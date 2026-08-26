@@ -26,6 +26,10 @@ what unblocks the most.
   separates what a fresh turn would carry from what is merely stored.
 - **Tools** — paged `read_file`, `write_file`, unambiguous `edit_file`, `list_dir`,
   regex `search`, `run_command` with timeout, output cap and deny list.
+- **Compaction** — the model summarises the span it replaces, into goal / done /
+  open sections, and the summary is recorded in the log as a durable checkpoint:
+  later turns and later processes start from it instead of replaying the span.
+  A failed summary degrades to a marker rather than wedging the turn. 4 tests.
 - **Permissions** — three modes and regex allow/ask/deny rules over what a call
   would actually do, defaulting to asking, with denial beating everything
   ([ADR-0009](adr/0009-ask-before-acting.md)). 12 tests, including the shipped
@@ -73,11 +77,10 @@ means dropping to `rook chat`.
 falling back to direct access. Removes the single-writer papercut
 ([ADR-0006](adr/0006-single-writer-store.md)).
 
-**Model-summarised compaction.** Today's is mechanical — head plus recent tail,
-elision marked. A summarising pass over the elided span is strictly better; the
-full transcript stays in the store either way.
-
 ## After that
+
+**Hierarchical compaction.** A session long enough to compact twice summarises a
+summary. goose's ladder of progressively larger removals is the reference.
 
 **Concurrent sub-agents.** Delegation is synchronous: the parent waits. codex's
 `spawn_agent`/`wait_agent` model runs several at once, which is the next step for

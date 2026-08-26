@@ -154,15 +154,27 @@ impl<'a> AgentLoop<'a> {
         s
     }
 
-    /// Rebuild the conversation from the session log.
+    /// Rebuild the conversation from the session log, starting after the most
+    /// recent compaction.
+    ///
+    /// A compaction is a durable checkpoint, not a per-turn trim: once the log
+    /// records one, every later turn — and every later process — starts from its
+    /// summary instead of replaying the span again.
     ///
     /// The log is the only record of a turn; without replaying it every call
     /// would start from nothing, and `--session` would continue a session in
     /// name only. Tool calls and their results are paired by adjacency, which
     /// holds because the loop logs each call immediately before its result.
     fn history(&self) -> Result<Vec<Message>> {
-        let events = self.rook.store.events(self.session, 0, usize::MAX)?;
-        let mut messages = Vec::with_capacity(events.len());
+        let (from_seq, summary) = self.rook.last_compaction(self.session)?;
+        let events = self.rook.store.events(self.session, from_seq, usize::MAX)?;
+        let mut messages = Vec::with_capacity(events.len() + 1);
+        if let Some(summary) = summary {
+            messages.push(Message::user(format!(
+                "[Summary of earlier work in this session, which has been compacted out of \
+                 context. The full transcript is still in the session log.]\n\n{summary}"
+            )));
+        }
         let mut open_call: Option<String> = None;
 
         for event in events {
@@ -313,8 +325,9 @@ impl<'a> AgentLoop<'a> {
 
             if self.budget.needs_compaction(measure(&messages)) {
                 outcome.compactions += 1;
-                let note = compact(&mut messages, self.budget.threshold() / 2);
-                self.rook.log(self.session, EventKind::Compaction, "auto", &note)?;
+                self.compact().await;
+                messages = vec![Message::system(self.system_prompt(prompt))];
+                messages.extend(self.history()?);
             }
 
             let mut request = Request::new(messages.clone());
@@ -537,6 +550,12 @@ impl<'a> AgentLoop<'a> {
         }
     }
 
+    /// Shrink the context window this loop budgets against, so a test can reach
+    /// compaction without a hundred thousand tokens of fixture.
+    pub fn set_window_for_test(&mut self, window: usize) {
+        self.budget = ContextBudget::new(window, self.rook.config.agent.compact_at);
+    }
+
     /// Skip every prompt: run whatever the deny list does not forbid.
     pub fn allow_everything_not_denied(&mut self) {
         let sandbox = &self.rook.config.sandbox;
@@ -579,46 +598,104 @@ impl<'a> AgentLoop<'a> {
     }
 }
 
-fn measure(messages: &[Message]) -> usize {
-    messages.iter().map(|m| estimate_tokens(&m.content) + 4).sum()
+/// Replace the earlier part of the session with a summary of it.
+///
+/// Summarised by the model rather than elided, because an agent that has
+/// forgotten what it did twenty turns ago repeats it. If the summary cannot be
+/// produced — a provider error, a span that will not fit — it falls back to a
+/// marker, since a failed compaction must not wedge the turn.
+impl AgentLoop<'_> {
+    async fn compact(&self) {
+        let note = match self.summarise_span().await {
+            Ok(note) => note,
+            Err(e) => {
+                tracing::warn!("summarising for compaction failed: {e}");
+                format!("compacted without a summary: {e}")
+            }
+        };
+        self.rook.log(self.session, EventKind::Compaction, "auto", &note).ok();
+    }
+
+    async fn summarise_span(&self) -> Result<String> {
+        let (from_seq, _) = self.rook.last_compaction(self.session)?;
+        let entries = self.rook.transcript(self.session, from_seq, usize::MAX, 8_000)?;
+
+        // Keep the recent tail live; only what falls before it is summarised.
+        let keep = self.budget.threshold() / 3;
+        let mut kept = 0;
+        let mut split = entries.len();
+        for entry in entries.iter().rev() {
+            kept += estimate_tokens(&entry.body);
+            if kept > keep {
+                break;
+            }
+            split -= 1;
+        }
+        if split < 2 {
+            return Err(CoreError::Other("not enough history to compact".into()));
+        }
+
+        let span = &entries[..split];
+        let through_seq = span.last().map(|e| e.seq).unwrap_or(0);
+        let transcript = render_span(span, self.budget.usable() / 2);
+
+        let request = Request::new(vec![Message::system(SUMMARY_INSTRUCTIONS), Message::user(transcript)]);
+        let mut stream = self.provider.stream(request).await.map_err(|e| CoreError::Other(e.to_string()))?;
+        let mut assembler = Assembler::default();
+        while let Some(delta) = stream.next().await {
+            assembler.push(delta.map_err(|e| CoreError::Other(e.to_string()))?);
+        }
+        let summary = assembler.finish().message.content;
+        if summary.trim().is_empty() {
+            return Err(CoreError::Other("the model returned an empty summary".into()));
+        }
+
+        Ok(serde_json::to_string(&serde_json::json!({
+            "through_seq": through_seq,
+            "dropped_events": span.len(),
+            "summary": summary,
+        }))?)
+    }
 }
 
-/// Mechanical compaction: keep the system prompt, the first user message and the
-/// most recent exchanges; elide the middle with an explicit marker.
-///
-/// The full history is never lost — it is in the store, addressable by session
-/// and sequence — so this drops what is in *context*, not what happened.
-fn compact(messages: &mut Vec<Message>, target_tokens: usize) -> String {
-    if messages.len() <= 4 {
-        return "nothing to compact".into();
-    }
-    let head = 2.min(messages.len());
-    let mut keep_tail = 0usize;
-    let mut used = 0usize;
-    for m in messages.iter().rev() {
-        used += estimate_tokens(&m.content) + 4;
-        if used > target_tokens {
+const SUMMARY_INSTRUCTIONS: &str = "\
+You are compacting an agent's working transcript so it can keep going with less \
+context. Write a summary that lets the agent resume without re-reading what you \
+were given. Use these sections, omitting any that are empty:
+
+## Goal
+What the user actually asked for, in their terms.
+
+## Done
+What was established or changed, with file paths and the specific facts that \
+matter — names, signatures, numbers, error messages. Not a narration of steps.
+
+## Open
+What is unfinished, what was tried and failed, and what was decided against and \
+why, so it is not retried.
+
+Be concrete and terse. Facts the agent would otherwise have to rediscover are \
+worth more than prose.";
+
+/// Flatten a span of the transcript for summarising, keeping the most recent
+/// part when it will not all fit — a summarisation request that overflows is
+/// how compaction fails exactly when it is needed most.
+fn render_span(entries: &[crate::TranscriptEntry], budget_tokens: usize) -> String {
+    let mut lines = Vec::new();
+    let mut used = 0;
+    for entry in entries.iter().rev() {
+        let line = format!("[{}] {}: {}", entry.seq, entry.kind, entry.body);
+        used += estimate_tokens(&line);
+        if used > budget_tokens && !lines.is_empty() {
+            lines.push("[earlier still, elided]".to_string());
             break;
         }
-        keep_tail += 1;
+        lines.push(line);
     }
-    keep_tail = keep_tail.max(2);
-    if head + keep_tail >= messages.len() {
-        return "nothing to compact".into();
-    }
+    lines.reverse();
+    lines.join("\n\n")
+}
 
-    let dropped = messages.len() - head - keep_tail;
-    let tail = messages.split_off(messages.len() - keep_tail);
-    messages.truncate(head);
-    messages.push(Message {
-        role: Role::User,
-        content: format!(
-            "[{dropped} earlier messages elided to stay within the context window. \
-             The full transcript is in the session log and can be re-read by sequence number.]"
-        ),
-        tool_calls: vec![],
-        tool_call_id: None,
-    });
-    messages.extend(tail);
-    format!("compacted: dropped {dropped} messages from context")
+fn measure(messages: &[Message]) -> usize {
+    messages.iter().map(|m| estimate_tokens(&m.content) + 4).sum()
 }

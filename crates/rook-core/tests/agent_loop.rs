@@ -712,3 +712,125 @@ async fn the_deny_list_holds_even_with_everything_else_allowed() {
     let result = entries.iter().find(|e| e.kind == "tool-result").unwrap();
     assert!(result.body.contains("refused"), "{}", result.body);
 }
+
+/// A provider that answers tool-free turns with canned text and records what it
+/// was asked, so the summarisation call can be inspected.
+fn long_session(f: &Fixture, turns: usize) -> u128 {
+    let session = f.rook.start_session("long").unwrap();
+    for i in 0..turns {
+        f.rook
+            .log(
+                session,
+                rook_store::EventKind::UserMessage,
+                "",
+                &format!("question {i}: {}", "x".repeat(400)),
+            )
+            .unwrap();
+        f.rook
+            .log(
+                session,
+                rook_store::EventKind::AssistantMessage,
+                "m",
+                &format!("answer {i}: {}", "y".repeat(400)),
+            )
+            .unwrap();
+    }
+    session
+}
+
+#[tokio::test]
+async fn compaction_summarises_and_later_turns_start_from_the_summary() {
+    let f = fixture();
+    let session = long_session(&f, 40);
+
+    let provider = ScriptedProvider::new(vec![
+        reply("## Goal\nanswer the questions\n\n## Done\nanswered 0..39"),
+        reply("carrying on"),
+    ]);
+    let seen = provider.share();
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), session);
+    agent.set_window_for_test(4_000);
+    let outcome = agent.run("and now?").await.unwrap();
+    assert_eq!(outcome.compactions, 1, "a session this long must compact");
+
+    let requests = seen.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2, "one summarisation call, then the turn itself");
+    assert!(
+        requests[0].messages[0].content.contains("## Goal"),
+        "the first call is the summarisation, with its own instructions"
+    );
+
+    let turn = &requests[1];
+    let carried: String = turn.messages.iter().map(|m| m.content.clone()).collect();
+    assert!(carried.contains("answered 0..39"), "the summary must be carried into the turn");
+    assert!(
+        !carried.contains("question 0"),
+        "the compacted span must not be carried; only the recent tail should remain"
+    );
+}
+
+#[tokio::test]
+async fn the_compaction_survives_into_a_later_process() {
+    let f = fixture();
+    let session = long_session(&f, 40);
+
+    let first = ScriptedProvider::new(vec![reply("## Done\nthe important fact is 42"), reply("ok")]);
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(first), session);
+    agent.set_window_for_test(4_000);
+    agent.run("first").await.unwrap();
+
+    // A fresh loop, as a later invocation would build: no compaction of its own,
+    // but it must still start from the recorded summary.
+    let second = ScriptedProvider::new(vec![reply("still going")]);
+    let seen = second.share();
+    let outcome = AgentLoop::new(&f.rook, Arc::new(second), session).run("second").await.unwrap();
+    assert_eq!(outcome.compactions, 0, "the summary is already recorded; do not redo it");
+
+    let carried: String =
+        seen.lock().unwrap().last().cloned().unwrap().messages.iter().map(|m| m.content.clone()).collect();
+    assert!(carried.contains("the important fact is 42"));
+    assert!(!carried.contains("question 0"), "and the span it replaced stays out");
+}
+
+#[tokio::test]
+async fn a_failed_summary_does_not_wedge_the_turn() {
+    let f = fixture();
+    let session = long_session(&f, 40);
+
+    // The script runs out on the summarisation call, so the provider errors.
+    let provider = ScriptedProvider::new(vec![]);
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), session);
+    agent.set_window_for_test(4_000);
+    let result = agent.run("go").await;
+
+    assert!(result.is_err(), "the turn itself still needs a provider");
+    let entries = f.rook.transcript(session, 0, usize::MAX, 4096).unwrap();
+    let compaction = entries.iter().find(|e| e.kind == "compaction").expect("compaction was recorded");
+    assert!(
+        compaction.body.contains("without a summary"),
+        "a failed summary must be recorded as such: {}",
+        compaction.body
+    );
+}
+
+#[tokio::test]
+async fn context_usage_counts_only_what_survives_compaction() {
+    let f = fixture();
+    let session = long_session(&f, 40);
+    let before = f.rook.context_usage(session, 128_000).unwrap();
+
+    let provider = ScriptedProvider::new(vec![reply("## Done\nshort"), reply("ok")]);
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), session);
+    agent.set_window_for_test(4_000);
+    agent.run("go").await.unwrap();
+
+    let after = f.rook.context_usage(session, 128_000).unwrap();
+    assert!(
+        after.live_tokens < before.live_tokens / 2,
+        "compaction should cut what a turn carries: {} -> {}",
+        before.live_tokens,
+        after.live_tokens
+    );
+    assert!(after.logged_tokens > after.live_tokens, "and the log keeps everything");
+    assert_eq!(after.compactions, 1);
+}

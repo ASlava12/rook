@@ -243,6 +243,23 @@ impl Rook {
         Ok(id)
     }
 
+    /// Where replay should start, and the summary standing in for what came
+    /// before it.
+    pub fn last_compaction(&self, session: u128) -> Result<(u64, Option<String>)> {
+        let mut found = None;
+        for event in self.store.events(session, 0, usize::MAX)? {
+            if event.record.kind != EventKind::Compaction {
+                continue;
+            }
+            let Ok(body) = self.store.get(&event.record.body) else { continue };
+            let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&body) else { continue };
+            let Some(through) = parsed.get("through_seq").and_then(|t| t.as_u64()) else { continue };
+            let summary = parsed.get("summary").and_then(|s| s.as_str()).map(String::from);
+            found = Some((through + 1, summary));
+        }
+        Ok(found.unwrap_or((0, None)))
+    }
+
     /// Render a session's log with bodies resolved. `max_body` bounds how much of
     /// each payload is materialised, so viewing a session with a 200 MB tool
     /// result does not itself become the problem.
@@ -302,8 +319,17 @@ impl Rook {
             entry.tokens += (bytes as usize).div_ceil(4);
         }
 
-        let live: usize =
-            by_kind.iter().filter(|(k, _)| k.as_str() != "checkpoint").map(|(_, v)| v.tokens).sum();
+        // What a fresh turn would carry: everything after the last compaction plus
+        // its summary. Checkpoints are storage, not context.
+        let (from_seq, summary) = self.last_compaction(session)?;
+        let mut live = summary.as_deref().map(crate::context::estimate_tokens).unwrap_or(0);
+        for event in self.store.events(session, from_seq, usize::MAX)? {
+            if event.record.kind == EventKind::Checkpoint {
+                continue;
+            }
+            let bytes = self.store.stat_object(&event.record.body)?.map(|m| m.size_raw as usize).unwrap_or(0);
+            live += bytes.div_ceil(4);
+        }
 
         Ok(ContextUsage {
             window,
