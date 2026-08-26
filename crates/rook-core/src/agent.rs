@@ -292,6 +292,11 @@ impl<'a> AgentLoop<'a> {
                             "type": "string",
                             "description": "The whole assignment. The sub-agent cannot see this conversation."
                         },
+                        "tasks": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Several independent assignments, run at the same time.                                             Use this rather than calling delegate repeatedly."
+                        },
                         "context": {
                             "type": "string",
                             "enum": ["none", "recent"],
@@ -299,8 +304,7 @@ impl<'a> AgentLoop<'a> {
                             "description": "`recent` also gives it the last few exchanges."
                         },
                         "max_steps": { "type": "integer" }
-                    },
-                    "required": ["task"]
+                    }
                 }),
             });
         }
@@ -489,49 +493,74 @@ impl<'a> AgentLoop<'a> {
     /// its parent, so the detail is recoverable without ever entering this
     /// conversation's context — which is the entire point.
     async fn delegate(&self, args: &serde_json::Value, outcome: &mut TurnOutcome) -> String {
-        let task = args.get("task").and_then(|t| t.as_str()).unwrap_or("").trim();
-        if task.is_empty() {
-            return "delegate needs a task".into();
+        let tasks = requested_tasks(args);
+        if tasks.is_empty() {
+            return "delegate needs a task, or a list of tasks".into();
         }
 
-        let child_session = match self.rook.fork_for_subtask(self.session, task) {
-            Ok(id) => id,
-            Err(e) => return format!("could not start a sub-agent: {e}"),
-        };
+        let inherit = args.get("context").and_then(|c| c.as_str()) == Some("recent");
+        let inherited = inherit.then(|| self.recent_exchanges(6).ok()).flatten();
+        let max_steps = args.get("max_steps").and_then(|s| s.as_u64()).map(|s| s as u32);
 
-        if args.get("context").and_then(|c| c.as_str()) == Some("recent")
-            && let Ok(recent) = self.recent_exchanges(6)
-        {
-            self.rook.log(child_session, EventKind::Note, "inherited", &recent).ok();
+        // Bounded rather than unbounded: the sub-tasks share one token budget and
+        // one provider, and a model asked to check twenty things will ask for
+        // twenty at once.
+        let limit = std::sync::Arc::new(tokio::sync::Semaphore::new(
+            self.rook.config.agent.max_parallel_subagents.max(1),
+        ));
+        let running = tasks.iter().map(|task| {
+            let limit = limit.clone();
+            let inherited = inherited.clone();
+            async move {
+                let _permit = limit.acquire().await;
+                self.run_subtask(task, inherited.as_deref(), max_steps).await
+            }
+        });
+
+        let results = futures_util::future::join_all(running).await;
+        let mut report = Vec::with_capacity(results.len());
+        for (task, result) in tasks.iter().zip(results) {
+            match result {
+                Ok((id, child)) => {
+                    outcome.delegated.push(id.clone());
+                    outcome.input_tokens += child.input_tokens;
+                    outcome.output_tokens += child.output_tokens;
+                    report.push(format!(
+                        "### {task}\nsub-agent {id}, {} steps ({}):\n{}",
+                        child.steps, child.stopped, child.reply
+                    ));
+                }
+                Err(e) => report.push(format!("### {task}\nfailed: {e}")),
+            }
+        }
+        report.join("\n\n")
+    }
+
+    async fn run_subtask(
+        &self,
+        task: &str,
+        inherited: Option<&str>,
+        max_steps: Option<u32>,
+    ) -> Result<(String, TurnOutcome)> {
+        let session = self.rook.fork_for_subtask(self.session, task)?;
+        if let Some(context) = inherited {
+            self.rook.log(session, EventKind::Note, "inherited", context).ok();
         }
 
-        let mut child = AgentLoop::new(self.rook, self.provider.clone(), child_session);
+        let mut child = AgentLoop::new(self.rook, self.provider.clone(), session);
         child.depth = self.depth + 1;
         child.tools = self.tools.clone();
         child.tool_ctx = self.tool_ctx.clone();
         child.policy = self.policy.clone();
         child.approver = self.approver.clone();
         child.hooks = self.hooks.clone();
-        if let Some(steps) = args.get("max_steps").and_then(|s| s.as_u64()) {
-            child.max_steps = steps as u32;
+        if let Some(steps) = max_steps {
+            child.max_steps = steps;
         }
 
         // Boxed because this is `run` calling itself through a tool call.
-        let result = Box::pin(child.run(task)).await;
-        let id = rook_store::format_session_id(child_session);
-        outcome.delegated.push(id.clone());
-
-        match result {
-            Ok(child_outcome) => {
-                outcome.input_tokens += child_outcome.input_tokens;
-                outcome.output_tokens += child_outcome.output_tokens;
-                format!(
-                    "sub-agent {id} finished after {} steps ({}):\n{}",
-                    child_outcome.steps, child_outcome.stopped, child_outcome.reply
-                )
-            }
-            Err(e) => format!("sub-agent {id} failed: {e}"),
-        }
+        let outcome = Box::pin(child.run(task)).await?;
+        Ok((rook_store::format_session_id(session), outcome))
     }
 
     /// The last `count` exchanges as plain text, for a child asked to inherit
@@ -792,6 +821,21 @@ fn render_span(entries: &[crate::TranscriptEntry], budget_tokens: usize) -> Stri
     }
     lines.reverse();
     lines.join("\n\n")
+}
+
+/// One task, or several. Accepting both keeps a single delegation from having to
+/// be phrased as a list.
+fn requested_tasks(args: &serde_json::Value) -> Vec<String> {
+    let mut tasks: Vec<String> = args
+        .get("tasks")
+        .and_then(|t| t.as_array())
+        .map(|items| items.iter().filter_map(|t| t.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    if let Some(single) = args.get("task").and_then(|t| t.as_str()) {
+        tasks.push(single.to_string());
+    }
+    tasks.retain(|t| !t.trim().is_empty());
+    tasks
 }
 
 fn measure(messages: &[Message]) -> usize {

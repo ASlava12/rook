@@ -9,7 +9,7 @@ as a feature rather than a debugging afterthought: a CLI, a terminal browser and
 web UI, all views over the same engine.
 
 > **Status: early.** The storage layer, the skill system and the inspection tools
-> are implemented and covered by 113 tests. The agent loop — tool dispatch, skill
+> are implemented and covered by 117 tests. The agent loop — tool dispatch, skill
 > loading, budgeting, logging — is tested against a scripted provider; it has not
 > yet been exercised against a live model in CI. Streaming, MCP and ACP are on the
 > [roadmap](docs/roadmap.md) and are not implemented. Nothing below describes
@@ -165,10 +165,11 @@ refuse rather than improvise, and say what would have made it possible.
 
 ### Delegation
 
-A turn can hand a self-contained sub-task to a fresh agent and get back only its
-conclusion. The sub-agent runs in its own session with an empty context, so a wide
-search or a long file survey never enters the conversation that asked for it — and
-its full transcript stays readable afterwards:
+A turn can hand self-contained sub-tasks to fresh agents and get back only their
+conclusions. Each sub-agent runs in its own session with an empty context, so a
+wide search or a long file survey never enters the conversation that asked for it
+— and its full transcript stays readable afterwards. Several at once run
+concurrently, bounded by `agent.max_parallel_subagents`:
 
 ```sh
 rook session ls              # sub-tasks appear under ↳, linked to their parent

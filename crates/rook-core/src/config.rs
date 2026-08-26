@@ -50,6 +50,9 @@ pub struct AgentConfig {
     pub lazy_skills: bool,
     /// Same idea for tool schemas.
     pub lazy_tools: bool,
+    /// How many delegated sub-tasks may run at once. Bounded because each one
+    /// spends tokens against the same budget and the same provider rate limit.
+    pub max_parallel_subagents: usize,
     /// How long the model may go silent mid-stream before the turn gives up.
     /// A dropped connection is indistinguishable from deep thought without it.
     pub stream_idle_timeout_secs: u64,
@@ -129,6 +132,7 @@ impl Default for AgentConfig {
             max_steps: 200,
             lazy_skills: true,
             lazy_tools: true,
+            max_parallel_subagents: 4,
             stream_idle_timeout_secs: 90,
         }
     }

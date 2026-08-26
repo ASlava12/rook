@@ -1004,3 +1004,142 @@ async fn a_hook_matcher_keeps_it_off_calls_it_does_not_care_about() {
 
     assert!(f.workspace.path().join("fine.txt").exists(), "the matcher should have excluded this call");
 }
+
+/// A provider that records when each call started and finished, so overlap is
+/// observable rather than assumed.
+struct TimedProvider {
+    script: Mutex<Vec<Response>>,
+    spans: Arc<Mutex<Vec<(std::time::Instant, std::time::Instant)>>>,
+    delay: std::time::Duration,
+}
+
+#[async_trait]
+impl Provider for TimedProvider {
+    fn id(&self) -> &str {
+        "timed/test"
+    }
+    fn context_window(&self) -> usize {
+        16_000
+    }
+    async fn complete(&self, _request: Request) -> rook_llm::Result<Response> {
+        let started = std::time::Instant::now();
+        tokio::time::sleep(self.delay).await;
+        let response = {
+            let mut script = self.script.lock().unwrap();
+            if script.is_empty() {
+                return Err(LlmError::Other("out of script".into()));
+            }
+            script.remove(0)
+        };
+        self.spans.lock().unwrap().push((started, std::time::Instant::now()));
+        Ok(response)
+    }
+}
+
+#[tokio::test]
+async fn several_sub_tasks_run_at_the_same_time() {
+    let f = fixture();
+    let session = f.rook.start_session("fanout").unwrap();
+
+    // One delegation of three tasks: the parent's two calls plus three children.
+    let mut script =
+        vec![call("delegate", serde_json::json!({ "tasks": ["check a", "check b", "check c"] }))];
+    script.extend((0..3).map(|i| reply(&format!("finding {i}"))));
+    script.push(reply("all three checked"));
+
+    let spans = Arc::new(Mutex::new(Vec::new()));
+    let provider = Arc::new(TimedProvider {
+        script: Mutex::new(script),
+        spans: spans.clone(),
+        delay: std::time::Duration::from_millis(120),
+    });
+
+    let started = std::time::Instant::now();
+    let outcome = AgentLoop::new(&f.rook, provider, session).run("check three things").await.unwrap();
+    let elapsed = started.elapsed();
+
+    assert_eq!(outcome.delegated.len(), 3, "every sub-task should report its session");
+    assert!(outcome.reply.contains("all three checked"));
+
+    // Serial would be five delays; concurrent children collapse three into one.
+    assert!(
+        elapsed < std::time::Duration::from_millis(500),
+        "three sub-tasks took {elapsed:?}, which looks serial"
+    );
+
+    let spans = spans.lock().unwrap();
+    let overlapping =
+        spans.iter().enumerate().any(|(i, a)| spans.iter().skip(i + 1).any(|b| a.0 < b.1 && b.0 < a.1));
+    assert!(overlapping, "no two model calls overlapped, so nothing actually ran in parallel");
+}
+
+#[tokio::test]
+async fn the_parallel_limit_is_respected() {
+    let f = fixture();
+    let mut config = Config::default();
+    config.agent.max_parallel_subagents = 1;
+    let rook = Rook::from_parts(
+        Store::open(f._store_dir.path().join("serial")).unwrap(),
+        config,
+        f.rook.env.clone(),
+        SkillIndex::default(),
+        PathBuf::from(f.workspace.path()),
+    );
+    let session = rook.start_session("serial").unwrap();
+
+    let mut script = vec![call("delegate", serde_json::json!({ "tasks": ["a", "b"] }))];
+    script.extend((0..2).map(|i| reply(&format!("done {i}"))));
+    script.push(reply("both"));
+
+    let spans = Arc::new(Mutex::new(Vec::new()));
+    let provider = Arc::new(TimedProvider {
+        script: Mutex::new(script),
+        spans: spans.clone(),
+        delay: std::time::Duration::from_millis(80),
+    });
+    AgentLoop::new(&rook, provider, session).run("two things").await.unwrap();
+
+    let spans = spans.lock().unwrap();
+    let overlapping =
+        spans.iter().enumerate().any(|(i, a)| spans.iter().skip(i + 1).any(|b| a.0 < b.1 && b.0 < a.1));
+    assert!(!overlapping, "a limit of one must serialise them");
+}
+
+#[tokio::test]
+async fn one_failing_sub_task_does_not_lose_the_others() {
+    let f = fixture();
+    let session = f.rook.start_session("partial").unwrap();
+
+    // Two children, then the script runs dry so the third fails.
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("delegate", serde_json::json!({ "tasks": ["one", "two", "three"] })),
+        reply("first answer"),
+        reply("second answer"),
+    ]));
+    let outcome = AgentLoop::new(&f.rook, provider, session).run("three things").await;
+
+    // The parent's own follow-up call also has no script left, so the turn ends
+    // in error — but the tool result must already carry what did succeed.
+    let entries = f.rook.transcript(session, 0, usize::MAX, 8000).unwrap();
+    let result = entries
+        .iter()
+        .find(|e| e.kind == "tool-result")
+        .expect("the delegation must have reported something");
+    assert!(result.body.contains("answer"), "successful children must be reported: {}", result.body);
+    assert!(result.body.contains("failed"), "and the failure named: {}", result.body);
+    let _ = outcome;
+}
+
+#[tokio::test]
+async fn a_single_task_still_works_unchanged() {
+    let f = fixture();
+    let session = f.rook.start_session("one").unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("delegate", serde_json::json!({ "task": "look at one thing" })),
+        reply("looked"),
+        reply("reported"),
+    ]));
+    let outcome = AgentLoop::new(&f.rook, provider, session).run("look").await.unwrap();
+    assert_eq!(outcome.delegated.len(), 1);
+    assert_eq!(outcome.reply, "reported");
+}

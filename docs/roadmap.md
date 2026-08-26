@@ -34,10 +34,11 @@ what unblocks the most.
   would actually do, defaulting to asking, with denial beating everything
   ([ADR-0009](adr/0009-ask-before-acting.md)). 12 tests, including the shipped
   deny rules checked in both directions.
-- **Delegation** — a `delegate` pseudo-tool runs a sub-task in a child session
-  with its own context and returns only its conclusion, so bulk stays out of the
-  parent while remaining readable in the child. Depth-limited, with optional
-  inheritance of the recent exchange. 3 tests.
+- **Delegation** — a `delegate` pseudo-tool runs sub-tasks in child sessions with
+  their own context and returns only their conclusions, so bulk stays out of the
+  parent while remaining readable in the children. Several tasks run concurrently
+  under a configured cap; one failing does not lose the rest. Depth-limited, with
+  optional inheritance of the recent exchange. 7 tests.
 - **Memory** — durable facts with provenance, global or per-workspace scope,
   pinning, and a version per change so `memory since`, `memory diff` and rollback
   all work. Retrieval is term overlap with prefix matching, budgeted into the
@@ -84,12 +85,12 @@ falling back to direct access. Removes the single-writer papercut
 
 ## After that
 
+**Supervising sub-agents while they run.** Delegation fans out and waits for all
+of them. codex's `spawn_agent`/`wait_agent` lets a parent send messages to a child
+mid-run, which is a different feature rather than a deeper version of this one.
+
 **Hierarchical compaction.** A session long enough to compact twice summarises a
 summary. goose's ladder of progressively larger removals is the reference.
-
-**Concurrent sub-agents.** Delegation is synchronous: the parent waits. codex's
-`spawn_agent`/`wait_agent` model runs several at once, which is the next step for
-wide searches.
 
 **Memory consolidation.** Nothing merges near-duplicate facts or ages out stale
 ones yet; the identity check only catches exact repeats.
