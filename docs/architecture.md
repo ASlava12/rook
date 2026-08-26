@@ -48,7 +48,9 @@ same trait, and the agent loop never learns which is answering.
 
 **`rookd` is a separate binary from `rook`.** A container, a headless box or an
 editor integration should be able to run the backend without linking a terminal UI
-into it.
+into it. Its `/api/chat` websocket runs a turn and streams it back, including the
+approval round-trip, so the browser is a way to use the agent and not only to
+read what it did.
 
 ## The agent loop
 

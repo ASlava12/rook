@@ -2399,13 +2399,17 @@ name = "rookd"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "clap",
+ "futures-util",
  "mime_guess",
  "rook-core",
+ "rook-llm",
  "rook-proto",
  "rook-skills",
  "rook-store",
+ "rook-tools",
  "rust-embed",
  "serde",
  "serde_json",

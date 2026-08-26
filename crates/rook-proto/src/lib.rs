@@ -95,6 +95,65 @@ impl ApiError {
     }
 }
 
+/// What a browser sends over the chat socket.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ClientMessage {
+    Prompt {
+        session: Option<String>,
+        text: String,
+    },
+    /// Answer to an [`ChatEvent::Approval`], by its id.
+    Approval {
+        id: String,
+        decision: ApprovalDecision,
+    },
+    /// Stop the turn in flight, leaving what it already did in the log.
+    Cancel,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalDecision {
+    Once,
+    ForRun,
+    Deny,
+}
+
+/// What the server streams back during a turn.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ChatEvent {
+    Started {
+        session: String,
+    },
+    Text {
+        text: String,
+    },
+    Reasoning {
+        text: String,
+    },
+    Tool {
+        name: String,
+    },
+    /// The turn is blocked until an [`ClientMessage::Approval`] with this id.
+    Approval {
+        id: String,
+        tool: String,
+        action: String,
+    },
+    Done {
+        steps: u32,
+        input_tokens: u32,
+        output_tokens: u32,
+        delegated: Vec<String>,
+        compactions: u32,
+    },
+    Error {
+        message: String,
+    },
+}
+
 /// Server-pushed events over the websocket.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

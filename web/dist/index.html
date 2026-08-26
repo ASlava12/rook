@@ -49,6 +49,19 @@ td.t{font-family:inherit}
 .tag{font-family:var(--mono);font-size:.72rem;padding:.05rem .35rem;border-radius:3px;border:1px solid var(--line)}
 .ok{color:var(--accent)} .warn{color:var(--warn)} .bad{color:var(--bad)}
 .empty{color:var(--dim);padding:1.5rem 0;text-align:center}
+.stream{min-height:12rem;max-height:60vh;overflow:auto;white-space:pre-wrap;word-break:break-word;
+  font-family:var(--mono);font-size:.85rem;line-height:1.6}
+.stream .tool{color:var(--accent)} .stream .think{color:var(--dim);font-style:italic}
+.stream .err{color:var(--bad)} .stream .stat{color:var(--dim);font-size:.78rem}
+form.ask{display:flex;gap:.5rem;margin-top:.8rem}
+form.ask input{flex:1;padding:.55rem .7rem;border:1px solid var(--line);border-radius:6px;
+  background:var(--bg);color:var(--fg);font:inherit}
+form.ask button,.approve button{padding:.5rem .9rem;border:1px solid var(--line);border-radius:6px;
+  background:var(--panel);color:var(--fg);cursor:pointer;font:inherit}
+form.ask button[disabled]{opacity:.5;cursor:default}
+.approve{border:1px solid var(--warn);border-radius:6px;padding:.6rem .8rem;margin:.5rem 0;
+  display:flex;gap:.5rem;align-items:center;flex-wrap:wrap}
+.approve span{flex:1;font-family:var(--mono);font-size:.82rem}
 .scroll{max-height:74vh;overflow:auto}
 </style>
 </head>
@@ -58,7 +71,8 @@ td.t{font-family:inherit}
   <span class="meta" id="meta">connecting…</span>
 </header>
 <nav>
-  <button data-tab="sessions" aria-selected="true">Sessions</button>
+  <button data-tab="chat" aria-selected="true">Chat</button>
+  <button data-tab="sessions">Sessions</button>
   <button data-tab="skills">Skills</button>
   <button data-tab="store">Store</button>
 </nav>
@@ -96,7 +110,7 @@ const api = async (path) => {
   return body;
 };
 
-const state = { tab: 'sessions', session: null, skill: null };
+const state = { tab: 'chat', session: null, skill: null, chat: { log: [], session: null, busy: false } };
 
 async function boot() {
   try {
@@ -115,12 +129,96 @@ async function boot() {
 
 function render() {
   const v = $('#view'); v.replaceChildren(el('p', {class:'empty'}, 'loading…'));
-  ({ sessions: renderSessions, skills: renderSkills, store: renderStore })[state.tab]().catch(e => {
+  ({ chat: renderChat, sessions: renderSessions, skills: renderSkills, store: renderStore })[state.tab]().catch(e => {
     v.replaceChildren(el('div', {class:'card'},
       el('h2', {}, 'error'),
       el('p', {}, e.error || String(e)),
       e.hint ? el('p', {class:'sub'}, e.hint) : null));
   });
+}
+
+// One socket for the tab's lifetime; reconnecting per prompt would drop the
+// approval channel mid-turn.
+let socket = null;
+const chatOut = () => document.querySelector('#stream');
+
+function say(kind, text) {
+  const out = chatOut();
+  if (!out) return;
+  const last = out.lastElementChild;
+  if (kind === 'text' && last && last.className === 'text') last.append(text);
+  else out.append(el('div', { class: kind }, text));
+  out.scrollTop = out.scrollHeight;
+}
+
+function connect() {
+  if (socket && socket.readyState <= 1) return socket;
+  socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/chat`);
+  socket.onmessage = (event) => {
+    const e = JSON.parse(event.data);
+    if (e.type === 'started') { state.chat.session = e.session; }
+    else if (e.type === 'text') say('text', e.text);
+    else if (e.type === 'reasoning') say('think', e.text);
+    else if (e.type === 'tool') say('tool', `\n  · ${e.name}\n`);
+    else if (e.type === 'error') { say('err', `\n${e.message}\n`); done(); }
+    else if (e.type === 'approval') askApproval(e);
+    else if (e.type === 'done') {
+      say('stat', `\n[${e.steps} steps · ${e.input_tokens} in / ${e.output_tokens} out` +
+        (e.compactions ? ` · ${e.compactions} compactions` : '') +
+        (e.delegated.length ? ` · ${e.delegated.length} sub-agent(s)` : '') + ']\n\n');
+      done();
+    }
+  };
+  socket.onclose = () => { say('err', '\ndisconnected\n'); done(); };
+  return socket;
+}
+
+function done() {
+  state.chat.busy = false;
+  const button = document.querySelector('#send');
+  if (button) { button.disabled = false; button.textContent = 'Send'; }
+}
+
+function askApproval(request) {
+  const out = chatOut();
+  const decide = (decision) => {
+    socket.send(JSON.stringify({ type: 'approval', id: request.id, decision }));
+    box.replaceWith(el('div', { class: 'stat' }, `  approval: ${decision}\n`));
+  };
+  const box = el('div', { class: 'approve' },
+    el('span', {}, `${request.tool} wants to ${request.action}`),
+    el('button', { onclick: () => decide('once') }, 'Allow once'),
+    el('button', { onclick: () => decide('for_run') }, 'Always'),
+    el('button', { onclick: () => decide('deny') }, 'Deny'));
+  out.append(box);
+  out.scrollTop = out.scrollHeight;
+}
+
+async function renderChat() {
+  const stream = el('div', { class: 'stream', id: 'stream' });
+  const input = el('input', { placeholder: 'Ask the agent…', autofocus: 'true' });
+  const send = el('button', { id: 'send' }, 'Send');
+
+  const form = el('form', { class: 'ask', onsubmit: (event) => {
+    event.preventDefault();
+    const text = input.value.trim();
+    if (!text || state.chat.busy) return;
+    say('stat', `› ${text}\n`);
+    connect();
+    const deliver = () => socket.send(JSON.stringify({
+      type: 'prompt', session: state.chat.session, text,
+    }));
+    if (socket.readyState === 1) deliver(); else socket.addEventListener('open', deliver, { once: true });
+    input.value = '';
+    state.chat.busy = true;
+    send.disabled = true;
+    send.textContent = '…';
+  } }, input, send);
+
+  $('#view').replaceChildren(el('div', { class: 'card' },
+    el('h2', {}, state.chat.session ? `session ${state.chat.session}` : 'new session'),
+    stream, form));
+  input.focus();
 }
 
 async function renderSessions() {

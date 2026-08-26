@@ -112,6 +112,10 @@ rook session rewind 01JQ… --to 12 --keep-files  # conversation only
 rook session fork 01JQ… --at 12                 # branch without touching files
 ```
 
+The web UI at `rookd` drives the agent too: it streams a turn over a websocket
+and asks for approvals in the page, so the same policy applies whether you are at
+a terminal or in a browser.
+
 ### What it is allowed to do
 
 By default the agent asks before anything that changes the machine, and refuses
@@ -232,7 +236,7 @@ crates/
   rook-tools    read/write/edit/list/search/run, with the guards that keep a turn survivable
   rook-mcp      Model Context Protocol client, stdio transport, ~250 lines
   rook-proto    wire types shared by daemon, CLI and web
-  rookd         HTTP backend + embedded web UI
+  rookd         HTTP backend, chat websocket, embedded web UI
   rook-cli      `rook`: commands and the terminal browser
 web/dist        the web UI: one hand-written HTML file, no build step
 docs/           architecture, storage format, skills, platforms, ADRs, research
@@ -265,7 +269,6 @@ lose people's trust:
 - **The CLI opens the store directly**, so it cannot run while `rookd` holds it.
   It says so clearly; routing the CLI through the daemon is
   [ADR-0006](docs/adr/0006-single-writer-store.md).
-- **The web UI is read-only.**
 - **Permissions are pattern matching, not a sandbox.** They raise the floor;
   `curl … | sh` is one obfuscation away from any rule. Not a jail.
 

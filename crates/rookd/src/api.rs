@@ -31,6 +31,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/skills/{name}/history", get(skill_history))
         .route("/api/checkpoints", get(checkpoints))
         .route("/api/maintenance", post(maintenance))
+        .route("/api/chat", get(crate::chat::upgrade))
         .with_state(state)
 }
 

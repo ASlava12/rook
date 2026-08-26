@@ -7,6 +7,7 @@
 //! accident.
 
 mod api;
+mod chat;
 mod web;
 
 use std::net::{IpAddr, SocketAddr};
@@ -33,7 +34,9 @@ struct Args {
 }
 
 pub struct AppState {
-    pub rook: RwLock<Rook>,
+    /// An `Arc` so a websocket turn can take an owned read guard and outlive the
+    /// request that spawned it.
+    pub rook: Arc<RwLock<Rook>>,
     pub started: std::time::Instant,
 }
 
@@ -58,7 +61,7 @@ async fn main() -> Result<()> {
         );
     }
 
-    let state = Arc::new(AppState { rook: RwLock::new(rook), started: std::time::Instant::now() });
+    let state = Arc::new(AppState { rook: Arc::new(RwLock::new(rook)), started: std::time::Instant::now() });
     let app = api::router(state.clone()).merge(web::router());
 
     let addr = SocketAddr::new(bind, port);
