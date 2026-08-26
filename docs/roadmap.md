@@ -52,10 +52,12 @@ what unblocks the most.
   new/load/list/prompt/cancel, streamed `session/update`, and approvals through
   `session/request_permission`. Field names come from the schema in
   `references/acp`, not from memory. 8 tests over duplex streams.
-- **MCP client** — stdio transport, written directly rather than via the SDK
-  ([ADR-0008](adr/0008-hand-written-mcp-client.md)). Servers connect concurrently,
+- **MCP client** — stdio and streamable-HTTP transports, written directly rather
+  than via the SDK ([ADR-0008](adr/0008-hand-written-mcp-client.md)). An HTTP
+  answer may be JSON or an event stream and both are handled; the session id from
+  `initialize` is carried on later requests. Servers connect concurrently,
   failures are reported rather than fatal, and their tools join the toolbox
-  namespaced `server__tool`. 10 tests against a mock server.
+  namespaced `server__tool`. 16 tests against mock servers.
 - **Providers** — OpenAI-compatible HTTP: Ollama, LM Studio, llama.cpp, vLLM,
   OpenAI, OpenRouter. Streaming over SSE with a configurable idle watchdog, so a
   dropped connection surfaces as a stall instead of looking like deep thought.
@@ -101,9 +103,6 @@ editor's buffers, and terminals are all defined and unimplemented.
 **MCP provenance in tool results.** A result carries the namespaced tool name but
 nothing about which server produced it; codex exposes that to its lifecycle hooks
 and it belongs in ours too.
-
-**MCP over HTTP.** The stdio transport covers local servers; hosted ones need the
-streamable-HTTP transport.
 
 **Agent Plugins 1.0 packaging.** `plugin.json` bundling skills and MCP servers.
 Defers to Agent Skills for the skill format, so skills authored today package

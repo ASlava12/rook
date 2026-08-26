@@ -1,23 +1,22 @@
-//! A Model Context Protocol client, stdio transport only.
+//! A Model Context Protocol client.
 //!
-//! MCP over stdio is JSON-RPC 2.0 in newline-delimited JSON. Rook uses four
-//! methods of it — `initialize`, `notifications/initialized`, `tools/list` and
-//! `tools/call` — so this is written directly rather than pulling in the full
-//! SDK, which would add 21 crates for a fraction of its surface. See
-//! `docs/adr/0008-hand-written-mcp-client.md`.
+//! MCP is JSON-RPC 2.0, carried either over a subprocess's pipes or over HTTP.
+//! Rook uses four methods of it — `initialize`, `notifications/initialized`,
+//! `tools/list` and `tools/call` — so this is written directly rather than
+//! pulling in the full SDK, which would add 21 crates for a fraction of its
+//! surface. See `docs/adr/0008-hand-written-mcp-client.md`.
 
+pub mod http;
 pub mod protocol;
+pub mod stdio;
+pub mod transport;
 
 use std::collections::HashMap;
-use std::process::Stdio;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin};
-use tokio::sync::{Mutex, oneshot};
+
+use transport::Transport;
 
 pub use protocol::{RpcError, ServerInfo, ToolDescriptor, ToolResult};
 
@@ -39,6 +38,8 @@ pub enum McpError {
     Closed { server: String },
     #[error("{server}: could not parse the response to {method}: {message}")]
     Decode { server: String, method: String, message: String },
+    #[error("{server}: needs either a command or a url")]
+    NotConfigured { server: String },
 }
 
 pub type Result<T> = std::result::Result<T, McpError>;
@@ -47,10 +48,15 @@ pub type Result<T> = std::result::Result<T, McpError>;
 #[serde(default)]
 pub struct ServerConfig {
     pub name: String,
+    /// A subprocess to speak to over its pipes.
     pub command: String,
     pub args: Vec<String>,
     pub env: HashMap<String, String>,
     pub cwd: Option<String>,
+    /// An HTTP endpoint, used instead of `command` when set.
+    pub url: Option<String>,
+    /// Extra headers for the HTTP transport, which is where an API key goes.
+    pub headers: HashMap<String, String>,
     /// A server that never completes the handshake must fail fast rather than
     /// stalling the agent's startup.
     pub startup_timeout_secs: u64,
@@ -66,6 +72,8 @@ impl Default for ServerConfig {
             args: Vec::new(),
             env: HashMap::new(),
             cwd: None,
+            url: None,
+            headers: HashMap::new(),
             startup_timeout_secs: 20,
             call_timeout_secs: 120,
             enabled: true,
@@ -73,81 +81,28 @@ impl Default for ServerConfig {
     }
 }
 
-type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<protocol::Incoming>>>>;
-
 pub struct Server {
     name: String,
     info: ServerInfo,
-    stdin: Mutex<ChildStdin>,
-    pending: Pending,
-    next_id: AtomicU64,
+    transport: Box<dyn Transport>,
     call_timeout: Duration,
-    child: Mutex<Child>,
 }
 
 impl Server {
-    /// Spawn the server and complete the MCP handshake.
+    /// Connect and complete the MCP handshake, over whichever transport the
+    /// configuration describes.
     pub async fn connect(config: &ServerConfig) -> Result<Self> {
-        let mut command = tokio::process::Command::new(&config.command);
-        command
-            .args(&config.args)
-            .envs(&config.env)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        if let Some(cwd) = &config.cwd {
-            command.current_dir(cwd);
-        }
-
-        let mut child =
-            command.spawn().map_err(|e| McpError::Spawn { command: config.command.clone(), source: e })?;
-        let stdin = child.stdin.take().expect("stdin was piped");
-        let stdout = child.stdout.take().expect("stdout was piped");
-        let stderr = child.stderr.take().expect("stderr was piped");
-
-        // An undrained stderr pipe fills and blocks the server mid-write, which
-        // presents as a hang with no output anywhere.
-        let name = config.name.clone();
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                tracing::debug!(server = %name, "{line}");
-            }
-        });
-
-        let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
-        let reader_pending = pending.clone();
-        let name = config.name.clone();
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                let Ok(message) = serde_json::from_str::<protocol::Incoming>(&line) else {
-                    tracing::debug!(server = %name, "unparsable line: {line}");
-                    continue;
-                };
-                match message.id {
-                    Some(id) => {
-                        if let Some(tx) = reader_pending.lock().await.remove(&id) {
-                            let _ = tx.send(message);
-                        }
-                    }
-                    // Notifications are not requested and nothing waits on them.
-                    None => tracing::debug!(server = %name, method = ?message.method, "notification"),
-                }
-            }
-            // The pipe closed: waiters would otherwise hang until their timeout.
-            reader_pending.lock().await.clear();
-        });
+        let transport: Box<dyn Transport> = match config.url.as_deref() {
+            Some(url) if !url.is_empty() => Box::new(http::Http::new(&config.name, url, &config.headers)?),
+            _ if !config.command.trim().is_empty() => Box::new(stdio::Stdio::spawn(config)?),
+            _ => return Err(McpError::NotConfigured { server: config.name.clone() }),
+        };
 
         let server = Self {
             name: config.name.clone(),
             info: ServerInfo::default(),
-            stdin: Mutex::new(stdin),
-            pending,
-            next_id: AtomicU64::new(1),
+            transport,
             call_timeout: Duration::from_secs(config.call_timeout_secs),
-            child: Mutex::new(child),
         };
 
         let info: ServerInfo = server
@@ -162,7 +117,7 @@ impl Server {
             )
             .await?;
 
-        server.notify("notifications/initialized", None).await?;
+        server.transport.notify("notifications/initialized", None).await?;
         Ok(Self { info, ..server })
     }
 
@@ -189,8 +144,7 @@ impl Server {
     }
 
     pub async fn shutdown(&self) {
-        let mut child = self.child.lock().await;
-        let _ = child.kill().await;
+        self.transport.shutdown().await;
     }
 
     async fn request<T: for<'de> Deserialize<'de>>(
@@ -207,53 +161,12 @@ impl Server {
         params: Option<serde_json::Value>,
         timeout: Duration,
     ) -> Result<T> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id, tx);
-
-        let line = serde_json::to_string(&protocol::Request { jsonrpc: "2.0", id, method, params })
-            .map_err(|e| self.decode_error(method, e.to_string()))?;
-        if let Err(e) = self.write_line(&line).await {
-            self.pending.lock().await.remove(&id);
-            return Err(e);
-        }
-
-        let message = match tokio::time::timeout(timeout, rx).await {
-            Err(_) => {
-                self.pending.lock().await.remove(&id);
-                return Err(McpError::Timeout { server: self.name.clone(), method: method.into(), timeout });
-            }
-            Ok(Err(_)) => return Err(McpError::Closed { server: self.name.clone() }),
-            Ok(Ok(message)) => message,
-        };
-
+        let message = self.transport.request(method, params, timeout).await?;
         if let Some(error) = message.error {
             return Err(McpError::Rpc { server: self.name.clone(), method: method.into(), error });
         }
-        serde_json::from_value(message.result.unwrap_or(serde_json::Value::Null))
-            .map_err(|e| self.decode_error(method, e.to_string()))
-    }
-
-    async fn notify(&self, method: &str, params: Option<serde_json::Value>) -> Result<()> {
-        let line = serde_json::to_string(&protocol::Notification { jsonrpc: "2.0", method, params })
-            .map_err(|e| self.decode_error(method, e.to_string()))?;
-        self.write_line(&line).await
-    }
-
-    async fn write_line(&self, line: &str) -> Result<()> {
-        let mut stdin = self.stdin.lock().await;
-        stdin
-            .write_all(format!("{line}\n").as_bytes())
-            .await
-            .map_err(|e| self.transport_error(e.to_string()))?;
-        stdin.flush().await.map_err(|e| self.transport_error(e.to_string()))
-    }
-
-    fn transport_error(&self, message: String) -> McpError {
-        McpError::Transport { server: self.name.clone(), message }
-    }
-
-    fn decode_error(&self, method: &str, message: String) -> McpError {
-        McpError::Decode { server: self.name.clone(), method: method.into(), message }
+        serde_json::from_value(message.result.unwrap_or(serde_json::Value::Null)).map_err(|e| {
+            McpError::Decode { server: self.name.clone(), method: method.into(), message: e.to_string() }
+        })
     }
 }

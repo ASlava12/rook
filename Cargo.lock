@@ -2348,7 +2348,10 @@ dependencies = [
 name = "rook-mcp"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "futures-util",
+ "reqwest",
+ "rook-llm",
  "serde",
  "serde_json",
  "thiserror 2.0.20",

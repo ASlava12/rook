@@ -10,9 +10,15 @@ and goose depend on `rmcp`, the official SDK.
 
 ## Decision
 
-Implement the stdio transport directly in `rook-mcp`. Four methods are used —
+Implement the transports directly in `rook-mcp`. Four methods are used —
 `initialize`, `notifications/initialized`, `tools/list`, `tools/call` — over
-newline-delimited JSON-RPC 2.0.
+newline-delimited JSON-RPC 2.0 on a subprocess's pipes, or over HTTP.
+
+The two differ in more than plumbing, which is why the abstraction is at the
+level of a whole request rather than of writing a line: stdio needs a
+pending-request table because answers arrive on a shared pipe, while HTTP answers
+each POST directly and must handle a reply that arrives as either a JSON object
+or an event stream.
 
 ## Why not `rmcp`
 
@@ -55,8 +61,8 @@ has a test:
 
 ## Cost
 
-- No HTTP or SSE transport. Servers that are not subprocesses are unsupported for
-  now; adding one means writing it.
 - No sampling, roots, elicitation or resource subscriptions.
+- The HTTP transport does not open the optional server-to-client stream, so a
+  server that initiates requests of its own is unsupported.
 - Protocol revisions have to be tracked by hand. The subset in use has been stable
   across revisions, and `initialize` reports the mismatch when a server disagrees.

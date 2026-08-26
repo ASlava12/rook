@@ -9,7 +9,7 @@ as a feature rather than a debugging afterthought: a CLI, a terminal browser and
 web UI, all views over the same engine.
 
 > **Status: early.** The storage layer, the skill system and the inspection tools
-> are implemented and covered by 118 tests. The agent loop — tool dispatch, skill
+> are implemented and covered by 124 tests. The agent loop — tool dispatch, skill
 > loading, budgeting, logging — is tested against a scripted provider; it has not
 > yet been exercised against a live model in CI. Streaming, MCP and ACP are on the
 > [roadmap](docs/roadmap.md) and are not implemented. Nothing below describes
@@ -209,7 +209,15 @@ Any MCP server becomes a tool the agent can call. Declare it in
 name = "filesystem"
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
+
+[[mcp]]
+name = "hosted"
+url = "https://example.com/mcp"
+headers = { Authorization = "Bearer …" }
 ```
+
+A `command` is spoken to over its pipes; a `url` over HTTP, which may answer
+either with JSON or with an event stream.
 
 ```sh
 rook mcp ls                              # connect everything, report what it offers
@@ -266,7 +274,7 @@ crates/
   rook-core     the engine: config, agent loop, context budget, file captures
   rook-llm      provider trait + OpenAI-compatible HTTP (Ollama, LM Studio, vLLM, OpenAI)
   rook-tools    read/write/edit/list/search/run, with the guards that keep a turn survivable
-  rook-mcp      Model Context Protocol client, stdio transport, ~250 lines
+  rook-mcp      Model Context Protocol client: stdio and HTTP transports
   rook-acp      Agent Client Protocol server, so editors can drive it
   rook-proto    wire types shared by daemon, CLI and web
   rookd         HTTP backend, chat websocket, embedded web UI
@@ -295,7 +303,6 @@ lose people's trust:
 - **The agent loop has not been run against a live model in CI.** Its logic is
   covered by tests against a scripted provider, and the SSE parser by tests over a
   real socket, but no real model has been driven end to end in CI.
-- **MCP is stdio only.** HTTP-transport servers are not supported yet.
 - **Compaction summarises, but only the whole span at once.** There is no
   incremental or hierarchical summary of a very long session.
 - **The CLI opens the store directly**, so it cannot run while `rookd` holds it.
