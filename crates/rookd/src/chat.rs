@@ -39,6 +39,10 @@ async fn serve(socket: WebSocket, state: Arc<AppState>) {
     });
 
     let (approver, relay) = approver(outbound.clone());
+    // Per connection, not per prompt: an approval granted for "the run" has to
+    // survive the turn it was granted in.
+    let policy =
+        std::sync::Arc::new(tokio::sync::OnceCell::<std::sync::Arc<rook_tools::policy::Policy>>::new());
     let mut running: Option<tokio::task::JoinHandle<()>> = None;
 
     while let Some(Ok(message)) = stream.next().await {
@@ -69,6 +73,7 @@ async fn serve(socket: WebSocket, state: Arc<AppState>) {
                 running = Some(tokio::spawn(turn(
                     state.clone(),
                     approver.clone(),
+                    policy.clone(),
                     outbound.clone(),
                     session,
                     text,
@@ -88,6 +93,7 @@ async fn serve(socket: WebSocket, state: Arc<AppState>) {
 async fn turn(
     state: Arc<AppState>,
     approver: Arc<ChannelApprover>,
+    policy: Arc<tokio::sync::OnceCell<Arc<rook_tools::policy::Policy>>>,
     outbound: mpsc::UnboundedSender<ChatEvent>,
     session: Option<String>,
     prompt: String,
@@ -114,6 +120,7 @@ async fn turn(
     };
 
     let mut agent = AgentLoop::new(&rook, provider.into(), session);
+    agent.policy = policy.get_or_init(|| async { rook_core::agent::policy_for(&rook) }).await.clone();
     agent.approver = approver;
 
     let mcp = rook.connect_mcp().await;

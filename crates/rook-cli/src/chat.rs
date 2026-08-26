@@ -64,6 +64,10 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
     );
     println!("/help for commands\n");
 
+    // One policy for the whole session, so "always this run" means the session
+    // and not the single turn it was granted in.
+    let policy = rook_core::agent::policy_for(&rook);
+
     let mut editor = rustyline::DefaultEditor::new()?;
     let history = rook_core::paths::home().join("history");
     let _ = editor.load_history(&history);
@@ -96,7 +100,7 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
                     rook.config.agent.stream_idle(),
                     rook.config.agent.context_window,
                 )?;
-                runtime.block_on(turn(&rook, provider, session, &mcp, &line, yes));
+                runtime.block_on(turn(&rook, provider, session, &mcp, &line, yes, &policy));
             }
             // Ctrl-C at the prompt clears the line rather than leaving; the
             // reflex from every other REPL is to press it to abandon input.
@@ -139,11 +143,13 @@ async fn turn(
     mcp: &rook_core::McpSession,
     prompt: &str,
     yes: bool,
+    policy: &std::sync::Arc<rook_tools::policy::Policy>,
 ) {
     let mut agent = AgentLoop::new(rook, provider.into(), session);
     if yes {
         agent.allow_everything_not_denied();
     } else {
+        agent.policy = policy.clone();
         agent.approver = std::sync::Arc::new(crate::approve::Terminal);
     }
     for (server, tools) in &mcp.servers {

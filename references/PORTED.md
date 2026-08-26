@@ -16,6 +16,8 @@ Add a row when you implement something after reading a reference. Add it to
 | Budgeted, content-addressed checkpoints | opencode's `git add .` failure ([#3176](https://github.com/anomalyco/opencode/issues/3176)) | issues, not source | `FileSet::capture`, `CaptureLimits` |
 | Summarised compaction with a fallback ladder | goose `goose-context-management/src/summarize.rs` — took the structured summary and the "must not fail when needed most" framing, left the template engine | source | `AgentLoop::compact`, `Rook::last_compaction` |
 | Three-way approval with per-command rules | goose `permission_inspector.rs` (AlwaysAllow/AskBefore/NeverAllow, defaults to asking) and its regex allow/ask/deny request; codex `approval_policy` | source | `rook-tools/src/policy.rs`, [ADR-0009](../docs/adr/0009-ask-before-acting.md) |
+| Approval scope outliving a single turn | codex `a57b398` *require approval for input to escalated terminals* — the fix does not apply (no persistent terminals here), but its subject, approval scope across turns, exposed the opposite defect in ours | source, via `refs advance` | `agent::policy_for`, [ADR-0009](../docs/adr/0009-ask-before-acting.md) |
+| A budget on advertised tool schemas | hermes `3fd70ad1` cutting one tool from 924 to 518 tokens a call — ours are already lean, so the value was the lesson that schemas drift unmeasured | source, via `refs advance` | `the_advertised_tool_schemas_stay_within_a_budget` |
 | Planning without a checklist tool | goose [#11172](https://github.com/aaif-goose/goose/issues/11172) — a benchmarked A/B showing the tool is not the active ingredient; adopted its V2 variant and skipped the tool every reference ships | issues, not source | [ADR-0010](../docs/adr/0010-no-todo-tool.md) |
 | Code intelligence from a language server | codex [#8745](https://github.com/openai/codex/issues/8745) *LSP integration (auto-detect + auto-install)* (564 reactions) — took detection, left installation | issues, not source | `rook-lsp`, `rook-core/src/lsp.rs`, `rook lsp` |
 | An aside that does not clutter the conversation | opencode [#16992](https://github.com/anomalyco/opencode/issues/16992) *add /btw command* (376 reactions), asking for what Claude Code shipped | issues, not source | `AgentLoop::aside`, `/btw` |
@@ -34,6 +36,22 @@ Add a row when you implement something after reading a reference. Add it to
 `cargo xtask refs advance` prints what landed upstream since the pointer was last
 moved; what follows is what was done with it, so a dismissal is a decision rather
 than an omission.
+
+**2026-08-27 (second pass)** — codex, goose and hermes advanced again.
+
+- hermes `3fd70ad1` *skill_manage 924 → 518 tok/call* — **measured, no diet
+  needed.** Our six built-in schemas cost ~489 tokens together, against 924 for
+  their one tool. The transferable part was that a schema grows unmeasured, so
+  there is now a budget test.
+- codex `a57b398` *require approval for input to escalated terminals* — **does
+  not apply, but found a defect.** Rook has no persistent terminals and closes
+  stdin. Its subject — approval scope spanning turns — prompted a check of ours,
+  which had the opposite bug: "allow for the rest of the run" was forgotten at
+  the end of the turn it was granted in, because every front end built a fresh
+  policy per turn. Fixed; measured at two prompts before and one after.
+- codex `37a5149`, `d61ba72`, `102ae5e`, `07d260c`, goose `f812cbd`, hermes
+  formatting commits — **not applicable**: Guardian internals, Windows telemetry,
+  CI automation and `npm run fix`.
 
 **2026-08-27** — codex, goose, opencode and hermes advanced.
 

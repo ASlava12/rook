@@ -80,6 +80,7 @@ struct App {
     events: mpsc::UnboundedReceiver<TurnEvent>,
     to_loop: mpsc::UnboundedSender<TurnEvent>,
     approver: Arc<ChannelApprover>,
+    policy: Arc<rook_tools::policy::Policy>,
     turn: Option<tokio::task::JoinHandle<()>>,
     tab: usize,
     sessions: Vec<SessionMeta>,
@@ -109,13 +110,14 @@ impl App {
         });
 
         let mut app = Self {
-            rook,
+            rook: rook.clone(),
             runtime,
             yes,
             chat: Chat::default(),
             events,
             to_loop,
             approver: Arc::new(ChannelApprover::new(requests, Duration::from_secs(600))),
+            policy: rook_core::agent::policy_for(&rook),
             turn: None,
             tab: 0,
             sessions: Vec::new(),
@@ -286,6 +288,7 @@ impl App {
         let rook = self.rook.clone();
         let to_loop = self.to_loop.clone();
         let approver = self.approver.clone();
+        let policy = self.policy.clone();
         let session = self.chat.session;
         let yes = self.yes;
 
@@ -329,6 +332,7 @@ impl App {
             if yes {
                 agent.allow_everything_not_denied();
             } else {
+                agent.policy = policy;
                 agent.approver = approver;
             }
             let mcp = rook.connect_mcp().await;

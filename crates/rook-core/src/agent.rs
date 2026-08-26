@@ -27,6 +27,20 @@ use crate::error::{CoreError, Result};
 use crate::hooks::{self, Hooks};
 use crate::service::Rook;
 
+/// Build the approval policy from configuration.
+///
+/// Exposed because "allow this for the rest of the run" has to outlive a single
+/// turn: an interactive front end builds one policy for the session and hands it
+/// to every loop, or the user is asked again the moment they said not to be.
+pub fn policy_for(rook: &Rook) -> std::sync::Arc<Policy> {
+    let sandbox = &rook.config.sandbox;
+    let (policy, unusable) = Policy::compile(sandbox.mode, &sandbox.allow, &sandbox.ask, &sandbox.deny);
+    for error in unusable {
+        tracing::warn!("ignoring unusable sandbox rule: {error}");
+    }
+    std::sync::Arc::new(policy)
+}
+
 /// Pseudo-tools: implemented by the loop rather than the toolbox, because they
 /// need the agent's own state.
 pub const LOAD_SKILL: &str = "load_skill";
@@ -93,11 +107,6 @@ impl<'a> AgentLoop<'a> {
             tracing::warn!("ignoring unusable hook matcher: {error}");
         }
 
-        let sandbox = &rook.config.sandbox;
-        let (policy, bad_rules) = Policy::compile(sandbox.mode, &sandbox.allow, &sandbox.ask, &sandbox.deny);
-        for error in bad_rules {
-            tracing::warn!("ignoring unusable sandbox rule: {error}");
-        }
         let budget = ContextBudget::new(provider.context_window(), rook.config.agent.compact_at);
         Self {
             rook,
@@ -105,7 +114,7 @@ impl<'a> AgentLoop<'a> {
             tools,
             tool_ctx,
             session,
-            policy: std::sync::Arc::new(policy),
+            policy: policy_for(rook),
             hooks: std::sync::Arc::new(hooks),
             servers,
             session_context: std::sync::Mutex::new(None),

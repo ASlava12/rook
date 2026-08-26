@@ -149,3 +149,29 @@ fn rook_core_config_deny() -> Vec<&'static str> {
         r"/\bchmod\s+-R\s+777\s+\/\s*$/",
     ]
 }
+
+/// A guard against the drift hermes had to correct: their one tool grew to 924
+/// tokens a call before anyone measured it.
+#[test]
+fn the_advertised_tool_schemas_stay_within_a_budget() {
+    let tools = rook_tools::ToolBox::standard();
+    let cost = |t: &rook_llm::ToolSpec| {
+        (t.name.len() + t.description.len() + t.parameters.to_string().len()).div_ceil(4)
+    };
+
+    let full: usize = tools.specs().iter().map(cost).sum();
+    let stubs: usize = tools.stubs().iter().map(cost).sum();
+
+    assert!(
+        full < 700,
+        "the built-in schemas cost ~{full} tokens on every eager request; \
+         trim a description or merge an argument before raising this"
+    );
+    assert!(
+        stubs * 2 < full,
+        "stubs ({stubs}) must be much cheaper than full schemas ({full}), or lazy loading buys nothing"
+    );
+    for spec in tools.specs() {
+        assert!(cost(&spec) < 200, "{} alone costs ~{} tokens", spec.name, cost(&spec));
+    }
+}

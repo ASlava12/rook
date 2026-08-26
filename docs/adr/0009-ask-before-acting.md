@@ -53,6 +53,17 @@ substring also blocks `rm -rf /tmp/scratch` and `rm -rf ./target`. A deny list
 that cries wolf gets turned off, so the shipped rules are tested in both
 directions: what they must stop, and what they must leave alone.
 
+## What "for this run" means
+
+An approval granted for the run lives on the policy, and the policy's lifetime is
+the front end's, not the turn's. In an interactive session — `rook chat`, the
+TUI, one websocket connection — it is built once and shared by every turn, so
+"always" means until the session ends. In `rook run` a turn *is* the run.
+
+Getting this wrong is invisible from the code and obvious in use: the user says
+"always" and is asked again on the next turn, which is precisely what they
+declined.
+
 ## Hooks fit under the same rule
 
 A `pre_tool` hook may answer `allow`, `ask` or `deny`, and it is consulted after
