@@ -105,10 +105,25 @@ max_total_bytes      = 4294967296   # 4 GiB
 protect_tags         = ["keep", "pinned"]
 ```
 
-`Store::prune` deletes the oldest unprotected sessions until the policy is
-satisfied; `Store::gc` then reclaims what nothing references. Both have a dry run,
-and the CLI's `--dry-run` is how you find out what a policy would do before it does
-it. `rookd` runs both on a configurable interval.
+Any field may be omitted; an omitted one keeps the default above.
+
+The age and count limits are enforced by `Store::prune`, which deletes the oldest
+unprotected sessions first. The byte limit cannot be, because deleting a session
+frees nothing until garbage collection runs, so nothing can tell whether the limit
+has been met. `Rook::maintenance` enforces it instead: prune, collect, measure,
+delete the next batch of oldest sessions, repeat. `rook store maintain` is that
+whole cycle, and `rookd` runs it on a configurable interval.
+
+`max_total_bytes` is measured against stored content, not against the file on disk.
+redb reuses freed pages rather than returning them, so `index.redb` never shrinks
+and a cap on its size could never be met.
+
+Retention only deletes sessions. Checkpoints, skill versions and memory are kept
+until you delete them, so a store can sit above its byte budget legitimately —
+`store maintain` reports how far over it is and how many sessions were left.
+
+Every step has a dry run, and `--dry-run` is how you find out what a policy would do
+before it does it.
 
 Garbage collection is **mark-and-sweep**. Roots are every ref and every event body;
 higher layers supply an expander so a snapshot manifest keeps its files alive. A

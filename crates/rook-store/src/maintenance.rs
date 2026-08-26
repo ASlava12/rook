@@ -45,7 +45,10 @@ pub struct GcReport {
     pub dry_run: bool,
 }
 
+/// Every field is optional in a config file: an omitted one keeps its default,
+/// so a user can set one limit without restating the rest.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RetentionPolicy {
     pub max_session_age_days: Option<u32>,
     pub max_sessions: Option<usize>,
@@ -199,37 +202,32 @@ impl Store {
         Ok(removed)
     }
 
-    /// Deletes the oldest unprotected sessions first. Objects survive until
-    /// [`Store::gc`] runs, because other sessions may share them.
+    /// Deletes the oldest unprotected sessions first, by age and by count.
+    /// Objects survive until [`Store::gc`] runs, because other sessions may
+    /// share them.
     pub fn prune(&self, policy: &RetentionPolicy, dry_run: bool) -> Result<PruneReport> {
         let mut report = PruneReport { dry_run, ..Default::default() };
         let mut sessions = self.list_sessions()?;
         sessions.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
 
         let now = crate::now_unix();
-        let disk = self.stats()?.disk_bytes();
-        let mut budget_exceeded = policy.max_total_bytes.map(|cap| disk > cap).unwrap_or(false);
-
         let mut kept = 0usize;
         let mut doomed = Vec::new();
-        for s in &sessions {
-            let protected = s.tags.iter().any(|t| policy.protect_tags.contains(t));
-            if protected {
+
+        for session in &sessions {
+            if session.tags.iter().any(|t| policy.protect_tags.contains(t)) {
                 report.protected += 1;
                 kept += 1;
                 continue;
             }
-            let too_old =
-                policy.max_session_age_days.map(|d| now - s.updated_at > d as i64 * 86_400).unwrap_or(false);
-            let too_many = policy.max_sessions.map(|m| kept >= m).unwrap_or(false);
+            let too_old = policy
+                .max_session_age_days
+                .map(|days| now - session.updated_at > days as i64 * 86_400)
+                .unwrap_or(false);
+            let too_many = policy.max_sessions.map(|max| kept >= max).unwrap_or(false);
 
-            if too_old || too_many || budget_exceeded {
-                doomed.push(s.id);
-                // One pass of oldest-first deletion; re-measuring the directory
-                // per session would make this quadratic for no real gain.
-                if budget_exceeded && doomed.len() >= sessions.len() / 4 {
-                    budget_exceeded = false;
-                }
+            if too_old || too_many {
+                doomed.push(session.id);
             } else {
                 kept += 1;
             }
@@ -242,6 +240,18 @@ impl Store {
             }
         }
         Ok(report)
+    }
+
+    /// The `count` oldest sessions no tag protects, oldest first.
+    pub fn oldest_unprotected(&self, policy: &RetentionPolicy, count: usize) -> Result<Vec<u128>> {
+        let mut sessions = self.list_sessions()?;
+        sessions.sort_by_key(|s| s.updated_at);
+        Ok(sessions
+            .into_iter()
+            .filter(|s| !s.tags.iter().any(|t| policy.protect_tags.contains(t)))
+            .take(count)
+            .map(|s| s.id)
+            .collect())
     }
 
     /// Worth running once a store has a few hundred objects, and again after

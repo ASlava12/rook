@@ -192,6 +192,11 @@ enum StoreCmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Prune, collect, enforce the size budget and retrain dictionaries.
+    Maintain {
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Re-read and re-hash every object.
     Verify,
     /// Train compression dictionaries from what is already stored.
@@ -738,6 +743,42 @@ fn cmd_store(rook: &Rook, cmd: StoreCmd, json: bool) -> Result<()> {
             );
             if !dry_run {
                 println!("run `rook store gc` to reclaim the space");
+            }
+            if rook.config.storage.retention.max_total_bytes.is_some() {
+                println!("`store maintain` also enforces the size budget, which needs gc to measure");
+            }
+        }
+        StoreCmd::Maintain { dry_run } => {
+            let report = rook.maintenance(dry_run)?;
+            let tag = if dry_run { "[dry run] " } else { "" };
+            println!(
+                "{tag}sessions deleted {}, events deleted {}, protected {}",
+                report.prune.sessions_deleted, report.prune.events_deleted, report.prune.protected
+            );
+            println!("{tag}collected {} ({} freed)", report.gc.collected, fmt::bytes(report.gc.bytes_freed));
+            for (kind, samples) in &report.dictionaries_trained {
+                println!("trained {kind} dictionary from {samples} objects");
+            }
+            match report.over_budget_by {
+                0 => println!("stored {}", fmt::bytes(rook.content_bytes()?)),
+                over => {
+                    let policy = &rook.config.storage.retention;
+                    let left = rook.store.list_sessions()?;
+                    let protected = left
+                        .iter()
+                        .filter(|s| s.tags.iter().any(|t| policy.protect_tags.contains(t)))
+                        .count();
+                    println!(
+                        "still {} over the {} budget",
+                        fmt::bytes(over),
+                        fmt::bytes(policy.max_total_bytes.unwrap_or(0))
+                    );
+                    println!(
+                        "  {} session(s) remain, {protected} protected; the rest is checkpoints, \
+                         skill versions and memory, which retention does not delete",
+                        left.len()
+                    );
+                }
             }
         }
         StoreCmd::Verify => {

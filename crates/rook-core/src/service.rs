@@ -589,14 +589,58 @@ impl Rook {
         Ok(self.store.stats()?)
     }
 
-    /// Prune to the retention policy, then collect what that freed.
+    /// Stored content, which is what a size cap can actually control. The redb
+    /// file is not it: freed pages are reused rather than returned, so
+    /// `index.redb` never shrinks and a cap on its size could never be met.
+    pub fn content_bytes(&self) -> Result<u64> {
+        Ok(self.store.stats()?.bytes_stored)
+    }
+
+    /// Prune to the retention policy, collect what that freed, and keep going
+    /// until the size cap is met.
+    ///
+    /// The cap has to be enforced here rather than inside `prune`: bytes are
+    /// only released by garbage collection, so nothing can tell whether it has
+    /// been met until that has run.
     pub fn maintenance(&self, dry_run: bool) -> Result<MaintenanceReport> {
-        let prune = self.store.prune(&self.config.storage.retention, dry_run)?;
-        let gc = self.store.gc(&GcOptions {
+        let policy = &self.config.storage.retention;
+        let mut prune = self.store.prune(policy, dry_run)?;
+        let mut gc = self.store.gc(&GcOptions {
             expand: Some(&fileset::gc_expander),
             dry_run,
             ..Default::default()
         })?;
+
+        let cap = policy.max_total_bytes.unwrap_or(u64::MAX);
+        let mut over_budget_by = self.content_bytes()?.saturating_sub(cap);
+
+        if !dry_run {
+            // Oldest first, in batches, re-measuring after each collection.
+            // Deleting a fixed fraction and hoping was the previous behaviour,
+            // and it deleted the newest sessions.
+            for _ in 0..MAX_PRUNE_ROUNDS {
+                if over_budget_by == 0 {
+                    break;
+                }
+                let remaining = self.store.list_sessions()?.len();
+                let batch = (remaining / 8).max(1);
+                let oldest = self.store.oldest_unprotected(policy, batch)?;
+                if oldest.is_empty() {
+                    break;
+                }
+                for id in oldest {
+                    prune.sessions_deleted += 1;
+                    prune.events_deleted += self.store.delete_session(id)?;
+                }
+                let round = self
+                    .store
+                    .gc(&GcOptions { expand: Some(&fileset::gc_expander), ..Default::default() })?;
+                gc.collected += round.collected;
+                gc.bytes_freed += round.bytes_freed;
+                over_budget_by = self.content_bytes()?.saturating_sub(cap);
+            }
+        }
+
         let trained = if dry_run {
             Vec::new()
         } else {
@@ -605,9 +649,14 @@ impl Rook {
                 self.config.storage.dictionary_bytes,
             )?
         };
-        Ok(MaintenanceReport { prune, gc, dictionaries_trained: trained })
+        Ok(MaintenanceReport { prune, gc, dictionaries_trained: trained, over_budget_by })
     }
 }
+
+/// A store that is still over its cap after this many rounds is being kept over
+/// it by something a size policy cannot remove — protected sessions, or one
+/// session larger than the whole budget.
+const MAX_PRUNE_ROUNDS: usize = 16;
 
 /// Result of restoring a captured version over a live directory.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -630,7 +679,6 @@ fn walk_files(root: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// One recorded state of memory.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MemoryVersion {
     pub reference: String,
@@ -721,6 +769,8 @@ pub struct MaintenanceReport {
     pub prune: PruneReport,
     pub gc: GcReport,
     pub dictionaries_trained: Vec<(String, usize)>,
+    /// Stored bytes still above the cap once everything prunable is gone.
+    pub over_budget_by: u64,
 }
 
 fn skill_template(name: &str, description: &str, env: &Environment) -> String {

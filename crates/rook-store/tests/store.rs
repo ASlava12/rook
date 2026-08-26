@@ -327,3 +327,69 @@ fn a_fork_keeps_exactly_the_events_before_the_split() {
     // The original is untouched by any of that.
     assert_eq!(s.events(source, 0, usize::MAX).unwrap().len(), 5);
 }
+
+/// Sessions of a known age, newest last.
+fn aged_sessions(store: &Store, count: usize) -> Vec<u128> {
+    let now = rook_store::now_unix();
+    (0..count)
+        .map(|i| {
+            let id = rook_store::new_session_id();
+            let mut meta = SessionMeta::new(id, format!("session {i}"), "/tmp", now);
+            store.create_session(&meta).unwrap();
+            store
+                .append_event(id, NewEvent::new(EventKind::UserMessage, Kind::Message, &message(i)))
+                .unwrap();
+            // After the event, which stamps `updated_at` with the current time.
+            meta.updated_at = now - (count - i) as i64 * 3_600;
+            store.create_session(&meta).unwrap();
+            id
+        })
+        .collect()
+}
+
+fn budget(bytes: Option<u64>) -> rook_store::RetentionPolicy {
+    rook_store::RetentionPolicy {
+        max_session_age_days: None,
+        max_sessions: None,
+        max_total_bytes: bytes,
+        protect_tags: vec!["keep".into()],
+    }
+}
+
+#[test]
+fn the_oldest_unprotected_sessions_come_back_oldest_first() {
+    let (_d, s) = tmp_store();
+    let sessions = aged_sessions(&s, 8);
+
+    let picked = s.oldest_unprotected(&budget(None), 3).unwrap();
+    assert_eq!(picked, sessions[..3], "oldest three, in age order");
+}
+
+#[test]
+fn a_protecting_tag_keeps_a_session_out_of_the_oldest_batch() {
+    let (_d, s) = tmp_store();
+    let sessions = aged_sessions(&s, 4);
+    let mut oldest = s.get_session(sessions[0]).unwrap().unwrap();
+    oldest.tags.push("keep".into());
+    s.create_session(&oldest).unwrap();
+
+    let picked = s.oldest_unprotected(&budget(None), 2).unwrap();
+    assert_eq!(picked, sessions[1..3], "the protected one is skipped, not kept");
+}
+
+#[test]
+fn count_and_age_limits_delete_the_oldest_not_the_newest() {
+    let (_d, s) = tmp_store();
+    let sessions = aged_sessions(&s, 8);
+    let policy = rook_store::RetentionPolicy { max_sessions: Some(3), ..budget(None) };
+
+    let report = s.prune(&policy, false).unwrap();
+
+    assert_eq!(report.sessions_deleted, 5);
+    for id in &sessions[..5] {
+        assert!(s.get_session(*id).unwrap().is_none(), "the oldest five go");
+    }
+    for id in &sessions[5..] {
+        assert!(s.get_session(*id).unwrap().is_some(), "the newest three stay");
+    }
+}
