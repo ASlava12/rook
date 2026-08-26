@@ -861,7 +861,7 @@ impl AgentLoop<'_> {
     }
 
     async fn summarise_span(&self) -> Result<String> {
-        let (from_seq, _) = self.rook.last_compaction(self.session)?;
+        let (from_seq, previous) = self.rook.last_compaction(self.session)?;
         let entries = self.rook.transcript(self.session, from_seq, usize::MAX, 8_000)?;
 
         // Keep the recent tail live; only what falls before it is summarised.
@@ -875,15 +875,24 @@ impl AgentLoop<'_> {
             }
             split -= 1;
         }
-        if split < 2 {
+        if split < 2 && previous.is_none() {
             return Err(CoreError::Other("not enough history to compact".into()));
         }
 
         let span = &entries[..split];
-        let through_seq = span.last().map(|e| e.seq).unwrap_or(0);
-        let transcript = render_span(span, self.budget.usable() / 2);
+        let through_seq = span.last().map(|e| e.seq).unwrap_or(from_seq.saturating_sub(1));
 
-        let request = Request::new(vec![Message::system(SUMMARY_INSTRUCTIONS), Message::user(transcript)]);
+        // The previous summary is folded into this one, and is never what gets
+        // trimmed. Without it a second compaction covers only the span since
+        // the first, and everything before that is simply gone — which is the
+        // failure compaction exists to prevent.
+        let carried = previous
+            .map(|p| format!("A summary of everything before this point:\n\n{p}\n\n---\n\n"))
+            .unwrap_or_default();
+        let room = (self.budget.usable() / 2).saturating_sub(estimate_tokens(&carried));
+        let material = format!("{carried}{}", render_span(span, room));
+
+        let request = Request::new(vec![Message::system(SUMMARY_INSTRUCTIONS), Message::user(material)]);
         let mut stream = self.provider.stream(request).await.map_err(|e| CoreError::Other(e.to_string()))?;
         let mut assembler = Assembler::default();
         while let Some(delta) = stream.next().await {

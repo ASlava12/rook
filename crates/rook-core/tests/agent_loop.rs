@@ -1565,3 +1565,44 @@ async fn a_binary_file_is_reported_as_changed_without_a_diff() {
     assert_eq!(file.change, rook_core::changes::Change::Modified);
     assert!(file.diff.is_none(), "rendering a binary diff into a terminal helps nobody");
 }
+
+#[tokio::test]
+async fn a_second_compaction_keeps_what_the_first_one_summarised() {
+    let f = fixture();
+    let session = long_session(&f, 40);
+
+    let first = ScriptedProvider::new(vec![reply("## Done\nthe API key lives in 1password"), reply("ok")]);
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(first), session);
+    agent.set_window_for_test(4_000);
+    let outcome = agent.run("first").await.unwrap();
+    assert_eq!(outcome.compactions, 1);
+
+    // Fill it up again so a second compaction has to happen.
+    for i in 0..40 {
+        f.rook
+            .log(session, rook_store::EventKind::UserMessage, "", &format!("filler {i}: {}", "z".repeat(400)))
+            .unwrap();
+    }
+
+    let second = ScriptedProvider::new(vec![reply("## Done\nfiller happened"), reply("ok")]);
+    let seen = second.share();
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(second), session);
+    agent.set_window_for_test(4_000);
+    let outcome = agent.run("second").await.unwrap();
+    assert_eq!(outcome.compactions, 1, "it should have compacted again");
+
+    let summarised: String = seen.lock().unwrap()[0].messages.iter().map(|m| m.content.clone()).collect();
+    assert!(
+        summarised.contains("1password"),
+        "the second summarisation must be given the first summary, or what it covered is lost:\n{summarised:.600}"
+    );
+
+    // What the second summary *says* is the model's business; a scripted one
+    // returns canned text. What is asserted here is the material it was given,
+    // which is the part this code is responsible for.
+    assert!(summarised.contains("filler"), "the raw span must be there too, not only the carried summary");
+    assert!(
+        summarised.find("1password") < summarised.find("filler"),
+        "the carried summary comes first, so trimming takes the raw span and never it"
+    );
+}

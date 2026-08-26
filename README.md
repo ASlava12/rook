@@ -9,7 +9,7 @@ as a feature rather than a debugging afterthought: a CLI, a terminal browser and
 web UI, all views over the same engine.
 
 > **Status: early.** The storage layer, the skill system and the inspection tools
-> are implemented and covered by 182 tests. The agent loop — tool dispatch, skill
+> are implemented and covered by 183 tests. The agent loop — tool dispatch, skill
 > loading, budgeting, logging — is tested against a scripted provider; it has not
 > yet been exercised against a live model in CI. Streaming, MCP and ACP are on the
 > [roadmap](docs/roadmap.md) and are not implemented. Nothing below describes
@@ -364,8 +364,6 @@ lose people's trust:
 - **The agent loop has not been run against a live model in CI.** Its logic is
   covered by tests against a scripted provider, and the SSE parser by tests over a
   real socket, but no real model has been driven end to end in CI.
-- **Compaction summarises, but only the whole span at once.** There is no
-  incremental or hierarchical summary of a very long session.
 - **The CLI opens the store directly**, so it cannot run while `rookd` holds it.
   It says so clearly; routing the CLI through the daemon is
   [ADR-0006](docs/adr/0006-single-writer-store.md).

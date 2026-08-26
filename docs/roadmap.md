@@ -32,7 +32,9 @@ what unblocks the most.
 - **Compaction** — the model summarises the span it replaces, into goal / done /
   open sections, and the summary is recorded in the log as a durable checkpoint:
   later turns and later processes start from it instead of replaying the span.
-  A failed summary degrades to a marker rather than wedging the turn. 4 tests.
+  A failed summary degrades to a marker rather than wedging the turn, and each
+  compaction folds the previous summary into the next, so a session compacted
+  many times still knows what it did at the start. 5 tests.
 - **Permissions** — three modes and regex allow/ask/deny rules over what a call
   would actually do, defaulting to asking, with denial beating everything
   ([ADR-0009](adr/0009-ask-before-acting.md)). 12 tests, including the shipped
@@ -116,9 +118,6 @@ falling back to direct access. Removes the single-writer papercut
 **Supervising sub-agents while they run.** Delegation fans out and waits for all
 of them. codex's `spawn_agent`/`wait_agent` lets a parent send messages to a child
 mid-run, which is a different feature rather than a deeper version of this one.
-
-**Hierarchical compaction.** A session long enough to compact twice summarises a
-summary. goose's ladder of progressively larger removals is the reference.
 
 **Memory consolidation.** Nothing merges near-duplicate facts or ages out stale
 ones yet; the identity check only catches exact repeats.
