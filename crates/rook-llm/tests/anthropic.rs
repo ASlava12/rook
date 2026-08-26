@@ -81,10 +81,11 @@ async fn the_system_prompt_is_lifted_out_of_the_message_list() {
     provider(url).complete(request).await.unwrap();
 
     let body = seen.lock().unwrap().clone().unwrap();
-    assert_eq!(body["system"], "be terse\n\nand precise", "both system turns must be merged");
+    assert_eq!(body["system"][0]["text"], "be terse\n\nand precise", "both system turns must be merged");
     let messages = body["messages"].as_array().unwrap();
     assert_eq!(messages.len(), 1, "no system message may remain in the list");
     assert_eq!(messages[0]["role"], "user");
+    assert_eq!(messages[0]["content"][0]["text"], "hello");
 }
 
 #[tokio::test]
@@ -98,6 +99,7 @@ async fn tool_results_are_blocks_in_one_user_message() {
             ToolCall { id: "b".into(), name: "two".into(), arguments: serde_json::json!({}) },
         ],
         tool_call_id: None,
+        cache: false,
     };
     let request = Request::new(vec![
         Message::user("do both"),
@@ -303,4 +305,74 @@ async fn a_stalled_stream_gives_up() {
         }
     }
     assert!(matches!(failure, Some(LlmError::Stalled { .. })), "{failure:?}");
+}
+
+#[tokio::test]
+async fn a_breakpoint_on_the_system_block_caches_the_tools_with_it() {
+    let (url, seen) = serve("200 OK", "application/json", DONE).await;
+    let mut request =
+        Request::new(vec![Message::system("a large stable preamble").cacheable(), Message::user("hello")]);
+    request.tools = vec![ToolSpec {
+        name: "t".into(),
+        description: "d".into(),
+        parameters: serde_json::json!({ "type": "object" }),
+    }];
+    provider(url).complete(request).await.unwrap();
+
+    let body = seen.lock().unwrap().clone().unwrap();
+    assert!(body["system"].is_array(), "a breakpoint needs the block form, not a bare string");
+    assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+    assert!(
+        body["tools"][0]["cache_control"].is_null(),
+        "tools render before system, so one marker covers both"
+    );
+}
+
+#[tokio::test]
+async fn an_unmarked_system_prompt_carries_no_breakpoint() {
+    let (url, seen) = serve("200 OK", "application/json", DONE).await;
+    provider(url).complete(Request::new(vec![Message::system("short"), Message::user("hi")])).await.unwrap();
+
+    let body = seen.lock().unwrap().clone().unwrap();
+    assert!(
+        body["system"][0]["cache_control"].is_null(),
+        "marking a prefix too small to cache only pays the write premium"
+    );
+}
+
+#[tokio::test]
+async fn a_marked_conversation_turn_carries_the_breakpoint_on_its_last_block() {
+    let (url, seen) = serve("200 OK", "application/json", DONE).await;
+    let assistant = Message {
+        role: Role::Assistant,
+        content: "done".into(),
+        tool_calls: vec![ToolCall { id: "a".into(), name: "t".into(), arguments: serde_json::json!({}) }],
+        tool_call_id: None,
+        cache: true,
+    };
+    provider(url)
+        .complete(Request::new(vec![Message::user("go"), assistant, Message::user("next")]))
+        .await
+        .unwrap();
+
+    let body = seen.lock().unwrap().clone().unwrap();
+    let blocks = body["messages"][1]["content"].as_array().unwrap();
+    assert!(blocks[0]["cache_control"].is_null());
+    assert_eq!(
+        blocks.last().unwrap()["cache_control"]["type"],
+        "ephemeral",
+        "the breakpoint belongs on the last block of the marked turn"
+    );
+}
+
+#[tokio::test]
+async fn cache_hits_are_reported_back() {
+    let body = r#"{"id":"m","model":"claude-opus-5","content":[{"type":"text","text":"hi"}],
+        "stop_reason":"end_turn",
+        "usage":{"input_tokens":12,"output_tokens":3,"cache_read_input_tokens":9000,"cache_creation_input_tokens":40}}"#;
+    let (url, _) = serve("200 OK", "application/json", Box::leak(body.to_string().into_boxed_str())).await;
+
+    let usage = provider(url).complete(Request::new(vec![Message::user("hi")])).await.unwrap().usage;
+    assert_eq!(usage.cache_read_tokens, 9000, "without this there is no way to tell caching works");
+    assert_eq!(usage.cache_write_tokens, 40);
 }

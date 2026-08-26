@@ -19,20 +19,34 @@ pub struct Message {
     /// Present on tool messages, matching the call being answered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// A cache breakpoint may be placed at the end of this message. Providers
+    /// without prompt caching ignore it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cache: bool,
 }
 
 impl Message {
     pub fn system(text: impl Into<String>) -> Self {
-        Self { role: Role::System, content: text.into(), tool_calls: vec![], tool_call_id: None }
+        Self::of(Role::System, text)
     }
     pub fn user(text: impl Into<String>) -> Self {
-        Self { role: Role::User, content: text.into(), tool_calls: vec![], tool_call_id: None }
+        Self::of(Role::User, text)
     }
     pub fn assistant(text: impl Into<String>) -> Self {
-        Self { role: Role::Assistant, content: text.into(), tool_calls: vec![], tool_call_id: None }
+        Self::of(Role::Assistant, text)
     }
     pub fn tool_result(id: impl Into<String>, text: impl Into<String>) -> Self {
-        Self { role: Role::Tool, content: text.into(), tool_calls: vec![], tool_call_id: Some(id.into()) }
+        Self { tool_call_id: Some(id.into()), ..Self::of(Role::Tool, text) }
+    }
+
+    fn of(role: Role, text: impl Into<String>) -> Self {
+        Self { role, content: text.into(), tool_calls: vec![], tool_call_id: None, cache: false }
+    }
+
+    /// Mark this as the end of a stable prefix worth caching.
+    pub fn cacheable(mut self) -> Self {
+        self.cache = true;
+        self
     }
 }
 
@@ -73,6 +87,11 @@ impl ToolSpec {
 pub struct Usage {
     pub input_tokens: u32,
     pub output_tokens: u32,
+    /// Read from the prompt cache instead of being processed again.
+    #[serde(default)]
+    pub cache_read_tokens: u32,
+    #[serde(default)]
+    pub cache_write_tokens: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

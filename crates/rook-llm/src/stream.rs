@@ -56,6 +56,7 @@ impl Assembler {
                 content: self.text,
                 tool_calls: self.tool_calls,
                 tool_call_id: None,
+                cache: false,
             },
             stop_reason,
             usage,

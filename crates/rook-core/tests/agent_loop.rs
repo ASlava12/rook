@@ -53,7 +53,7 @@ fn reply(text: &str) -> Response {
     Response {
         message: Message::assistant(text),
         stop_reason: StopReason::EndTurn,
-        usage: Usage { input_tokens: 100, output_tokens: 20 },
+        usage: Usage { input_tokens: 100, output_tokens: 20, ..Default::default() },
         model: "scripted".into(),
     }
 }
@@ -65,9 +65,10 @@ fn call(name: &str, args: serde_json::Value) -> Response {
             content: String::new(),
             tool_calls: vec![ToolCall { id: "call_1".into(), name: name.into(), arguments: args }],
             tool_call_id: None,
+            cache: false,
         },
         stop_reason: StopReason::ToolUse,
-        usage: Usage { input_tokens: 100, output_tokens: 20 },
+        usage: Usage { input_tokens: 100, output_tokens: 20, ..Default::default() },
         model: "scripted".into(),
     }
 }
@@ -135,7 +136,7 @@ async fn the_system_prompt_carries_the_environment_and_skill_cards_not_bodies() 
     let session = f.rook.start_session("test").unwrap();
     let provider = Arc::new(ScriptedProvider::new(vec![reply("ok")]));
     let mut agent = AgentLoop::new(&f.rook, provider, session);
-    let prompt = agent.system_prompt("hi");
+    let prompt = agent.system_prompt();
 
     assert!(prompt.contains("os: linux"), "{prompt}");
     assert!(prompt.contains("gnu userland"), "{prompt}");
@@ -455,8 +456,9 @@ async fn the_agent_can_remember_and_recall_across_sessions() {
         .await
         .unwrap();
 
-    let system = seen.lock().unwrap().last().cloned().unwrap().messages[0].content.clone();
-    assert!(system.contains("tabs, not spaces"), "recalled memory belongs in the prompt:\n{system}");
+    let sent: String =
+        seen.lock().unwrap().last().cloned().unwrap().messages.iter().map(|m| m.content.clone()).collect();
+    assert!(sent.contains("tabs, not spaces"), "recalled memory must reach the model:\n{sent}");
 }
 
 #[tokio::test]
@@ -474,9 +476,10 @@ async fn irrelevant_memory_stays_out_of_the_prompt() {
     let seen = provider.share();
     AgentLoop::new(&f.rook, Arc::new(provider), session).run("how do I deploy?").await.unwrap();
 
-    let system = seen.lock().unwrap().last().cloned().unwrap().messages[0].content.clone();
-    assert!(system.contains("deploy key"), "the matching fact should be recalled");
-    assert!(!system.contains("ripgrep"), "an unrelated fact must not ride along:\n{system}");
+    let sent: String =
+        seen.lock().unwrap().last().cloned().unwrap().messages.iter().map(|m| m.content.clone()).collect();
+    assert!(sent.contains("deploy key"), "the matching fact should be recalled");
+    assert!(!sent.contains("ripgrep"), "an unrelated fact must not ride along:\n{sent}");
 }
 
 #[tokio::test]
@@ -494,8 +497,9 @@ async fn a_pinned_fact_is_always_present() {
         .await
         .unwrap();
 
-    let system = seen.lock().unwrap().last().cloned().unwrap().messages[0].content.clone();
-    assert!(system.contains("force-push"), "a pinned fact ignores relevance:\n{system}");
+    let sent: String =
+        seen.lock().unwrap().last().cloned().unwrap().messages.iter().map(|m| m.content.clone()).collect();
+    assert!(sent.contains("force-push"), "a pinned fact ignores relevance:\n{sent}");
 }
 
 #[tokio::test]
@@ -1263,4 +1267,64 @@ async fn a_delegated_child_shares_the_parent_language_servers() {
         "and a front end that keeps a pool must be able to hand it over — \
          otherwise every turn restarts the language servers"
     );
+}
+
+#[tokio::test]
+async fn the_system_prompt_does_not_vary_with_the_prompt() {
+    let f = fixture();
+    f.rook.remember(rook_core::Fact::new("deploys run on fridays", rook_core::Scope::Global), None).unwrap();
+    let session = f.rook.start_session("stable").unwrap();
+
+    let provider = ScriptedProvider::new(vec![reply("a"), reply("b")]);
+    let seen = provider.share();
+    let provider = Arc::new(provider);
+    AgentLoop::new(&f.rook, provider.clone(), session).run("when do we deploy?").await.unwrap();
+    AgentLoop::new(&f.rook, provider, session).run("what colour is the sky?").await.unwrap();
+
+    let requests = seen.lock().unwrap().clone();
+    assert_eq!(
+        requests[0].messages[0].content, requests[1].messages[0].content,
+        "anything that varies per turn belongs after the cached prefix, not in the system block"
+    );
+    assert!(
+        !requests[0].messages[0].content.contains("fridays"),
+        "recalled memory varies with the prompt and must not sit at the front"
+    );
+    let carried: String = requests[0].messages.iter().map(|m| m.content.clone()).collect();
+    assert!(carried.contains("fridays"), "but it must still reach the model");
+}
+
+#[tokio::test]
+async fn tools_are_advertised_in_a_stable_order() {
+    let f = fixture();
+    let session = f.rook.start_session("order").unwrap();
+    let provider = ScriptedProvider::new(vec![reply("ok")]);
+    let seen = provider.share();
+    AgentLoop::new(&f.rook, Arc::new(provider), session).run("go").await.unwrap();
+
+    let names: Vec<String> = seen.lock().unwrap()[0].tools.iter().map(|t| t.name.clone()).collect();
+    let mut sorted = names.clone();
+    sorted.sort();
+    assert_eq!(names, sorted, "tools render first; a reordered list invalidates the whole prefix");
+}
+
+#[tokio::test]
+async fn the_conversation_so_far_is_marked_as_a_cacheable_prefix() {
+    let f = fixture();
+    let session = f.rook.start_session("cache").unwrap();
+    let first = Arc::new(ScriptedProvider::new(vec![reply("noted")]));
+    AgentLoop::new(&f.rook, first, session).run("remember this").await.unwrap();
+
+    let second = ScriptedProvider::new(vec![reply("ok")]);
+    let seen = second.share();
+    AgentLoop::new(&f.rook, Arc::new(second), session).run("and now").await.unwrap();
+
+    let messages = seen.lock().unwrap().last().cloned().unwrap().messages;
+    let marked: Vec<usize> = messages.iter().enumerate().filter(|(_, m)| m.cache).map(|(i, _)| i).collect();
+    assert!(
+        marked.contains(&(messages.len() - 2)),
+        "the turn before the newest one is where the prefix ends: {marked:?} of {}",
+        messages.len()
+    );
+    assert!(!messages.last().unwrap().cache, "the newest turn is not a stable prefix");
 }

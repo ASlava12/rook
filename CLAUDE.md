@@ -59,6 +59,12 @@ non-obvious choice was made — usually a failure mode being avoided.
 **Tests are named as claims.** `a_capture_refuses_to_run_away_instead_of_thrashing`,
 not `test_capture_2`. Assertion messages print the actual values.
 
+**The front of a request must not vary per turn.** Prompt caching is a prefix
+match, so anything interpolated into the system prompt — recalled memory, a
+timestamp, a reordered tool list — invalidates everything behind it. Keep the
+system block and the tool list stable, sort tools by name, and put per-turn
+context next to the newest message instead.
+
 **Expensive things belong to the front end, not the turn.** A new `AgentLoop` is
 built for every turn, so anything constructed inside it is rebuilt every turn —
 and anything dropped with it is torn down. The approval policy, the language

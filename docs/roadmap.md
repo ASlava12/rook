@@ -70,8 +70,9 @@ what unblocks the most.
   namespaced `server__tool`. 16 tests against mock servers.
 - **Providers** — OpenAI-compatible HTTP (Ollama, LM Studio, llama.cpp, vLLM,
   OpenAI, OpenRouter) and the Anthropic Messages API, which the OpenAI dialect
-  cannot reach. 11 tests over the wire shape, since that is where the dialects
-  differ. `rook models` lists what an endpoint serves and `rook
+  cannot reach, with prompt caching: the system block and the conversation so
+  far each carry a breakpoint, and anything that varies per turn is kept behind
+  them. 15 tests over the wire shape, since that is where the dialects differ. `rook models` lists what an endpoint serves and `rook
   doctor` says whether the configured one is among them; the context window can
   be set explicitly rather than assumed from the provider's name. Streaming over
   SSE with a configurable idle watchdog, so a
@@ -132,8 +133,7 @@ unchanged.
 **A Google native provider.** The OpenAI dialect covers a great deal but not
 `generateContent`'s own shape.
 
-**Prompt caching and effort on the Anthropic provider.** The wire support is
-there; nothing sets `cache_control` breakpoints or `output_config.effort` yet.
+**Effort on the Anthropic provider.** `output_config.effort` is not set yet.
 
 **Real sandboxing.** Today's boundary is a workspace path check and pattern
 rules ([ADR-0009](adr/0009-ask-before-acting.md)) — text matching, not containment.

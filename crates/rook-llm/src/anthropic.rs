@@ -163,9 +163,14 @@ impl Provider for Anthropic {
         }
 
         Ok(Response {
-            message: Message { role: Role::Assistant, content, tool_calls, tool_call_id: None },
+            message: Message { role: Role::Assistant, content, tool_calls, tool_call_id: None, cache: false },
             stop_reason: stop_reason(wire.stop_reason.as_deref()),
-            usage: Usage { input_tokens: wire.usage.input_tokens, output_tokens: wire.usage.output_tokens },
+            usage: Usage {
+                input_tokens: wire.usage.input_tokens,
+                output_tokens: wire.usage.output_tokens,
+                cache_read_tokens: wire.usage.cache_read_input_tokens,
+                cache_write_tokens: wire.usage.cache_creation_input_tokens,
+            },
             model: wire.model.unwrap_or_else(|| self.model.clone()),
         })
     }
@@ -217,6 +222,8 @@ impl Provider for Anthropic {
                                     model = m;
                                 }
                                 usage.input_tokens = message.usage.input_tokens;
+                                usage.cache_read_tokens = message.usage.cache_read_input_tokens;
+                                usage.cache_write_tokens = message.usage.cache_creation_input_tokens;
                             }
                             Event::ContentBlockStart { index, content_block } => {
                                 if let Block::ToolUse { id, name, .. } = content_block {
@@ -290,6 +297,7 @@ fn stop_reason(raw: Option<&str>) -> StopReason {
 /// making parallel calls.
 fn wire_request(model: &str, request: &Request, stream: bool) -> serde_json::Value {
     let mut system = String::new();
+    let mut cache_system = false;
     let mut messages: Vec<serde_json::Value> = Vec::new();
 
     for message in &request.messages {
@@ -299,6 +307,7 @@ fn wire_request(model: &str, request: &Request, stream: bool) -> serde_json::Val
                     system.push_str("\n\n");
                 }
                 system.push_str(&message.content);
+                cache_system |= message.cache;
             }
             Role::Tool => {
                 let block = serde_json::json!({
@@ -320,12 +329,12 @@ fn wire_request(model: &str, request: &Request, stream: bool) -> serde_json::Val
             }
             Role::User => messages.push(serde_json::json!({
                 "role": "user",
-                "content": message.content,
+                "content": [text_block(&message.content, message.cache)],
             })),
             Role::Assistant => {
                 let mut blocks = Vec::new();
                 if !message.content.trim().is_empty() {
-                    blocks.push(serde_json::json!({ "type": "text", "text": message.content }));
+                    blocks.push(text_block(&message.content, false));
                 }
                 for call in &message.tool_calls {
                     blocks.push(serde_json::json!({
@@ -334,6 +343,12 @@ fn wire_request(model: &str, request: &Request, stream: bool) -> serde_json::Val
                         "name": call.name,
                         "input": call.arguments,
                     }));
+                }
+                // A breakpoint sits on the last block of the message it marks.
+                if message.cache
+                    && let Some(last) = blocks.last_mut()
+                {
+                    last["cache_control"] = ephemeral();
                 }
                 // An assistant turn with nothing in it is rejected.
                 if !blocks.is_empty() {
@@ -350,7 +365,9 @@ fn wire_request(model: &str, request: &Request, stream: bool) -> serde_json::Val
         "stream": stream,
     });
     if !system.is_empty() {
-        body["system"] = system.into();
+        // As an array so the breakpoint can sit on it; tools render before
+        // system, so one marker here caches both.
+        body["system"] = serde_json::json!([text_block(&system, cache_system)]);
     }
     if !request.tools.is_empty() {
         body["tools"] = request
@@ -367,6 +384,18 @@ fn wire_request(model: &str, request: &Request, stream: bool) -> serde_json::Val
             .into();
     }
     body
+}
+
+fn text_block(text: &str, cache: bool) -> serde_json::Value {
+    let mut block = serde_json::json!({ "type": "text", "text": text });
+    if cache {
+        block["cache_control"] = ephemeral();
+    }
+    block
+}
+
+fn ephemeral() -> serde_json::Value {
+    serde_json::json!({ "type": "ephemeral" })
 }
 
 fn truncate(text: &str, max: usize) -> String {
@@ -412,6 +441,10 @@ struct WireUsage {
     input_tokens: u32,
     #[serde(default)]
     output_tokens: u32,
+    #[serde(default)]
+    cache_read_input_tokens: u32,
+    #[serde(default)]
+    cache_creation_input_tokens: u32,
 }
 
 #[derive(Deserialize)]

@@ -111,11 +111,13 @@ impl Provider for OpenAiCompatible {
                 content: choice.message.content.unwrap_or_default(),
                 tool_calls,
                 tool_call_id: None,
+                cache: false,
             },
             stop_reason,
             usage: Usage {
                 input_tokens: wire.usage.as_ref().map(|u| u.prompt_tokens).unwrap_or(0),
                 output_tokens: wire.usage.as_ref().map(|u| u.completion_tokens).unwrap_or(0),
+                ..Default::default()
             },
             model: wire.model.unwrap_or_else(|| self.model.clone()),
         })
@@ -217,6 +219,7 @@ impl Provider for OpenAiCompatible {
                             usage = Usage {
                                 input_tokens: u.prompt_tokens,
                                 output_tokens: u.completion_tokens,
+                                ..Default::default()
                             };
                         }
                         for choice in parsed.choices {

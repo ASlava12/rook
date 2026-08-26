@@ -474,11 +474,12 @@ fn cmd_run(
             eprintln!("sub-agent {id} — `rook session show {id}` for its detail");
         }
         eprintln!(
-            "\n[session {} · {} steps · {} in / {} out tokens · {} tool calls{}]",
+            "\n[session {} · {} steps · {} in / {} out tokens{} · {} tool calls{}]",
             rook_store::format_session_id(session),
             outcome.steps,
             outcome.input_tokens,
             outcome.output_tokens,
+            cached(outcome.cached_tokens),
             outcome.tools_called.len(),
             if outcome.compactions > 0 {
                 format!(" · {} compactions", outcome.compactions)
@@ -498,6 +499,11 @@ fn compact(args: &serde_json::Value) -> String {
     }
     let cut = (0..=80).rev().find(|i| text.is_char_boundary(*i)).unwrap_or(0);
     format!("{}…", &text[..cut])
+}
+
+/// Cache hits only matter when there are any; a constant "0 cached" is noise.
+pub fn cached(tokens: u32) -> String {
+    if tokens == 0 { String::new() } else { format!(" ({tokens} cached)") }
 }
 
 fn first_line(s: &str) -> String {

@@ -72,6 +72,8 @@ pub struct TurnOutcome {
     pub reply: String,
     pub input_tokens: u32,
     pub output_tokens: u32,
+    /// Input tokens served from the prompt cache instead of reprocessed.
+    pub cached_tokens: u32,
     pub tools_called: Vec<String>,
     pub skills_loaded: Vec<String>,
     pub facts_learned: Vec<String>,
@@ -142,7 +144,12 @@ impl<'a> AgentLoop<'a> {
     /// FreeBSD with BSD userland stops reaching for `sed -i` with a GNU argument
     /// order, which is the single most common cross-platform failure in agent
     /// transcripts.
-    pub fn system_prompt(&self, prompt: &str) -> String {
+    /// Deliberately independent of the current prompt.
+    ///
+    /// Everything here renders at the front of the request, so anything that
+    /// varies per turn invalidates the cached prefix behind it. Recalled memory
+    /// used to live here and now travels next to the prompt instead.
+    pub fn system_prompt(&self) -> String {
         let env = &self.rook.env;
         let mut s = String::new();
         s.push_str(
@@ -175,23 +182,8 @@ impl<'a> AgentLoop<'a> {
             s.push_str(&format!("tools: {}\n", tools.join(", ")));
         }
 
-        let facts = if self.rook.config.memory.enabled {
-            self.rook.recall(prompt, self.rook.config.memory.context_budget_tokens).unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        if !facts.is_empty() {
-            s.push_str(
-                "\n## Memory\nThings you were told to remember. \
-                 Correct one with `forget` when it turns out to be wrong.\n",
-            );
-            for fact in facts {
-                s.push_str(&format!("- [{}] {}\n", fact.id, fact.text));
-            }
-        }
-
         if let Ok(extra) = self.session_context.lock()
-            && let Some(text) = extra.as_deref()
+            && let Some(text) = extra.as_deref().filter(|t| !t.trim().is_empty())
         {
             s.push_str(&format!("\n## From this workspace\n{text}\n"));
         }
@@ -254,6 +246,7 @@ impl<'a> AgentLoop<'a> {
                             arguments: serde_json::from_str(&body).unwrap_or(serde_json::Value::Null),
                         }],
                         tool_call_id: None,
+                        cache: false,
                     });
                     open_call = Some(id);
                 }
@@ -269,6 +262,23 @@ impl<'a> AgentLoop<'a> {
             }
         }
         Ok(messages)
+    }
+
+    /// Facts worth putting in front of the model for this prompt, if any.
+    fn recalled(&self, prompt: &str) -> Option<String> {
+        if !self.rook.config.memory.enabled {
+            return None;
+        }
+        let facts = self.rook.recall(prompt, self.rook.config.memory.context_budget_tokens).ok()?;
+        if facts.is_empty() {
+            return None;
+        }
+        let lines: Vec<String> = facts.iter().map(|f| format!("- [{}] {}", f.id, f.text)).collect();
+        Some(format!(
+            "Things you were told to remember that look relevant here. Correct one with \
+             `forget` when it turns out to be wrong.\n{}",
+            lines.join("\n")
+        ))
     }
 
     fn tool_specs(&self) -> Vec<ToolSpec> {
@@ -346,6 +356,9 @@ impl<'a> AgentLoop<'a> {
                 }),
             });
         }
+        // Sorted so the rendered prefix is byte-identical between turns:
+        // tools render first, and a reordered list invalidates everything.
+        specs.sort_by(|a, b| a.name.cmp(&b.name));
         specs
     }
 
@@ -361,7 +374,7 @@ impl<'a> AgentLoop<'a> {
     /// neither costs the agent a tool round trip nor leaves anything in the
     /// context it will carry for the rest of the session.
     pub async fn aside<F: FnMut(&Delta)>(&self, question: &str, mut on_delta: F) -> Result<String> {
-        let mut messages = vec![Message::system(self.system_prompt(question))];
+        let mut messages = vec![cacheable(Message::system(self.system_prompt()))];
         messages.extend(self.history()?);
         messages.push(Message::user(format!(
             "{question}\n\n(Answer from what you already know here. Do not act, and do not \
@@ -415,14 +428,21 @@ impl<'a> AgentLoop<'a> {
 
         // The prompt was just logged, so replaying the session already ends
         // with it: the log is the only source of truth for what was said.
-        let mut messages = vec![Message::system(self.system_prompt(prompt))];
+        let mut messages = vec![cacheable(Message::system(self.system_prompt()))];
         messages.extend(self.history()?);
+        self.mark_stable_prefix(&mut messages);
+        if let Some(memory) = self.recalled(prompt) {
+            // Just before the newest turn: memory varies with the prompt, and
+            // anything volatile belongs after everything worth caching.
+            messages.insert(messages.len().saturating_sub(1), Message::user(memory));
+        }
         let mut outcome = TurnOutcome {
             steps: 0,
             stopped: "end_turn".into(),
             reply: String::new(),
             input_tokens: 0,
             output_tokens: 0,
+            cached_tokens: 0,
             tools_called: Vec::new(),
             skills_loaded: Vec::new(),
             facts_learned: Vec::new(),
@@ -436,8 +456,9 @@ impl<'a> AgentLoop<'a> {
             if self.budget.needs_compaction(measure(&messages)) {
                 outcome.compactions += 1;
                 self.compact().await;
-                messages = vec![Message::system(self.system_prompt(prompt))];
+                messages = vec![cacheable(Message::system(self.system_prompt()))];
                 messages.extend(self.history()?);
+                self.mark_stable_prefix(&mut messages);
             }
 
             let mut request = Request::new(messages.clone());
@@ -457,6 +478,7 @@ impl<'a> AgentLoop<'a> {
 
             outcome.input_tokens += response.usage.input_tokens;
             outcome.output_tokens += response.usage.output_tokens;
+            outcome.cached_tokens += response.usage.cache_read_tokens;
 
             if !response.message.content.is_empty() {
                 self.rook.store.append_event(
@@ -712,6 +734,15 @@ impl<'a> AgentLoop<'a> {
         self.budget = ContextBudget::new(window, self.rook.config.agent.compact_at);
     }
 
+    /// Mark the end of the conversation as it stood before this turn, so each
+    /// request reuses the whole prior prefix instead of only the system block.
+    fn mark_stable_prefix(&self, messages: &mut [Message]) {
+        if messages.len() >= 3 {
+            let last_stable = messages.len() - 2;
+            messages[last_stable].cache = true;
+        }
+    }
+
     /// Skip every prompt: run whatever the deny list does not forbid.
     pub fn allow_everything_not_denied(&mut self) {
         let sandbox = &self.rook.config.sandbox;
@@ -914,6 +945,13 @@ fn requested_tasks(args: &serde_json::Value) -> Vec<String> {
     }
     tasks.retain(|t| !t.trim().is_empty());
     tasks
+}
+
+/// A breakpoint below the minimum cacheable prefix only pays the write premium,
+/// so a small system prompt is left unmarked.
+fn cacheable(message: Message) -> Message {
+    const MINIMUM_TOKENS: usize = 1024;
+    if estimate_tokens(&message.content) >= MINIMUM_TOKENS { message.cacheable() } else { message }
 }
 
 fn measure(messages: &[Message]) -> usize {
