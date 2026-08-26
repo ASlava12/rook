@@ -5,6 +5,7 @@
 //! nothing.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use rook_core::{Config, Rook};
 use rook_skills::{Environment, SkillIndex};
@@ -52,6 +53,18 @@ impl Editor {
     async fn notify(&mut self, method: &str, params: serde_json::Value) {
         let note = serde_json::json!({"jsonrpc": "2.0", "method": method, "params": params});
         self.stdin.write_all(format!("{note}\n").as_bytes()).await.unwrap();
+    }
+
+    /// Everything the server sends within `window`.
+    async fn drain(&mut self, window: Duration) -> Vec<serde_json::Value> {
+        let mut seen = Vec::new();
+        let deadline = tokio::time::Instant::now() + window;
+        while let Ok(Ok(Some(line))) = tokio::time::timeout_at(deadline, self.lines.next_line()).await {
+            if let Ok(message) = serde_json::from_str(&line) {
+                seen.push(message);
+            }
+        }
+        seen
     }
 
     async fn next(&mut self) -> serde_json::Value {
@@ -154,4 +167,55 @@ fn tool_kinds_match_the_vocabulary_the_schema_defines() {
     }
     assert_eq!(tool_kind("read_file"), "read");
     assert_eq!(tool_kind("run_command"), "execute");
+}
+
+#[tokio::test]
+async fn cancelling_a_turn_answers_the_request_it_was_running() {
+    let mut editor = Editor::start();
+    let created = editor.call(1, "session/new", serde_json::json!({ "cwd": "/tmp", "mcpServers": [] })).await;
+    let id = created["result"]["sessionId"].as_str().unwrap().to_string();
+
+    // No model is reachable, so the turn is in flight when cancel arrives.
+    let prompt = serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "session/prompt",
+        "params": { "sessionId": id, "prompt": [{ "type": "text", "text": "something long" }] }
+    });
+    editor.stdin.write_all(format!("{prompt}\n").as_bytes()).await.unwrap();
+    editor.notify("session/cancel", serde_json::json!({ "sessionId": id })).await;
+
+    let reply = loop {
+        let message = editor.next().await;
+        if message.get("id").and_then(|i| i.as_u64()) == Some(2) {
+            break message;
+        }
+    };
+    let stop = reply["result"]["stopReason"].as_str();
+    assert!(
+        stop == Some("cancelled") || reply.get("error").is_some(),
+        "a cancelled prompt must be answered, not left pending: {reply}"
+    );
+}
+
+#[tokio::test]
+async fn a_request_is_answered_exactly_once() {
+    let mut editor = Editor::start();
+    let created = editor.call(1, "session/new", serde_json::json!({ "cwd": "/tmp", "mcpServers": [] })).await;
+    let id = created["result"]["sessionId"].as_str().unwrap().to_string();
+
+    let prompt = serde_json::json!({
+        "jsonrpc": "2.0", "id": 7, "method": "session/prompt",
+        "params": { "sessionId": id, "prompt": [{ "type": "text", "text": "go" }] }
+    });
+    editor.stdin.write_all(format!("{prompt}\n").as_bytes()).await.unwrap();
+    // Cancelled twice, and the turn may also be finishing on its own: an id
+    // answered twice is as wrong as one never answered.
+    editor.notify("session/cancel", serde_json::json!({})).await;
+    editor.notify("session/cancel", serde_json::json!({})).await;
+
+    let answers = editor.drain(Duration::from_millis(400)).await;
+    let for_seven = answers.iter().filter(|m| m.get("id").and_then(|i| i.as_u64()) == Some(7)).count();
+    assert_eq!(for_seven, 1, "expected one answer for id 7, saw {for_seven}: {answers:#?}");
+
+    let alive = editor.call(8, "initialize", serde_json::json!({ "protocolVersion": 1 })).await;
+    assert!(alive.get("result").is_some(), "the connection must survive repeated cancels");
 }

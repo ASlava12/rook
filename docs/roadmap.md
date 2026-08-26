@@ -127,6 +127,10 @@ editor's buffers, and terminals are all defined and unimplemented.
 codex #8745 asks for installation too, which means downloading and running a
 binary on the user's behalf.
 
+**Fork and compaction positions on the session.** Both are recoverable from the
+log today; recording them on `SessionMeta` would let `session ls` show where a
+fork diverged without reading it.
+
 **MCP provenance in tool results.** A result carries the namespaced tool name but
 nothing about which server produced it; codex exposes that to its lifecycle hooks
 and it belongs in ours too.

@@ -63,6 +63,9 @@ async fn serve(socket: WebSocket, state: Arc<AppState>) {
             ClientMessage::Cancel => {
                 if let Some(handle) = running.take() {
                     handle.abort();
+                    // The browser only leaves its working state on Done or
+                    // Error; aborting silently leaves it stuck forever.
+                    let _ = outbound.send(ChatEvent::Cancelled);
                 }
             }
             ClientMessage::Prompt { session, text } => {

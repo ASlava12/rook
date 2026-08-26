@@ -37,6 +37,28 @@ Add a row when you implement something after reading a reference. Add it to
 moved; what follows is what was done with it, so a dismissal is a decision rather
 than an omission.
 
+**2026-08-27 (third pass)** — codex, cline and hermes advanced.
+
+- hermes `708f84c4` / `39a5838f` *claim a message before enriching it; release a
+  failed handler's claim so the turn isn't swallowed* — **does not port, but
+  found two of ours.** Rook has no message-dedup problem, but the subject — a
+  turn duplicated or swallowed around cancellation — pointed at both cancel
+  paths. In `rookd` a cancel aborted the task and sent nothing, so the browser
+  sat in its working state forever. In ACP it aborted the task that owed a reply
+  to the pending `session/prompt`, so the editor waited for a JSON-RPC response
+  that would never come. Both fixed; the ACP reply is now claimed with an atomic
+  flag, since aborting a task that was about to reply would otherwise answer one
+  id twice.
+- codex `528fd7a` *retained-image budgeting* — **not applicable**: tool results
+  here are text, and oversized ones are already windowed.
+- codex `0d654e6` *track window and fork positions in turn metadata* — **worth
+  revisiting.** Our fork point is a sequence number and the compaction point is
+  an event; recording both on the session would make `session ls` show where a
+  fork diverged without reading the log. Roadmap, not done.
+- codex `a98b946`, `b9c4b9a`, `6e00841`, `0340e12`, cline `ee0982c`, and the
+  hermes Slack/desktop fixes — **not applicable**: Guardian internals, browser
+  plugins, a window title bar, and product surfaces with no counterpart here.
+
 **2026-08-27 (second pass)** — codex, goose and hermes advanced again.
 
 - hermes `3fd70ad1` *skill_manage 924 → 518 tok/call* — **measured, no diet

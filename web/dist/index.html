@@ -162,6 +162,7 @@ function connect() {
     else if (e.type === 'reasoning') say('think', e.text);
     else if (e.type === 'tool') say('tool', `\n  · ${e.name}\n`);
     else if (e.type === 'error') { say('err', `\n${e.message}\n`); done(); }
+    else if (e.type === 'cancelled') { say('stat', '\n[stopped]\n\n'); done(); }
     else if (e.type === 'approval') askApproval(e);
     else if (e.type === 'done') {
       say('stat', `\n[${e.steps} steps · ${e.input_tokens} in / ${e.output_tokens} out` +

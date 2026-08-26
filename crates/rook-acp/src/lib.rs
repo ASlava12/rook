@@ -58,7 +58,7 @@ where
 
     let peer = Arc::new(Peer::new(outbound));
     let mut lines = reader.lines();
-    let mut turn: Option<tokio::task::JoinHandle<()>> = None;
+    let mut turn: Option<Turn> = None;
 
     while let Some(line) = lines.next_line().await? {
         let Ok(message) = serde_json::from_str::<Incoming>(&line) else {
@@ -79,21 +79,27 @@ where
 
         match (method.as_str(), message.id) {
             ("session/cancel", _) => {
-                if let Some(handle) = turn.take() {
-                    handle.abort();
+                if let Some(turn) = turn.take() {
+                    turn.cancel(&peer);
                 }
             }
             ("session/prompt", Some(id)) => {
-                if let Some(handle) = turn.take() {
-                    handle.abort();
+                if let Some(turn) = turn.take() {
+                    turn.cancel(&peer);
                 }
-                turn = Some(tokio::spawn(prompt(
-                    rook.clone(),
-                    peer.clone(),
-                    Shared { policy: policy.clone(), servers: servers.clone(), mcp: mcp.clone() },
-                    id,
-                    params,
-                )));
+                let replied = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                turn = Some(Turn {
+                    id: id.clone(),
+                    replied: replied.clone(),
+                    handle: tokio::spawn(prompt(
+                        rook.clone(),
+                        peer.clone(),
+                        Shared { policy: policy.clone(), servers: servers.clone(), mcp: mcp.clone() },
+                        id,
+                        params,
+                        replied,
+                    )),
+                });
             }
             (_, Some(id)) => {
                 let outcome = dispatch(&rook, &method, params);
@@ -104,8 +110,8 @@ where
         }
     }
 
-    if let Some(handle) = turn {
-        handle.abort();
+    if let Some(turn) = turn {
+        turn.handle.abort();
     }
     mcp.shutdown().await;
     servers.shutdown().await;
@@ -165,6 +171,26 @@ fn dispatch(rook: &Rook, method: &str, params: serde_json::Value) -> Result<serd
     }
 }
 
+/// A running turn and the request it owes an answer to.
+///
+/// The reply is claimed before it is sent, by whichever of the turn and the
+/// canceller gets there first — a JSON-RPC id answered twice is as wrong as one
+/// never answered, and aborting a task that was about to reply is a real race.
+struct Turn {
+    id: serde_json::Value,
+    handle: tokio::task::JoinHandle<()>,
+    replied: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Turn {
+    fn cancel(self, peer: &Peer) {
+        self.handle.abort();
+        if !self.replied.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            peer.respond(&self.id, Ok(serde_json::json!({ "stopReason": "cancelled" })));
+        }
+    }
+}
+
 /// What the connection keeps between prompts.
 #[derive(Clone)]
 struct Shared {
@@ -179,18 +205,24 @@ async fn prompt(
     shared: Shared,
     id: serde_json::Value,
     params: serde_json::Value,
+    replied: Arc<std::sync::atomic::AtomicBool>,
 ) {
+    let answer = |outcome| {
+        if !replied.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            peer.respond(&id, outcome);
+        }
+    };
     let request: protocol::Prompt = match serde_json::from_value(params) {
         Ok(request) => request,
-        Err(e) => return peer.respond(&id, Err(Error::invalid_params(e.to_string()))),
+        Err(e) => return answer(Err(Error::invalid_params(e.to_string()))),
     };
     let Some(session) = rook_store::parse_session_id(&request.session_id) else {
-        return peer.respond(&id, Err(Error::invalid_params("not a session id")));
+        return answer(Err(Error::invalid_params("not a session id")));
     };
 
     let text = request.prompt.iter().filter_map(ContentBlock::render).collect::<Vec<_>>().join("\n");
     if text.trim().is_empty() {
-        return peer.respond(&id, Err(Error::invalid_params("the prompt has no text")));
+        return answer(Err(Error::invalid_params("the prompt has no text")));
     }
 
     let provider = match rook_llm::from_spec_with(
@@ -229,11 +261,10 @@ async fn prompt(
         })
         .await;
 
-    let response = match result {
+    answer(match result {
         Ok(outcome) => Ok(serde_json::json!({ "stopReason": stop_reason(&outcome.stopped) })),
         Err(e) => Err(Error::internal(e.to_string())),
-    };
-    peer.respond(&id, response);
+    });
 }
 
 fn stop_reason(stopped: &str) -> &'static str {

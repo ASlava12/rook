@@ -141,6 +141,9 @@ pub enum ChatEvent {
         tool: String,
         action: String,
     },
+    /// The turn was stopped before it finished. Sent instead of `Done`, so a
+    /// client waiting on one of them is never left waiting.
+    Cancelled,
     Done {
         steps: u32,
         input_tokens: u32,
