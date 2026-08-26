@@ -285,3 +285,23 @@ fn opening_a_newer_format_is_refused() {
     std::fs::write(dir.path().join("format.json"), br#"{"format": 99999, "created_at": 0}"#).unwrap();
     assert!(matches!(Store::open(dir.path()), Err(rook_store::StoreError::FormatTooNew { .. })));
 }
+
+#[test]
+fn session_ids_round_trip_as_ulids_in_json_and_as_integers_on_disk() {
+    let id = rook_store::new_session_id();
+    let mut meta = SessionMeta::new(id, "t", "/tmp", 0);
+    meta.parent = Some(rook_store::new_session_id());
+
+    let json = serde_json::to_value(&meta).unwrap();
+    let text = json["id"].as_str().expect("json must carry a ULID string, not a number");
+    assert_eq!(rook_store::parse_session_id(text), Some(id), "the printed id must be usable as input");
+    assert!(json["parent"].is_string());
+    let back: SessionMeta = serde_json::from_value(json).unwrap();
+    assert_eq!(back.id, id);
+    assert_eq!(back.parent, meta.parent);
+
+    // On disk it stays a compact integer.
+    let packed = postcard::to_stdvec(&meta).unwrap();
+    assert!(packed.len() < 120, "postcard encoding grew to {} bytes", packed.len());
+    assert_eq!(postcard::from_bytes::<SessionMeta>(&packed).unwrap().id, id);
+}

@@ -14,7 +14,8 @@
 //!   An agent that discovers the limit by being rejected has already lost the
 //!   turn, and usually the task with it.
 
-use rook_llm::{Message, Provider, Request, Response, Role, StopReason, ToolSpec};
+use futures_util::StreamExt;
+use rook_llm::{Assembler, Delta, Message, Provider, Request, Role, StopReason, ToolSpec};
 use rook_store::EventKind;
 use rook_tools::{ToolBox, ToolContext};
 use serde::{Deserialize, Serialize};
@@ -118,6 +119,15 @@ impl<'a> AgentLoop<'a> {
 
     /// Run one user turn to completion.
     pub async fn run(&mut self, prompt: &str) -> Result<TurnOutcome> {
+        self.run_with(prompt, |_| {}).await
+    }
+
+    /// Run a turn, reporting each fragment as it arrives.
+    ///
+    /// `on_delta` sees text as the model produces it and tool calls once they
+    /// are complete; the turn's bookkeeping is unaffected by whether anyone is
+    /// watching.
+    pub async fn run_with<F: FnMut(&Delta)>(&mut self, prompt: &str, mut on_delta: F) -> Result<TurnOutcome> {
         self.rook.log(self.session, EventKind::UserMessage, "", prompt)?;
 
         let mut messages = vec![Message::system(self.system_prompt()), Message::user(prompt)];
@@ -143,8 +153,18 @@ impl<'a> AgentLoop<'a> {
 
             let mut request = Request::new(messages.clone());
             request.tools = self.tool_specs();
-            let response: Response =
-                self.provider.complete(request).await.map_err(|e| CoreError::Other(e.to_string()))?;
+            let mut stream =
+                self.provider.stream(request).await.map_err(|e| CoreError::Other(e.to_string()))?;
+            let mut assembler = Assembler::default();
+            while let Some(delta) = stream.next().await {
+                let delta = delta.map_err(|e| CoreError::Other(e.to_string()))?;
+                on_delta(&delta);
+                assembler.push(delta);
+            }
+            if !assembler.reasoning().is_empty() {
+                self.rook.log(self.session, EventKind::Reasoning, "", assembler.reasoning()).ok();
+            }
+            let response = assembler.finish();
 
             outcome.input_tokens += response.usage.input_tokens;
             outcome.output_tokens += response.usage.output_tokens;

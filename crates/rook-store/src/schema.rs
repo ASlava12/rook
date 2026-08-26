@@ -48,8 +48,49 @@ pub fn parse_event_key(k: &[u8]) -> Option<(u128, u64)> {
     Some((sid, seq))
 }
 
+/// Session ids are a `u128` on disk and a ULID string everywhere a person or
+/// another program might see one, so `session ls --json | jq .id` produces
+/// something the other commands accept.
+mod ulid_repr {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error};
+
+    pub fn serialize<S: Serializer>(v: &u128, s: S) -> Result<S::Ok, S::Error> {
+        if s.is_human_readable() { s.serialize_str(&crate::format_session_id(*v)) } else { v.serialize(s) }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<u128, D::Error> {
+        if d.is_human_readable() {
+            let text = String::deserialize(d)?;
+            crate::parse_session_id(&text)
+                .ok_or_else(|| D::Error::custom(format!("{text:?} is not a session id")))
+        } else {
+            u128::deserialize(d)
+        }
+    }
+
+    pub mod option {
+        use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+        pub fn serialize<S: Serializer>(v: &Option<u128>, s: S) -> Result<S::Ok, S::Error> {
+            match v {
+                Some(id) if s.is_human_readable() => s.serialize_some(&crate::format_session_id(*id)),
+                other => other.serialize(s),
+            }
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u128>, D::Error> {
+            if d.is_human_readable() {
+                Ok(Option::<String>::deserialize(d)?.and_then(|s| crate::parse_session_id(&s)))
+            } else {
+                Option::<u128>::deserialize(d)
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionMeta {
+    #[serde(with = "ulid_repr")]
     pub id: u128,
     pub title: String,
     pub created_at: i64,
@@ -63,6 +104,7 @@ pub struct SessionMeta {
     pub tokens_out: u64,
     /// Set when this session was forked from another, so a rewind can branch
     /// instead of destroying history.
+    #[serde(with = "ulid_repr::option")]
     pub parent: Option<u128>,
     pub tags: Vec<String>,
 }

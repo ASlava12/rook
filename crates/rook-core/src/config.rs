@@ -28,6 +28,9 @@ pub struct AgentConfig {
     pub lazy_skills: bool,
     /// Same idea for tool schemas.
     pub lazy_tools: bool,
+    /// How long the model may go silent mid-stream before the turn gives up.
+    /// A dropped connection is indistinguishable from deep thought without it.
+    pub stream_idle_timeout_secs: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -85,6 +88,7 @@ impl Default for AgentConfig {
             max_steps: 200,
             lazy_skills: true,
             lazy_tools: true,
+            stream_idle_timeout_secs: 90,
         }
     }
 }
@@ -123,6 +127,12 @@ impl Default for SandboxConfig {
 impl Default for TelemetryConfig {
     fn default() -> Self {
         Self { upload: false, log_level: "warn".into(), max_log_bytes: 64 << 20 }
+    }
+}
+
+impl AgentConfig {
+    pub fn stream_idle(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.stream_idle_timeout_secs)
     }
 }
 

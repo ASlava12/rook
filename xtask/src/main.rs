@@ -59,6 +59,12 @@ enum Task {
     },
     /// Measure what the store's compaction actually achieves.
     Compaction,
+    /// Report what `target/` is costing and reclaim it.
+    Clean {
+        /// Remove everything, not just the parts that regenerate cheaply.
+        #[arg(long)]
+        all: bool,
+    },
     /// Work with the upstream agent sources in `references/`.
     Refs {
         #[command(subcommand)]
@@ -203,8 +209,51 @@ fn run() -> Result<()> {
             Ok(())
         }
         Task::Compaction => cargo(&["run", "--release", "-p", "rook-store", "--example", "compaction"]),
+        Task::Clean { all } => clean(all),
         Task::Refs { action } => refs(action),
     }
+}
+
+/// Incremental state and cross-target artifacts dominate `target/` and rebuild
+/// cheaply, so they go first; `--all` is for when the disk is actually full.
+fn clean(all: bool) -> Result<()> {
+    let before = dir_size(std::path::Path::new("target"));
+    if all {
+        cargo(&["clean"])?;
+    } else {
+        for path in ["target/debug/incremental", "target/release/incremental"] {
+            let _ = std::fs::remove_dir_all(path);
+        }
+        for entry in std::fs::read_dir("target").into_iter().flatten().flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.contains('-') && entry.path().is_dir() {
+                println!("removing cross-target artifacts: {name}");
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+    let after = dir_size(std::path::Path::new("target"));
+    println!("target/: {} -> {} ({} reclaimed)", gib(before), gib(after), gib(before - after));
+    if !all && after > 4 << 30 {
+        println!("still large — `cargo xtask clean --all` removes the rest");
+    }
+    Ok(())
+}
+
+fn dir_size(path: &std::path::Path) -> u64 {
+    let mut total = 0;
+    for entry in std::fs::read_dir(path).into_iter().flatten().flatten() {
+        match entry.metadata() {
+            Ok(m) if m.is_dir() => total += dir_size(&entry.path()),
+            Ok(m) => total += m.len(),
+            Err(_) => {}
+        }
+    }
+    total
+}
+
+fn gib(bytes: u64) -> String {
+    format!("{:.2} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
 }
 
 fn refs(action: RefsCmd) -> Result<()> {

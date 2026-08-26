@@ -9,7 +9,7 @@ as a feature rather than a debugging afterthought: a CLI, a terminal browser and
 web UI, all views over the same engine.
 
 > **Status: early.** The storage layer, the skill system and the inspection tools
-> are implemented and covered by 49 tests. The agent loop — tool dispatch, skill
+> are implemented and covered by 56 tests. The agent loop — tool dispatch, skill
 > loading, budgeting, logging — is tested against a scripted provider; it has not
 > yet been exercised against a live model in CI. Streaming, MCP and ACP are on the
 > [roadmap](docs/roadmap.md) and are not implemented. Nothing below describes
@@ -66,7 +66,7 @@ Requires a Rust toolchain and a C compiler (two dependencies vendor C — see
 rook init                                  # create ~/.rook, config, store
 rook doctor                                # what was detected, and what it means for skills
 
-rook run "summarise what changed in src/ this week"
+rook run "summarise what changed in src/ this week"   # streams as it arrives
 rook                                       # terminal browser over everything stored
 rookd                                      # http://127.0.0.1:7717 — web UI + API
 ```
@@ -168,9 +168,8 @@ Being explicit, because a roadmap presented as a feature list is how these proje
 lose people's trust:
 
 - **The agent loop has not been run against a live model in CI.** Its logic is
-  covered by tests against a scripted provider; the HTTP provider is implemented
-  but unexercised end to end here.
-- **No streaming.** Responses arrive whole. The provider trait is shaped for it.
+  covered by tests against a scripted provider, and the SSE parser by tests over a
+  real socket, but no real model has been driven end to end in CI.
 - **No MCP client, no ACP server.** Both are planned; see [docs/roadmap.md](docs/roadmap.md).
 - **Compaction is mechanical**, not model-summarised: it keeps the head and the
   recent tail and marks the elision. The full transcript is never lost.
@@ -186,8 +185,14 @@ lose people's trust:
 cargo xtask ci             # fmt + clippy + test, the gate CI runs
 cargo xtask targets        # the supported target matrix
 cargo xtask compaction     # measure the storage claims above
+cargo xtask clean          # report what target/ costs and reclaim it
+cargo xtask refs status    # how far the reference pointers have drifted
 cargo test --workspace
 ```
+
+A full debug build with tests is about 800 MB of `target/`. Debug info is
+line-tables-only and dependencies carry none, because full DWARF for the
+dependency graph costs several gigabytes and is never stepped through.
 
 ## License
 

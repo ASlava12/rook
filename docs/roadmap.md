@@ -27,7 +27,10 @@ what unblocks the most.
 - **Tools** — paged `read_file`, `write_file`, unambiguous `edit_file`, `list_dir`,
   regex `search`, `run_command` with timeout, output cap and deny list.
 - **Providers** — OpenAI-compatible HTTP: Ollama, LM Studio, llama.cpp, vLLM,
-  OpenAI, OpenRouter.
+  OpenAI, OpenRouter. Streaming over SSE with a configurable idle watchdog, so a
+  dropped connection surfaces as a stall instead of looking like deep thought.
+  Tool calls are emitted only once whole. Providers that cannot stream get a
+  one-shot fallback, so no caller branches on it.
 - **Three front ends** — CLI with `--json` throughout, ratatui terminal browser,
   read-only web UI, all over one engine.
 - **Four platforms** — Linux, macOS, Windows tested on hosted runners; FreeBSD
@@ -42,8 +45,8 @@ seven upstream agents; nothing has been read past their issue trackers yet.
 model, so the HTTP provider and one full turn are exercised for real rather than
 against a stub.
 
-**Streaming responses.** The provider trait is shaped for it; the loop and the
-three front ends are not. Everything about perceived latency depends on this.
+**Streaming in the TUI and the web UI.** The CLI streams; the other two front
+ends still wait for the whole turn.
 
 **CLI through the daemon.** Detect a running `rookd` and route through its API,
 falling back to direct access. Removes the single-writer papercut

@@ -11,8 +11,10 @@
 //! contain a branch on which vendor is answering.
 
 pub mod openai;
+pub mod stream;
 pub mod types;
 
+pub use stream::{Assembler, Delta, ResponseStream};
 pub use types::*;
 
 use async_trait::async_trait;
@@ -29,6 +31,8 @@ pub enum LlmError {
     ContextOverflow { used: usize, window: usize },
     #[error("no provider configured for {0:?}")]
     UnknownProvider(String),
+    #[error("the model stopped sending for {secs}s; giving up on the stream")]
+    Stalled { secs: u64 },
     #[error("{0}")]
     Other(String),
 }
@@ -51,6 +55,24 @@ pub trait Provider: Send + Sync {
     }
 
     async fn complete(&self, request: Request) -> Result<Response>;
+
+    fn supports_streaming(&self) -> bool {
+        false
+    }
+
+    /// Falls back to a one-shot `complete` so every provider is streamable and
+    /// callers never branch on whether this one really streams.
+    async fn stream(&self, request: Request) -> Result<ResponseStream> {
+        let response = self.complete(request).await?;
+        let mut deltas = vec![Ok(Delta::Text(response.message.content.clone()))];
+        deltas.extend(response.message.tool_calls.iter().cloned().map(|c| Ok(Delta::ToolCall(c))));
+        deltas.push(Ok(Delta::Done {
+            stop_reason: response.stop_reason,
+            usage: response.usage.clone(),
+            model: response.model.clone(),
+        }));
+        Ok(Box::pin(futures_util::stream::iter(deltas)))
+    }
 }
 
 /// Split a `provider/model` spec, e.g. `ollama/qwen3-coder:30b`.
@@ -63,32 +85,29 @@ pub fn split_spec(spec: &str) -> (&str, &str) {
 
 /// Endpoints and keys come from environment variables, so neither the store nor
 /// the config file ever holds a credential.
-pub fn from_spec(spec: &str) -> Result<Box<dyn Provider>> {
+pub fn from_spec(spec: &str, stream_idle: std::time::Duration) -> Result<Box<dyn Provider>> {
     let (provider, model) = split_spec(spec);
-    let cfg = match provider {
-        "ollama" => openai::Config {
-            base_url: env_or("OLLAMA_HOST", "http://127.0.0.1:11434") + "/v1",
-            api_key: None,
-            context_window: 32_768,
-        },
-        "lmstudio" => openai::Config {
-            base_url: env_or("LMSTUDIO_HOST", "http://127.0.0.1:1234") + "/v1",
-            api_key: None,
-            context_window: 32_768,
-        },
-        "openai" => openai::Config {
-            base_url: env_or("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-            api_key: std::env::var("OPENAI_API_KEY").ok(),
-            context_window: 128_000,
-        },
-        "openai-compatible" => openai::Config {
-            base_url: std::env::var("ROOK_LLM_BASE_URL")
+    let mut cfg = match provider {
+        "ollama" => {
+            openai::Config::new(env_or("OLLAMA_HOST", "http://127.0.0.1:11434") + "/v1", None, 32_768)
+        }
+        "lmstudio" => {
+            openai::Config::new(env_or("LMSTUDIO_HOST", "http://127.0.0.1:1234") + "/v1", None, 32_768)
+        }
+        "openai" => openai::Config::new(
+            env_or("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+            std::env::var("OPENAI_API_KEY").ok(),
+            128_000,
+        ),
+        "openai-compatible" => openai::Config::new(
+            std::env::var("ROOK_LLM_BASE_URL")
                 .map_err(|_| LlmError::Other("set ROOK_LLM_BASE_URL for openai-compatible".into()))?,
-            api_key: std::env::var("ROOK_LLM_API_KEY").ok(),
-            context_window: 32_768,
-        },
+            std::env::var("ROOK_LLM_API_KEY").ok(),
+            32_768,
+        ),
         other => return Err(LlmError::UnknownProvider(other.to_string())),
     };
+    cfg.stream_idle_timeout = stream_idle;
     Ok(Box::new(openai::OpenAiCompatible::new(spec, model, cfg)?))
 }
 

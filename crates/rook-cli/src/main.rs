@@ -3,6 +3,7 @@
 mod fmt;
 mod tui;
 
+use std::io::Write;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
@@ -272,15 +273,28 @@ fn cmd_run(workspace: Option<PathBuf>, prompt: Vec<String>, session: Option<Stri
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     runtime.block_on(async move {
         let rook = Rook::open(workspace)?;
-        let provider = rook_llm::from_spec(&rook.config.agent.model)
+        let provider = rook_llm::from_spec(&rook.config.agent.model, rook.config.agent.stream_idle())
             .with_context(|| format!("configuring model {:?}", rook.config.agent.model))?;
         let session = match session {
             Some(s) => session_id(&s)?,
             None => rook.start_session(&first_line(&prompt))?,
         };
         let mut agent = rook_core::agent::AgentLoop::new(&rook, provider, session);
-        let outcome = agent.run(&prompt).await?;
-        println!("{}", outcome.reply);
+        let mut out = std::io::stdout();
+        let outcome = agent
+            .run_with(&prompt, |delta| match delta {
+                rook_llm::Delta::Text(text) => {
+                    let _ = write!(out, "{text}");
+                    let _ = out.flush();
+                }
+                rook_llm::Delta::ToolCall(call) => {
+                    let _ = writeln!(out, "\n  · {}({})", call.name, compact(&call.arguments));
+                    let _ = out.flush();
+                }
+                _ => {}
+            })
+            .await?;
+        println!();
         eprintln!(
             "\n[session {} · {} steps · {} in / {} out tokens · {} tool calls{}]",
             rook_store::format_session_id(session),
@@ -296,6 +310,16 @@ fn cmd_run(workspace: Option<PathBuf>, prompt: Vec<String>, session: Option<Stri
         );
         anyhow::Ok(())
     })
+}
+
+/// One-line form of tool arguments, for the progress line.
+fn compact(args: &serde_json::Value) -> String {
+    let text = args.to_string();
+    if text.len() <= 80 {
+        return text;
+    }
+    let cut = (0..=80).rev().find(|i| text.is_char_boundary(*i)).unwrap_or(0);
+    format!("{}…", &text[..cut])
 }
 
 fn first_line(s: &str) -> String {

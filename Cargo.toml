@@ -37,6 +37,15 @@ codegen-units = 1
 panic = "abort"
 strip = "symbols"
 
-# Keep debug builds usable on large sessions.
+# Dependencies at opt-level 2 keep debug builds usable on large sessions; full
+# debug info for them costs gigabytes in `target/` and is never stepped through.
 [profile.dev.package."*"]
 opt-level = 2
+debug = false
+
+# Line tables give readable backtraces at a fraction of the size of full DWARF.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.test]
+debug = "line-tables-only"

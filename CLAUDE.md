@@ -15,6 +15,10 @@ cargo xtask compaction     # re-measure the storage claims in README/docs
 cargo xtask targets        # supported target matrix
 ```
 
+`cargo xtask clean` reclaims `target/` — incremental state and cross-target
+artifacts first, `--all` for the rest. A full debug build with tests is ~800 MB;
+if it is several gigabytes, something has re-enabled full debug info.
+
 `ROOK_HOME` redirects all agent state, which is how tests and manual runs stay out
 of a real store:
 

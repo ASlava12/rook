@@ -4,15 +4,29 @@
 //! is what makes "works with local models" true rather than aspirational: Ollama,
 //! LM Studio, llama.cpp and vLLM all serve this shape.
 
+use std::time::Duration;
+
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
+use crate::stream::{Delta, ResponseStream, ToolCallBuffer};
 use crate::{LlmError, Message, Provider, Request, Response, Result, Role, StopReason, ToolCall, Usage};
 
 pub struct Config {
     pub base_url: String,
     pub api_key: Option<String>,
     pub context_window: usize,
+    /// How long the model may go silent mid-stream before the stream is
+    /// abandoned. Without this a dropped connection looks like a model that is
+    /// merely thinking, and the turn hangs until the overall timeout.
+    pub stream_idle_timeout: Duration,
+}
+
+impl Config {
+    pub fn new(base_url: String, api_key: Option<String>, context_window: usize) -> Self {
+        Self { base_url, api_key, context_window, stream_idle_timeout: Duration::from_secs(90) }
+    }
 }
 
 pub struct OpenAiCompatible {
@@ -47,36 +61,12 @@ impl Provider for OpenAiCompatible {
         self.config.context_window
     }
 
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
     async fn complete(&self, request: Request) -> Result<Response> {
-        let body = WireRequest {
-            model: &self.model,
-            messages: request.messages.iter().map(WireMessage::from).collect(),
-            tools: request
-                .tools
-                .iter()
-                .map(|t| WireTool {
-                    r#type: "function",
-                    function: WireFunction {
-                        name: &t.name,
-                        description: &t.description,
-                        parameters: t.parameters.clone(),
-                    },
-                })
-                .collect(),
-            max_tokens: request.max_output_tokens,
-            temperature: request.temperature,
-            stream: false,
-        };
-
-        let mut req = self
-            .http
-            .post(format!("{}/chat/completions", self.config.base_url.trim_end_matches('/')))
-            .json(&body);
-        if let Some(key) = &self.config.api_key {
-            req = req.bearer_auth(key);
-        }
-
-        let resp = req.send().await.map_err(|e| LlmError::Transport(e.to_string()))?;
+        let resp = self.send(&request, false).await?;
         let status = resp.status();
         let text = resp.text().await.map_err(|e| LlmError::Transport(e.to_string()))?;
         if !status.is_success() {
@@ -106,12 +96,9 @@ impl Provider for OpenAiCompatible {
             .collect();
 
         let stop_reason = match choice.finish_reason.as_deref() {
-            Some("tool_calls") | Some("function_call") => StopReason::ToolUse,
-            Some("length") => StopReason::MaxTokens,
-            Some("content_filter") => StopReason::Refusal,
-            Some("stop") => StopReason::EndTurn,
-            _ if !tool_calls.is_empty() => StopReason::ToolUse,
-            _ => StopReason::Other,
+            Some(reason) => finish_reason(reason),
+            None if !tool_calls.is_empty() => StopReason::ToolUse,
+            None => StopReason::Other,
         };
 
         Ok(Response {
@@ -128,6 +115,133 @@ impl Provider for OpenAiCompatible {
             },
             model: wire.model.unwrap_or_else(|| self.model.clone()),
         })
+    }
+
+    async fn stream(&self, request: Request) -> Result<ResponseStream> {
+        let resp = self.send(&request, true).await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(LlmError::Status { status: status.as_u16(), body: truncate(&body, 2000) });
+        }
+
+        let idle = self.config.stream_idle_timeout;
+        let fallback_model = self.model.clone();
+
+        Ok(Box::pin(async_stream::try_stream! {
+            let mut bytes = resp.bytes_stream();
+            let mut buffer = String::new();
+            let mut tools = ToolCallBuffer::default();
+            let mut usage = Usage::default();
+            let mut model = fallback_model;
+            let mut stop = None;
+
+            'outer: loop {
+                let chunk = match tokio::time::timeout(idle, bytes.next()).await {
+                    Err(_) => Err(LlmError::Stalled { secs: idle.as_secs() })?,
+                    Ok(None) => break,
+                    Ok(Some(chunk)) => chunk.map_err(|e| LlmError::Transport(e.to_string()))?,
+                };
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+                // SSE frames are separated by a blank line; a frame can span
+                // several transport chunks, and a chunk can hold several frames.
+                while let Some(end) = buffer.find("\n\n") {
+                    let frame: String = buffer.drain(..end + 2).collect();
+                    for line in frame.lines() {
+                        let Some(data) = line.strip_prefix("data:") else { continue };
+                        let data = data.trim();
+                        if data == "[DONE]" {
+                            break 'outer;
+                        }
+                        let Ok(parsed) = serde_json::from_str::<WireChunk>(data) else { continue };
+                        if let Some(m) = parsed.model {
+                            model = m;
+                        }
+                        if let Some(u) = parsed.usage {
+                            usage = Usage {
+                                input_tokens: u.prompt_tokens,
+                                output_tokens: u.completion_tokens,
+                            };
+                        }
+                        for choice in parsed.choices {
+                            if let Some(text) = choice.delta.content.filter(|t| !t.is_empty()) {
+                                yield Delta::Text(text);
+                            }
+                            if let Some(text) = choice.delta.reasoning_content.filter(|t| !t.is_empty()) {
+                                yield Delta::Reasoning(text);
+                            }
+                            for call in choice.delta.tool_calls.unwrap_or_default() {
+                                let function = call.function.unwrap_or_default();
+                                tools.push(
+                                    call.index,
+                                    call.id.as_deref(),
+                                    function.name.as_deref(),
+                                    function.arguments.as_deref().unwrap_or_default(),
+                                );
+                            }
+                            if let Some(reason) = choice.finish_reason {
+                                stop = Some(finish_reason(&reason));
+                            }
+                        }
+                    }
+                }
+            }
+
+            let had_tools = !tools.is_empty();
+            for call in tools.drain() {
+                yield Delta::ToolCall(call);
+            }
+            yield Delta::Done {
+                stop_reason: stop.unwrap_or(if had_tools { StopReason::ToolUse } else { StopReason::EndTurn }),
+                usage,
+                model,
+            };
+        }))
+    }
+}
+
+impl OpenAiCompatible {
+    async fn send(&self, request: &Request, stream: bool) -> Result<reqwest::Response> {
+        let body = WireRequest {
+            model: &self.model,
+            messages: request.messages.iter().map(WireMessage::from).collect(),
+            tools: request
+                .tools
+                .iter()
+                .map(|t| WireTool {
+                    r#type: "function",
+                    function: WireFunction {
+                        name: &t.name,
+                        description: &t.description,
+                        parameters: t.parameters.clone(),
+                    },
+                })
+                .collect(),
+            max_tokens: request.max_output_tokens,
+            temperature: request.temperature,
+            stream,
+            stream_options: stream.then_some(StreamOptions { include_usage: true }),
+        };
+
+        let mut req = self
+            .http
+            .post(format!("{}/chat/completions", self.config.base_url.trim_end_matches('/')))
+            .json(&body);
+        if let Some(key) = &self.config.api_key {
+            req = req.bearer_auth(key);
+        }
+        req.send().await.map_err(|e| LlmError::Transport(e.to_string()))
+    }
+}
+
+fn finish_reason(raw: &str) -> StopReason {
+    match raw {
+        "tool_calls" | "function_call" => StopReason::ToolUse,
+        "length" => StopReason::MaxTokens,
+        "content_filter" => StopReason::Refusal,
+        "stop" => StopReason::EndTurn,
+        _ => StopReason::Other,
     }
 }
 
@@ -151,6 +265,15 @@ struct WireRequest<'a> {
     max_tokens: u32,
     temperature: f32,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<StreamOptions>,
+}
+
+/// Without this, a streamed response carries no token counts at all, and the
+/// context budget has nothing to work from.
+#[derive(Serialize)]
+struct StreamOptions {
+    include_usage: bool,
 }
 
 #[derive(Serialize)]
@@ -248,6 +371,53 @@ struct WireRespFunction {
     name: String,
     #[serde(default)]
     arguments: String,
+}
+
+#[derive(Deserialize)]
+struct WireChunk {
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    choices: Vec<WireChunkChoice>,
+    #[serde(default)]
+    usage: Option<WireUsage>,
+}
+
+#[derive(Deserialize)]
+struct WireChunkChoice {
+    #[serde(default)]
+    delta: WireDelta,
+    #[serde(default)]
+    finish_reason: Option<String>,
+}
+
+#[derive(Default, Deserialize)]
+struct WireDelta {
+    #[serde(default)]
+    content: Option<String>,
+    /// Non-standard but widely emitted by reasoning models.
+    #[serde(default, alias = "reasoning")]
+    reasoning_content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<WireDeltaToolCall>>,
+}
+
+#[derive(Deserialize)]
+struct WireDeltaToolCall {
+    #[serde(default)]
+    index: usize,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<WireDeltaFunction>,
+}
+
+#[derive(Default, Deserialize)]
+struct WireDeltaFunction {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
 }
 
 #[derive(Deserialize)]
