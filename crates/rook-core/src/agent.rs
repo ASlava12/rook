@@ -65,6 +65,7 @@ pub struct AgentLoop<'a> {
     pub session: u128,
     pub policy: std::sync::Arc<Policy>,
     pub hooks: std::sync::Arc<Hooks>,
+    pub servers: std::sync::Arc<crate::lsp::Servers>,
     /// What the `session_start` hooks contributed, computed once.
     session_context: std::sync::Mutex<Option<String>>,
     /// Consulted whenever the policy says to ask. Refuses by default, so an
@@ -81,6 +82,12 @@ impl<'a> AgentLoop<'a> {
         tool_ctx.max_output_bytes = rook.config.sandbox.max_output_bytes;
         tool_ctx.command_timeout = std::time::Duration::from_secs(rook.config.sandbox.command_timeout_secs);
 
+        let configured =
+            if rook.config.lsp.is_empty() { crate::lsp::detected() } else { rook.config.lsp.clone() };
+        let servers = crate::lsp::Servers::new(configured, &rook.workspace);
+        let mut tools = ToolBox::standard();
+        crate::lsp::register(&mut tools, servers.clone());
+
         let (hooks, bad_hooks) = Hooks::compile(&rook.config.hooks);
         for error in bad_hooks {
             tracing::warn!("ignoring unusable hook matcher: {error}");
@@ -95,11 +102,12 @@ impl<'a> AgentLoop<'a> {
         Self {
             rook,
             provider,
-            tools: ToolBox::standard(),
+            tools,
             tool_ctx,
             session,
             policy: std::sync::Arc::new(policy),
             hooks: std::sync::Arc::new(hooks),
+            servers,
             session_context: std::sync::Mutex::new(None),
             approver: std::sync::Arc::new(Unattended),
             depth: 0,
@@ -593,6 +601,7 @@ impl<'a> AgentLoop<'a> {
         child.policy = self.policy.clone();
         child.approver = self.approver.clone();
         child.hooks = self.hooks.clone();
+        child.servers = self.servers.clone();
         if let Some(steps) = max_steps {
             child.max_steps = steps;
         }

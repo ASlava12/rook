@@ -2289,6 +2289,7 @@ dependencies = [
  "rook-acp",
  "rook-core",
  "rook-llm",
+ "rook-lsp",
  "rook-mcp",
  "rook-proto",
  "rook-skills",
@@ -2310,6 +2311,7 @@ dependencies = [
  "futures-util",
  "ignore",
  "rook-llm",
+ "rook-lsp",
  "rook-mcp",
  "rook-proto",
  "rook-skills",
@@ -2342,6 +2344,19 @@ dependencies = [
  "tokio",
  "tracing",
  "webpki-roots",
+]
+
+[[package]]
+name = "rook-lsp"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

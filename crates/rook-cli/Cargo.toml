@@ -16,6 +16,7 @@ ratatui = "0.30.2"
 rook-acp = { version = "0.1.0", path = "../rook-acp" }
 rook-core.workspace = true
 rook-llm.workspace = true
+rook-lsp = { version = "0.1.0", path = "../rook-lsp" }
 rook-mcp = { version = "0.1.0", path = "../rook-mcp" }
 rook-proto.workspace = true
 rook-skills.workspace = true

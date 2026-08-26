@@ -45,6 +45,10 @@ what unblocks the most.
   prompt; the agent edits it through `remember`/`forget`/`recall`. This is the
   shape [hermes-agent#12238](https://github.com/NousResearch/hermes-agent/issues/12238)
   asked for. 7 tests.
+- **Code intelligence** — an LSP client and four tools over it: diagnostics,
+  definition, references and workspace symbols, addressed by symbol name rather
+  than by position. Known servers are detected on `PATH` and started lazily.
+  8 tests against a mock server, plus a real run against clangd.
 - **Hooks** — five events with matchers, able to allow / ask / deny a tool call
   and to add context the model sees. A failing `pre_tool` hook blocks; no hook
   overrides the deny list. 7 tests.
@@ -104,6 +108,13 @@ ones yet; the identity check only catches exact repeats.
 
 **ACP beyond the basics.** Modes, config options, `fs/*` delegation to the
 editor's buffers, and terminals are all defined and unimplemented.
+
+**Auto-installing language servers.** Detection is done; the other half of
+codex #8745 asks for installation too, which means downloading and running a
+binary on the user's behalf.
+
+**Editing through the language server.** `didChange` on an edit would let
+diagnostics reflect unsaved work; today a file is opened once and read from disk.
 
 **MCP provenance in tool results.** A result carries the namespaced tool name but
 nothing about which server produced it; codex exposes that to its lifecycle hooks

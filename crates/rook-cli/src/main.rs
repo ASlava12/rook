@@ -85,6 +85,23 @@ enum Command {
     /// Read, edit and audit what the agent remembers.
     #[command(subcommand)]
     Memory(MemoryCmd),
+    /// Ask the language servers what the agent would ask them.
+    #[command(subcommand)]
+    Lsp(LspCmd),
+}
+
+#[derive(Subcommand)]
+enum LspCmd {
+    /// Which language servers apply here.
+    Servers,
+    /// What the type checker thinks is wrong with a file.
+    Diagnostics { path: String },
+    /// Where a name used in a file is defined.
+    Definition { path: String, symbol: String },
+    /// What refers to a name, as the type checker sees it.
+    References { path: String, symbol: String },
+    /// Find a symbol anywhere in the workspace.
+    Symbol { query: String },
 }
 
 #[derive(Subcommand)]
@@ -282,6 +299,7 @@ fn main() -> Result<()> {
         Some(Command::Checkpoint(c)) => cmd_checkpoint(&Rook::open(cli.workspace)?, c, cli.json),
         Some(Command::Mcp(c)) => cmd_mcp(cli.workspace, c, cli.json),
         Some(Command::Memory(c)) => cmd_memory(&Rook::open(cli.workspace)?, c, cli.json),
+        Some(Command::Lsp(c)) => cmd_lsp(cli.workspace, c, cli.json),
     }
 }
 
@@ -330,6 +348,17 @@ fn cmd_doctor(rook: &Rook, json: bool) -> Result<()> {
     match probe_provider(rook) {
         Ok(note) => println!("  {note}"),
         Err(e) => println!("  {} — {e}", rook.config.agent.model),
+    }
+
+    let servers =
+        if rook.config.lsp.is_empty() { rook_core::lsp::detected() } else { rook.config.lsp.clone() };
+    println!();
+    print!("language servers: ");
+    if servers.is_empty() {
+        println!("none found on PATH (rust-analyzer, gopls, clangd, …)");
+    } else {
+        let names: Vec<String> = servers.iter().map(|s| format!("{} ({})", s.language, s.command)).collect();
+        println!("{}", names.join(", "));
     }
 
     let cards = rook.catalog();
@@ -979,6 +1008,50 @@ fn cmd_skills(rook: &Rook, cmd: SkillCmd, json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn cmd_lsp(workspace: Option<PathBuf>, cmd: LspCmd, json: bool) -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    runtime.block_on(async move {
+        let rook = Rook::open(workspace)?;
+        let configs =
+            if rook.config.lsp.is_empty() { rook_core::lsp::detected() } else { rook.config.lsp.clone() };
+        if configs.is_empty() {
+            bail!("no language server found on PATH, and none configured under [[lsp]]");
+        }
+        let servers = rook_core::lsp::Servers::new(configs, &rook.workspace);
+
+        // The tools are the same ones the agent calls, so this cannot drift
+        // from what a turn would see.
+        let mut tools = rook_tools::ToolBox::default();
+        rook_core::lsp::register(&mut tools, servers.clone());
+        let ctx = rook_tools::ToolContext::new(rook.workspace.clone());
+
+        let (tool, args) = match &cmd {
+            LspCmd::Servers => {
+                println!("{}", servers.languages().join(", "));
+                servers.shutdown().await;
+                return anyhow::Ok(());
+            }
+            LspCmd::Diagnostics { path } => ("diagnostics", serde_json::json!({ "path": path })),
+            LspCmd::Definition { path, symbol } => {
+                ("definition", serde_json::json!({ "path": path, "symbol": symbol }))
+            }
+            LspCmd::References { path, symbol } => {
+                ("references", serde_json::json!({ "path": path, "symbol": symbol }))
+            }
+            LspCmd::Symbol { query } => ("find_symbol", serde_json::json!({ "query": query })),
+        };
+
+        let outcome = tools.call(&ctx, tool, &args).await?;
+        servers.shutdown().await;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&outcome)?);
+        } else {
+            println!("{}", outcome.content);
+        }
+        anyhow::Ok(())
+    })
 }
 
 fn cmd_memory(rook: &Rook, cmd: MemoryCmd, json: bool) -> Result<()> {

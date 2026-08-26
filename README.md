@@ -9,7 +9,7 @@ as a feature rather than a debugging afterthought: a CLI, a terminal browser and
 web UI, all views over the same engine.
 
 > **Status: early.** The storage layer, the skill system and the inspection tools
-> are implemented and covered by 133 tests. The agent loop — tool dispatch, skill
+> are implemented and covered by 141 tests. The agent loop — tool dispatch, skill
 > loading, budgeting, logging — is tested against a scripted provider; it has not
 > yet been exercised against a live model in CI. Streaming, MCP and ACP are on the
 > [roadmap](docs/roadmap.md) and are not implemented. Nothing below describes
@@ -119,6 +119,27 @@ rook session fork 01JQ… --at 12                 # branch without touching file
 All three front ends run turns, stream them, and ask for approvals the same way:
 `rook chat`, `rook tui`, and the web UI at `rookd`. Nothing is reachable from one
 that is not reachable from the others.
+
+### Code intelligence
+
+When a language server is on `PATH`, the agent gets four more tools: what the
+type checker thinks is wrong with a file, where a name is defined, what actually
+refers to it, and where a symbol lives in the workspace. It asks by name — the
+name it can read in the source — rather than by line and column:
+
+```sh
+rook lsp servers                              # what applies here
+rook lsp diagnostics src/main.rs              # without running a build
+rook lsp definition src/main.rs parse
+rook lsp references src/main.rs parse
+rook lsp symbol ObjectId
+```
+
+rust-analyzer, gopls, clangd, typescript-language-server and pyright are detected
+automatically; `[[lsp]]` in the config overrides that. Servers start lazily, on
+the first question that needs one. Auto-*installation* is deliberately not done:
+downloading and running a binary on your behalf is a different decision from
+using one you already have.
 
 ### Hooks
 
@@ -279,6 +300,7 @@ crates/
   rook-llm      provider trait + OpenAI-compatible HTTP (Ollama, LM Studio, vLLM, OpenAI)
   rook-tools    read/write/edit/list/search/run, with the guards that keep a turn survivable
   rook-mcp      Model Context Protocol client: stdio and HTTP transports
+  rook-lsp      Language Server Protocol client: diagnostics and navigation
   rook-acp      Agent Client Protocol server, so editors can drive it
   rook-proto    wire types shared by daemon, CLI and web
   rookd         HTTP backend, chat websocket, embedded web UI

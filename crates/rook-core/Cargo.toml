@@ -12,6 +12,7 @@ async-trait = "0.1.92"
 futures-util = "0.3.34"
 ignore = "0.4.33"
 rook-llm.workspace = true
+rook-lsp = { version = "0.1.0", path = "../rook-lsp" }
 rook-mcp = { version = "0.1.0", path = "../rook-mcp" }
 rook-proto.workspace = true
 rook-skills.workspace = true

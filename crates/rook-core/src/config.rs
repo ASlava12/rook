@@ -26,6 +26,10 @@ pub struct Config {
     pub sandbox: SandboxConfig,
     pub telemetry: TelemetryConfig,
     pub memory: MemoryConfig,
+    /// Language servers, as `[[lsp]]` tables. When empty, known servers found
+    /// on `PATH` are used.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub lsp: Vec<rook_lsp::ServerConfig>,
     /// Commands run at points in a turn, as `[[hooks]]` tables.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub hooks: Vec<crate::hooks::HookConfig>,

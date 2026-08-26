@@ -10,6 +10,7 @@ pub mod context;
 pub mod error;
 pub mod fileset;
 pub mod hooks;
+pub mod lsp;
 pub mod memory;
 pub mod paths;
 pub mod service;
