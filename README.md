@@ -9,7 +9,7 @@ as a feature rather than a debugging afterthought: a CLI, a terminal browser and
 web UI, all views over the same engine.
 
 > **Status: early.** The storage layer, the skill system and the inspection tools
-> are implemented and covered by 143 tests. The agent loop — tool dispatch, skill
+> are implemented and covered by 146 tests. The agent loop — tool dispatch, skill
 > loading, budgeting, logging — is tested against a scripted provider; it has not
 > yet been exercised against a live model in CI. Streaming, MCP and ACP are on the
 > [roadmap](docs/roadmap.md) and are not implemented. Nothing below describes
@@ -77,6 +77,7 @@ In a conversation, slash commands reach the same engine the subcommands do:
 
 ```
 /btw <question> ask about the work without joining the conversation
+/goal [text]    what this session is for; the agent is told
 /context        what this conversation costs, and of what
 /skills [name]  what applies here, or one skill's body
 /undo           rewind past the last exchange, files included
@@ -334,6 +335,10 @@ lose people's trust:
 - **The CLI opens the store directly**, so it cannot run while `rookd` holds it.
   It says so clearly; routing the CLI through the daemon is
   [ADR-0006](docs/adr/0006-single-writer-store.md).
+- **No structured plan state.** The agent is asked for a plan in prose and told
+  not to keep a checklist — deliberately, on the strength of someone else's
+  benchmark ([ADR-0010](docs/adr/0010-no-todo-tool.md)). There is nothing for a
+  UI to render as progress.
 - **Permissions are pattern matching, not a sandbox.** They raise the floor;
   `curl … | sh` is one obfuscation away from any rule. Not a jail.
 

@@ -210,6 +210,12 @@ enum SessionCmd {
         #[arg(long, default_value_t = 128_000)]
         window: usize,
     },
+    /// Show or set what a session is for.
+    Goal {
+        id: String,
+        /// Leave empty to show the current goal.
+        goal: Vec<String>,
+    },
     /// Fork a session at a sequence number, keeping the original intact.
     Fork {
         id: String,
@@ -822,6 +828,18 @@ fn cmd_session(rook: &Rook, cmd: SessionCmd, json: bool) -> Result<()> {
                 })
                 .collect();
             print!("{}", fmt::table(&["kind", "events", "bytes", "tokens", ""], &rows));
+        }
+        SessionCmd::Goal { id, goal } => {
+            let session = session_id(&id)?;
+            if goal.is_empty() {
+                match rook.goal(session)? {
+                    Some(goal) => println!("{goal}"),
+                    None => println!("no goal set for this session"),
+                }
+            } else {
+                rook.set_goal(session, &goal.join(" "))?;
+                println!("goal set");
+            }
         }
         SessionCmd::Fork { id, at } => {
             let source = session_id(&id)?;

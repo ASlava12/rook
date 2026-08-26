@@ -54,6 +54,9 @@ pub struct AgentConfig {
     pub lazy_skills: bool,
     /// Same idea for tool schemas.
     pub lazy_tools: bool,
+    /// Ask for a brief plan before multi-step work. One line in the system
+    /// prompt, not a checklist tool — see ADR-0010.
+    pub plan_first: bool,
     /// Overrides the provider's assumed context length, which is guesswork for
     /// anything self-hosted: a local model may serve 8k or a million.
     pub context_window: Option<usize>,
@@ -139,6 +142,7 @@ impl Default for AgentConfig {
             max_steps: 200,
             lazy_skills: true,
             lazy_tools: true,
+            plan_first: true,
             context_window: None,
             max_parallel_subagents: 4,
             stream_idle_timeout_secs: 90,

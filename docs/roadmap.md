@@ -45,6 +45,9 @@ what unblocks the most.
   prompt; the agent edits it through `remember`/`forget`/`recall`. This is the
   shape [hermes-agent#12238](https://github.com/NousResearch/hermes-agent/issues/12238)
   asked for. 7 tests.
+- **Planning** — one system-prompt line rather than a checklist tool, and a goal
+  the user sets on a session. Chosen against the obvious design on the strength
+  of goose's own A/B benchmark ([ADR-0010](adr/0010-no-todo-tool.md)). 3 tests.
 - **Code intelligence** — an LSP client and four tools over it: diagnostics,
   definition, references and workspace symbols, addressed by symbol name rather
   than by position. Known servers are detected on `PATH` and started lazily, and

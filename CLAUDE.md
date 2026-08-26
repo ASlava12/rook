@@ -73,6 +73,10 @@ app renders into a zero-sized terminal and emits nothing.
 
 - Bump `FORMAT_VERSION` in `crates/rook-store/src/schema.rs` for any change older
   builds cannot read. Opening a newer format must keep failing cleanly.
+- **Adding a field to a stored struct breaks every record already written.**
+  postcard is not self-describing, so a decoder reading an old record hits the
+  end of the buffer looking for the new field. Put session-scoped extras in the
+  `kv` table instead — that is where `goal/<session>` lives.
 - Never change how an existing object decodes. Objects record their own codec
   precisely so encoding can evolve without rewriting history.
 - Re-run `cargo xtask compaction` and update the numbers in `README.md` and

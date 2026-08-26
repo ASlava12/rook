@@ -479,6 +479,25 @@ impl Rook {
         session
     }
 
+    /// What this session is for, as the user stated it.
+    ///
+    /// Kept in the key-value table rather than on `SessionMeta`: that struct is
+    /// stored with postcard, which is not self-describing, so adding a field to
+    /// it makes every record already written unreadable.
+    pub fn goal(&self, session: u128) -> Result<Option<String>> {
+        Ok(self
+            .store
+            .kv_get(&format!("goal/{:032x}", session))?
+            .and_then(|raw| String::from_utf8(raw).ok())
+            .filter(|goal| !goal.trim().is_empty()))
+    }
+
+    pub fn set_goal(&self, session: u128, goal: &str) -> Result<()> {
+        self.store.kv_set(&format!("goal/{:032x}", session), goal.trim().as_bytes())?;
+        self.log(session, EventKind::Note, "goal", goal.trim())?;
+        Ok(())
+    }
+
     // ---------------------------------------------------------------- memory
 
     /// The current memory, or an empty book if nothing has been remembered.

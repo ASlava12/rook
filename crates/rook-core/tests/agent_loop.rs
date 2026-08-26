@@ -1186,3 +1186,63 @@ async fn an_aside_is_still_recorded_for_the_transcript() {
     assert!(note.body.contains("what is it?"));
     assert!(note.body.contains("forty-two"));
 }
+
+#[tokio::test]
+async fn the_session_goal_reaches_the_prompt_and_survives_the_session() {
+    let f = fixture();
+    let session = f.rook.start_session("goal").unwrap();
+    f.rook.set_goal(session, "  make the parser handle CRLF  ").unwrap();
+    assert_eq!(f.rook.goal(session).unwrap().as_deref(), Some("make the parser handle CRLF"));
+
+    let provider = ScriptedProvider::new(vec![reply("ok")]);
+    let seen = provider.share();
+    AgentLoop::new(&f.rook, Arc::new(provider), session).run("start").await.unwrap();
+
+    let system = seen.lock().unwrap().last().cloned().unwrap().messages[0].content.clone();
+    assert!(system.contains("make the parser handle CRLF"), "{system}");
+
+    // Another session must not inherit it.
+    let other = f.rook.start_session("other").unwrap();
+    assert_eq!(f.rook.goal(other).unwrap(), None);
+}
+
+#[tokio::test]
+async fn planning_is_asked_for_in_the_prompt_and_never_as_a_tool() {
+    let f = fixture();
+    let session = f.rook.start_session("plan").unwrap();
+    let provider = ScriptedProvider::new(vec![reply("ok")]);
+    let seen = provider.share();
+    AgentLoop::new(&f.rook, Arc::new(provider), session).run("do a big thing").await.unwrap();
+
+    let request = seen.lock().unwrap().last().cloned().unwrap();
+    assert!(request.messages[0].content.contains("say the plan"), "the instruction is the mechanism");
+    assert!(
+        request.messages[0].content.contains("Do not keep a checklist"),
+        "checklist bookkeeping is the cost this avoids"
+    );
+    let offered: Vec<&str> = request.tools.iter().map(|t| t.name.as_str()).collect();
+    for name in ["todo", "todo_write", "update_plan", "plan"] {
+        assert!(!offered.contains(&name), "a planning tool was offered: {offered:?}");
+    }
+}
+
+#[tokio::test]
+async fn planning_can_be_turned_off() {
+    let f = fixture();
+    let mut config = Config::default();
+    config.agent.plan_first = false;
+    let rook = Rook::from_parts(
+        Store::open(f._store_dir.path().join("noplan")).unwrap(),
+        config,
+        f.rook.env.clone(),
+        SkillIndex::default(),
+        PathBuf::from(f.workspace.path()),
+    );
+    let session = rook.start_session("plain").unwrap();
+    let provider = ScriptedProvider::new(vec![reply("ok")]);
+    let seen = provider.share();
+    AgentLoop::new(&rook, Arc::new(provider), session).run("go").await.unwrap();
+
+    let system = seen.lock().unwrap().last().cloned().unwrap().messages[0].content.clone();
+    assert!(!system.contains("say the plan"));
+}

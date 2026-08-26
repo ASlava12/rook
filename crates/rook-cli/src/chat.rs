@@ -18,6 +18,7 @@ use crate::fmt;
 const HELP: &str = "  /context [window]   what this conversation costs, and of what
   /skills [name]      skills that apply here, or one skill's body
   /session            id, size and token totals
+  /goal [text]        what this session is for; the agent is told
   /memory [query]     what it remembers, or what matches
   /btw <question>     ask about this conversation without joining it
   /mcp                connected tool servers
@@ -237,6 +238,15 @@ async fn dispatch(
             println!("{}", resolved.body);
         }
 
+        "goal" if rest.is_empty() => match rook.goal(*session)? {
+            Some(goal) => println!("{goal}"),
+            None => println!("no goal set — /goal <text> to set one"),
+        },
+        "goal" => {
+            rook.set_goal(*session, rest)?;
+            println!("goal set");
+        }
+
         "memory" => {
             let book = rook.memory()?;
             let workspace = rook.workspace.display().to_string();
@@ -261,6 +271,9 @@ async fn dispatch(
             let meta = rook.store.get_session(*session)?.context("session vanished")?;
             println!("{}", rook_store::format_session_id(meta.id));
             println!("{} events · {} in / {} out tokens", meta.event_count, meta.tokens_in, meta.tokens_out);
+            if let Some(goal) = rook.goal(*session)? {
+                println!("goal: {goal}");
+            }
             if let Some(parent) = meta.parent {
                 println!("forked from {}", rook_store::format_session_id(parent));
             }

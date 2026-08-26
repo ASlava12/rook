@@ -127,8 +127,18 @@ impl<'a> AgentLoop<'a> {
         let mut s = String::new();
         s.push_str(
             "You are Rook, an autonomous agent working in a local workspace.\n\
-             Work in small verified steps. Prefer reading before editing. State what you did.\n\n",
+             Work in small verified steps. Prefer reading before editing. State what you did.\n",
         );
+        if self.rook.config.agent.plan_first {
+            s.push_str(
+                "For anything that takes more than one step, say the plan in a sentence or two \
+                 before acting, and say so when it changes. Do not keep a checklist.\n",
+            );
+        }
+        if let Ok(Some(goal)) = self.rook.goal(self.session) {
+            s.push_str(&format!("\nThe user's goal for this session: {goal}\n"));
+        }
+        s.push('\n');
         s.push_str(&format!(
             "## Environment\nos: {} ({} userland)\narch: {}\nworkspace: {}\n",
             env.os,
