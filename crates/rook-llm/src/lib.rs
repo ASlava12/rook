@@ -10,6 +10,7 @@
 //! Everything here is provider-agnostic on purpose: the agent loop must never
 //! contain a branch on which vendor is answering.
 
+pub mod anthropic;
 pub mod openai;
 pub mod stream;
 pub mod types;
@@ -113,6 +114,17 @@ pub fn from_spec_with(
         }
         "lmstudio" => {
             openai::Config::new(env_or("LMSTUDIO_HOST", "http://127.0.0.1:1234") + "/v1", None, 32_768)
+        }
+        "anthropic" | "claude" => {
+            let key = std::env::var("ANTHROPIC_API_KEY")
+                .map_err(|_| LlmError::Other("set ANTHROPIC_API_KEY".into()))?;
+            let base = env_or("ANTHROPIC_BASE_URL", "https://api.anthropic.com");
+            let mut config = anthropic::Config::new(base, key, model);
+            config.stream_idle_timeout = stream_idle;
+            if let Some(window) = context_window {
+                config.context_window = window;
+            }
+            return Ok(Box::new(anthropic::Anthropic::new(spec, model, config)?));
         }
         "openai" => openai::Config::new(
             env_or("OPENAI_BASE_URL", "https://api.openai.com/v1"),

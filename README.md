@@ -9,7 +9,7 @@ as a feature rather than a debugging afterthought: a CLI, a terminal browser and
 web UI, all views over the same engine.
 
 > **Status: early.** The storage layer, the skill system and the inspection tools
-> are implemented and covered by 148 tests. The agent loop — tool dispatch, skill
+> are implemented and covered by 159 tests. The agent loop — tool dispatch, skill
 > loading, budgeting, logging — is tested against a scripted provider; it has not
 > yet been exercised against a live model in CI. Streaming, MCP and ACP are on the
 > [roadmap](docs/roadmap.md) and are not implemented. Nothing below describes
@@ -165,6 +165,20 @@ context for the model, so `echo` works. A `pre_tool` hook that fails blocks the
 call it was guarding — a guard that cannot run is not approval — and no hook can
 unlock what the deny list forbids.
 
+### Models
+
+The `provider/model` in `config.toml` picks the wire dialect:
+
+```toml
+[agent]
+model = "anthropic/claude-opus-5"   # ANTHROPIC_API_KEY
+# model = "ollama/qwen3-coder:30b"  # a local endpoint, no key
+# model = "openai/gpt-5.5"          # OPENAI_API_KEY
+```
+
+Keys come from the environment, never from the config file or the store.
+`rook models` asks the endpoint what it serves.
+
 ### From an editor
 
 `rook acp` speaks the [Agent Client Protocol](https://agentclientprotocol.com) on
@@ -298,7 +312,7 @@ crates/
   rook-store    content-addressed store: redb index, zstd dictionaries, gc, retention
   rook-skills   SKILL.md parsing, environment detection, version + variant resolution
   rook-core     the engine: config, agent loop, context budget, file captures
-  rook-llm      provider trait + OpenAI-compatible HTTP (Ollama, LM Studio, vLLM, OpenAI)
+  rook-llm      provider trait, OpenAI-compatible HTTP and the Anthropic Messages API
   rook-tools    read/write/edit/list/search/run, with the guards that keep a turn survivable
   rook-mcp      Model Context Protocol client: stdio and HTTP transports
   rook-lsp      Language Server Protocol client: diagnostics and navigation
