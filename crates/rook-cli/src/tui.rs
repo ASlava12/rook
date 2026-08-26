@@ -278,6 +278,7 @@ impl App {
         if prompt.is_empty() || self.chat.busy {
             return;
         }
+        let aside = prompt.strip_prefix("/btw ").map(|q| q.trim().to_string());
         self.chat.push("you", &format!("› {prompt}"));
         self.chat.busy = true;
         self.chat.scroll = 0;
@@ -310,6 +311,21 @@ impl App {
             };
 
             let mut agent = AgentLoop::new(&rook, provider.into(), session);
+            if let Some(question) = aside {
+                let emit = to_loop.clone();
+                let result = agent
+                    .aside(&question, |delta| {
+                        if let Delta::Text(text) = delta {
+                            let _ = emit.send(TurnEvent::Reasoning(text.clone()));
+                        }
+                    })
+                    .await;
+                let _ = match result {
+                    Ok(_) => to_loop.send(TurnEvent::Done("[aside]".into())),
+                    Err(e) => to_loop.send(TurnEvent::Error(e.to_string())),
+                };
+                return;
+            }
             if yes {
                 agent.allow_everything_not_denied();
             } else {
@@ -713,6 +729,7 @@ impl App {
             Line::from("  q / Esc     quit (Ctrl-C anywhere)"),
             Line::from(""),
             Line::from("  In Chat:    Enter sends · Esc clears, then quits"),
+            Line::from("              /btw <question> asks without joining the conversation"),
             Line::from("              y / a / n answer an approval"),
         ];
         f.render_widget(Paragraph::new(text).block(bordered(" Help ")), area);

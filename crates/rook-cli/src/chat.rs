@@ -19,6 +19,7 @@ const HELP: &str = "  /context [window]   what this conversation costs, and of w
   /skills [name]      skills that apply here, or one skill's body
   /session            id, size and token totals
   /memory [query]     what it remembers, or what matches
+  /btw <question>     ask about this conversation without joining it
   /mcp                connected tool servers
   /undo               rewind past the last exchange, files included
   /rewind <seq>       rewind to a specific point in the transcript
@@ -72,6 +73,15 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
             Ok(line) => {
                 let _ = editor.add_history_entry(line.as_str());
                 let line = line.trim().to_string();
+                if let Some(question) = line.strip_prefix("/btw ") {
+                    let provider = rook_llm::from_spec_with(
+                        &rook.config.agent.model,
+                        rook.config.agent.stream_idle(),
+                        rook.config.agent.context_window,
+                    )?;
+                    runtime.block_on(aside(&rook, provider, session, question.trim()));
+                    continue;
+                }
                 if let Some(command) = line.strip_prefix('/') {
                     match runtime.block_on(dispatch(&rook, &mut session, &mcp, command)) {
                         Ok(true) => break,
@@ -100,6 +110,25 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
     drop(provider);
     println!("session {}", rook_store::format_session_id(session));
     Ok(())
+}
+
+async fn aside(rook: &Rook, provider: Box<dyn rook_llm::Provider>, session: u128, question: &str) {
+    let agent = AgentLoop::new(rook, provider.into(), session);
+    let mut out = std::io::stdout();
+    let _ = write!(out, "\x1b[2m");
+    let _ = out.flush();
+    let result = agent
+        .aside(question, |delta| {
+            if let Delta::Text(text) = delta {
+                let _ = write!(out, "{text}");
+                let _ = out.flush();
+            }
+        })
+        .await;
+    println!("\x1b[0m");
+    if let Err(e) = result {
+        println!("{e}");
+    }
 }
 
 async fn turn(

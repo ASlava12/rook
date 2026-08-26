@@ -70,6 +70,8 @@ what unblocks the most.
   interruptible turns, a CLI with `--json` throughout, a ratatui browser, and a
   web UI that both reads the store and drives a turn over a websocket. All three
   run turns, stream them and answer approvals the same way, over one engine.
+- **Asides** — `/btw` answers a question from the conversation without tools and
+  without joining it, recorded as a note the history replay skips. 2 tests.
 - **Conversation continuity** — every turn replays the session log, so `--session`
   and the chat both continue a conversation rather than starting one.
 - **Four platforms** — Linux, macOS, Windows tested on hosted runners; FreeBSD

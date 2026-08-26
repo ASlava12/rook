@@ -316,6 +316,45 @@ impl<'a> AgentLoop<'a> {
         self.run_with(prompt, |_| {}).await
     }
 
+    /// Answer a question about the conversation without joining it.
+    ///
+    /// One call, no tools, no loop. The exchange is recorded as a note, which
+    /// the history replay skips — so asking what a piece of code does mid-task
+    /// neither costs the agent a tool round trip nor leaves anything in the
+    /// context it will carry for the rest of the session.
+    pub async fn aside<F: FnMut(&Delta)>(&self, question: &str, mut on_delta: F) -> Result<String> {
+        let mut messages = vec![Message::system(self.system_prompt(question))];
+        messages.extend(self.history()?);
+        messages.push(Message::user(format!(
+            "{question}\n\n(Answer from what you already know here. Do not act, and do not \
+             offer to — this is an aside, not an instruction.)"
+        )));
+
+        let mut request = Request::new(messages);
+        request.max_output_tokens = 1024;
+
+        let mut stream = self.provider.stream(request).await.map_err(|e| CoreError::Other(e.to_string()))?;
+        let mut assembler = Assembler::default();
+        while let Some(delta) = stream.next().await {
+            let delta = delta.map_err(|e| CoreError::Other(e.to_string()))?;
+            on_delta(&delta);
+            assembler.push(delta);
+        }
+
+        let response = assembler.finish();
+        // A model that answers an aside with a tool call has nothing to say and
+        // no way to act; an empty pane would leave that looking like a hang.
+        let answer = match response.message.content.trim() {
+            "" if !response.message.tool_calls.is_empty() => {
+                "(the model tried to use a tool instead of answering; ask it as a normal message)".to_string()
+            }
+            "" => "(the model returned nothing)".to_string(),
+            text => text.to_string(),
+        };
+        self.rook.log(self.session, EventKind::Note, "btw", &format!("Q: {question}\nA: {answer}")).ok();
+        Ok(answer)
+    }
+
     /// Run a turn, reporting each fragment as it arrives.
     ///
     /// `on_delta` sees text as the model produces it and tool calls once they

@@ -9,7 +9,7 @@ as a feature rather than a debugging afterthought: a CLI, a terminal browser and
 web UI, all views over the same engine.
 
 > **Status: early.** The storage layer, the skill system and the inspection tools
-> are implemented and covered by 131 tests. The agent loop — tool dispatch, skill
+> are implemented and covered by 133 tests. The agent loop — tool dispatch, skill
 > loading, budgeting, logging — is tested against a scripted provider; it has not
 > yet been exercised against a live model in CI. Streaming, MCP and ACP are on the
 > [roadmap](docs/roadmap.md) and are not implemented. Nothing below describes
@@ -76,6 +76,7 @@ rookd                                      # http://127.0.0.1:7717 — web UI + 
 In a conversation, slash commands reach the same engine the subcommands do:
 
 ```
+/btw <question> ask about the work without joining the conversation
 /context        what this conversation costs, and of what
 /skills [name]  what applies here, or one skill's body
 /undo           rewind past the last exchange, files included
@@ -83,8 +84,10 @@ In a conversation, slash commands reach the same engine the subcommands do:
 /session  /mcp  /new  /help  /quit
 ```
 
-Ctrl-C stops the turn in flight without leaving; whatever it already did stays in
-the log.
+`/btw` answers from what the agent already knows — no tools, one call — and its
+answer never enters the context the agent carries forward, though it is still in
+the transcript. Ctrl-C stops the turn in flight without leaving; whatever it
+already did stays in the log.
 
 ### Reading what the agent remembers
 

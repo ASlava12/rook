@@ -1139,3 +1139,50 @@ async fn a_single_task_still_works_unchanged() {
     assert_eq!(outcome.delegated.len(), 1);
     assert_eq!(outcome.reply, "reported");
 }
+
+#[tokio::test]
+async fn an_aside_sees_the_conversation_but_never_joins_it() {
+    let f = fixture();
+    let session = f.rook.start_session("aside").unwrap();
+
+    let first = Arc::new(ScriptedProvider::new(vec![reply("I used exponential backoff")]));
+    AgentLoop::new(&f.rook, first, session).run("add retries").await.unwrap();
+
+    let asking = ScriptedProvider::new(vec![reply("because the server rate-limits")]);
+    let seen = asking.share();
+    let answer =
+        AgentLoop::new(&f.rook, Arc::new(asking), session).aside("why backoff?", |_| {}).await.unwrap();
+    assert_eq!(answer, "because the server rate-limits");
+
+    let request = seen.lock().unwrap().last().cloned().unwrap();
+    let carried: String = request.messages.iter().map(|m| m.content.clone()).collect();
+    assert!(carried.contains("add retries"), "an aside must see the conversation");
+    assert!(request.tools.is_empty(), "and must be given no tools to act with");
+
+    // The next real turn must not see the aside at all.
+    let next = ScriptedProvider::new(vec![reply("ok")]);
+    let seen = next.share();
+    AgentLoop::new(&f.rook, Arc::new(next), session).run("carry on").await.unwrap();
+    let carried: String =
+        seen.lock().unwrap().last().cloned().unwrap().messages.iter().map(|m| m.content.clone()).collect();
+    assert!(!carried.contains("why backoff?"), "the aside leaked into the conversation:\n{carried}");
+    assert!(!carried.contains("rate-limits"), "and so did its answer");
+}
+
+#[tokio::test]
+async fn an_aside_is_still_recorded_for_the_transcript() {
+    let f = fixture();
+    let session = f.rook.start_session("aside").unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![reply("forty-two")]));
+    AgentLoop::new(&f.rook, provider, session).aside("what is it?", |_| {}).await.unwrap();
+
+    let note = f
+        .rook
+        .transcript(session, 0, usize::MAX, 4096)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.label == "btw")
+        .expect("an aside must be auditable even though the model never sees it again");
+    assert!(note.body.contains("what is it?"));
+    assert!(note.body.contains("forty-two"));
+}
