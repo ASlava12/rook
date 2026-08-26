@@ -103,6 +103,41 @@ pub enum StopReason {
     Other,
 }
 
+/// How much thinking and overall token spend to allow.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Effort {
+    Low,
+    Medium,
+    #[default]
+    High,
+    XHigh,
+    Max,
+}
+
+impl Effort {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Effort::Low => "low",
+            Effort::Medium => "medium",
+            Effort::High => "high",
+            Effort::XHigh => "xhigh",
+            Effort::Max => "max",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        Some(match text.trim().to_lowercase().as_str() {
+            "low" => Effort::Low,
+            "medium" => Effort::Medium,
+            "high" => Effort::High,
+            "xhigh" => Effort::XHigh,
+            "max" => Effort::Max,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Request {
     pub messages: Vec<Message>,
@@ -110,11 +145,14 @@ pub struct Request {
     pub tools: Vec<ToolSpec>,
     pub max_output_tokens: u32,
     pub temperature: f32,
+    /// Providers that have no notion of effort ignore it.
+    #[serde(default)]
+    pub effort: Option<Effort>,
 }
 
 impl Request {
     pub fn new(messages: Vec<Message>) -> Self {
-        Self { messages, tools: Vec::new(), max_output_tokens: 4096, temperature: 0.0 }
+        Self { messages, tools: Vec::new(), max_output_tokens: 4096, temperature: 0.0, effort: None }
     }
 }
 

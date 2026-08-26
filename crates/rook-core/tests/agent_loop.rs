@@ -1328,3 +1328,44 @@ async fn the_conversation_so_far_is_marked_as_a_cacheable_prefix() {
     );
     assert!(!messages.last().unwrap().cache, "the newest turn is not a stable prefix");
 }
+
+#[tokio::test]
+async fn a_sub_agent_runs_at_lower_effort_than_its_parent() {
+    let f = fixture();
+    let session = f.rook.start_session("effort").unwrap();
+    let provider = ScriptedProvider::new(vec![
+        call("delegate", serde_json::json!({ "task": "look something up" })),
+        reply("found it"),
+        reply("reported"),
+    ]);
+    let seen = provider.share();
+    AgentLoop::new(&f.rook, Arc::new(provider), session).run("go").await.unwrap();
+
+    let requests = seen.lock().unwrap().clone();
+    assert_eq!(requests[0].effort, Some(rook_llm::Effort::High), "the parent uses the configured effort");
+    assert_eq!(
+        requests[1].effort,
+        Some(rook_llm::Effort::Low),
+        "a bounded errand does not need the parent's depth"
+    );
+}
+
+#[tokio::test]
+async fn the_configured_effort_reaches_the_request() {
+    let f = fixture();
+    let mut config = Config::default();
+    config.agent.effort = "max".into();
+    let rook = Rook::from_parts(
+        Store::open(f._store_dir.path().join("effort")).unwrap(),
+        config,
+        f.rook.env.clone(),
+        SkillIndex::default(),
+        PathBuf::from(f.workspace.path()),
+    );
+    let session = rook.start_session("e").unwrap();
+    let provider = ScriptedProvider::new(vec![reply("ok")]);
+    let seen = provider.share();
+    AgentLoop::new(&rook, Arc::new(provider), session).run("go").await.unwrap();
+
+    assert_eq!(seen.lock().unwrap()[0].effort, Some(rook_llm::Effort::Max));
+}

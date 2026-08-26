@@ -9,7 +9,7 @@ as a feature rather than a debugging afterthought: a CLI, a terminal browser and
 web UI, all views over the same engine.
 
 > **Status: early.** The storage layer, the skill system and the inspection tools
-> are implemented and covered by 166 tests. The agent loop — tool dispatch, skill
+> are implemented and covered by 171 tests. The agent loop — tool dispatch, skill
 > loading, budgeting, logging — is tested against a scripted provider; it has not
 > yet been exercised against a live model in CI. Streaming, MCP and ACP are on the
 > [roadmap](docs/roadmap.md) and are not implemented. Nothing below describes
@@ -171,13 +171,16 @@ The `provider/model` in `config.toml` picks the wire dialect:
 
 ```toml
 [agent]
-model = "anthropic/claude-opus-5"   # ANTHROPIC_API_KEY
+model  = "anthropic/claude-opus-5"  # ANTHROPIC_API_KEY
+effort = "high"                     # low | medium | high | xhigh | max
 # model = "ollama/qwen3-coder:30b"  # a local endpoint, no key
 # model = "openai/gpt-5.5"          # OPENAI_API_KEY
 ```
 
 Keys come from the environment, never from the config file or the store.
-`rook models` asks the endpoint what it serves.
+`rook models` asks the endpoint what it serves. Effort applies where the provider
+has the notion; sub-agents and `/btw` run at `low` regardless, since a bounded
+errand does not need the depth the main turn does.
 
 ### From an editor
 

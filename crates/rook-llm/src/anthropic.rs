@@ -295,6 +295,25 @@ fn stop_reason(raw: Option<&str>) -> StopReason {
 /// become content blocks, and *consecutive* tool results are merged into one
 /// user message — splitting them across several teaches the model to stop
 /// making parallel calls.
+/// Whether the model takes adaptive thinking and `output_config.effort`.
+///
+/// Sent only to families documented to accept them: on an older model
+/// `thinking: {type: "adaptive"}` is rejected outright, and guessing wrong
+/// fails every request rather than degrading.
+fn takes_adaptive_thinking(model: &str) -> bool {
+    const FAMILIES: [&str; 6] = [
+        "claude-opus-5",
+        "claude-opus-4-8",
+        "claude-opus-4-7",
+        "claude-opus-4-6",
+        "claude-sonnet-5",
+        "claude-sonnet-4-6",
+    ];
+    FAMILIES.iter().any(|f| model.starts_with(f))
+        || model.starts_with("claude-fable")
+        || model.starts_with("claude-mythos")
+}
+
 fn wire_request(model: &str, request: &Request, stream: bool) -> serde_json::Value {
     let mut system = String::new();
     let mut cache_system = false;
@@ -368,6 +387,14 @@ fn wire_request(model: &str, request: &Request, stream: bool) -> serde_json::Val
         // As an array so the breakpoint can sit on it; tools render before
         // system, so one marker here caches both.
         body["system"] = serde_json::json!([text_block(&system, cache_system)]);
+    }
+    if takes_adaptive_thinking(model) {
+        // `display` defaults to omitted on these models, which streams empty
+        // thinking blocks — a long pause with nothing to show for it.
+        body["thinking"] = serde_json::json!({ "type": "adaptive", "display": "summarized" });
+        if let Some(effort) = request.effort {
+            body["output_config"] = serde_json::json!({ "effort": effort.as_str() });
+        }
     }
     if !request.tools.is_empty() {
         body["tools"] = request

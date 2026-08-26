@@ -376,3 +376,49 @@ async fn cache_hits_are_reported_back() {
     assert_eq!(usage.cache_read_tokens, 9000, "without this there is no way to tell caching works");
     assert_eq!(usage.cache_write_tokens, 40);
 }
+
+#[tokio::test]
+async fn a_current_model_gets_adaptive_thinking_and_a_visible_summary() {
+    let (url, seen) = serve("200 OK", "application/json", DONE).await;
+    let mut request = Request::new(vec![Message::user("hi")]);
+    request.effort = Some(rook_llm::Effort::XHigh);
+    provider(url).complete(request).await.unwrap();
+
+    let body = seen.lock().unwrap().clone().unwrap();
+    assert_eq!(body["thinking"]["type"], "adaptive");
+    assert_eq!(
+        body["thinking"]["display"], "summarized",
+        "the default is omitted, which streams empty thinking blocks"
+    );
+    assert_eq!(body["output_config"]["effort"], "xhigh");
+    assert!(
+        body["thinking"]["budget_tokens"].is_null(),
+        "budget_tokens is rejected outright on current models"
+    );
+}
+
+#[tokio::test]
+async fn a_model_outside_the_documented_families_is_sent_neither() {
+    let (url, seen) = serve("200 OK", "application/json", DONE).await;
+    let mut request = Request::new(vec![Message::user("hi")]);
+    request.effort = Some(rook_llm::Effort::Max);
+    Anthropic::new("x", "claude-haiku-4-5", Config::new(url, "k".into(), "claude-haiku-4-5"))
+        .unwrap()
+        .complete(request)
+        .await
+        .unwrap();
+
+    let body = seen.lock().unwrap().clone().unwrap();
+    assert!(
+        body["thinking"].is_null() && body["output_config"].is_null(),
+        "guessing wrong here fails every request rather than degrading: {body}"
+    );
+}
+
+#[test]
+fn an_unreadable_effort_setting_falls_back_rather_than_failing_a_turn() {
+    assert_eq!(rook_llm::Effort::parse("xhigh"), Some(rook_llm::Effort::XHigh));
+    assert_eq!(rook_llm::Effort::parse("  MAX "), Some(rook_llm::Effort::Max));
+    assert_eq!(rook_llm::Effort::parse("very"), None);
+    assert_eq!(rook_llm::Effort::default().as_str(), "high");
+}

@@ -100,6 +100,7 @@ pub struct AgentLoop<'a> {
     pub approver: std::sync::Arc<dyn Approver>,
     pub depth: u32,
     pub max_steps: u32,
+    pub effort: rook_llm::Effort,
     budget: ContextBudget,
 }
 
@@ -134,6 +135,7 @@ impl<'a> AgentLoop<'a> {
             approver: std::sync::Arc::new(Unattended),
             depth: 0,
             max_steps: rook.config.agent.max_steps,
+            effort: rook.config.agent.effort(),
             budget,
         }
     }
@@ -383,6 +385,8 @@ impl<'a> AgentLoop<'a> {
 
         let mut request = Request::new(messages);
         request.max_output_tokens = 1024;
+        // An aside is a question about work already done, not the work.
+        request.effort = Some(rook_llm::Effort::Low);
 
         let mut stream = self.provider.stream(request).await.map_err(|e| CoreError::Other(e.to_string()))?;
         let mut assembler = Assembler::default();
@@ -463,6 +467,7 @@ impl<'a> AgentLoop<'a> {
 
             let mut request = Request::new(messages.clone());
             request.tools = self.tool_specs();
+            request.effort = Some(self.effort);
             let mut stream =
                 self.provider.stream(request).await.map_err(|e| CoreError::Other(e.to_string()))?;
             let mut assembler = Assembler::default();
@@ -654,6 +659,9 @@ impl<'a> AgentLoop<'a> {
         child.approver = self.approver.clone();
         child.hooks = self.hooks.clone();
         child.servers = self.servers.clone();
+        // A sub-task is a bounded errand, and lower effort means fewer and more
+        // consolidated tool calls rather than a worse answer.
+        child.effort = rook_llm::Effort::Low;
         if let Some(steps) = max_steps {
             child.max_steps = steps;
         }

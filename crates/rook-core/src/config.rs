@@ -54,6 +54,9 @@ pub struct AgentConfig {
     pub lazy_skills: bool,
     /// Same idea for tool schemas.
     pub lazy_tools: bool,
+    /// How much thinking to allow: low, medium, high, xhigh or max. `xhigh`
+    /// suits most coding work; sub-agents are run at `low` regardless.
+    pub effort: String,
     /// Ask for a brief plan before multi-step work. One line in the system
     /// prompt, not a checklist tool — see ADR-0010.
     pub plan_first: bool,
@@ -142,6 +145,7 @@ impl Default for AgentConfig {
             max_steps: 200,
             lazy_skills: true,
             lazy_tools: true,
+            effort: "high".into(),
             plan_first: true,
             context_window: None,
             max_parallel_subagents: 4,
@@ -207,6 +211,13 @@ impl Default for TelemetryConfig {
 }
 
 impl AgentConfig {
+    /// An unrecognised setting falls back to the default rather than failing a
+    /// turn: the provider would reject it, and the value is a typo, not a
+    /// reason to stop working.
+    pub fn effort(&self) -> rook_llm::Effort {
+        rook_llm::Effort::parse(&self.effort).unwrap_or_default()
+    }
+
     pub fn stream_idle(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.stream_idle_timeout_secs)
     }
