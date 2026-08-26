@@ -26,6 +26,10 @@ what unblocks the most.
   separates what a fresh turn would carry from what is merely stored.
 - **Tools** — paged `read_file`, `write_file`, unambiguous `edit_file`, `list_dir`,
   regex `search`, `run_command` with timeout, output cap and deny list.
+- **Delegation** — a `delegate` pseudo-tool runs a sub-task in a child session
+  with its own context and returns only its conclusion, so bulk stays out of the
+  parent while remaining readable in the child. Depth-limited, with optional
+  inheritance of the recent exchange. 3 tests.
 - **Memory** — durable facts with provenance, global or per-workspace scope,
   pinning, and a version per change so `memory since`, `memory diff` and rollback
   all work. Retrieval is term overlap with prefix matching, budgeted into the
@@ -71,6 +75,10 @@ full transcript stays in the store either way.
 
 ## After that
 
+**Concurrent sub-agents.** Delegation is synchronous: the parent waits. codex's
+`spawn_agent`/`wait_agent` model runs several at once, which is the next step for
+wide searches.
+
 **Memory consolidation.** Nothing merges near-duplicate facts or ages out stale
 ones yet; the identity check only catches exact repeats.
 
@@ -86,10 +94,6 @@ unchanged.
 
 **Anthropic and Google native providers.** The OpenAI dialect covers a great deal
 but not extended thinking or native prompt caching.
-
-**Sub-agents.** Delegating a bounded task to a fresh context. Requested across
-[every](https://github.com/openai/codex/issues/11626) surveyed project. Worth doing
-only once streaming and compaction are solid.
 
 **Real sandboxing.** Today's boundary is a workspace path check and a deny list.
 Platform-native containment — seccomp, Seatbelt, Capsicum, Job Objects — is a

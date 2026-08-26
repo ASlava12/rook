@@ -9,7 +9,7 @@ as a feature rather than a debugging afterthought: a CLI, a terminal browser and
 web UI, all views over the same engine.
 
 > **Status: early.** The storage layer, the skill system and the inspection tools
-> are implemented and covered by 76 tests. The agent loop — tool dispatch, skill
+> are implemented and covered by 79 tests. The agent loop — tool dispatch, skill
 > loading, budgeting, logging — is tested against a scripted provider; it has not
 > yet been exercised against a live model in CI. Streaming, MCP and ACP are on the
 > [roadmap](docs/roadmap.md) and are not implemented. Nothing below describes
@@ -111,6 +111,21 @@ rook session rewind 01JQ… --to 12               # conversation and files
 rook session rewind 01JQ… --to 12 --keep-files  # conversation only
 rook session fork 01JQ… --at 12                 # branch without touching files
 ```
+
+### Delegation
+
+A turn can hand a self-contained sub-task to a fresh agent and get back only its
+conclusion. The sub-agent runs in its own session with an empty context, so a wide
+search or a long file survey never enters the conversation that asked for it — and
+its full transcript stays readable afterwards:
+
+```sh
+rook session ls              # sub-tasks appear under ↳, linked to their parent
+rook session show <child>    # everything the sub-agent actually did
+```
+
+Nesting stops at two levels, because past that the token cost compounds faster
+than the work gets done.
 
 ### Memory
 

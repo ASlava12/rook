@@ -226,6 +226,23 @@ impl Rook {
         Ok(id)
     }
 
+    /// A child session for a delegated task, linked to its parent.
+    ///
+    /// A fresh session rather than a fork of this one: the point of delegating
+    /// is that the sub-agent starts with an empty context.
+    pub fn fork_for_subtask(&self, parent: u128, task: &str) -> Result<u128> {
+        let id = rook_store::new_session_id();
+        let title: String = task.lines().next().unwrap_or("sub-task").chars().take(72).collect();
+        let mut meta =
+            SessionMeta::new(id, title, self.workspace.display().to_string(), rook_store::now_unix());
+        meta.model = self.config.agent.model.clone();
+        meta.agent = format!("rook {AGENT_VERSION}");
+        meta.parent = Some(parent);
+        meta.tags.push("subtask".into());
+        self.store.create_session(&meta)?;
+        Ok(id)
+    }
+
     /// Render a session's log with bodies resolved. `max_body` bounds how much of
     /// each payload is materialised, so viewing a session with a 200 MB tool
     /// result does not itself become the problem.

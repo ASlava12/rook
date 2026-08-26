@@ -346,7 +346,7 @@ fn cmd_run(workspace: Option<PathBuf>, prompt: Vec<String>, session: Option<Stri
             Some(s) => session_id(&s)?,
             None => rook.start_session(&first_line(&prompt))?,
         };
-        let mut agent = rook_core::agent::AgentLoop::new(&rook, provider, session);
+        let mut agent = rook_core::agent::AgentLoop::new(&rook, provider.into(), session);
         let mcp = rook.connect_mcp().await;
         for (server, tools) in &mcp.servers {
             agent.tools.register_server(server.clone(), tools.clone());
@@ -370,6 +370,9 @@ fn cmd_run(workspace: Option<PathBuf>, prompt: Vec<String>, session: Option<Stri
             .await?;
         println!();
         mcp.shutdown().await;
+        for id in &outcome.delegated {
+            eprintln!("sub-agent {id} — `rook session show {id}` for its detail");
+        }
         eprintln!(
             "\n[session {} · {} steps · {} in / {} out tokens · {} tool calls{}]",
             rook_store::format_session_id(session),
@@ -603,7 +606,13 @@ fn cmd_session(rook: &Rook, cmd: SessionCmd, json: bool) -> Result<()> {
                 .map(|s| {
                     vec![
                         rook_store::format_session_id(s.id),
-                        s.title.chars().take(40).collect(),
+                        // Sub-tasks are listed alongside their parents; the
+                        // marker is what tells them apart at a glance.
+                        format!(
+                            "{}{}",
+                            if s.parent.is_some() { "↳ " } else { "" },
+                            s.title.chars().take(40).collect::<String>()
+                        ),
                         s.event_count.to_string(),
                         format!("{}/{}", s.tokens_in, s.tokens_out),
                         fmt::ago(s.updated_at),

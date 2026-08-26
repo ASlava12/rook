@@ -115,7 +115,7 @@ fn fixture() -> Fixture {
 async fn a_plain_turn_is_logged_end_to_end() {
     let f = fixture();
     let session = f.rook.start_session("test").unwrap();
-    let provider = Box::new(ScriptedProvider::new(vec![reply("done")]));
+    let provider = Arc::new(ScriptedProvider::new(vec![reply("done")]));
     let mut agent = AgentLoop::new(&f.rook, provider, session);
 
     let outcome = agent.run("say hello").await.unwrap();
@@ -133,7 +133,7 @@ async fn a_plain_turn_is_logged_end_to_end() {
 async fn the_system_prompt_carries_the_environment_and_skill_cards_not_bodies() {
     let f = fixture();
     let session = f.rook.start_session("test").unwrap();
-    let provider = Box::new(ScriptedProvider::new(vec![reply("ok")]));
+    let provider = Arc::new(ScriptedProvider::new(vec![reply("ok")]));
     let mut agent = AgentLoop::new(&f.rook, provider, session);
     let prompt = agent.system_prompt("hi");
 
@@ -157,7 +157,7 @@ async fn a_tool_call_runs_and_both_halves_reach_the_log() {
     std::fs::write(f.workspace.path().join("hello.txt"), "line one\nline two\n").unwrap();
     let session = f.rook.start_session("test").unwrap();
 
-    let provider = Box::new(ScriptedProvider::new(vec![
+    let provider = Arc::new(ScriptedProvider::new(vec![
         call("read_file", serde_json::json!({ "path": "hello.txt" })),
         reply("the file has two lines"),
     ]));
@@ -178,7 +178,7 @@ async fn a_tool_call_runs_and_both_halves_reach_the_log() {
 async fn load_skill_pulls_a_body_in_on_demand() {
     let f = fixture();
     let session = f.rook.start_session("test").unwrap();
-    let provider = Box::new(ScriptedProvider::new(vec![
+    let provider = Arc::new(ScriptedProvider::new(vec![
         call("load_skill", serde_json::json!({ "name": "greeting" })),
         reply("greeted"),
     ]));
@@ -195,7 +195,7 @@ async fn load_skill_pulls_a_body_in_on_demand() {
 async fn a_skill_blocked_by_the_environment_explains_itself_rather_than_404ing() {
     let f = fixture();
     let session = f.rook.start_session("test").unwrap();
-    let provider = Box::new(ScriptedProvider::new(vec![
+    let provider = Arc::new(ScriptedProvider::new(vec![
         call("load_skill", serde_json::json!({ "name": "windows-only" })),
         reply("understood"),
     ]));
@@ -220,7 +220,7 @@ async fn a_skill_blocked_by_the_environment_explains_itself_rather_than_404ing()
 async fn an_unknown_tool_is_reported_to_the_model_not_fatal() {
     let f = fixture();
     let session = f.rook.start_session("test").unwrap();
-    let provider = Box::new(ScriptedProvider::new(vec![
+    let provider = Arc::new(ScriptedProvider::new(vec![
         call("no_such_tool", serde_json::json!({})),
         reply("recovered"),
     ]));
@@ -239,7 +239,7 @@ async fn a_repeated_tool_result_is_stored_once() {
     std::fs::write(f.workspace.path().join("same.txt"), "x".repeat(4096)).unwrap();
     let session = f.rook.start_session("test").unwrap();
 
-    let provider = Box::new(ScriptedProvider::new(vec![
+    let provider = Arc::new(ScriptedProvider::new(vec![
         call("read_file", serde_json::json!({ "path": "same.txt" })),
         call("read_file", serde_json::json!({ "path": "same.txt" })),
         reply("read twice"),
@@ -269,7 +269,7 @@ async fn the_loop_stops_at_max_steps_instead_of_spinning() {
 
     // A model that only ever asks for another tool call.
     let script = (0..10).map(|_| call("list_dir", serde_json::json!({}))).collect();
-    let provider = Box::new(ScriptedProvider::new(script));
+    let provider = Arc::new(ScriptedProvider::new(script));
     let mut agent = AgentLoop::new(&rook, provider, session);
     let outcome = agent.run("go forever").await.unwrap();
 
@@ -284,7 +284,7 @@ async fn a_mutating_tool_is_checkpointed_and_a_rewind_undoes_it() {
     std::fs::write(&target, "original\n").unwrap();
     let session = f.rook.start_session("edit").unwrap();
 
-    let provider = Box::new(ScriptedProvider::new(vec![
+    let provider = Arc::new(ScriptedProvider::new(vec![
         call("write_file", serde_json::json!({ "path": "notes.txt", "content": "rewritten\n" })),
         reply("done"),
     ]));
@@ -312,7 +312,7 @@ async fn a_rewind_deletes_a_file_the_agent_created() {
     let created = f.workspace.path().join("new.txt");
     let session = f.rook.start_session("create").unwrap();
 
-    let provider = Box::new(ScriptedProvider::new(vec![
+    let provider = Arc::new(ScriptedProvider::new(vec![
         call("write_file", serde_json::json!({ "path": "new.txt", "content": "hello\n" })),
         reply("created"),
     ]));
@@ -339,7 +339,7 @@ async fn a_read_only_tool_does_not_checkpoint() {
     std::fs::write(f.workspace.path().join("r.txt"), "x").unwrap();
     let session = f.rook.start_session("read").unwrap();
 
-    let provider = Box::new(ScriptedProvider::new(vec![
+    let provider = Arc::new(ScriptedProvider::new(vec![
         call("read_file", serde_json::json!({ "path": "r.txt" })),
         reply("read"),
     ]));
@@ -356,7 +356,7 @@ async fn context_usage_separates_what_is_live_from_what_is_merely_stored() {
     std::fs::write(f.workspace.path().join("big.txt"), "z".repeat(40_000)).unwrap();
     let session = f.rook.start_session("usage").unwrap();
 
-    let provider = Box::new(ScriptedProvider::new(vec![
+    let provider = Arc::new(ScriptedProvider::new(vec![
         call("write_file", serde_json::json!({ "path": "big.txt", "content": "small\n" })),
         reply("done"),
     ]));
@@ -379,12 +379,12 @@ async fn a_second_turn_carries_the_first_one_with_it() {
     let f = fixture();
     let session = f.rook.start_session("continuity").unwrap();
 
-    let first = Box::new(ScriptedProvider::new(vec![reply("your name is Ada")]));
+    let first = Arc::new(ScriptedProvider::new(vec![reply("your name is Ada")]));
     AgentLoop::new(&f.rook, first, session).run("remember my name").await.unwrap();
 
     let second = ScriptedProvider::new(vec![reply("Ada")]);
     let seen = second.share();
-    AgentLoop::new(&f.rook, Box::new(second), session).run("what is my name?").await.unwrap();
+    AgentLoop::new(&f.rook, Arc::new(second), session).run("what is my name?").await.unwrap();
 
     let request = seen.lock().unwrap().last().cloned().expect("the provider must have been called");
     let roles: Vec<_> = request.messages.iter().map(|m| m.role).collect();
@@ -404,7 +404,7 @@ async fn replayed_tool_calls_keep_their_results_paired() {
     std::fs::write(f.workspace.path().join("p.txt"), "payload").unwrap();
     let session = f.rook.start_session("tools").unwrap();
 
-    let first = Box::new(ScriptedProvider::new(vec![
+    let first = Arc::new(ScriptedProvider::new(vec![
         call("read_file", serde_json::json!({ "path": "p.txt" })),
         reply("read it"),
     ]));
@@ -412,7 +412,7 @@ async fn replayed_tool_calls_keep_their_results_paired() {
 
     let second = ScriptedProvider::new(vec![reply("still here")]);
     let seen = second.share();
-    AgentLoop::new(&f.rook, Box::new(second), session).run("and now?").await.unwrap();
+    AgentLoop::new(&f.rook, Arc::new(second), session).run("and now?").await.unwrap();
 
     let request = seen.lock().unwrap().last().cloned().unwrap();
     let call_msg = request
@@ -433,7 +433,7 @@ async fn replayed_tool_calls_keep_their_results_paired() {
 async fn the_agent_can_remember_and_recall_across_sessions() {
     let f = fixture();
     let first = f.rook.start_session("learn").unwrap();
-    let provider = Box::new(ScriptedProvider::new(vec![
+    let provider = Arc::new(ScriptedProvider::new(vec![
         call(
             "remember",
             serde_json::json!({ "text": "this project uses tabs, not spaces", "tags": ["style"] }),
@@ -447,7 +447,7 @@ async fn the_agent_can_remember_and_recall_across_sessions() {
     let second = f.rook.start_session("apply").unwrap();
     let provider = ScriptedProvider::new(vec![reply("ok")]);
     let seen = provider.share();
-    AgentLoop::new(&f.rook, Box::new(provider), second)
+    AgentLoop::new(&f.rook, Arc::new(provider), second)
         .run("what indentation style should I use?")
         .await
         .unwrap();
@@ -469,7 +469,7 @@ async fn irrelevant_memory_stays_out_of_the_prompt() {
     let session = f.rook.start_session("s").unwrap();
     let provider = ScriptedProvider::new(vec![reply("ok")]);
     let seen = provider.share();
-    AgentLoop::new(&f.rook, Box::new(provider), session).run("how do I deploy?").await.unwrap();
+    AgentLoop::new(&f.rook, Arc::new(provider), session).run("how do I deploy?").await.unwrap();
 
     let system = seen.lock().unwrap().last().cloned().unwrap().messages[0].content.clone();
     assert!(system.contains("deploy key"), "the matching fact should be recalled");
@@ -486,7 +486,7 @@ async fn a_pinned_fact_is_always_present() {
     let session = f.rook.start_session("s").unwrap();
     let provider = ScriptedProvider::new(vec![reply("ok")]);
     let seen = provider.share();
-    AgentLoop::new(&f.rook, Box::new(provider), session)
+    AgentLoop::new(&f.rook, Arc::new(provider), session)
         .run("something entirely unrelated to git")
         .await
         .unwrap();
@@ -564,4 +564,86 @@ async fn a_recalled_fact_says_why_it_matched() {
     assert_eq!(hits.len(), 1);
     assert!(hits[0].matched.contains(&"#deploy".to_string()), "{:?}", hits[0].matched);
     assert!(hits[0].score >= 2.0, "a tag hit should outrank a bare word");
+}
+
+#[tokio::test]
+async fn a_delegated_task_runs_in_its_own_session_and_returns_only_its_conclusion() {
+    let f = fixture();
+    std::fs::write(f.workspace.path().join("big.txt"), "a".repeat(50_000)).unwrap();
+    let parent = f.rook.start_session("parent").unwrap();
+
+    // The parent delegates; the child reads a large file and reports a summary.
+    let provider = ScriptedProvider::new(vec![
+        call("delegate", serde_json::json!({ "task": "survey big.txt and report its size" })),
+        call("read_file", serde_json::json!({ "path": "big.txt" })),
+        reply("big.txt is 50 kB of the letter a"),
+        reply("the survey says it is 50 kB"),
+    ]);
+    let seen = provider.share();
+    let outcome =
+        AgentLoop::new(&f.rook, Arc::new(provider), parent).run("how big is big.txt?").await.unwrap();
+
+    assert_eq!(outcome.delegated.len(), 1, "the child session should be reported");
+    assert_eq!(outcome.reply, "the survey says it is 50 kB");
+
+    let child = rook_store::parse_session_id(&outcome.delegated[0]).unwrap();
+    let child_meta = f.rook.store.get_session(child).unwrap().unwrap();
+    assert_eq!(child_meta.parent, Some(parent), "the child must be linked to its parent");
+    assert!(child_meta.tags.contains(&"subtask".to_string()));
+
+    // The 50 kB read happened in the child and never entered the parent's context.
+    let parent_body: String =
+        f.rook.transcript(parent, 0, usize::MAX, 100_000).unwrap().iter().map(|e| e.body.clone()).collect();
+    assert!(!parent_body.contains(&"a".repeat(1000)), "the child's bulk must stay out of the parent");
+    assert!(parent_body.contains("50 kB"), "but its conclusion must come back");
+
+    let child_body: String =
+        f.rook.transcript(child, 0, usize::MAX, 100_000).unwrap().iter().map(|e| e.body.clone()).collect();
+    assert!(child_body.contains(&"a".repeat(1000)), "the detail is still readable in the child");
+
+    // The child started from nothing: its first message is the task, not the parent's prompt.
+    let child_request = seen.lock().unwrap()[1].clone();
+    assert_eq!(child_request.messages[1].content, "survey big.txt and report its size");
+    assert!(!child_request.messages.iter().any(|m| m.content.contains("how big is big.txt?")));
+}
+
+#[tokio::test]
+async fn delegation_stops_nesting_at_the_depth_limit() {
+    let f = fixture();
+    let session = f.rook.start_session("deep").unwrap();
+
+    let provider = ScriptedProvider::new(vec![reply("ok")]);
+    let seen = provider.share();
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), session);
+    agent.depth = rook_core::agent::MAX_DEPTH;
+    agent.run("go").await.unwrap();
+
+    let requests = seen.lock().unwrap();
+    let offered: Vec<&str> = requests[0].tools.iter().map(|t| t.name.as_str()).collect();
+    assert!(
+        !offered.contains(&"delegate"),
+        "an agent at the depth limit must not be offered delegation: {offered:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_child_can_inherit_the_recent_conversation_when_asked() {
+    let f = fixture();
+    let parent = f.rook.start_session("parent").unwrap();
+    f.rook.log(parent, rook_store::EventKind::UserMessage, "", "we are migrating to redb").unwrap();
+    f.rook.log(parent, rook_store::EventKind::AssistantMessage, "m", "understood").unwrap();
+
+    let provider = ScriptedProvider::new(vec![
+        call("delegate", serde_json::json!({ "task": "check the migration", "context": "recent" })),
+        reply("checked"),
+        reply("done"),
+    ]);
+    let seen = provider.share();
+    let outcome = AgentLoop::new(&f.rook, Arc::new(provider), parent).run("verify it").await.unwrap();
+
+    let child = rook_store::parse_session_id(&outcome.delegated[0]).unwrap();
+    let inherited: String =
+        f.rook.transcript(child, 0, usize::MAX, 10_000).unwrap().iter().map(|e| e.body.clone()).collect();
+    assert!(inherited.contains("migrating to redb"), "the inherited context should be there");
+    let _ = seen;
 }

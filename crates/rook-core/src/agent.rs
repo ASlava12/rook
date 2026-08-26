@@ -31,6 +31,12 @@ pub const LOAD_SKILL: &str = "load_skill";
 pub const REMEMBER: &str = "remember";
 pub const FORGET: &str = "forget";
 pub const RECALL: &str = "recall";
+pub const DELEGATE: &str = "delegate";
+
+/// How deep delegation may nest. One level of sub-delegation is useful for
+/// splitting a task; beyond that the token cost compounds faster than the work
+/// gets done.
+pub const MAX_DEPTH: u32 = 2;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TurnOutcome {
@@ -42,27 +48,42 @@ pub struct TurnOutcome {
     pub tools_called: Vec<String>,
     pub skills_loaded: Vec<String>,
     pub facts_learned: Vec<String>,
+    /// Sessions of sub-agents this turn ran, for reading their detail later.
+    pub delegated: Vec<String>,
     pub compactions: u32,
 }
 
 pub struct AgentLoop<'a> {
     pub rook: &'a Rook,
-    pub provider: Box<dyn Provider>,
+    /// Shared rather than owned so a delegated child can reuse the connection
+    /// instead of building a second HTTP client per sub-task.
+    pub provider: std::sync::Arc<dyn Provider>,
     pub tools: ToolBox,
     pub tool_ctx: ToolContext,
     pub session: u128,
+    pub depth: u32,
+    pub max_steps: u32,
     budget: ContextBudget,
 }
 
 impl<'a> AgentLoop<'a> {
-    pub fn new(rook: &'a Rook, provider: Box<dyn Provider>, session: u128) -> Self {
+    pub fn new(rook: &'a Rook, provider: std::sync::Arc<dyn Provider>, session: u128) -> Self {
         let mut tool_ctx = ToolContext::new(rook.workspace.clone());
         tool_ctx.max_output_bytes = rook.config.sandbox.max_output_bytes;
         tool_ctx.command_timeout = std::time::Duration::from_secs(rook.config.sandbox.command_timeout_secs);
         tool_ctx.allow = rook.config.sandbox.allow.clone();
         tool_ctx.deny = rook.config.sandbox.deny.clone();
         let budget = ContextBudget::new(provider.context_window(), rook.config.agent.compact_at);
-        Self { rook, provider, tools: ToolBox::standard(), tool_ctx, session, budget }
+        Self {
+            rook,
+            provider,
+            tools: ToolBox::standard(),
+            tool_ctx,
+            session,
+            depth: 0,
+            max_steps: rook.config.agent.max_steps,
+            budget,
+        }
     }
 
     /// The system prompt: identity, environment, and the skill catalog.
@@ -219,6 +240,30 @@ impl<'a> AgentLoop<'a> {
                 }),
             });
         }
+        if self.depth < MAX_DEPTH {
+            specs.push(ToolSpec {
+                name: DELEGATE.into(),
+                description: "Hand a self-contained sub-task to a fresh agent and get back only                               its conclusion. Use it when a step would otherwise fill this                               conversation with detail you do not need to keep — a wide search,                               a long file survey, an independent verification."
+                    .into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "task": {
+                            "type": "string",
+                            "description": "The whole assignment. The sub-agent cannot see this conversation."
+                        },
+                        "context": {
+                            "type": "string",
+                            "enum": ["none", "recent"],
+                            "default": "none",
+                            "description": "`recent` also gives it the last few exchanges."
+                        },
+                        "max_steps": { "type": "integer" }
+                    },
+                    "required": ["task"]
+                }),
+            });
+        }
         specs
     }
 
@@ -248,10 +293,11 @@ impl<'a> AgentLoop<'a> {
             tools_called: Vec::new(),
             skills_loaded: Vec::new(),
             facts_learned: Vec::new(),
+            delegated: Vec::new(),
             compactions: 0,
         };
 
-        while outcome.steps < self.rook.config.agent.max_steps {
+        while outcome.steps < self.max_steps {
             outcome.steps += 1;
 
             if self.budget.needs_compaction(measure(&messages)) {
@@ -311,6 +357,14 @@ impl<'a> AgentLoop<'a> {
     async fn dispatch(&self, call: &rook_llm::ToolCall, outcome: &mut TurnOutcome) -> String {
         self.rook.log(self.session, EventKind::ToolCall, &call.name, &call.arguments.to_string()).ok();
 
+        outcome.tools_called.push(call.name.clone());
+
+        if call.name == DELEGATE {
+            let text = self.delegate(&call.arguments, outcome).await;
+            self.rook.log(self.session, EventKind::ToolResult, DELEGATE, &text).ok();
+            return text;
+        }
+
         match call.name.as_str() {
             REMEMBER | FORGET | RECALL => {
                 let text = self.memory_tool(&call.name, &call.arguments, outcome);
@@ -342,7 +396,6 @@ impl<'a> AgentLoop<'a> {
             };
         }
 
-        outcome.tools_called.push(call.name.clone());
         self.checkpoint_before(call);
         let result = self.tools.call(&self.tool_ctx, &call.name, &call.arguments).await;
         let text = match result {
@@ -351,6 +404,70 @@ impl<'a> AgentLoop<'a> {
         };
         self.rook.log(self.session, EventKind::ToolResult, &call.name, &text).ok();
         text
+    }
+
+    /// Run a sub-task in its own session and return only what it concluded.
+    ///
+    /// The child's full transcript stays in the store, linked to this session by
+    /// its parent, so the detail is recoverable without ever entering this
+    /// conversation's context — which is the entire point.
+    async fn delegate(&self, args: &serde_json::Value, outcome: &mut TurnOutcome) -> String {
+        let task = args.get("task").and_then(|t| t.as_str()).unwrap_or("").trim();
+        if task.is_empty() {
+            return "delegate needs a task".into();
+        }
+
+        let child_session = match self.rook.fork_for_subtask(self.session, task) {
+            Ok(id) => id,
+            Err(e) => return format!("could not start a sub-agent: {e}"),
+        };
+
+        if args.get("context").and_then(|c| c.as_str()) == Some("recent")
+            && let Ok(recent) = self.recent_exchanges(6)
+        {
+            self.rook.log(child_session, EventKind::Note, "inherited", &recent).ok();
+        }
+
+        let mut child = AgentLoop::new(self.rook, self.provider.clone(), child_session);
+        child.depth = self.depth + 1;
+        child.tools = self.tools.clone();
+        child.tool_ctx = self.tool_ctx.clone();
+        if let Some(steps) = args.get("max_steps").and_then(|s| s.as_u64()) {
+            child.max_steps = steps as u32;
+        }
+
+        // Boxed because this is `run` calling itself through a tool call.
+        let result = Box::pin(child.run(task)).await;
+        let id = rook_store::format_session_id(child_session);
+        outcome.delegated.push(id.clone());
+
+        match result {
+            Ok(child_outcome) => {
+                outcome.input_tokens += child_outcome.input_tokens;
+                outcome.output_tokens += child_outcome.output_tokens;
+                format!(
+                    "sub-agent {id} finished after {} steps ({}):\n{}",
+                    child_outcome.steps, child_outcome.stopped, child_outcome.reply
+                )
+            }
+            Err(e) => format!("sub-agent {id} failed: {e}"),
+        }
+    }
+
+    /// The last `count` exchanges as plain text, for a child asked to inherit
+    /// context. Deliberately flattened: the child gets what was said, not a
+    /// replayable tool-call history it cannot answer for.
+    fn recent_exchanges(&self, count: usize) -> Result<String> {
+        let entries = self.rook.transcript(self.session, 0, usize::MAX, 2000)?;
+        let mut tail: Vec<String> = entries
+            .iter()
+            .rev()
+            .filter(|e| e.kind == "user" || e.kind == "assistant")
+            .take(count)
+            .map(|e| format!("{}: {}", e.kind, e.body))
+            .collect();
+        tail.reverse();
+        Ok(format!("Context from the conversation that delegated this:\n{}", tail.join("\n")))
     }
 
     fn memory_tool(&self, name: &str, args: &serde_json::Value, outcome: &mut TurnOutcome) -> String {

@@ -102,7 +102,7 @@ async fn turn(
     mcp: &rook_core::McpSession,
     prompt: &str,
 ) {
-    let mut agent = AgentLoop::new(rook, provider, session);
+    let mut agent = AgentLoop::new(rook, provider.into(), session);
     for (server, tools) in &mcp.servers {
         agent.tools.register_server(server.clone(), tools.clone());
     }
@@ -124,13 +124,18 @@ async fn turn(
     // stays in the session, so an interrupted turn is still readable afterwards.
     tokio::select! {
         result = running => match result {
-            Ok(outcome) => println!(
+            Ok(outcome) => {
+                for id in &outcome.delegated {
+                    println!("\x1b[2m  sub-agent {id}\x1b[0m");
+                }
+                println!(
                 "\n\x1b[2m[{} steps · {} in / {} out{}]\x1b[0m",
                 outcome.steps,
                 outcome.input_tokens,
                 outcome.output_tokens,
                 if outcome.compactions > 0 { format!(" · {} compactions", outcome.compactions) } else { String::new() }
-            ),
+                )
+            }
             Err(e) => println!("\n{e}"),
         },
         _ = tokio::signal::ctrl_c() => {
