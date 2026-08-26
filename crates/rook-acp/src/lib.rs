@@ -50,6 +50,12 @@ where
         }
     });
 
+    // Built once for the connection: an editor sends many prompts, and
+    // reconnecting MCP or restarting a language server for each is wasted time.
+    let policy = rook_core::agent::policy_for(&rook);
+    let servers = rook_core::agent::servers_for(&rook);
+    let mcp = Arc::new(rook.connect_mcp().await);
+
     let peer = Arc::new(Peer::new(outbound));
     let mut lines = reader.lines();
     let mut turn: Option<tokio::task::JoinHandle<()>> = None;
@@ -81,7 +87,13 @@ where
                 if let Some(handle) = turn.take() {
                     handle.abort();
                 }
-                turn = Some(tokio::spawn(prompt(rook.clone(), peer.clone(), id, params)));
+                turn = Some(tokio::spawn(prompt(
+                    rook.clone(),
+                    peer.clone(),
+                    Shared { policy: policy.clone(), servers: servers.clone(), mcp: mcp.clone() },
+                    id,
+                    params,
+                )));
             }
             (_, Some(id)) => {
                 let outcome = dispatch(&rook, &method, params);
@@ -95,6 +107,8 @@ where
     if let Some(handle) = turn {
         handle.abort();
     }
+    mcp.shutdown().await;
+    servers.shutdown().await;
     drop(peer);
     let _ = writer.await;
     Ok(())
@@ -151,7 +165,21 @@ fn dispatch(rook: &Rook, method: &str, params: serde_json::Value) -> Result<serd
     }
 }
 
-async fn prompt(rook: Arc<Rook>, peer: Arc<Peer>, id: serde_json::Value, params: serde_json::Value) {
+/// What the connection keeps between prompts.
+#[derive(Clone)]
+struct Shared {
+    policy: Arc<rook_tools::policy::Policy>,
+    servers: Arc<rook_core::lsp::Servers>,
+    mcp: Arc<rook_core::McpSession>,
+}
+
+async fn prompt(
+    rook: Arc<Rook>,
+    peer: Arc<Peer>,
+    shared: Shared,
+    id: serde_json::Value,
+    params: serde_json::Value,
+) {
     let request: protocol::Prompt = match serde_json::from_value(params) {
         Ok(request) => request,
         Err(e) => return peer.respond(&id, Err(Error::invalid_params(e.to_string()))),
@@ -175,11 +203,13 @@ async fn prompt(rook: Arc<Rook>, peer: Arc<Peer>, id: serde_json::Value, params:
     };
 
     let mut agent = AgentLoop::new(&rook, provider.into(), session);
-    agent.approver = Arc::new(EditorApprover { peer: peer.clone(), session: request.session_id.clone() });
-    let mcp = rook.connect_mcp().await;
-    for (server, tools) in &mcp.servers {
+    agent.policy = shared.policy.clone();
+    agent.servers = shared.servers.clone();
+    rook_core::lsp::register(&mut agent.tools, shared.servers.clone());
+    for (server, tools) in &shared.mcp.servers {
         agent.tools.register_server(server.clone(), tools.clone());
     }
+    agent.approver = Arc::new(EditorApprover { peer: peer.clone(), session: request.session_id.clone() });
 
     let calls = AtomicU64::new(0);
     let result = agent
@@ -198,7 +228,6 @@ async fn prompt(rook: Arc<Rook>, peer: Arc<Peer>, id: serde_json::Value, params:
             peer.notify("session/update", update);
         })
         .await;
-    mcp.shutdown().await;
 
     let response = match result {
         Ok(outcome) => Ok(serde_json::json!({ "stopReason": stop_reason(&outcome.stopped) })),

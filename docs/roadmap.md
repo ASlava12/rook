@@ -52,7 +52,8 @@ what unblocks the most.
   definition, references and workspace symbols, addressed by symbol name rather
   than by position. Known servers are detected on `PATH` and started lazily, and
   a file edited since it was opened is re-sent before it is queried, so the
-  answer describes the code as it is now. 10 tests against a mock server, plus a
+  answer describes the code as it is now. The pool belongs to the session, not
+  the turn, so servers are not restarted between turns. 10 tests against a mock server, plus a
   real check-edit-check turn against clangd.
 - **Hooks** — five events with matchers, able to allow / ask / deny a tool call
   and to add context the model sees. A failing `pre_tool` hook blocks; no hook

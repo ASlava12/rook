@@ -66,7 +66,14 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
 
     // One policy for the whole session, so "always this run" means the session
     // and not the single turn it was granted in.
-    let policy = rook_core::agent::policy_for(&rook);
+    let shared = Session {
+        mcp,
+        policy: rook_core::agent::policy_for(&rook),
+        // Likewise the language servers: a pool dropped per turn restarts
+        // rust-analyzer, and it indexes the workspace every time it starts.
+        servers: rook_core::agent::servers_for(&rook),
+        yes,
+    };
 
     let mut editor = rustyline::DefaultEditor::new()?;
     let history = rook_core::paths::home().join("history");
@@ -88,7 +95,7 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
                     continue;
                 }
                 if let Some(command) = line.strip_prefix('/') {
-                    match runtime.block_on(dispatch(&rook, &mut session, &mcp, command)) {
+                    match runtime.block_on(dispatch(&rook, &mut session, &shared.mcp, command)) {
                         Ok(true) => break,
                         Ok(false) => {}
                         Err(e) => println!("{e}"),
@@ -100,7 +107,7 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
                     rook.config.agent.stream_idle(),
                     rook.config.agent.context_window,
                 )?;
-                runtime.block_on(turn(&rook, provider, session, &mcp, &line, yes, &policy));
+                runtime.block_on(turn(&rook, provider, session, &shared, &line));
             }
             // Ctrl-C at the prompt clears the line rather than leaving; the
             // reflex from every other REPL is to press it to abandon input.
@@ -111,7 +118,8 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
     }
 
     let _ = editor.save_history(&history);
-    runtime.block_on(mcp.shutdown());
+    runtime.block_on(shared.mcp.shutdown());
+    runtime.block_on(shared.servers.shutdown());
     drop(provider);
     println!("session {}", rook_store::format_session_id(session));
     Ok(())
@@ -136,23 +144,31 @@ async fn aside(rook: &Rook, provider: Box<dyn rook_llm::Provider>, session: u128
     }
 }
 
+/// What a session keeps between turns, so a turn does not rebuild it.
+struct Session {
+    mcp: rook_core::McpSession,
+    policy: std::sync::Arc<rook_tools::policy::Policy>,
+    servers: std::sync::Arc<rook_core::lsp::Servers>,
+    yes: bool,
+}
+
 async fn turn(
     rook: &Rook,
     provider: Box<dyn rook_llm::Provider>,
     session: u128,
-    mcp: &rook_core::McpSession,
+    shared: &Session,
     prompt: &str,
-    yes: bool,
-    policy: &std::sync::Arc<rook_tools::policy::Policy>,
 ) {
     let mut agent = AgentLoop::new(rook, provider.into(), session);
-    if yes {
+    agent.servers = shared.servers.clone();
+    rook_core::lsp::register(&mut agent.tools, shared.servers.clone());
+    if shared.yes {
         agent.allow_everything_not_denied();
     } else {
-        agent.policy = policy.clone();
+        agent.policy = shared.policy.clone();
         agent.approver = std::sync::Arc::new(crate::approve::Terminal);
     }
-    for (server, tools) in &mcp.servers {
+    for (server, tools) in &shared.mcp.servers {
         agent.tools.register_server(server.clone(), tools.clone());
     }
 

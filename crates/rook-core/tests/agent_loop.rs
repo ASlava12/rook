@@ -1246,3 +1246,21 @@ async fn planning_can_be_turned_off() {
     let system = seen.lock().unwrap().last().cloned().unwrap().messages[0].content.clone();
     assert!(!system.contains("say the plan"));
 }
+
+#[tokio::test]
+async fn a_delegated_child_shares_the_parent_language_servers() {
+    let f = fixture();
+    let session = f.rook.start_session("share").unwrap();
+    let parent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(vec![])), session);
+
+    let pool = rook_core::agent::servers_for(&f.rook);
+    let mut owner = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(vec![])), session);
+    owner.servers = pool.clone();
+
+    assert!(!Arc::ptr_eq(&parent.servers, &pool), "a loop that was not given one builds its own");
+    assert!(
+        Arc::ptr_eq(&owner.servers, &pool),
+        "and a front end that keeps a pool must be able to hand it over — \
+         otherwise every turn restarts the language servers"
+    );
+}

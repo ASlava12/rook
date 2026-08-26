@@ -27,6 +27,17 @@ use crate::error::{CoreError, Result};
 use crate::hooks::{self, Hooks};
 use crate::service::Rook;
 
+/// Build the language-server pool from configuration.
+///
+/// Exposed for the same reason as [`policy_for`], and more urgently: a pool
+/// dropped at the end of a turn takes its running servers with it, and
+/// rust-analyzer spends seconds indexing the workspace every time it starts.
+pub fn servers_for(rook: &Rook) -> std::sync::Arc<crate::lsp::Servers> {
+    let configured =
+        if rook.config.lsp.is_empty() { crate::lsp::detected() } else { rook.config.lsp.clone() };
+    crate::lsp::Servers::new(configured, &rook.workspace)
+}
+
 /// Build the approval policy from configuration.
 ///
 /// Exposed because "allow this for the rest of the run" has to outlive a single

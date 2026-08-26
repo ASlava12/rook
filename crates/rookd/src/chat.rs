@@ -41,8 +41,10 @@ async fn serve(socket: WebSocket, state: Arc<AppState>) {
     let (approver, relay) = approver(outbound.clone());
     // Per connection, not per prompt: an approval granted for "the run" has to
     // survive the turn it was granted in.
-    let policy =
-        std::sync::Arc::new(tokio::sync::OnceCell::<std::sync::Arc<rook_tools::policy::Policy>>::new());
+    // Per connection, not per prompt: connecting MCP servers and starting
+    // language servers is expensive, and an approval granted for the run has to
+    // survive the turn it was granted in.
+    let shared: Arc<tokio::sync::OnceCell<Shared>> = Arc::new(tokio::sync::OnceCell::new());
     let mut running: Option<tokio::task::JoinHandle<()>> = None;
 
     while let Some(Ok(message)) = stream.next().await {
@@ -73,7 +75,7 @@ async fn serve(socket: WebSocket, state: Arc<AppState>) {
                 running = Some(tokio::spawn(turn(
                     state.clone(),
                     approver.clone(),
-                    policy.clone(),
+                    shared.clone(),
                     outbound.clone(),
                     session,
                     text,
@@ -93,7 +95,7 @@ async fn serve(socket: WebSocket, state: Arc<AppState>) {
 async fn turn(
     state: Arc<AppState>,
     approver: Arc<ChannelApprover>,
-    policy: Arc<tokio::sync::OnceCell<Arc<rook_tools::policy::Policy>>>,
+    shared: Arc<tokio::sync::OnceCell<Shared>>,
     outbound: mpsc::UnboundedSender<ChatEvent>,
     session: Option<String>,
     prompt: String,
@@ -119,12 +121,22 @@ async fn turn(
         Err(e) => return report(&outbound, e.to_string()),
     };
 
-    let mut agent = AgentLoop::new(&rook, provider.into(), session);
-    agent.policy = policy.get_or_init(|| async { rook_core::agent::policy_for(&rook) }).await.clone();
-    agent.approver = approver;
+    let shared = shared
+        .get_or_init(|| async {
+            Shared {
+                policy: rook_core::agent::policy_for(&rook),
+                servers: rook_core::agent::servers_for(&rook),
+                mcp: Arc::new(rook.connect_mcp().await),
+            }
+        })
+        .await;
 
-    let mcp = rook.connect_mcp().await;
-    for (server, tools) in &mcp.servers {
+    let mut agent = AgentLoop::new(&rook, provider.into(), session);
+    agent.policy = shared.policy.clone();
+    agent.approver = approver;
+    agent.servers = shared.servers.clone();
+    rook_core::lsp::register(&mut agent.tools, shared.servers.clone());
+    for (server, tools) in &shared.mcp.servers {
         agent.tools.register_server(server.clone(), tools.clone());
     }
 
@@ -140,7 +152,6 @@ async fn turn(
             let _ = emit.send(event);
         })
         .await;
-    mcp.shutdown().await;
 
     match result {
         Ok(outcome) => {
@@ -158,6 +169,13 @@ async fn turn(
 
 fn report(outbound: &mpsc::UnboundedSender<ChatEvent>, message: String) {
     let _ = outbound.send(ChatEvent::Error { message });
+}
+
+/// What a connection keeps between turns.
+struct Shared {
+    policy: Arc<rook_tools::policy::Policy>,
+    servers: Arc<rook_core::lsp::Servers>,
+    mcp: Arc<rook_core::McpSession>,
 }
 
 /// Relays approval requests to the browser and routes the answers back.

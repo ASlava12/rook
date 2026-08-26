@@ -59,6 +59,14 @@ non-obvious choice was made — usually a failure mode being avoided.
 **Tests are named as claims.** `a_capture_refuses_to_run_away_instead_of_thrashing`,
 not `test_capture_2`. Assertion messages print the actual values.
 
+**Expensive things belong to the front end, not the turn.** A new `AgentLoop` is
+built for every turn, so anything constructed inside it is rebuilt every turn —
+and anything dropped with it is torn down. The approval policy, the language
+server pool and the MCP session are all built once by the front end and handed
+in. Getting this wrong is invisible in the code and expensive in use: language
+servers re-index, MCP servers respawn, and an approval granted "for the run" is
+forgotten.
+
 **Three front ends, one engine.** New capability goes in `rook-core` and is
 exposed by the CLI, the API and the TUI. A feature reachable from one front end
 and not the others is a bug — the approver is shared for exactly this reason.

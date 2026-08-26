@@ -81,6 +81,8 @@ struct App {
     to_loop: mpsc::UnboundedSender<TurnEvent>,
     approver: Arc<ChannelApprover>,
     policy: Arc<rook_tools::policy::Policy>,
+    servers: Arc<rook_core::lsp::Servers>,
+    mcp: Arc<rook_core::McpSession>,
     turn: Option<tokio::task::JoinHandle<()>>,
     tab: usize,
     sessions: Vec<SessionMeta>,
@@ -109,6 +111,9 @@ impl App {
             }
         });
 
+        // Connected before the struct takes the runtime, since it needs both.
+        let mcp = Arc::new(runtime.block_on(rook.connect_mcp()));
+
         let mut app = Self {
             rook: rook.clone(),
             runtime,
@@ -118,6 +123,10 @@ impl App {
             to_loop,
             approver: Arc::new(ChannelApprover::new(requests, Duration::from_secs(600))),
             policy: rook_core::agent::policy_for(&rook),
+            servers: rook_core::agent::servers_for(&rook),
+            // Connected once: every turn would otherwise spawn each server,
+            // wait out its handshake and kill it again.
+            mcp,
             turn: None,
             tab: 0,
             sessions: Vec::new(),
@@ -289,6 +298,8 @@ impl App {
         let to_loop = self.to_loop.clone();
         let approver = self.approver.clone();
         let policy = self.policy.clone();
+        let servers = self.servers.clone();
+        let mcp = self.mcp.clone();
         let session = self.chat.session;
         let yes = self.yes;
 
@@ -335,10 +346,11 @@ impl App {
                 agent.policy = policy;
                 agent.approver = approver;
             }
-            let mcp = rook.connect_mcp().await;
             for (server, tools) in &mcp.servers {
                 agent.tools.register_server(server.clone(), tools.clone());
             }
+            agent.servers = servers.clone();
+            rook_core::lsp::register(&mut agent.tools, servers);
 
             let emit = to_loop.clone();
             let result = agent
@@ -352,7 +364,6 @@ impl App {
                     let _ = emit.send(event);
                 })
                 .await;
-            mcp.shutdown().await;
 
             let _ = match result {
                 Ok(outcome) => to_loop.send(TurnEvent::Done(format!(
