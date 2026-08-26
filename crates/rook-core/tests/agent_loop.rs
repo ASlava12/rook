@@ -1047,12 +1047,9 @@ async fn several_sub_tasks_run_at_the_same_time() {
     script.extend((0..3).map(|i| reply(&format!("finding {i}"))));
     script.push(reply("all three checked"));
 
+    let delay = std::time::Duration::from_millis(200);
     let spans = Arc::new(Mutex::new(Vec::new()));
-    let provider = Arc::new(TimedProvider {
-        script: Mutex::new(script),
-        spans: spans.clone(),
-        delay: std::time::Duration::from_millis(120),
-    });
+    let provider = Arc::new(TimedProvider { script: Mutex::new(script), spans: spans.clone(), delay });
 
     let started = std::time::Instant::now();
     let outcome = AgentLoop::new(&f.rook, provider, session).run("check three things").await.unwrap();
@@ -1061,11 +1058,10 @@ async fn several_sub_tasks_run_at_the_same_time() {
     assert_eq!(outcome.delegated.len(), 3, "every sub-task should report its session");
     assert!(outcome.reply.contains("all three checked"));
 
-    // Serial would be five delays; concurrent children collapse three into one.
-    assert!(
-        elapsed < std::time::Duration::from_millis(500),
-        "three sub-tasks took {elapsed:?}, which looks serial"
-    );
+    // Five model calls happen; serial they would cost five delays, concurrent
+    // children collapse three of them into one. Compared against that bound
+    // rather than a fixed millisecond count, which only measures the machine.
+    assert!(elapsed < delay * 5, "five calls took {elapsed:?}, no better than running them one at a time");
 
     let spans = spans.lock().unwrap();
     let overlapping =

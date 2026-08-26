@@ -16,6 +16,7 @@ Add a row when you implement something after reading a reference. Add it to
 | Budgeted, content-addressed checkpoints | opencode's `git add .` failure ([#3176](https://github.com/anomalyco/opencode/issues/3176)) | issues, not source | `FileSet::capture`, `CaptureLimits` |
 | Summarised compaction with a fallback ladder | goose `goose-context-management/src/summarize.rs` — took the structured summary and the "must not fail when needed most" framing, left the template engine | source | `AgentLoop::compact`, `Rook::last_compaction` |
 | Three-way approval with per-command rules | goose `permission_inspector.rs` (AlwaysAllow/AskBefore/NeverAllow, defaults to asking) and its regex allow/ask/deny request; codex `approval_policy` | source | `rook-tools/src/policy.rs`, [ADR-0009](../docs/adr/0009-ask-before-acting.md) |
+| Bounded scanning of a stream with no separator | goose 8a1b836 "bound HTML comment scanning" — the same shape (rescan-from-the-start over unbounded input) was in our SSE parser | source, via `refs advance` | `rook-llm/src/openai.rs` |
 | Bounded parallel sub-agents | codex `max_concurrent_threads_per_session` — took the per-session cap, kept delegation synchronous rather than adopting spawn/wait | source | `AgentLoop::delegate` |
 | Hooks at points in a turn | codex `codex-rs/hooks/schema/generated` — took the allow/ask/deny decision and added-context ideas, left twelve events and a schema each for five events and one reply shape | source | `rook-core/src/hooks.rs` |
 | Speaking ACP to editors | `references/acp` schema v1 — read the JSON schema for exact field names and enum values rather than the prose | source | `rook-acp`, `rook acp` |
@@ -23,8 +24,25 @@ Add a row when you implement something after reading a reference. Add it to
 | Durable memory with provenance and history | hermes ([#12238](https://github.com/NousResearch/hermes-agent/issues/12238)); read `hermes/tools/memory_tool.py` and `goose/crates/goose-mcp/src/memory` | source | `rook-core/src/memory.rs`, `rook memory` |
 | Bounded logging and retention | codex SQLite growth ([#28224](https://github.com/openai/codex/issues/28224), [#17320](https://github.com/openai/codex/issues/17320)) | issues, not source | `RetentionPolicy`, `TelemetryConfig` |
 
-## Not yet read
+## Triage log
 
-Submodule pointers that have never been advanced since being added are, by
-definition, unread beyond their issue trackers. `cargo xtask refs status` shows
-how far each has drifted.
+`cargo xtask refs advance` prints what landed upstream since the pointer was last
+moved; what follows is what was done with it, so a dismissal is a decision rather
+than an omission.
+
+**2026-08-27** — codex, goose, opencode and hermes advanced.
+
+- goose `8a1b836` *bound HTML comment scanning* — **acted on.** The bug is a
+  rescan-from-the-start over input that never terminates, quadratic against a
+  hostile source. Our SSE parser had the same shape: no frame cap, and
+  `buffer.find` restarting from byte zero on every chunk. Fixed and tested.
+- goose `867a83c` *keep nested execute fences inert* — **does not apply.** It
+  guards a local-inference mode where the model emits ```` ```execute ```` fences
+  that get run. Rook takes tool calls from structured JSON only, and never
+  executes anything it recognised in prose.
+- codex `21ff2e8` *expose MCP provenance to tool lifecycle extensions* — **worth
+  taking later.** An MCP tool result currently reaches the model with no marker
+  of which server produced it. Recorded for the roadmap rather than done here.
+- opencode `c2eacd7`, codex `daa3eaf`, hermes `15b673d` — **not applicable**:
+  a Next.js redirect fix, a model-gating rule, and a provider change with no
+  counterpart here.

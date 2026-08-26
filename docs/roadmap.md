@@ -98,6 +98,10 @@ ones yet; the identity check only catches exact repeats.
 **ACP beyond the basics.** Modes, config options, `fs/*` delegation to the
 editor's buffers, and terminals are all defined and unimplemented.
 
+**MCP provenance in tool results.** A result carries the namespaced tool name but
+nothing about which server produced it; codex exposes that to its lifecycle hooks
+and it belongs in ours too.
+
 **MCP over HTTP.** The stdio transport covers local servers; hosted ones need the
 streamable-HTTP transport.
 

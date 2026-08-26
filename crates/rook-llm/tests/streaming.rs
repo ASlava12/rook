@@ -215,3 +215,27 @@ async fn an_http_error_is_reported_before_any_delta() {
         other => panic!("expected a status error, got {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn a_stream_that_never_sends_a_separator_is_cut_off_rather_than_buffered_forever() {
+    // 64k of frame-less noise: the shape that turns a naive rescan quadratic and
+    // an unbounded buffer into an out-of-memory.
+    let noise: &'static str = Box::leak("data: {\"x\":1}".repeat(700_000).into_boxed_str());
+    let url = serve(vec![noise, noise, noise], Duration::from_millis(1), true).await;
+
+    let started = std::time::Instant::now();
+    let mut stream = provider(url, Duration::from_secs(5)).stream(request()).await.unwrap();
+    let mut error = None;
+    while let Some(delta) = stream.next().await {
+        if let Err(e) = delta {
+            error = Some(e);
+            break;
+        }
+    }
+    assert!(matches!(error, Some(LlmError::Decode(_))), "expected the frame cap to fire, got {error:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "cutting it off took {:?}, which means it was still rescanning",
+        started.elapsed()
+    );
+}
