@@ -44,6 +44,10 @@ what unblocks the most.
   prompt; the agent edits it through `remember`/`forget`/`recall`. This is the
   shape [hermes-agent#12238](https://github.com/NousResearch/hermes-agent/issues/12238)
   asked for. 7 tests.
+- **ACP server** — `rook acp` speaks v1 over stdio: initialize, session
+  new/load/list/prompt/cancel, streamed `session/update`, and approvals through
+  `session/request_permission`. Field names come from the schema in
+  `references/acp`, not from memory. 8 tests over duplex streams.
 - **MCP client** — stdio transport, written directly rather than via the SDK
   ([ADR-0008](adr/0008-hand-written-mcp-client.md)). Servers connect concurrently,
   failures are reported rather than fatal, and their tools join the toolbox
@@ -87,11 +91,11 @@ wide searches.
 **Memory consolidation.** Nothing merges near-duplicate facts or ages out stale
 ones yet; the identity check only catches exact repeats.
 
+**ACP beyond the basics.** Modes, config options, `fs/*` delegation to the
+editor's buffers, and terminals are all defined and unimplemented.
+
 **MCP over HTTP.** The stdio transport covers local servers; hosted ones need the
 streamable-HTTP transport.
-
-**ACP server.** JSON-RPC over stdio, v1 stable, adopted by Zed, JetBrains, Google
-and GitHub. One implementation replaces a plugin per editor.
 
 **Agent Plugins 1.0 packaging.** `plugin.json` bundling skills and MCP servers.
 Defers to Agent Skills for the skill format, so skills authored today package

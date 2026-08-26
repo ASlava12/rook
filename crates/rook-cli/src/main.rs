@@ -58,6 +58,8 @@ enum Command {
     },
     /// Browse the store, sessions and skills in a read-only terminal UI.
     Tui,
+    /// Speak the Agent Client Protocol on stdio, for editors.
+    Acp,
     /// Start the HTTP backend and web UI.
     Serve {
         #[arg(long)]
@@ -269,6 +271,7 @@ fn main() -> Result<()> {
         Some(Command::Doctor) => cmd_doctor(&Rook::open(cli.workspace)?, cli.json),
         Some(Command::Chat { session }) => chat::run(cli.workspace, session, cli.yes),
         Some(Command::Run { prompt, session }) => cmd_run(cli.workspace, prompt, session, cli.yes),
+        Some(Command::Acp) => cmd_acp(cli.workspace),
         Some(Command::Serve { port }) => cmd_serve(port),
         Some(Command::Store(c)) => cmd_store(&Rook::open(cli.workspace)?, c, cli.json),
         Some(Command::Session(c)) => cmd_session(&Rook::open(cli.workspace)?, c, cli.json),
@@ -416,6 +419,17 @@ fn compact(args: &serde_json::Value) -> String {
 
 fn first_line(s: &str) -> String {
     s.lines().next().unwrap_or("session").chars().take(72).collect()
+}
+
+fn cmd_acp(workspace: Option<PathBuf>) -> Result<()> {
+    // stdout carries the protocol, so logs must not: a stray line there is an
+    // unparsable message to the editor.
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    runtime.block_on(async move {
+        let rook = Rook::open(workspace)?;
+        rook_acp::serve_stdio(rook).await?;
+        anyhow::Ok(())
+    })
 }
 
 fn cmd_serve(port: Option<u16>) -> Result<()> {

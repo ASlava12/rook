@@ -1,0 +1,177 @@
+//! The subset of the Agent Client Protocol that Rook speaks.
+//!
+//! Field names and enum values come from the v1 schema in `references/acp`, not
+//! from memory: an editor that gets `sessionUpdate: "agentMessage"` instead of
+//! `"agent_message_chunk"` simply shows nothing, with no error to explain it.
+
+use serde::{Deserialize, Serialize};
+
+pub const PROTOCOL_VERSION: u32 = 1;
+
+#[derive(Debug, Deserialize)]
+pub struct Incoming {
+    #[serde(default)]
+    pub id: Option<serde_json::Value>,
+    #[serde(default)]
+    pub method: Option<String>,
+    #[serde(default)]
+    pub params: Option<serde_json::Value>,
+    #[serde(default)]
+    pub result: Option<serde_json::Value>,
+    #[serde(default)]
+    pub error: Option<serde_json::Value>,
+}
+
+#[derive(Serialize)]
+pub struct Response<'a> {
+    pub jsonrpc: &'static str,
+    pub id: &'a serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<Error>,
+}
+
+#[derive(Serialize)]
+pub struct Request<'a> {
+    pub jsonrpc: &'static str,
+    pub id: u64,
+    pub method: &'a str,
+    pub params: serde_json::Value,
+}
+
+#[derive(Serialize)]
+pub struct Notification<'a> {
+    pub jsonrpc: &'static str,
+    pub method: &'a str,
+    pub params: serde_json::Value,
+}
+
+#[derive(Serialize)]
+pub struct Error {
+    pub code: i64,
+    pub message: String,
+}
+
+impl Error {
+    pub fn method_not_found(method: &str) -> Self {
+        Self { code: -32601, message: format!("{method} is not implemented") }
+    }
+
+    pub fn invalid_params(message: impl Into<String>) -> Self {
+        Self { code: -32602, message: message.into() }
+    }
+
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self { code: -32603, message: message.into() }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewSession {
+    pub cwd: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Prompt {
+    pub session_id: String,
+    #[serde(default)]
+    pub prompt: Vec<ContentBlock>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentBlock {
+    Text {
+        text: String,
+    },
+    ResourceLink {
+        uri: String,
+    },
+    #[serde(other)]
+    Other,
+}
+
+impl ContentBlock {
+    /// What the model should see. Non-text blocks are named rather than dropped,
+    /// so a prompt that was mostly an attachment does not arrive empty.
+    pub fn render(&self) -> Option<String> {
+        match self {
+            ContentBlock::Text { text } => Some(text.clone()),
+            ContentBlock::ResourceLink { uri } => Some(format!("[attached: {uri}]")),
+            ContentBlock::Other => None,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionRef {
+    pub session_id: String,
+}
+
+/// `session/update` payloads. The client renders these as the turn happens.
+pub fn agent_message_chunk(session: &str, text: &str) -> serde_json::Value {
+    update(
+        session,
+        serde_json::json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": { "type": "text", "text": text },
+        }),
+    )
+}
+
+pub fn agent_thought_chunk(session: &str, text: &str) -> serde_json::Value {
+    update(
+        session,
+        serde_json::json!({
+            "sessionUpdate": "agent_thought_chunk",
+            "content": { "type": "text", "text": text },
+        }),
+    )
+}
+
+pub fn tool_call(session: &str, id: &str, title: &str, kind: &str) -> serde_json::Value {
+    update(
+        session,
+        serde_json::json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": id,
+            "title": title,
+            "kind": kind,
+            "status": "in_progress",
+        }),
+    )
+}
+
+pub fn tool_call_done(session: &str, id: &str, failed: bool) -> serde_json::Value {
+    update(
+        session,
+        serde_json::json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": id,
+            "status": if failed { "failed" } else { "completed" },
+        }),
+    )
+}
+
+fn update(session: &str, mut body: serde_json::Value) -> serde_json::Value {
+    body["sessionId"] = serde_json::Value::String(session.to_string());
+    body
+}
+
+/// Which of Rook's tools maps to which ACP tool kind, so an editor can show the
+/// right icon and grouping.
+pub fn tool_kind(name: &str) -> &'static str {
+    match name {
+        "read_file" | "list_dir" => "read",
+        "write_file" | "edit_file" => "edit",
+        "search" => "search",
+        "run_command" => "execute",
+        "delegate" => "think",
+        _ if name.contains("__") => "other",
+        _ => "other",
+    }
+}

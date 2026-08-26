@@ -13,6 +13,7 @@ async-trait = "0.1.92"
 clap = { version = "4.6.6", features = ["derive"] }
 crossterm = "0.29.0"
 ratatui = "0.30.2"
+rook-acp = { version = "0.1.0", path = "../rook-acp" }
 rook-core.workspace = true
 rook-llm.workspace = true
 rook-mcp = { version = "0.1.0", path = "../rook-mcp" }

@@ -2260,6 +2260,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "rook-acp"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "rook-core",
+ "rook-llm",
+ "rook-skills",
+ "rook-store",
+ "rook-tools",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "rook-cli"
 version = "0.1.0"
 dependencies = [
@@ -2268,6 +2286,7 @@ dependencies = [
  "clap",
  "crossterm",
  "ratatui",
+ "rook-acp",
  "rook-core",
  "rook-llm",
  "rook-mcp",

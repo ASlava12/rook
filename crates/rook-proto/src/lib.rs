@@ -11,8 +11,7 @@
 //! * **Agent Skills** — the on-disk `SKILL.md` format. Implemented; see
 //!   `rook-skills`, which reads skills written for any conforming agent.
 //! * **ACP** (Agent Client Protocol) — JSON-RPC 2.0 over stdio, how editors talk
-//!   to agents. Planned, not yet implemented: it is the path to Zed, JetBrains
-//!   and Neovim without a bespoke plugin for each.
+//!   to agents. Implemented by `rook acp`; see `rook-acp`.
 //! * **MCP** (Model Context Protocol) — for consuming third-party tools. Planned.
 //! * **Agent Plugins** — `plugin.json` packaging around skills and MCP servers.
 //!   Planned; it defers to Agent Skills for the skill format itself.

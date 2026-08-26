@@ -9,7 +9,7 @@ as a feature rather than a debugging afterthought: a CLI, a terminal browser and
 web UI, all views over the same engine.
 
 > **Status: early.** The storage layer, the skill system and the inspection tools
-> are implemented and covered by 98 tests. The agent loop — tool dispatch, skill
+> are implemented and covered by 106 tests. The agent loop — tool dispatch, skill
 > loading, budgeting, logging — is tested against a scripted provider; it has not
 > yet been exercised against a live model in CI. Streaming, MCP and ACP are on the
 > [roadmap](docs/roadmap.md) and are not implemented. Nothing below describes
@@ -115,6 +115,14 @@ rook session fork 01JQ… --at 12                 # branch without touching file
 All three front ends run turns, stream them, and ask for approvals the same way:
 `rook chat`, `rook tui`, and the web UI at `rookd`. Nothing is reachable from one
 that is not reachable from the others.
+
+### From an editor
+
+`rook acp` speaks the [Agent Client Protocol](https://agentclientprotocol.com) on
+stdio — the same protocol Zed, JetBrains and Neovim already use — so no plugin is
+needed per editor. Streamed output becomes `session/update`, and the permission
+policy becomes the editor's approval dialog: the same decision, reaching the same
+rules, whichever front end asks.
 
 ### What it is allowed to do
 
@@ -235,6 +243,7 @@ crates/
   rook-llm      provider trait + OpenAI-compatible HTTP (Ollama, LM Studio, vLLM, OpenAI)
   rook-tools    read/write/edit/list/search/run, with the guards that keep a turn survivable
   rook-mcp      Model Context Protocol client, stdio transport, ~250 lines
+  rook-acp      Agent Client Protocol server, so editors can drive it
   rook-proto    wire types shared by daemon, CLI and web
   rookd         HTTP backend, chat websocket, embedded web UI
   rook-cli      `rook`: commands and the terminal browser
@@ -262,7 +271,6 @@ lose people's trust:
 - **The agent loop has not been run against a live model in CI.** Its logic is
   covered by tests against a scripted provider, and the SSE parser by tests over a
   real socket, but no real model has been driven end to end in CI.
-- **No ACP server.** Planned; see [docs/roadmap.md](docs/roadmap.md).
 - **MCP is stdio only.** HTTP-transport servers are not supported yet.
 - **Compaction summarises, but only the whole span at once.** There is no
   incremental or hierarchical summary of a very long session.
