@@ -59,7 +59,10 @@ what unblocks the most.
   failures are reported rather than fatal, and their tools join the toolbox
   namespaced `server__tool`. 16 tests against mock servers.
 - **Providers** — OpenAI-compatible HTTP: Ollama, LM Studio, llama.cpp, vLLM,
-  OpenAI, OpenRouter. Streaming over SSE with a configurable idle watchdog, so a
+  OpenAI, OpenRouter. `rook models` lists what an endpoint serves and `rook
+  doctor` says whether the configured one is among them; the context window can
+  be set explicitly rather than assumed from the provider's name. Streaming over
+  SSE with a configurable idle watchdog, so a
   dropped connection surfaces as a stall instead of looking like deep thought.
   Tool calls are emitted only once whole. Providers that cannot stream get a
   one-shot fallback, so no caller branches on it.

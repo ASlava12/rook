@@ -60,6 +60,16 @@ pub trait Provider: Send + Sync {
         false
     }
 
+    /// What this endpoint says it can serve. Empty when it does not say.
+    async fn models(&self) -> Result<Vec<ModelInfo>> {
+        Ok(Vec::new())
+    }
+
+    /// Cheapest possible proof that the endpoint is there and answering.
+    async fn reachable(&self) -> Result<()> {
+        self.models().await.map(|_| ())
+    }
+
     /// Falls back to a one-shot `complete` so every provider is streamable and
     /// callers never branch on whether this one really streams.
     async fn stream(&self, request: Request) -> Result<ResponseStream> {
@@ -86,6 +96,16 @@ pub fn split_spec(spec: &str) -> (&str, &str) {
 /// Endpoints and keys come from environment variables, so neither the store nor
 /// the config file ever holds a credential.
 pub fn from_spec(spec: &str, stream_idle: std::time::Duration) -> Result<Box<dyn Provider>> {
+    from_spec_with(spec, stream_idle, None)
+}
+
+/// `context_window` overrides the provider's assumed default, which is guesswork
+/// for anything self-hosted: a local model may serve 8k or a million.
+pub fn from_spec_with(
+    spec: &str,
+    stream_idle: std::time::Duration,
+    context_window: Option<usize>,
+) -> Result<Box<dyn Provider>> {
     let (provider, model) = split_spec(spec);
     let mut cfg = match provider {
         "ollama" => {
@@ -108,6 +128,9 @@ pub fn from_spec(spec: &str, stream_idle: std::time::Duration) -> Result<Box<dyn
         other => return Err(LlmError::UnknownProvider(other.to_string())),
     };
     cfg.stream_idle_timeout = stream_idle;
+    if let Some(window) = context_window {
+        cfg.context_window = window;
+    }
     Ok(Box::new(openai::OpenAiCompatible::new(spec, model, cfg)?))
 }
 

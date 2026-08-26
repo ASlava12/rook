@@ -9,7 +9,7 @@ as a feature rather than a debugging afterthought: a CLI, a terminal browser and
 web UI, all views over the same engine.
 
 > **Status: early.** The storage layer, the skill system and the inspection tools
-> are implemented and covered by 124 tests. The agent loop — tool dispatch, skill
+> are implemented and covered by 131 tests. The agent loop — tool dispatch, skill
 > loading, budgeting, logging — is tested against a scripted provider; it has not
 > yet been exercised against a live model in CI. Streaming, MCP and ACP are on the
 > [roadmap](docs/roadmap.md) and are not implemented. Nothing below describes
@@ -64,7 +64,8 @@ Requires a Rust toolchain and a C compiler (two dependencies vendor C — see
 
 ```sh
 rook init                                  # create ~/.rook, config, store
-rook doctor                                # what was detected, and what it means for skills
+rook doctor                                # environment, model reachability, skills
+rook models                                # what the configured provider serves
 
 rook                                       # talk to it
 rook run "summarise what changed in src/"  # one turn, streamed, for scripts

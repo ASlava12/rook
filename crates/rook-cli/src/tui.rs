@@ -300,11 +300,14 @@ impl App {
                 },
             };
 
-            let provider =
-                match rook_llm::from_spec(&rook.config.agent.model, rook.config.agent.stream_idle()) {
-                    Ok(provider) => provider,
-                    Err(e) => return fail(&to_loop, e.to_string()),
-                };
+            let provider = match rook_llm::from_spec_with(
+                &rook.config.agent.model,
+                rook.config.agent.stream_idle(),
+                rook.config.agent.context_window,
+            ) {
+                Ok(provider) => provider,
+                Err(e) => return fail(&to_loop, e.to_string()),
+            };
 
             let mut agent = AgentLoop::new(&rook, provider.into(), session);
             if yes {

@@ -58,6 +58,8 @@ enum Command {
     },
     /// Browse the store, sessions and skills in a read-only terminal UI.
     Tui,
+    /// List the models the configured provider says it can serve.
+    Models,
     /// Speak the Agent Client Protocol on stdio, for editors.
     Acp,
     /// Start the HTTP backend and web UI.
@@ -271,6 +273,7 @@ fn main() -> Result<()> {
         Some(Command::Doctor) => cmd_doctor(&Rook::open(cli.workspace)?, cli.json),
         Some(Command::Chat { session }) => chat::run(cli.workspace, session, cli.yes),
         Some(Command::Run { prompt, session }) => cmd_run(cli.workspace, prompt, session, cli.yes),
+        Some(Command::Models) => cmd_models(cli.workspace, cli.json),
         Some(Command::Acp) => cmd_acp(cli.workspace),
         Some(Command::Serve { port }) => cmd_serve(port),
         Some(Command::Store(c)) => cmd_store(&Rook::open(cli.workspace)?, c, cli.json),
@@ -322,6 +325,13 @@ fn cmd_doctor(rook: &Rook, json: bool) -> Result<()> {
         println!("  {k:<10} {v}");
     }
 
+    println!();
+    println!("model:");
+    match probe_provider(rook) {
+        Ok(note) => println!("  {note}"),
+        Err(e) => println!("  {} — {e}", rook.config.agent.model),
+    }
+
     let cards = rook.catalog();
     let (ok, blocked): (Vec<_>, Vec<_>) = cards.iter().partition(|c| c.applicable);
     println!();
@@ -339,6 +349,40 @@ fn cmd_doctor(rook: &Rook, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// Ask the endpoint what it serves, which answers "is it up" and "is the model
+/// configured actually there" in one round trip.
+fn probe_provider(rook: &Rook) -> Result<String> {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    let (_, configured) = rook_llm::split_spec(&rook.config.agent.model);
+    let provider = provider(rook)?;
+    let models = runtime.block_on(provider.models())?;
+
+    let spec = &rook.config.agent.model;
+    let window = provider.context_window();
+    let reported = models.iter().find(|m| m.id == configured).and_then(|m| m.context_window);
+
+    if models.is_empty() {
+        return Ok(format!("{spec} — reachable, {window} token window assumed"));
+    }
+    if !models.iter().any(|m| m.id == configured) {
+        return Ok(format!(
+            "{spec} — reachable, but {configured:?} is not among the {} it offers (`rook models`)",
+            models.len()
+        ));
+    }
+
+    let mut note = format!("{spec} — reachable, {} model(s) offered, {window} token window", models.len());
+    // The endpoint knowing better than our default is common for self-hosted
+    // models, and silently budgeting against the wrong number wastes most of
+    // the window or overruns it.
+    if let Some(reported) = reported.filter(|r| *r != window) {
+        note.push_str(&format!(
+            "\n  the endpoint reports {reported}; set `context_window = {reported}` under [agent] to use it"
+        ));
+    }
+    Ok(note)
+}
+
 fn cmd_run(
     workspace: Option<PathBuf>,
     prompt: Vec<String>,
@@ -352,8 +396,12 @@ fn cmd_run(
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     runtime.block_on(async move {
         let rook = Rook::open(workspace)?;
-        let provider = rook_llm::from_spec(&rook.config.agent.model, rook.config.agent.stream_idle())
-            .with_context(|| format!("configuring model {:?}", rook.config.agent.model))?;
+        let provider = rook_llm::from_spec_with(
+            &rook.config.agent.model,
+            rook.config.agent.stream_idle(),
+            rook.config.agent.context_window,
+        )
+        .with_context(|| format!("configuring model {:?}", rook.config.agent.model))?;
         let session = match session {
             Some(s) => session_id(&s)?,
             None => rook.start_session(&first_line(&prompt))?,
@@ -419,6 +467,48 @@ fn compact(args: &serde_json::Value) -> String {
 
 fn first_line(s: &str) -> String {
     s.lines().next().unwrap_or("session").chars().take(72).collect()
+}
+
+fn cmd_models(workspace: Option<PathBuf>, json: bool) -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    runtime.block_on(async move {
+        let rook = Rook::open(workspace)?;
+        let (_, configured) = rook_llm::split_spec(&rook.config.agent.model);
+        let models = provider(&rook)?.models().await?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&models)?);
+            return anyhow::Ok(());
+        }
+        if models.is_empty() {
+            println!("the endpoint does not list its models");
+            return anyhow::Ok(());
+        }
+        let rows: Vec<Vec<String>> = models
+            .iter()
+            .map(|m| {
+                vec![
+                    if m.id == configured { "▸".into() } else { " ".into() },
+                    m.id.clone(),
+                    m.context_window.map(|w| format!("{w}")).unwrap_or_default(),
+                    m.owned_by.clone().unwrap_or_default(),
+                ]
+            })
+            .collect();
+        print!("{}", fmt::table(&["", "model", "context", "owner"], &rows));
+        if !models.iter().any(|m| m.id == configured) {
+            println!("\n{configured:?} is configured but not offered here");
+        }
+        anyhow::Ok(())
+    })
+}
+
+fn provider(rook: &Rook) -> Result<Box<dyn rook_llm::Provider>> {
+    rook_llm::from_spec_with(
+        &rook.config.agent.model,
+        rook.config.agent.stream_idle(),
+        rook.config.agent.context_window,
+    )
+    .with_context(|| format!("configuring model {:?}", rook.config.agent.model))
 }
 
 fn cmd_acp(workspace: Option<PathBuf>) -> Result<()> {

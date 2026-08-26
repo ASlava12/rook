@@ -106,3 +106,14 @@ pub struct Response {
     pub usage: Usage,
     pub model: String,
 }
+
+/// A model the provider says it can serve.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModelInfo {
+    pub id: String,
+    #[serde(default)]
+    pub owned_by: Option<String>,
+    /// Reported context length, where the endpoint gives one. Most do not.
+    #[serde(default)]
+    pub context_window: Option<usize>,
+}

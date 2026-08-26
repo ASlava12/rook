@@ -165,7 +165,11 @@ async fn prompt(rook: Arc<Rook>, peer: Arc<Peer>, id: serde_json::Value, params:
         return peer.respond(&id, Err(Error::invalid_params("the prompt has no text")));
     }
 
-    let provider = match rook_llm::from_spec(&rook.config.agent.model, rook.config.agent.stream_idle()) {
+    let provider = match rook_llm::from_spec_with(
+        &rook.config.agent.model,
+        rook.config.agent.stream_idle(),
+        rook.config.agent.context_window,
+    ) {
         Ok(provider) => provider,
         Err(e) => return peer.respond(&id, Err(Error::internal(e.to_string()))),
     };

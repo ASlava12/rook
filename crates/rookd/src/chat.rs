@@ -104,7 +104,11 @@ async fn turn(
     };
     let _ = outbound.send(ChatEvent::Started { session: rook_store::format_session_id(session) });
 
-    let provider = match rook_llm::from_spec(&rook.config.agent.model, rook.config.agent.stream_idle()) {
+    let provider = match rook_llm::from_spec_with(
+        &rook.config.agent.model,
+        rook.config.agent.stream_idle(),
+        rook.config.agent.context_window,
+    ) {
         Ok(provider) => provider,
         Err(e) => return report(&outbound, e.to_string()),
     };

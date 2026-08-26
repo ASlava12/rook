@@ -50,6 +50,9 @@ pub struct AgentConfig {
     pub lazy_skills: bool,
     /// Same idea for tool schemas.
     pub lazy_tools: bool,
+    /// Overrides the provider's assumed context length, which is guesswork for
+    /// anything self-hosted: a local model may serve 8k or a million.
+    pub context_window: Option<usize>,
     /// How many delegated sub-tasks may run at once. Bounded because each one
     /// spends tokens against the same budget and the same provider rate limit.
     pub max_parallel_subagents: usize,
@@ -132,6 +135,7 @@ impl Default for AgentConfig {
             max_steps: 200,
             lazy_skills: true,
             lazy_tools: true,
+            context_window: None,
             max_parallel_subagents: 4,
             stream_idle_timeout_secs: 90,
         }

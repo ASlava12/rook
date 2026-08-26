@@ -121,6 +121,46 @@ impl Provider for OpenAiCompatible {
         })
     }
 
+    async fn models(&self) -> Result<Vec<crate::ModelInfo>> {
+        #[derive(Deserialize)]
+        struct Listing {
+            #[serde(default)]
+            data: Vec<Entry>,
+        }
+        #[derive(Deserialize)]
+        struct Entry {
+            id: String,
+            #[serde(default)]
+            owned_by: Option<String>,
+            /// Not in the OpenAI shape, but several compatible servers add it.
+            #[serde(default, alias = "max_model_len", alias = "context_length")]
+            context_window: Option<usize>,
+        }
+
+        let mut request = self.http.get(format!("{}/models", self.config.base_url.trim_end_matches('/')));
+        if let Some(key) = &self.config.api_key {
+            request = request.bearer_auth(key);
+        }
+        let response = request
+            .timeout(std::time::Duration::from_secs(20))
+            .send()
+            .await
+            .map_err(|e| LlmError::Transport(e.to_string()))?;
+
+        let status = response.status();
+        let text = response.text().await.map_err(|e| LlmError::Transport(e.to_string()))?;
+        if !status.is_success() {
+            return Err(LlmError::Status { status: status.as_u16(), body: truncate(&text, 500) });
+        }
+        let listing: Listing = serde_json::from_str(&text)
+            .map_err(|e| LlmError::Decode(format!("{e}: {}", truncate(&text, 300))))?;
+        Ok(listing
+            .data
+            .into_iter()
+            .map(|e| crate::ModelInfo { id: e.id, owned_by: e.owned_by, context_window: e.context_window })
+            .collect())
+    }
+
     async fn stream(&self, request: Request) -> Result<ResponseStream> {
         let resp = self.send(&request, true).await?;
         let status = resp.status();

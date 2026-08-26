@@ -30,8 +30,12 @@ Ctrl-C stops the turn in flight. Ctrl-D leaves.";
 pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: bool) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let rook = Rook::open(workspace)?;
-    let provider = rook_llm::from_spec(&rook.config.agent.model, rook.config.agent.stream_idle())
-        .with_context(|| format!("configuring model {:?}", rook.config.agent.model))?;
+    let provider = rook_llm::from_spec_with(
+        &rook.config.agent.model,
+        rook.config.agent.stream_idle(),
+        rook.config.agent.context_window,
+    )
+    .with_context(|| format!("configuring model {:?}", rook.config.agent.model))?;
 
     let mut session = match resume {
         Some(id) => crate::session_id(&id)?,
@@ -76,8 +80,11 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
                     }
                     continue;
                 }
-                let provider =
-                    rook_llm::from_spec(&rook.config.agent.model, rook.config.agent.stream_idle())?;
+                let provider = rook_llm::from_spec_with(
+                    &rook.config.agent.model,
+                    rook.config.agent.stream_idle(),
+                    rook.config.agent.context_window,
+                )?;
                 runtime.block_on(turn(&rook, provider, session, &mcp, &line, yes));
             }
             // Ctrl-C at the prompt clears the line rather than leaving; the
