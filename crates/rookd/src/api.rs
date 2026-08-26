@@ -32,6 +32,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/checkpoints", get(checkpoints))
         .route("/api/maintenance", post(maintenance))
         .route("/api/chat", get(crate::chat::upgrade))
+        .route("/api/search", get(search))
         .with_state(state)
 }
 
@@ -241,6 +242,23 @@ async fn skill_history(
 ) -> ApiResult<Page<rook_core::SkillVersionRecord>> {
     let rook = s.rook.read().await;
     Ok(Json(Page::new(rook.skill_history(&name)?)))
+}
+
+#[derive(Deserialize)]
+struct SearchQuery {
+    #[serde(default)]
+    q: String,
+    #[serde(default = "default_limit")]
+    limit: usize,
+}
+
+async fn search(
+    State(s): State<Shared>,
+    Query(query): Query<SearchQuery>,
+) -> ApiResult<rook_core::search::Found> {
+    let rook = s.rook.read().await;
+    let options = rook_core::search::Search { limit: query.limit.min(200), ..Default::default() };
+    Ok(Json(rook.search(&query.q, &options)?))
 }
 
 async fn checkpoints(State(s): State<Shared>) -> ApiResult<Page<serde_json::Value>> {

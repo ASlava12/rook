@@ -1369,3 +1369,98 @@ async fn the_configured_effort_reaches_the_request() {
 
     assert_eq!(seen.lock().unwrap()[0].effort, Some(rook_llm::Effort::Max));
 }
+
+fn transcript(f: &Fixture, title: &str, lines: &[(rook_store::EventKind, &str)]) -> u128 {
+    let session = f.rook.start_session(title).unwrap();
+    for (kind, body) in lines {
+        f.rook.log(session, *kind, "", body).unwrap();
+    }
+    session
+}
+
+#[tokio::test]
+async fn search_finds_a_line_across_sessions_and_ranks_the_best_one_first() {
+    use rook_store::EventKind::{AssistantMessage, UserMessage};
+    let f = fixture();
+    transcript(
+        &f,
+        "old work",
+        &[
+            (UserMessage, "can you look at the CSV importer"),
+            (AssistantMessage, "the importer trims whitespace before parsing"),
+        ],
+    );
+    transcript(
+        &f,
+        "parser work",
+        &[
+            (UserMessage, "the parser mishandles CRLF"),
+            (
+                AssistantMessage,
+                "fixed: the parser now splits on CRLF and on LF, so the parser is line-ending agnostic",
+            ),
+        ],
+    );
+
+    let found = f.rook.search("parser CRLF", &Default::default()).unwrap();
+    assert!(!found.hits.is_empty(), "the words are right there");
+    assert!(
+        found.hits[0].snippet.contains("splits on CRLF"),
+        "the line that dwells on the terms should outrank one that mentions them once: {:?}",
+        found.hits[0].snippet
+    );
+    assert!(found.hits.iter().all(|h| !h.snippet.contains("whitespace")));
+}
+
+#[tokio::test]
+async fn a_repeated_body_is_matched_once_and_reported_at_every_position() {
+    use rook_store::EventKind::ToolResult;
+    let f = fixture();
+    let session = f.rook.start_session("repeats").unwrap();
+    for _ in 0..5 {
+        f.rook.log(session, ToolResult, "read_file", "the distinctive marker line").unwrap();
+    }
+
+    let found = f.rook.search("distinctive marker", &Default::default()).unwrap();
+    assert_eq!(found.hits.len(), 5, "every position that references it is a hit");
+    assert_eq!(found.objects_scanned, 1, "but content addressing means it is decompressed and matched once");
+}
+
+#[tokio::test]
+async fn search_can_be_narrowed_to_one_session() {
+    use rook_store::EventKind::UserMessage;
+    let f = fixture();
+    let wanted = transcript(&f, "a", &[(UserMessage, "the migration is nearly done")]);
+    transcript(&f, "b", &[(UserMessage, "the migration was reverted")]);
+
+    let options = rook_core::search::Search { session: Some(wanted), ..Default::default() };
+    let found = f.rook.search("migration", &options).unwrap();
+    assert_eq!(found.hits.len(), 1);
+    assert!(found.hits[0].snippet.contains("nearly done"));
+}
+
+#[tokio::test]
+async fn an_empty_query_finds_nothing_rather_than_everything() {
+    let f = fixture();
+    transcript(&f, "s", &[(rook_store::EventKind::UserMessage, "anything at all")]);
+    for query in ["", "   ", "the and of"] {
+        let found = f.rook.search(query, &Default::default()).unwrap();
+        assert!(found.hits.is_empty(), "{query:?} matched: it is all noise words");
+    }
+}
+
+#[tokio::test]
+async fn a_bounded_scan_says_when_it_stopped_early() {
+    let f = fixture();
+    let session = f.rook.start_session("many").unwrap();
+    for i in 0..40 {
+        f.rook
+            .log(session, rook_store::EventKind::UserMessage, "", &format!("entry {i} about widgets"))
+            .unwrap();
+    }
+
+    let options = rook_core::search::Search { budget: 10, ..Default::default() };
+    let found = f.rook.search("widgets", &options).unwrap();
+    assert!(found.truncated, "a scan that hit its budget must say so, not look complete");
+    assert!(found.objects_scanned <= 10);
+}

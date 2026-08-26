@@ -13,6 +13,7 @@ pub mod hooks;
 pub mod lsp;
 pub mod memory;
 pub mod paths;
+pub mod search;
 pub mod service;
 
 pub use config::{Config, ConfigError};

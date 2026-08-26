@@ -73,6 +73,7 @@ form.ask button[disabled]{opacity:.5;cursor:default}
 <nav>
   <button data-tab="chat" aria-selected="true">Chat</button>
   <button data-tab="sessions">Sessions</button>
+  <button data-tab="search">Search</button>
   <button data-tab="skills">Skills</button>
   <button data-tab="store">Store</button>
 </nav>
@@ -110,7 +111,7 @@ const api = async (path) => {
   return body;
 };
 
-const state = { tab: 'chat', session: null, skill: null, chat: { log: [], session: null, busy: false } };
+const state = { tab: 'chat', session: null, skill: null, query: '', chat: { log: [], session: null, busy: false } };
 
 async function boot() {
   try {
@@ -129,7 +130,7 @@ async function boot() {
 
 function render() {
   const v = $('#view'); v.replaceChildren(el('p', {class:'empty'}, 'loading…'));
-  ({ chat: renderChat, sessions: renderSessions, skills: renderSkills, store: renderStore })[state.tab]().catch(e => {
+  ({ chat: renderChat, sessions: renderSessions, search: renderSearch, skills: renderSkills, store: renderStore })[state.tab]().catch(e => {
     v.replaceChildren(el('div', {class:'card'},
       el('h2', {}, 'error'),
       el('p', {}, e.error || String(e)),
@@ -219,6 +220,39 @@ async function renderChat() {
     el('h2', {}, state.chat.session ? `session ${state.chat.session}` : 'new session'),
     stream, form));
   input.focus();
+}
+
+async function renderSearch() {
+  const input = el('input', { placeholder: 'Search everything said, read and run…', value: state.query });
+  const results = el('div', { class: 'scroll' });
+
+  const look = async () => {
+    state.query = input.value.trim();
+    if (!state.query) { results.replaceChildren(); return; }
+    results.replaceChildren(el('p', { class: 'empty' }, 'searching…'));
+    const found = await api(`/api/search?q=${encodeURIComponent(state.query)}`);
+    if (!found.hits.length) {
+      results.replaceChildren(el('p', { class: 'empty' }, `nothing in ${found.objects_scanned} objects`));
+      return;
+    }
+    results.replaceChildren(...found.hits.map(h => el('div', { class: 'entry' },
+      el('div', { class: 'hd' },
+        el('span', {}, h.title || '(untitled)'),
+        el('span', { class: 'tag' }, h.kind),
+        el('span', {}, `#${h.seq}`),
+        el('span', {}, ago(h.when))),
+      el('pre', {}, h.snippet))),
+      el('p', { class: 'sub' },
+        `${found.hits.length} hit(s) across ${found.objects_scanned} object(s)` +
+        (found.truncated ? ' — the scan hit its budget' : '')));
+  };
+
+  const form = el('form', { class: 'ask', onsubmit: (e) => { e.preventDefault(); look(); } },
+    input, el('button', {}, 'Find'));
+
+  $('#view').replaceChildren(el('div', { class: 'card' }, el('h2', {}, 'search'), form, results));
+  input.focus();
+  if (state.query) look();
 }
 
 async function renderSessions() {

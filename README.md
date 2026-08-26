@@ -9,7 +9,7 @@ as a feature rather than a debugging afterthought: a CLI, a terminal browser and
 web UI, all views over the same engine.
 
 > **Status: early.** The storage layer, the skill system and the inspection tools
-> are implemented and covered by 171 tests. The agent loop — tool dispatch, skill
+> are implemented and covered by 176 tests. The agent loop — tool dispatch, skill
 > loading, budgeting, logging — is tested against a scripted provider; it has not
 > yet been exercised against a live model in CI. Streaming, MCP and ACP are on the
 > [roadmap](docs/roadmap.md) and are not implemented. Nothing below describes
@@ -99,6 +99,7 @@ rook store cat 4f2a9b          # any object, by short hash
 rook store gc --dry-run        # what is unreachable
 rook store prune --dry-run     # what the retention policy would drop
 
+rook search "the CRLF fix"            # across every transcript, ranked
 rook session ls
 rook session show 01JQ… --from 0 --limit 50
 rook session show 01JQ… --json | jq '.[] | select(.kind=="tool-call")'

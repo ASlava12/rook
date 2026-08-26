@@ -88,6 +88,18 @@ enum Command {
     /// Ask the language servers what the agent would ask them.
     #[command(subcommand)]
     Lsp(LspCmd),
+    /// Search everything the agent has said, read and run.
+    Search {
+        query: Vec<String>,
+        /// Only this session.
+        #[arg(long)]
+        session: Option<String>,
+        /// Skip file contents, which are most of a store by size.
+        #[arg(long)]
+        conversation: bool,
+        #[arg(long, default_value_t = 40)]
+        limit: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -306,6 +318,9 @@ fn main() -> Result<()> {
         Some(Command::Mcp(c)) => cmd_mcp(cli.workspace, c, cli.json),
         Some(Command::Memory(c)) => cmd_memory(&Rook::open(cli.workspace)?, c, cli.json),
         Some(Command::Lsp(c)) => cmd_lsp(cli.workspace, c, cli.json),
+        Some(Command::Search { query, session, conversation, limit }) => {
+            cmd_search(&Rook::open(cli.workspace)?, &query.join(" "), session, conversation, limit, cli.json)
+        }
     }
 }
 
@@ -1031,6 +1046,48 @@ fn cmd_skills(rook: &Rook, cmd: SkillCmd, json: bool) -> Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+fn cmd_search(
+    rook: &Rook,
+    query: &str,
+    session: Option<String>,
+    conversation: bool,
+    limit: usize,
+    json: bool,
+) -> Result<()> {
+    let options = rook_core::search::Search {
+        limit,
+        session: session.as_deref().map(session_id).transpose()?,
+        conversation_only: conversation,
+        ..Default::default()
+    };
+    let found = rook.search(query, &options)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&found)?);
+        return Ok(());
+    }
+    if found.hits.is_empty() {
+        println!("nothing matched in {} object(s)", found.objects_scanned);
+        return Ok(());
+    }
+    for hit in &found.hits {
+        println!(
+            "\x1b[2m{}  #{:<4} {:<12} {}\x1b[0m",
+            &hit.session[..12],
+            hit.seq,
+            hit.kind,
+            fmt::ago(hit.when)
+        );
+        println!("  {}", hit.snippet);
+    }
+    println!(
+        "\n{} hit(s) across {} object(s){}",
+        found.hits.len(),
+        found.objects_scanned,
+        if found.truncated { " — scan hit its budget, narrow with --session" } else { "" }
+    );
     Ok(())
 }
 

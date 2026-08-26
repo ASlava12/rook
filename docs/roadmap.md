@@ -39,6 +39,10 @@ what unblocks the most.
   parent while remaining readable in the children. Several tasks run concurrently
   under a configured cap; one failing does not lose the rest. Depth-limited, with
   optional inheritance of the recent exchange. 7 tests.
+- **Search** — over everything said, read and run, ranked by how much a line
+  dwells on the query. Matching runs over distinct objects rather than events,
+  so a file read twenty times is decompressed once. Bounded, and says when the
+  scan stopped early. In the CLI, chat, the API and the web UI. 5 tests.
 - **Memory** — durable facts with provenance, global or per-workspace scope,
   pinning, and a version per change so `memory since`, `memory diff` and rollback
   all work. Retrieval is term overlap with prefix matching, budgeted into the

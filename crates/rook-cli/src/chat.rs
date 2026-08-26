@@ -20,6 +20,7 @@ const HELP: &str = "  /context [window]   what this conversation costs, and of w
   /session            id, size and token totals
   /goal [text]        what this session is for; the agent is told
   /memory [query]     what it remembers, or what matches
+  /search <query>     find it in everything said, read and run
   /btw <question>     ask about this conversation without joining it
   /mcp                connected tool servers
   /undo               rewind past the last exchange, files included
@@ -267,6 +268,17 @@ async fn dispatch(
         "goal" => {
             rook.set_goal(*session, rest)?;
             println!("goal set");
+        }
+
+        "search" if !rest.is_empty() => {
+            let found = rook.search(rest, &Default::default())?;
+            if found.hits.is_empty() {
+                println!("nothing matched in {} object(s)", found.objects_scanned);
+            }
+            for hit in found.hits.iter().take(10) {
+                println!("\x1b[2m{} #{} {}\x1b[0m", &hit.session[..12], hit.seq, hit.kind);
+                println!("  {}", hit.snippet);
+            }
         }
 
         "memory" => {
