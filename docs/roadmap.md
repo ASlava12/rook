@@ -44,6 +44,9 @@ what unblocks the most.
   prompt; the agent edits it through `remember`/`forget`/`recall`. This is the
   shape [hermes-agent#12238](https://github.com/NousResearch/hermes-agent/issues/12238)
   asked for. 7 tests.
+- **Hooks** — five events with matchers, able to allow / ask / deny a tool call
+  and to add context the model sees. A failing `pre_tool` hook blocks; no hook
+  overrides the deny list. 7 tests.
 - **ACP server** — `rook acp` speaks v1 over stdio: initialize, session
   new/load/list/prompt/cancel, streamed `session/update`, and approvals through
   `session/request_permission`. Field names come from the schema in

@@ -9,7 +9,7 @@ as a feature rather than a debugging afterthought: a CLI, a terminal browser and
 web UI, all views over the same engine.
 
 > **Status: early.** The storage layer, the skill system and the inspection tools
-> are implemented and covered by 106 tests. The agent loop — tool dispatch, skill
+> are implemented and covered by 113 tests. The agent loop — tool dispatch, skill
 > loading, budgeting, logging — is tested against a scripted provider; it has not
 > yet been exercised against a live model in CI. Streaming, MCP and ACP are on the
 > [roadmap](docs/roadmap.md) and are not implemented. Nothing below describes
@@ -115,6 +115,29 @@ rook session fork 01JQ… --at 12                 # branch without touching file
 All three front ends run turns, stream them, and ask for approvals the same way:
 `rook chat`, `rook tui`, and the web UI at `rookd`. Nothing is reachable from one
 that is not reachable from the others.
+
+### Hooks
+
+Commands that run at points in a turn, so extending the agent does not mean
+changing it:
+
+```toml
+[[hooks]]
+event   = "post_tool"                    # what it prints is appended to the result
+match   = "/^(write_file|edit_file)$/"   # plain substring, or /regex/
+command = "cargo fmt --all 2>&1 | tail -3"
+
+[[hooks]]
+event   = "pre_tool"                     # may allow, ask, or deny
+match   = "run_command"
+command = "my-policy-check"              # {"decision":"deny","reason":"…"} on stdout
+```
+
+Five events: `session_start`, `prompt`, `pre_tool`, `post_tool`, `turn_end`. A
+hook reads JSON on stdin and may answer with JSON; plain output is treated as
+context for the model, so `echo` works. A `pre_tool` hook that fails blocks the
+call it was guarding — a guard that cannot run is not approval — and no hook can
+unlock what the deny list forbids.
 
 ### From an editor
 

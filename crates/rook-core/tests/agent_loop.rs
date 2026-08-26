@@ -834,3 +834,173 @@ async fn context_usage_counts_only_what_survives_compaction() {
     assert!(after.logged_tokens > after.live_tokens, "and the log keeps everything");
     assert_eq!(after.compactions, 1);
 }
+
+fn hooked(f: &Fixture, hooks: Vec<rook_core::hooks::HookConfig>) -> Rook {
+    let config = Config { hooks, ..Default::default() };
+    Rook::from_parts(
+        Store::open(f._store_dir.path().join(format!("h{}", hooks_seed()))).unwrap(),
+        config,
+        f.rook.env.clone(),
+        SkillIndex::default(),
+        PathBuf::from(f.workspace.path()),
+    )
+}
+
+fn hooks_seed() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+fn hook(event: rook_core::hooks::Event, command: &str) -> rook_core::hooks::HookConfig {
+    rook_core::hooks::HookConfig { event, command: command.into(), timeout_secs: 10, ..Default::default() }
+}
+
+#[tokio::test]
+async fn a_pre_tool_hook_can_block_a_call_the_policy_would_have_allowed() {
+    let f = fixture();
+    let rook = hooked(
+        &f,
+        vec![rook_core::hooks::HookConfig {
+            matches: Some("write_file".into()),
+            ..hook(rook_core::hooks::Event::PreTool, r#"echo '{"decision":"deny","reason":"frozen"}'"#)
+        }],
+    );
+    let session = rook.start_session("blocked").unwrap();
+
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("write_file", serde_json::json!({ "path": "out.txt", "content": "x" })),
+        reply("blocked"),
+    ]));
+    let mut agent = AgentLoop::new(&rook, provider, session);
+    agent.allow_everything_not_denied();
+    agent.run("write it").await.unwrap();
+
+    assert!(!f.workspace.path().join("out.txt").exists());
+    let entries = rook.transcript(session, 0, usize::MAX, 4096).unwrap();
+    let refusal = entries.iter().find(|e| e.kind == "tool-result").unwrap();
+    assert!(refusal.body.contains("frozen"), "the hook's reason must reach the model: {}", refusal.body);
+}
+
+#[tokio::test]
+async fn a_hook_cannot_unlock_what_the_deny_list_forbids() {
+    let f = fixture();
+    let mut config = Config::default();
+    config.sandbox.deny = vec!["/rm -rf/".into()];
+    config.hooks = vec![hook(rook_core::hooks::Event::PreTool, r#"echo '{"decision":"allow"}'"#)];
+    let rook = Rook::from_parts(
+        Store::open(f._store_dir.path().join("hook-deny")).unwrap(),
+        config,
+        f.rook.env.clone(),
+        SkillIndex::default(),
+        PathBuf::from(f.workspace.path()),
+    );
+    let session = rook.start_session("deny").unwrap();
+
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("run_command", serde_json::json!({ "command": "rm -rf /tmp/x" })),
+        reply("refused"),
+    ]));
+    let mut agent = AgentLoop::new(&rook, provider, session);
+    agent.allow_everything_not_denied();
+    agent.run("clean").await.unwrap();
+
+    let entries = rook.transcript(session, 0, usize::MAX, 4096).unwrap();
+    let result = entries.iter().find(|e| e.kind == "tool-result").unwrap();
+    assert!(result.body.contains("refused"), "{}", result.body);
+    assert!(!result.body.contains("allow"), "an approval must never beat a denial");
+}
+
+#[tokio::test]
+async fn a_post_tool_hook_appends_what_it_prints_to_the_result() {
+    let f = fixture();
+    let rook = hooked(&f, vec![hook(rook_core::hooks::Event::PostTool, "echo 'formatted with prettier'")]);
+    let session = rook.start_session("post").unwrap();
+    std::fs::write(f.workspace.path().join("a.txt"), "hello").unwrap();
+
+    let provider =
+        ScriptedProvider::new(vec![call("read_file", serde_json::json!({ "path": "a.txt" })), reply("read")]);
+    let seen = provider.share();
+    let mut agent = AgentLoop::new(&rook, Arc::new(provider), session);
+    agent.allow_everything_not_denied();
+    agent.run("read a.txt").await.unwrap();
+
+    let sent: String =
+        seen.lock().unwrap().last().cloned().unwrap().messages.iter().map(|m| m.content.clone()).collect();
+    assert!(sent.contains("formatted with prettier"), "the hook's output must reach the model");
+}
+
+#[tokio::test]
+async fn a_hook_that_fails_blocks_the_call_it_was_guarding() {
+    let f = fixture();
+    let rook = hooked(&f, vec![hook(rook_core::hooks::Event::PreTool, "exit 3")]);
+    let session = rook.start_session("failing").unwrap();
+
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("write_file", serde_json::json!({ "path": "out.txt", "content": "x" })),
+        reply("ok"),
+    ]));
+    let mut agent = AgentLoop::new(&rook, provider, session);
+    agent.allow_everything_not_denied();
+    agent.run("write").await.unwrap();
+
+    assert!(
+        !f.workspace.path().join("out.txt").exists(),
+        "a guard that cannot run must not be taken as approval"
+    );
+}
+
+#[tokio::test]
+async fn a_prompt_hook_can_refuse_the_turn_and_add_context() {
+    let f = fixture();
+    let rook = hooked(
+        &f,
+        vec![rook_core::hooks::HookConfig {
+            matches: Some("secret".into()),
+            ..hook(rook_core::hooks::Event::Prompt, r#"echo '{"decision":"deny","reason":"not that"}'"#)
+        }],
+    );
+    let session = rook.start_session("refused").unwrap();
+
+    let provider = Arc::new(ScriptedProvider::new(vec![reply("never reached")]));
+    let error = AgentLoop::new(&rook, provider, session).run("tell me the secret").await.unwrap_err();
+    assert!(error.to_string().contains("not that"), "{error}");
+    assert!(rook.transcript(session, 0, usize::MAX, 100).unwrap().is_empty(), "nothing should be logged");
+}
+
+#[tokio::test]
+async fn a_session_start_hook_contributes_to_the_system_prompt() {
+    let f = fixture();
+    let rook = hooked(&f, vec![hook(rook_core::hooks::Event::SessionStart, "echo 'this repo pins nightly'")]);
+    let session = rook.start_session("start").unwrap();
+
+    let provider = ScriptedProvider::new(vec![reply("ok")]);
+    let seen = provider.share();
+    AgentLoop::new(&rook, Arc::new(provider), session).run("hello").await.unwrap();
+
+    let system = seen.lock().unwrap().last().cloned().unwrap().messages[0].content.clone();
+    assert!(system.contains("this repo pins nightly"), "{system}");
+}
+
+#[tokio::test]
+async fn a_hook_matcher_keeps_it_off_calls_it_does_not_care_about() {
+    let f = fixture();
+    let rook = hooked(
+        &f,
+        vec![rook_core::hooks::HookConfig {
+            matches: Some("/^run_command$/".into()),
+            ..hook(rook_core::hooks::Event::PreTool, r#"echo '{"decision":"deny","reason":"no shell"}'"#)
+        }],
+    );
+    let session = rook.start_session("matcher").unwrap();
+
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("write_file", serde_json::json!({ "path": "fine.txt", "content": "x" })),
+        reply("done"),
+    ]));
+    let mut agent = AgentLoop::new(&rook, provider, session);
+    agent.allow_everything_not_denied();
+    agent.run("write").await.unwrap();
+
+    assert!(f.workspace.path().join("fine.txt").exists(), "the matcher should have excluded this call");
+}

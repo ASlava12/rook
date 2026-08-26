@@ -24,6 +24,7 @@ use serde_json::json;
 
 use crate::context::{ContextBudget, estimate_tokens};
 use crate::error::{CoreError, Result};
+use crate::hooks::{self, Hooks};
 use crate::service::Rook;
 
 /// Pseudo-tools: implemented by the loop rather than the toolbox, because they
@@ -63,6 +64,9 @@ pub struct AgentLoop<'a> {
     pub tool_ctx: ToolContext,
     pub session: u128,
     pub policy: std::sync::Arc<Policy>,
+    pub hooks: std::sync::Arc<Hooks>,
+    /// What the `session_start` hooks contributed, computed once.
+    session_context: std::sync::Mutex<Option<String>>,
     /// Consulted whenever the policy says to ask. Refuses by default, so an
     /// unattended run cannot silently do something nobody reviewed.
     pub approver: std::sync::Arc<dyn Approver>,
@@ -77,6 +81,11 @@ impl<'a> AgentLoop<'a> {
         tool_ctx.max_output_bytes = rook.config.sandbox.max_output_bytes;
         tool_ctx.command_timeout = std::time::Duration::from_secs(rook.config.sandbox.command_timeout_secs);
 
+        let (hooks, bad_hooks) = Hooks::compile(&rook.config.hooks);
+        for error in bad_hooks {
+            tracing::warn!("ignoring unusable hook matcher: {error}");
+        }
+
         let sandbox = &rook.config.sandbox;
         let (policy, bad_rules) = Policy::compile(sandbox.mode, &sandbox.allow, &sandbox.ask, &sandbox.deny);
         for error in bad_rules {
@@ -90,6 +99,8 @@ impl<'a> AgentLoop<'a> {
             tool_ctx,
             session,
             policy: std::sync::Arc::new(policy),
+            hooks: std::sync::Arc::new(hooks),
+            session_context: std::sync::Mutex::new(None),
             approver: std::sync::Arc::new(Unattended),
             depth: 0,
             max_steps: rook.config.agent.max_steps,
@@ -139,6 +150,12 @@ impl<'a> AgentLoop<'a> {
             for fact in facts {
                 s.push_str(&format!("- [{}] {}\n", fact.id, fact.text));
             }
+        }
+
+        if let Ok(extra) = self.session_context.lock()
+            && let Some(text) = extra.as_deref()
+        {
+            s.push_str(&format!("\n## From this workspace\n{text}\n"));
         }
 
         let cards = self.rook.catalog();
@@ -301,7 +318,19 @@ impl<'a> AgentLoop<'a> {
     /// are complete; the turn's bookkeeping is unaffected by whether anyone is
     /// watching.
     pub async fn run_with<F: FnMut(&Delta)>(&mut self, prompt: &str, mut on_delta: F) -> Result<TurnOutcome> {
+        self.run_session_hooks().await;
+        let gate = self
+            .hooks
+            .run(hooks::Event::Prompt, prompt, &self.payload(serde_json::json!({ "prompt": prompt })))
+            .await;
+        if let Some(rook_tools::policy::Decision::Deny(why)) = gate.decision {
+            return Err(CoreError::Other(format!("the turn was refused before it began: {why}")));
+        }
+
         self.rook.log(self.session, EventKind::UserMessage, "", prompt)?;
+        if let Some(context) = gate.context() {
+            self.rook.log(self.session, EventKind::Note, "hook", &context)?;
+        }
 
         // The prompt was just logged, so replaying the session already ends
         // with it: the log is the only source of truth for what was said.
@@ -364,6 +393,7 @@ impl<'a> AgentLoop<'a> {
 
             if response.stop_reason != StopReason::ToolUse || response.message.tool_calls.is_empty() {
                 outcome.stopped = format!("{:?}", response.stop_reason);
+                self.finish(&outcome).await;
                 return Ok(outcome);
             }
 
@@ -375,6 +405,7 @@ impl<'a> AgentLoop<'a> {
         }
 
         outcome.stopped = "max_steps".into();
+        self.finish(&outcome).await;
         Ok(outcome)
     }
 
@@ -431,8 +462,25 @@ impl<'a> AgentLoop<'a> {
             Ok(o) => o.content,
             Err(e) => format!("tool error: {e}"),
         };
+        let text = match self.after_tool(call, &text).await {
+            Some(extra) => format!("{text}\n\n{extra}"),
+            None => text,
+        };
         self.rook.log(self.session, EventKind::ToolResult, &call.name, &text).ok();
         text
+    }
+
+    /// `post_tool` hooks, whose output the model sees appended to the result.
+    async fn after_tool(&self, call: &rook_llm::ToolCall, result: &str) -> Option<String> {
+        if self.hooks.is_empty() {
+            return None;
+        }
+        let payload = self.payload(serde_json::json!({
+            "tool": call.name,
+            "input": call.arguments,
+            "result": result,
+        }));
+        self.hooks.run(hooks::Event::PostTool, &call.name, &payload).await.context()
     }
 
     /// Run a sub-task in its own session and return only what it concluded.
@@ -463,6 +511,7 @@ impl<'a> AgentLoop<'a> {
         child.tool_ctx = self.tool_ctx.clone();
         child.policy = self.policy.clone();
         child.approver = self.approver.clone();
+        child.hooks = self.hooks.clone();
         if let Some(steps) = args.get("max_steps").and_then(|s| s.as_u64()) {
             child.max_steps = steps as u32;
         }
@@ -563,12 +612,61 @@ impl<'a> AgentLoop<'a> {
         self.policy = std::sync::Arc::new(policy);
     }
 
-    /// Consult the policy, and the user when it says to. Returns the refusal to
-    /// hand back to the model, or `None` when the call may proceed.
+    async fn run_session_hooks(&self) {
+        if self.hooks.is_empty() || self.session_context.lock().is_ok_and(|c| c.is_some()) {
+            return;
+        }
+        let outcome =
+            self.hooks.run(hooks::Event::SessionStart, "", &self.payload(serde_json::json!({}))).await;
+        if let Ok(mut slot) = self.session_context.lock() {
+            *slot = Some(outcome.context().unwrap_or_default());
+        }
+    }
+
+    async fn finish(&self, outcome: &TurnOutcome) {
+        if self.hooks.is_empty() {
+            return;
+        }
+        let payload = self.payload(serde_json::json!({
+            "steps": outcome.steps,
+            "stopped": outcome.stopped,
+            "reply": outcome.reply,
+            "input_tokens": outcome.input_tokens,
+            "output_tokens": outcome.output_tokens,
+        }));
+        self.hooks.run(hooks::Event::TurnEnd, &outcome.stopped, &payload).await;
+    }
+
+    fn payload(&self, mut extra: serde_json::Value) -> serde_json::Value {
+        extra["session"] = rook_store::format_session_id(self.session).into();
+        extra["cwd"] = self.rook.workspace.display().to_string().into();
+        extra["model"] = self.rook.config.agent.model.clone().into();
+        extra
+    }
+
+    /// Consult the policy and any `pre_tool` hooks, and the user when the answer
+    /// is to ask. Returns the refusal to hand back to the model, or `None` when
+    /// the call may proceed.
     async fn gate(&self, call: &rook_llm::ToolCall) -> Option<String> {
         let tool = self.tools.get(&call.name)?;
         let risk = tool.risk(&call.arguments);
-        match self.policy.decide(&risk) {
+
+        // The policy runs first so a hook cannot unlock what the deny list
+        // forbids; everything else, a hook may override.
+        let mut decision = self.policy.decide(&risk);
+        if !matches!(decision, Decision::Deny(_)) && !self.hooks.is_empty() {
+            let payload = self.payload(serde_json::json!({
+                "tool": call.name,
+                "input": call.arguments,
+                "action": risk.describe(),
+            }));
+            let outcome = self.hooks.run(hooks::Event::PreTool, &call.name, &payload).await;
+            if let Some(hooked) = outcome.decision {
+                decision = hooked;
+            }
+        }
+
+        match decision {
             Decision::Allow => None,
             Decision::Deny(why) => Some(format!("refused: {why}")),
             Decision::Ask => match self.approver.ask(&call.name, &risk).await {

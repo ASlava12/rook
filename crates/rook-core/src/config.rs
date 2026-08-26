@@ -26,6 +26,9 @@ pub struct Config {
     pub sandbox: SandboxConfig,
     pub telemetry: TelemetryConfig,
     pub memory: MemoryConfig,
+    /// Commands run at points in a turn, as `[[hooks]]` tables.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hooks: Vec<crate::hooks::HookConfig>,
     /// External tool servers, as `[[mcp]]` tables in config.toml. Omitted from a
     /// written config when empty: TOML cannot hold both `mcp = []` and a later
     /// `[[mcp]]` table, so emitting the empty array would block the documented

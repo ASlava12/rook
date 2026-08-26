@@ -53,6 +53,13 @@ substring also blocks `rm -rf /tmp/scratch` and `rm -rf ./target`. A deny list
 that cries wolf gets turned off, so the shipped rules are tested in both
 directions: what they must stop, and what they must leave alone.
 
+## Hooks fit under the same rule
+
+A `pre_tool` hook may answer `allow`, `ask` or `deny`, and it is consulted after
+the policy rather than before, so it can loosen an `ask` but never a `deny`. A
+hook that fails to run is treated as a denial for the call it was guarding: a
+guard that could not run is not an approval.
+
 ## Cost
 
 - `rook run` no longer writes files unattended without `--yes`. That is a
