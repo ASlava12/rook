@@ -27,7 +27,7 @@ const HELP: &str = "  /context [window]   what this conversation costs, and of w
 
 Ctrl-C stops the turn in flight. Ctrl-D leaves.";
 
-pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>) -> Result<()> {
+pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: bool) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let rook = Rook::open(workspace)?;
     let provider = rook_llm::from_spec(&rook.config.agent.model, rook.config.agent.stream_idle())
@@ -78,7 +78,7 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>) -> Res
                 }
                 let provider =
                     rook_llm::from_spec(&rook.config.agent.model, rook.config.agent.stream_idle())?;
-                runtime.block_on(turn(&rook, provider, session, &mcp, &line));
+                runtime.block_on(turn(&rook, provider, session, &mcp, &line, yes));
             }
             // Ctrl-C at the prompt clears the line rather than leaving; the
             // reflex from every other REPL is to press it to abandon input.
@@ -101,8 +101,14 @@ async fn turn(
     session: u128,
     mcp: &rook_core::McpSession,
     prompt: &str,
+    yes: bool,
 ) {
     let mut agent = AgentLoop::new(rook, provider.into(), session);
+    if yes {
+        agent.allow_everything_not_denied();
+    } else {
+        agent.approver = std::sync::Arc::new(crate::approve::Terminal);
+    }
     for (server, tools) in &mcp.servers {
         agent.tools.register_server(server.clone(), tools.clone());
     }

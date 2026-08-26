@@ -9,7 +9,7 @@ as a feature rather than a debugging afterthought: a CLI, a terminal browser and
 web UI, all views over the same engine.
 
 > **Status: early.** The storage layer, the skill system and the inspection tools
-> are implemented and covered by 79 tests. The agent loop — tool dispatch, skill
+> are implemented and covered by 94 tests. The agent loop — tool dispatch, skill
 > loading, budgeting, logging — is tested against a scripted provider; it has not
 > yet been exercised against a live model in CI. Streaming, MCP and ACP are on the
 > [roadmap](docs/roadmap.md) and are not implemented. Nothing below describes
@@ -111,6 +111,22 @@ rook session rewind 01JQ… --to 12               # conversation and files
 rook session rewind 01JQ… --to 12 --keep-files  # conversation only
 rook session fork 01JQ… --at 12                 # branch without touching files
 ```
+
+### What it is allowed to do
+
+By default the agent asks before anything that changes the machine, and refuses
+outright what the deny list forbids — no approval can override a denial:
+
+```toml
+[sandbox]
+mode  = "ask"                      # auto | ask | readonly
+allow = ["git status", '/^(ls|cat|rg)\b/']   # plain string, or /regex/
+ask   = ["git push"]                          # prompts even in auto mode
+deny  = ['/\brm\s+(-[a-zA-Z]+\s+)*\/(\s|\*|$)/']
+```
+
+`rook --yes` skips the prompts for one run. Unattended runs with no `--yes`
+refuse rather than improvise, and say what would have made it possible.
 
 ### Delegation
 
@@ -250,7 +266,8 @@ lose people's trust:
   It says so clearly; routing the CLI through the daemon is
   [ADR-0006](docs/adr/0006-single-writer-store.md).
 - **The web UI is read-only.**
-- **No sandboxing beyond a deny list and a workspace boundary.** Not a jail.
+- **Permissions are pattern matching, not a sandbox.** They raise the floor;
+  `curl … | sh` is one obfuscation away from any rule. Not a jail.
 
 ## Development
 

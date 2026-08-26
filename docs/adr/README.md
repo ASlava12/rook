@@ -14,3 +14,4 @@ usually goes missing.
 | [0006](0006-single-writer-store.md) | One writer process; the CLI opens the store directly for now | accepted, revisit |
 | [0007](0007-no-js-build-step.md) | The web UI is one hand-written file with no bundler | accepted |
 | [0008](0008-hand-written-mcp-client.md) | A hand-written MCP client instead of the SDK | accepted |
+| [0009](0009-ask-before-acting.md) | Ask before acting; a denial always wins | accepted |

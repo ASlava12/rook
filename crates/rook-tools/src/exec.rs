@@ -37,14 +37,6 @@ impl Tool for RunCommand {
     async fn call(&self, ctx: &ToolContext, args: &serde_json::Value) -> Result<ToolOutcome> {
         let command = arg_str(args, self.name(), "command")?;
 
-        // Deny list first: these are refused even with interactive approval,
-        // because there is no recovery from them.
-        for pattern in &ctx.deny {
-            if command.contains(pattern.as_str()) {
-                return Err(ToolError::Denied(format!("command matches the deny list entry {pattern:?}")));
-            }
-        }
-
         let cwd = match args.get("cwd").and_then(|v| v.as_str()) {
             Some(rel) => ctx.resolve(rel)?,
             None => ctx.workspace.clone(),
@@ -112,6 +104,16 @@ impl Tool for RunCommand {
             meta: Default::default(),
         }
         .with("exit_code", code))
+    }
+
+    fn risk(&self, args: &serde_json::Value) -> crate::policy::Risk {
+        crate::policy::Risk::Execute(Self::command_of(args))
+    }
+}
+
+impl RunCommand {
+    fn command_of(args: &serde_json::Value) -> String {
+        args.get("command").and_then(|c| c.as_str()).unwrap_or_default().to_string()
     }
 }
 

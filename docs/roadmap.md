@@ -26,6 +26,10 @@ what unblocks the most.
   separates what a fresh turn would carry from what is merely stored.
 - **Tools** — paged `read_file`, `write_file`, unambiguous `edit_file`, `list_dir`,
   regex `search`, `run_command` with timeout, output cap and deny list.
+- **Permissions** — three modes and regex allow/ask/deny rules over what a call
+  would actually do, defaulting to asking, with denial beating everything
+  ([ADR-0009](adr/0009-ask-before-acting.md)). 12 tests, including the shipped
+  deny rules checked in both directions.
 - **Delegation** — a `delegate` pseudo-tool runs a sub-task in a child session
   with its own context and returns only its conclusion, so bulk stays out of the
   parent while remaining readable in the child. Depth-limited, with optional
@@ -95,7 +99,8 @@ unchanged.
 **Anthropic and Google native providers.** The OpenAI dialect covers a great deal
 but not extended thinking or native prompt caching.
 
-**Real sandboxing.** Today's boundary is a workspace path check and a deny list.
+**Real sandboxing.** Today's boundary is a workspace path check and pattern
+rules ([ADR-0009](adr/0009-ask-before-acting.md)) — text matching, not containment.
 Platform-native containment — seccomp, Seatbelt, Capsicum, Job Objects — is a
 serious piece of work and platform-specific by nature.
 

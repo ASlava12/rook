@@ -17,6 +17,7 @@
 use futures_util::StreamExt;
 use rook_llm::{Assembler, Delta, Message, Provider, Request, Role, StopReason, ToolSpec};
 use rook_store::EventKind;
+use rook_tools::policy::{Approver, Decision, Policy, Unattended};
 use rook_tools::{ToolBox, ToolContext};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -61,6 +62,10 @@ pub struct AgentLoop<'a> {
     pub tools: ToolBox,
     pub tool_ctx: ToolContext,
     pub session: u128,
+    pub policy: std::sync::Arc<Policy>,
+    /// Consulted whenever the policy says to ask. Refuses by default, so an
+    /// unattended run cannot silently do something nobody reviewed.
+    pub approver: std::sync::Arc<dyn Approver>,
     pub depth: u32,
     pub max_steps: u32,
     budget: ContextBudget,
@@ -71,8 +76,12 @@ impl<'a> AgentLoop<'a> {
         let mut tool_ctx = ToolContext::new(rook.workspace.clone());
         tool_ctx.max_output_bytes = rook.config.sandbox.max_output_bytes;
         tool_ctx.command_timeout = std::time::Duration::from_secs(rook.config.sandbox.command_timeout_secs);
-        tool_ctx.allow = rook.config.sandbox.allow.clone();
-        tool_ctx.deny = rook.config.sandbox.deny.clone();
+
+        let sandbox = &rook.config.sandbox;
+        let (policy, bad_rules) = Policy::compile(sandbox.mode, &sandbox.allow, &sandbox.ask, &sandbox.deny);
+        for error in bad_rules {
+            tracing::warn!("ignoring unusable sandbox rule: {error}");
+        }
         let budget = ContextBudget::new(provider.context_window(), rook.config.agent.compact_at);
         Self {
             rook,
@@ -80,6 +89,8 @@ impl<'a> AgentLoop<'a> {
             tools: ToolBox::standard(),
             tool_ctx,
             session,
+            policy: std::sync::Arc::new(policy),
+            approver: std::sync::Arc::new(Unattended),
             depth: 0,
             max_steps: rook.config.agent.max_steps,
             budget,
@@ -396,6 +407,11 @@ impl<'a> AgentLoop<'a> {
             };
         }
 
+        if let Some(refusal) = self.gate(call).await {
+            self.rook.log(self.session, EventKind::ToolResult, &call.name, &refusal).ok();
+            return refusal;
+        }
+
         self.checkpoint_before(call);
         let result = self.tools.call(&self.tool_ctx, &call.name, &call.arguments).await;
         let text = match result {
@@ -432,6 +448,8 @@ impl<'a> AgentLoop<'a> {
         child.depth = self.depth + 1;
         child.tools = self.tools.clone();
         child.tool_ctx = self.tool_ctx.clone();
+        child.policy = self.policy.clone();
+        child.approver = self.approver.clone();
         if let Some(steps) = args.get("max_steps").and_then(|s| s.as_u64()) {
             child.max_steps = steps as u32;
         }
@@ -516,6 +534,32 @@ impl<'a> AgentLoop<'a> {
                     Err(e) => format!("could not recall: {e}"),
                 }
             }
+        }
+    }
+
+    /// Skip every prompt: run whatever the deny list does not forbid.
+    pub fn allow_everything_not_denied(&mut self) {
+        let sandbox = &self.rook.config.sandbox;
+        let (policy, _) = Policy::compile(rook_tools::policy::Mode::Auto, &sandbox.allow, &[], &sandbox.deny);
+        self.policy = std::sync::Arc::new(policy);
+    }
+
+    /// Consult the policy, and the user when it says to. Returns the refusal to
+    /// hand back to the model, or `None` when the call may proceed.
+    async fn gate(&self, call: &rook_llm::ToolCall) -> Option<String> {
+        let tool = self.tools.get(&call.name)?;
+        let risk = tool.risk(&call.arguments);
+        match self.policy.decide(&risk) {
+            Decision::Allow => None,
+            Decision::Deny(why) => Some(format!("refused: {why}")),
+            Decision::Ask => match self.approver.ask(&call.name, &risk).await {
+                rook_tools::policy::Approval::Once => None,
+                rook_tools::policy::Approval::ForRun => {
+                    self.policy.grant_for_run(&risk.subject());
+                    None
+                }
+                rook_tools::policy::Approval::Deny(why) => Some(format!("refused: {why}")),
+            },
         }
     }
 

@@ -14,6 +14,7 @@
 pub mod exec;
 pub mod files;
 pub mod mcp;
+pub mod policy;
 pub mod search;
 
 use std::collections::BTreeMap;
@@ -84,8 +85,6 @@ pub struct ToolContext {
     pub workspace: PathBuf,
     pub max_output_bytes: usize,
     pub command_timeout: std::time::Duration,
-    pub allow: Vec<String>,
-    pub deny: Vec<String>,
     /// When false, tools refuse paths outside the workspace.
     pub allow_outside_workspace: bool,
 }
@@ -96,8 +95,6 @@ impl ToolContext {
             workspace,
             max_output_bytes: 256 * 1024,
             command_timeout: std::time::Duration::from_secs(120),
-            allow: Vec::new(),
-            deny: Vec::new(),
             allow_outside_workspace: false,
         }
     }
@@ -150,6 +147,14 @@ pub trait Tool: Send + Sync {
     /// first. Empty for read-only tools.
     fn touched_paths(&self, _args: &serde_json::Value) -> Vec<String> {
         Vec::new()
+    }
+
+    /// What this call would do to the machine, for the approval policy.
+    fn risk(&self, args: &serde_json::Value) -> policy::Risk {
+        match self.touched_paths(args) {
+            paths if paths.is_empty() => policy::Risk::ReadOnly,
+            paths => policy::Risk::Write(paths),
+        }
     }
 }
 

@@ -93,9 +93,13 @@ pub struct ServerConfig {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SandboxConfig {
-    /// Commands the agent may run without asking.
+    pub mode: rook_tools::policy::Mode,
+    /// Patterns the agent may act on without asking. A plain string matches as a
+    /// substring; `/…/` is a regular expression.
     pub allow: Vec<String>,
-    /// Commands that are refused even when the user approves interactively.
+    /// Patterns that always prompt, even in `auto` mode.
+    pub ask: Vec<String>,
+    /// Patterns refused outright, which no approval can override.
     pub deny: Vec<String>,
     /// Cap on a single command's captured output, before it is stored and
     /// summarised rather than pasted into context.
@@ -148,10 +152,29 @@ impl Default for ServerConfig {
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
-            allow: vec!["git status".into(), "git diff".into(), "cargo check".into()],
-            // Denied outright: these are the shapes that turn a bad turn into an
-            // unrecoverable one.
-            deny: vec!["rm -rf /".into(), "mkfs".into(), "dd if=".into(), ":(){ :|:& };:".into()],
+            mode: rook_tools::policy::Mode::Ask,
+            allow: vec![
+                "git status".into(),
+                "git diff".into(),
+                "git log".into(),
+                "/^(ls|cat|head|tail|wc|rg|grep|find)\\b/".into(),
+            ],
+            ask: Vec::new(),
+            // Denied outright: the shapes that turn a bad turn into an
+            // unrecoverable one. Anchored deliberately — a substring rule for
+            // `rm -rf /` would also block `rm -rf /tmp/scratch`, and a deny list
+            // that cries wolf gets turned off.
+            deny: [
+                r"/\brm\s+(-[a-zA-Z]+\s+)*\/(\s|\*|$)/",
+                r"/\bmkfs(\.|\s)/",
+                r"/\bdd\s+[^|]*\bof=\/dev\//",
+                r"/>\s*\/dev\/(sd|nvme|disk)/",
+                r"/:\(\)\s*\{.*\|.*&.*\}\s*;\s*:/",
+                r"/\bchmod\s+-R\s+777\s+\/\s*$/",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect(),
             max_output_bytes: 256 * 1024,
             command_timeout_secs: 120,
         }

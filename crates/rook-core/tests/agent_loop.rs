@@ -289,6 +289,7 @@ async fn a_mutating_tool_is_checkpointed_and_a_rewind_undoes_it() {
         reply("done"),
     ]));
     let mut agent = AgentLoop::new(&f.rook, provider, session);
+    agent.allow_everything_not_denied();
     agent.run("rewrite notes.txt").await.unwrap();
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "rewritten\n");
 
@@ -317,6 +318,7 @@ async fn a_rewind_deletes_a_file_the_agent_created() {
         reply("created"),
     ]));
     let mut agent = AgentLoop::new(&f.rook, provider, session);
+    agent.allow_everything_not_denied();
     agent.run("create new.txt").await.unwrap();
     assert!(created.exists());
 
@@ -361,6 +363,7 @@ async fn context_usage_separates_what_is_live_from_what_is_merely_stored() {
         reply("done"),
     ]));
     let mut agent = AgentLoop::new(&f.rook, provider, session);
+    agent.allow_everything_not_denied();
     agent.run("shrink it").await.unwrap();
 
     let usage = f.rook.context_usage(session, 128_000).unwrap();
@@ -646,4 +649,66 @@ async fn a_child_can_inherit_the_recent_conversation_when_asked() {
         f.rook.transcript(child, 0, usize::MAX, 10_000).unwrap().iter().map(|e| e.body.clone()).collect();
     assert!(inherited.contains("migrating to redb"), "the inherited context should be there");
     let _ = seen;
+}
+
+#[tokio::test]
+async fn an_unattended_run_refuses_what_it_cannot_get_approved() {
+    let f = fixture();
+    let session = f.rook.start_session("unattended").unwrap();
+    let target = f.workspace.path().join("out.txt");
+
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("write_file", serde_json::json!({ "path": "out.txt", "content": "x" })),
+        reply("could not write"),
+    ]));
+    AgentLoop::new(&f.rook, provider, session).run("write out.txt").await.unwrap();
+
+    assert!(!target.exists(), "nothing may run unreviewed when nothing can review it");
+    let entries = f.rook.transcript(session, 0, usize::MAX, 4096).unwrap();
+    let refusal = entries.iter().find(|e| e.kind == "tool-result").unwrap();
+    assert!(refusal.body.contains("refused"), "{}", refusal.body);
+    assert!(refusal.body.contains("--yes"), "the refusal must say how to proceed: {}", refusal.body);
+}
+
+#[tokio::test]
+async fn allowing_everything_not_denied_lets_the_turn_through() {
+    let f = fixture();
+    let session = f.rook.start_session("approved").unwrap();
+
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("write_file", serde_json::json!({ "path": "out.txt", "content": "x" })),
+        reply("written"),
+    ]));
+    let mut agent = AgentLoop::new(&f.rook, provider, session);
+    agent.allow_everything_not_denied();
+    agent.run("write out.txt").await.unwrap();
+
+    assert_eq!(std::fs::read_to_string(f.workspace.path().join("out.txt")).unwrap(), "x");
+}
+
+#[tokio::test]
+async fn the_deny_list_holds_even_with_everything_else_allowed() {
+    let f = fixture();
+    let mut config = Config::default();
+    config.sandbox.deny = vec!["/rm -rf/".into()];
+    let rook = Rook::from_parts(
+        Store::open(f._store_dir.path().join("deny")).unwrap(),
+        config,
+        f.rook.env.clone(),
+        SkillIndex::default(),
+        PathBuf::from(f.workspace.path()),
+    );
+    let session = rook.start_session("deny").unwrap();
+
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("run_command", serde_json::json!({ "command": "rm -rf /tmp/whatever" })),
+        reply("refused"),
+    ]));
+    let mut agent = AgentLoop::new(&rook, provider, session);
+    agent.allow_everything_not_denied();
+    agent.run("clean up").await.unwrap();
+
+    let entries = rook.transcript(session, 0, usize::MAX, 4096).unwrap();
+    let result = entries.iter().find(|e| e.kind == "tool-result").unwrap();
+    assert!(result.body.contains("refused"), "{}", result.body);
 }

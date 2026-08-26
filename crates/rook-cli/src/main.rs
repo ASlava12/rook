@@ -1,5 +1,6 @@
 //! `rook` — the command line and TUI front end.
 
+mod approve;
 mod chat;
 mod fmt;
 mod tui;
@@ -29,6 +30,9 @@ struct Cli {
     /// Emit JSON instead of tables.
     #[arg(long, global = true)]
     json: bool,
+    /// Approve everything the deny list does not forbid, without asking.
+    #[arg(long, short = 'y', global = true)]
+    yes: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -259,12 +263,12 @@ fn main() -> Result<()> {
     match cli.command {
         // Bare `rook` opens a conversation: talking to the agent is the point,
         // and every comparable tool starts there.
-        None => chat::run(cli.workspace, None),
+        None => chat::run(cli.workspace, None, cli.yes),
         Some(Command::Tui) => tui::run(Rook::open(cli.workspace)?),
         Some(Command::Init) => cmd_init(cli.workspace),
         Some(Command::Doctor) => cmd_doctor(&Rook::open(cli.workspace)?, cli.json),
-        Some(Command::Chat { session }) => chat::run(cli.workspace, session),
-        Some(Command::Run { prompt, session }) => cmd_run(cli.workspace, prompt, session),
+        Some(Command::Chat { session }) => chat::run(cli.workspace, session, cli.yes),
+        Some(Command::Run { prompt, session }) => cmd_run(cli.workspace, prompt, session, cli.yes),
         Some(Command::Serve { port }) => cmd_serve(port),
         Some(Command::Store(c)) => cmd_store(&Rook::open(cli.workspace)?, c, cli.json),
         Some(Command::Session(c)) => cmd_session(&Rook::open(cli.workspace)?, c, cli.json),
@@ -332,7 +336,12 @@ fn cmd_doctor(rook: &Rook, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_run(workspace: Option<PathBuf>, prompt: Vec<String>, session: Option<String>) -> Result<()> {
+fn cmd_run(
+    workspace: Option<PathBuf>,
+    prompt: Vec<String>,
+    session: Option<String>,
+    yes: bool,
+) -> Result<()> {
     let prompt = prompt.join(" ");
     if prompt.trim().is_empty() {
         bail!("nothing to do: pass a prompt");
@@ -347,6 +356,11 @@ fn cmd_run(workspace: Option<PathBuf>, prompt: Vec<String>, session: Option<Stri
             None => rook.start_session(&first_line(&prompt))?,
         };
         let mut agent = rook_core::agent::AgentLoop::new(&rook, provider.into(), session);
+        // `run` is scripted more often than watched, so it refuses what it cannot
+        // get approved rather than prompting into a pipe.
+        if yes {
+            agent.allow_everything_not_denied();
+        }
         let mcp = rook.connect_mcp().await;
         for (server, tools) in &mcp.servers {
             agent.tools.register_server(server.clone(), tools.clone());
