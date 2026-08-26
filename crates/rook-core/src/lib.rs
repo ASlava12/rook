@@ -9,13 +9,15 @@ pub mod config;
 pub mod context;
 pub mod error;
 pub mod fileset;
+pub mod memory;
 pub mod paths;
 pub mod service;
 
 pub use config::{Config, ConfigError};
 pub use error::{CoreError, Result};
 pub use fileset::{CaptureLimits, Change, FileSet};
+pub use memory::{Fact, MemoryBook, Scope};
 pub use service::{
-    AGENT_VERSION, ContextUsage, KindUsage, MaintenanceReport, McpSession, Rewind, Rollback, Rook,
-    SkillVersionRecord, TranscriptEntry,
+    AGENT_VERSION, ContextUsage, KindUsage, MaintenanceReport, McpSession, MemoryVersion, Rewind, Rollback,
+    Rook, SkillVersionRecord, TranscriptEntry,
 };

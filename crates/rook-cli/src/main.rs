@@ -74,6 +74,44 @@ enum Command {
     /// Inspect the external tool servers from `[[mcp]]` in config.toml.
     #[command(subcommand)]
     Mcp(McpCmd),
+    /// Read, edit and audit what the agent remembers.
+    #[command(subcommand)]
+    Memory(MemoryCmd),
+}
+
+#[derive(Subcommand)]
+enum MemoryCmd {
+    /// Everything remembered that applies here.
+    Ls {
+        /// Include facts scoped to other workspaces.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Rank memory against a query, showing why each result matched.
+    Search { query: Vec<String> },
+    /// Teach it something.
+    Add {
+        text: Vec<String>,
+        #[arg(long)]
+        tag: Vec<String>,
+        /// Applies everywhere, not just this workspace.
+        #[arg(long)]
+        global: bool,
+        /// Always keep in context, regardless of relevance.
+        #[arg(long)]
+        pin: bool,
+    },
+    /// Drop a fact by id or exact text.
+    Rm { id: String },
+    /// Every recorded state of memory.
+    History,
+    /// What changed between two recorded states.
+    Diff { a: String, b: String },
+    /// What has been learned or forgotten since a number of days ago.
+    Since {
+        #[arg(default_value_t = 1)]
+        days: i64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -233,6 +271,7 @@ fn main() -> Result<()> {
         Some(Command::Skills(c)) => cmd_skills(&Rook::open(cli.workspace)?, c, cli.json),
         Some(Command::Checkpoint(c)) => cmd_checkpoint(&Rook::open(cli.workspace)?, c, cli.json),
         Some(Command::Mcp(c)) => cmd_mcp(cli.workspace, c, cli.json),
+        Some(Command::Memory(c)) => cmd_memory(&Rook::open(cli.workspace)?, c, cli.json),
     }
 }
 
@@ -809,6 +848,113 @@ fn cmd_skills(rook: &Rook, cmd: SkillCmd, json: bool) -> Result<()> {
                 for f in &result.left_behind {
                     println!("  {f}");
                 }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn cmd_memory(rook: &Rook, cmd: MemoryCmd, json: bool) -> Result<()> {
+    let workspace = rook.workspace.display().to_string();
+    match cmd {
+        MemoryCmd::Ls { all } => {
+            let book = rook.memory()?;
+            let facts: Vec<_> =
+                if all { book.facts.iter().collect() } else { book.in_scope(&workspace).collect() };
+            if json {
+                println!("{}", serde_json::to_string_pretty(&facts)?);
+                return Ok(());
+            }
+            let rows: Vec<Vec<String>> = facts
+                .iter()
+                .map(|f| {
+                    vec![
+                        f.id.clone(),
+                        if f.pinned { "pin".into() } else { String::new() },
+                        f.scope.label().rsplit('/').next().unwrap_or("global").to_string(),
+                        f.tags.join(","),
+                        f.text.chars().take(70).collect(),
+                    ]
+                })
+                .collect();
+            print!("{}", fmt::table(&["id", "", "scope", "tags", "fact"], &rows));
+            if !all && facts.len() < book.facts.len() {
+                println!("\n{} more scoped to other workspaces (--all)", book.facts.len() - facts.len());
+            }
+        }
+
+        MemoryCmd::Search { query } => {
+            let book = rook.memory()?;
+            let hits = rook_core::memory::search(book.in_scope(&workspace), &query.join(" "));
+            if json {
+                println!("{}", serde_json::to_string_pretty(&hits)?);
+                return Ok(());
+            }
+            if hits.is_empty() {
+                println!("nothing matched");
+            }
+            for hit in hits {
+                println!("[{}] {}", hit.fact.id, hit.fact.text);
+                let why = if hit.matched.is_empty() { "pinned".into() } else { hit.matched.join(", ") };
+                println!("      score {:.1} · {why}", hit.score);
+            }
+        }
+
+        MemoryCmd::Add { text, tag, global, pin } => {
+            let scope = if global { rook_core::Scope::Global } else { rook_core::Scope::Project(workspace) };
+            let mut fact = rook_core::Fact::new(text.join(" "), scope).with_tags(tag);
+            fact.pinned = pin;
+            let id = fact.id.clone();
+            match rook.remember(fact, Some("added from the command line".into()))? {
+                true => println!("remembered as [{id}]"),
+                false => println!("already remembered as [{id}]"),
+            }
+        }
+
+        MemoryCmd::Rm { id } => match rook.forget(&id, Some("removed from the command line".into()))? {
+            Some(fact) => println!("forgot [{}] {}", fact.id, fact.text),
+            None => bail!("no fact {id:?}"),
+        },
+
+        MemoryCmd::History => {
+            let history = rook.memory_history()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&history)?);
+                return Ok(());
+            }
+            let rows: Vec<Vec<String>> = history
+                .iter()
+                .map(|v| {
+                    vec![
+                        v.object.chars().take(12).collect(),
+                        fmt::timestamp(v.updated_at),
+                        v.facts.to_string(),
+                        v.note.clone().unwrap_or_default(),
+                    ]
+                })
+                .collect();
+            print!("{}", fmt::table(&["object", "when", "facts", "note"], &rows));
+        }
+
+        MemoryCmd::Diff { a, b } => {
+            let changes = rook.memory_diff(&resolve_object(rook, &a)?, &resolve_object(rook, &b)?)?;
+            if changes.is_empty() {
+                println!("identical");
+            }
+            for (change, fact) in changes {
+                let sigil = if change == rook_core::memory::Change::Learned { '+' } else { '-' };
+                println!("{sigil} [{}] {}", fact.id, fact.text);
+            }
+        }
+
+        MemoryCmd::Since { days } => {
+            let changes = rook.memory_since(rook_store::now_unix() - days * 86_400)?;
+            if changes.is_empty() {
+                println!("nothing learned or forgotten in the last {days} day(s)");
+            }
+            for (change, fact) in changes {
+                let sigil = if change == rook_core::memory::Change::Learned { '+' } else { '-' };
+                println!("{sigil} [{}] {}", fact.id, fact.text);
             }
         }
     }

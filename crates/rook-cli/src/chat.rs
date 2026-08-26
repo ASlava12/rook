@@ -18,6 +18,7 @@ use crate::fmt;
 const HELP: &str = "  /context [window]   what this conversation costs, and of what
   /skills [name]      skills that apply here, or one skill's body
   /session            id, size and token totals
+  /memory [query]     what it remembers, or what matches
   /mcp                connected tool servers
   /undo               rewind past the last exchange, files included
   /rewind <seq>       rewind to a specific point in the transcript
@@ -187,6 +188,26 @@ async fn dispatch(
         "skills" => {
             let resolved = rook.skills.resolve(rest, &rook.env)?;
             println!("{}", resolved.body);
+        }
+
+        "memory" => {
+            let book = rook.memory()?;
+            let workspace = rook.workspace.display().to_string();
+            let facts: Vec<_> = if rest.is_empty() {
+                book.in_scope(&workspace).cloned().collect()
+            } else {
+                rook_core::memory::search(book.in_scope(&workspace), rest)
+                    .into_iter()
+                    .map(|h| h.fact)
+                    .collect()
+            };
+            if facts.is_empty() {
+                println!("nothing remembered yet");
+            }
+            for fact in facts {
+                let pin = if fact.pinned { "* " } else { "  " };
+                println!("{pin}[{}] {}", fact.id, fact.text);
+            }
         }
 
         "session" => {

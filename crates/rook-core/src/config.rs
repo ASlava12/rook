@@ -25,6 +25,7 @@ pub struct Config {
     pub server: ServerConfig,
     pub sandbox: SandboxConfig,
     pub telemetry: TelemetryConfig,
+    pub memory: MemoryConfig,
     /// External tool servers, as `[[mcp]]` tables in config.toml. Omitted from a
     /// written config when empty: TOML cannot hold both `mcp = []` and a later
     /// `[[mcp]]` table, so emitting the empty array would block the documented
@@ -49,6 +50,21 @@ pub struct AgentConfig {
     /// How long the model may go silent mid-stream before the turn gives up.
     /// A dropped connection is indistinguishable from deep thought without it.
     pub stream_idle_timeout_secs: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryConfig {
+    pub enabled: bool,
+    /// Ceiling on what recalled facts may cost in the system prompt. Memory that
+    /// silently grows into the context window is the failure this prevents.
+    pub context_budget_tokens: usize,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self { enabled: true, context_budget_tokens: 600 }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

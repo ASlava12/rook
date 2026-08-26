@@ -9,7 +9,7 @@ as a feature rather than a debugging afterthought: a CLI, a terminal browser and
 web UI, all views over the same engine.
 
 > **Status: early.** The storage layer, the skill system and the inspection tools
-> are implemented and covered by 69 tests. The agent loop — tool dispatch, skill
+> are implemented and covered by 76 tests. The agent loop — tool dispatch, skill
 > loading, budgeting, logging — is tested against a scripted provider; it has not
 > yet been exercised against a live model in CI. Streaming, MCP and ACP are on the
 > [roadmap](docs/roadmap.md) and are not implemented. Nothing below describes
@@ -111,6 +111,26 @@ rook session rewind 01JQ… --to 12               # conversation and files
 rook session rewind 01JQ… --to 12 --keep-files  # conversation only
 rook session fork 01JQ… --at 12                 # branch without touching files
 ```
+
+### Memory
+
+The agent can remember things across sessions, and you can read, correct and
+audit what it believes:
+
+```sh
+rook memory ls                        # what applies in this workspace
+rook memory search "how do deploys work"   # ranked, with why each matched
+rook memory add --pin --global "never force-push to main"
+rook memory since 7                   # what it learned or forgot this week
+rook memory history                   # every recorded state
+rook memory diff <objA> <objB>
+```
+
+Each fact carries where it came from — the session and turn that produced it —
+so a wrong memory is traceable back to the turn that formed it. Every change
+writes a new version, which is what makes `since`, `diff` and rollback possible.
+Facts are scoped global or per-workspace, and only what matches the current
+prompt enters the context, under a token budget.
 
 ### External tools
 

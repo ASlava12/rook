@@ -26,6 +26,12 @@ what unblocks the most.
   separates what a fresh turn would carry from what is merely stored.
 - **Tools** — paged `read_file`, `write_file`, unambiguous `edit_file`, `list_dir`,
   regex `search`, `run_command` with timeout, output cap and deny list.
+- **Memory** — durable facts with provenance, global or per-workspace scope,
+  pinning, and a version per change so `memory since`, `memory diff` and rollback
+  all work. Retrieval is term overlap with prefix matching, budgeted into the
+  prompt; the agent edits it through `remember`/`forget`/`recall`. This is the
+  shape [hermes-agent#12238](https://github.com/NousResearch/hermes-agent/issues/12238)
+  asked for. 7 tests.
 - **MCP client** — stdio transport, written directly rather than via the SDK
   ([ADR-0008](adr/0008-hand-written-mcp-client.md)). Servers connect concurrently,
   failures are reported rather than fatal, and their tools join the toolbox
@@ -63,13 +69,10 @@ falling back to direct access. Removes the single-writer papercut
 elision marked. A summarising pass over the elided span is strictly better; the
 full transcript stays in the store either way.
 
-**Memory beyond the transcript.** `Kind::Memory` exists and nothing writes it yet.
-Wanted: durable facts with provenance, a diff of what a session learned, and the
-same capture/rollback treatment skills already get — the shape
-[hermes-agent#12238](https://github.com/NousResearch/hermes-agent/issues/12238)
-asked for.
-
 ## After that
+
+**Memory consolidation.** Nothing merges near-duplicate facts or ages out stale
+ones yet; the identity check only catches exact repeats.
 
 **MCP over HTTP.** The stdio transport covers local servers; hosted ones need the
 streamable-HTTP transport.

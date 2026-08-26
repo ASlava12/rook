@@ -25,8 +25,12 @@ use crate::context::{ContextBudget, estimate_tokens};
 use crate::error::{CoreError, Result};
 use crate::service::Rook;
 
-/// The pseudo-tool through which the model pulls a skill body into context.
+/// Pseudo-tools: implemented by the loop rather than the toolbox, because they
+/// need the agent's own state.
 pub const LOAD_SKILL: &str = "load_skill";
+pub const REMEMBER: &str = "remember";
+pub const FORGET: &str = "forget";
+pub const RECALL: &str = "recall";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TurnOutcome {
@@ -37,6 +41,7 @@ pub struct TurnOutcome {
     pub output_tokens: u32,
     pub tools_called: Vec<String>,
     pub skills_loaded: Vec<String>,
+    pub facts_learned: Vec<String>,
     pub compactions: u32,
 }
 
@@ -66,7 +71,7 @@ impl<'a> AgentLoop<'a> {
     /// FreeBSD with BSD userland stops reaching for `sed -i` with a GNU argument
     /// order, which is the single most common cross-platform failure in agent
     /// transcripts.
-    pub fn system_prompt(&self) -> String {
+    pub fn system_prompt(&self, prompt: &str) -> String {
         let env = &self.rook.env;
         let mut s = String::new();
         s.push_str(
@@ -87,6 +92,21 @@ impl<'a> AgentLoop<'a> {
         if !env.tools.is_empty() {
             let tools: Vec<String> = env.tools.iter().map(|(k, v)| format!("{k} {v}")).collect();
             s.push_str(&format!("tools: {}\n", tools.join(", ")));
+        }
+
+        let facts = if self.rook.config.memory.enabled {
+            self.rook.recall(prompt, self.rook.config.memory.context_budget_tokens).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        if !facts.is_empty() {
+            s.push_str(
+                "\n## Memory\nThings you were told to remember. \
+                 Correct one with `forget` when it turns out to be wrong.\n",
+            );
+            for fact in facts {
+                s.push_str(&format!("- [{}] {}\n", fact.id, fact.text));
+            }
         }
 
         let cards = self.rook.catalog();
@@ -164,6 +184,41 @@ impl<'a> AgentLoop<'a> {
                 "required": ["name"]
             }),
         });
+        if self.rook.config.memory.enabled {
+            specs.push(ToolSpec {
+                name: REMEMBER.into(),
+                description: "Remember something for future sessions. Use it for durable facts                               — preferences, conventions, decisions — not for what is already in                               this conversation."
+                    .into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "text": { "type": "string", "description": "One self-contained fact." },
+                        "tags": { "type": "array", "items": { "type": "string" } },
+                        "scope": { "type": "string", "enum": ["global", "project"], "default": "project" },
+                        "pinned": { "type": "boolean", "description": "Always keep in context." }
+                    },
+                    "required": ["text"]
+                }),
+            });
+            specs.push(ToolSpec {
+                name: FORGET.into(),
+                description: "Drop a remembered fact by its id, once it is wrong or stale.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": { "id": { "type": "string" } },
+                    "required": ["id"]
+                }),
+            });
+            specs.push(ToolSpec {
+                name: RECALL.into(),
+                description: "Search memory for facts beyond the ones already in context.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": { "query": { "type": "string" } },
+                    "required": ["query"]
+                }),
+            });
+        }
         specs
     }
 
@@ -182,7 +237,7 @@ impl<'a> AgentLoop<'a> {
 
         // The prompt was just logged, so replaying the session already ends
         // with it: the log is the only source of truth for what was said.
-        let mut messages = vec![Message::system(self.system_prompt())];
+        let mut messages = vec![Message::system(self.system_prompt(prompt))];
         messages.extend(self.history()?);
         let mut outcome = TurnOutcome {
             steps: 0,
@@ -192,6 +247,7 @@ impl<'a> AgentLoop<'a> {
             output_tokens: 0,
             tools_called: Vec::new(),
             skills_loaded: Vec::new(),
+            facts_learned: Vec::new(),
             compactions: 0,
         };
 
@@ -255,6 +311,15 @@ impl<'a> AgentLoop<'a> {
     async fn dispatch(&self, call: &rook_llm::ToolCall, outcome: &mut TurnOutcome) -> String {
         self.rook.log(self.session, EventKind::ToolCall, &call.name, &call.arguments.to_string()).ok();
 
+        match call.name.as_str() {
+            REMEMBER | FORGET | RECALL => {
+                let text = self.memory_tool(&call.name, &call.arguments, outcome);
+                self.rook.log(self.session, EventKind::ToolResult, &call.name, &text).ok();
+                return text;
+            }
+            _ => {}
+        }
+
         if call.name == LOAD_SKILL {
             let name = call.arguments.get("name").and_then(|v| v.as_str()).unwrap_or_default();
             return match self.rook.skills.resolve(name, &self.rook.env) {
@@ -286,6 +351,55 @@ impl<'a> AgentLoop<'a> {
         };
         self.rook.log(self.session, EventKind::ToolResult, &call.name, &text).ok();
         text
+    }
+
+    fn memory_tool(&self, name: &str, args: &serde_json::Value, outcome: &mut TurnOutcome) -> String {
+        let string = |key: &str| args.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        match name {
+            REMEMBER => {
+                let text = string("text");
+                if text.trim().is_empty() {
+                    return "remember needs non-empty text".into();
+                }
+                let scope = match string("scope").as_str() {
+                    "global" => crate::memory::Scope::Global,
+                    _ => crate::memory::Scope::Project(self.rook.workspace.display().to_string()),
+                };
+                let tags = args
+                    .get("tags")
+                    .and_then(|t| t.as_array())
+                    .map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+                let mut fact = crate::memory::Fact::new(text, scope).with_tags(tags).from_turn(
+                    self.session,
+                    self.rook.store.get_session(self.session).ok().flatten().map(|m| m.next_seq).unwrap_or(0),
+                );
+                fact.pinned = args.get("pinned").and_then(|p| p.as_bool()).unwrap_or(false);
+                let id = fact.id.clone();
+                match self.rook.remember(fact, Some(format!("learned in turn {}", outcome.steps))) {
+                    Ok(true) => {
+                        outcome.facts_learned.push(id.clone());
+                        format!("remembered as [{id}]")
+                    }
+                    Ok(false) => format!("already remembered as [{id}]"),
+                    Err(e) => format!("could not remember: {e}"),
+                }
+            }
+            FORGET => match self.rook.forget(&string("id"), Some("forgotten by the agent".into())) {
+                Ok(Some(fact)) => format!("forgot [{}] {}", fact.id, fact.text),
+                Ok(None) => format!("no fact {:?} to forget", string("id")),
+                Err(e) => format!("could not forget: {e}"),
+            },
+            _ => {
+                match self.rook.recall(&string("query"), self.rook.config.memory.context_budget_tokens * 2) {
+                    Ok(facts) if facts.is_empty() => "nothing remembered about that".into(),
+                    Ok(facts) => {
+                        facts.iter().map(|f| format!("[{}] {}", f.id, f.text)).collect::<Vec<_>>().join("\n")
+                    }
+                    Err(e) => format!("could not recall: {e}"),
+                }
+            }
+        }
     }
 
     /// Snapshot whatever a mutating tool is about to touch, so `rook session

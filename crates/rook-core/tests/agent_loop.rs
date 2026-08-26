@@ -135,7 +135,7 @@ async fn the_system_prompt_carries_the_environment_and_skill_cards_not_bodies() 
     let session = f.rook.start_session("test").unwrap();
     let provider = Box::new(ScriptedProvider::new(vec![reply("ok")]));
     let mut agent = AgentLoop::new(&f.rook, provider, session);
-    let prompt = agent.system_prompt();
+    let prompt = agent.system_prompt("hi");
 
     assert!(prompt.contains("os: linux"), "{prompt}");
     assert!(prompt.contains("gnu userland"), "{prompt}");
@@ -427,4 +427,141 @@ async fn replayed_tool_calls_keep_their_results_paired() {
         "a tool result must reference the call it answers, or the provider rejects the request"
     );
     assert_eq!(call_msg.tool_calls[0].name, "read_file");
+}
+
+#[tokio::test]
+async fn the_agent_can_remember_and_recall_across_sessions() {
+    let f = fixture();
+    let first = f.rook.start_session("learn").unwrap();
+    let provider = Box::new(ScriptedProvider::new(vec![
+        call(
+            "remember",
+            serde_json::json!({ "text": "this project uses tabs, not spaces", "tags": ["style"] }),
+        ),
+        reply("noted"),
+    ]));
+    let outcome = AgentLoop::new(&f.rook, provider, first).run("we use tabs here").await.unwrap();
+    assert_eq!(outcome.facts_learned.len(), 1);
+
+    // A different session must see it — that is the whole point of memory.
+    let second = f.rook.start_session("apply").unwrap();
+    let provider = ScriptedProvider::new(vec![reply("ok")]);
+    let seen = provider.share();
+    AgentLoop::new(&f.rook, Box::new(provider), second)
+        .run("what indentation style should I use?")
+        .await
+        .unwrap();
+
+    let system = seen.lock().unwrap().last().cloned().unwrap().messages[0].content.clone();
+    assert!(system.contains("tabs, not spaces"), "recalled memory belongs in the prompt:\n{system}");
+}
+
+#[tokio::test]
+async fn irrelevant_memory_stays_out_of_the_prompt() {
+    let f = fixture();
+    f.rook
+        .remember(rook_core::Fact::new("the deploy key lives in 1password", rook_core::Scope::Global), None)
+        .unwrap();
+    f.rook
+        .remember(rook_core::Fact::new("prefer ripgrep over grep", rook_core::Scope::Global), None)
+        .unwrap();
+
+    let session = f.rook.start_session("s").unwrap();
+    let provider = ScriptedProvider::new(vec![reply("ok")]);
+    let seen = provider.share();
+    AgentLoop::new(&f.rook, Box::new(provider), session).run("how do I deploy?").await.unwrap();
+
+    let system = seen.lock().unwrap().last().cloned().unwrap().messages[0].content.clone();
+    assert!(system.contains("deploy key"), "the matching fact should be recalled");
+    assert!(!system.contains("ripgrep"), "an unrelated fact must not ride along:\n{system}");
+}
+
+#[tokio::test]
+async fn a_pinned_fact_is_always_present() {
+    let f = fixture();
+    let mut fact = rook_core::Fact::new("never force-push to main", rook_core::Scope::Global);
+    fact.pinned = true;
+    f.rook.remember(fact, None).unwrap();
+
+    let session = f.rook.start_session("s").unwrap();
+    let provider = ScriptedProvider::new(vec![reply("ok")]);
+    let seen = provider.share();
+    AgentLoop::new(&f.rook, Box::new(provider), session)
+        .run("something entirely unrelated to git")
+        .await
+        .unwrap();
+
+    let system = seen.lock().unwrap().last().cloned().unwrap().messages[0].content.clone();
+    assert!(system.contains("force-push"), "a pinned fact ignores relevance:\n{system}");
+}
+
+#[tokio::test]
+async fn remembering_the_same_thing_twice_does_not_duplicate_it() {
+    let f = fixture();
+    let fact = || rook_core::Fact::new("the build needs a C compiler", rook_core::Scope::Global);
+    assert!(f.rook.remember(fact(), None).unwrap());
+    assert!(!f.rook.remember(fact().with_tags(vec!["build".into()]), None).unwrap());
+
+    let book = f.rook.memory().unwrap();
+    assert_eq!(book.facts.len(), 1);
+    assert_eq!(book.facts[0].tags, vec!["build"], "the repeat should merge its tags in");
+}
+
+#[tokio::test]
+async fn memory_keeps_its_history_and_can_say_what_changed() {
+    let f = fixture();
+    f.rook
+        .remember(rook_core::Fact::new("first thing", rook_core::Scope::Global), Some("one".into()))
+        .unwrap();
+    let after_first = rook_store::now_unix();
+    f.rook
+        .remember(rook_core::Fact::new("second thing", rook_core::Scope::Global), Some("two".into()))
+        .unwrap();
+    f.rook.forget("first thing", Some("three".into())).unwrap();
+
+    let history = f.rook.memory_history().unwrap();
+    assert_eq!(history.len(), 3, "every change is a version");
+    assert_eq!(history[0].note.as_deref(), Some("three"), "newest first");
+
+    let changes = f.rook.memory_since(after_first).unwrap();
+    let learned: Vec<_> = changes.iter().filter(|(c, _)| *c == rook_core::memory::Change::Learned).collect();
+    let forgotten: Vec<_> =
+        changes.iter().filter(|(c, _)| *c == rook_core::memory::Change::Forgotten).collect();
+    assert_eq!(learned.len(), 1);
+    assert_eq!(learned[0].1.text, "second thing");
+    assert_eq!(forgotten.len(), 1);
+    assert_eq!(forgotten[0].1.text, "first thing");
+}
+
+#[tokio::test]
+async fn project_facts_do_not_leak_into_other_workspaces() {
+    let f = fixture();
+    let here = f.rook.workspace.display().to_string();
+    f.rook
+        .remember(rook_core::Fact::new("this repo deploys on fridays", rook_core::Scope::Project(here)), None)
+        .unwrap();
+    f.rook
+        .remember(
+            rook_core::Fact::new("elsewhere deploys on mondays", rook_core::Scope::Project("/other".into())),
+            None,
+        )
+        .unwrap();
+
+    let recalled = f.rook.recall("when does it deploy", 500).unwrap();
+    assert_eq!(recalled.len(), 1, "{recalled:?}");
+    assert!(recalled[0].text.contains("fridays"));
+}
+
+#[tokio::test]
+async fn a_recalled_fact_says_why_it_matched() {
+    let f = fixture();
+    let fact = rook_core::Fact::new("run the migrations before deploying", rook_core::Scope::Global)
+        .with_tags(vec!["deploy".into()]);
+    f.rook.remember(fact, None).unwrap();
+
+    let book = f.rook.memory().unwrap();
+    let hits = rook_core::memory::search(book.facts.iter(), "how do I deploy");
+    assert_eq!(hits.len(), 1);
+    assert!(hits[0].matched.contains(&"#deploy".to_string()), "{:?}", hits[0].matched);
+    assert!(hits[0].score >= 2.0, "a tag hit should outrank a bare word");
 }

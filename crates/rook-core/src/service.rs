@@ -14,9 +14,13 @@ use rook_store::{
 use crate::config::Config;
 use crate::error::{CoreError, Result};
 use crate::fileset::{self, CaptureLimits, Change, FileSet};
+use crate::memory::{self, Fact, MemoryBook};
 use crate::paths;
 
 pub const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+const MEMORY_HEAD: &str = "memory/head";
+const MEMORY_LOG: &str = "memory/h/";
 
 pub struct Rook {
     pub store: Store,
@@ -432,6 +436,91 @@ impl Rook {
         session
     }
 
+    // ---------------------------------------------------------------- memory
+
+    /// The current memory, or an empty book if nothing has been remembered.
+    pub fn memory(&self) -> Result<MemoryBook> {
+        match self.store.get_ref(MEMORY_HEAD)? {
+            Some(id) => MemoryBook::load(&self.store, &id),
+            None => Ok(MemoryBook::default()),
+        }
+    }
+
+    /// Returns whether the fact was new. A repeat that folds in new tags or
+    /// pinning is still written — otherwise the merge would be silently lost.
+    pub fn remember(&self, fact: Fact, note: Option<String>) -> Result<bool> {
+        let mut book = self.memory()?;
+        let learned = book.learn(fact);
+        if learned != memory::Learned::Unchanged {
+            self.save_memory(&book, note)?;
+        }
+        Ok(learned == memory::Learned::New)
+    }
+
+    pub fn forget(&self, id_or_text: &str, note: Option<String>) -> Result<Option<Fact>> {
+        let mut book = self.memory()?;
+        let removed = book.forget(id_or_text);
+        if removed.is_some() {
+            self.save_memory(&book, note)?;
+        }
+        Ok(removed)
+    }
+
+    /// Facts relevant to `query` that fit in `budget` tokens, scoped to this
+    /// workspace.
+    pub fn recall(&self, query: &str, budget: usize) -> Result<Vec<Fact>> {
+        let book = self.memory()?;
+        let workspace = self.workspace.display().to_string();
+        Ok(memory::select(book.in_scope(&workspace), query, budget))
+    }
+
+    pub fn memory_history(&self) -> Result<Vec<MemoryVersion>> {
+        let mut out = Vec::new();
+        for (reference, id) in self.store.list_refs(MEMORY_LOG)? {
+            let book = MemoryBook::load(&self.store, &id)?;
+            out.push(MemoryVersion {
+                reference,
+                object: id.to_hex(),
+                updated_at: book.updated_at,
+                facts: book.facts.len(),
+                note: book.note.clone(),
+            });
+        }
+        out.sort_by(|a, b| b.reference.cmp(&a.reference));
+        Ok(out)
+    }
+
+    pub fn memory_diff(&self, a: &ObjectId, b: &ObjectId) -> Result<Vec<(memory::Change, Fact)>> {
+        Ok(MemoryBook::load(&self.store, a)?.diff(&MemoryBook::load(&self.store, b)?))
+    }
+
+    /// What the agent learned since `since` — the answer to "what changed today".
+    pub fn memory_since(&self, since: i64) -> Result<Vec<(memory::Change, Fact)>> {
+        let history = self.memory_history()?;
+        let Some(baseline) = history.iter().rev().find(|v| v.updated_at <= since) else {
+            let book = self.memory()?;
+            return Ok(book.facts.into_iter().map(|f| (memory::Change::Learned, f)).collect());
+        };
+        let from = ObjectId::from_hex(&baseline.object)
+            .ok_or_else(|| CoreError::Other("corrupt memory history".into()))?;
+        let current = self.store.get_ref(MEMORY_HEAD)?;
+        match current {
+            Some(head) => self.memory_diff(&from, &head),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    fn save_memory(&self, book: &MemoryBook, note: Option<String>) -> Result<ObjectId> {
+        let mut book = book.clone();
+        book.note = note;
+        book.updated_at = rook_store::now_unix();
+        let id = book.store(&self.store)?;
+        self.store.set_ref(MEMORY_HEAD, &id)?;
+        self.store
+            .set_ref(&format!("{MEMORY_LOG}{:015}-{}", rook_store::now_unix_millis(), id.short()), &id)?;
+        Ok(id)
+    }
+
     // ------------------------------------------------------------ maintenance
 
     pub fn stats(&self) -> Result<StoreStats> {
@@ -477,6 +566,16 @@ fn walk_files(root: &Path) -> Vec<PathBuf> {
         .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
         .map(|e| e.path().to_path_buf())
         .collect()
+}
+
+/// One recorded state of memory.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MemoryVersion {
+    pub reference: String,
+    pub object: String,
+    pub updated_at: i64,
+    pub facts: usize,
+    pub note: Option<String>,
 }
 
 #[derive(Default)]
