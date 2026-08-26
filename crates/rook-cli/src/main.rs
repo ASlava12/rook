@@ -1,0 +1,709 @@
+//! `rook` — the command line and TUI front end.
+
+mod fmt;
+mod tui;
+
+use std::path::PathBuf;
+
+use anyhow::{Context, Result, bail};
+use clap::{Parser, Subcommand};
+
+use rook_core::{AGENT_VERSION, Rook};
+use rook_store::{Kind, ObjectId};
+
+#[derive(Parser)]
+#[command(
+    name = "rook",
+    version = AGENT_VERSION,
+    about = "A compact autonomous agent with an inspectable memory",
+    long_about = "Rook keeps everything it does in a content-addressed local store.\n\
+                  Every subcommand under `store`, `session` and `skills` exists so that\n\
+                  memory is something you can read, diff and roll back — not a black box."
+)]
+struct Cli {
+    /// Workspace root. Defaults to the current directory.
+    #[arg(long, short = 'C', global = true)]
+    workspace: Option<PathBuf>,
+    /// Emit JSON instead of tables.
+    #[arg(long, global = true)]
+    json: bool,
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Create the store, the config file and a sample skill.
+    Init,
+    /// Report what Rook detected about this machine and what it means for skills.
+    Doctor,
+    /// Run a single turn against the configured model.
+    Run {
+        prompt: Vec<String>,
+        /// Continue an existing session instead of starting one.
+        #[arg(long)]
+        session: Option<String>,
+    },
+    /// Browse the store, sessions and skills in a terminal UI.
+    Tui,
+    /// Start the HTTP backend and web UI.
+    Serve {
+        #[arg(long)]
+        port: Option<u16>,
+    },
+    /// Inspect and maintain the object store.
+    #[command(subcommand)]
+    Store(StoreCmd),
+    /// Inspect session transcripts.
+    #[command(subcommand)]
+    Session(SessionCmd),
+    /// List, author and version skills.
+    #[command(subcommand)]
+    Skills(SkillCmd),
+    /// Snapshot and restore parts of the workspace.
+    #[command(subcommand)]
+    Checkpoint(CheckpointCmd),
+}
+
+#[derive(Subcommand)]
+enum StoreCmd {
+    /// Size, compression ratio and per-kind breakdown.
+    Stat,
+    /// List objects.
+    Ls {
+        #[arg(long)]
+        kind: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
+    /// Print one object by hash prefix.
+    Cat { id: String },
+    /// List refs, optionally under a prefix.
+    Refs { prefix: Option<String> },
+    /// Collect unreachable objects.
+    Gc {
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Apply the retention policy.
+    Prune {
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Re-read and re-hash every object.
+    Verify,
+    /// Train compression dictionaries from what is already stored.
+    Train,
+}
+
+#[derive(Subcommand)]
+enum SessionCmd {
+    Ls,
+    /// Print a session transcript.
+    Show {
+        id: String,
+        #[arg(long, default_value_t = 0)]
+        from: u64,
+        #[arg(long, default_value_t = 200)]
+        limit: usize,
+        /// Bytes of each payload to show before eliding.
+        #[arg(long, default_value_t = 4096)]
+        max_body: usize,
+    },
+    Rm {
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum SkillCmd {
+    /// List skills that apply here.
+    Ls {
+        /// Include skills whose requirements do not match this machine.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Print a skill's resolved body for this environment.
+    Show { name: String },
+    /// Explain which version was chosen and why the others were not.
+    Why { name: String },
+    /// Scaffold a new skill.
+    New {
+        name: String,
+        #[arg(long, short)]
+        description: String,
+    },
+    /// Record the skill's current content as a new version in the store.
+    Capture {
+        name: String,
+        #[arg(long, short)]
+        message: Option<String>,
+    },
+    /// Show a skill's captured versions.
+    History { name: String },
+    /// Diff two captures by object id.
+    Diff { a: String, b: String },
+    /// Restore a captured version over the skill's directory.
+    Rollback { name: String, object: String },
+}
+
+#[derive(Subcommand)]
+enum CheckpointCmd {
+    Create {
+        name: String,
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
+    Ls,
+    Restore {
+        object: String,
+        #[arg(long)]
+        to: PathBuf,
+    },
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    tracing_subscriber::fmt()
+        .with_env_filter(std::env::var("ROOK_LOG").unwrap_or_else(|_| "warn".into()))
+        .with_writer(std::io::stderr)
+        .init();
+
+    match cli.command {
+        None | Some(Command::Tui) => {
+            let rook = Rook::open(cli.workspace)?;
+            tui::run(rook)
+        }
+        Some(Command::Init) => cmd_init(cli.workspace),
+        Some(Command::Doctor) => cmd_doctor(&Rook::open(cli.workspace)?, cli.json),
+        Some(Command::Run { prompt, session }) => cmd_run(cli.workspace, prompt, session),
+        Some(Command::Serve { port }) => cmd_serve(port),
+        Some(Command::Store(c)) => cmd_store(&Rook::open(cli.workspace)?, c, cli.json),
+        Some(Command::Session(c)) => cmd_session(&Rook::open(cli.workspace)?, c, cli.json),
+        Some(Command::Skills(c)) => cmd_skills(&Rook::open(cli.workspace)?, c, cli.json),
+        Some(Command::Checkpoint(c)) => cmd_checkpoint(&Rook::open(cli.workspace)?, c, cli.json),
+    }
+}
+
+fn cmd_init(workspace: Option<PathBuf>) -> Result<()> {
+    let rook = Rook::open(workspace)?;
+    rook.config.save().ok();
+    println!("store       {}", rook.store.root().display());
+    println!("config      {}", rook_core::paths::config_file().display());
+    println!("skills      {}", rook_core::paths::user_skills_dir().display());
+    println!("model       {}", rook.config.agent.model);
+    println!();
+    println!("Next: `rook skills new my-skill -d \"...\"`, then `rook doctor`.");
+    Ok(())
+}
+
+fn cmd_doctor(rook: &Rook, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(&rook.env)?);
+        return Ok(());
+    }
+    let env = &rook.env;
+    println!("rook {AGENT_VERSION}");
+    println!("os        {} ({} userland)", env.os, env.userland);
+    println!("arch      {}", env.arch);
+    println!("workspace {}", rook.workspace.display());
+    println!("store     {}", rook.store.root().display());
+    println!();
+    println!("toolchains detected:");
+    if env.languages.is_empty() {
+        println!("  (none)");
+    }
+    for (k, v) in &env.languages {
+        println!("  {k:<10} {v}");
+    }
+    println!();
+    println!("tools detected:");
+    if env.tools.is_empty() {
+        println!("  (none)");
+    }
+    for (k, v) in &env.tools {
+        println!("  {k:<10} {v}");
+    }
+
+    let cards = rook.catalog();
+    let (ok, blocked): (Vec<_>, Vec<_>) = cards.iter().partition(|c| c.applicable);
+    println!();
+    println!("skills: {} usable, {} blocked here", ok.len(), blocked.len());
+    for c in blocked {
+        println!("  {} — {}", c.name, c.mismatches.join("; "));
+    }
+    if !rook.skill_errors.is_empty() {
+        println!();
+        println!("skills that failed to load:");
+        for e in &rook.skill_errors {
+            println!("  {e}");
+        }
+    }
+    Ok(())
+}
+
+fn cmd_run(workspace: Option<PathBuf>, prompt: Vec<String>, session: Option<String>) -> Result<()> {
+    let prompt = prompt.join(" ");
+    if prompt.trim().is_empty() {
+        bail!("nothing to do: pass a prompt");
+    }
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    runtime.block_on(async move {
+        let rook = Rook::open(workspace)?;
+        let provider = rook_llm::from_spec(&rook.config.agent.model)
+            .with_context(|| format!("configuring model {:?}", rook.config.agent.model))?;
+        let session = match session {
+            Some(s) => rook_store::parse_session_id(&s).context("not a session id")?,
+            None => rook.start_session(&first_line(&prompt))?,
+        };
+        let mut agent = rook_core::agent::AgentLoop::new(&rook, provider, session);
+        let outcome = agent.run(&prompt).await?;
+        println!("{}", outcome.reply);
+        eprintln!(
+            "\n[session {} · {} steps · {} in / {} out tokens · {} tool calls{}]",
+            rook_store::format_session_id(session),
+            outcome.steps,
+            outcome.input_tokens,
+            outcome.output_tokens,
+            outcome.tools_called.len(),
+            if outcome.compactions > 0 {
+                format!(" · {} compactions", outcome.compactions)
+            } else {
+                String::new()
+            }
+        );
+        anyhow::Ok(())
+    })
+}
+
+fn first_line(s: &str) -> String {
+    s.lines().next().unwrap_or("session").chars().take(72).collect()
+}
+
+fn cmd_serve(port: Option<u16>) -> Result<()> {
+    let mut config = rook_core::Config::load();
+    if let Some(p) = port {
+        config.server.port = p;
+    }
+    bail!(
+        "the daemon lives in its own binary: run `rookd --port {}`.\n\
+         It is separate so an editor integration or a headless box can run the backend \
+         without pulling in the TUI.",
+        config.server.port
+    )
+}
+
+fn cmd_store(rook: &Rook, cmd: StoreCmd, json: bool) -> Result<()> {
+    match cmd {
+        StoreCmd::Stat => {
+            let s = rook.stats()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&s)?);
+                return Ok(());
+            }
+            println!(
+                "objects        {:>12}  ({} inline, {} external)",
+                s.objects, s.inline_objects, s.external_objects
+            );
+            println!("logical size   {:>12}", fmt::bytes(s.bytes_raw));
+            println!(
+                "stored size    {:>12}  ({:.1}x compression)",
+                fmt::bytes(s.bytes_stored),
+                s.compression_ratio()
+            );
+            println!("saved by dedup {:>12}", fmt::bytes(s.dedup_saved_hint));
+            println!(
+                "on disk        {:>12}  (index {}, objects {})",
+                fmt::bytes(s.disk_bytes()),
+                fmt::bytes(s.index_bytes),
+                fmt::bytes(s.external_bytes)
+            );
+            println!("sessions       {:>12}", s.sessions);
+            println!("events         {:>12}", s.events);
+            println!("refs           {:>12}", s.refs);
+            if !s.dictionaries.is_empty() {
+                let d: Vec<String> =
+                    s.dictionaries.iter().map(|(k, v)| format!("{k} {}", fmt::bytes(*v))).collect();
+                println!("dictionaries   {}", d.join(", "));
+            } else {
+                println!("dictionaries   none yet — run `rook store train` once you have some history");
+            }
+            println!();
+            let max = s.per_kind.iter().map(|k| k.bytes_stored).max().unwrap_or(0);
+            let rows: Vec<Vec<String>> = s
+                .per_kind
+                .iter()
+                .map(|k| {
+                    vec![
+                        k.kind.clone(),
+                        k.objects.to_string(),
+                        fmt::bytes(k.bytes_raw),
+                        fmt::bytes(k.bytes_stored),
+                        format!("{:.1}x", k.ratio()),
+                        fmt::bar(k.bytes_stored, max, 20),
+                    ]
+                })
+                .collect();
+            print!("{}", fmt::table(&["kind", "objects", "logical", "stored", "ratio", ""], &rows));
+        }
+        StoreCmd::Ls { kind, limit } => {
+            let want = kind.as_deref().map(parse_kind).transpose()?;
+            let objects = rook.store.list_objects(want, limit)?;
+            if json {
+                let items: Vec<_> = objects
+                    .iter()
+                    .map(|(id, m)| {
+                        serde_json::json!({
+                            "id": id.to_hex(), "kind": Kind::from_u8(m.kind).as_str(),
+                            "raw": m.size_raw, "stored": m.size_stored, "created_at": m.created_at,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&items)?);
+                return Ok(());
+            }
+            let rows: Vec<Vec<String>> = objects
+                .iter()
+                .map(|(id, m)| {
+                    vec![
+                        id.short(),
+                        Kind::from_u8(m.kind).as_str().to_string(),
+                        fmt::bytes(m.size_raw),
+                        fmt::bytes(m.size_stored),
+                        if m.external { "file".into() } else { "inline".into() },
+                        fmt::timestamp(m.created_at),
+                    ]
+                })
+                .collect();
+            print!("{}", fmt::table(&["id", "kind", "logical", "stored", "where", "created"], &rows));
+        }
+        StoreCmd::Cat { id } => {
+            let object = rook
+                .store
+                .resolve_prefix(&id)?
+                .with_context(|| format!("no object matches {id:?} (or the prefix is ambiguous)"))?;
+            let data = rook.store.get(&object)?;
+            use std::io::Write;
+            std::io::stdout().write_all(&data)?;
+        }
+        StoreCmd::Refs { prefix } => {
+            let refs = rook.store.list_refs(prefix.as_deref().unwrap_or(""))?;
+            if json {
+                let items: Vec<_> =
+                    refs.iter().map(|(n, id)| serde_json::json!({"ref": n, "object": id.to_hex()})).collect();
+                println!("{}", serde_json::to_string_pretty(&items)?);
+                return Ok(());
+            }
+            let rows: Vec<Vec<String>> = refs.iter().map(|(n, id)| vec![n.clone(), id.short()]).collect();
+            print!("{}", fmt::table(&["ref", "object"], &rows));
+        }
+        StoreCmd::Gc { dry_run } => {
+            let report = rook.store.gc(&rook_store::GcOptions {
+                expand: Some(&rook_core::fileset::gc_expander),
+                dry_run,
+                ..Default::default()
+            })?;
+            println!(
+                "{}scanned {}, reachable {}, collected {} ({} freed), orphan files {}",
+                if dry_run { "[dry run] " } else { "" },
+                report.scanned,
+                report.reachable,
+                report.collected,
+                fmt::bytes(report.bytes_freed),
+                report.orphan_files_removed
+            );
+        }
+        StoreCmd::Prune { dry_run } => {
+            let report = rook.store.prune(&rook.config.storage.retention, dry_run)?;
+            println!(
+                "{}sessions deleted {}, events deleted {}, protected {}",
+                if dry_run { "[dry run] " } else { "" },
+                report.sessions_deleted,
+                report.events_deleted,
+                report.protected
+            );
+            if !dry_run {
+                println!("run `rook store gc` to reclaim the space");
+            }
+        }
+        StoreCmd::Verify => {
+            let bad = rook.store.verify()?;
+            if bad.is_empty() {
+                println!("all objects verified");
+            } else {
+                for (id, reason) in &bad {
+                    println!("{}  {reason}", id.short());
+                }
+                bail!("{} object(s) failed verification", bad.len());
+            }
+        }
+        StoreCmd::Train => {
+            let trained = rook.store.train_dictionaries(
+                rook.config.storage.train_dictionaries_after,
+                rook.config.storage.dictionary_bytes,
+            )?;
+            if trained.is_empty() {
+                println!("not enough samples yet — dictionaries need at least 32 objects of a kind");
+            }
+            for (kind, size) in trained {
+                println!("trained {kind}: {}", fmt::bytes(size as u64));
+            }
+            println!("existing objects keep their old encoding; new ones use the dictionary");
+        }
+    }
+    Ok(())
+}
+
+fn parse_kind(s: &str) -> Result<Kind> {
+    Ok(match s {
+        "message" => Kind::Message,
+        "tool-result" | "tool_result" => Kind::ToolResult,
+        "file" => Kind::FileBlob,
+        "skill" => Kind::Skill,
+        "memory" => Kind::Memory,
+        "snapshot" => Kind::Snapshot,
+        "other" => Kind::Other,
+        other => bail!(
+            "unknown kind {other:?}; expected one of message, tool-result, file, skill, memory, snapshot, other"
+        ),
+    })
+}
+
+fn cmd_session(rook: &Rook, cmd: SessionCmd, json: bool) -> Result<()> {
+    match cmd {
+        SessionCmd::Ls => {
+            let sessions = rook.sessions()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&sessions)?);
+                return Ok(());
+            }
+            let rows: Vec<Vec<String>> = sessions
+                .iter()
+                .map(|s| {
+                    vec![
+                        rook_store::format_session_id(s.id),
+                        s.title.chars().take(40).collect(),
+                        s.event_count.to_string(),
+                        format!("{}/{}", s.tokens_in, s.tokens_out),
+                        fmt::ago(s.updated_at),
+                        s.workspace.clone(),
+                    ]
+                })
+                .collect();
+            print!("{}", fmt::table(&["id", "title", "events", "tok in/out", "updated", "workspace"], &rows));
+        }
+        SessionCmd::Show { id, from, limit, max_body } => {
+            let sid = rook_store::parse_session_id(&id).context("not a session id")?;
+            let entries = rook.transcript(sid, from, limit, max_body)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&entries)?);
+                return Ok(());
+            }
+            for e in entries {
+                println!(
+                    "── #{:<4} {:<12} {:<20} {} → {} {}",
+                    e.seq,
+                    e.kind,
+                    e.label.chars().take(20).collect::<String>(),
+                    fmt::bytes(e.bytes),
+                    fmt::bytes(e.stored_bytes),
+                    if e.truncated { "(elided)" } else { "" }
+                );
+                println!("{}\n", e.body);
+            }
+        }
+        SessionCmd::Rm { id } => {
+            let sid = rook_store::parse_session_id(&id).context("not a session id")?;
+            let removed = rook.store.delete_session(sid)?;
+            println!("removed session with {removed} events; run `rook store gc` to reclaim space");
+        }
+    }
+    Ok(())
+}
+
+fn cmd_skills(rook: &Rook, cmd: SkillCmd, json: bool) -> Result<()> {
+    match cmd {
+        SkillCmd::Ls { all } => {
+            let cards: Vec<_> = rook.catalog().into_iter().filter(|c| all || c.applicable).collect();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&cards)?);
+                return Ok(());
+            }
+            let rows: Vec<Vec<String>> = cards
+                .iter()
+                .map(|c| {
+                    vec![
+                        if c.applicable { "✓".into() } else { "·".into() },
+                        c.name.clone(),
+                        c.version.clone(),
+                        c.source.clone(),
+                        format!("~{}", c.body_tokens),
+                        c.description.chars().take(60).collect(),
+                    ]
+                })
+                .collect();
+            print!("{}", fmt::table(&["", "name", "version", "source", "tokens", "description"], &rows));
+            if !all {
+                println!(
+                    "\n(`--all` also shows skills blocked by this environment; `rook skills why <name>` explains one)"
+                );
+            }
+        }
+        SkillCmd::Show { name } => {
+            let resolved = rook.skills.resolve(&name, &rook.env)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "name": resolved.skill.manifest.name,
+                        "version": resolved.skill.version().to_string(),
+                        "source": resolved.skill.source.label(),
+                        "dir": resolved.skill.dir,
+                        "variant": resolved.variant.as_ref().map(|v| v.body.clone()),
+                        "body": resolved.body,
+                    }))?
+                );
+                return Ok(());
+            }
+            println!(
+                "# {} {} ({})",
+                resolved.skill.manifest.name,
+                resolved.skill.version(),
+                resolved.skill.source.label()
+            );
+            if let Some(v) = &resolved.variant {
+                println!("variant: {} — selected for this environment", v.body.display());
+            }
+            println!("dir: {}\n", resolved.skill.dir.display());
+            println!("{}", resolved.body);
+        }
+        SkillCmd::Why { name } => {
+            let versions = rook.skills.versions_of(&name);
+            if versions.is_empty() {
+                bail!("no skill named {name:?}");
+            }
+            println!("environment: {} / {} / {} userland", rook.env.os, rook.env.arch, rook.env.userland);
+            println!();
+            for skill in &versions {
+                let mismatches = skill.manifest.requires.check(&rook.env);
+                if mismatches.is_empty() {
+                    println!("  ✓ {} [{}] applies", skill.id(), skill.source.label());
+                } else {
+                    println!("  ✗ {} [{}]", skill.id(), skill.source.label());
+                    for m in mismatches {
+                        println!("      {m}");
+                    }
+                }
+            }
+            println!();
+            match rook.skills.resolve(&name, &rook.env) {
+                Ok(r) => println!("chosen: {} [{}]", r.skill.id(), r.skill.source.label()),
+                Err(e) => println!("chosen: none — {e}"),
+            }
+        }
+        SkillCmd::New { name, description } => {
+            let dir = rook.new_skill(&name, &description)?;
+            println!("created {}", dir.join("SKILL.md").display());
+            println!("edit it, then `rook skills capture {name} -m \"first version\"`");
+        }
+        SkillCmd::Capture { name, message } => {
+            let (set, id) = rook.capture_skill(&name, message)?;
+            println!(
+                "captured {} v{} — {} file{}, {} → object {}",
+                set.name,
+                set.version,
+                set.files.len(),
+                if set.files.len() == 1 { "" } else { "s" },
+                fmt::bytes(set.total_bytes),
+                id.short()
+            );
+        }
+        SkillCmd::History { name } => {
+            let history = rook.skill_history(&name)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&history)?);
+                return Ok(());
+            }
+            if history.is_empty() {
+                println!("no captures yet — `rook skills capture {name}`");
+                return Ok(());
+            }
+            let rows: Vec<Vec<String>> = history
+                .iter()
+                .map(|h| {
+                    vec![
+                        h.object.chars().take(12).collect(),
+                        h.version.clone(),
+                        fmt::timestamp(h.captured_at),
+                        h.files.to_string(),
+                        fmt::bytes(h.bytes),
+                        h.note.clone().unwrap_or_default(),
+                    ]
+                })
+                .collect();
+            print!("{}", fmt::table(&["object", "version", "captured", "files", "size", "note"], &rows));
+        }
+        SkillCmd::Diff { a, b } => {
+            let a = resolve_object(rook, &a)?;
+            let b = resolve_object(rook, &b)?;
+            let changes = rook.skill_diff(&a, &b)?;
+            if changes.is_empty() {
+                println!("identical");
+            }
+            for (path, change) in changes {
+                println!("{} {path}", change.sigil());
+            }
+        }
+        SkillCmd::Rollback { name, object } => {
+            let id = resolve_object(rook, &object)?;
+            let result = rook.rollback_skill(&name, &id)?;
+            println!("restored {} file(s) for {name} from {}", result.restored, id.short());
+            println!("the previous state was captured first, so this is undoable");
+            if !result.left_behind.is_empty() {
+                println!("\nnot in that capture, left on disk in {}:", result.dir.display());
+                for f in &result.left_behind {
+                    println!("  {f}");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn resolve_object(rook: &Rook, prefix: &str) -> Result<ObjectId> {
+    rook.store
+        .resolve_prefix(prefix)?
+        .with_context(|| format!("no object matches {prefix:?} (or the prefix is ambiguous)"))
+}
+
+fn cmd_checkpoint(rook: &Rook, cmd: CheckpointCmd, json: bool) -> Result<()> {
+    match cmd {
+        CheckpointCmd::Create { name, path } => {
+            let (set, id) = rook.checkpoint(&name, path.as_deref())?;
+            println!(
+                "checkpoint {name}: {} files, {} → {}",
+                set.files.len(),
+                fmt::bytes(set.total_bytes),
+                id.short()
+            );
+        }
+        CheckpointCmd::Ls => {
+            let list = rook.checkpoints()?;
+            if json {
+                let items: Vec<_> =
+                    list.iter().map(|(n, id)| serde_json::json!({"ref": n, "object": id.to_hex()})).collect();
+                println!("{}", serde_json::to_string_pretty(&items)?);
+                return Ok(());
+            }
+            let rows: Vec<Vec<String>> = list.iter().map(|(n, id)| vec![n.clone(), id.short()]).collect();
+            print!("{}", fmt::table(&["ref", "object"], &rows));
+        }
+        CheckpointCmd::Restore { object, to } => {
+            let id = resolve_object(rook, &object)?;
+            let set = rook_core::FileSet::load(&rook.store, &id)?;
+            let written = set.restore(&rook.store, &to)?;
+            println!("restored {written} file(s) into {}", to.display());
+        }
+    }
+    Ok(())
+}

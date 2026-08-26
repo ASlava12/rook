@@ -1,0 +1,41 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/rook-store",
+    "crates/rook-skills",
+    "crates/rook-core",
+    "crates/rook-llm",
+    "crates/rook-tools",
+    "crates/rook-proto",
+    "crates/rookd",
+    "crates/rook-cli",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ASlava12/rook"
+authors = ["Rook contributors"]
+
+[workspace.dependencies]
+# internal
+rook-store  = { path = "crates/rook-store",  version = "0.1.0" }
+rook-skills = { path = "crates/rook-skills", version = "0.1.0" }
+rook-core   = { path = "crates/rook-core",   version = "0.1.0" }
+rook-llm    = { path = "crates/rook-llm",    version = "0.1.0" }
+rook-tools  = { path = "crates/rook-tools",  version = "0.1.0" }
+rook-proto  = { path = "crates/rook-proto",  version = "0.1.0" }
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+# Keep debug builds usable on large sessions.
+[profile.dev.package."*"]
+opt-level = 2

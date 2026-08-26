@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rook</title>
+<style>
+:root{
+  --bg:#fbfbfa; --panel:#fff; --line:#e4e2dd; --fg:#1c1b19; --dim:#78736c;
+  --accent:#2f6f4f; --warn:#9a6a00; --bad:#a33; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root{ --bg:#14150f; --panel:#1b1c16; --line:#2c2e25; --fg:#e8e6df; --dim:#8f8b81;
+         --accent:#7fbf95; --warn:#d9a441; --bad:#e07a6a; }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+     font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+header{display:flex;align-items:baseline;gap:1rem;padding:.9rem 1.2rem;border-bottom:1px solid var(--line)}
+header h1{margin:0;font-size:1rem;letter-spacing:.02em}
+header .meta{color:var(--dim);font-size:.8rem;font-family:var(--mono)}
+nav{display:flex;gap:.25rem;padding:0 1.2rem;border-bottom:1px solid var(--line)}
+nav button{background:none;border:none;border-bottom:2px solid transparent;color:var(--dim);
+  padding:.6rem .8rem;cursor:pointer;font-size:.9rem}
+nav button[aria-selected=true]{color:var(--fg);border-bottom-color:var(--accent)}
+main{padding:1.2rem;max-width:1400px}
+.grid{display:grid;grid-template-columns:minmax(240px,1fr) 2fr;gap:1rem;align-items:start}
+@media(max-width:860px){.grid{grid-template-columns:1fr}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:1rem}
+.card h2{margin:0 0 .7rem;font-size:.78rem;text-transform:uppercase;letter-spacing:.08em;color:var(--dim)}
+ul.list{list-style:none;margin:0;padding:0;max-height:70vh;overflow:auto}
+ul.list li{padding:.5rem .6rem;border-radius:6px;cursor:pointer;border:1px solid transparent}
+ul.list li:hover{background:var(--bg)}
+ul.list li[aria-current=true]{border-color:var(--line);background:var(--bg)}
+.name{font-weight:600}
+.sub{color:var(--dim);font-size:.8rem;font-family:var(--mono)}
+table{width:100%;border-collapse:collapse;font-size:.85rem}
+th{text-align:left;color:var(--dim);font-weight:500;padding:.35rem .5rem;border-bottom:1px solid var(--line)}
+td{padding:.35rem .5rem;border-bottom:1px solid var(--line);font-family:var(--mono)}
+td.t{font-family:inherit}
+.bar{display:inline-block;height:.55rem;background:var(--accent);border-radius:2px;vertical-align:middle}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:.2rem 1.2rem;font-family:var(--mono);font-size:.85rem}
+.kv dt{color:var(--dim)}
+.kv dd{margin:0}
+.entry{border-left:2px solid var(--line);padding:.1rem 0 .8rem .8rem;margin-bottom:.4rem}
+.entry .hd{font-family:var(--mono);font-size:.78rem;color:var(--dim);display:flex;gap:.7rem;flex-wrap:wrap}
+.entry pre{margin:.35rem 0 0;white-space:pre-wrap;word-break:break-word;font-family:var(--mono);
+  font-size:.82rem;max-height:26rem;overflow:auto}
+.tag{font-family:var(--mono);font-size:.72rem;padding:.05rem .35rem;border-radius:3px;border:1px solid var(--line)}
+.ok{color:var(--accent)} .warn{color:var(--warn)} .bad{color:var(--bad)}
+.empty{color:var(--dim);padding:1.5rem 0;text-align:center}
+.scroll{max-height:74vh;overflow:auto}
+</style>
+</head>
+<body>
+<header>
+  <h1>rook</h1>
+  <span class="meta" id="meta">connecting…</span>
+</header>
+<nav>
+  <button data-tab="sessions" aria-selected="true">Sessions</button>
+  <button data-tab="skills">Skills</button>
+  <button data-tab="store">Store</button>
+</nav>
+<main id="view"></main>
+
+<script>
+const $ = (s, r=document) => r.querySelector(s);
+const el = (tag, attrs={}, ...kids) => {
+  const n = document.createElement(tag);
+  for (const [k,v] of Object.entries(attrs)) {
+    if (k === 'class') n.className = v;
+    else if (k.startsWith('on')) n.addEventListener(k.slice(2), v);
+    else if (v !== null && v !== undefined) n.setAttribute(k, v);
+  }
+  for (const kid of kids.flat()) if (kid !== null && kid !== undefined)
+    n.append(kid.nodeType ? kid : document.createTextNode(kid));
+  return n;
+};
+const bytes = n => {
+  const u = ['B','KiB','MiB','GiB','TiB']; let i = 0, v = Number(n) || 0;
+  while (v >= 1024 && i < u.length-1) { v /= 1024; i++; }
+  return i === 0 ? `${v} B` : `${v.toFixed(1)} ${u[i]}`;
+};
+const ago = ts => {
+  const d = Math.floor(Date.now()/1000) - ts;
+  if (d < 60) return `${d}s ago`;
+  if (d < 3600) return `${Math.floor(d/60)}m ago`;
+  if (d < 86400) return `${Math.floor(d/3600)}h ago`;
+  return `${Math.floor(d/86400)}d ago`;
+};
+const api = async (path) => {
+  const r = await fetch(path);
+  const body = await r.json().catch(() => ({ error: r.statusText, kind: 'transport' }));
+  if (!r.ok) throw body;
+  return body;
+};
+
+const state = { tab: 'sessions', session: null, skill: null };
+
+async function boot() {
+  try {
+    const h = await api('/api/health');
+    $('#meta').textContent = `v${h.version} · ${h.os}/${h.arch} · ${h.workspace}`;
+  } catch { $('#meta').textContent = 'backend unreachable'; }
+  document.querySelectorAll('nav button').forEach(b =>
+    b.addEventListener('click', () => {
+      state.tab = b.dataset.tab;
+      document.querySelectorAll('nav button').forEach(x =>
+        x.setAttribute('aria-selected', String(x === b)));
+      render();
+    }));
+  render();
+}
+
+function render() {
+  const v = $('#view'); v.replaceChildren(el('p', {class:'empty'}, 'loading…'));
+  ({ sessions: renderSessions, skills: renderSkills, store: renderStore })[state.tab]().catch(e => {
+    v.replaceChildren(el('div', {class:'card'},
+      el('h2', {}, 'error'),
+      el('p', {}, e.error || String(e)),
+      e.hint ? el('p', {class:'sub'}, e.hint) : null));
+  });
+}
+
+async function renderSessions() {
+  const { items } = await api('/api/sessions');
+  if (!state.session && items.length) state.session = items[0].id;
+  const list = el('ul', {class:'list'}, items.map(s => el('li', {
+      'aria-current': String(String(s.id) === String(state.session)),
+      onclick: () => { state.session = s.id; render(); }
+    },
+    el('div', {class:'name'}, s.title || '(untitled)'),
+    el('div', {class:'sub'}, `${ago(s.updated_at)} · ${s.event_count} events · ${s.model||'—'}`))));
+
+  const right = el('div', {class:'card'}, el('h2', {}, 'transcript'));
+  if (state.session) {
+    const { items: entries } = await api(`/api/sessions/${state.session}/transcript?limit=200`);
+    const box = el('div', {class:'scroll'});
+    if (!entries.length) box.append(el('p', {class:'empty'}, 'no events yet'));
+    for (const e of entries) {
+      box.append(el('div', {class:'entry'},
+        el('div', {class:'hd'},
+          el('span', {}, `#${e.seq}`),
+          el('span', {class:'tag'}, e.kind),
+          e.label ? el('span', {}, e.label) : null,
+          el('span', {}, `${bytes(e.bytes)} → ${bytes(e.stored_bytes)}`),
+          e.truncated ? el('span', {class:'warn'}, 'elided') : null),
+        el('pre', {}, e.body)));
+    }
+    right.append(box);
+  } else {
+    right.append(el('p', {class:'empty'}, 'no sessions yet — run `rook run "…"`'));
+  }
+  $('#view').replaceChildren(el('div', {class:'grid'},
+    el('div', {class:'card'}, el('h2', {}, `sessions (${items.length})`), list), right));
+}
+
+async function renderSkills() {
+  const { items } = await api('/api/skills');
+  if (!state.skill && items.length) state.skill = items[0].name;
+  const list = el('ul', {class:'list'}, items.map(c => el('li', {
+      'aria-current': String(c.name === state.skill),
+      onclick: () => { state.skill = c.name; render(); }
+    },
+    el('div', {class:'name'},
+      el('span', {class: c.applicable ? 'ok' : 'sub'}, c.applicable ? '✓ ' : '· '), c.name),
+    el('div', {class:'sub'}, `${c.version} · ${c.source} · ~${c.body_tokens} tok`))));
+
+  const right = el('div', {class:'card'}, el('h2', {}, 'skill'));
+  if (state.skill) {
+    const card = items.find(c => c.name === state.skill);
+    right.append(el('p', {}, card.description));
+    if (!card.applicable) {
+      right.append(el('p', {class:'warn'}, 'blocked in this environment:'));
+      right.append(el('ul', {}, card.mismatches.map(m => el('li', {class:'sub'}, m))));
+    }
+    let history = [];
+    try { history = (await api(`/api/skills/${encodeURIComponent(state.skill)}/history`)).items; } catch {}
+    right.append(el('h2', {style:'margin-top:1rem'}, `versions (${history.length})`));
+    if (!history.length) {
+      right.append(el('p', {class:'sub'}, 'no captures yet — `rook skills capture ' + state.skill + '`'));
+    } else {
+      right.append(el('table', {},
+        el('tr', {}, ['object','version','captured','files','size','note'].map(h => el('th', {}, h))),
+        history.map(h => el('tr', {},
+          el('td', {}, h.object.slice(0,12)),
+          el('td', {}, h.version),
+          el('td', {}, new Date(h.captured_at*1000).toISOString().slice(0,16).replace('T',' ')),
+          el('td', {}, String(h.files)),
+          el('td', {}, bytes(h.bytes)),
+          el('td', {class:'t'}, h.note || '')))));
+    }
+    try {
+      const full = await api(`/api/skills/${encodeURIComponent(state.skill)}`);
+      right.append(el('h2', {style:'margin-top:1rem'},
+        full.variant ? `body — variant ${full.variant}` : 'body'));
+      right.append(el('pre', {style:'white-space:pre-wrap;font-size:.82rem;max-height:24rem;overflow:auto'}, full.body));
+    } catch {}
+  }
+  $('#view').replaceChildren(el('div', {class:'grid'},
+    el('div', {class:'card'}, el('h2', {}, `skills (${items.length})`), list), right));
+}
+
+async function renderStore() {
+  const s = await api('/api/store/stats');
+  const { items } = await api('/api/store/objects?limit=200');
+  const max = Math.max(1, ...s.per_kind.map(k => k.bytes_stored));
+  const ratio = s.bytes_stored ? (s.bytes_raw / s.bytes_stored) : 1;
+
+  $('#view').replaceChildren(el('div', {class:'grid', style:'grid-template-columns:1fr 1fr'},
+    el('div', {class:'card'}, el('h2', {}, 'footprint'),
+      el('dl', {class:'kv'},
+        el('dt', {}, 'logical'), el('dd', {}, bytes(s.bytes_raw)),
+        el('dt', {}, 'stored'), el('dd', {}, `${bytes(s.bytes_stored)} (${ratio.toFixed(1)}× compression)`),
+        el('dt', {}, 'saved by dedup'), el('dd', {}, bytes(s.dedup_saved_hint)),
+        el('dt', {}, 'on disk'), el('dd', {}, `${bytes(s.index_bytes + s.external_bytes)} (index ${bytes(s.index_bytes)})`),
+        el('dt', {}, 'objects'), el('dd', {}, String(s.objects)),
+        el('dt', {}, 'events'), el('dd', {}, String(s.events)),
+        el('dt', {}, 'sessions'), el('dd', {}, String(s.sessions)),
+        el('dt', {}, 'dictionaries'), el('dd', {},
+          s.dictionaries.length ? s.dictionaries.map(d => `${d[0]} ${bytes(d[1])}`).join(', ')
+                                : 'none yet — `rook store train`')),
+      el('h2', {style:'margin-top:1.2rem'}, 'by kind'),
+      el('table', {},
+        el('tr', {}, ['kind','objects','logical','stored','ratio',''].map(h => el('th', {}, h))),
+        s.per_kind.map(k => el('tr', {},
+          el('td', {class:'t'}, k.kind),
+          el('td', {}, String(k.objects)),
+          el('td', {}, bytes(k.bytes_raw)),
+          el('td', {}, bytes(k.bytes_stored)),
+          el('td', {}, (k.bytes_raw/Math.max(1,k.bytes_stored)).toFixed(1)+'×'),
+          el('td', {}, el('span', {class:'bar', style:`width:${(k.bytes_stored/max*100).toFixed(0)}%`})))))),
+
+    el('div', {class:'card'}, el('h2', {}, `objects (newest ${items.length})`),
+      el('div', {class:'scroll'}, el('table', {},
+        el('tr', {}, ['id','kind','logical','stored','where'].map(h => el('th', {}, h))),
+        items.map(o => el('tr', {},
+          el('td', {}, o.short),
+          el('td', {class:'t'}, o.kind),
+          el('td', {}, bytes(o.size_raw)),
+          el('td', {}, bytes(o.size_stored)),
+          el('td', {}, o.external ? 'file' : 'inline')))))) ));
+}
+
+boot();
+</script>
+</body>
+</html>

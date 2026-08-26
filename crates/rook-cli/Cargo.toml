@@ -1,0 +1,28 @@
+[package]
+name = "rook-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.6", features = ["derive"] }
+crossterm = "0.29.0"
+ratatui = "0.30.2"
+rook-core.workspace = true
+rook-llm.workspace = true
+rook-proto.workspace = true
+rook-skills.workspace = true
+rook-store.workspace = true
+serde = "1.0.229"
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "signal"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[[bin]]
+name = "rook"
+path = "src/main.rs"

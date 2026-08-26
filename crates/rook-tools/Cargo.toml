@@ -1,0 +1,20 @@
+[package]
+name = "rook-tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+async-trait = "0.1.92"
+ignore = "0.4.33"
+regex = "1.13.1"
+rook-llm.workspace = true
+rook-proto.workspace = true
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["rt", "process", "fs", "io-util", "time", "macros"] }
+tracing = "0.1.44"

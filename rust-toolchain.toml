@@ -1,0 +1,6 @@
+# Not pinned to an exact version on purpose: pinning here forces every
+# contributor and CI runner onto one toolchain download, and the MSRV that
+# actually matters is declared as `rust-version` in Cargo.toml.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]

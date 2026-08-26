@@ -1,0 +1,123 @@
+//! Wire types shared by the daemon, the CLI and the web UI.
+//!
+//! Kept in its own crate so the HTTP surface has exactly one definition. A web
+//! UI that drifts from the CLI is how two front ends end up disagreeing about
+//! what the agent did.
+//!
+//! # Interoperability
+//!
+//! Rook speaks three external protocols, and none of them is invented here:
+//!
+//! * **Agent Skills** — the on-disk `SKILL.md` format. Implemented; see
+//!   `rook-skills`, which reads skills written for any conforming agent.
+//! * **ACP** (Agent Client Protocol) — JSON-RPC 2.0 over stdio, how editors talk
+//!   to agents. Planned, not yet implemented: it is the path to Zed, JetBrains
+//!   and Neovim without a bespoke plugin for each.
+//! * **MCP** (Model Context Protocol) — for consuming third-party tools. Planned.
+//! * **Agent Plugins** — `plugin.json` packaging around skills and MCP servers.
+//!   Planned; it defers to Agent Skills for the skill format itself.
+//!
+//! The HTTP API below is Rook's own, for its CLI and web UI only.
+
+use serde::{Deserialize, Serialize};
+
+/// Bumped when the HTTP surface changes incompatibly. Clients send it in
+/// `X-Rook-Api`; the daemon refuses a mismatch rather than misbehaving quietly.
+pub const API_VERSION: u32 = 1;
+
+pub mod routes {
+    pub const HEALTH: &str = "/api/health";
+    pub const STATS: &str = "/api/store/stats";
+    pub const OBJECTS: &str = "/api/store/objects";
+    pub const OBJECT: &str = "/api/store/objects/{id}";
+    pub const REFS: &str = "/api/store/refs";
+    pub const SESSIONS: &str = "/api/sessions";
+    pub const SESSION: &str = "/api/sessions/{id}";
+    pub const TRANSCRIPT: &str = "/api/sessions/{id}/transcript";
+    pub const SKILLS: &str = "/api/skills";
+    pub const SKILL: &str = "/api/skills/{name}";
+    pub const SKILL_HISTORY: &str = "/api/skills/{name}/history";
+    pub const CHECKPOINTS: &str = "/api/checkpoints";
+    pub const MAINTENANCE: &str = "/api/maintenance";
+    pub const EVENTS_WS: &str = "/api/events";
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Health {
+    pub ok: bool,
+    pub version: String,
+    pub api_version: u32,
+    pub store_root: String,
+    pub workspace: String,
+    pub os: String,
+    pub arch: String,
+    pub uptime_secs: u64,
+}
+
+/// One page of results. Cursor rather than offset: an append-only log grows
+/// underneath a reader, and offset paging silently skips or repeats entries.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Page<T> {
+    pub items: Vec<T>,
+    pub next_cursor: Option<String>,
+    pub total: Option<u64>,
+}
+
+impl<T> Page<T> {
+    pub fn new(items: Vec<T>) -> Self {
+        Self { items, next_cursor: None, total: None }
+    }
+
+    pub fn with_cursor(mut self, cursor: Option<String>) -> Self {
+        self.next_cursor = cursor;
+        self
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ApiError {
+    pub error: String,
+    /// Machine-readable discriminant, e.g. `not_found`, `capture_too_big`.
+    pub kind: String,
+    /// What the caller can do about it, when there is something.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
+
+impl ApiError {
+    pub fn new(kind: &str, error: impl Into<String>) -> Self {
+        Self { error: error.into(), kind: kind.to_string(), hint: None }
+    }
+
+    pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
+        self.hint = Some(hint.into());
+        self
+    }
+}
+
+/// Server-pushed events over the websocket.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ServerEvent {
+    /// A new entry landed in a session log.
+    Event {
+        session: String,
+        seq: u64,
+        kind: String,
+        label: String,
+    },
+    /// Long-running maintenance progress, so a big prune is not a frozen UI —
+    /// the shape of failure where a backup runs past the gateway timeout and the
+    /// user is told it failed while it is still working.
+    Progress {
+        job: String,
+        done: u64,
+        total: Option<u64>,
+        message: String,
+    },
+    Done {
+        job: String,
+        ok: bool,
+        message: String,
+    },
+}

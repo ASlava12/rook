@@ -1,0 +1,5 @@
+/target
+**/*.rs.bk
+.DS_Store
+# Local agent state, when someone points ROOK_HOME at the repo.
+/.rook
