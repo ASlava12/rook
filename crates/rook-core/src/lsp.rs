@@ -130,7 +130,7 @@ impl Servers {
     async fn prepare(&self, path: &Path) -> rook_lsp::Result<Opened> {
         let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let (server, language_id) = self.for_path(&path).await?;
-        server.open(&path, &language_id).await?;
+        server.sync(&path, &language_id).await?;
         let text = tokio::fs::read_to_string(&path)
             .await
             .map_err(|e| rook_lsp::LspError::Io { path: path.clone(), source: e })?;
@@ -190,7 +190,10 @@ impl Tool for Diagnostics {
         };
         let found = opened.server.diagnostics(&opened.path).await;
         if found.is_empty() {
-            return Ok(ToolOutcome::ok(format!("no diagnostics for {}", path.display())));
+            return Ok(ToolOutcome::ok(format!(
+                "no diagnostics for {}",
+                self.0.shorten(&opened.path.display().to_string())
+            )));
         }
         let lines: Vec<String> = found
             .iter()

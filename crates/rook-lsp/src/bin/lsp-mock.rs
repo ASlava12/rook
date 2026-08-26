@@ -18,8 +18,17 @@ fn main() {
         let Ok(message) = serde_json::from_slice::<serde_json::Value>(&body) else { continue };
         let method = message["method"].as_str().unwrap_or("");
 
-        if method == "textDocument/didOpen" {
+        if method == "textDocument/didOpen" || method == "textDocument/didChange" {
             let uri = message.pointer("/params/textDocument/uri").cloned().unwrap_or_default();
+            // Echo back what the client last said the file contains, so a test
+            // can tell a refreshed analysis from a stale one.
+            let seen = message
+                .pointer("/params/textDocument/text")
+                .or_else(|| message.pointer("/params/contentChanges/0/text"))
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .lines()
+                .count();
             send(
                 &mut out,
                 &serde_json::json!({
@@ -31,7 +40,7 @@ fn main() {
                             "range": { "start": { "line": 3, "character": 4 }, "end": { "line": 3, "character": 9 } },
                             "severity": 1,
                             "source": "mock",
-                            "message": "cannot find value `oops` in this scope"
+                            "message": format!("cannot find value `oops` in this scope ({seen} lines seen)")
                         }]
                     }
                 }),

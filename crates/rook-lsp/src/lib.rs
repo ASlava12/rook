@@ -112,6 +112,12 @@ impl ServerConfig {
 
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<protocol::Incoming>>>>;
 type Complaint = Arc<Mutex<Option<String>>>;
+
+/// What the server was last told a file contains.
+struct Document {
+    version: i64,
+    text: String,
+}
 type Diagnostics = Arc<Mutex<HashMap<String, Vec<Diagnostic>>>>;
 
 pub struct Server {
@@ -120,7 +126,7 @@ pub struct Server {
     stdin: Mutex<ChildStdin>,
     pending: Pending,
     diagnostics: Diagnostics,
-    opened: Mutex<HashMap<PathBuf, i64>>,
+    opened: Mutex<HashMap<PathBuf, Document>>,
     next_id: AtomicU64,
     request_timeout: Duration,
     diagnostics_wait: Duration,
@@ -204,29 +210,54 @@ impl Server {
         &self.language
     }
 
-    /// Tell the server about a file. Most servers analyse nothing until asked,
-    /// so this is a precondition for both diagnostics and navigation.
-    pub async fn open(&self, path: &Path, language_id: &str) -> Result<()> {
-        if self.opened.lock().await.contains_key(path) {
-            return Ok(());
-        }
+    /// Tell the server what a file contains now, opening it the first time and
+    /// sending a change after that.
+    ///
+    /// The agent's normal loop is edit, then check — so a server still holding
+    /// the version it saw at open time reports diagnostics for code that no
+    /// longer exists, which is worse than reporting none.
+    pub async fn sync(&self, path: &Path, language_id: &str) -> Result<()> {
         let text = tokio::fs::read_to_string(path)
             .await
             .map_err(|e| LspError::Io { path: path.to_path_buf(), source: e })?;
-        self.notify(
-            "textDocument/didOpen",
-            serde_json::json!({
-                "textDocument": {
-                    "uri": protocol::to_uri(path),
-                    "languageId": language_id,
-                    "version": 1,
-                    "text": text,
-                }
-            }),
-        )
-        .await?;
-        self.opened.lock().await.insert(path.to_path_buf(), 1);
-        Ok(())
+        let uri = protocol::to_uri(path);
+
+        let mut opened = self.opened.lock().await;
+        let (method, params) = match opened.get_mut(path) {
+            Some(document) if document.text == text => return Ok(()),
+            Some(document) => {
+                document.version += 1;
+                document.text = text.clone();
+                (
+                    "textDocument/didChange",
+                    serde_json::json!({
+                        "textDocument": { "uri": uri, "version": document.version },
+                        "contentChanges": [{ "text": text }],
+                    }),
+                )
+            }
+            None => {
+                opened.insert(path.to_path_buf(), Document { version: 1, text: text.clone() });
+                (
+                    "textDocument/didOpen",
+                    serde_json::json!({
+                        "textDocument": {
+                            "uri": uri,
+                            "languageId": language_id,
+                            "version": 1,
+                            "text": text,
+                        }
+                    }),
+                )
+            }
+        };
+        drop(opened);
+
+        // Whatever the server said about the old text is now wrong, and leaving
+        // it cached would let `diagnostics` return it before the new analysis
+        // has arrived.
+        self.diagnostics.lock().await.remove(&protocol::to_uri(path));
+        self.notify(method, params).await
     }
 
     /// Diagnostics for a file, after giving the server time to produce them.

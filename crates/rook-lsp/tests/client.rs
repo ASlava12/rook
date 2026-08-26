@@ -47,7 +47,7 @@ async fn the_handshake_completes_over_content_length_framing() {
 async fn diagnostics_arrive_after_a_file_is_opened() {
     let workspace = Workspace::new();
     let server = Server::start(&mock(), workspace.dir.path()).await.unwrap();
-    server.open(&workspace.file(), "rust").await.unwrap();
+    server.sync(&workspace.file(), "rust").await.unwrap();
 
     let found = server.diagnostics(&workspace.file()).await;
     assert_eq!(found.len(), 1, "the server publishes one; none means didOpen never landed");
@@ -60,7 +60,7 @@ async fn diagnostics_arrive_after_a_file_is_opened() {
 async fn a_definition_answered_as_a_single_object_is_understood() {
     let workspace = Workspace::new();
     let server = Server::start(&mock(), workspace.dir.path()).await.unwrap();
-    server.open(&workspace.file(), "rust").await.unwrap();
+    server.sync(&workspace.file(), "rust").await.unwrap();
 
     let found =
         server.definition(&workspace.file(), rook_lsp::Position { line: 1, character: 4 }).await.unwrap();
@@ -76,7 +76,7 @@ async fn a_definition_answered_as_a_single_object_is_understood() {
 async fn references_come_back_as_a_list() {
     let workspace = Workspace::new();
     let server = Server::start(&mock(), workspace.dir.path()).await.unwrap();
-    server.open(&workspace.file(), "rust").await.unwrap();
+    server.sync(&workspace.file(), "rust").await.unwrap();
 
     let found =
         server.references(&workspace.file(), rook_lsp::Position { line: 0, character: 7 }).await.unwrap();
@@ -125,4 +125,46 @@ fn a_symbol_is_located_by_name_on_a_word_boundary() {
     assert_eq!(at.line, 1, "parse_all must not match: it is a different name");
     assert_eq!(at.character, 3);
     assert!(rook_lsp::locate(text, "missing").is_none());
+}
+
+#[tokio::test]
+async fn an_edited_file_is_re_analysed_rather_than_answered_from_the_old_version() {
+    let workspace = Workspace::new();
+    let server = Server::start(&mock(), workspace.dir.path()).await.unwrap();
+    server.sync(&workspace.file(), "rust").await.unwrap();
+
+    let before = server.diagnostics(&workspace.file()).await;
+    assert!(before[0].message.contains("5 lines seen"), "{}", before[0].message);
+
+    std::fs::write(
+        workspace.file(),
+        "// a new first line\n// and another\npub fn parse(input: &str) -> usize {\n    input.len()\n}\n\nfn broken() { oops }\n",
+    )
+    .unwrap();
+    server.sync(&workspace.file(), "rust").await.unwrap();
+
+    let after = server.diagnostics(&workspace.file()).await;
+    assert!(
+        after[0].message.contains("7 lines seen"),
+        "the server answered from the version it saw at open time: {}",
+        after[0].message
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn syncing_an_unchanged_file_costs_nothing() {
+    let workspace = Workspace::new();
+    let server = Server::start(&mock(), workspace.dir.path()).await.unwrap();
+    server.sync(&workspace.file(), "rust").await.unwrap();
+    let first = server.diagnostics(&workspace.file()).await;
+
+    // No edit: the second sync must not discard the analysis and wait again.
+    let started = std::time::Instant::now();
+    server.sync(&workspace.file(), "rust").await.unwrap();
+    let second = server.diagnostics(&workspace.file()).await;
+
+    assert_eq!(first[0].message, second[0].message);
+    assert!(started.elapsed() < std::time::Duration::from_millis(500), "it re-analysed anyway");
+    server.shutdown().await;
 }
