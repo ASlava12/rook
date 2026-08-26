@@ -59,9 +59,15 @@ non-obvious choice was made — usually a failure mode being avoided.
 **Tests are named as claims.** `a_capture_refuses_to_run_away_instead_of_thrashing`,
 not `test_capture_2`. Assertion messages print the actual values.
 
-**Three front ends, one engine.** New capability goes in `rook-core` and is exposed
-by all of the CLI, the API and (where it makes sense) the TUI. A feature reachable
-only from the web UI is a bug.
+**Three front ends, one engine.** New capability goes in `rook-core` and is
+exposed by the CLI, the API and the TUI. A feature reachable from one front end
+and not the others is a bug — the approver is shared for exactly this reason.
+
+**Verifying the TUI.** A pty capture is not readable as text: ratatui places
+characters cell by cell, so a substring the screen clearly shows never appears
+contiguously in the byte stream. Reconstruct the grid from the cursor-positioning
+escapes before asserting on it, and set the window size with `TIOCSWINSZ` or the
+app renders into a zero-sized terminal and emits nothing.
 
 ## Storage changes
 

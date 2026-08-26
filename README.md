@@ -68,7 +68,7 @@ rook doctor                                # what was detected, and what it mean
 
 rook                                       # talk to it
 rook run "summarise what changed in src/"  # one turn, streamed, for scripts
-rook tui                                   # read-only browser over everything stored
+rook tui                                   # full terminal UI: chat plus a store browser
 rookd                                      # http://127.0.0.1:7717 — web UI + API
 ```
 
@@ -112,9 +112,9 @@ rook session rewind 01JQ… --to 12 --keep-files  # conversation only
 rook session fork 01JQ… --at 12                 # branch without touching files
 ```
 
-The web UI at `rookd` drives the agent too: it streams a turn over a websocket
-and asks for approvals in the page, so the same policy applies whether you are at
-a terminal or in a browser.
+All three front ends run turns, stream them, and ask for approvals the same way:
+`rook chat`, `rook tui`, and the web UI at `rookd`. Nothing is reachable from one
+that is not reachable from the others.
 
 ### What it is allowed to do
 

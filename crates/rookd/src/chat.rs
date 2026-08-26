@@ -4,21 +4,18 @@
 //! the policy wants an approval the socket is what asks — so the web UI is a way
 //! to *use* the agent rather than only to read what it did.
 
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
-use async_trait::async_trait;
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
 use futures_util::{SinkExt, StreamExt};
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::mpsc;
 
 use rook_core::agent::AgentLoop;
 use rook_llm::Delta;
 use rook_proto::{ApprovalDecision, ChatEvent, ClientMessage};
-use rook_tools::policy::{Approval, Approver, Risk};
+use rook_tools::policy::{Approval, ChannelApprover};
 
 use crate::AppState;
 
@@ -41,7 +38,7 @@ async fn serve(socket: WebSocket, state: Arc<AppState>) {
         }
     });
 
-    let approver = Arc::new(SocketApprover::new(outbound.clone()));
+    let (approver, relay) = approver(outbound.clone());
     let mut running: Option<tokio::task::JoinHandle<()>> = None;
 
     while let Some(Ok(message)) = stream.next().await {
@@ -49,7 +46,14 @@ async fn serve(socket: WebSocket, state: Arc<AppState>) {
         let Ok(incoming) = serde_json::from_str::<ClientMessage>(&text) else { continue };
 
         match incoming {
-            ClientMessage::Approval { id, decision } => approver.answer(&id, decision),
+            ClientMessage::Approval { id, decision } => approver.answer(
+                &id,
+                match decision {
+                    ApprovalDecision::Once => Approval::Once,
+                    ApprovalDecision::ForRun => Approval::ForRun,
+                    ApprovalDecision::Deny => Approval::Deny("the user declined".into()),
+                },
+            ),
             ClientMessage::Cancel => {
                 if let Some(handle) = running.take() {
                     handle.abort();
@@ -76,13 +80,14 @@ async fn serve(socket: WebSocket, state: Arc<AppState>) {
     if let Some(handle) = running {
         handle.abort();
     }
+    relay.abort();
     drop(outbound);
     let _ = writer.await;
 }
 
 async fn turn(
     state: Arc<AppState>,
-    approver: Arc<SocketApprover>,
+    approver: Arc<ChannelApprover>,
     outbound: mpsc::UnboundedSender<ChatEvent>,
     session: Option<String>,
     prompt: String,
@@ -144,54 +149,22 @@ fn report(outbound: &mpsc::UnboundedSender<ChatEvent>, message: String) {
     let _ = outbound.send(ChatEvent::Error { message });
 }
 
-/// Asks the browser, and waits.
-struct SocketApprover {
+/// Relays approval requests to the browser and routes the answers back.
+fn approver(
     outbound: mpsc::UnboundedSender<ChatEvent>,
-    waiting: Mutex<HashMap<String, oneshot::Sender<ApprovalDecision>>>,
-    next_id: AtomicU64,
-}
-
-impl SocketApprover {
-    fn new(outbound: mpsc::UnboundedSender<ChatEvent>) -> Self {
-        Self { outbound, waiting: Mutex::new(HashMap::new()), next_id: AtomicU64::new(1) }
-    }
-
-    fn answer(&self, id: &str, decision: ApprovalDecision) {
-        if let Ok(mut waiting) = self.waiting.try_lock()
-            && let Some(tx) = waiting.remove(id)
-        {
-            let _ = tx.send(decision);
-        }
-    }
-}
-
-#[async_trait]
-impl Approver for SocketApprover {
-    async fn ask(&self, tool: &str, risk: &Risk) -> Approval {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed).to_string();
-        let (tx, rx) = oneshot::channel();
-        self.waiting.lock().await.insert(id.clone(), tx);
-
-        let sent = self.outbound.send(ChatEvent::Approval {
-            id: id.clone(),
-            tool: tool.to_string(),
-            action: risk.describe(),
-        });
-        if sent.is_err() {
-            return Approval::Deny("the browser disconnected".into());
-        }
-
-        // A tab closed mid-prompt would otherwise leave the turn waiting
-        // forever, holding the store's read lock with it.
-        match tokio::time::timeout(std::time::Duration::from_secs(300), rx).await {
-            Ok(Ok(ApprovalDecision::Once)) => Approval::Once,
-            Ok(Ok(ApprovalDecision::ForRun)) => Approval::ForRun,
-            Ok(Ok(ApprovalDecision::Deny)) => Approval::Deny("the user declined".into()),
-            Ok(Err(_)) => Approval::Deny("the approval was dropped".into()),
-            Err(_) => {
-                self.waiting.lock().await.remove(&id);
-                Approval::Deny("no answer within five minutes".into())
+) -> (Arc<ChannelApprover>, tokio::task::JoinHandle<()>) {
+    let (requests, mut incoming) = mpsc::unbounded_channel::<rook_tools::policy::ApprovalRequest>();
+    let relay = tokio::spawn(async move {
+        while let Some(request) = incoming.recv().await {
+            let sent = outbound.send(ChatEvent::Approval {
+                id: request.id,
+                tool: request.tool,
+                action: request.action,
+            });
+            if sent.is_err() {
+                break;
             }
         }
-    }
+    });
+    (Arc::new(ChannelApprover::new(requests, std::time::Duration::from_secs(300))), relay)
 }

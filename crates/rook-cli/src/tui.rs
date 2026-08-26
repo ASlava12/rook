@@ -1,8 +1,13 @@
-//! A terminal browser for everything the agent has stored.
+//! The terminal UI: a conversation, and a browser over everything stored.
 //!
-//! Read-only by design. The point is to make the agent's memory legible — which
-//! sessions exist, what a turn actually cost, which skills apply here and why —
-//! without needing a database client or a browser.
+//! The browsing tabs make the agent's memory legible — which sessions exist,
+//! what a turn actually cost, which skills apply here and why — without needing
+//! a database client. The chat tab runs turns against the same engine, with the
+//! same permission policy, so nothing is reachable here that is not reachable
+//! from the CLI or the web.
+
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -12,23 +17,70 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph, Tabs, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 
+use rook_core::agent::AgentLoop;
 use rook_core::{Rook, TranscriptEntry};
+use rook_llm::Delta;
 use rook_skills::SkillCard;
 use rook_store::{SessionMeta, StoreStats};
+use rook_tools::policy::{Approval, ApprovalRequest, ChannelApprover};
+use tokio::sync::mpsc;
 
 use crate::fmt;
 
-const TABS: [&str; 4] = ["Sessions", "Skills", "Store", "Help"];
+const TABS: [&str; 5] = ["Chat", "Sessions", "Skills", "Store", "Help"];
 
-pub fn run(rook: Rook) -> Result<()> {
+/// How often the loop wakes to drain turn events when no key is pressed.
+const TICK: Duration = Duration::from_millis(60);
+
+pub fn run(rook: Rook, yes: bool) -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let mut terminal = ratatui::init();
-    let result = App::new(rook).run(&mut terminal);
+    let result = App::new(Arc::new(rook), runtime, yes).run(&mut terminal);
     ratatui::restore();
     result
 }
 
+/// What a running turn reports back to the drawing loop.
+enum TurnEvent {
+    Started(u128),
+    Text(String),
+    Reasoning(String),
+    Tool(String),
+    Approval(ApprovalRequest),
+    Done(String),
+    Error(String),
+}
+
+#[derive(Default)]
+struct Chat {
+    input: String,
+    log: Vec<(&'static str, String)>,
+    session: Option<u128>,
+    busy: bool,
+    pending: Option<ApprovalRequest>,
+    scroll: u16,
+}
+
+impl Chat {
+    /// Append, merging consecutive text so a streamed reply is one paragraph
+    /// rather than one line per token.
+    fn push(&mut self, kind: &'static str, text: &str) {
+        match self.log.last_mut() {
+            Some((last, body)) if *last == kind && kind == "text" => body.push_str(text),
+            _ => self.log.push((kind, text.to_string())),
+        }
+    }
+}
+
 struct App {
-    rook: Rook,
+    rook: Arc<Rook>,
+    runtime: tokio::runtime::Runtime,
+    yes: bool,
+    chat: Chat,
+    events: mpsc::UnboundedReceiver<TurnEvent>,
+    to_loop: mpsc::UnboundedSender<TurnEvent>,
+    approver: Arc<ChannelApprover>,
+    turn: Option<tokio::task::JoinHandle<()>>,
     tab: usize,
     sessions: Vec<SessionMeta>,
     session_state: ListState,
@@ -43,9 +95,28 @@ struct App {
 }
 
 impl App {
-    fn new(rook: Rook) -> Self {
+    fn new(rook: Arc<Rook>, runtime: tokio::runtime::Runtime, yes: bool) -> Self {
+        let (to_loop, events) = mpsc::unbounded_channel();
+        let (requests, mut incoming) = mpsc::unbounded_channel::<ApprovalRequest>();
+
+        let relay = to_loop.clone();
+        runtime.spawn(async move {
+            while let Some(request) = incoming.recv().await {
+                if relay.send(TurnEvent::Approval(request)).is_err() {
+                    break;
+                }
+            }
+        });
+
         let mut app = Self {
             rook,
+            runtime,
+            yes,
+            chat: Chat::default(),
+            events,
+            to_loop,
+            approver: Arc::new(ChannelApprover::new(requests, Duration::from_secs(600))),
+            turn: None,
             tab: 0,
             sessions: Vec::new(),
             session_state: ListState::default(),
@@ -109,38 +180,178 @@ impl App {
     fn run(mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         while !self.quit {
             terminal.draw(|f| self.draw(f))?;
-            if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-                match (key.code, key.modifiers) {
-                    (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => self.quit = true,
-                    (KeyCode::Char('c'), KeyModifiers::CONTROL) => self.quit = true,
-                    (KeyCode::Tab, _) | (KeyCode::Right, _) => self.tab = (self.tab + 1) % TABS.len(),
-                    (KeyCode::BackTab, _) | (KeyCode::Left, _) => {
-                        self.tab = (self.tab + TABS.len() - 1) % TABS.len()
-                    }
-                    (KeyCode::Char(c @ '1'..='4'), _) => self.tab = c as usize - '1' as usize,
-                    (KeyCode::Char('r'), _) => self.reload(),
-                    (KeyCode::Char('j'), _) | (KeyCode::Down, _) => self.move_selection(1),
-                    (KeyCode::Char('k'), _) | (KeyCode::Up, _) => self.move_selection(-1),
-                    (KeyCode::PageDown, _) | (KeyCode::Char(' '), _) => {
-                        self.transcript_scroll = self.transcript_scroll.saturating_add(20)
-                    }
-                    (KeyCode::PageUp, _) => {
-                        self.transcript_scroll = self.transcript_scroll.saturating_sub(20)
-                    }
-                    _ => {}
-                }
+            self.drain_turn_events();
+            // Poll rather than block: a streaming turn has to keep redrawing
+            // even while nobody is typing.
+            if event::poll(TICK)?
+                && let Event::Key(key) = event::read()?
+                && key.kind == KeyEventKind::Press
+            {
+                self.on_key(key);
             }
+        }
+        if let Some(turn) = self.turn.take() {
+            turn.abort();
         }
         Ok(())
     }
 
+    fn drain_turn_events(&mut self) {
+        while let Ok(event) = self.events.try_recv() {
+            match event {
+                TurnEvent::Started(id) => self.chat.session = Some(id),
+                TurnEvent::Text(text) => self.chat.push("text", &text),
+                TurnEvent::Reasoning(text) => self.chat.push("think", &text),
+                TurnEvent::Tool(name) => self.chat.push("tool", &format!("  · {name}")),
+                TurnEvent::Approval(request) => self.chat.pending = Some(request),
+                TurnEvent::Done(note) => {
+                    self.chat.push("stat", &note);
+                    self.chat.busy = false;
+                    self.reload();
+                }
+                TurnEvent::Error(message) => {
+                    self.chat.push("err", &message);
+                    self.chat.busy = false;
+                }
+            }
+        }
+    }
+
+    fn on_key(&mut self, key: crossterm::event::KeyEvent) {
+        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('c') {
+            self.quit = true;
+            return;
+        }
+        if self.tab == 0 {
+            self.on_chat_key(key);
+            return;
+        }
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
+            KeyCode::Tab | KeyCode::Right => self.tab = (self.tab + 1) % TABS.len(),
+            KeyCode::BackTab | KeyCode::Left => self.tab = (self.tab + TABS.len() - 1) % TABS.len(),
+            KeyCode::Char(c @ '1'..='5') => self.tab = c as usize - '1' as usize,
+            KeyCode::Char('r') => self.reload(),
+            KeyCode::Char('j') | KeyCode::Down => self.move_selection(1),
+            KeyCode::Char('k') | KeyCode::Up => self.move_selection(-1),
+            KeyCode::PageDown | KeyCode::Char(' ') => {
+                self.transcript_scroll = self.transcript_scroll.saturating_add(20)
+            }
+            KeyCode::PageUp => self.transcript_scroll = self.transcript_scroll.saturating_sub(20),
+            _ => {}
+        }
+    }
+
+    fn on_chat_key(&mut self, key: crossterm::event::KeyEvent) {
+        // An approval blocks the turn, so it takes the keyboard until answered.
+        if let Some(request) = self.chat.pending.clone() {
+            let approval = match key.code {
+                KeyCode::Char('y') | KeyCode::Enter => Approval::Once,
+                KeyCode::Char('a') => Approval::ForRun,
+                KeyCode::Char('n') | KeyCode::Esc => Approval::Deny("the user declined".into()),
+                _ => return,
+            };
+            self.chat.push("stat", &format!("  {} → {approval:?}", request.action));
+            self.approver.answer(&request.id, approval);
+            self.chat.pending = None;
+            return;
+        }
+
+        match key.code {
+            KeyCode::Tab => self.tab = (self.tab + 1) % TABS.len(),
+            KeyCode::BackTab => self.tab = (self.tab + TABS.len() - 1) % TABS.len(),
+            KeyCode::Esc if self.chat.input.is_empty() => self.quit = true,
+            KeyCode::Esc => self.chat.input.clear(),
+            KeyCode::Enter => self.send(),
+            KeyCode::Backspace => {
+                self.chat.input.pop();
+            }
+            KeyCode::PageUp => self.chat.scroll = self.chat.scroll.saturating_sub(10),
+            KeyCode::PageDown => self.chat.scroll = self.chat.scroll.saturating_add(10),
+            KeyCode::Char(c) => self.chat.input.push(c),
+            _ => {}
+        }
+    }
+
+    fn send(&mut self) {
+        let prompt = std::mem::take(&mut self.chat.input).trim().to_string();
+        if prompt.is_empty() || self.chat.busy {
+            return;
+        }
+        self.chat.push("you", &format!("› {prompt}"));
+        self.chat.busy = true;
+        self.chat.scroll = 0;
+
+        let rook = self.rook.clone();
+        let to_loop = self.to_loop.clone();
+        let approver = self.approver.clone();
+        let session = self.chat.session;
+        let yes = self.yes;
+
+        self.turn = Some(self.runtime.spawn(async move {
+            let session = match session {
+                Some(id) => id,
+                None => match rook.start_session(prompt.lines().next().unwrap_or("tui")) {
+                    Ok(id) => {
+                        let _ = to_loop.send(TurnEvent::Started(id));
+                        id
+                    }
+                    Err(e) => return fail(&to_loop, e.to_string()),
+                },
+            };
+
+            let provider =
+                match rook_llm::from_spec(&rook.config.agent.model, rook.config.agent.stream_idle()) {
+                    Ok(provider) => provider,
+                    Err(e) => return fail(&to_loop, e.to_string()),
+                };
+
+            let mut agent = AgentLoop::new(&rook, provider.into(), session);
+            if yes {
+                agent.allow_everything_not_denied();
+            } else {
+                agent.approver = approver;
+            }
+            let mcp = rook.connect_mcp().await;
+            for (server, tools) in &mcp.servers {
+                agent.tools.register_server(server.clone(), tools.clone());
+            }
+
+            let emit = to_loop.clone();
+            let result = agent
+                .run_with(&prompt, |delta| {
+                    let event = match delta {
+                        Delta::Text(text) => TurnEvent::Text(text.clone()),
+                        Delta::Reasoning(text) => TurnEvent::Reasoning(text.clone()),
+                        Delta::ToolCall(call) => TurnEvent::Tool(call.name.clone()),
+                        Delta::Done { .. } => return,
+                    };
+                    let _ = emit.send(event);
+                })
+                .await;
+            mcp.shutdown().await;
+
+            let _ = match result {
+                Ok(outcome) => to_loop.send(TurnEvent::Done(format!(
+                    "[{} steps · {} in / {} out{}]",
+                    outcome.steps,
+                    outcome.input_tokens,
+                    outcome.output_tokens,
+                    if outcome.delegated.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" · {} sub-agent(s)", outcome.delegated.len())
+                    }
+                ))),
+                Err(e) => to_loop.send(TurnEvent::Error(e.to_string())),
+            };
+        }));
+    }
+
     fn move_selection(&mut self, delta: isize) {
         let (state, len) = match self.tab {
-            0 => (&mut self.session_state, self.sessions.len()),
-            1 => (&mut self.skill_state, self.skills.len()),
+            1 => (&mut self.session_state, self.sessions.len()),
+            2 => (&mut self.skill_state, self.skills.len()),
             _ => {
                 self.transcript_scroll = self.transcript_scroll.saturating_add_signed(delta as i16 * 3);
                 return;
@@ -152,7 +363,7 @@ impl App {
         let current = state.selected().unwrap_or(0) as isize;
         let next = (current + delta).clamp(0, len as isize - 1) as usize;
         state.select(Some(next));
-        if self.tab == 0 {
+        if self.tab == 1 {
             self.load_transcript();
         }
     }
@@ -173,15 +384,16 @@ impl App {
         f.render_widget(tabs, header);
 
         match self.tab {
-            0 => self.draw_sessions(f, body),
-            1 => self.draw_skills(f, body),
-            2 => self.draw_store(f, body),
+            0 => self.draw_chat(f, body),
+            1 => self.draw_sessions(f, body),
+            2 => self.draw_skills(f, body),
+            3 => self.draw_store(f, body),
             _ => self.draw_help(f, body),
         }
 
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled(" ↹/1-4 ", Style::default().fg(Color::Cyan)),
+                Span::styled(" ↹/1-5 ", Style::default().fg(Color::Cyan)),
                 Span::raw("tab  "),
                 Span::styled("j/k ", Style::default().fg(Color::Cyan)),
                 Span::raw("move  "),
@@ -193,6 +405,88 @@ impl App {
             .style(Style::default().fg(Color::DarkGray)),
             footer,
         );
+    }
+
+    fn draw_chat(&mut self, f: &mut Frame, area: Rect) {
+        let approval_height = if self.chat.pending.is_some() { 4 } else { 0 };
+        let [log, ask, input] = Layout::vertical([
+            Constraint::Min(3),
+            Constraint::Length(approval_height),
+            Constraint::Length(3),
+        ])
+        .areas(area);
+
+        let mut lines: Vec<Line> = Vec::new();
+        for (kind, body) in &self.chat.log {
+            let style = match *kind {
+                "you" => Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                "tool" => Style::default().fg(Color::Magenta),
+                "think" => Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                "stat" => Style::default().fg(Color::DarkGray),
+                "err" => Style::default().fg(Color::Red),
+                _ => Style::default(),
+            };
+            for line in body.split('\n') {
+                lines.push(Line::from(Span::styled(line.to_string(), style)));
+            }
+            lines.push(Line::from(""));
+        }
+        if lines.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "Ask it something. Tab switches to the browsing tabs.",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+
+        // Pin to the bottom while streaming: a reply that scrolls off the top as
+        // it arrives is unreadable.
+        let visible = log.height.saturating_sub(2);
+        let overflow = (lines.len() as u16).saturating_sub(visible);
+        let scroll = overflow.saturating_sub(self.chat.scroll);
+
+        f.render_widget(
+            Paragraph::new(lines)
+                .block(bordered(&match self.chat.session {
+                    Some(id) => format!(" {} ", rook_store::format_session_id(id)),
+                    None => " new session ".into(),
+                }))
+                .wrap(Wrap { trim: false })
+                .scroll((scroll, 0)),
+            log,
+        );
+
+        if let Some(request) = &self.chat.pending {
+            f.render_widget(
+                Paragraph::new(vec![
+                    Line::from(Span::styled(
+                        format!("{} wants to {}", request.tool, request.action),
+                        Style::default().fg(Color::Yellow),
+                    )),
+                    Line::from(Span::styled(
+                        "[y]es once · [a]lways this run · [n]o",
+                        Style::default().fg(Color::DarkGray),
+                    )),
+                ])
+                .block(bordered(" approval ")),
+                ask,
+            );
+        }
+
+        let prompt = if self.chat.busy { "  working… " } else { "› " };
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(prompt, Style::default().fg(Color::DarkGray)),
+                Span::raw(self.chat.input.as_str()),
+            ]))
+            .block(bordered("")),
+            input,
+        );
+        if !self.chat.busy && self.chat.pending.is_none() {
+            f.set_cursor_position((
+                input.x + 1 + prompt.chars().count() as u16 + self.chat.input.chars().count() as u16,
+                input.y + 1,
+            ));
+        }
     }
 
     fn draw_sessions(&mut self, f: &mut Frame, area: Rect) {
@@ -396,8 +690,8 @@ impl App {
         let text = vec![
             Line::from(Span::styled("rook", Style::default().add_modifier(Modifier::BOLD))),
             Line::from(""),
-            Line::from("This browser is read-only. Everything it shows is also available"),
-            Line::from("from the command line, in tables or as JSON with --json:"),
+            Line::from("The Chat tab runs turns; the rest browse what is stored."),
+            Line::from("Everything here is also on the command line, as tables or --json:"),
             Line::from(""),
             Line::from("  rook store stat                what memory costs, per kind"),
             Line::from("  rook store ls / cat <id>       list and print raw objects"),
@@ -410,12 +704,20 @@ impl App {
             Line::from("  rook doctor                    detected toolchains and platform"),
             Line::from(""),
             Line::from(Span::styled("keys", Style::default().add_modifier(Modifier::BOLD))),
-            Line::from("  Tab / 1-4   switch tab          j k ↑ ↓   move"),
+            Line::from("  Tab         switch tab          j k ↑ ↓   move"),
+            Line::from("  1-5         switch tab, outside Chat where digits are text"),
             Line::from("  Space/PgDn  scroll transcript    r         reload"),
-            Line::from("  q / Esc     quit"),
+            Line::from("  q / Esc     quit (Ctrl-C anywhere)"),
+            Line::from(""),
+            Line::from("  In Chat:    Enter sends · Esc clears, then quits"),
+            Line::from("              y / a / n answer an approval"),
         ];
         f.render_widget(Paragraph::new(text).block(bordered(" Help ")), area);
     }
+}
+
+fn fail(to_loop: &mpsc::UnboundedSender<TurnEvent>, message: String) {
+    let _ = to_loop.send(TurnEvent::Error(message));
 }
 
 fn bordered(title: &str) -> Block<'_> {

@@ -192,3 +192,71 @@ impl Approver for Unattended {
         ))
     }
 }
+
+/// What a front end is being asked to decide.
+#[derive(Clone, Debug)]
+pub struct ApprovalRequest {
+    pub id: String,
+    pub tool: String,
+    pub action: String,
+}
+
+/// An approver that hands the question to whatever is driving the UI and waits
+/// for an answer to come back by id.
+///
+/// The terminal UI and the websocket both need exactly this, and an approval
+/// that behaves differently depending on which front end is attached would be a
+/// bug rather than a feature.
+pub struct ChannelApprover {
+    requests: tokio::sync::mpsc::UnboundedSender<ApprovalRequest>,
+    waiting: tokio::sync::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<Approval>>>,
+    next_id: std::sync::atomic::AtomicU64,
+    patience: std::time::Duration,
+}
+
+impl ChannelApprover {
+    /// `patience` bounds the wait: a closed tab or an abandoned terminal would
+    /// otherwise leave the turn pending forever, holding its locks with it.
+    pub fn new(
+        requests: tokio::sync::mpsc::UnboundedSender<ApprovalRequest>,
+        patience: std::time::Duration,
+    ) -> Self {
+        Self {
+            requests,
+            waiting: Default::default(),
+            next_id: std::sync::atomic::AtomicU64::new(1),
+            patience,
+        }
+    }
+
+    pub fn answer(&self, id: &str, approval: Approval) {
+        if let Ok(mut waiting) = self.waiting.try_lock()
+            && let Some(tx) = waiting.remove(id)
+        {
+            let _ = tx.send(approval);
+        }
+    }
+}
+
+#[async_trait]
+impl Approver for ChannelApprover {
+    async fn ask(&self, tool: &str, risk: &Risk) -> Approval {
+        let id = self.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed).to_string();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.waiting.lock().await.insert(id.clone(), tx);
+
+        let request = ApprovalRequest { id: id.clone(), tool: tool.to_string(), action: risk.describe() };
+        if self.requests.send(request).is_err() {
+            return Approval::Deny("nothing is listening for approvals".into());
+        }
+
+        match tokio::time::timeout(self.patience, rx).await {
+            Ok(Ok(approval)) => approval,
+            Ok(Err(_)) => Approval::Deny("the approval was dropped".into()),
+            Err(_) => {
+                self.waiting.lock().await.remove(&id);
+                Approval::Deny(format!("no answer within {}s", self.patience.as_secs()))
+            }
+        }
+    }
+}

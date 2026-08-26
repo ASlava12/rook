@@ -55,8 +55,8 @@ what unblocks the most.
   one-shot fallback, so no caller branches on it.
 - **Three front ends** — an interactive conversation with slash commands and
   interruptible turns, a CLI with `--json` throughout, a ratatui browser, and a
-  web UI that both reads the store and drives a turn over a websocket, with
-  approvals answered in the page. All over one engine.
+  web UI that both reads the store and drives a turn over a websocket. All three
+  run turns, stream them and answer approvals the same way, over one engine.
 - **Conversation continuity** — every turn replays the session log, so `--session`
   and the chat both continue a conversation rather than starting one.
 - **Four platforms** — Linux, macOS, Windows tested on hosted runners; FreeBSD
@@ -70,9 +70,6 @@ seven upstream agents; nothing has been read past their issue trackers yet.
 **A live-model smoke test in CI.** An Ollama service container running a small
 model, so the HTTP provider and one full turn are exercised for real rather than
 against a stub.
-
-**A conversation pane in the TUI.** The terminal browser is still read-only;
-running a turn there means dropping to `rook chat`. The web UI already does it.
 
 **CLI through the daemon.** Detect a running `rookd` and route through its API,
 falling back to direct access. Removes the single-writer papercut

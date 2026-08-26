@@ -264,7 +264,7 @@ fn main() -> Result<()> {
         // Bare `rook` opens a conversation: talking to the agent is the point,
         // and every comparable tool starts there.
         None => chat::run(cli.workspace, None, cli.yes),
-        Some(Command::Tui) => tui::run(Rook::open(cli.workspace)?),
+        Some(Command::Tui) => tui::run(Rook::open(cli.workspace)?, cli.yes),
         Some(Command::Init) => cmd_init(cli.workspace),
         Some(Command::Doctor) => cmd_doctor(&Rook::open(cli.workspace)?, cli.json),
         Some(Command::Chat { session }) => chat::run(cli.workspace, session, cli.yes),
