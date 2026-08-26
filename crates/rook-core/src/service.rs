@@ -34,7 +34,7 @@ impl Rook {
         paths::ensure_dirs().map_err(|e| CoreError::Io { path: paths::home(), source: e })?;
         let workspace =
             workspace.or_else(|| std::env::current_dir().ok()).unwrap_or_else(|| PathBuf::from("."));
-        let config = Config::load();
+        let config = Config::load()?;
         let mut store = Store::open(paths::store_dir())?;
         store.set_level(config.storage.compression_level);
         let env = Environment::detect(AGENT_VERSION);
@@ -402,6 +402,36 @@ impl Rook {
         )?)
     }
 
+    /// Connect every enabled MCP server and collect what they offer.
+    ///
+    /// Servers are connected concurrently and failures are collected rather than
+    /// propagated: one misconfigured server must not stop the agent from
+    /// starting with the tools that do work.
+    pub async fn connect_mcp(&self) -> McpSession {
+        let enabled: Vec<_> = self.config.mcp.iter().filter(|c| c.enabled).collect();
+        let connections = enabled.iter().map(|config| async move {
+            match rook_mcp::Server::connect(config).await {
+                Ok(server) => {
+                    let server = std::sync::Arc::new(server);
+                    match server.list_tools().await {
+                        Ok(tools) => Ok((server, tools)),
+                        Err(e) => Err((config.name.clone(), e.to_string())),
+                    }
+                }
+                Err(e) => Err((config.name.clone(), e.to_string())),
+            }
+        });
+
+        let mut session = McpSession::default();
+        for outcome in futures_util::future::join_all(connections).await {
+            match outcome {
+                Ok((server, tools)) => session.servers.push((server, tools)),
+                Err(failure) => session.failures.push(failure),
+            }
+        }
+        session
+    }
+
     // ------------------------------------------------------------ maintenance
 
     pub fn stats(&self) -> Result<StoreStats> {
@@ -447,6 +477,25 @@ fn walk_files(root: &Path) -> Vec<PathBuf> {
         .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
         .map(|e| e.path().to_path_buf())
         .collect()
+}
+
+#[derive(Default)]
+pub struct McpSession {
+    pub servers: Vec<(std::sync::Arc<rook_mcp::Server>, Vec<rook_mcp::ToolDescriptor>)>,
+    /// Server name and why it could not be used.
+    pub failures: Vec<(String, String)>,
+}
+
+impl McpSession {
+    pub fn tool_count(&self) -> usize {
+        self.servers.iter().map(|(_, tools)| tools.len()).sum()
+    }
+
+    pub async fn shutdown(&self) {
+        for (server, _) in &self.servers {
+            server.shutdown().await;
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

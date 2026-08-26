@@ -5,11 +5,12 @@ members = [
     "crates/rook-skills",
     "crates/rook-core",
     "crates/rook-llm",
+    "crates/rook-mcp",
     "crates/rook-tools",
     "crates/rook-proto",
     "crates/rookd",
     "crates/rook-cli",
-    "xtask",
+    "xtask", "crates/rook-mcp",
 ]
 exclude = ["references"]
 

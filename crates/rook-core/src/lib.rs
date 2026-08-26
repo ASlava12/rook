@@ -12,10 +12,10 @@ pub mod fileset;
 pub mod paths;
 pub mod service;
 
-pub use config::Config;
+pub use config::{Config, ConfigError};
 pub use error::{CoreError, Result};
 pub use fileset::{CaptureLimits, Change, FileSet};
 pub use service::{
-    AGENT_VERSION, ContextUsage, KindUsage, MaintenanceReport, Rewind, Rollback, Rook, SkillVersionRecord,
-    TranscriptEntry,
+    AGENT_VERSION, ContextUsage, KindUsage, MaintenanceReport, McpSession, Rewind, Rollback, Rook,
+    SkillVersionRecord, TranscriptEntry,
 };

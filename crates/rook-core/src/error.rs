@@ -16,6 +16,8 @@ pub enum CoreError {
     Capture(String),
     #[error("refusing to capture {what}: exceeds {limit}. Narrow the paths or raise the limit in config.")]
     CaptureTooBig { what: String, limit: String },
+    #[error(transparent)]
+    Config(#[from] crate::config::ConfigError),
     #[error("serialization error: {0}")]
     Json(#[from] serde_json::Error),
     #[error("no session {0}")]

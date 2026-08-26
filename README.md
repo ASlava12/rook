@@ -9,7 +9,7 @@ as a feature rather than a debugging afterthought: a CLI, a terminal browser and
 web UI, all views over the same engine.
 
 > **Status: early.** The storage layer, the skill system and the inspection tools
-> are implemented and covered by 56 tests. The agent loop — tool dispatch, skill
+> are implemented and covered by 66 tests. The agent loop — tool dispatch, skill
 > loading, budgeting, logging — is tested against a scripted provider; it has not
 > yet been exercised against a live model in CI. Streaming, MCP and ACP are on the
 > [roadmap](docs/roadmap.md) and are not implemented. Nothing below describes
@@ -98,6 +98,28 @@ rook session rewind 01JQ… --to 12 --keep-files  # conversation only
 rook session fork 01JQ… --at 12                 # branch without touching files
 ```
 
+### External tools
+
+Any MCP server becomes a tool the agent can call. Declare it in
+`~/.rook/config.toml`:
+
+```toml
+[[mcp]]
+name = "filesystem"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
+```
+
+```sh
+rook mcp ls                              # connect everything, report what it offers
+rook mcp tools filesystem                # its tools and their arguments
+rook mcp call filesystem read_file '{"path":"a.txt"}'   # no model in the loop
+```
+
+Servers connect concurrently and a failure is reported without stopping the turn —
+one misconfigured server must not cost you the working ones. Tools are namespaced
+`server__tool`.
+
 ### Skills
 
 ```sh
@@ -143,6 +165,7 @@ crates/
   rook-core     the engine: config, agent loop, context budget, file captures
   rook-llm      provider trait + OpenAI-compatible HTTP (Ollama, LM Studio, vLLM, OpenAI)
   rook-tools    read/write/edit/list/search/run, with the guards that keep a turn survivable
+  rook-mcp      Model Context Protocol client, stdio transport, ~250 lines
   rook-proto    wire types shared by daemon, CLI and web
   rookd         HTTP backend + embedded web UI
   rook-cli      `rook`: commands and the terminal browser
@@ -170,7 +193,8 @@ lose people's trust:
 - **The agent loop has not been run against a live model in CI.** Its logic is
   covered by tests against a scripted provider, and the SSE parser by tests over a
   real socket, but no real model has been driven end to end in CI.
-- **No MCP client, no ACP server.** Both are planned; see [docs/roadmap.md](docs/roadmap.md).
+- **No ACP server.** Planned; see [docs/roadmap.md](docs/roadmap.md).
+- **MCP is stdio only.** HTTP-transport servers are not supported yet.
 - **Compaction is mechanical**, not model-summarised: it keeps the head and the
   recent tail and marks the elision. The full transcript is never lost.
 - **The CLI opens the store directly**, so it cannot run while `rookd` holds it.

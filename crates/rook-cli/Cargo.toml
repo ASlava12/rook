@@ -14,9 +14,11 @@ crossterm = "0.29.0"
 ratatui = "0.30.2"
 rook-core.workspace = true
 rook-llm.workspace = true
+rook-mcp = { version = "0.1.0", path = "../rook-mcp" }
 rook-proto.workspace = true
 rook-skills.workspace = true
 rook-store.workspace = true
+rook-tools.workspace = true
 serde = "1.0.229"
 serde_json = "1.0.151"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "signal"] }

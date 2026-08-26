@@ -4,6 +4,18 @@ use serde::{Deserialize, Serialize};
 
 use rook_store::RetentionPolicy;
 
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    #[error("could not read {path}: {source}")]
+    Read {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("{path} is not valid: {message}")]
+    Parse { path: std::path::PathBuf, message: String },
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 #[derive(Default)]
@@ -13,6 +25,12 @@ pub struct Config {
     pub server: ServerConfig,
     pub sandbox: SandboxConfig,
     pub telemetry: TelemetryConfig,
+    /// External tool servers, as `[[mcp]]` tables in config.toml. Omitted from a
+    /// written config when empty: TOML cannot hold both `mcp = []` and a later
+    /// `[[mcp]]` table, so emitting the empty array would block the documented
+    /// way of adding the first server.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub mcp: Vec<rook_mcp::ServerConfig>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -137,16 +155,16 @@ impl AgentConfig {
 }
 
 impl Config {
-    pub fn load() -> Self {
+    /// A malformed config is an error, not a fallback to defaults: silently
+    /// ignoring it would also silently change which model the agent talks to.
+    pub fn load() -> std::result::Result<Self, ConfigError> {
         let path = crate::paths::config_file();
-        let Ok(text) = std::fs::read_to_string(&path) else { return Self::default() };
-        match toml::from_str(&text) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!("{}: {e}; falling back to defaults", path.display());
-                Self::default()
-            }
-        }
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(source) => return Err(ConfigError::Read { path, source }),
+        };
+        toml::from_str(&text).map_err(|e| ConfigError::Parse { path, message: e.to_string() })
     }
 
     pub fn save(&self) -> std::io::Result<()> {

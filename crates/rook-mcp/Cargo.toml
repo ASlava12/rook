@@ -1,5 +1,5 @@
 [package]
-name = "rook-tools"
+name = "rook-mcp"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,14 +8,13 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-async-trait = "0.1.92"
-ignore = "0.4.33"
-regex = "1.13.1"
-rook-llm.workspace = true
-rook-mcp = { version = "0.1.0", path = "../rook-mcp" }
-rook-proto.workspace = true
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 thiserror = "2.0.20"
-tokio = { version = "1.53.1", features = ["rt", "process", "fs", "io-util", "time", "macros"] }
+tokio = { version = "1.53.1", features = ["rt", "process", "io-util", "sync", "time", "macros"] }
 tracing = "0.1.44"
+
+[dev-dependencies]
+futures-util = "0.3.34"
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time"] }

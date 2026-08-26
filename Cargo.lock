@@ -2217,9 +2217,11 @@ dependencies = [
  "ratatui",
  "rook-core",
  "rook-llm",
+ "rook-mcp",
  "rook-proto",
  "rook-skills",
  "rook-store",
+ "rook-tools",
  "serde",
  "serde_json",
  "tokio",
@@ -2235,6 +2237,7 @@ dependencies = [
  "futures-util",
  "ignore",
  "rook-llm",
+ "rook-mcp",
  "rook-proto",
  "rook-skills",
  "rook-store",
@@ -2266,6 +2269,18 @@ dependencies = [
  "tokio",
  "tracing",
  "webpki-roots",
+]
+
+[[package]]
+name = "rook-mcp"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2316,6 +2331,7 @@ dependencies = [
  "ignore",
  "regex",
  "rook-llm",
+ "rook-mcp",
  "rook-proto",
  "serde",
  "serde_json",

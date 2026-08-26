@@ -64,6 +64,25 @@ enum Command {
     /// Snapshot and restore parts of the workspace.
     #[command(subcommand)]
     Checkpoint(CheckpointCmd),
+    /// Inspect the external tool servers from `[[mcp]]` in config.toml.
+    #[command(subcommand)]
+    Mcp(McpCmd),
+}
+
+#[derive(Subcommand)]
+enum McpCmd {
+    /// Connect every configured server and report what it offers.
+    Ls,
+    /// List one server's tools with their schemas.
+    Tools { server: String },
+    /// Call a tool directly, without a model in the loop.
+    Call {
+        server: String,
+        tool: String,
+        /// Arguments as JSON.
+        #[arg(default_value = "{}")]
+        args: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -205,6 +224,7 @@ fn main() -> Result<()> {
         Some(Command::Session(c)) => cmd_session(&Rook::open(cli.workspace)?, c, cli.json),
         Some(Command::Skills(c)) => cmd_skills(&Rook::open(cli.workspace)?, c, cli.json),
         Some(Command::Checkpoint(c)) => cmd_checkpoint(&Rook::open(cli.workspace)?, c, cli.json),
+        Some(Command::Mcp(c)) => cmd_mcp(cli.workspace, c, cli.json),
     }
 }
 
@@ -280,6 +300,13 @@ fn cmd_run(workspace: Option<PathBuf>, prompt: Vec<String>, session: Option<Stri
             None => rook.start_session(&first_line(&prompt))?,
         };
         let mut agent = rook_core::agent::AgentLoop::new(&rook, provider, session);
+        let mcp = rook.connect_mcp().await;
+        for (server, tools) in &mcp.servers {
+            agent.tools.register_server(server.clone(), tools.clone());
+        }
+        for (name, error) in &mcp.failures {
+            eprintln!("mcp {name}: {error}");
+        }
         let mut out = std::io::stdout();
         let outcome = agent
             .run_with(&prompt, |delta| match delta {
@@ -295,6 +322,7 @@ fn cmd_run(workspace: Option<PathBuf>, prompt: Vec<String>, session: Option<Stri
             })
             .await?;
         println!();
+        mcp.shutdown().await;
         eprintln!(
             "\n[session {} · {} steps · {} in / {} out tokens · {} tool calls{}]",
             rook_store::format_session_id(session),
@@ -327,7 +355,7 @@ fn first_line(s: &str) -> String {
 }
 
 fn cmd_serve(port: Option<u16>) -> Result<()> {
-    let mut config = rook_core::Config::load();
+    let mut config = rook_core::Config::load()?;
     if let Some(p) = port {
         config.server.port = p;
     }
@@ -777,6 +805,76 @@ fn cmd_skills(rook: &Rook, cmd: SkillCmd, json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn cmd_mcp(workspace: Option<PathBuf>, cmd: McpCmd, json: bool) -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    runtime.block_on(async move {
+        let rook = Rook::open(workspace)?;
+        if rook.config.mcp.is_empty() {
+            println!("no servers configured. Add one to {}:\n", rook_core::paths::config_file().display());
+            println!("  [[mcp]]\n  name = \"filesystem\"\n  command = \"npx\"\n  args = [\"-y\", \"@modelcontextprotocol/server-filesystem\", \".\"]");
+            return anyhow::Ok(());
+        }
+        let session = rook.connect_mcp().await;
+
+        match cmd {
+            McpCmd::Ls => {
+                if json {
+                    let items: Vec<_> = session.servers.iter().map(|(s, tools)| serde_json::json!({
+                        "name": s.name(), "server": s.info().server, "tools": tools.len(),
+                    })).collect();
+                    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                        "connected": items,
+                        "failed": session.failures.iter().map(|(n, e)| serde_json::json!({"name": n, "error": e})).collect::<Vec<_>>(),
+                    }))?);
+                } else {
+                    let rows: Vec<Vec<String>> = session.servers.iter().map(|(s, tools)| vec![
+                        s.name().to_string(),
+                        format!("{} {}", s.info().server.name, s.info().server.version),
+                        s.info().protocol_version.clone(),
+                        tools.len().to_string(),
+                    ]).collect();
+                    print!("{}", fmt::table(&["name", "server", "protocol", "tools"], &rows));
+                    for (name, error) in &session.failures {
+                        println!("\n✗ {name}: {error}");
+                    }
+                }
+            }
+            McpCmd::Tools { server } => {
+                let (_, tools) = session.servers.iter().find(|(s, _)| s.name() == server)
+                    .with_context(|| format!("{server:?} is not connected"))?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(tools)?);
+                } else {
+                    for tool in tools {
+                        println!("{}  ({})", rook_tools::mcp::namespaced(&server, &tool.name), tool.name);
+                        println!("  {}", tool.description);
+                        if let Some(props) = tool.input_schema.get("properties").and_then(|p| p.as_object()) {
+                            let required = tool.input_schema.get("required").and_then(|r| r.as_array()).cloned().unwrap_or_default();
+                            for (arg, schema) in props {
+                                let mark = if required.iter().any(|r| r.as_str() == Some(arg)) { "*" } else { " " };
+                                println!("   {mark}{arg}: {}", schema.get("type").and_then(|t| t.as_str()).unwrap_or("any"));
+                            }
+                        }
+                        println!();
+                    }
+                }
+            }
+            McpCmd::Call { server, tool, args } => {
+                let (connected, _) = session.servers.iter().find(|(s, _)| s.name() == server)
+                    .with_context(|| format!("{server:?} is not connected"))?;
+                let args: serde_json::Value = serde_json::from_str(&args).context("arguments must be JSON")?;
+                let result = connected.call_tool(&tool, &args).await?;
+                if result.is_error {
+                    eprintln!("the server reported an error:");
+                }
+                println!("{}", result.to_text());
+            }
+        }
+        session.shutdown().await;
+        anyhow::Ok(())
+    })
 }
 
 fn session_id(s: &str) -> Result<u128> {

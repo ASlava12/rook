@@ -13,6 +13,7 @@
 
 pub mod exec;
 pub mod files;
+pub mod mcp;
 pub mod search;
 
 use std::collections::BTreeMap;

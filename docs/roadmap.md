@@ -26,6 +26,10 @@ what unblocks the most.
   separates what a fresh turn would carry from what is merely stored.
 - **Tools** — paged `read_file`, `write_file`, unambiguous `edit_file`, `list_dir`,
   regex `search`, `run_command` with timeout, output cap and deny list.
+- **MCP client** — stdio transport, written directly rather than via the SDK
+  ([ADR-0008](adr/0008-hand-written-mcp-client.md)). Servers connect concurrently,
+  failures are reported rather than fatal, and their tools join the toolbox
+  namespaced `server__tool`. 10 tests against a mock server.
 - **Providers** — OpenAI-compatible HTTP: Ollama, LM Studio, llama.cpp, vLLM,
   OpenAI, OpenRouter. Streaming over SSE with a configurable idle watchdog, so a
   dropped connection surfaces as a stall instead of looking like deep thought.
@@ -52,9 +56,6 @@ ends still wait for the whole turn.
 falling back to direct access. Removes the single-writer papercut
 ([ADR-0006](adr/0006-single-writer-store.md)).
 
-**MCP client.** The way to consume third-party tools without writing each one. The
-`Tool` trait and `ToolBox` were designed to take a dynamic backend.
-
 **Model-summarised compaction.** Today's is mechanical — head plus recent tail,
 elision marked. A summarising pass over the elided span is strictly better; the
 full transcript stays in the store either way.
@@ -66,6 +67,9 @@ same capture/rollback treatment skills already get — the shape
 asked for.
 
 ## After that
+
+**MCP over HTTP.** The stdio transport covers local servers; hosted ones need the
+streamable-HTTP transport.
 
 **ACP server.** JSON-RPC over stdio, v1 stable, adopted by Zed, JetBrains, Google
 and GitHub. One implementation replaces a plugin per editor.
