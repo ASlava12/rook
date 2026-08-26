@@ -305,3 +305,25 @@ fn session_ids_round_trip_as_ulids_in_json_and_as_integers_on_disk() {
     assert!(packed.len() < 120, "postcard encoding grew to {} bytes", packed.len());
     assert_eq!(postcard::from_bytes::<SessionMeta>(&packed).unwrap().id, id);
 }
+
+#[test]
+fn a_fork_keeps_exactly_the_events_before_the_split() {
+    let (_d, s) = tmp_store();
+    let source = rook_store::new_session_id();
+    s.create_session(&SessionMeta::new(source, "src", "/tmp", rook_store::now_unix())).unwrap();
+    for i in 0..5 {
+        s.append_event(source, NewEvent::new(EventKind::UserMessage, Kind::Message, &message(i))).unwrap();
+    }
+
+    for split in [0u64, 1, 3, 5] {
+        let fork = rook_store::new_session_id();
+        let meta = s.fork_session(source, fork, split, "fork").unwrap();
+        assert_eq!(meta.event_count, split, "forking at {split} kept the wrong count");
+        assert_eq!(meta.next_seq, split);
+        assert_eq!(s.events(fork, 0, usize::MAX).unwrap().len() as u64, split);
+        assert_eq!(meta.parent, Some(source));
+    }
+
+    // The original is untouched by any of that.
+    assert_eq!(s.events(source, 0, usize::MAX).unwrap().len(), 5);
+}

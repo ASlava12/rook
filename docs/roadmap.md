@@ -35,8 +35,11 @@ what unblocks the most.
   dropped connection surfaces as a stall instead of looking like deep thought.
   Tool calls are emitted only once whole. Providers that cannot stream get a
   one-shot fallback, so no caller branches on it.
-- **Three front ends** — CLI with `--json` throughout, ratatui terminal browser,
+- **Three front ends** — an interactive conversation with slash commands and
+  interruptible turns, a CLI with `--json` throughout, a ratatui browser and a
   read-only web UI, all over one engine.
+- **Conversation continuity** — every turn replays the session log, so `--session`
+  and the chat both continue a conversation rather than starting one.
 - **Four platforms** — Linux, macOS, Windows tested on hosted runners; FreeBSD
   built and tested in a VM.
 
@@ -49,8 +52,8 @@ seven upstream agents; nothing has been read past their issue trackers yet.
 model, so the HTTP provider and one full turn are exercised for real rather than
 against a stub.
 
-**Streaming in the TUI and the web UI.** The CLI streams; the other two front
-ends still wait for the whole turn.
+**A conversation pane in the TUI.** The browser is read-only; running a turn
+means dropping to `rook chat`.
 
 **CLI through the daemon.** Detect a running `rookd` and route through its API,
 falling back to direct access. Removes the single-writer papercut

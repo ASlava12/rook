@@ -486,10 +486,12 @@ impl Store {
 
         {
             let mut events = txn.open_table(schema::EVENTS)?;
+            // Half-open: the fork keeps seqs [0, upto_seq), so rewinding to 0
+            // keeps nothing rather than keeping the event being rewound past.
             let start = schema::event_key(source, 0);
-            let end = schema::event_key(source, upto_seq.saturating_sub(1));
+            let end = schema::event_key(source, upto_seq);
             let copied: Vec<(u64, Vec<u8>)> = events
-                .range(start.as_slice()..=end.as_slice())?
+                .range(start.as_slice()..end.as_slice())?
                 .filter_map(|e| e.ok())
                 .filter_map(|(k, v)| {
                     schema::parse_event_key(k.value()).map(|(_, seq)| (seq, v.value().to_vec()))

@@ -9,7 +9,7 @@ as a feature rather than a debugging afterthought: a CLI, a terminal browser and
 web UI, all views over the same engine.
 
 > **Status: early.** The storage layer, the skill system and the inspection tools
-> are implemented and covered by 66 tests. The agent loop — tool dispatch, skill
+> are implemented and covered by 69 tests. The agent loop — tool dispatch, skill
 > loading, budgeting, logging — is tested against a scripted provider; it has not
 > yet been exercised against a live model in CI. Streaming, MCP and ACP are on the
 > [roadmap](docs/roadmap.md) and are not implemented. Nothing below describes
@@ -66,10 +66,24 @@ Requires a Rust toolchain and a C compiler (two dependencies vendor C — see
 rook init                                  # create ~/.rook, config, store
 rook doctor                                # what was detected, and what it means for skills
 
-rook run "summarise what changed in src/ this week"   # streams as it arrives
-rook                                       # terminal browser over everything stored
+rook                                       # talk to it
+rook run "summarise what changed in src/"  # one turn, streamed, for scripts
+rook tui                                   # read-only browser over everything stored
 rookd                                      # http://127.0.0.1:7717 — web UI + API
 ```
+
+In a conversation, slash commands reach the same engine the subcommands do:
+
+```
+/context        what this conversation costs, and of what
+/skills [name]  what applies here, or one skill's body
+/undo           rewind past the last exchange, files included
+/rewind <seq>   rewind to a point in the transcript
+/session  /mcp  /new  /help  /quit
+```
+
+Ctrl-C stops the turn in flight without leaving; whatever it already did stays in
+the log.
 
 ### Reading what the agent remembers
 

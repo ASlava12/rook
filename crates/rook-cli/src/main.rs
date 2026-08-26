@@ -1,5 +1,6 @@
 //! `rook` — the command line and TUI front end.
 
+mod chat;
 mod fmt;
 mod tui;
 
@@ -38,6 +39,12 @@ enum Command {
     Init,
     /// Report what Rook detected about this machine and what it means for skills.
     Doctor,
+    /// Talk to the agent interactively.
+    Chat {
+        /// Continue an existing session instead of starting one.
+        #[arg(long)]
+        session: Option<String>,
+    },
     /// Run a single turn against the configured model.
     Run {
         prompt: Vec<String>,
@@ -45,7 +52,7 @@ enum Command {
         #[arg(long)]
         session: Option<String>,
     },
-    /// Browse the store, sessions and skills in a terminal UI.
+    /// Browse the store, sessions and skills in a read-only terminal UI.
     Tui,
     /// Start the HTTP backend and web UI.
     Serve {
@@ -212,12 +219,13 @@ fn main() -> Result<()> {
         .init();
 
     match cli.command {
-        None | Some(Command::Tui) => {
-            let rook = Rook::open(cli.workspace)?;
-            tui::run(rook)
-        }
+        // Bare `rook` opens a conversation: talking to the agent is the point,
+        // and every comparable tool starts there.
+        None => chat::run(cli.workspace, None),
+        Some(Command::Tui) => tui::run(Rook::open(cli.workspace)?),
         Some(Command::Init) => cmd_init(cli.workspace),
         Some(Command::Doctor) => cmd_doctor(&Rook::open(cli.workspace)?, cli.json),
+        Some(Command::Chat { session }) => chat::run(cli.workspace, session),
         Some(Command::Run { prompt, session }) => cmd_run(cli.workspace, prompt, session),
         Some(Command::Serve { port }) => cmd_serve(port),
         Some(Command::Store(c)) => cmd_store(&Rook::open(cli.workspace)?, c, cli.json),
@@ -877,7 +885,7 @@ fn cmd_mcp(workspace: Option<PathBuf>, cmd: McpCmd, json: bool) -> Result<()> {
     })
 }
 
-fn session_id(s: &str) -> Result<u128> {
+pub fn session_id(s: &str) -> Result<u128> {
     rook_store::parse_session_id(s).with_context(|| format!("{s:?} is not a session id"))
 }
 

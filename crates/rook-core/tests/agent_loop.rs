@@ -5,7 +5,7 @@
 //! prompt actually contains.
 
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use rook_core::agent::AgentLoop;
@@ -17,12 +17,17 @@ use rook_store::Store;
 /// Replays a fixed sequence of responses and records what it was asked.
 struct ScriptedProvider {
     script: Mutex<Vec<Response>>,
-    seen: Mutex<Vec<Request>>,
+    seen: Arc<Mutex<Vec<Request>>>,
 }
 
 impl ScriptedProvider {
     fn new(script: Vec<Response>) -> Self {
-        Self { script: Mutex::new(script), seen: Mutex::new(Vec::new()) }
+        Self { script: Mutex::new(script), seen: Arc::new(Mutex::new(Vec::new())) }
+    }
+
+    /// Handle on what the provider was asked, readable after it is boxed away.
+    fn share(&self) -> Arc<Mutex<Vec<Request>>> {
+        self.seen.clone()
     }
 }
 
@@ -367,4 +372,59 @@ async fn context_usage_separates_what_is_live_from_what_is_merely_stored() {
         usage.logged_tokens
     );
     assert!(usage.compact_at < usage.window);
+}
+
+#[tokio::test]
+async fn a_second_turn_carries_the_first_one_with_it() {
+    let f = fixture();
+    let session = f.rook.start_session("continuity").unwrap();
+
+    let first = Box::new(ScriptedProvider::new(vec![reply("your name is Ada")]));
+    AgentLoop::new(&f.rook, first, session).run("remember my name").await.unwrap();
+
+    let second = ScriptedProvider::new(vec![reply("Ada")]);
+    let seen = second.share();
+    AgentLoop::new(&f.rook, Box::new(second), session).run("what is my name?").await.unwrap();
+
+    let request = seen.lock().unwrap().last().cloned().expect("the provider must have been called");
+    let roles: Vec<_> = request.messages.iter().map(|m| m.role).collect();
+    assert_eq!(
+        roles,
+        vec![Role::System, Role::User, Role::Assistant, Role::User],
+        "the second turn must replay the first"
+    );
+    assert_eq!(request.messages[1].content, "remember my name");
+    assert_eq!(request.messages[2].content, "your name is Ada");
+    assert_eq!(request.messages[3].content, "what is my name?");
+}
+
+#[tokio::test]
+async fn replayed_tool_calls_keep_their_results_paired() {
+    let f = fixture();
+    std::fs::write(f.workspace.path().join("p.txt"), "payload").unwrap();
+    let session = f.rook.start_session("tools").unwrap();
+
+    let first = Box::new(ScriptedProvider::new(vec![
+        call("read_file", serde_json::json!({ "path": "p.txt" })),
+        reply("read it"),
+    ]));
+    AgentLoop::new(&f.rook, first, session).run("read p.txt").await.unwrap();
+
+    let second = ScriptedProvider::new(vec![reply("still here")]);
+    let seen = second.share();
+    AgentLoop::new(&f.rook, Box::new(second), session).run("and now?").await.unwrap();
+
+    let request = seen.lock().unwrap().last().cloned().unwrap();
+    let call_msg = request
+        .messages
+        .iter()
+        .find(|m| !m.tool_calls.is_empty())
+        .expect("the replayed history must contain the tool call");
+    let result_msg = request.messages.iter().find(|m| m.role == Role::Tool).expect("and its result");
+    assert_eq!(
+        result_msg.tool_call_id.as_deref(),
+        Some(call_msg.tool_calls[0].id.as_str()),
+        "a tool result must reference the call it answers, or the provider rejects the request"
+    );
+    assert_eq!(call_msg.tool_calls[0].name, "read_file");
 }

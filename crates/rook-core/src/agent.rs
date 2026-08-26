@@ -102,6 +102,56 @@ impl<'a> AgentLoop<'a> {
         s
     }
 
+    /// Rebuild the conversation from the session log.
+    ///
+    /// The log is the only record of a turn; without replaying it every call
+    /// would start from nothing, and `--session` would continue a session in
+    /// name only. Tool calls and their results are paired by adjacency, which
+    /// holds because the loop logs each call immediately before its result.
+    fn history(&self) -> Result<Vec<Message>> {
+        let events = self.rook.store.events(self.session, 0, usize::MAX)?;
+        let mut messages = Vec::with_capacity(events.len());
+        let mut open_call: Option<String> = None;
+
+        for event in events {
+            let body = match self.rook.store.get(&event.record.body) {
+                Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+                Err(_) => continue,
+            };
+            match event.record.kind {
+                EventKind::UserMessage => messages.push(Message::user(body)),
+                EventKind::AssistantMessage => messages.push(Message::assistant(body)),
+                EventKind::SkillLoaded => {
+                    messages.push(Message::user(format!("[skill {} loaded]\n{body}", event.record.label)))
+                }
+                EventKind::ToolCall => {
+                    let id = format!("call_{}", event.seq);
+                    messages.push(Message {
+                        role: Role::Assistant,
+                        content: String::new(),
+                        tool_calls: vec![rook_llm::ToolCall {
+                            id: id.clone(),
+                            name: event.record.label.clone(),
+                            arguments: serde_json::from_str(&body).unwrap_or(serde_json::Value::Null),
+                        }],
+                        tool_call_id: None,
+                    });
+                    open_call = Some(id);
+                }
+                EventKind::ToolResult => {
+                    // A result with no preceding call would make the message
+                    // list invalid for the provider, so drop it rather than
+                    // send something that will be rejected.
+                    if let Some(id) = open_call.take() {
+                        messages.push(Message::tool_result(id, body));
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(messages)
+    }
+
     fn tool_specs(&self) -> Vec<ToolSpec> {
         let mut specs =
             if self.rook.config.agent.lazy_tools { self.tools.stubs() } else { self.tools.specs() };
@@ -130,7 +180,10 @@ impl<'a> AgentLoop<'a> {
     pub async fn run_with<F: FnMut(&Delta)>(&mut self, prompt: &str, mut on_delta: F) -> Result<TurnOutcome> {
         self.rook.log(self.session, EventKind::UserMessage, "", prompt)?;
 
-        let mut messages = vec![Message::system(self.system_prompt()), Message::user(prompt)];
+        // The prompt was just logged, so replaying the session already ends
+        // with it: the log is the only source of truth for what was said.
+        let mut messages = vec![Message::system(self.system_prompt())];
+        messages.extend(self.history()?);
         let mut outcome = TurnOutcome {
             steps: 0,
             stopped: "end_turn".into(),
