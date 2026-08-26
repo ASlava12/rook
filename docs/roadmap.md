@@ -19,6 +19,9 @@ what unblocks the most.
   mechanical compaction, automatic checkpointing before any mutating tool call,
   everything logged to the store. 12 tests against a scripted provider; not yet
   exercised against a live model in CI.
+- **Session diffs** — what a session changed on disk, from its own checkpoints:
+  no repository, no staging, and files that were never versioned. Text diffs
+  with counts, binary reported without one. 4 tests.
 - **Rewind and fork** — `rook session rewind` restores workspace files as well as
   the conversation, deleting files the turn created, and forks rather than
   truncating so the rewound-past turns stay readable.

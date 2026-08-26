@@ -21,6 +21,7 @@ const HELP: &str = "  /context [window]   what this conversation costs, and of w
   /goal [text]        what this session is for; the agent is told
   /memory [query]     what it remembers, or what matches
   /search <query>     find it in everything said, read and run
+  /diff               what this session has changed on disk
   /btw <question>     ask about this conversation without joining it
   /mcp                connected tool servers
   /undo               rewind past the last exchange, files included
@@ -191,6 +192,11 @@ async fn turn(
     tokio::select! {
         result = running => match result {
             Ok(outcome) => {
+                if let Ok(changes) = rook.changes(session, false)
+                    && changes.touched() > 0
+                {
+                    println!("\n\x1b[2m  {} — /diff\x1b[0m", changes.summary());
+                }
                 for id in &outcome.delegated {
                     println!("\x1b[2m  sub-agent {id}\x1b[0m");
                 }
@@ -268,6 +274,22 @@ async fn dispatch(
         "goal" => {
             rook.set_goal(*session, rest)?;
             println!("goal set");
+        }
+
+        "diff" => {
+            let changes = rook.changes(*session, false)?;
+            if changes.touched() == 0 {
+                println!("nothing changed on disk yet");
+            }
+            for file in changes.files.iter().filter(|f| f.change != rook_core::changes::Change::Unchanged) {
+                println!(
+                    "{} {}  +{} -{}",
+                    file.change.sigil(),
+                    file.path,
+                    file.lines_added,
+                    file.lines_removed
+                );
+            }
         }
 
         "search" if !rest.is_empty() => {

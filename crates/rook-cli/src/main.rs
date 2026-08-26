@@ -222,6 +222,13 @@ enum SessionCmd {
         #[arg(long, default_value_t = 128_000)]
         window: usize,
     },
+    /// What a session changed on disk, from its own checkpoints.
+    Diff {
+        id: String,
+        /// Names and counts only.
+        #[arg(long)]
+        stat: bool,
+    },
     /// Show or set what a session is for.
     Goal {
         id: String,
@@ -487,6 +494,15 @@ fn cmd_run(
         mcp.shutdown().await;
         for id in &outcome.delegated {
             eprintln!("sub-agent {id} — `rook session show {id}` for its detail");
+        }
+        if let Ok(changes) = rook.changes(session, false)
+            && changes.touched() > 0
+        {
+            eprintln!(
+                "{} — `rook session diff {}`",
+                changes.summary(),
+                rook_store::format_session_id(session)
+            );
         }
         eprintln!(
             "\n[session {} · {} steps · {} in / {} out tokens{} · {} tool calls{}]",
@@ -849,6 +865,38 @@ fn cmd_session(rook: &Rook, cmd: SessionCmd, json: bool) -> Result<()> {
                 })
                 .collect();
             print!("{}", fmt::table(&["kind", "events", "bytes", "tokens", ""], &rows));
+        }
+        SessionCmd::Diff { id, stat } => {
+            let changes = rook.changes(session_id(&id)?, !stat)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&changes)?);
+                return Ok(());
+            }
+            if changes.touched() == 0 {
+                println!("this session changed nothing on disk");
+                return Ok(());
+            }
+            for file in changes.files.iter().filter(|f| f.change != rook_core::changes::Change::Unchanged) {
+                println!(
+                    "{} {}  +{} -{}",
+                    file.change.sigil(),
+                    file.path,
+                    file.lines_added,
+                    file.lines_removed
+                );
+                if let Some(diff) = &file.diff {
+                    for line in diff.lines() {
+                        let colour = match line.chars().next() {
+                            Some('+') => "\x1b[32m",
+                            Some('-') => "\x1b[31m",
+                            Some('@') => "\x1b[36m",
+                            _ => "",
+                        };
+                        println!("  {colour}{line}\x1b[0m");
+                    }
+                }
+            }
+            println!("\n{}", changes.summary());
         }
         SessionCmd::Goal { id, goal } => {
             let session = session_id(&id)?;

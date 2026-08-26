@@ -5,6 +5,7 @@
 //! keeps them from drifting into three subtly different products.
 
 pub mod agent;
+pub mod changes;
 pub mod config;
 pub mod context;
 pub mod error;

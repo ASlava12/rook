@@ -1464,3 +1464,104 @@ async fn a_bounded_scan_says_when_it_stopped_early() {
     assert!(found.truncated, "a scan that hit its budget must say so, not look complete");
     assert!(found.objects_scanned <= 10);
 }
+
+#[tokio::test]
+async fn a_session_can_show_exactly_what_it_changed() {
+    use rook_core::changes::Change;
+    let f = fixture();
+    std::fs::write(f.workspace.path().join("kept.txt"), "one\ntwo\nthree\n").unwrap();
+    std::fs::write(f.workspace.path().join("edited.txt"), "alpha\nbeta\n").unwrap();
+    let session = f.rook.start_session("edits").unwrap();
+
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("write_file", serde_json::json!({ "path": "edited.txt", "content": "alpha\nGAMMA\n" })),
+        call("write_file", serde_json::json!({ "path": "created.txt", "content": "new\n" })),
+        // Touched and put back: the diff must not claim it changed.
+        call("write_file", serde_json::json!({ "path": "kept.txt", "content": "one\ntwo\nthree\n" })),
+        reply("done"),
+    ]));
+    let mut agent = AgentLoop::new(&f.rook, provider, session);
+    agent.allow_everything_not_denied();
+    agent.run("make the edits").await.unwrap();
+
+    let changes = f.rook.changes(session, true).unwrap();
+    let by_name = |name: &str| {
+        changes.files.iter().find(|c| c.path.ends_with(name)).unwrap_or_else(|| panic!("{name} missing"))
+    };
+
+    assert_eq!(by_name("edited.txt").change, Change::Modified);
+    assert_eq!(by_name("edited.txt").lines_added, 1);
+    assert_eq!(by_name("edited.txt").lines_removed, 1);
+    assert!(by_name("edited.txt").diff.as_ref().unwrap().contains("+GAMMA"));
+
+    assert_eq!(by_name("created.txt").change, Change::Added);
+    assert_eq!(by_name("created.txt").lines_added, 1);
+
+    assert_eq!(
+        by_name("kept.txt").change,
+        Change::Unchanged,
+        "a file written back identically was not changed by the session"
+    );
+    assert_eq!(changes.touched(), 2);
+}
+
+#[tokio::test]
+async fn a_deleted_file_shows_as_removed() {
+    let f = fixture();
+    let target = f.workspace.path().join("doomed.txt");
+    std::fs::write(&target, "here\n").unwrap();
+    let session = f.rook.start_session("delete").unwrap();
+
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("write_file", serde_json::json!({ "path": "doomed.txt", "content": "here\n" })),
+        reply("touched"),
+    ]));
+    let mut agent = AgentLoop::new(&f.rook, provider, session);
+    agent.allow_everything_not_denied();
+    agent.run("touch it").await.unwrap();
+    std::fs::remove_file(&target).unwrap();
+
+    let changes = f.rook.changes(session, false).unwrap();
+    assert_eq!(changes.files[0].change, rook_core::changes::Change::Removed);
+}
+
+#[tokio::test]
+async fn the_earliest_checkpoint_is_the_baseline_not_the_latest() {
+    let f = fixture();
+    std::fs::write(f.workspace.path().join("f.txt"), "original\n").unwrap();
+    let session = f.rook.start_session("twice").unwrap();
+
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("write_file", serde_json::json!({ "path": "f.txt", "content": "first pass\n" })),
+        call("write_file", serde_json::json!({ "path": "f.txt", "content": "second pass\n" })),
+        reply("done"),
+    ]));
+    let mut agent = AgentLoop::new(&f.rook, provider, session);
+    agent.allow_everything_not_denied();
+    agent.run("edit twice").await.unwrap();
+
+    let diff = f.rook.changes(session, true).unwrap().files[0].diff.clone().unwrap();
+    assert!(diff.contains("-original"), "the baseline is before the agent touched it:\n{diff}");
+    assert!(diff.contains("+second pass"));
+    assert!(!diff.contains("first pass"), "its own intermediate state is not a change it made");
+}
+
+#[tokio::test]
+async fn a_binary_file_is_reported_as_changed_without_a_diff() {
+    let f = fixture();
+    let target = f.workspace.path().join("data.bin");
+    std::fs::write(&target, [0u8, 1, 2, 3]).unwrap();
+    let session = f.rook.start_session("binary").unwrap();
+
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("write_file", serde_json::json!({ "path": "data.bin", "content": "text now" })),
+        reply("done"),
+    ]));
+    let mut agent = AgentLoop::new(&f.rook, provider, session);
+    agent.allow_everything_not_denied();
+    agent.run("overwrite").await.unwrap();
+
+    let file = f.rook.changes(session, true).unwrap().files[0].clone();
+    assert_eq!(file.change, rook_core::changes::Change::Modified);
+    assert!(file.diff.is_none(), "rendering a binary diff into a terminal helps nobody");
+}

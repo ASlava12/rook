@@ -9,7 +9,7 @@ as a feature rather than a debugging afterthought: a CLI, a terminal browser and
 web UI, all views over the same engine.
 
 > **Status: early.** The storage layer, the skill system and the inspection tools
-> are implemented and covered by 178 tests. The agent loop — tool dispatch, skill
+> are implemented and covered by 182 tests. The agent loop — tool dispatch, skill
 > loading, budgeting, logging — is tested against a scripted provider; it has not
 > yet been exercised against a live model in CI. Streaming, MCP and ACP are on the
 > [roadmap](docs/roadmap.md) and are not implemented. Nothing below describes
@@ -105,6 +105,22 @@ rook session show 01JQ… --from 0 --limit 50
 rook session show 01JQ… --json | jq '.[] | select(.kind=="tool-call")'
 rook session context 01JQ…            # what the conversation costs, and of what
 ```
+
+### Seeing what changed
+
+The loop checkpoints every file a tool is about to touch, so the store already
+holds each file as it was before the agent first touched it. That is a diff of a
+whole session, computed without a repository and for files that were never under
+version control:
+
+```sh
+rook session diff 01JQ…            # unified diff of everything it changed
+rook session diff 01JQ… --stat     # names and counts only
+```
+
+A file the agent wrote back identically shows as unchanged, and its own
+intermediate states are not counted — the baseline is what was there before it
+started, not what it wrote last.
 
 ### Undoing a turn
 
