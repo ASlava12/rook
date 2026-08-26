@@ -1,9 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// A blake3 content hash. Objects are addressed by content, so identical
-/// payloads — a re-read of the same file, a repeated tool result, the system
-/// prompt on every turn — cost storage exactly once.
+/// A blake3 content hash. Identical payloads — a re-read of the same file, a
+/// repeated tool result — therefore cost storage exactly once.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ObjectId(pub [u8; 32]);
 
@@ -16,8 +15,7 @@ impl ObjectId {
         hex::encode(self.0)
     }
 
-    /// Short form used in CLI listings. Long enough to stay unambiguous in a
-    /// store with millions of objects, short enough to read.
+    /// 6 bytes: unambiguous across millions of objects, short enough to read.
     pub fn short(self) -> String {
         hex::encode(&self.0[..6])
     }
@@ -45,25 +43,17 @@ impl fmt::Display for ObjectId {
     }
 }
 
-/// What an object holds. The kind drives which zstd dictionary is used, so
-/// thousands of small same-shaped payloads compress far better than they would
-/// individually.
+/// What an object holds. Selects the zstd dictionary, so same-shaped payloads
+/// compress against a model trained on their own population.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum Kind {
-    /// A single conversation message body (JSON).
     Message = 0,
-    /// Output captured from a tool call.
     ToolResult = 1,
-    /// Contents of a file the agent read or wrote.
     FileBlob = 2,
-    /// A `SKILL.md` document or one of its bundled assets.
     Skill = 3,
-    /// A serialized memory record.
     Memory = 4,
-    /// A workspace checkpoint manifest.
     Snapshot = 5,
-    /// Anything without a more specific kind.
     Other = 255,
 }
 
@@ -103,17 +93,15 @@ impl Kind {
     ];
 }
 
-/// Index entry describing where and how an object is stored.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ObjectMeta {
     pub kind: u8,
     pub codec: u8,
-    /// Size of the payload as the caller handed it to us.
+    /// As the caller handed it to us, before compression.
     pub size_raw: u64,
-    /// Size actually occupied after compression.
     pub size_stored: u64,
     /// Unix seconds, first time this content was seen.
     pub created_at: i64,
-    /// Objects above the inline threshold live in `objects/`, not in the index.
+    /// Stored in `objects/` rather than inline in the index.
     pub external: bool,
 }

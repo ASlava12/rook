@@ -47,13 +47,10 @@ pub struct GcReport {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RetentionPolicy {
-    /// Delete sessions whose last activity is older than this.
     pub max_session_age_days: Option<u32>,
-    /// Keep at most this many sessions, newest first.
     pub max_sessions: Option<usize>,
-    /// Soft cap on total on-disk bytes; oldest sessions go first.
     pub max_total_bytes: Option<u64>,
-    /// Sessions carrying any of these tags are never pruned automatically.
+    /// Never pruned automatically, at any age.
     pub protect_tags: Vec<String>,
 }
 
@@ -170,7 +167,6 @@ impl Store {
         Ok(report)
     }
 
-    /// Remove payload files that no index entry claims.
     fn sweep_orphan_files(&self, dry_run: bool) -> Result<u64> {
         let objects_dir = self.root.join("objects");
         let mut removed = 0;
@@ -203,8 +199,8 @@ impl Store {
         Ok(removed)
     }
 
-    /// Enforce `policy`, deleting the oldest unprotected sessions first.
-    /// Objects are not touched here — run [`Store::gc`] afterwards to reclaim.
+    /// Deletes the oldest unprotected sessions first. Objects survive until
+    /// [`Store::gc`] runs, because other sessions may share them.
     pub fn prune(&self, policy: &RetentionPolicy, dry_run: bool) -> Result<PruneReport> {
         let mut report = PruneReport { dry_run, ..Default::default() };
         let mut sessions = self.list_sessions()?;
@@ -248,11 +244,9 @@ impl Store {
         Ok(report)
     }
 
-    /// Train a zstd dictionary per kind from objects already in the store.
-    ///
-    /// Worth running once a store has a few hundred objects, and again after the
-    /// agent's usage shape changes. Objects written earlier keep working: each
-    /// one records the codec it was written with.
+    /// Worth running once a store has a few hundred objects, and again after
+    /// usage changes shape. Objects written earlier keep decoding: each records
+    /// the codec it was written with.
     pub fn train_dictionaries(&self, sample_limit: usize, dict_size: usize) -> Result<Vec<(String, usize)>> {
         let mut out = Vec::new();
         for kind in Kind::ALL {

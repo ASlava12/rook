@@ -61,10 +61,8 @@ pub fn split_spec(spec: &str) -> (&str, &str) {
     }
 }
 
-/// Build a provider from a `provider/model` spec and the environment.
-///
-/// Endpoints and keys come from environment variables so a store or a config
-/// file never has to hold a credential.
+/// Endpoints and keys come from environment variables, so neither the store nor
+/// the config file ever holds a credential.
 pub fn from_spec(spec: &str) -> Result<Box<dyn Provider>> {
     let (provider, model) = split_spec(spec);
     let cfg = match provider {
@@ -98,12 +96,8 @@ fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).ok().filter(|v| !v.is_empty()).unwrap_or_else(|| default.to_string())
 }
 
-/// Install the process-wide crypto provider for TLS.
-///
-/// `ring` rather than `aws-lc-rs`: it is pure Rust plus a small amount of
-/// assembly and cross-compiles cleanly, which matters because FreeBSD is a
-/// first-class target here and `aws-lc-rs` needs cmake and a working C
-/// toolchain for it.
+/// `ring` rather than rustls' default `aws-lc-rs`: the latter needs cmake and a
+/// full C toolchain, which is the usual blocker for the FreeBSD target.
 pub fn init_tls() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }

@@ -11,6 +11,7 @@ members = [
     "crates/rook-cli",
     "xtask",
 ]
+exclude = ["references"]
 
 [workspace.package]
 version = "0.1.0"

@@ -42,10 +42,8 @@ pub enum ToolError {
 
 pub type Result<T> = std::result::Result<T, ToolError>;
 
-/// What a tool produced.
-///
-/// `content` is what the model sees; `full_bytes` records what actually happened
-/// so the store keeps the whole thing even when context only gets a window of it.
+/// `content` is what the model sees; `full_bytes` is what actually happened, so
+/// the store keeps the whole thing even when context gets only a window of it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolOutcome {
     pub content: String,
@@ -78,8 +76,8 @@ impl ToolOutcome {
     }
 }
 
-/// Context a tool runs in. The workspace root bounds every path a tool will
-/// touch unless the caller explicitly widens it.
+/// The workspace root bounds every path a tool will touch, unless the caller
+/// explicitly widens it.
 #[derive(Clone, Debug)]
 pub struct ToolContext {
     pub workspace: PathBuf,
@@ -146,16 +144,20 @@ pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn spec(&self) -> ToolSpec;
     async fn call(&self, ctx: &ToolContext, args: &serde_json::Value) -> Result<ToolOutcome>;
+
+    /// Paths this call is about to modify, so the caller can checkpoint them
+    /// first. Empty for read-only tools.
+    fn touched_paths(&self, _args: &serde_json::Value) -> Vec<String> {
+        Vec::new()
+    }
 }
 
-/// The set of tools available to a turn.
 #[derive(Clone, Default)]
 pub struct ToolBox {
     tools: Vec<Arc<dyn Tool>>,
 }
 
 impl ToolBox {
-    /// Everything built in.
     pub fn standard() -> Self {
         let mut tb = Self::default();
         tb.register(Arc::new(files::ReadFile));

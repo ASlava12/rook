@@ -48,7 +48,6 @@ pub fn logs_dir() -> PathBuf {
     home().join("logs")
 }
 
-/// Skills vendored into a workspace: `<workspace>/.rook/skills`.
 pub fn project_skills_dir(workspace: &Path) -> PathBuf {
     workspace.join(".rook").join("skills")
 }

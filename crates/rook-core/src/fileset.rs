@@ -31,6 +31,10 @@ pub struct FileSet {
     pub root: String,
     /// Relative path -> hex object id.
     pub files: BTreeMap<String, String>,
+    /// Paths that did not exist when this was captured. A rewind deletes them,
+    /// which is the only way to undo a file the agent created.
+    #[serde(default)]
+    pub absent: Vec<String>,
     pub total_bytes: u64,
     #[serde(default)]
     pub note: Option<String>,
@@ -152,6 +156,7 @@ impl FileSet {
             captured_at: rook_store::now_unix(),
             root: root.display().to_string(),
             files,
+            absent: Vec::new(),
             total_bytes: total,
             note,
         };
@@ -236,7 +241,8 @@ pub fn gc_expander(_kind: Kind, body: &[u8]) -> Vec<ObjectId> {
     }
 }
 
-/// Convenience for callers that hold paths rather than a root directory.
+/// Capture an explicit list of paths. A path that does not exist is recorded in
+/// `absent` rather than failing, so a later rewind can remove it.
 pub fn capture_paths(
     store: &Store,
     kind: &str,
@@ -245,10 +251,15 @@ pub fn capture_paths(
     paths: &[PathBuf],
     limits: &CaptureLimits,
 ) -> Result<(FileSet, ObjectId)> {
+    let rel = |p: &Path| p.strip_prefix(root).unwrap_or(p).to_string_lossy().replace('\\', "/");
     let mut files = BTreeMap::new();
+    let mut absent = Vec::new();
     let mut total = 0u64;
     for path in paths {
-        let meta = std::fs::metadata(path).map_err(|e| CoreError::Io { path: path.clone(), source: e })?;
+        let Ok(meta) = std::fs::metadata(path) else {
+            absent.push(rel(path));
+            continue;
+        };
         if meta.len() > limits.max_file_bytes {
             return Err(CoreError::CaptureTooBig {
                 what: format!("{} is {} bytes", path.display(), meta.len()),
@@ -264,8 +275,7 @@ pub fn capture_paths(
         }
         let data = std::fs::read(path).map_err(|e| CoreError::Io { path: path.clone(), source: e })?;
         let id = store.put(Kind::FileBlob, &data)?;
-        let rel = path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('\\', "/");
-        files.insert(rel, id.to_hex());
+        files.insert(rel(path), id.to_hex());
     }
     let set = FileSet {
         kind: kind.into(),
@@ -274,6 +284,7 @@ pub fn capture_paths(
         captured_at: rook_store::now_unix(),
         root: root.display().to_string(),
         files,
+        absent,
         total_bytes: total,
         note: None,
     };

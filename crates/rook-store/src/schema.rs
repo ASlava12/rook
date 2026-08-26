@@ -54,11 +54,9 @@ pub struct SessionMeta {
     pub title: String,
     pub created_at: i64,
     pub updated_at: i64,
-    /// Absolute path the session was rooted at, for grouping in the UIs.
     pub workspace: String,
     pub agent: String,
     pub model: String,
-    /// Sequence number the next appended event will receive.
     pub next_seq: u64,
     pub event_count: u64,
     pub tokens_in: u64,
@@ -137,11 +135,8 @@ pub struct EventRecord {
     pub tokens_out: u32,
 }
 
-/// A log entry about to be appended.
-///
-/// Grouped into a struct rather than a long parameter list: six positional
-/// arguments of which two are `u32` is a call site where a transposition is
-/// invisible at the point of the mistake.
+/// Grouped rather than passed positionally: six arguments of which two are
+/// `u32` is a call site where a transposition is invisible.
 #[derive(Clone, Debug)]
 pub struct NewEvent<'a> {
     pub kind: EventKind,
@@ -170,7 +165,6 @@ impl<'a> NewEvent<'a> {
     }
 }
 
-/// An event paired with the position it was read from.
 #[derive(Clone, Debug)]
 pub struct Event {
     pub session: u128,

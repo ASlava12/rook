@@ -205,6 +205,7 @@ impl<'a> AgentLoop<'a> {
         }
 
         outcome.tools_called.push(call.name.clone());
+        self.checkpoint_before(call);
         let result = self.tools.call(&self.tool_ctx, &call.name, &call.arguments).await;
         let text = match result {
             Ok(o) => o.content,
@@ -212,6 +213,21 @@ impl<'a> AgentLoop<'a> {
         };
         self.rook.log(self.session, EventKind::ToolResult, &call.name, &text).ok();
         text
+    }
+
+    /// Snapshot whatever a mutating tool is about to touch, so `rook session
+    /// rewind` can put the files back. Read-only tools report no paths and cost
+    /// nothing here.
+    fn checkpoint_before(&self, call: &rook_llm::ToolCall) {
+        let Some(tool) = self.tools.get(&call.name) else { return };
+        let paths: Vec<std::path::PathBuf> = tool
+            .touched_paths(&call.arguments)
+            .iter()
+            .filter_map(|p| self.tool_ctx.resolve(p).ok())
+            .collect();
+        if let Err(e) = self.rook.checkpoint_paths(self.session, &call.name, &paths) {
+            tracing::warn!("checkpoint before {} failed: {e}", call.name);
+        }
     }
 }
 

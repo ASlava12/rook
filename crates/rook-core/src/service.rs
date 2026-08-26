@@ -1,6 +1,7 @@
 //! The façade both the CLI and the daemon drive. Everything a user can inspect
 //! or change goes through here, so the three front ends cannot drift apart.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -259,6 +260,135 @@ impl Rook {
         Ok(out)
     }
 
+    /// What a session is costing in context, broken down by what is in it.
+    ///
+    /// Answers the question every agent gets asked and few can: why is this
+    /// conversation nearly full, and of what.
+    pub fn context_usage(&self, session: u128, window: usize) -> Result<ContextUsage> {
+        let budget = crate::context::ContextBudget::new(window, self.config.agent.compact_at);
+        let mut by_kind: BTreeMap<String, KindUsage> = BTreeMap::new();
+        let mut compactions = 0;
+
+        for event in self.store.events(session, 0, usize::MAX)? {
+            let kind = event.record.kind;
+            if kind == EventKind::Compaction {
+                compactions += 1;
+            }
+            let bytes = self.store.stat_object(&event.record.body)?.map(|m| m.size_raw).unwrap_or(0);
+            let entry = by_kind.entry(kind.as_str().to_string()).or_default();
+            entry.events += 1;
+            entry.bytes += bytes;
+            entry.tokens += (bytes as usize).div_ceil(4);
+        }
+
+        let live: usize =
+            by_kind.iter().filter(|(k, _)| k.as_str() != "checkpoint").map(|(_, v)| v.tokens).sum();
+
+        Ok(ContextUsage {
+            window,
+            usable: budget.usable(),
+            compact_at: budget.threshold(),
+            logged_tokens: by_kind.values().map(|v| v.tokens).sum(),
+            live_tokens: live,
+            needs_compaction: budget.needs_compaction(live),
+            compactions,
+            by_kind: by_kind.into_iter().collect(),
+        })
+    }
+
+    /// Fork a session at `to_seq` and put the workspace back the way it was.
+    ///
+    /// The original session is left intact — the fork carries the kept prefix
+    /// and the rewound-past turns stay readable in the parent. File state comes
+    /// from the checkpoints the loop takes before each mutating tool call: for
+    /// every path, the earliest capture at or after `to_seq` holds its
+    /// pre-edit content, and a path recorded as absent is deleted.
+    pub fn rewind(&self, session: u128, to_seq: u64, restore_files: bool) -> Result<Rewind> {
+        let meta = self
+            .store
+            .get_session(session)?
+            .ok_or_else(|| CoreError::NoSession(rook_store::format_session_id(session)))?;
+
+        let forked = self.store.fork_session(
+            session,
+            rook_store::new_session_id(),
+            to_seq,
+            &format!("{} @{to_seq}", meta.title),
+        )?;
+
+        let mut restore: BTreeMap<PathBuf, ObjectId> = BTreeMap::new();
+        let mut remove: Vec<PathBuf> = Vec::new();
+        let mut checkpoints = 0;
+
+        if restore_files {
+            for event in self.store.events(session, to_seq, usize::MAX)? {
+                if event.record.kind != EventKind::Checkpoint {
+                    continue;
+                }
+                let set = FileSet::load(&self.store, &event.record.body)?;
+                checkpoints += 1;
+                let root = PathBuf::from(&set.root);
+                for (rel, hex) in &set.files {
+                    if let Some(id) = ObjectId::from_hex(hex) {
+                        restore.entry(root.join(rel)).or_insert(id);
+                    }
+                }
+                for rel in &set.absent {
+                    let path = root.join(rel);
+                    if !restore.contains_key(&path) && !remove.contains(&path) {
+                        remove.push(path);
+                    }
+                }
+            }
+        }
+
+        let mut restored = 0;
+        for (path, id) in &restore {
+            let data = self.store.get(id)?;
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| CoreError::Io { path: parent.to_path_buf(), source: e })?;
+            }
+            std::fs::write(path, data).map_err(|e| CoreError::Io { path: path.clone(), source: e })?;
+            restored += 1;
+        }
+        let removed = remove.iter().filter(|p| std::fs::remove_file(p).is_ok()).count();
+
+        Ok(Rewind {
+            session: rook_store::format_session_id(forked.id),
+            parent: rook_store::format_session_id(session),
+            events_kept: forked.event_count,
+            checkpoints_applied: checkpoints,
+            files_restored: restored,
+            files_removed: removed,
+        })
+    }
+
+    /// Capture `paths` before something modifies them, and record it in the log.
+    pub fn checkpoint_paths(&self, session: u128, label: &str, paths: &[PathBuf]) -> Result<()> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let (set, _) = fileset::capture_paths(
+            &self.store,
+            "checkpoint",
+            label,
+            &self.workspace,
+            paths,
+            &CaptureLimits::for_skill(),
+        )?;
+        self.store.append_event(
+            session,
+            rook_store::NewEvent::new(
+                EventKind::Checkpoint,
+                rook_store::Kind::Snapshot,
+                &serde_json::to_vec(&set)?,
+            )
+            .label(label),
+        )?;
+        Ok(())
+    }
+
     pub fn log(&self, session: u128, kind: EventKind, label: &str, body: &str) -> Result<u64> {
         let body_kind = match kind {
             EventKind::ToolResult => rook_store::Kind::ToolResult,
@@ -317,6 +447,37 @@ fn walk_files(root: &Path) -> Vec<PathBuf> {
         .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
         .map(|e| e.path().to_path_buf())
         .collect()
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct KindUsage {
+    pub events: u64,
+    pub bytes: u64,
+    pub tokens: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ContextUsage {
+    pub window: usize,
+    pub usable: usize,
+    pub compact_at: usize,
+    /// Everything the session has ever logged.
+    pub logged_tokens: usize,
+    /// What a fresh turn would actually carry: checkpoints are storage, not context.
+    pub live_tokens: usize,
+    pub needs_compaction: bool,
+    pub compactions: u32,
+    pub by_kind: Vec<(String, KindUsage)>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Rewind {
+    pub session: String,
+    pub parent: String,
+    pub events_kept: u64,
+    pub checkpoints_applied: usize,
+    pub files_restored: usize,
+    pub files_removed: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

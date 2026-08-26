@@ -9,11 +9,11 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ContextBudget {
-    /// The model's total context window, in tokens.
+    /// Tokens.
     pub window: usize,
     /// Fraction of the window to fill before compacting.
     pub compact_at: f32,
-    /// Always leave room for the model's reply.
+    /// Held back so there is always room for the reply.
     pub reserve_output: usize,
 }
 
@@ -35,18 +35,15 @@ impl ContextBudget {
     }
 }
 
-/// How a large payload is admitted into context.
+/// How a large payload was admitted into context.
 ///
-/// Nothing is ever refused outright for being large: the full bytes go to the
-/// store and a bounded view goes into context, so the agent can still page
-/// through the rest by offset.
+/// Nothing is refused for being large: the full bytes go to the store and a
+/// bounded view goes into context, so the rest stays reachable by offset.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Admission {
-    /// Bytes placed into context.
     pub inlined: usize,
-    /// Total size of the payload as stored.
     pub total: usize,
-    /// Object id holding the full payload.
+    /// Holds the full payload.
     pub object: String,
     pub truncated: bool,
 }

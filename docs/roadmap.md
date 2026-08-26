@@ -16,8 +16,14 @@ what unblocks the most.
 - **Skill and workspace versioning** — capture, history, diff, undoable rollback,
   budgeted captures that refuse rather than thrash. 11 tests.
 - **Agent loop** — tool dispatch, `load_skill`, pre-request context budgeting,
-  mechanical compaction, everything logged to the store. 8 tests against a
-  scripted provider; not yet exercised against a live model in CI.
+  mechanical compaction, automatic checkpointing before any mutating tool call,
+  everything logged to the store. 12 tests against a scripted provider; not yet
+  exercised against a live model in CI.
+- **Rewind and fork** — `rook session rewind` restores workspace files as well as
+  the conversation, deleting files the turn created, and forks rather than
+  truncating so the rewound-past turns stay readable.
+- **Context visibility** — `rook session context` breaks the cost down by kind and
+  separates what a fresh turn would carry from what is merely stored.
 - **Tools** — paged `read_file`, `write_file`, unambiguous `edit_file`, `list_dir`,
   regex `search`, `run_command` with timeout, output cap and deny list.
 - **Providers** — OpenAI-compatible HTTP: Ollama, LM Studio, llama.cpp, vLLM,
@@ -28,6 +34,9 @@ what unblocks the most.
   built and tested in a VM.
 
 ## Next
+
+**Triage the reference backlog.** `cargo xtask refs status` reports drift from
+seven upstream agents; nothing has been read past their issue trackers yet.
 
 **A live-model smoke test in CI.** An Ollama service container running a small
 model, so the HTTP provider and one full turn are exercised for real rather than

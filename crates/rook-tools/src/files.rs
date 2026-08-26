@@ -7,6 +7,10 @@ use rook_llm::ToolSpec;
 
 use crate::{Result, Tool, ToolContext, ToolError, ToolOutcome, arg_str, arg_usize};
 
+fn path_arg(args: &serde_json::Value) -> Vec<String> {
+    args.get("path").and_then(|v| v.as_str()).map(|p| vec![p.to_string()]).unwrap_or_default()
+}
+
 pub struct ReadFile;
 
 #[async_trait]
@@ -125,6 +129,10 @@ impl Tool for WriteFile {
         ))
         .with("created", !existed))
     }
+
+    fn touched_paths(&self, args: &serde_json::Value) -> Vec<String> {
+        path_arg(args)
+    }
 }
 
 pub struct EditFile;
@@ -190,6 +198,10 @@ impl Tool for EditFile {
             path.display()
         ))
         .with("occurrences", count as u64))
+    }
+
+    fn touched_paths(&self, args: &serde_json::Value) -> Vec<String> {
+        path_arg(args)
     }
 }
 

@@ -1,0 +1,42 @@
+[submodule "references/acp"]
+	path = references/acp
+	url = https://github.com/agentclientprotocol/agent-client-protocol.git
+	branch = main
+	shallow = true
+	update = none
+[submodule "references/codex"]
+	path = references/codex
+	url = https://github.com/openai/codex.git
+	branch = main
+	shallow = true
+	update = none
+[submodule "references/goose"]
+	path = references/goose
+	url = https://github.com/aaif-goose/goose.git
+	branch = main
+	shallow = true
+	update = none
+[submodule "references/opencode"]
+	path = references/opencode
+	url = https://github.com/anomalyco/opencode.git
+	branch = dev
+	shallow = true
+	update = none
+[submodule "references/cline"]
+	path = references/cline
+	url = https://github.com/cline/cline.git
+	branch = main
+	shallow = true
+	update = none
+[submodule "references/hermes"]
+	path = references/hermes
+	url = https://github.com/NousResearch/hermes-agent.git
+	branch = main
+	shallow = true
+	update = none
+[submodule "references/openhands"]
+	path = references/openhands
+	url = https://github.com/OpenHands/OpenHands.git
+	branch = main
+	shallow = true
+	update = none

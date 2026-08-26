@@ -271,3 +271,100 @@ async fn the_loop_stops_at_max_steps_instead_of_spinning() {
     assert_eq!(outcome.steps, 3);
     assert_eq!(outcome.stopped, "max_steps");
 }
+
+#[tokio::test]
+async fn a_mutating_tool_is_checkpointed_and_a_rewind_undoes_it() {
+    let f = fixture();
+    let target = f.workspace.path().join("notes.txt");
+    std::fs::write(&target, "original\n").unwrap();
+    let session = f.rook.start_session("edit").unwrap();
+
+    let provider = Box::new(ScriptedProvider::new(vec![
+        call("write_file", serde_json::json!({ "path": "notes.txt", "content": "rewritten\n" })),
+        reply("done"),
+    ]));
+    let mut agent = AgentLoop::new(&f.rook, provider, session);
+    agent.run("rewrite notes.txt").await.unwrap();
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "rewritten\n");
+
+    let entries = f.rook.transcript(session, 0, 100, 4096).unwrap();
+    let checkpoint = entries.iter().find(|e| e.kind == "checkpoint").expect("mutation must checkpoint");
+    assert!(checkpoint.body.contains("notes.txt"), "{}", checkpoint.body);
+
+    let report = f.rook.rewind(session, checkpoint.seq, true).unwrap();
+    assert_eq!(report.files_restored, 1);
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "original\n");
+    assert_eq!(report.events_kept, checkpoint.seq, "the fork keeps the prefix before the rewind point");
+
+    // The original session is untouched: a rewind must not destroy history.
+    let original = f.rook.transcript(session, 0, 100, 4096).unwrap();
+    assert_eq!(original.len(), entries.len());
+}
+
+#[tokio::test]
+async fn a_rewind_deletes_a_file_the_agent_created() {
+    let f = fixture();
+    let created = f.workspace.path().join("new.txt");
+    let session = f.rook.start_session("create").unwrap();
+
+    let provider = Box::new(ScriptedProvider::new(vec![
+        call("write_file", serde_json::json!({ "path": "new.txt", "content": "hello\n" })),
+        reply("created"),
+    ]));
+    let mut agent = AgentLoop::new(&f.rook, provider, session);
+    agent.run("create new.txt").await.unwrap();
+    assert!(created.exists());
+
+    let seq = f
+        .rook
+        .transcript(session, 0, 100, 4096)
+        .unwrap()
+        .iter()
+        .find(|e| e.kind == "checkpoint")
+        .unwrap()
+        .seq;
+    let report = f.rook.rewind(session, seq, true).unwrap();
+    assert_eq!(report.files_removed, 1);
+    assert!(!created.exists(), "a file that did not exist before the turn must be removed");
+}
+
+#[tokio::test]
+async fn a_read_only_tool_does_not_checkpoint() {
+    let f = fixture();
+    std::fs::write(f.workspace.path().join("r.txt"), "x").unwrap();
+    let session = f.rook.start_session("read").unwrap();
+
+    let provider = Box::new(ScriptedProvider::new(vec![
+        call("read_file", serde_json::json!({ "path": "r.txt" })),
+        reply("read"),
+    ]));
+    let mut agent = AgentLoop::new(&f.rook, provider, session);
+    agent.run("read it").await.unwrap();
+
+    let entries = f.rook.transcript(session, 0, 100, 4096).unwrap();
+    assert!(!entries.iter().any(|e| e.kind == "checkpoint"));
+}
+
+#[tokio::test]
+async fn context_usage_separates_what_is_live_from_what_is_merely_stored() {
+    let f = fixture();
+    std::fs::write(f.workspace.path().join("big.txt"), "z".repeat(40_000)).unwrap();
+    let session = f.rook.start_session("usage").unwrap();
+
+    let provider = Box::new(ScriptedProvider::new(vec![
+        call("write_file", serde_json::json!({ "path": "big.txt", "content": "small\n" })),
+        reply("done"),
+    ]));
+    let mut agent = AgentLoop::new(&f.rook, provider, session);
+    agent.run("shrink it").await.unwrap();
+
+    let usage = f.rook.context_usage(session, 128_000).unwrap();
+    assert!(usage.by_kind.iter().any(|(k, _)| k == "checkpoint"));
+    assert!(
+        usage.live_tokens < usage.logged_tokens,
+        "the 40 KB checkpoint is storage, not context: live {} vs logged {}",
+        usage.live_tokens,
+        usage.logged_tokens
+    );
+    assert!(usage.compact_at < usage.window);
+}

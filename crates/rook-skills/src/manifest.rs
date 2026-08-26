@@ -178,7 +178,7 @@ pub fn version_matches(req: &str, version: &str) -> bool {
 pub struct Variant {
     #[serde(default)]
     pub when: Requirements,
-    /// Path to the alternative body, relative to the skill directory.
+    /// Relative to the skill directory.
     pub body: PathBuf,
     #[serde(default)]
     pub note: Option<String>,
@@ -217,7 +217,6 @@ impl SkillManifest {
     }
 }
 
-/// Split a `SKILL.md` into its frontmatter and body.
 pub fn split_frontmatter<'a>(text: &'a str, path: &Path) -> Result<(&'a str, &'a str)> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let rest = text

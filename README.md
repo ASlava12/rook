@@ -9,7 +9,7 @@ as a feature rather than a debugging afterthought: a CLI, a terminal browser and
 web UI, all views over the same engine.
 
 > **Status: early.** The storage layer, the skill system and the inspection tools
-> are implemented and covered by 45 tests. The agent loop — tool dispatch, skill
+> are implemented and covered by 49 tests. The agent loop — tool dispatch, skill
 > loading, budgeting, logging — is tested against a scripted provider; it has not
 > yet been exercised against a live model in CI. Streaming, MCP and ACP are on the
 > [roadmap](docs/roadmap.md) and are not implemented. Nothing below describes
@@ -83,6 +83,19 @@ rook store prune --dry-run     # what the retention policy would drop
 rook session ls
 rook session show 01JQ… --from 0 --limit 50
 rook session show 01JQ… --json | jq '.[] | select(.kind=="tool-call")'
+rook session context 01JQ…            # what the conversation costs, and of what
+```
+
+### Undoing a turn
+
+The loop checkpoints every file a tool is about to modify, so a rewind puts the
+workspace back as well as the conversation — and forks rather than truncates, so
+the turns you rewound past stay readable in the parent session.
+
+```sh
+rook session rewind 01JQ… --to 12               # conversation and files
+rook session rewind 01JQ… --to 12 --keep-files  # conversation only
+rook session fork 01JQ… --at 12                 # branch without touching files
 ```
 
 ### Skills
@@ -135,7 +148,12 @@ crates/
   rook-cli      `rook`: commands and the terminal browser
 web/dist        the web UI: one hand-written HTML file, no build step
 docs/           architecture, storage format, skills, platforms, ADRs, research
+references/     upstream agent sources as shallow submodules, to read from
 ```
+
+`references/` is not fetched by a normal clone. `cargo xtask refs status` shows how
+far each pinned pointer has drifted from upstream — that gap is the backlog of
+upstream work nobody has looked at yet. See [references/README.md](references/README.md).
 
 ## Platforms
 

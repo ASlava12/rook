@@ -453,6 +453,66 @@ impl Store {
         Ok(out)
     }
 
+    /// Copy the first `upto_seq` events of `source` into a new session.
+    ///
+    /// Forking rather than truncating: a rewind that destroys the history it
+    /// rewound past leaves no way back, which is the complaint against every
+    /// undo that does it. Objects are shared, so a fork costs only its records.
+    pub fn fork_session(
+        &self,
+        source: u128,
+        new_id: u128,
+        upto_seq: u64,
+        title: &str,
+    ) -> Result<SessionMeta> {
+        let txn = self.db.begin_write()?;
+        let mut meta = {
+            let sessions = txn.open_table(schema::SESSIONS)?;
+            let raw = sessions
+                .get(schema::session_key(source).as_slice())?
+                .ok_or_else(|| StoreError::MissingSession(format_session_id(source)))?;
+            postcard::from_bytes::<SessionMeta>(raw.value())?
+        };
+
+        meta.id = new_id;
+        meta.parent = Some(source);
+        meta.title = title.to_string();
+        meta.created_at = now_unix();
+        meta.updated_at = now_unix();
+        meta.next_seq = 0;
+        meta.event_count = 0;
+        meta.tokens_in = 0;
+        meta.tokens_out = 0;
+
+        {
+            let mut events = txn.open_table(schema::EVENTS)?;
+            let start = schema::event_key(source, 0);
+            let end = schema::event_key(source, upto_seq.saturating_sub(1));
+            let copied: Vec<(u64, Vec<u8>)> = events
+                .range(start.as_slice()..=end.as_slice())?
+                .filter_map(|e| e.ok())
+                .filter_map(|(k, v)| {
+                    schema::parse_event_key(k.value()).map(|(_, seq)| (seq, v.value().to_vec()))
+                })
+                .collect();
+            for (seq, raw) in copied {
+                let record: EventRecord = postcard::from_bytes(&raw)?;
+                meta.tokens_in += record.tokens_in as u64;
+                meta.tokens_out += record.tokens_out as u64;
+                meta.event_count += 1;
+                meta.next_seq = seq + 1;
+                events.insert(schema::event_key(new_id, seq).as_slice(), raw.as_slice())?;
+            }
+        }
+        {
+            let mut sessions = txn.open_table(schema::SESSIONS)?;
+            let encoded = postcard::to_stdvec(&meta)?;
+            sessions.insert(schema::session_key(new_id).as_slice(), encoded.as_slice())?;
+        }
+        txn.commit()?;
+        Ok(meta)
+    }
+
     /// Drop a session and its log. Objects it referenced survive until `gc`,
     /// because other sessions may share them.
     pub fn delete_session(&self, session: u128) -> Result<u64> {

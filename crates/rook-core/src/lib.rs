@@ -15,4 +15,7 @@ pub mod service;
 pub use config::Config;
 pub use error::{CoreError, Result};
 pub use fileset::{CaptureLimits, Change, FileSet};
-pub use service::{AGENT_VERSION, MaintenanceReport, Rollback, Rook, SkillVersionRecord, TranscriptEntry};
+pub use service::{
+    AGENT_VERSION, ContextUsage, KindUsage, MaintenanceReport, Rewind, Rollback, Rook, SkillVersionRecord,
+    TranscriptEntry,
+};

@@ -113,6 +113,28 @@ enum SessionCmd {
     Rm {
         id: String,
     },
+    /// Show what a session is costing in context, and of what.
+    Context {
+        id: String,
+        /// Model context window to measure against.
+        #[arg(long, default_value_t = 128_000)]
+        window: usize,
+    },
+    /// Fork a session at a sequence number, keeping the original intact.
+    Fork {
+        id: String,
+        #[arg(long)]
+        at: u64,
+    },
+    /// Fork at a sequence number and put the workspace files back with it.
+    Rewind {
+        id: String,
+        #[arg(long)]
+        to: u64,
+        /// Rewind the conversation only, leaving files as they are.
+        #[arg(long)]
+        keep_files: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -253,7 +275,7 @@ fn cmd_run(workspace: Option<PathBuf>, prompt: Vec<String>, session: Option<Stri
         let provider = rook_llm::from_spec(&rook.config.agent.model)
             .with_context(|| format!("configuring model {:?}", rook.config.agent.model))?;
         let session = match session {
-            Some(s) => rook_store::parse_session_id(&s).context("not a session id")?,
+            Some(s) => session_id(&s)?,
             None => rook.start_session(&first_line(&prompt))?,
         };
         let mut agent = rook_core::agent::AgentLoop::new(&rook, provider, session);
@@ -493,8 +515,7 @@ fn cmd_session(rook: &Rook, cmd: SessionCmd, json: bool) -> Result<()> {
             print!("{}", fmt::table(&["id", "title", "events", "tok in/out", "updated", "workspace"], &rows));
         }
         SessionCmd::Show { id, from, limit, max_body } => {
-            let sid = rook_store::parse_session_id(&id).context("not a session id")?;
-            let entries = rook.transcript(sid, from, limit, max_body)?;
+            let entries = rook.transcript(session_id(&id)?, from, limit, max_body)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&entries)?);
                 return Ok(());
@@ -512,9 +533,73 @@ fn cmd_session(rook: &Rook, cmd: SessionCmd, json: bool) -> Result<()> {
                 println!("{}\n", e.body);
             }
         }
+        SessionCmd::Context { id, window } => {
+            let usage = rook.context_usage(session_id(&id)?, window)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&usage)?);
+                return Ok(());
+            }
+            let pct = usage.live_tokens as f64 / usage.usable.max(1) as f64 * 100.0;
+            println!(
+                "window       {:>9}  (usable {}, compacts at {})",
+                usage.window, usage.usable, usage.compact_at
+            );
+            println!(
+                "in context   {:>9}  {:.0}% of usable {}",
+                usage.live_tokens,
+                pct,
+                if usage.needs_compaction { "— over the compaction threshold" } else { "" }
+            );
+            println!("ever logged  {:>9}  ({} compactions so far)", usage.logged_tokens, usage.compactions);
+            println!();
+            let max = usage.by_kind.iter().map(|(_, u)| u.tokens).max().unwrap_or(0) as u64;
+            let rows: Vec<Vec<String>> = usage
+                .by_kind
+                .iter()
+                .map(|(kind, u)| {
+                    vec![
+                        kind.clone(),
+                        u.events.to_string(),
+                        fmt::bytes(u.bytes),
+                        format!("~{}", u.tokens),
+                        fmt::bar(u.tokens as u64, max, 20),
+                    ]
+                })
+                .collect();
+            print!("{}", fmt::table(&["kind", "events", "bytes", "tokens", ""], &rows));
+        }
+        SessionCmd::Fork { id, at } => {
+            let source = session_id(&id)?;
+            let meta = rook.store.get_session(source)?.context("no such session")?;
+            let forked = rook.store.fork_session(
+                source,
+                rook_store::new_session_id(),
+                at,
+                &format!("{} @{at}", meta.title),
+            )?;
+            println!(
+                "forked {} events into {}",
+                forked.event_count,
+                rook_store::format_session_id(forked.id)
+            );
+        }
+        SessionCmd::Rewind { id, to, keep_files } => {
+            let report = rook.rewind(session_id(&id)?, to, !keep_files)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+                return Ok(());
+            }
+            println!("rewound to #{to} as session {}", report.session);
+            println!("  {} events kept, parent {} left intact", report.events_kept, report.parent);
+            if !keep_files {
+                println!(
+                    "  {} checkpoint(s) applied: {} file(s) restored, {} removed",
+                    report.checkpoints_applied, report.files_restored, report.files_removed
+                );
+            }
+        }
         SessionCmd::Rm { id } => {
-            let sid = rook_store::parse_session_id(&id).context("not a session id")?;
-            let removed = rook.store.delete_session(sid)?;
+            let removed = rook.store.delete_session(session_id(&id)?)?;
             println!("removed session with {removed} events; run `rook store gc` to reclaim space");
         }
     }
@@ -668,6 +753,10 @@ fn cmd_skills(rook: &Rook, cmd: SkillCmd, json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn session_id(s: &str) -> Result<u128> {
+    rook_store::parse_session_id(s).with_context(|| format!("{s:?} is not a session id"))
 }
 
 fn resolve_object(rook: &Rook, prefix: &str) -> Result<ObjectId> {

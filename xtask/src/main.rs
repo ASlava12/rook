@@ -59,6 +59,75 @@ enum Task {
     },
     /// Measure what the store's compaction actually achieves.
     Compaction,
+    /// Work with the upstream agent sources in `references/`.
+    Refs {
+        #[command(subcommand)]
+        action: RefsCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum RefsCmd {
+    /// Clone the reference sources (shallow). They are not fetched by `git clone`.
+    Init { name: Option<String> },
+    /// How far each pinned pointer has drifted from upstream, and what landed.
+    Status { name: Option<String> },
+    /// Move one pointer to the current upstream tip, printing what came in.
+    Advance { name: String },
+}
+
+struct Reference {
+    name: String,
+    path: String,
+    branch: String,
+}
+
+/// Read the submodule table straight from `.gitmodules` so this stays correct
+/// when a reference is added without touching xtask.
+fn references() -> Result<Vec<Reference>> {
+    let out = git(&["config", "-f", ".gitmodules", "--get-regexp", r"^submodule\..*\.path$"])?;
+    let mut refs = Vec::new();
+    for line in out.lines() {
+        let Some((key, path)) = line.split_once(' ') else { continue };
+        let module = key.trim_start_matches("submodule.").trim_end_matches(".path");
+        let branch =
+            git(&["config", "-f", ".gitmodules", &format!("submodule.{module}.branch")]).unwrap_or_default();
+        let branch = if branch.trim().is_empty() { "main".into() } else { branch.trim().to_string() };
+        let name = path.rsplit('/').next().unwrap_or(path).to_string();
+        refs.push(Reference { name, path: path.to_string(), branch });
+    }
+    refs.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(refs)
+}
+
+fn git(args: &[&str]) -> Result<String> {
+    let out = Command::new("git").args(args).output().context("running git")?;
+    if !out.status.success() {
+        bail!("git {} failed: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
+}
+
+fn git_in(dir: &str, args: &[&str]) -> Result<String> {
+    let mut full = vec!["-C", dir];
+    full.extend_from_slice(args);
+    git(&full)
+}
+
+/// The commit this repository pins the submodule at. Read from the index rather
+/// than from HEAD, so a freshly added or advanced pointer reports correctly
+/// before it is committed.
+fn pinned(path: &str) -> Result<String> {
+    let entry = git(&["ls-files", "-s", "--", path])?;
+    entry
+        .split_whitespace()
+        .nth(1)
+        .map(str::to_string)
+        .with_context(|| format!("{path} is not a tracked submodule"))
+}
+
+fn is_cloned(path: &str) -> bool {
+    std::path::Path::new(path).join(".git").exists()
 }
 
 fn main() -> ExitCode {
@@ -134,7 +203,109 @@ fn run() -> Result<()> {
             Ok(())
         }
         Task::Compaction => cargo(&["run", "--release", "-p", "rook-store", "--example", "compaction"]),
+        Task::Refs { action } => refs(action),
     }
+}
+
+fn refs(action: RefsCmd) -> Result<()> {
+    let all = references()?;
+    let pick = |name: &Option<String>| -> Vec<&Reference> {
+        match name {
+            Some(n) => all.iter().filter(|r| &r.name == n).collect(),
+            None => all.iter().collect(),
+        }
+    };
+
+    match action {
+        RefsCmd::Init { name } => {
+            let selected = pick(&name);
+            if selected.is_empty() {
+                bail!("no reference named {name:?}; try `cargo xtask refs status`");
+            }
+            for r in selected {
+                println!("── {}", r.name);
+                git(&["submodule", "update", "--init", "--depth", "1", "--", &r.path])?;
+            }
+            Ok(())
+        }
+
+        RefsCmd::Status { name } => {
+            println!("{:<12} {:<10} {:<10} drift", "reference", "pinned", "upstream");
+            println!("{}", "─".repeat(52));
+            for r in pick(&name) {
+                let pin = pinned(&r.path).unwrap_or_default();
+                if !is_cloned(&r.path) {
+                    println!(
+                        "{:<12} {:<10} {:<10} not cloned — `cargo xtask refs init {}`",
+                        r.name,
+                        short(&pin),
+                        "?",
+                        r.name
+                    );
+                    continue;
+                }
+                let (head, behind) = upstream(r)?;
+                println!("{:<12} {:<10} {:<10} {}", r.name, short(&pin), short(&head), behind);
+            }
+            println!("\nAdvancing a pointer is how upstream work gets triaged; see references/PORTED.md.");
+            Ok(())
+        }
+
+        RefsCmd::Advance { name } => {
+            let r = all
+                .iter()
+                .find(|r| r.name == name)
+                .with_context(|| format!("no reference named {name:?}"))?;
+            if !is_cloned(&r.path) {
+                bail!("{} is not cloned; run `cargo xtask refs init {}` first", r.name, r.name);
+            }
+            let pin = pinned(&r.path)?;
+            let (head, _) = upstream(r)?;
+            if pin == head {
+                println!("{} is already at upstream {}", r.name, short(&head));
+                return Ok(());
+            }
+            println!("incoming since {}:", short(&pin));
+            match git_in(&r.path, &["log", "--oneline", "--no-merges", &format!("{pin}..{head}")]) {
+                Ok(log) if !log.is_empty() => println!("{log}"),
+                _ => println!("  (history too shallow to list; fetch deeper to see it)"),
+            }
+            git_in(&r.path, &["checkout", "--detach", &head])?;
+            git(&["add", &r.path])?;
+            println!(
+                "\n{} advanced to {} — staged. Triage the above into references/PORTED.md",
+                r.name,
+                short(&head)
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Upstream tip and how far the pinned commit is behind it.
+///
+/// The clones are shallow, so a deeper fetch is needed before the two commits
+/// share enough history to be counted. When even that is not enough, say so
+/// rather than reporting a wrong number.
+fn upstream(r: &Reference) -> Result<(String, String)> {
+    let remote = format!("origin/{}", r.branch);
+    git_in(&r.path, &["fetch", "--quiet", "--depth", "200", "origin", &r.branch])
+        .or_else(|_| git_in(&r.path, &["fetch", "--quiet", "origin", &r.branch]))?;
+    let head = git_in(&r.path, &["rev-parse", &remote])
+        .or_else(|_| git_in(&r.path, &["rev-parse", "FETCH_HEAD"]))?;
+    let pin = pinned(&r.path)?;
+    if pin == head {
+        return Ok((head, "up to date".into()));
+    }
+    let drift = match git_in(&r.path, &["rev-list", "--count", &format!("{pin}..{head}")]) {
+        Ok(n) => format!("{n} commits behind"),
+        Err(_) => "behind (history too shallow to count)".into(),
+    };
+    Ok((head, drift))
+}
+
+fn short(sha: &str) -> String {
+    sha.chars().take(9).collect()
 }
 
 fn cargo(args: &[&str]) -> Result<()> {
