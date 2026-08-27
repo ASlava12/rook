@@ -8,12 +8,12 @@ does in a compact, content-addressed store, and it treats *inspecting* that stor
 as a feature rather than a debugging afterthought: a CLI, a terminal browser and a
 web UI, all views over the same engine.
 
-> **Status: early.** The storage layer, the skill system and the inspection tools
-> are implemented and covered by 183 tests. The agent loop — tool dispatch, skill
-> loading, budgeting, logging — is tested against a scripted provider; it has not
-> yet been exercised against a live model in CI. Streaming, MCP and ACP are on the
-> [roadmap](docs/roadmap.md) and are not implemented. Nothing below describes
-> something that does not exist — see
+> **Status: young, and honest about it.** The storage layer, the skill system,
+> the inspection tools, the agent loop, streaming, MCP, LSP and ACP are
+> implemented and under test — including whole turns driven over a real socket
+> against a server that speaks the provider's dialect. What has never happened is
+> a model with judgement driving any of it. Nothing below describes something
+> that does not exist, and what is missing is listed under
 > [what is not done](#what-is-not-done-yet).
 
 ## Why another one
@@ -54,8 +54,12 @@ platform-specific bodies instead of forking into `deploy-linux` and
 
 ```sh
 git clone https://github.com/ASlava12/rook && cd rook
-cargo build --release          # rook 4.4 MiB, rookd 2.8 MiB — no runtime, no shared libs
+cargo xtask dist               # builds, packages the built-in skills, prints the sizes
 ```
+
+Two binaries, no runtime and no shared libraries — 5.3 MiB and 5.0 MiB at the
+time of writing, which `dist` prints so the number here can be checked rather
+than believed.
 
 Requires a Rust toolchain and a C compiler (two dependencies vendor C — see
 [docs/platforms.md](docs/platforms.md)). No Node, no Python, no Docker.
@@ -374,12 +378,15 @@ exactly what a cross-check cannot exercise. Details and the target tier list:
 Being explicit, because a roadmap presented as a feature list is how these projects
 lose people's trust:
 
-- **The agent loop has not been run against a live model in CI.** Its logic is
-  covered by tests against a scripted provider, and the SSE parser by tests over a
-  real socket, but no real model has been driven end to end in CI.
-- **The CLI opens the store directly**, so it cannot run while `rookd` holds it.
-  It says so clearly; routing the CLI through the daemon is
-  [ADR-0006](docs/adr/0006-single-writer-store.md).
+- **No model with judgement has ever driven it.** Whole turns run in CI against a
+  server that speaks the OpenAI dialect over a real socket — the request shape,
+  the tool-call round trip and the streaming are all covered — but everything
+  that model says is scripted. Whether the agent behaves well when the answers
+  are not is untested.
+- **The CLI writes to the store directly**, so a command that changes it cannot
+  run while `rookd` holds the lock. Reads route over the daemon's API instead and
+  print the same thing; writes say where the lock is
+  ([ADR-0006](docs/adr/0006-single-writer-store.md)).
 - **No structured plan state.** The agent is asked for a plan in prose and told
   not to keep a checklist — deliberately, on the strength of someone else's
   benchmark ([ADR-0010](docs/adr/0010-no-todo-tool.md)). There is nothing for a

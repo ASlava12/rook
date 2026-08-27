@@ -173,8 +173,10 @@ body in when it decides it needs one.
 
 This matters more than it sounds. Full bodies for a large library cost thousands of
 tokens on every request, and on local models a tool-and-skill-heavy prompt is
-roughly an order of magnitude slower to process than plain text. A full catalog
-costs under 100 tokens; the test suite asserts it.
+roughly an order of magnitude slower to process than plain text. A card is tiny next to the body it
+stands for — a test pins that at well under 100 tokens for a couple of them —
+and the catalog as a whole is what `agent.max_skill_cards` bounds: fifty cards
+cost roughly 770 tokens a request.
 
 The catalog itself is bounded by `agent.max_skill_cards` (50), because it is paid
 for on every request and a machine that has collected skills for a year would

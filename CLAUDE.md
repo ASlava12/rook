@@ -12,6 +12,7 @@ public failure in another agent, and the ADRs cite them.
 cargo xtask ci             # fmt + clippy -D warnings + test — the CI gate
 cargo test --workspace
 cargo xtask compaction     # re-measure the storage claims in README/docs
+cargo xtask dist           # release build; also prints the binary sizes README quotes
 cargo xtask targets        # supported target matrix
 ```
 
@@ -76,6 +77,12 @@ forgotten.
 **Three front ends, one engine.** New capability goes in `rook-core` and is
 exposed by the CLI, the API and the TUI. A feature reachable from one front end
 and not the others is a bug — the approver is shared for exactly this reason.
+
+**A number in prose rots unless a command reprints it.** The README's
+compression ratios and binary sizes are re-measurable by `cargo xtask compaction`
+and `cargo xtask dist`, and are kept current. A test count in prose is not worth
+the same discipline — it was wrong by a factor of two before anyone noticed — so
+do not put one there.
 
 **Nothing here is exempt from being used.** Every crate is a library, so `pub`
 turns off the dead-code lint: a function that exists and is called from nowhere

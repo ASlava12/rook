@@ -78,9 +78,9 @@ The two are not the same trade. A skill card defers the *whole body*, and
 `load_skill` fetches it — the model asks by name. A tool stub defers only the
 prose: the first sentence of the description, and every argument's name and type
 without the guidance around them. There is nothing to fetch, because a tool
-advertised without its shape could not be called at all. Measured: 680 tokens
-full, 324 as stubs, and the whole advertised set — pseudo-tools included — is
-held under 800 by a test.
+advertised without its shape could not be called at all. A test holds the whole advertised set — pseudo-tools included — under 800 tokens
+a request, and stubs to under a third of the full schemas; `cargo run -p
+rook-tools --example schema-cost` prints where they stand today.
 
 The skill catalog is capped by `agent.max_skill_cards`, and what does not fit is
 named as a count rather than dropped silently: `load_skill` answers an unknown
