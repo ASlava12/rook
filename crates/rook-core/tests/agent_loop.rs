@@ -2268,3 +2268,58 @@ async fn nothing_worth_compacting_records_no_compaction() {
     let entries = f.rook.transcript(session, 0, 100, 512).unwrap();
     assert!(entries.iter().all(|e| e.kind != "compaction"), "{entries:?}");
 }
+
+/// A live model filled both fields of every call with the same instruction —
+/// differing only in whether the function name wore backticks — and both were
+/// taken: every sub-task ran twice, for twice the tokens and twice the wait,
+/// with one of each pair thrown away. Three files became six sub-agents.
+#[tokio::test]
+async fn the_same_task_asked_for_twice_is_one_sub_task() {
+    let f = fixture();
+    let session = f.rook.start_session("duplicated").unwrap();
+
+    let script = vec![
+        call(
+            "delegate",
+            serde_json::json!({
+                "task": "check `a.py` for the empty-list bug",
+                "tasks": ["check a.py for the empty-list bug"],
+            }),
+        ),
+        reply("a.py divides by zero"),
+        reply("one file, one answer"),
+    ];
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
+    let outcome = agent.run("check it").await.unwrap();
+
+    assert_eq!(outcome.delegated.len(), 1, "one task said twice is one task: {:?}", outcome.delegated);
+}
+
+#[tokio::test]
+async fn a_list_of_tasks_is_run_in_full() {
+    let f = fixture();
+    let session = f.rook.start_session("several").unwrap();
+
+    let mut script =
+        vec![call("delegate", serde_json::json!({ "tasks": ["check a.py", "check b.py", "check c.py"] }))];
+    script.extend((0..3).map(|i| reply(&format!("finding {i}"))));
+    script.push(reply("all three"));
+
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
+    let outcome = agent.run("check them").await.unwrap();
+
+    assert_eq!(outcome.delegated.len(), 3, "{:?}", outcome.delegated);
+}
+
+#[tokio::test]
+async fn a_bare_task_still_works_on_its_own() {
+    let f = fixture();
+    let session = f.rook.start_session("one").unwrap();
+
+    let script =
+        vec![call("delegate", serde_json::json!({ "task": "check a.py" })), reply("checked"), reply("done")];
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
+    let outcome = agent.run("check it").await.unwrap();
+
+    assert_eq!(outcome.delegated.len(), 1, "the single-task shape is still accepted");
+}

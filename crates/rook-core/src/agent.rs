@@ -1380,16 +1380,34 @@ fn render_span(entries: &[crate::TranscriptEntry], budget_tokens: usize) -> Stri
 
 /// One task, or several. Accepting both keeps a single delegation from having to
 /// be phrased as a list.
+/// Accepts a bare `task` as well as `tasks`, so a model that learnt the
+/// single-task shape elsewhere is not refused over a detail of framing.
+///
+/// One or the other, not both. A live model filled both fields of every call
+/// with the same instruction — differing only in whether the function name wore
+/// backticks — so every sub-task ran twice, for twice the tokens and twice the
+/// wait, and one of each pair was thrown away. Nobody was told.
+///
+/// Sameness is not judged by meaning. `memory::overlap` answers that question
+/// for facts, and measured here it scores those two spellings 1.00 and two
+/// genuinely different sub-tasks — `a.py` against `b.py` — 0.94, against a
+/// threshold of 0.95. A hundredth of a point between "one task said twice" and
+/// "two files to check" is not a distinction to spend real work on.
 fn requested_tasks(args: &serde_json::Value) -> Vec<String> {
-    let mut tasks: Vec<String> = args
+    let listed: Vec<&str> = args
         .get("tasks")
         .and_then(|t| t.as_array())
-        .map(|items| items.iter().filter_map(|t| t.as_str().map(str::to_string)).collect())
+        .map(|items| items.iter().filter_map(|t| t.as_str()).collect())
         .unwrap_or_default();
-    if let Some(single) = args.get("task").and_then(|t| t.as_str()) {
-        tasks.push(single.to_string());
+    let single = args.get("task").and_then(|t| t.as_str());
+
+    let mut tasks: Vec<String> = Vec::new();
+    for task in listed.iter().copied().chain(single.filter(|_| listed.is_empty())) {
+        let task = task.trim();
+        if !task.is_empty() && !tasks.iter().any(|kept| kept == task) {
+            tasks.push(task.to_string());
+        }
     }
-    tasks.retain(|t| !t.trim().is_empty());
     tasks
 }
 

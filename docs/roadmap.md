@@ -543,6 +543,17 @@ like to something that has to act on it.
   say what it was about to do, says that no other tool and no sub-agent gets past
   it, and addresses the remedies to the user. The same task: four steps, 8,498
   tokens, twenty-three seconds, and an answer worth reading. 1 test.
+- **Every sub-task ran twice** — `delegate` took `task` and `tasks` together, and
+  a live model filled both fields of every call with the same instruction,
+  differing only in whether the function name wore backticks. Three files became
+  six sub-agents: twice the tokens and twice the wait, with one of each pair
+  thrown away, and nothing said so. They are alternatives now, not a union.
+  Judging sameness by meaning was measured and rejected: `memory::overlap` scores
+  those two spellings 1.00 and two genuinely different sub-tasks — `a.py` against
+  `b.py` — 0.94, against a threshold of 0.95, and a hundredth of a point between
+  "one task said twice" and "two files to check" is not a distinction to spend
+  real work on. The same request afterwards: 20,040 input tokens against 33,183,
+  and ninety seconds against two minutes ten. 3 tests.
 - **`session context` measured against a window nobody had** — it defaulted to
   128,000 tokens whatever model was configured, so a session at 55% of a 6k
   window read as 1% — the difference between "about to compact" and "nothing to
