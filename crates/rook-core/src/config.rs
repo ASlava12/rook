@@ -182,6 +182,14 @@ impl Default for ServerConfig {
     }
 }
 
+/// Where a command starts: the beginning, or after a shell separator, allowing
+/// for the wrappers that precede one.
+///
+/// Not shell parsing — a dangerous command quoted inside a string after a `;`
+/// still matches, which errs towards refusing. What it buys is that mentioning
+/// a word is not the same as running it.
+const COMMAND: &str = r"(^|[;&|]\s*|\n\s*)(sudo\s+|doas\s+|env\s+\S+=\S+\s+)*";
+
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
@@ -194,16 +202,18 @@ impl Default for SandboxConfig {
             ],
             ask: Vec::new(),
             // Denied outright: the shapes that turn a bad turn into an
-            // unrecoverable one. Anchored deliberately — a substring rule for
-            // `rm -rf /` would also block `rm -rf /tmp/scratch`, and a deny list
-            // that cries wolf gets turned off.
+            // unrecoverable one. Anchored twice over, because a deny list that
+            // cries wolf gets turned off and nothing can override a denial. The
+            // argument is anchored — a substring rule for `rm -rf /` would also
+            // block `rm -rf /tmp/scratch` — and so is the command, or `grep -r
+            // mkfs docs/` is refused for saying the word.
             deny: [
-                r"/\brm\s+(-[a-zA-Z]+\s+)*\/(\s|\*|$)/",
-                r"/\bmkfs(\.|\s)/",
-                r"/\bdd\s+[^|]*\bof=\/dev\//",
+                &format!(r"/{COMMAND}rm\s+(-[a-zA-Z]+\s+)*\/(\s|\*|$)/"),
+                &format!(r"/{COMMAND}mkfs(\.|\s)/"),
+                &format!(r"/{COMMAND}dd\s+[^|]*\bof=\/dev\//"),
                 r"/>\s*\/dev\/(sd|nvme|disk)/",
                 r"/:\(\)\s*\{.*\|.*&.*\}\s*;\s*:/",
-                r"/\bchmod\s+-R\s+777\s+\/\s*$/",
+                &format!(r"/{COMMAND}chmod\s+-R\s+777\s+\/\s*$/"),
             ]
             .into_iter()
             .map(String::from)

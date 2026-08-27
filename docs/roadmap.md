@@ -120,6 +120,11 @@ what unblocks the most.
   a skill scoped away and explained by `skills why`, capture and rollback, a
   broken config that fails loudly, and the daemon path where a read goes over
   HTTP and a write says where the lock is.
+- **A deny list that does not cry wolf** — the default rules matched a word
+  anywhere in a command, so `grep -r mkfs docs/` and `echo 'never run mkfs'`
+  were refused outright, and nothing overrides a denial. They are now anchored
+  to command position as well as to their argument, allowing for `sudo` and
+  friends. 3 tests, covering what must be refused and what must not.
 - **The browser can set a goal and rewind** — the last two conversational
   actions it could not reach. A goal field on the session view, and a rewind on
   every entry in a transcript that asks whether to put the files back, since

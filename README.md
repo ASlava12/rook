@@ -226,7 +226,7 @@ outright what the deny list forbids — no approval can override a denial:
 mode  = "ask"                      # auto | ask | readonly
 allow = ["git status", '/^(ls|cat|rg)\b/']   # plain string, or /regex/
 ask   = ["git push"]                          # prompts even in auto mode
-deny  = ['/\brm\s+(-[a-zA-Z]+\s+)*\/(\s|\*|$)/']
+deny  = ['/(^|[;&|]\s*)(sudo\s+)*rm\s+(-[a-zA-Z]+\s+)*\/(\s|\*|$)/']
 allow_outside_workspace = false    # file tools stay inside, symlinks included
 ```
 
@@ -239,6 +239,11 @@ Logs go to stderr and to `$ROOK_HOME/logs/rook.log`, at `telemetry.log_level`
 unless `ROOK_LOG` says otherwise, rotated once at `telemetry.max_log_bytes` so
 they cost at most twice it. Nothing is uploaded anywhere; `telemetry.upload`
 exists so that answer is findable rather than assumed.
+
+A deny rule is anchored twice: to the argument, so `rm -rf /tmp/scratch` is not
+`rm -rf /`, and to the command position, so `grep -r mkfs docs/` is not running
+`mkfs`. Nothing overrides a denial, which is why a rule that fires on a harmless
+command takes that command away for good.
 
 File tools are bounded by the workspace, and the boundary is where a path leads
 rather than how it is spelled: a symlink inside the workspace that points out of

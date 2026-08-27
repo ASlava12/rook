@@ -33,6 +33,7 @@ Add a row when you implement something after reading a reference. Add it to
 | Widening a fact's scope instead of keeping the first | hermes `3b672a68` *delete-path drops every scope of a removed id* — the fix does not apply (identity here is the text, not an id per scope), but its subject exposed the same hazard in ours | source, via `refs advance` | `MemoryBook::learn`, `Scope::within` |
 | Reporting a search hit inside a captured file | codex `57e2edc` *encrypt sensitive history and notes tool arguments* — encryption does not fit a store whose point is that it is readable, but the question behind it exposed a search that scanned files and could not report them | source, via `refs advance` | `Rook::captured_as`, `Hit::file` |
 | Summarising only what the model was shown | hermes `1341dfbd` *exclude operational notifications from the tail anchor* — the same mismatch: their notifications, our checkpoint manifests and asides | source, via `refs advance` | `AgentLoop::summarise_span`, `replayed` |
+| A deny list anchored to command position | hermes *anchor the mkfs hardline pattern to command position* — the same half-anchoring, and the same reasoning: an unoverridable rule that fires on a mention takes a harmless command away for good | source, via `refs advance` | `config::COMMAND`, `deny_list.rs` |
 | Durable memory with provenance and history | hermes ([#12238](https://github.com/NousResearch/hermes-agent/issues/12238)); read `hermes/tools/memory_tool.py` and `goose/crates/goose-mcp/src/memory` | source | `rook-core/src/memory.rs`, `rook memory` |
 | Bounded logging and retention | codex SQLite growth ([#28224](https://github.com/openai/codex/issues/28224), [#17320](https://github.com/openai/codex/issues/17320)) | issues, not source | `RetentionPolicy`, `TelemetryConfig` |
 
@@ -41,6 +42,30 @@ Add a row when you implement something after reading a reference. Add it to
 `cargo xtask refs advance` prints what landed upstream since the pointer was last
 moved; what follows is what was done with it, so a dismissal is a decision rather
 than an omission.
+
+**2026-08-27 (thirteenth pass)** — hermes moved 1509 commits, codex one.
+
+A long-lived branch landed on hermes' default branch, so the pointer jumped by
+more than a release. Triaged by subject rather than one by one, which is the
+honest way to handle a bulk landing: 234 desktop fixes, 78 gateway, 49 JS
+formatting, and the rest across Slack, Telegram, cron, kanban and their
+OpenViking memory provider — none applicable. What was read closely is the
+thirty-odd commits under `agent`, `tools`, `context`, `tui`, `cli` and `memory`.
+
+- hermes `anchor the mkfs hardline pattern to command position` and *widen the
+  command-position anchor to the whole hardline class* — **ported, and it was
+  the same defect.** Our deny rules anchored their argument but not the command,
+  so `grep -r mkfs docs/` and `echo 'never run mkfs on a live disk'` were refused
+  outright — and nothing overrides a denial, so those commands were simply gone.
+  The comment beside the rules already said a deny list that cries wolf gets
+  turned off; it was half right about its own rules.
+- hermes `fix(context): prefer max_input_tokens over max_tokens for Anthropic
+  proxies` — **not applicable**: `agent.context_window` is configured or taken
+  from the provider, and a proxy that reports both is a shape we do not meet.
+- hermes `fix(agent): honor prompt_caching for custom providers`, `normalize
+  custom provider route identity` — **not applicable**: one provider per spec
+  here, with caching decided by the dialect rather than by a route table.
+- codex `d5cacec` — **not applicable**: their own release tooling.
 
 **2026-08-27 (twelfth pass)** — hermes advanced 26 commits.
 
