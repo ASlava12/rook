@@ -772,20 +772,44 @@ impl Rook {
         Ok(MemoryBook::load(&self.store, a)?.diff(&MemoryBook::load(&self.store, b)?))
     }
 
-    /// What the agent learned since `since` — the answer to "what changed today".
+    /// What the agent learned and forgot since `since` — the answer to "what
+    /// changed today", in the order it happened.
+    ///
+    /// Every recorded state in the window, folded in turn, rather than a diff of
+    /// the two ends. A fact learned and forgotten between them cancels out of
+    /// such a diff, and that is precisely the story being asked for: an agent
+    /// deleting what it had just been told to remember looked, to this, like a
+    /// day in which nothing happened.
     pub fn memory_since(&self, since: i64) -> Result<Vec<(memory::Change, Fact)>> {
-        let history = self.memory_history()?;
-        let Some(baseline) = history.iter().rev().find(|v| v.updated_at <= since) else {
-            let book = self.memory()?;
-            return Ok(book.facts.into_iter().map(|f| (memory::Change::Learned, f)).collect());
-        };
-        let from = ObjectId::from_hex(&baseline.object)
-            .ok_or_else(|| CoreError::Other("corrupt memory history".into()))?;
-        let current = self.store.get_ref(MEMORY_HEAD)?;
-        match current {
-            Some(head) => self.memory_diff(&from, &head),
-            None => Ok(Vec::new()),
+        let mut history = self.memory_history()?;
+        // `memory_history` is newest first, for a listing. This reads forwards
+        // in time, and the baseline is the last state before the window opened.
+        history.reverse();
+        let baseline = history.iter().rposition(|v| v.updated_at <= since);
+        let first = baseline.map(|i| i + 1).unwrap_or(0);
+
+        let mut changes = Vec::new();
+        let mut previous = baseline.map(|i| &history[i]);
+        for version in &history[first..] {
+            let to = ObjectId::from_hex(&version.object)
+                .ok_or_else(|| CoreError::Other("corrupt memory history".into()))?;
+            changes.extend(match previous {
+                Some(from) => {
+                    let from = ObjectId::from_hex(&from.object)
+                        .ok_or_else(|| CoreError::Other("corrupt memory history".into()))?;
+                    self.memory_diff(&from, &to)?
+                }
+                // Nothing was known before the window, so everything in the
+                // first state inside it was learned inside it.
+                None => MemoryBook::load(&self.store, &to)?
+                    .facts
+                    .into_iter()
+                    .map(|f| (memory::Change::Learned, f))
+                    .collect(),
+            });
+            previous = Some(version);
         }
+        Ok(changes)
     }
 
     fn save_memory(&self, book: &MemoryBook, note: Option<String>) -> Result<ObjectId> {

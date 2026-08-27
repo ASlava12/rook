@@ -535,7 +535,10 @@ async fn memory_keeps_its_history_and_can_say_what_changed() {
     f.rook
         .remember(rook_core::Fact::new("first thing", rook_core::Scope::Global), Some("one".into()))
         .unwrap();
+    // A version is stamped in whole seconds, so a boundary between two of them
+    // written in the same second does not exist to be asked about.
     let after_first = rook_store::now_unix();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
     f.rook
         .remember(rook_core::Fact::new("second thing", rook_core::Scope::Global), Some("two".into()))
         .unwrap();

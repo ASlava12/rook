@@ -543,6 +543,14 @@ like to something that has to act on it.
   say what it was about to do, says that no other tool and no sub-agent gets past
   it, and addresses the remedies to the user. The same task: four steps, 8,498
   tokens, twenty-three seconds, and an answer worth reading. 1 test.
+- **"What changed today" was a diff and is a story** — told to remember
+  something, the model recalled it in the next session, decided it did not match
+  the workspace and forgot it. `memory since 1` then answered that nothing had
+  been learned or forgotten all day: a fact learned and forgotten between the
+  ends of a window cancels out of a diff of those ends. Every recorded state in
+  the window is folded in turn now, in the order it happened. The baseline was
+  also the oldest state before the window rather than the newest, so a long
+  history reported more than the window held. 3 tests.
 - **A sub-task named by its whole instruction** — the progress line printed the
   entire delegated prompt on every step, two hundred characters of it, burying
   the step it was reporting.
