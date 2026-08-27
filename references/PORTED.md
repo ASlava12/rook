@@ -397,3 +397,37 @@ previews in the TUI, which shows a change summary rather than diffs and says why
 in the code. #41159, #41158, #41151, #41150 and #41146 are Guardian V2 and their
 own skill machinery. openhands' two are a model catalogue and a cloud-only
 conversation rename.
+
+**2026-08-27 (eighteenth pass)** — hermes 65.
+
+The pointer was advanced during the seventeenth pass and the commits read, and
+then the log entry was not written. Recording it late is worth doing: an
+advanced pointer with no entry is exactly the silent omission this file exists
+to prevent.
+
+Acted on: `refactor(delegate_task): tasks-only interface + depth-derived
+delegation (1,201 → 773 tok/call, −36%)`. Rook's `delegate` was already a
+quarter of theirs, so the −36% was not there to take, but the shape was: it
+advertised both a bare `task` and a `tasks` list, which is what led a live model
+to fill both and run every sub-task twice. It advertises the list and still
+accepts the bare field. Measuring it turned up the larger problem — the schema
+budget test and the tool that prices it both lived in `rook-tools`, which cannot
+see the six tools the loop adds, so they guarded 729 tokens of a list that costs
+1,476.
+
+Considered and not done, for now: `fix(mcp): signal reconnect from the mid-call
+fast-fail site too` and `fix(mcp): correct inverted liveness check in
+_stdio_children_dead`. Rook's stdio client has no inverted check — a timeout
+removes the waiter, the reader awaits the lock rather than trying it, and the
+pending map is cleared when the pipe closes. It also does not reconnect: a
+server that dies takes its tools out for the rest of the run, and every later
+call returns the transport error. That is honest but poor, and it is a piece of
+work rather than a line, so it is named here rather than half-done.
+
+Dismissed: `fix(sessions): don't let the empty-session sweep delete an archived
+transcript` — there is no such sweep here; retention deletes by age, size and
+tag. `fix(gemini): embed images in Gemini 3.x functionResponse.parts` — a tool
+result is text throughout Rook, so there is no image to embed. The remaining
+sixty are gateway liveness and launchd restarts, desktop STT and cloud auth,
+cron booking, WeCom streaming, kanban connections, plugin handlers for their own
+platform adapters, YAML provider-key coercion, and contributor mappings.
