@@ -166,10 +166,12 @@ fn the_advertised_tool_schemas_stay_within_a_budget() {
     let stubs: usize = tools.stubs().iter().map(cost).sum();
 
     assert!(
-        full < 700,
+        full < 800,
         "the built-in schemas cost ~{full} tokens on every eager request; \
          trim a description or merge an argument before raising this"
     );
+    // The number that is actually paid, since lazy loading is the default.
+    assert!(stubs < 350, "the stubs cost ~{stubs} tokens on every request");
     assert!(
         stubs * 2 < full,
         "stubs ({stubs}) must be much cheaper than full schemas ({full}), or lazy loading buys nothing"

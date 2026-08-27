@@ -113,3 +113,26 @@ async fn a_missing_command_fails_with_the_command_in_the_message() {
     assert!(matches!(err, McpError::Spawn { .. }));
     assert!(err.to_string().contains("definitely-not-installed-anywhere"), "{err}");
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn dropping_a_server_takes_its_child_process_with_it() {
+    // `kill -0` rather than a libc dependency for one call in one test.
+    let alive = |pid: u32| {
+        std::process::Command::new("kill").args(["-0", &pid.to_string()]).status().is_ok_and(|s| s.success())
+    };
+
+    let server = Server::connect(&mock("ok")).await.unwrap();
+    let pid = server.child_pid().expect("a stdio server has a child");
+    assert!(alive(pid), "the server should be running while it is connected");
+
+    drop(server);
+    // Reaped by the runtime, so the kill is not instantaneous.
+    for _ in 0..100 {
+        if !alive(pid) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("the child outlived the session it belonged to");
+}

@@ -39,6 +39,27 @@ Add a row when you implement something after reading a reference. Add it to
 moved; what follows is what was done with it, so a dismissal is a decision rather
 than an omission.
 
+**2026-08-27 (sixth pass)** — cline and hermes advanced.
+
+- hermes `e1e72f10` *register stdio MCP helper children in the spawn ledger and
+  reap orphans* — **probed, mostly already handled, and one gap left open on
+  purpose.** Both spawners set `kill_on_drop`, and a probe confirmed it: a
+  handshake that never answers, one that times out, and a dropped session all
+  leave nothing behind, which is now asserted by
+  `dropping_a_server_takes_its_child_process_with_it`. What is not covered is
+  SIGKILL or an abort, where no in-process cleanup can run. A ledger of PIDs
+  would need to prove identity before killing anything — the codex commits
+  triaged in the fifth pass were about exactly that failure — and on the four
+  platforms here that means four ways to read a process's start time or
+  environment. Killing a user's own rust-analyzer by PID reuse is worse than
+  leaving an orphan they can see, so this stays open rather than half-built.
+- cline `b4fd4ee` *tunnel ProtoBus over the existing Host Bridge* — **not
+  applicable**: an internal IPC consolidation for their extension host.
+- hermes `6170fff1`, `65335549` *managed SSH remote update engine*, `bf5ff510`,
+  `53057f2b` *config migration on update paths*, `89f32fe4` *contributors
+  registry* — **not applicable**: desktop update machinery and repository
+  bookkeeping.
+
 **2026-08-27 (fifth pass)** — acp, cline and codex advanced.
 
 - codex `2926014` *make filesystem policy matching URI-native* — **does not

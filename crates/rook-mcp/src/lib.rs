@@ -129,6 +129,10 @@ impl Server {
         &self.info
     }
 
+    pub fn child_pid(&self) -> Option<u32> {
+        self.transport.child_pid()
+    }
+
     pub async fn list_tools(&self) -> Result<Vec<ToolDescriptor>> {
         #[derive(Deserialize)]
         struct Listing {

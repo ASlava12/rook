@@ -137,6 +137,14 @@ impl Tool for WriteFile {
 
 pub struct EditFile;
 
+#[derive(serde::Deserialize)]
+struct Edit {
+    old: String,
+    new: String,
+    #[serde(default)]
+    replace_all: bool,
+}
+
 #[async_trait]
 impl Tool for EditFile {
     fn name(&self) -> &str {
@@ -146,62 +154,110 @@ impl Tool for EditFile {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "edit_file".into(),
-            description: "Replace an exact string in a file. `old` must appear exactly once, \
-                          so an ambiguous edit is rejected rather than applied to the wrong place."
+            description: "Replace exact strings in a file. Every edit to one file goes in one \
+                          call: they apply in order, and either all land or none do. Each `old` \
+                          is matched literally, indentation included, and must match exactly once \
+                          against the text as it then stands — add surrounding context to \
+                          disambiguate, or set `replace_all`."
                 .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" },
-                    "old": { "type": "string", "description": "Exact text to replace, including indentation." },
-                    "new": { "type": "string" },
-                    "replace_all": { "type": "boolean", "default": false }
+                    "edits": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "old": { "type": "string" },
+                                "new": { "type": "string" },
+                                "replace_all": { "type": "boolean" }
+                            },
+                            "required": ["old", "new"]
+                        }
+                    }
                 },
-                "required": ["path", "old", "new"]
+                "required": ["path", "edits"]
             }),
         }
     }
 
     async fn call(&self, ctx: &ToolContext, args: &serde_json::Value) -> Result<ToolOutcome> {
         let path = ctx.resolve(&arg_str(args, self.name(), "path")?)?;
-        let old = arg_str(args, self.name(), "old")?;
-        let new = arg_str(args, self.name(), "new")?;
-        let replace_all = args.get("replace_all").and_then(|v| v.as_bool()).unwrap_or(false);
+        let edits = parse_edits(args)?;
 
-        let text = tokio::fs::read_to_string(&path)
+        let original = tokio::fs::read_to_string(&path)
             .await
             .map_err(|e| ToolError::Io { path: path.clone(), source: e })?;
-        let count = text.matches(&old).count();
 
-        if count == 0 {
-            return Ok(ToolOutcome::error(format!(
-                "no occurrence of that text in {}. Read the file again — it may have changed.",
-                path.display()
-            )));
-        }
-        if count > 1 && !replace_all {
-            return Ok(ToolOutcome::error(format!(
-                "that text appears {count} times in {}. Include more surrounding context to \
-                 make it unique, or pass replace_all.",
-                path.display()
-            ))
-            .with("occurrences", count as u64));
+        // Applied to a copy: a later edit that cannot be placed must not leave
+        // the earlier ones on disk.
+        let mut text = original;
+        let mut replaced = 0usize;
+        for (i, edit) in edits.iter().enumerate() {
+            match apply(&text, edit) {
+                Ok((updated, count)) => {
+                    text = updated;
+                    replaced += count;
+                }
+                Err(reason) => {
+                    return Ok(ToolOutcome::error(format!(
+                        "edit {} of {} did not apply to {}: {reason}. Nothing was written.",
+                        i + 1,
+                        edits.len(),
+                        path.display()
+                    ))
+                    .with("failed_edit", i as u64 + 1));
+                }
+            }
         }
 
-        let updated = if replace_all { text.replace(&old, &new) } else { text.replacen(&old, &new, 1) };
-        tokio::fs::write(&path, &updated)
-            .await
-            .map_err(|e| ToolError::Io { path: path.clone(), source: e })?;
+        tokio::fs::write(&path, &text).await.map_err(|e| ToolError::Io { path: path.clone(), source: e })?;
         Ok(ToolOutcome::ok(format!(
-            "replaced {} occurrence(s) in {}",
-            if replace_all { count } else { 1 },
+            "{} edit(s), {replaced} replacement(s) in {}",
+            edits.len(),
             path.display()
         ))
-        .with("occurrences", count as u64))
+        .with("occurrences", replaced as u64))
     }
 
     fn touched_paths(&self, args: &serde_json::Value) -> Vec<String> {
         path_arg(args)
+    }
+}
+
+/// Accepts a bare `{old, new}` alongside `edits`, so a model that learnt the
+/// single-edit shape elsewhere is not refused over a detail of framing.
+fn parse_edits(args: &serde_json::Value) -> Result<Vec<Edit>> {
+    let invalid = |message: String| ToolError::Invalid { tool: "edit_file".into(), message };
+
+    if let Some(edits) = args.get("edits") {
+        let edits: Vec<Edit> = serde_json::from_value(edits.clone())
+            .map_err(|e| invalid(format!("`edits` must be an array of {{old, new}}: {e}")))?;
+        if edits.is_empty() {
+            return Err(invalid("`edits` is empty — there is nothing to change".into()));
+        }
+        return Ok(edits);
+    }
+    match (args.get("old"), args.get("new")) {
+        (Some(old), Some(new)) => Ok(vec![Edit {
+            old: old.as_str().unwrap_or_default().to_string(),
+            new: new.as_str().unwrap_or_default().to_string(),
+            replace_all: args.get("replace_all").and_then(|v| v.as_bool()).unwrap_or(false),
+        }]),
+        _ => Err(invalid("no edits given — pass `edits: [{old, new}]`".into())),
+    }
+}
+
+fn apply(text: &str, edit: &Edit) -> std::result::Result<(String, usize), String> {
+    match text.matches(&edit.old).count() {
+        0 => Err("that text is not in the file as given — read it again, it may have changed".into()),
+        n if n > 1 && !edit.replace_all => {
+            Err(format!("that text appears {n} times; add surrounding context or set replace_all"))
+        }
+        n if edit.replace_all => Ok((text.replace(&edit.old, &edit.new), n)),
+        _ => Ok((text.replacen(&edit.old, &edit.new, 1), 1)),
     }
 }
 

@@ -25,4 +25,10 @@ pub(crate) trait Transport: Send + Sync {
     async fn notify(&self, method: &str, params: Option<serde_json::Value>) -> Result<()>;
 
     async fn shutdown(&self);
+
+    /// The subprocess this transport owns, if it owns one. Used to check that a
+    /// server does not outlive the session it belongs to.
+    fn child_pid(&self) -> Option<u32> {
+        None
+    }
 }

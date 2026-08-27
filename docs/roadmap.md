@@ -27,8 +27,10 @@ what unblocks the most.
   truncating so the rewound-past turns stay readable.
 - **Context visibility** — `rook session context` breaks the cost down by kind and
   separates what a fresh turn would carry from what is merely stored.
-- **Tools** — paged `read_file`, `write_file`, unambiguous `edit_file`, `list_dir`,
-  regex `search`, `run_command` with timeout, output cap and deny list.
+- **Tools** — paged `read_file`, `write_file`, batched and unambiguous `edit_file`,
+  `list_dir`, regex `search`, `run_command` with timeout, output cap and deny
+  list. Every edit to one file goes in one call, applied in order against the
+  text as it then stands; a batch that cannot finish writes nothing. 8 tests.
 - **Asking the user** — `ask` puts a form of independent questions to whoever is
   driving: numbered choices in the CLI and TUI, radio and checkbox rows in the
   browser, the approval dialog over ACP. Typing past the options is always the

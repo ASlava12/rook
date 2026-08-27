@@ -137,6 +137,10 @@ impl Transport for Stdio {
         self.write_line(&line).await
     }
 
+    fn child_pid(&self) -> Option<u32> {
+        self.child.try_lock().ok()?.id()
+    }
+
     async fn shutdown(&self) {
         let _ = self.child.lock().await.kill().await;
     }
