@@ -598,6 +598,12 @@ impl Rook {
         Ok(memory::select(book.in_scope(&workspace), query, budget))
     }
 
+    /// Facts that already say close to this one, in the workspace's scope.
+    pub fn similar_facts(&self, text: &str) -> Result<Vec<Fact>> {
+        let book = self.memory()?;
+        Ok(book.similar_to(text).into_iter().cloned().collect())
+    }
+
     pub fn memory_history(&self) -> Result<Vec<MemoryVersion>> {
         let mut out = Vec::new();
         for (reference, id) in self.store.list_refs(MEMORY_LOG)? {

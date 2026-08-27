@@ -1754,3 +1754,22 @@ fn turning_off_lazy_tools_restores_the_argument_descriptions() {
     assert!(read(&eager).contains("description"), "eager schemas carry their guidance");
     assert!(!read(&loop_for(&f).tool_specs()).contains("description"), "lazy ones do not");
 }
+
+#[tokio::test]
+async fn remembering_something_already_said_names_the_older_fact() {
+    let f = fixture();
+    let session = f.rook.start_session("memory").unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("remember", serde_json::json!({"text": "deployments go through staging first"})),
+        call("remember", serde_json::json!({"text": "deployments first go through staging"})),
+        reply("noted"),
+    ]));
+
+    AgentLoop::new(&f.rook, provider.clone(), session).run("remember both").await.unwrap();
+
+    let said = provider.share();
+    let requests = said.lock().unwrap();
+    let last = requests.last().unwrap().messages.iter().rev().find(|m| m.role == Role::Tool).unwrap();
+    assert!(last.content.contains("close to ["), "the restatement must be flagged: {}", last.content);
+    assert!(last.content.contains("forget"), "and say what to do about it: {}", last.content);
+}

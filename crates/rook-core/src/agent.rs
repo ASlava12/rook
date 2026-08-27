@@ -826,10 +826,20 @@ impl<'a> AgentLoop<'a> {
                 );
                 fact.pinned = args.get("pinned").and_then(|p| p.as_bool()).unwrap_or(false);
                 let id = fact.id.clone();
+                // Named, not merged: only the model knows whether this replaces
+                // the older fact, narrows it, or contradicts it.
+                let close = self.rook.similar_facts(&fact.text).unwrap_or_default();
                 match self.rook.remember(fact, Some(format!("learned in turn {}", outcome.steps))) {
                     Ok(true) => {
                         outcome.facts_learned.push(id.clone());
-                        format!("remembered as [{id}]")
+                        let mut reply = format!("remembered as [{id}]");
+                        for other in close {
+                            reply.push_str(&format!(
+                                "\nclose to [{}] {:?} — `forget` it if this replaces it",
+                                other.id, other.text
+                            ));
+                        }
+                        reply
                     }
                     Ok(false) => format!("already remembered as [{id}]"),
                     Err(e) => format!("could not remember: {e}"),

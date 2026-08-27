@@ -160,6 +160,15 @@ impl MemoryBook {
         }
     }
 
+    /// Facts that already say close to this, so the caller can supersede one
+    /// rather than keep both. Never merged automatically: "prefer tabs" and
+    /// "prefer tabs in Makefiles" read alike and mean different things, and a
+    /// memory that quietly drops the difference is worse than one that repeats
+    /// itself.
+    pub fn similar_to(&self, text: &str) -> Vec<&Fact> {
+        self.facts.iter().filter(|f| f.text != text && overlap(&f.text, text) >= WORTH_MENTIONING).collect()
+    }
+
     /// Forget by id or by exact text. Returns what went.
     pub fn forget(&mut self, id_or_text: &str) -> Option<Fact> {
         let position = self.facts.iter().position(|f| f.id == id_or_text || f.text == id_or_text)?;
@@ -270,15 +279,50 @@ pub(crate) fn terms_of(text: &str) -> BTreeSet<String> {
 
 /// Pick what fits in `budget` tokens: everything pinned, then the best matches.
 pub fn select<'a>(facts: impl Iterator<Item = &'a Fact>, query: &str, budget: usize) -> Vec<Fact> {
-    let mut chosen = Vec::new();
+    let mut chosen: Vec<Fact> = Vec::new();
     let mut used = 0;
     for hit in search(facts, query) {
         let cost = hit.fact.tokens();
         if !hit.fact.pinned && used + cost > budget {
             continue;
         }
+        // Two ways of saying one thing spend the budget twice and tell the model
+        // nothing the first did. The better-scoring one is already first.
+        if chosen.iter().any(|kept| overlap(&kept.text, &hit.fact.text) >= SAME_FACT) {
+            continue;
+        }
         used += cost;
         chosen.push(hit.fact);
     }
     chosen
+}
+
+/// High enough that only a sentence reordered collapses.
+///
+/// Term overlap cannot tell a restatement from a narrowing or a contradiction,
+/// because the distinguishing word is exactly the one that differs. Measured:
+/// "prefer tabs" against "prefer tabs in Makefiles" scores 0.80, and "the API
+/// listens on port 7717" against "port 8080" scores 0.75 — suppressing either
+/// would hide the fact that says something new. Only an identical set of terms
+/// is safe to drop.
+pub const SAME_FACT: f32 = 0.95;
+
+/// Low enough to catch a restatement, which is all it is used for: a fact this
+/// close is named when the model writes a new one, and nothing is discarded on
+/// the strength of it. Measured: a plain restatement scores 0.67 and two facts
+/// about different things score 0.29, so erring low costs a line of text and
+/// erring high costs the mention entirely.
+pub const WORTH_MENTIONING: f32 = 0.55;
+
+/// Shared terms as a fraction of the terms either one uses.
+///
+/// Jaccard over the same terms the ranking matches on, so a fact judged similar
+/// here is one that would have matched the same queries.
+pub fn overlap(a: &str, b: &str) -> f32 {
+    let (a, b) = (terms_of(a), terms_of(b));
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    let shared = a.intersection(&b).count() as f32;
+    shared / (a.len() + b.len()) as f32 * 2.0
 }

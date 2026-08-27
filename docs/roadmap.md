@@ -107,6 +107,13 @@ what unblocks the most.
   work out, scoped by `requires` to where it actually holds, validated by reading
   it back, and captured as a version so a rewrite keeps the old one. The index
   reloads in place, so the next turn's catalog has it without a restart. 7 tests.
+- **Memory that stops repeating itself** — recall spends its budget once on a
+  fact said twice, and `remember` names an older fact that says nearly the same
+  thing so the model can supersede it. Two thresholds, because the costs differ:
+  suppression needs 0.95 and the advisory 0.55. Measured — "prefer tabs" against
+  "prefer tabs in Makefiles" scores 0.80 and "port 7717" against "port 8080"
+  scores 0.75, so a single threshold would have hidden the fact that says
+  something new. 7 tests.
 - **An API with tests** — `rookd` had none, though it is the surface the web UI
   and now the CLI both read through. 10 cover the paged endpoints, the typed
   error shape, a session id that is not one, and that the page is actually
@@ -161,9 +168,6 @@ against a stub.
 **Supervising sub-agents while they run.** Delegation fans out and waits for all
 of them. codex's `spawn_agent`/`wait_agent` lets a parent send messages to a child
 mid-run, which is a different feature rather than a deeper version of this one.
-
-**Memory consolidation.** Nothing merges near-duplicate facts or ages out stale
-ones yet; the identity check only catches exact repeats.
 
 **ACP beyond the basics.** Modes, config options, `fs/*` delegation to the
 editor's buffers, and terminals are all defined and unimplemented.
