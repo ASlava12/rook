@@ -810,15 +810,18 @@ impl<'a> AgentLoop<'a> {
             return (refusal, true);
         }
 
-        self.checkpoint_before(call);
+        let unprotected = self.checkpoint_before(call);
         let outcome = match self.tools.call(&self.tool_ctx, &call.name, &call.arguments).await {
             Ok(o) => o,
             Err(e) => rook_tools::ToolOutcome::error(format!("tool error: {e}")),
         };
-        let text = match self.after_tool(call, &outcome).await {
+        let mut text = match self.after_tool(call, &outcome).await {
             Some(extra) => format!("{}\n\n{extra}", outcome.content),
             None => outcome.content,
         };
+        if let Some(note) = unprotected {
+            text.push_str(&format!("\n\n{note}"));
+        }
         self.rook.log(self.session, EventKind::ToolResult, &call.name, &text).ok();
         (text, outcome.is_error)
     }
@@ -1138,16 +1141,30 @@ impl<'a> AgentLoop<'a> {
     /// Snapshot whatever a mutating tool is about to touch, so `rook session
     /// rewind` can put the files back. Read-only tools report no paths and cost
     /// nothing here.
-    fn checkpoint_before(&self, call: &rook_llm::ToolCall) {
-        let Some(tool) = self.tools.get(&call.name) else { return };
+    /// Returns what the model has to be told, which is nothing when the files
+    /// were captured.
+    ///
+    /// A capture that fails takes the session's undo with it: `session rewind`
+    /// restores from these, so a file edited without one is edited for good.
+    /// That was a line in the log file, where neither the model nor the user was
+    /// looking, and both believed the edit was recoverable.
+    fn checkpoint_before(&self, call: &rook_llm::ToolCall) -> Option<String> {
+        let tool = self.tools.get(&call.name)?;
         let paths: Vec<std::path::PathBuf> = tool
             .touched_paths(&call.arguments)
             .iter()
             .filter_map(|p| self.tool_ctx.resolve(p).ok())
             .collect();
-        if let Err(e) = self.rook.checkpoint_paths(self.session, &call.name, &paths) {
-            tracing::warn!("checkpoint before {} failed: {e}", call.name);
+        if paths.is_empty() {
+            return None;
         }
+        let failure = self.rook.checkpoint_paths(self.session, &call.name, &paths).err()?;
+        let note = format!(
+            "no checkpoint was taken first ({failure}), so `rook session rewind` cannot undo this one."
+        );
+        tracing::warn!("checkpoint before {}: {failure}", call.name);
+        self.rook.log(self.session, EventKind::Error, "checkpoint", &note).ok();
+        Some(note)
     }
 }
 

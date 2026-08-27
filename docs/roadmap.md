@@ -301,6 +301,14 @@ what unblocks the most.
   before checking containment, so a link inside the workspace pointing out of it
   is refused rather than followed, and the refusal says where the path really
   led. Widened only by `sandbox.allow_outside_workspace`. 6 tests.
+- **An edit nothing could checkpoint says so** — the loop captures a file before
+  every mutating call, and `session rewind` restores from those captures. A file
+  past the capture limit got none, the failure went to the log file as a warning,
+  and the call went ahead: the model and the user both went on believing the edit
+  could be undone. The tool result says it cannot, and the session records it, so
+  `session show` and the TUI say it too. The call still runs — refusing every
+  edit to a large file would be a worse answer than telling the truth about one.
+  1 test.
 - **Reading and searching a file without holding it** — both read every file
   whole: `search` to look at it, and `read_file` to return two thousand lines of
   it, so a large file was the caller's problem in memory as well as in context.

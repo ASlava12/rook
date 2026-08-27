@@ -2083,3 +2083,35 @@ async fn the_report_keeps_the_order_the_tasks_were_asked_in() {
     assert!(first < second, "{}", report.body);
     assert_eq!(outcome.delegated.len(), 2);
 }
+
+/// A checkpoint that fails takes the session's undo with it: `session rewind`
+/// restores from these, so a file edited without one is edited for good. That
+/// was a line in the log file, where neither the model nor the user was looking.
+#[tokio::test]
+async fn an_edit_that_could_not_be_checkpointed_says_so_where_it_will_be_read() {
+    let f = fixture();
+    let big = f.workspace.path().join("fixture.json");
+    std::fs::write(&big, "x".repeat(9 << 20)).unwrap();
+
+    let session = f.rook.start_session("").unwrap();
+    let provider = ScriptedProvider::new(vec![
+        call("write_file", serde_json::json!({ "path": "fixture.json", "content": "{}" })),
+        reply("done"),
+    ]);
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), session);
+    agent.allow_everything_not_denied();
+    agent.run("shrink it").await.unwrap();
+
+    let transcript = f.rook.transcript(session, 0, 100, 4096).unwrap();
+    let told_the_model = transcript.iter().find(|e| e.kind.contains("result")).expect("the call happened");
+    assert!(
+        told_the_model.body.contains("cannot undo this one"),
+        "the model has to know an edit is final: {}",
+        told_the_model.body
+    );
+    assert!(
+        transcript.iter().any(|e| e.label == "checkpoint"),
+        "and the session says it, so `session show` does too"
+    );
+    assert_eq!(std::fs::read_to_string(&big).unwrap(), "{}", "the edit still happened");
+}
