@@ -228,7 +228,9 @@ deny  = ['/\brm\s+(-[a-zA-Z]+\s+)*\/(\s|\*|$)/']
 allow_outside_workspace = false    # file tools stay inside, symlinks included
 ```
 
-`rook --yes` skips the prompts for one run. Unattended runs with no `--yes`
+The mode is changeable while you work: `/mode` in the chat, F2 in the TUI, a
+select in the browser, and a session config option over ACP — all the same
+policy. `rook --yes` skips the prompts for one run. Unattended runs with no `--yes`
 refuse rather than improvise, and say what would have made it possible.
 
 Logs go to stderr and to `$ROOK_HOME/logs/rook.log`, at `telemetry.log_level`

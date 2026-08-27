@@ -46,6 +46,10 @@ async fn serve(socket: WebSocket, state: Arc<AppState>) {
     // language servers is expensive, and an approval granted for the run has to
     // survive the turn it was granted in.
     let shared: Arc<tokio::sync::OnceCell<Shared>> = Arc::new(tokio::sync::OnceCell::new());
+    // Settings are cheap and wanted before the first prompt, so they are not in
+    // the cell with the expensive things.
+    let settings = Arc::new(Settings::new(&*state.rook.read().await));
+    let _ = outbound.send(settings.describe());
     let mut running: Option<tokio::task::JoinHandle<()>> = None;
 
     while let Some(Ok(message)) = stream.next().await {
@@ -62,6 +66,12 @@ async fn serve(socket: WebSocket, state: Arc<AppState>) {
                 },
             ),
             ClientMessage::Answers { id, answers } => asker.answer(&id, answers),
+            ClientMessage::Setting { name, value } => {
+                let _ = match settings.set(&name, &value) {
+                    Ok(()) => outbound.send(settings.describe()),
+                    Err(message) => outbound.send(ChatEvent::Error { message }),
+                };
+            }
             ClientMessage::Cancel => {
                 if let Some(handle) = running.take() {
                     handle.abort();
@@ -79,8 +89,11 @@ async fn serve(socket: WebSocket, state: Arc<AppState>) {
                 }
                 running = Some(tokio::spawn(turn(
                     state.clone(),
-                    approver.clone(),
-                    asker.clone(),
+                    Connection {
+                        approver: approver.clone(),
+                        asker: asker.clone(),
+                        settings: settings.clone(),
+                    },
                     shared.clone(),
                     outbound.clone(),
                     session,
@@ -99,10 +112,18 @@ async fn serve(socket: WebSocket, state: Arc<AppState>) {
     let _ = writer.await;
 }
 
-async fn turn(
-    state: Arc<AppState>,
+/// What the connection gives a turn: who answers its questions, and what the
+/// user has set for the rest of the session.
+#[derive(Clone)]
+struct Connection {
     approver: Arc<ChannelApprover>,
     asker: Arc<ChannelAsker>,
+    settings: Arc<Settings>,
+}
+
+async fn turn(
+    state: Arc<AppState>,
+    connection: Connection,
     shared: Arc<tokio::sync::OnceCell<Shared>>,
     outbound: mpsc::UnboundedSender<ChatEvent>,
     session: Option<String>,
@@ -131,18 +152,15 @@ async fn turn(
 
     let shared = shared
         .get_or_init(|| async {
-            Shared {
-                policy: rook_core::agent::policy_for(&rook),
-                servers: rook_core::agent::servers_for(&rook),
-                mcp: Arc::new(rook.connect_mcp().await),
-            }
+            Shared { servers: rook_core::agent::servers_for(&rook), mcp: Arc::new(rook.connect_mcp().await) }
         })
         .await;
 
     let mut agent = AgentLoop::new(&rook, provider.into(), session);
-    agent.policy = shared.policy.clone();
-    agent.approver = approver;
-    agent.ask_via(asker);
+    agent.policy = connection.settings.policy.clone();
+    agent.effort = connection.settings.effort();
+    agent.approver = connection.approver;
+    agent.ask_via(connection.asker);
     agent.servers = shared.servers.clone();
     rook_core::lsp::register(&mut agent.tools, shared.servers.clone());
     for (server, tools) in &shared.mcp.servers {
@@ -183,9 +201,46 @@ fn report(outbound: &mpsc::UnboundedSender<ChatEvent>, message: String) {
 
 /// What a connection keeps between turns.
 struct Shared {
-    policy: Arc<rook_tools::policy::Policy>,
     servers: Arc<rook_core::lsp::Servers>,
     mcp: Arc<rook_core::McpSession>,
+}
+
+/// What the browser may change for the rest of the connection.
+struct Settings {
+    policy: Arc<rook_tools::policy::Policy>,
+    effort: std::sync::RwLock<rook_llm::Effort>,
+}
+
+impl Settings {
+    fn new(rook: &rook_core::Rook) -> Self {
+        Self {
+            policy: rook_core::agent::policy_for(rook),
+            effort: std::sync::RwLock::new(rook.config.agent.effort()),
+        }
+    }
+
+    fn effort(&self) -> rook_llm::Effort {
+        *self.effort.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn describe(&self) -> ChatEvent {
+        ChatEvent::Settings {
+            mode: self.policy.mode().as_str().into(),
+            effort: self.effort().as_str().into(),
+        }
+    }
+
+    fn set(&self, name: &str, value: &str) -> Result<(), String> {
+        match name {
+            "mode" => rook_tools::policy::Mode::parse(value)
+                .map(|mode| self.policy.set_mode(mode))
+                .ok_or_else(|| format!("no mode {value:?}")),
+            "effort" => rook_llm::Effort::parse(value)
+                .map(|effort| *self.effort.write().unwrap_or_else(|e| e.into_inner()) = effort)
+                .ok_or_else(|| format!("no effort {value:?}")),
+            other => Err(format!("no setting {other:?}")),
+        }
+    }
 }
 
 /// Relays the agent's questions to the browser and routes the answers back.

@@ -195,20 +195,11 @@ pub fn modes(current: rook_tools::policy::Mode) -> serde_json::Value {
 }
 
 pub fn mode_id(mode: rook_tools::policy::Mode) -> &'static str {
-    match mode {
-        rook_tools::policy::Mode::Auto => "auto",
-        rook_tools::policy::Mode::Ask => "ask",
-        rook_tools::policy::Mode::ReadOnly => "readonly",
-    }
+    mode.as_str()
 }
 
 pub fn mode_from_id(id: &str) -> Option<rook_tools::policy::Mode> {
-    match id {
-        "auto" => Some(rook_tools::policy::Mode::Auto),
-        "ask" => Some(rook_tools::policy::Mode::Ask),
-        "readonly" => Some(rook_tools::policy::Mode::ReadOnly),
-        _ => None,
-    }
+    rook_tools::policy::Mode::parse(id)
 }
 
 /// Told to the editor when the mode changes for any other reason, so its menu

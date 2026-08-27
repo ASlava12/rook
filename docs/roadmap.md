@@ -120,6 +120,10 @@ what unblocks the most.
   a skill scoped away and explained by `skills why`, capture and rollback, a
   broken config that fails loudly, and the daemon path where a read goes over
   HTTP and a write says where the lock is.
+- **Approvals and effort changeable everywhere** — `/mode` and `/effort` in the
+  chat REPL, F2 and F3 in the TUI with both shown in its footer, two selects in
+  the browser, and `configOptions` over ACP. All four reach the same policy;
+  effort was previously only settable by editing `config.toml` and restarting.
 - **Session settings the editor can offer** — approvals and reasoning effort go
   out as `configOptions`, which the protocol prefers to modes and will keep once
   modes are removed. Both are sent, so an older client still renders the modes

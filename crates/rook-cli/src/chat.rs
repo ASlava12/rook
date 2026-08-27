@@ -19,6 +19,8 @@ const HELP: &str = "  /context [window]   what this conversation costs, and of w
   /skills [name]      skills that apply here, or one skill's body
   /session            id, size and token totals
   /goal [text]        what this session is for; the agent is told
+  /mode [name]        approvals: auto, ask or readonly
+  /effort [name]      how much the model may think: low … max
   /memory [query]     what it remembers, or what matches
   /search <query>     find it in everything said, read and run
   /diff               what this session has changed on disk
@@ -74,6 +76,7 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
         // Likewise the language servers: a pool dropped per turn restarts
         // rust-analyzer, and it indexes the workspace every time it starts.
         servers: rook_core::agent::servers_for(&rook),
+        effort: std::cell::Cell::new(rook.config.agent.effort()),
         yes,
     };
 
@@ -97,7 +100,7 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
                     continue;
                 }
                 if let Some(command) = line.strip_prefix('/') {
-                    match runtime.block_on(dispatch(&rook, &mut session, &shared.mcp, command)) {
+                    match runtime.block_on(dispatch(&rook, &mut session, &shared, command)) {
                         Ok(true) => break,
                         Ok(false) => {}
                         Err(e) => println!("{e}"),
@@ -151,6 +154,9 @@ struct Session {
     mcp: rook_core::McpSession,
     policy: std::sync::Arc<rook_tools::policy::Policy>,
     servers: std::sync::Arc<rook_core::lsp::Servers>,
+    /// The policy holds the mode; effort has nowhere else to live and is worth
+    /// changing per task, so it sits beside it for the whole session.
+    effort: std::cell::Cell<rook_llm::Effort>,
     yes: bool,
 }
 
@@ -176,6 +182,7 @@ async fn turn(
     for (server, tools) in &shared.mcp.servers {
         agent.tools.register_server(server.clone(), tools.clone());
     }
+    agent.effort = shared.effort.get();
 
     let mut out = std::io::stdout();
     let running = agent.run_with(prompt, |progress| match progress {
@@ -225,18 +232,26 @@ async fn turn(
 }
 
 /// Returns true when the session should end.
-async fn dispatch(
-    rook: &Rook,
-    session: &mut u128,
-    mcp: &rook_core::McpSession,
-    command: &str,
-) -> Result<bool> {
+async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command: &str) -> Result<bool> {
+    let mcp = &shared.mcp;
     let (name, rest) = command.split_once(' ').unwrap_or((command, ""));
     let rest = rest.trim();
 
     match name {
         "quit" | "exit" | "q" => return Ok(true),
         "help" | "?" => println!("{HELP}"),
+
+        "mode" if rest.is_empty() => println!("{}", shared.policy.mode().as_str()),
+        "mode" => match rook_tools::policy::Mode::parse(rest) {
+            Some(mode) => shared.policy.set_mode(mode),
+            None => println!("no mode {rest:?} — auto, ask or readonly"),
+        },
+
+        "effort" if rest.is_empty() => println!("{}", shared.effort.get().as_str()),
+        "effort" => match rook_llm::Effort::parse(rest) {
+            Some(effort) => shared.effort.set(effort),
+            None => println!("no effort {rest:?} — low, medium, high, xhigh or max"),
+        },
 
         "context" => {
             let window = rest.parse().unwrap_or(128_000);

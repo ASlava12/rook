@@ -380,3 +380,21 @@ fn an_unknown_command_says_so_rather_than_being_sent_to_the_model() {
     assert!(out.to_lowercase().contains("nonsense"), "{out}");
     assert!(!out.contains("cannot reach"), "it must not have gone to the provider:\n{out}");
 }
+
+#[test]
+fn the_repl_can_change_the_approvals_and_the_effort() {
+    let rook = Rook::new();
+    let out = rook.chat("/mode\n/mode readonly\n/mode\n/effort\n/effort low\n/effort\n/quit\n");
+
+    let lines: Vec<&str> = out.lines().filter(|l| ["ask", "readonly", "high", "low"].contains(l)).collect();
+    assert_eq!(lines, ["ask", "readonly", "high", "low"], "each reads back what was set:\n{out}");
+}
+
+#[test]
+fn a_setting_the_repl_does_not_have_is_refused_by_name() {
+    let rook = Rook::new();
+    let out = rook.chat("/mode yolo\n/effort glacial\n/quit\n");
+
+    assert!(out.contains(r#"no mode "yolo""#), "{out}");
+    assert!(out.contains(r#"no effort "glacial""#), "{out}");
+}

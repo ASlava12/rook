@@ -25,6 +25,26 @@ pub enum Mode {
     ReadOnly,
 }
 
+impl Mode {
+    /// The spelling a user writes, in config and everywhere it is offered.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Mode::Auto => "auto",
+            Mode::Ask => "ask",
+            Mode::ReadOnly => "readonly",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "auto" => Some(Mode::Auto),
+            "ask" => Some(Mode::Ask),
+            "readonly" => Some(Mode::ReadOnly),
+            _ => None,
+        }
+    }
+}
+
 /// What a tool call is about to do. Read-only calls never reach the policy.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Risk {

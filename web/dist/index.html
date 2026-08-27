@@ -56,7 +56,10 @@ td.t{font-family:inherit}
 form.ask{display:flex;gap:.5rem;margin-top:.8rem}
 form.ask input{flex:1;padding:.55rem .7rem;border:1px solid var(--line);border-radius:6px;
   background:var(--bg);color:var(--fg);font:inherit}
-.row{display:flex;gap:.5rem;margin:.5rem 0}
+.row{display:flex;gap:.5rem;margin:.5rem 0;align-items:center}
+.row label{color:var(--dim);font-size:.82rem}
+.row select{background:var(--panel);color:var(--fg);border:1px solid var(--line);
+  border-radius:4px;padding:.2rem .3rem;font:inherit}
 .muted{color:var(--dim);font-size:.82rem}
 #maintenance-report{white-space:pre-wrap;font-family:var(--mono);margin:0}
 form.ask button,.row button,.approve button{padding:.5rem .9rem;border:1px solid var(--line);border-radius:6px;
@@ -124,7 +127,8 @@ const api = async (path, body) => {
   return parsed;
 };
 
-const state = { tab: 'chat', session: null, skill: null, query: '', chat: { log: [], session: null, busy: false } };
+const state = { tab: 'chat', session: null, skill: null, query: '',
+  chat: { log: [], session: null, busy: false, settings: null } };
 
 async function boot() {
   try {
@@ -175,6 +179,7 @@ function connect() {
     else if (e.type === 'reasoning') say('think', e.text);
     else if (e.type === 'tool') say('tool', `\n  · ${e.name}`);
     else if (e.type === 'tool_done') say('tool', e.failed ? ' ✗\n' : ' ✓\n');
+    else if (e.type === 'settings') { state.chat.settings = e; renderSettings(); }
     else if (e.type === 'error') { say('err', `\n${e.message}\n`); done(); }
     else if (e.type === 'cancelled') { say('stat', '\n[stopped]\n\n'); done(); }
     else if (e.type === 'approval') askApproval(e);
@@ -248,6 +253,21 @@ function askUser(request) {
   out.scrollTop = out.scrollHeight;
 }
 
+// A select each, because the values are few and named. The server answers every
+// change with the whole state, so the controls cannot drift from the policy.
+function renderSettings() {
+  const bar = $('#settings');
+  if (!bar || !state.chat.settings) return;
+  const pick = (name, values, current) => el('label', {},
+    `${name} `,
+    el('select', { onchange: (e) => socket.send(JSON.stringify(
+        { type: 'setting', name, value: e.target.value })) },
+      values.map(v => el('option', { value: v, ...(v === current ? { selected: '' } : {}) }, v))));
+  bar.replaceChildren(
+    pick('mode', ['auto', 'ask', 'readonly'], state.chat.settings.mode),
+    pick('effort', ['low', 'medium', 'high', 'xhigh', 'max'], state.chat.settings.effort));
+}
+
 async function renderChat() {
   const stream = el('div', { class: 'stream', id: 'stream' });
   const input = el('input', { placeholder: 'Ask the agent…', autofocus: 'true' });
@@ -271,7 +291,10 @@ async function renderChat() {
 
   $('#view').replaceChildren(el('div', { class: 'card' },
     el('h2', {}, state.chat.session ? `session ${state.chat.session}` : 'new session'),
+    el('div', { class: 'row', id: 'settings' }),
     stream, form));
+  renderSettings();
+  connect();
   input.focus();
 }
 

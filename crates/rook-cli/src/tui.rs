@@ -135,6 +135,9 @@ struct App {
     approver: Arc<ChannelApprover>,
     asker: Arc<ChannelAsker>,
     policy: Arc<rook_tools::policy::Policy>,
+    /// Beside the policy, which holds the mode: both are worth changing per task
+    /// and neither belongs to a single turn.
+    effort: rook_llm::Effort,
     servers: Arc<rook_core::lsp::Servers>,
     mcp: Arc<rook_core::McpSession>,
     turn: Option<tokio::task::JoinHandle<()>>,
@@ -188,6 +191,7 @@ impl App {
             approver: Arc::new(ChannelApprover::new(requests, Duration::from_secs(600))),
             asker: Arc::new(ChannelAsker::new(questions, Duration::from_secs(600))),
             policy: rook_core::agent::policy_for(&rook),
+            effort: rook.config.agent.effort(),
             servers: rook_core::agent::servers_for(&rook),
             // Connected once: every turn would otherwise spawn each server,
             // wait out its handshake and kill it again.
@@ -309,6 +313,13 @@ impl App {
             self.quit = true;
             return;
         }
+        // Before the per-tab dispatch: the chat tab is where you would want to
+        // drop to read-only, and there a digit is a character in the message.
+        match key.code {
+            KeyCode::F(2) => return self.cycle_mode(),
+            KeyCode::F(3) => return self.cycle_effort(),
+            _ => {}
+        }
         if self.tab == 0 {
             self.on_chat_key(key);
             return;
@@ -363,6 +374,29 @@ impl App {
 
     /// One question per Enter. The input line is the answer field, so typing
     /// past the choices works here exactly as it does in the plain CLI.
+    fn cycle_mode(&mut self) {
+        use rook_tools::policy::Mode;
+        let next = match self.policy.mode() {
+            Mode::Auto => Mode::Ask,
+            Mode::Ask => Mode::ReadOnly,
+            Mode::ReadOnly => Mode::Auto,
+        };
+        self.policy.set_mode(next);
+        self.chat.push("stat", &format!("  approvals: {}", next.as_str()));
+    }
+
+    fn cycle_effort(&mut self) {
+        use rook_llm::Effort::*;
+        self.effort = match self.effort {
+            Low => Medium,
+            Medium => High,
+            High => XHigh,
+            XHigh => Max,
+            Max => Low,
+        };
+        self.chat.push("stat", &format!("  effort: {}", self.effort.as_str()));
+    }
+
     fn answer(&mut self) {
         let Some(mut asking) = self.chat.asking.take() else { return };
         let answer = asking.record(&std::mem::take(&mut self.chat.input));
@@ -388,6 +422,7 @@ impl App {
         let approver = self.approver.clone();
         let asker = self.asker.clone();
         let policy = self.policy.clone();
+        let effort = self.effort;
         let servers = self.servers.clone();
         let mcp = self.mcp.clone();
         let session = self.chat.session;
@@ -430,6 +465,7 @@ impl App {
                 };
                 return;
             }
+            agent.effort = effort;
             if yes {
                 agent.allow_everything_not_denied();
             } else {
@@ -528,7 +564,14 @@ impl App {
                 Span::styled("r ", Style::default().fg(Color::Cyan)),
                 Span::raw("reload  "),
                 Span::styled("q ", Style::default().fg(Color::Cyan)),
-                Span::raw(format!("quit    {}", self.status)),
+                Span::raw("quit  "),
+                Span::styled("F2/F3 ", Style::default().fg(Color::Cyan)),
+                Span::raw(format!(
+                    "{}/{}    {}",
+                    self.policy.mode().as_str(),
+                    self.effort.as_str(),
+                    self.status
+                )),
             ]))
             .style(Style::default().fg(Color::DarkGray)),
             footer,
@@ -848,6 +891,7 @@ impl App {
             Line::from("              /btw <question> asks without joining the conversation"),
             Line::from("              y / a / n answer an approval"),
             Line::from("              enter     answer a question, one at a time"),
+            Line::from("              F2 / F3   cycle approvals / reasoning effort"),
         ];
         f.render_widget(Paragraph::new(text).block(bordered(" Help ")), area);
     }

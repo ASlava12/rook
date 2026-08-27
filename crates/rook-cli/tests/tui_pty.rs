@@ -182,3 +182,20 @@ fn the_browsing_tabs_render_without_a_model() {
         "the chat pane should be gone once another tab is selected:\n{screen}"
     );
 }
+
+#[test]
+fn the_footer_shows_the_settings_and_f2_changes_them() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let mut pty = tui(home.path(), workspace.path());
+
+    let before = pty.screen(100, 30).join("\n");
+    assert!(before.contains("ask/high"), "the configured defaults, in the footer:\n{before}");
+
+    // F2 as a VT sequence; crossterm reads both this and SS3, and a pty is not
+    // a terminal that will translate one for us.
+    pty.send("\u{1b}[12~");
+    let after = pty.screen(100, 30).join("\n");
+
+    assert!(after.contains("readonly/high"), "F2 cycles approvals:\n{after}");
+}

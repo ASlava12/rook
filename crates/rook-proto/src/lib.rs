@@ -113,6 +113,12 @@ pub enum ClientMessage {
         id: String,
         answers: Vec<Vec<String>>,
     },
+    /// Change a session setting for the rest of the connection: `mode` takes
+    /// auto/ask/readonly, `effort` takes low…max.
+    Setting {
+        name: String,
+        value: String,
+    },
     /// Stop the turn in flight, leaving what it already did in the log.
     Cancel,
 }
@@ -167,6 +173,12 @@ pub enum ChatEvent {
     Ask {
         id: String,
         questions: Vec<AskQuestion>,
+    },
+    /// What the settings are now, after a [`ClientMessage::Setting`] or on
+    /// connecting.
+    Settings {
+        mode: String,
+        effort: String,
     },
     /// The turn was stopped before it finished. Sent instead of `Done`, so a
     /// client waiting on one of them is never left waiting.

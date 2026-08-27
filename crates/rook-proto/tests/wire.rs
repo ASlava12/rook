@@ -49,3 +49,18 @@ fn a_finished_tool_call_is_reported_as_its_own_event() {
         "the browser branches on this tag by hand"
     );
 }
+
+#[test]
+fn the_settings_the_browser_sends_and_receives_match_what_it_reads() {
+    let sent = r#"{"type":"setting","name":"effort","value":"low"}"#;
+    let ClientMessage::Setting { name, value } = serde_json::from_str(sent).unwrap() else {
+        panic!("the browser's setting message must parse as Setting");
+    };
+    assert_eq!((name.as_str(), value.as_str()), ("effort", "low"));
+
+    assert_eq!(
+        serde_json::to_value(ChatEvent::Settings { mode: "ask".into(), effort: "high".into() }).unwrap(),
+        serde_json::json!({ "type": "settings", "mode": "ask", "effort": "high" }),
+        "the page branches on this tag by hand"
+    );
+}
