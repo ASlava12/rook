@@ -527,6 +527,26 @@ what unblocks the most.
   the matrix names the CI job behind it and a test fails if that job is gone, so
   the table cannot outlive its evidence.
 
+## Measured against a live model
+
+Everything below was found by running Rook against a local 27B model in LM
+Studio, which is the first time it has answered anything but a scripted provider
+or a socket. The wire was already right; what was not was what a refusal reads
+like to something that has to act on it.
+
+- **A refusal a model cannot act on is one it works around** — told nothing could
+  approve a write, the model tried another tool, then delegated the same task to
+  a sub-agent, which is refused for the same reason. Nine steps, 32,185 input
+  tokens and four minutes and twenty-two seconds, ending at the output cap. Every
+  remedy the message offered — re-run interactively, pass `--yes`, add an allow
+  rule — is something only the person can do. It now tells the model to stop and
+  say what it was about to do, says that no other tool and no sub-agent gets past
+  it, and addresses the remedies to the user. The same task: four steps, 8,498
+  tokens, twenty-three seconds, and an answer worth reading. 1 test.
+- **A sub-task named by its whole instruction** — the progress line printed the
+  entire delegated prompt on every step, two hundred characters of it, burying
+  the step it was reporting.
+
 ## Next
 
 **Keep triaging the reference backlog.** `cargo xtask refs advance` moves a

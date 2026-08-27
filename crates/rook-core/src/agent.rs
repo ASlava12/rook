@@ -96,6 +96,17 @@ fn bundled(skill: &rook_skills::Skill) -> String {
     format!("\n\nBundled with this skill, under {}:{}{more}", skill.dir.display(), listed.join(""))
 }
 
+/// The head of a sub-task, for a progress line. A task is a whole instruction —
+/// a live one ran to two hundred characters — and repeating it on every step
+/// buries what the step actually was.
+fn short(task: &str) -> &str {
+    let line = task.lines().next().unwrap_or(task);
+    match line.char_indices().nth(48) {
+        Some((cut, _)) => &line[..cut],
+        None => line,
+    }
+}
+
 /// What a turn reports as it goes.
 ///
 /// Stream deltas, and what only the loop knows: the provider's stream ends when
@@ -913,7 +924,7 @@ impl<'a> AgentLoop<'a> {
         loop {
             tokio::select! {
                 Some((i, tool)) = steps.recv() => {
-                    on_progress(Progress::Delegating { task: &tasks[i], tool: &tool });
+                    on_progress(Progress::Delegating { task: short(&tasks[i]), tool: &tool });
                 }
                 landed = stream.next() => match landed {
                     Some((i, result)) => {

@@ -344,3 +344,23 @@ fn what_the_user_is_told_after_answering_is_not_a_rust_name() {
     assert_eq!(Approval::Once.describe(), "allowed once");
     assert!(Approval::Deny("the user declined".into()).describe().contains("the user declined"));
 }
+
+/// The remedies are all things only the person can do, and a refusal that
+/// offers a model nothing it can act on is one it works around: asked to edit
+/// one line unattended, a real model spent nine steps and four minutes trying
+/// other tools and then delegating the same task to a sub-agent, which is
+/// refused for the same reason.
+#[tokio::test]
+async fn an_unattended_refusal_tells_the_model_to_stop_before_it_tells_the_user_anything() {
+    use rook_tools::policy::{Approver, Unattended};
+
+    let Approval::Deny(why) = Unattended.ask("write_file", &Risk::Write(vec!["a.py".into()])).await else {
+        panic!("nothing can approve anything here")
+    };
+
+    assert!(why.contains("Stop and say what you were about to do"), "{why}");
+    assert!(why.contains("no sub-agent"), "delegating is the way round it a model reaches for: {why}");
+    let stop = why.find("Stop and say").unwrap();
+    let user = why.find("For the user").unwrap();
+    assert!(stop < user, "what the reader can do comes before what it cannot: {why}");
+}

@@ -320,9 +320,16 @@ pub struct Unattended;
 #[async_trait]
 impl Approver for Unattended {
     async fn ask(&self, _tool: &str, risk: &Risk) -> Approval {
+        // Addressed to the model first, because the model is what reads it. The
+        // remedies are all things only the person can do, and a refusal that
+        // offers nothing actionable is one an agent works around: asked to edit
+        // one line unattended, a real model spent nine steps and four minutes
+        // trying other tools and then delegating the same task to a sub-agent,
+        // which is refused for the same reason.
         Approval::Deny(format!(
-            "nothing can approve `{}` here. Re-run interactively, pass --yes, or add a rule under \
-             [sandbox] allow in config.toml",
+            "`{}` needs someone to approve it and nobody is here. Stop and say what you \
+             were about to do — no other tool, and no sub-agent, can get past this. For the user: \
+             re-run interactively, pass --yes, or add a rule under [sandbox] allow in config.toml.",
             risk.describe()
         ))
     }
