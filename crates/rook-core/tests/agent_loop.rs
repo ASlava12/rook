@@ -1896,3 +1896,58 @@ async fn a_turn_reports_a_tool_finishing_as_well_as_starting() {
         "every call is followed by the report that it finished, and by how"
     );
 }
+
+#[tokio::test]
+async fn a_loaded_skill_names_the_files_bundled_with_it() {
+    let f = fixture();
+    let dir = f._skill_dir.path().join("greeting");
+    std::fs::create_dir_all(dir.join("scripts")).unwrap();
+    std::fs::write(dir.join("scripts/check.sh"), "#!/bin/sh\n").unwrap();
+    std::fs::write(dir.join("references/spec.md"), "spec").ok();
+    let (skills, _) =
+        SkillIndex::discover(&[(f._skill_dir.path().to_path_buf(), rook_skills::SkillSource::User)]);
+    let rook = Rook::from_parts(
+        Store::open(f._store_dir.path().join("bundled")).unwrap(),
+        Config::default(),
+        f.rook.env.clone(),
+        skills,
+        PathBuf::from(f.workspace.path()),
+    );
+
+    let session = rook.start_session("bundled").unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("load_skill", serde_json::json!({"name": "greeting"})),
+        reply("read it"),
+    ]));
+    AgentLoop::new(&rook, provider.clone(), session).run("greet someone").await.unwrap();
+
+    let sent = provider.share();
+    let requests = sent.lock().unwrap();
+    let loaded = requests.last().unwrap().messages.iter().rev().find(|m| m.role == Role::Tool).unwrap();
+
+    assert!(loaded.content.contains("Always greet"), "the body is still there: {}", loaded.content);
+    assert!(loaded.content.contains("scripts/check.sh"), "a bundled script must be named");
+    assert!(
+        loaded.content.contains(dir.canonicalize().unwrap().to_str().unwrap())
+            || loaded.content.contains(dir.to_str().unwrap()),
+        "and its directory, or the path in the body cannot be followed: {}",
+        loaded.content
+    );
+}
+
+#[tokio::test]
+async fn a_skill_that_is_only_a_markdown_file_gains_nothing() {
+    let f = fixture();
+    let session = f.rook.start_session("plain").unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("load_skill", serde_json::json!({"name": "greeting"})),
+        reply("read it"),
+    ]));
+    AgentLoop::new(&f.rook, provider.clone(), session).run("greet someone").await.unwrap();
+
+    let sent = provider.share();
+    let requests = sent.lock().unwrap();
+    let loaded = requests.last().unwrap().messages.iter().rev().find(|m| m.role == Role::Tool).unwrap();
+
+    assert!(!loaded.content.contains("Bundled with"), "most skills pay nothing: {}", loaded.content);
+}

@@ -203,10 +203,6 @@ impl SkillIndex {
         (Self { skills }, errors)
     }
 
-    pub fn from_skills(skills: Vec<Skill>) -> Self {
-        Self { skills }
-    }
-
     pub fn len(&self) -> usize {
         self.skills.len()
     }

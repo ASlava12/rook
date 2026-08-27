@@ -51,6 +51,13 @@ Resolution picks by **source precedence first, then version**. A skill in
 regardless of version number, because a skill vendored into a repository is there
 deliberately. Within a source, the newest *applicable* version wins.
 
+## Bundled files
+
+A skill can carry more than its `SKILL.md` — scripts to run, references to read.
+`load_skill` names them and the directory they are in, because a body that says
+`scripts/check.sh` is not something the agent can act on otherwise. A skill that
+is only a `SKILL.md`, which is most of them, adds nothing to the reply.
+
 ## What ships with Rook
 
 Three skills come in the box, under `skills/` in the source tree:

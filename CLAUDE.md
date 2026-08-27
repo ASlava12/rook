@@ -77,6 +77,13 @@ forgotten.
 exposed by the CLI, the API and the TUI. A feature reachable from one front end
 and not the others is a bug — the approver is shared for exactly this reason.
 
+**Nothing here is exempt from being used.** Every crate is a library, so `pub`
+turns off the dead-code lint: a function that exists and is called from nowhere
+advertises an API that is not there. Three shipped that way —
+`Skill::resources`, `protocol::tool_call_done`, `SkillIndex::from_skills` — and
+`every_public_function_is_called_somewhere` now fails the build for the next one.
+Either wire it up or delete it.
+
 **A config field nothing reads is a lie, not a stub.** Four shipped that way —
 `sandbox.allow`, `allow_outside_workspace`, `lazy_skills`, and
 `storage.maintenance_interval_hours`, which `docs/storage.md` described as

@@ -54,6 +54,32 @@ pub fn policy_for(rook: &Rook) -> std::sync::Arc<Policy> {
     std::sync::Arc::new(policy)
 }
 
+/// A skill's own files, named so instructions that mention them can be followed.
+///
+/// The format allows a skill to bundle scripts and references, and the body
+/// refers to them by relative path — which the agent cannot act on without
+/// knowing where the skill lives. Nothing is appended for a skill that is only a
+/// `SKILL.md`, which is most of them.
+fn bundled(skill: &rook_skills::Skill) -> String {
+    const MOST: usize = 20;
+    let files: Vec<String> = skill
+        .resources()
+        .into_iter()
+        .filter(|rel| rel != std::path::Path::new("SKILL.md"))
+        .filter(|rel| !rel.starts_with("variants"))
+        .map(|rel| rel.display().to_string())
+        .collect();
+    if files.is_empty() {
+        return String::new();
+    }
+    let listed: Vec<String> = files.iter().take(MOST).map(|f| format!("\n- {f}")).collect();
+    let more = match files.len().saturating_sub(MOST) {
+        0 => String::new(),
+        n => format!("\n- …and {n} more"),
+    };
+    format!("\n\nBundled with this skill, under {}:{}{more}", skill.dir.display(), listed.join(""))
+}
+
 /// What a turn reports as it goes.
 ///
 /// Stream deltas, and what only the loop knows: the provider's stream ends when
@@ -648,10 +674,9 @@ impl<'a> AgentLoop<'a> {
             return match self.rook.skills().resolve(name, &self.rook.env) {
                 Ok(resolved) => {
                     outcome.skills_loaded.push(resolved.skill.id());
-                    self.rook
-                        .log(self.session, EventKind::SkillLoaded, &resolved.skill.id(), &resolved.body)
-                        .ok();
-                    (resolved.body, false)
+                    let body = format!("{}{}", resolved.body, bundled(&resolved.skill));
+                    self.rook.log(self.session, EventKind::SkillLoaded, &resolved.skill.id(), &body).ok();
+                    (body, false)
                 }
                 // The reason matters: "needs docker >=27" is actionable, "not
                 // found" sends the model looking for a typo that is not there.

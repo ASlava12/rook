@@ -59,9 +59,9 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
     );
     let skills = rook.catalog().iter().filter(|c| c.applicable).count();
     println!(
-        "{} skill(s), {} tool server(s), session {}",
-        skills,
+        "{skills} skill(s), {} tool server(s) offering {} tool(s), session {}",
         mcp.servers.len(),
+        mcp.tool_count(),
         rook_store::format_session_id(session)
     );
     println!("/help for commands\n");

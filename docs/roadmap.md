@@ -118,6 +118,10 @@ what unblocks the most.
   a skill scoped away and explained by `skills why`, capture and rollback, a
   broken config that fails loudly, and the daemon path where a read goes over
   HTTP and a write says where the lock is.
+- **Skills that can carry scripts** — the format allows bundled files and the
+  layout is documented, but a loaded skill named neither them nor its own
+  directory, so a body saying `scripts/check.sh` could not be followed. Now it
+  says both, and a skill that is only a `SKILL.md` still costs nothing.
 - **A tool call that visibly finishes** — the provider's stream ends when the
   model stops asking for a tool, not when the tool has run, so every front end
   showed calls starting and none finishing. ACP had the `tool_call_update`
