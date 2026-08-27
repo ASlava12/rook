@@ -13,11 +13,12 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
 use crate::source::Source;
+use rook_core::SessionSummary;
 use rook_core::agent::Progress;
 use rook_core::{AGENT_VERSION, Rook};
 use rook_skills::SkillCard;
+use rook_store::StoreStats;
 use rook_store::{Kind, ObjectId};
-use rook_store::{SessionMeta, StoreStats};
 
 #[derive(Parser)]
 #[command(
@@ -682,7 +683,7 @@ fn show_stats(s: &StoreStats, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn show_sessions(sessions: &[SessionMeta], json: bool) -> Result<()> {
+fn show_sessions(sessions: &[SessionSummary], json: bool) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(&sessions)?);
         return Ok(());
@@ -691,22 +692,27 @@ fn show_sessions(sessions: &[SessionMeta], json: bool) -> Result<()> {
         .iter()
         .map(|s| {
             vec![
-                rook_store::format_session_id(s.id),
-                // Sub-tasks are listed alongside their parents; the
-                // marker is what tells them apart at a glance.
+                rook_store::format_session_id(s.meta.id),
+                // Sub-tasks and forks are listed alongside what they came
+                // from; the marker is what tells them apart at a glance, and a
+                // fork says where in the parent it diverged.
                 format!(
                     "{}{}",
-                    if s.parent.is_some() { "↳ " } else { "" },
-                    s.title.chars().take(40).collect::<String>()
+                    match (s.meta.parent, s.forked_at) {
+                        (Some(_), Some(at)) => format!("↳@{at} "),
+                        (Some(_), None) => "↳ ".into(),
+                        _ => String::new(),
+                    },
+                    s.meta.title.chars().take(40).collect::<String>()
                 ),
-                s.event_count.to_string(),
-                format!("{}/{}", s.tokens_in, s.tokens_out),
-                fmt::ago(s.updated_at),
-                s.workspace.clone(),
+                s.meta.event_count.to_string(),
+                format!("{}/{}", s.meta.tokens_in, s.meta.tokens_out),
+                fmt::ago(s.meta.updated_at),
+                s.goal.clone().unwrap_or_else(|| s.meta.workspace.clone()),
             ]
         })
         .collect();
-    print!("{}", fmt::table(&["id", "title", "events", "tok in/out", "updated", "workspace"], &rows));
+    print!("{}", fmt::table(&["id", "title", "events", "tok in/out", "updated", "goal / workspace"], &rows));
     Ok(())
 }
 
@@ -921,6 +927,9 @@ fn cmd_session(source: &Source, cmd: SessionCmd, json: bool) -> Result<()> {
                 if usage.needs_compaction { "— over the compaction threshold" } else { "" }
             );
             println!("ever logged  {:>9}  ({} compactions so far)", usage.logged_tokens, usage.compactions);
+            if usage.replay_from > 0 {
+                println!("replay from  {:>9}  everything before it is the last summary", usage.replay_from);
+            }
             println!();
             let max = usage.by_kind.iter().map(|(_, u)| u.tokens).max().unwrap_or(0) as u64;
             let rows: Vec<Vec<String>> = usage

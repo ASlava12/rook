@@ -18,10 +18,10 @@ use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, ListState, Pa
 use ratatui::{DefaultTerminal, Frame};
 
 use rook_core::agent::{AgentLoop, Progress};
-use rook_core::{Rook, TranscriptEntry};
+use rook_core::{Rook, SessionSummary, TranscriptEntry};
 use rook_llm::Delta;
 use rook_skills::SkillCard;
-use rook_store::{SessionMeta, StoreStats};
+use rook_store::StoreStats;
 use rook_tools::ask::{Answer, AskRequest, ChannelAsker, Question};
 use rook_tools::policy::{Approval, ApprovalRequest, ChannelApprover};
 use tokio::sync::mpsc;
@@ -56,6 +56,7 @@ enum TurnEvent {
 
 struct Selected {
     goal: Option<String>,
+    forked_at: Option<u64>,
     changes: rook_core::changes::Changes,
 }
 
@@ -143,7 +144,7 @@ struct App {
     shared: crate::chat::Session,
     turn: Option<tokio::task::JoinHandle<()>>,
     tab: usize,
-    sessions: Vec<SessionMeta>,
+    sessions: Vec<SessionSummary>,
     session_state: ListState,
     transcript: Vec<TranscriptEntry>,
     /// What the selected session was for and what it did, which is usually why
@@ -223,7 +224,7 @@ impl App {
     }
 
     fn reload(&mut self) {
-        self.sessions = self.rook.sessions().unwrap_or_default();
+        self.sessions = self.rook.session_summaries().unwrap_or_default();
         self.skills = self.rook.catalog();
         let workspace = self.rook.workspace.display().to_string();
         self.facts =
@@ -267,12 +268,13 @@ impl App {
         let Some(session) = self.sessions.get(i) else { return };
         // Bounded on purpose: viewing a session with a huge tool result must not
         // itself become the memory problem.
-        self.transcript = self.rook.transcript(session.id, 0, 500, 4_000).unwrap_or_default();
+        self.transcript = self.rook.transcript(session.meta.id, 0, 500, 4_000).unwrap_or_default();
         self.selected = Some(Selected {
-            goal: self.rook.goal(session.id).ok().flatten(),
+            goal: session.goal.clone(),
+            forked_at: session.forked_at,
             // No diffs: the header is a summary, and a session that rewrote a
             // large file would take the pane over.
-            changes: self.rook.changes(session.id, false).unwrap_or_default(),
+            changes: self.rook.changes(session.meta.id, false).unwrap_or_default(),
         });
     }
 
@@ -726,11 +728,16 @@ impl App {
             .map(|s| {
                 ListItem::new(vec![
                     Line::from(Span::styled(
-                        s.title.chars().take(40).collect::<String>(),
+                        s.meta.title.chars().take(40).collect::<String>(),
                         Style::default().add_modifier(Modifier::BOLD),
                     )),
                     Line::from(Span::styled(
-                        format!("  {} · {} events · {}", fmt::ago(s.updated_at), s.event_count, s.model),
+                        format!(
+                            "  {} · {} events · {}",
+                            fmt::ago(s.meta.updated_at),
+                            s.meta.event_count,
+                            s.meta.model
+                        ),
                         Style::default().fg(Color::DarkGray),
                     )),
                 ])
@@ -752,6 +759,12 @@ impl App {
                 lines.push(Line::from(Span::styled(
                     format!("goal: {goal}"),
                     Style::default().fg(Color::Cyan),
+                )));
+            }
+            if let Some(at) = selected.forked_at {
+                lines.push(Line::from(Span::styled(
+                    format!("forked from its parent at event {at}"),
+                    Style::default().fg(Color::DarkGray),
                 )));
             }
             if selected.changes.touched() > 0 {

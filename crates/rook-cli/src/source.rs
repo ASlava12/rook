@@ -7,10 +7,10 @@
 use anyhow::{Context, Result, bail};
 use serde::de::DeserializeOwned;
 
-use rook_core::{Rook, paths};
+use rook_core::{Rook, SessionSummary, paths};
 use rook_proto::Page;
 use rook_skills::SkillCard;
-use rook_store::{SessionMeta, StoreStats};
+use rook_store::StoreStats;
 
 pub enum Source {
     Local(Box<Rook>),
@@ -55,10 +55,10 @@ impl Source {
         }
     }
 
-    pub fn sessions(&self) -> Result<Vec<SessionMeta>> {
+    pub fn sessions(&self) -> Result<Vec<SessionSummary>> {
         match self {
-            Self::Local(rook) => Ok(rook.store.list_sessions()?),
-            Self::Daemon(d) => Ok(d.get::<Page<SessionMeta>>("/api/sessions")?.items),
+            Self::Local(rook) => Ok(rook.session_summaries()?),
+            Self::Daemon(d) => Ok(d.get::<Page<SessionSummary>>("/api/sessions")?.items),
         }
     }
 

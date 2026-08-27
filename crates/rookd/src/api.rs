@@ -192,20 +192,8 @@ async fn refs(State(s): State<Shared>, Query(q): Query<PrefixQuery>) -> ApiResul
 /// Sessions with their goals folded in. The goal lives in the `kv` table rather
 /// than on `SessionMeta`, because adding a field to a postcard record breaks
 /// every one already written — so it is joined here instead.
-async fn sessions(State(s): State<Shared>) -> ApiResult<Page<serde_json::Value>> {
-    let rook = s.rook.read().await;
-    let items = rook
-        .sessions()?
-        .into_iter()
-        .map(|meta| {
-            let goal = rook.goal(meta.id).ok().flatten();
-            let mut value = serde_json::to_value(&meta).unwrap_or_default();
-            if let (Some(object), Some(goal)) = (value.as_object_mut(), goal) {
-                object.insert("goal".into(), goal.into());
-            }
-            value
-        })
-        .collect();
+async fn sessions(State(s): State<Shared>) -> ApiResult<Page<rook_core::SessionSummary>> {
+    let items = s.rook.read().await.session_summaries()?;
     Ok(Json(Page::new(items)))
 }
 

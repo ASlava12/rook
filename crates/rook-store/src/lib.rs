@@ -534,6 +534,20 @@ impl Store {
             }
             let mut sessions = txn.open_table(schema::SESSIONS)?;
             sessions.remove(schema::session_key(session).as_slice())?;
+
+            // Whatever is kept beside a session rather than in it is keyed by
+            // the session id, and would otherwise outlive the session forever —
+            // an accumulator with no bound, since retention deletes on a timer.
+            let mut kv = txn.open_table(schema::KV)?;
+            let suffix = format!("/{session:032x}");
+            let orphaned: Vec<String> = kv
+                .iter()?
+                .filter_map(|entry| entry.ok().map(|(key, _)| key.value().to_string()))
+                .filter(|key| key.ends_with(&suffix))
+                .collect();
+            for key in orphaned {
+                kv.remove(key.as_str())?;
+            }
         }
         txn.commit()?;
         Ok(removed)

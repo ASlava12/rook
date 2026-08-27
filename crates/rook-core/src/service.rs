@@ -20,6 +20,9 @@ use crate::paths;
 pub const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const MEMORY_HEAD: &str = "memory/head";
+/// Key prefixes for the two positions a session carries besides its events.
+const COMPACTED: &str = "compacted";
+const FORK_AT: &str = "fork-at";
 const MEMORY_LOG: &str = "memory/h/";
 
 pub struct Rook {
@@ -278,6 +281,17 @@ impl Rook {
         Ok(list)
     }
 
+    /// Sessions as every front end lists them: the stored record joined with the
+    /// two things kept beside it rather than in it.
+    pub fn session_summaries(&self) -> Result<Vec<SessionSummary>> {
+        self.sessions()?
+            .into_iter()
+            .map(|meta| {
+                Ok(SessionSummary { goal: self.goal(meta.id)?, forked_at: self.forked_at(meta.id)?, meta })
+            })
+            .collect()
+    }
+
     pub fn start_session(&self, title: &str) -> Result<u128> {
         let id = rook_store::new_session_id();
         let mut meta =
@@ -308,18 +322,46 @@ impl Rook {
     /// Where replay should start, and the summary standing in for what came
     /// before it.
     pub fn last_compaction(&self, session: u128) -> Result<(u64, Option<String>)> {
+        if let Some(seq) = self.read_mark(COMPACTED, session)?
+            && let Some(found) = self.compaction_at(session, seq)?
+        {
+            return Ok(found);
+        }
+        // No mark, or one left dangling by a fork that cut past it: read the log
+        // once and record what it says, so the next turn does not read it again.
         let mut found = None;
         for event in self.store.events(session, 0, usize::MAX)? {
-            if event.record.kind != EventKind::Compaction {
-                continue;
+            if event.record.kind == EventKind::Compaction
+                && let Some(parsed) = self.compaction_body(&event)
+            {
+                found = Some((event.seq, parsed));
             }
-            let Ok(body) = self.store.get(&event.record.body) else { continue };
-            let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&body) else { continue };
-            let Some(through) = parsed.get("through_seq").and_then(|t| t.as_u64()) else { continue };
-            let summary = parsed.get("summary").and_then(|s| s.as_str()).map(String::from);
-            found = Some((through + 1, summary));
         }
-        Ok(found.unwrap_or((0, None)))
+        match found {
+            Some((seq, parsed)) => {
+                self.set_mark(COMPACTED, session, seq)?;
+                Ok(parsed)
+            }
+            None => Ok((0, None)),
+        }
+    }
+
+    fn compaction_at(&self, session: u128, seq: u64) -> Result<Option<(u64, Option<String>)>> {
+        let Some(event) = self.store.events(session, seq, 1)?.into_iter().next() else {
+            return Ok(None);
+        };
+        if event.seq != seq || event.record.kind != EventKind::Compaction {
+            return Ok(None);
+        }
+        Ok(self.compaction_body(&event))
+    }
+
+    /// Where replay resumes, and the summary standing in for what came before.
+    fn compaction_body(&self, event: &Event) -> Option<(u64, Option<String>)> {
+        let body = self.store.get(&event.record.body).ok()?;
+        let parsed = serde_json::from_slice::<serde_json::Value>(&body).ok()?;
+        let through = parsed.get("through_seq")?.as_u64()?;
+        Some((through + 1, parsed.get("summary").and_then(|s| s.as_str()).map(String::from)))
     }
 
     /// Render a session's log with bodies resolved. `max_body` bounds how much of
@@ -403,6 +445,7 @@ impl Rook {
             live_tokens: live,
             needs_compaction: budget.needs_compaction(live),
             compactions,
+            replay_from: self.last_compaction(session)?.0,
             by_kind: by_kind.into_iter().collect(),
         })
     }
@@ -426,6 +469,7 @@ impl Rook {
             to_seq,
             &format!("{} @{to_seq}", meta.title),
         )?;
+        self.set_mark(FORK_AT, forked.id, to_seq)?;
 
         let mut restore: BTreeMap<PathBuf, ObjectId> = BTreeMap::new();
         let mut remove: Vec<PathBuf> = Vec::new();
@@ -507,10 +551,14 @@ impl Rook {
             EventKind::Checkpoint => rook_store::Kind::Snapshot,
             _ => rook_store::Kind::Message,
         };
-        Ok(self.store.append_event(
+        let seq = self.store.append_event(
             session,
             rook_store::NewEvent::new(kind, body_kind, body.as_bytes()).label(label),
-        )?)
+        )?;
+        if kind == EventKind::Compaction {
+            self.set_mark(COMPACTED, session, seq)?;
+        }
+        Ok(seq)
     }
 
     /// Connect every enabled MCP server and collect what they offer.
@@ -560,6 +608,29 @@ impl Rook {
         self.store.kv_set(&format!("goal/{:032x}", session), goal.trim().as_bytes())?;
         self.log(session, EventKind::Note, "goal", goal.trim())?;
         Ok(())
+    }
+
+    /// Where the session's last compaction sits, and where a fork left its
+    /// parent. Both are recoverable by reading the log; recorded here so that
+    /// `session ls` and the start of every turn do not have to.
+    ///
+    /// In the key-value table for the reason `goal` is — see above.
+    fn read_mark(&self, kind: &str, session: u128) -> Result<Option<u64>> {
+        Ok(self
+            .store
+            .kv_get(&format!("{kind}/{session:032x}"))?
+            .and_then(|raw| String::from_utf8(raw).ok())
+            .and_then(|text| text.parse().ok()))
+    }
+
+    fn set_mark(&self, kind: &str, session: u128, seq: u64) -> Result<()> {
+        self.store.kv_set(&format!("{kind}/{session:032x}"), seq.to_string().as_bytes())?;
+        Ok(())
+    }
+
+    /// The parent event a forked session diverged at, if it was forked.
+    pub fn forked_at(&self, session: u128) -> Result<Option<u64>> {
+        self.read_mark(FORK_AT, session)
     }
 
     // ---------------------------------------------------------------- memory
@@ -795,7 +866,21 @@ pub struct ContextUsage {
     pub live_tokens: usize,
     pub needs_compaction: bool,
     pub compactions: u32,
+    /// The event a fresh turn starts replaying from — everything before it is
+    /// represented by the last compaction's summary.
+    pub replay_from: u64,
     pub by_kind: Vec<(String, KindUsage)>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SessionSummary {
+    #[serde(flatten)]
+    pub meta: SessionMeta,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub goal: Option<String>,
+    /// The event in the parent this session was forked at.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forked_at: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

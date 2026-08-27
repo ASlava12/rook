@@ -360,6 +360,7 @@ async function renderSessions() {
     },
     el('div', {class:'name'}, s.title || '(untitled)'),
     el('div', {class:'sub'}, `${ago(s.updated_at)} · ${s.event_count} events · ${s.model||'—'}`),
+    s.forked_at != null ? el('div', {class:'sub'}, `forked at event ${s.forked_at}`) : null,
     s.goal ? el('div', {class:'sub'}, `goal: ${s.goal}`) : null)));
 
   const right = el('div', {class:'card'}, el('h2', {}, 'transcript'));

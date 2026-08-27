@@ -297,6 +297,15 @@ what unblocks the most.
   before checking containment, so a link inside the workspace pointing out of it
   is refused rather than followed, and the refusal says where the path really
   led. Widened only by `sandbox.allow_outside_workspace`. 6 tests.
+- **Where a session was cut, without reading it** — the last compaction was found
+  by scanning every event, at the start of every turn, and where a fork left its
+  parent was legible only inside a title string. Both are now recorded beside the
+  session — in the `kv` table, because `SessionMeta` is postcard and a new field
+  would make every record already written unreadable — and shown by `session ls`,
+  `session context`, the TUI and the web UI. A session written before the position
+  existed still reads, and records what it found. Deleting a session takes those
+  keys with it: retention deletes on a timer, so anything left behind was an
+  accumulator with no bound. 5 tests.
 - **Four platforms** — Linux, macOS and Windows tested on hosted runners, FreeBSD
   in a VM; three more targets compiled and two supported best-effort. Each row of
   the matrix names the CI job behind it and a test fails if that job is gone, so
@@ -324,10 +333,6 @@ a child mid-run, which is what codex's `spawn_agent`/`wait_agent` is for.
 **Auto-installing language servers.** Detection is done; the other half of
 codex #8745 asks for installation too, which means downloading and running a
 binary on the user's behalf.
-
-**Fork and compaction positions on the session.** Both are recoverable from the
-log today; recording them on `SessionMeta` would let `session ls` show where a
-fork diverged without reading it.
 
 **Signed release binaries.** `cargo xtask dist` ships unsigned, so Windows
 SmartScreen warns on every download and macOS Gatekeeper needs a right-click to

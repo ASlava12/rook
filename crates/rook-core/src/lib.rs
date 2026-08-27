@@ -24,5 +24,5 @@ pub use fileset::{CaptureLimits, Change, FileSet};
 pub use memory::{Fact, MemoryBook, Scope};
 pub use service::{
     AGENT_VERSION, AuthoredSkill, ContextUsage, KindUsage, MaintenanceReport, McpSession, MemoryVersion,
-    Rewind, Rollback, Rook, SkillVersionRecord, TranscriptEntry,
+    Rewind, Rollback, Rook, SessionSummary, SkillVersionRecord, TranscriptEntry,
 };
