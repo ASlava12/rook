@@ -319,6 +319,21 @@ impl App {
         Ok(())
     }
 
+    /// Aborting drops the loop's future, which is how the chat REPL cancels
+    /// too. Whatever it had already logged stays in the session, so a stopped
+    /// turn is still readable — and the note says why it ends where it does.
+    fn stop(&mut self, turn: tokio::task::JoinHandle<()>) {
+        turn.abort();
+        if let Some(session) = self.chat.session {
+            self.rook
+                .log(session, rook_store::EventKind::Note, "interrupted", "the user stopped this turn")
+                .ok();
+        }
+        self.chat.push("stat", "[stopped]");
+        self.chat.busy = false;
+        self.status = "turn stopped".into();
+    }
+
     fn drain_turn_events(&mut self) {
         while let Ok(event) = self.events.try_recv() {
             match event {
@@ -354,7 +369,12 @@ impl App {
 
     fn on_key(&mut self, key: crossterm::event::KeyEvent) {
         if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('c') {
-            self.quit = true;
+            // A running turn is what there is to stop, as in the chat REPL and
+            // the browser; quitting is what it means when there is nothing.
+            match self.turn.take_if(|turn| !turn.is_finished()) {
+                Some(turn) => self.stop(turn),
+                None => self.quit = true,
+            }
             return;
         }
         // Before the per-tab dispatch: the chat tab is where you would want to
@@ -1033,6 +1053,7 @@ impl App {
             Line::from("              enter     answer a question, one at a time"),
             Line::from("              /…        the chat takes the same commands as `rook chat`"),
             Line::from("              F2 / F3   cycle approvals / reasoning effort"),
+            Line::from("              ctrl-c    stops a running turn, or quits when none is"),
         ];
         f.render_widget(Paragraph::new(text).block(bordered(" Help ")), area);
     }

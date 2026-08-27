@@ -281,3 +281,42 @@ fn the_footer_shows_no_running_total_before_there_is_one() {
     assert!(screen.contains("ask/high"), "{screen}");
     assert!(!screen.contains(" in / "), "a total nobody has spent yet:\n{screen}");
 }
+
+/// Accepts and then says nothing, so the turn that reaches it stays running for
+/// as long as the test needs it to.
+fn a_model_that_never_answers(home: &std::path::Path) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        while let Ok((socket, _)) = listener.accept() {
+            held.push(socket);
+        }
+    });
+    std::fs::write(
+        home.join("config.toml"),
+        "[agent]\nmodel = \"openai-compatible/never\"\n\n[sandbox]\nmode = \"auto\"\n",
+    )
+    .unwrap();
+    unsafe { std::env::set_var("ROOK_LLM_BASE_URL", format!("http://{addr}/v1")) };
+}
+
+/// The chat REPL and the browser could both stop a turn; the TUI could only be
+/// killed, taking the browsing state and any approval granted for the run.
+#[test]
+fn ctrl_c_stops_a_running_turn_rather_than_the_whole_ui() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    a_model_that_never_answers(home.path());
+    let mut pty = tui(home.path(), workspace.path());
+
+    pty.screen(100, 30);
+    pty.send("hello\r");
+    let running = pty.screen(100, 30).join("\n");
+    assert!(!running.contains("[stopped]"), "nothing has been stopped yet:\n{running}");
+
+    pty.send("\u{3}");
+    let after = pty.screen(100, 30).join("\n");
+    assert!(after.contains("[stopped]"), "ctrl-c stops the turn:\n{after}");
+    assert!(after.contains("Chat"), "and the tabs are still drawn, so it did not quit:\n{after}");
+}

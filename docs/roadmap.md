@@ -301,6 +301,12 @@ what unblocks the most.
   before checking containment, so a link inside the workspace pointing out of it
   is refused rather than followed, and the refusal says where the path really
   led. Widened only by `sandbox.allow_outside_workspace`. 6 tests.
+- **A turn can be stopped from every front end** — the chat REPL cancelled on
+  ctrl-c and the browser had a button, and the TUI could only be killed, taking
+  the browsing state and any approval granted for the run with it. Ctrl-c stops
+  the turn there now and quits only when there is none, the interruption is
+  logged so the session says where it ends, and the pty test drives it against a
+  socket that accepts and never answers. 1 test.
 - **The storage claim measured on a store that exercises it** — the benchmark
   behind the README's ratios read 25 distinct files, and a dictionary needs 32
   samples of a kind before it is trained: the file blobs never got one, so the
