@@ -118,6 +118,12 @@ what unblocks the most.
   a skill scoped away and explained by `skills why`, capture and rollback, a
   broken config that fails loudly, and the daemon path where a read goes over
   HTTP and a write says where the lock is.
+- **A whole turn over a real socket** — every other loop test hands the agent a
+  scripted provider and skips the wire, so a mis-shaped tool schema or an
+  unpaired `tool_call_id` would pass all of them and fail against the first real
+  model. Four tests run turns against a server that speaks the OpenAI dialect
+  and asserts on what it received. Confirmed to bite by dropping the pairing id
+  and watching them fail.
 - **The shipped skills actually shipping** — three built-in skills sat in the
   source tree and reached nobody: `cargo xtask dist` built binaries and left
   them behind, so a release had none and no dev build would ever notice. Now
@@ -192,8 +198,9 @@ commit, so a dismissal is a decision. Five passes so far — three of them found
 defect here rather than something to port.
 
 **A live-model smoke test in CI.** An Ollama service container running a small
-model, so the HTTP provider and one full turn are exercised for real rather than
-against a stub.
+model, so a turn is exercised against something with judgement. The wire itself
+no longer needs it: `crates/rook-core/tests/over_http.rs` runs whole turns
+against a server that speaks the OpenAI dialect and checks what it was sent.
 
 ## After that
 
