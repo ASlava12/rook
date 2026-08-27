@@ -537,3 +537,91 @@ async fn a_client_without_a_terminal_is_never_asked_for_one() {
         assert!(!method.starts_with("terminal/"), "the protocol forbids asking: {message}");
     }
 }
+
+#[tokio::test]
+async fn a_new_session_offers_the_settings_an_editor_can_render() {
+    let mut editor = Editor::start();
+    editor.call(1, "initialize", serde_json::json!({ "protocolVersion": 1 })).await;
+
+    let created = editor.call(2, "session/new", serde_json::json!({ "cwd": "." })).await;
+    let options = created["result"]["configOptions"].as_array().unwrap();
+
+    let ids: Vec<&str> = options.iter().map(|o| o["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["mode", "effort"], "{created}");
+    for option in options {
+        assert_eq!(option["type"], "select", "{option}");
+        assert!(option["name"].is_string() && option["description"].is_string(), "{option}");
+        let values: Vec<&str> =
+            option["options"].as_array().unwrap().iter().map(|v| v["value"].as_str().unwrap()).collect();
+        let current = option["currentValue"].as_str().unwrap();
+        assert!(values.contains(&current), "the current value must be one it offers: {option}");
+    }
+    assert!(
+        created["result"]["modes"].is_object(),
+        "modes go out too, until the protocol drops them: {created}"
+    );
+}
+
+#[tokio::test]
+async fn setting_a_config_option_answers_with_the_new_state() {
+    let mut editor = Editor::start();
+    editor.call(1, "initialize", serde_json::json!({ "protocolVersion": 1 })).await;
+    let id = editor.call(2, "session/new", serde_json::json!({ "cwd": "." })).await["result"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let set = editor
+        .call(
+            3,
+            "session/set_config_option",
+            serde_json::json!({ "sessionId": id, "configId": "effort", "value": "low" }),
+        )
+        .await;
+
+    let effort =
+        set["result"]["configOptions"].as_array().unwrap().iter().find(|o| o["id"] == "effort").unwrap();
+    assert_eq!(effort["currentValue"], "low", "{set}");
+}
+
+#[tokio::test]
+async fn a_setting_or_value_that_does_not_exist_is_refused_by_name() {
+    let mut editor = Editor::start();
+    editor.call(1, "initialize", serde_json::json!({ "protocolVersion": 1 })).await;
+    let id = editor.call(2, "session/new", serde_json::json!({ "cwd": "." })).await["result"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    for (config, value, expected) in
+        [("effort", "glacial", "glacial"), ("nonsense", "x", "nonsense"), ("mode", "yolo", "yolo")]
+    {
+        let reply = editor
+            .call(
+                9,
+                "session/set_config_option",
+                serde_json::json!({ "sessionId": id, "configId": config, "value": value }),
+            )
+            .await;
+        assert_eq!(reply["error"]["code"], -32602, "{reply}");
+        assert!(reply["error"]["message"].as_str().unwrap().contains(expected), "{reply}");
+    }
+}
+
+#[tokio::test]
+async fn the_two_ways_to_set_the_mode_reach_the_same_policy() {
+    let mut editor = Editor::start();
+    editor.call(1, "initialize", serde_json::json!({ "protocolVersion": 1 })).await;
+    let id = editor.call(2, "session/new", serde_json::json!({ "cwd": "." })).await["result"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    editor.call(3, "session/set_mode", serde_json::json!({ "sessionId": id, "modeId": "auto" })).await;
+    let after = editor.call(4, "session/new", serde_json::json!({ "cwd": "." })).await;
+    let mode =
+        after["result"]["configOptions"].as_array().unwrap().iter().find(|o| o["id"] == "mode").unwrap();
+
+    assert_eq!(mode["currentValue"], "auto", "the older message must move the newer view: {after}");
+    assert_eq!(after["result"]["modes"]["currentModeId"], "auto");
+}

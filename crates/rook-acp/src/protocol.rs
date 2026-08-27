@@ -219,3 +219,43 @@ pub fn current_mode_update(session: &str, mode: rook_tools::policy::Mode) -> ser
         "update": { "sessionUpdate": "current_mode_update", "currentModeId": mode_id(mode) },
     })
 }
+
+/// The session settings an editor can offer as controls.
+///
+/// The spec prefers these to `modes` and says modes will be removed, so both
+/// are sent: an older client renders the modes, a newer one these.
+pub fn config_options(mode: rook_tools::policy::Mode, effort: rook_llm::Effort) -> serde_json::Value {
+    serde_json::json!([
+        {
+            "id": "mode",
+            "name": "Approvals",
+            "description": "What the agent may do without asking.",
+            "category": "mode",
+            "type": "select",
+            "currentValue": mode_id(mode),
+            "options": [
+                { "value": "auto", "name": "Auto",
+                  "description": "Run anything the deny list does not forbid, without asking." },
+                { "value": "ask", "name": "Ask",
+                  "description": "Ask before anything that changes the machine." },
+                { "value": "readonly", "name": "Read only",
+                  "description": "Nothing that changes the machine runs at all." },
+            ],
+        },
+        {
+            "id": "effort",
+            "name": "Reasoning effort",
+            "description": "How much the model may think before answering.",
+            "category": "reasoning",
+            "type": "select",
+            "currentValue": effort.as_str(),
+            "options": [
+                { "value": "low", "name": "Low", "description": "Fastest, for mechanical work." },
+                { "value": "medium", "name": "Medium", "description": "A balance." },
+                { "value": "high", "name": "High", "description": "The default." },
+                { "value": "xhigh", "name": "Extra high", "description": "Suits most coding work." },
+                { "value": "max", "name": "Max", "description": "Slowest, for the hardest problems." },
+            ],
+        },
+    ])
+}

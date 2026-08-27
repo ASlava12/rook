@@ -80,9 +80,11 @@ what unblocks the most.
   and to add context the model sees. A failing `pre_tool` hook blocks; no hook
   overrides the deny list. 7 tests.
 - **ACP server** — `rook acp` speaks v1 over stdio: initialize, session
-  new/load/list/prompt/cancel, streamed `session/update`, and approvals through
-  `session/request_permission`. Field names come from the schema in
-  `references/acp`, not from memory. 8 tests over duplex streams.
+  new/load/list/prompt/cancel, streamed `session/update`, approvals through
+  `session/request_permission`, the editor's buffers through `fs/*`, its terminal
+  through `terminal/*`, and its settings through modes and `configOptions`. Field
+  names come from the schema in `references/acp`, not from memory. 21 tests over
+  duplex streams, some driving whole turns against a scripted provider.
 - **MCP client** — stdio and streamable-HTTP transports, written directly rather
   than via the SDK ([ADR-0008](adr/0008-hand-written-mcp-client.md)). An HTTP
   answer may be JSON or an event stream and both are handled; the session id from
@@ -118,6 +120,11 @@ what unblocks the most.
   a skill scoped away and explained by `skills why`, capture and rollback, a
   broken config that fails loudly, and the daemon path where a read goes over
   HTTP and a write says where the lock is.
+- **Session settings the editor can offer** — approvals and reasoning effort go
+  out as `configOptions`, which the protocol prefers to modes and will keep once
+  modes are removed. Both are sent, so an older client still renders the modes
+  and both routes reach the same policy. Effort was previously only settable in
+  `config.toml`. 4 tests.
 - **Commands in the editor's terminal** — a client that advertises `terminal`
   runs what the agent asks for in its own panel, so a build is something the
   user watches rather than something they are told about afterwards. Create,
@@ -241,9 +248,6 @@ against a server that speaks the OpenAI dialect and checks what it was sent.
 **Supervising sub-agents while they run.** Delegation fans out and waits for all
 of them. codex's `spawn_agent`/`wait_agent` lets a parent send messages to a child
 mid-run, which is a different feature rather than a deeper version of this one.
-
-**ACP beyond the basics.** Session config options are defined and unimplemented.
-`fs/*` delegation, session modes and terminals are done.
 
 **Auto-installing language servers.** Detection is done; the other half of
 codex #8745 asks for installation too, which means downloading and running a

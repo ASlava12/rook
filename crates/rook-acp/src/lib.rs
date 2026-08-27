@@ -21,6 +21,7 @@ pub mod protocol;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
@@ -62,6 +63,8 @@ where
     // Built once for the connection: an editor sends many prompts, and
     // reconnecting MCP or restarting a language server for each is wasted time.
     let policy = rook_core::agent::policy_for(&rook);
+    let settings =
+        Arc::new(Settings { policy: policy.clone(), effort: RwLock::new(rook.config.agent.effort()) });
     let servers = rook_core::agent::servers_for(&rook);
     let mcp = Arc::new(rook.connect_mcp().await);
     // Filled in by `initialize`, and read when a turn starts: the client may
@@ -100,6 +103,9 @@ where
                     turn.cancel(&peer);
                 }
                 let replied = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                // Read out of the lock before the spawn: a guard living to the
+                // end of the statement would travel into the task with it.
+                let effort = *settings.effort.read().unwrap();
                 turn = Some(Turn {
                     id: id.clone(),
                     replied: replied.clone(),
@@ -107,7 +113,7 @@ where
                         rook.clone(),
                         peer.clone(),
                         Shared { policy: policy.clone(), servers: servers.clone(), mcp: mcp.clone() },
-                        *client_files.lock().await,
+                        TurnSetup { client: *client_files.lock().await, effort },
                         id,
                         params,
                         replied,
@@ -118,7 +124,7 @@ where
                 if method == "initialize" {
                     *client_files.lock().await = ClientFiles::from_initialize(&params);
                 }
-                let outcome = dispatch(&rook, &policy, &method, params);
+                let outcome = dispatch(&rook, &settings, &method, params);
                 peer.respond(&id, outcome);
             }
             // A notification we do not handle is not an error.
@@ -136,19 +142,58 @@ where
     Ok(())
 }
 
+/// Settings a client may change for the rest of the connection.
+///
+/// The policy already holds the mode, because a turn reads it there; effort has
+/// nowhere else to live.
+struct Settings {
+    policy: Arc<rook_tools::policy::Policy>,
+    effort: RwLock<rook_llm::Effort>,
+}
+
+impl Settings {
+    fn describe(&self) -> serde_json::Value {
+        protocol::config_options(self.policy.mode(), *self.effort.read().unwrap())
+    }
+
+    fn set(&self, id: &str, value: &str) -> Result<(), Error> {
+        match id {
+            "mode" => {
+                let mode = protocol::mode_from_id(value)
+                    .ok_or_else(|| Error::invalid_params(format!("no mode {value:?}")))?;
+                self.policy.set_mode(mode);
+            }
+            "effort" => {
+                let effort = rook_llm::Effort::parse(value)
+                    .ok_or_else(|| Error::invalid_params(format!("no effort {value:?}")))?;
+                *self.effort.write().unwrap() = effort;
+            }
+            other => return Err(Error::invalid_params(format!("no setting {other:?}"))),
+        }
+        Ok(())
+    }
+}
+
 fn dispatch(
     rook: &Rook,
-    policy: &rook_tools::policy::Policy,
+    settings: &Settings,
     method: &str,
     params: serde_json::Value,
 ) -> Result<serde_json::Value, Error> {
     match method {
         "session/set_mode" => {
-            let id = params["modeId"].as_str().unwrap_or_default();
-            let mode =
-                protocol::mode_from_id(id).ok_or_else(|| Error::invalid_params(format!("no mode {id:?}")))?;
-            policy.set_mode(mode);
+            settings.set("mode", params["modeId"].as_str().unwrap_or_default())?;
             Ok(serde_json::json!({}))
+        }
+
+        "session/set_config_option" => {
+            let id = params["configId"].as_str().unwrap_or_default();
+            // A boolean option would arrive as one; none of ours are, and a
+            // value of the wrong shape should say so rather than be coerced.
+            let value =
+                params["value"].as_str().ok_or_else(|| Error::invalid_params("value must be a string"))?;
+            settings.set(id, value)?;
+            Ok(serde_json::json!({ "configOptions": settings.describe() }))
         }
 
         "initialize" => Ok(serde_json::json!({
@@ -169,7 +214,8 @@ fn dispatch(
                 .map_err(|e| Error::internal(e.to_string()))?;
             Ok(serde_json::json!({
                 "sessionId": rook_store::format_session_id(session),
-                "modes": protocol::modes(policy.mode()),
+                "modes": protocol::modes(settings.policy.mode()),
+                "configOptions": settings.describe(),
             }))
         }
 
@@ -181,7 +227,10 @@ fn dispatch(
             let id = rook_store::parse_session_id(&request.session_id)
                 .ok_or_else(|| Error::invalid_params("not a session id"))?;
             match rook.store.get_session(id) {
-                Ok(Some(_)) => Ok(serde_json::json!({ "modes": protocol::modes(policy.mode()) })),
+                Ok(Some(_)) => Ok(serde_json::json!({
+                    "modes": protocol::modes(settings.policy.mode()),
+                    "configOptions": settings.describe(),
+                })),
                 Ok(None) => Err(Error::invalid_params("no such session")),
                 Err(e) => Err(Error::internal(e.to_string())),
             }
@@ -235,7 +284,7 @@ async fn prompt(
     rook: Arc<Rook>,
     peer: Arc<Peer>,
     shared: Shared,
-    client_files: ClientFiles,
+    setup: TurnSetup,
     id: serde_json::Value,
     params: serde_json::Value,
     replied: Arc<std::sync::atomic::AtomicBool>,
@@ -277,14 +326,15 @@ async fn prompt(
     let editor = Arc::new(EditorApprover { peer: peer.clone(), session: request.session_id.clone() });
     agent.approver = editor.clone();
     agent.ask_via(editor);
-    if client_files.read {
+    agent.effort = setup.effort;
+    if setup.client.read {
         agent.tool_ctx.files = Some(Arc::new(EditorFiles {
             peer: peer.clone(),
             session: request.session_id.clone(),
-            can_write: client_files.write,
+            can_write: setup.client.write,
         }));
     }
-    if client_files.terminal {
+    if setup.client.terminal {
         agent.tool_ctx.terminals = Some(Arc::new(EditorTerminals {
             peer: peer.clone(),
             session: request.session_id.clone(),
@@ -517,6 +567,14 @@ impl rook_tools::Files for EditorFiles {
             }
         })
     }
+}
+
+/// What this turn takes from the connection: what the client can do for it, and
+/// what the user has set.
+#[derive(Clone, Copy)]
+struct TurnSetup {
+    client: ClientFiles,
+    effort: rook_llm::Effort,
 }
 
 /// What the client said it can do, from the `initialize` request.
