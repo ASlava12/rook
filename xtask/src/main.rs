@@ -199,6 +199,15 @@ fn run() -> Result<()> {
                 Some(t) => format!("target/{t}/release"),
                 None => "target/release".into(),
             };
+
+            // Next to the binary, which is the first place `builtin_skills_dir`
+            // looks. Without this a release ships an agent with no skills at
+            // all, and nothing in a dev build would ever notice.
+            let skills = std::path::Path::new(&dir).join("skills");
+            let _ = std::fs::remove_dir_all(&skills);
+            copy_tree(std::path::Path::new("skills"), &skills)?;
+            println!("packaged {} built-in skill(s)", count_dirs(&skills));
+
             println!("\nbinary sizes:");
             for name in ["rook", "rookd", "rook.exe", "rookd.exe"] {
                 let path = format!("{dir}/{name}");
@@ -212,6 +221,24 @@ fn run() -> Result<()> {
         Task::Clean { all } => clean(all),
         Task::Refs { action } => refs(action),
     }
+}
+
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_tree(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}
+
+fn count_dirs(path: &std::path::Path) -> usize {
+    std::fs::read_dir(path).into_iter().flatten().flatten().filter(|e| e.path().is_dir()).count()
 }
 
 /// Incremental state and cross-target artifacts dominate `target/` and rebuild

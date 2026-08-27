@@ -51,6 +51,25 @@ Resolution picks by **source precedence first, then version**. A skill in
 regardless of version number, because a skill vendored into a repository is there
 deliberately. Within a source, the newest *applicable* version wins.
 
+## What ships with Rook
+
+Three skills come in the box, under `skills/` in the source tree:
+
+| skill | what it is for |
+|---|---|
+| `in-place-edit` | Editing files from the shell across GNU, BSD and Windows userlands |
+| `rust-release` | Cutting a release of a Rust workspace |
+| `store-triage` | Working out why a store has grown, and reclaiming space safely |
+
+`cargo xtask dist` packages them next to the binary, which is the first place
+[`builtin_skills_dir`](../crates/rook-core/src/paths.rs) looks. A plain
+`cargo build` does not, so a development binary finds none — point
+`ROOK_BUILTIN_SKILLS` at `skills/` to work with them as a user would:
+
+```sh
+ROOK_BUILTIN_SKILLS=$PWD/skills cargo run -p rook-cli -- skills ls
+```
+
 ## `requires` — gating on the environment
 
 This is the part that does not exist in the base format, and the reason it is here:

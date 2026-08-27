@@ -118,6 +118,12 @@ what unblocks the most.
   a skill scoped away and explained by `skills why`, capture and rollback, a
   broken config that fails loudly, and the daemon path where a read goes over
   HTTP and a write says where the lock is.
+- **The shipped skills actually shipping** — three built-in skills sat in the
+  source tree and reached nobody: `cargo xtask dist` built binaries and left
+  them behind, so a release had none and no dev build would ever notice. Now
+  packaged next to the binary, with tests that each one parses, applies where
+  its requirements are met, and names what is missing where they are not. 4
+  tests.
 - **A first failure that says what to do** — no model is reachable on a fresh
   machine, and the first command a new user runs used to answer with
   `transport error: error sending request for url (…)`. It now names the
