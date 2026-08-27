@@ -569,9 +569,11 @@ impl<'a> AgentLoop<'a> {
                         },
                         "context": {
                             "type": "string",
-                            "enum": ["none", "recent"],
                             "default": "none",
-                            "description": "`recent` also gives it the last few exchanges."
+                            "description": "What the sub-task starts with. `recent` hands it the \
+                                            last few exchanges; anything else is passed to it \
+                                            verbatim, which is where a file it would otherwise \
+                                            have to go and read belongs."
                         },
                         "max_steps": { "type": "integer" }
                     }
@@ -908,8 +910,15 @@ impl<'a> AgentLoop<'a> {
             return "delegate needs a task, or a list of tasks".into();
         }
 
-        let inherit = args.get("context").and_then(|c| c.as_str()) == Some("recent");
-        let inherited = inherit.then(|| self.recent_exchanges(6).ok()).flatten();
+        // Anything that is not one of the two words is context the parent wrote
+        // out for the child. A live model filled this with the file it had just
+        // read, expecting it to arrive; the enum meant it was dropped and the
+        // child read the file again.
+        let inherited = match args.get("context").and_then(|c| c.as_str()).map(str::trim) {
+            None | Some("") | Some("none") => None,
+            Some("recent") => self.recent_exchanges(6).ok(),
+            Some(given) => Some(given.to_string()),
+        };
         let max_steps = args.get("max_steps").and_then(|s| s.as_u64()).map(|s| s as u32);
 
         // Bounded rather than unbounded: the sub-tasks share one token budget and

@@ -2323,3 +2323,57 @@ async fn a_bare_task_still_works_on_its_own() {
 
     assert_eq!(outcome.delegated.len(), 1, "the single-task shape is still accepted");
 }
+
+/// The parameter was an enum of two words, and a live model filled it with the
+/// file it had just read — expecting the sub-task to start with it. The value
+/// was dropped and the child read the same file again, a step the parent had
+/// already paid for.
+#[tokio::test]
+async fn context_the_parent_writes_out_reaches_the_sub_task() {
+    let f = fixture();
+    let session = f.rook.start_session("handing over").unwrap();
+
+    let script = vec![
+        call(
+            "delegate",
+            serde_json::json!({
+                "tasks": ["say what is wrong with it"],
+                "context": "a.py contains: def mean(xs): return sum(xs) / len(xs)",
+            }),
+        ),
+        reply("it divides by zero on an empty list"),
+        reply("passed on"),
+    ];
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
+    let outcome = agent.run("check a.py").await.unwrap();
+
+    let child = rook_store::parse_session_id(&outcome.delegated[0]).unwrap();
+    let handed = f.rook.transcript(child, 0, 100, 4096).unwrap();
+    assert!(
+        handed.iter().any(|e| e.label == "inherited" && e.body.contains("def mean")),
+        "the child starts with what the parent already knew: {:?}",
+        handed.iter().map(|e| (&e.kind, &e.label)).collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn recent_is_still_the_word_for_the_conversation_so_far() {
+    let f = fixture();
+    let session = f.rook.start_session("carrying").unwrap();
+    f.rook.log(session, rook_store::EventKind::UserMessage, "user", "the build is broken").unwrap();
+
+    let script = vec![
+        call("delegate", serde_json::json!({ "tasks": ["look into it"], "context": "recent" })),
+        reply("looked"),
+        reply("done"),
+    ];
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
+    let outcome = agent.run("why").await.unwrap();
+
+    let child = rook_store::parse_session_id(&outcome.delegated[0]).unwrap();
+    let handed = f.rook.transcript(child, 0, 100, 4096).unwrap();
+    assert!(
+        handed.iter().any(|e| e.label == "inherited" && e.body.contains("the build is broken")),
+        "{handed:?}"
+    );
+}

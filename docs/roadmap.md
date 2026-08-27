@@ -543,6 +543,12 @@ like to something that has to act on it.
   say what it was about to do, says that no other tool and no sub-agent gets past
   it, and addresses the remedies to the user. The same task: four steps, 8,498
   tokens, twenty-three seconds, and an answer worth reading. 1 test.
+- **Context the parent writes out reaches the sub-task** — `delegate`'s `context`
+  was an enum of two words, and a live model filled it with the file it had just
+  read, expecting the child to start with it. The value was outside the enum, so
+  it was dropped and the child read the same file the parent had already paid to
+  read. Anything that is not one of the two words is now handed over verbatim,
+  which is where a parent's working knowledge belongs. 2 tests.
 - **Every sub-task ran twice** — `delegate` took `task` and `tasks` together, and
   a live model filled both fields of every call with the same instruction,
   differing only in whether the function name wore backticks. Three files became
