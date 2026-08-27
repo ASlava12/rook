@@ -107,6 +107,10 @@ what unblocks the most.
   work out, scoped by `requires` to where it actually holds, validated by reading
   it back, and captured as a version so a rewrite keeps the old one. The index
   reloads in place, so the next turn's catalog has it without a restart. 7 tests.
+- **The TUI started for real** — on a pseudo-terminal, with the screen replayed
+  out of the escape stream and read back a row at a time. Nothing else can see
+  that it starts at all: it needs a tty to draw, so a panic on launch would
+  leave every other test green.
 - **The CLI tested as a user meets it** — 12 tests drive the real binary against
   a real store: every read command on an empty store, `--json` that parses,
   a skill scoped away and explained by `skills why`, capture and rollback, a

@@ -89,11 +89,15 @@ loading only that first sentence is advertised; the rest is guidance on writing
 the arguments, which only matters once the model has decided to call the tool.
 `cargo run -p rook-tools --example schema-cost` prices both forms.
 
-**Verifying the TUI.** A pty capture is not readable as text: ratatui places
-characters cell by cell, so a substring the screen clearly shows never appears
-contiguously in the byte stream. Reconstruct the grid from the cursor-positioning
-escapes before asserting on it, and set the window size with `TIOCSWINSZ` or the
-app renders into a zero-sized terminal and emits nothing.
+**Verifying the TUI.** `crates/rook-cli/tests/tui_pty.rs` does it; add to that
+rather than starting again. A pty capture is not readable as text: ratatui
+places characters cell by cell, so a substring the screen clearly shows never
+appears contiguously in the byte stream. Replay the cursor-positioning escapes
+into a grid before asserting on it, give the pty a window size or the app draws
+into a zero-sized terminal and emits nothing, and accumulate the stream across
+frames — a redraw after a keypress emits only the cells that changed. Do not
+wait for the output to go quiet: it redraws on a 60 ms tick whether or not
+anything changed.
 
 ## Storage changes
 

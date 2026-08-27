@@ -35,4 +35,5 @@ name = "rook"
 path = "src/main.rs"
 
 [dev-dependencies]
+libc = "0.2.180"
 tempfile = "3.24.0"

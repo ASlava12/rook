@@ -2285,6 +2285,7 @@ dependencies = [
  "async-trait",
  "clap",
  "crossterm",
+ "libc",
  "ratatui",
  "reqwest",
  "rook-acp",

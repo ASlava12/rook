@@ -514,7 +514,9 @@ impl App {
 
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled(" ↹/1-5 ", Style::default().fg(Color::Cyan)),
+                // Digits type into the message box on the chat tab, so
+                // promising them there would be a false instruction.
+                Span::styled(if self.tab == 0 { " ↹ " } else { " ↹/1-5 " }, Style::default().fg(Color::Cyan)),
                 Span::raw("tab  "),
                 Span::styled("j/k ", Style::default().fg(Color::Cyan)),
                 Span::raw("move  "),
