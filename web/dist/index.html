@@ -166,12 +166,18 @@ function render() {
 let socket = null;
 const chatOut = () => document.querySelector('#stream');
 
+// Scrollback, not the record: the session holds every word of this and the
+// sessions list reads it back, so a tab left open for a day need not keep an
+// afternoon of turns in the document to stay recoverable.
+const MAX_SCROLLBACK_BLOCKS = 2000;
+
 function say(kind, text) {
   const out = chatOut();
   if (!out) return;
   const last = out.lastElementChild;
   if (kind === 'text' && last && last.className === 'text') last.append(text);
   else out.append(el('div', { class: kind }, text));
+  while (out.childElementCount > MAX_SCROLLBACK_BLOCKS) out.firstElementChild.remove();
   out.scrollTop = out.scrollHeight;
 }
 

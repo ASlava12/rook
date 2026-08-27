@@ -301,6 +301,11 @@ what unblocks the most.
   before checking containment, so a link inside the workspace pointing out of it
   is refused rather than followed, and the refusal says where the path really
   led. Widened only by `sandbox.allow_outside_workspace`. 6 tests.
+- **A chat pane that does not keep the whole afternoon** — the TUI kept every
+  word of every turn for the life of the process, and the browser kept every
+  block in the document. Both are scrollback rather than the record: the session
+  holds all of it and the sessions view reads it back, so a bounded tail loses
+  nothing that is not recoverable. 2 tests.
 - **Pinning wins over relevance, not over the budget** — a pinned fact went into
   every request whatever it cost, so the bound on recall was however many facts
   somebody had pinned, which is not a bound. `remember` lets the model pin, so an

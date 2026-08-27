@@ -157,8 +157,23 @@ impl Chat {
             Some((last, body)) if *last == kind && kind == "text" => body.push_str(text),
             _ => self.log.push((kind, text.to_string())),
         }
+        self.trim();
+    }
+
+    /// Scrollback, not the record: the session holds every word of this and the
+    /// Sessions tab reads it back, so an afternoon of turns need not sit in
+    /// memory to stay recoverable.
+    fn trim(&mut self) {
+        let mut total: usize = self.log.iter().map(|(_, body)| body.len()).sum();
+        while total > MAX_SCROLLBACK && self.log.len() > 1 {
+            total -= self.log.remove(0).1.len();
+        }
     }
 }
+
+/// About a screenful of history a thousand times over. Past this the older part
+/// is in the store and nowhere else, which is where it was going anyway.
+const MAX_SCROLLBACK: usize = 1 << 20;
 
 struct App {
     rook: Arc<Rook>,
@@ -1109,6 +1124,35 @@ fn kind_style(kind: &str) -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pane kept every word of every turn for the life of the process. What
+    /// makes a bound safe here is that the session holds all of it: the
+    /// Sessions tab reads back what the pane has let go of.
+    #[test]
+    fn the_chat_pane_keeps_a_bounded_tail_rather_than_everything() {
+        let mut chat = Chat::default();
+        let filler = "x".repeat(1024);
+        for i in 0..4_000 {
+            chat.push("tool", &format!("  · a tool call number {i}: {filler}"));
+        }
+
+        let held: usize = chat.log.iter().map(|(_, body)| body.len()).sum();
+        assert!(held <= MAX_SCROLLBACK, "{held} bytes held against a bound of {MAX_SCROLLBACK}");
+        assert!(
+            chat.log.last().unwrap().1.contains("number 3999"),
+            "and it is the tail that is kept, not the head"
+        );
+    }
+
+    #[test]
+    fn streamed_text_still_joins_into_one_block() {
+        let mut chat = Chat::default();
+        chat.push("text", "the sky ");
+        chat.push("text", "is blue");
+
+        assert_eq!(chat.log.len(), 1, "a reply arrives in fragments and reads as one: {:?}", chat.log);
+        assert_eq!(chat.log[0].1, "the sky is blue");
+    }
 
     fn asking(questions: Vec<Question>) -> Asking {
         Asking { id: "1".into(), questions, at: 0, chosen: Vec::new() }
