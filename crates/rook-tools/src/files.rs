@@ -11,6 +11,10 @@ fn path_arg(args: &serde_json::Value) -> Vec<String> {
     args.get("path").and_then(|v| v.as_str()).map(|p| vec![p.to_string()]).unwrap_or_default()
 }
 
+/// Enough that a whole source file usually arrives in one call, and small
+/// enough that the byte budget rather than the line count is what stops it.
+const DEFAULT_LINES: usize = 2000;
+
 pub struct ReadFile;
 
 #[async_trait]
@@ -40,7 +44,13 @@ impl Tool for ReadFile {
     async fn call(&self, ctx: &ToolContext, args: &serde_json::Value) -> Result<ToolOutcome> {
         let path = ctx.resolve(&arg_str(args, self.name(), "path")?)?;
         let offset = arg_usize(args, "offset", 0);
-        let limit = arg_usize(args, "limit", 2000);
+        // A limit of zero returned no lines and a note to call again from where
+        // it stopped, which is where it started. This tool pages rather than
+        // refusing, so the answer to a limit that cannot page is the default one.
+        let limit = match arg_usize(args, "limit", DEFAULT_LINES) {
+            0 => DEFAULT_LINES,
+            given => given,
+        };
 
         // Bytes when reading the disk, so a binary file is reported rather than
         // pasted into context as mojibake. A front end that owns the files hands

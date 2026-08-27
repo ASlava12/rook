@@ -165,3 +165,20 @@ async fn listing_caps_and_says_how_much_it_left_out() {
     assert!(out.content.contains("40 more entries"), "{}", out.content);
     assert_eq!(out.meta["entries"], 50);
 }
+
+/// `limit: 0` asked for no lines and got an answer saying to call again from
+/// where it stopped — which is where it started.
+#[tokio::test]
+async fn a_page_of_no_lines_is_not_a_page() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("f.txt"), "a\nb\nc\n").unwrap();
+    let ctx = ToolContext::new(dir.path().to_path_buf());
+
+    let out = files::ReadFile
+        .call(&ctx, &serde_json::json!({ "path": "f.txt", "limit": 0 }))
+        .await
+        .unwrap();
+
+    assert!(!out.content.contains("offset=0"), "an answer that says to repeat the call: {}", out.content);
+    assert!(out.content.contains('c'), "it pages rather than refusing, so it answers: {}", out.content);
+}
