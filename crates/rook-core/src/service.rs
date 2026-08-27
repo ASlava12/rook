@@ -317,6 +317,29 @@ impl Rook {
         Ok(list)
     }
 
+    /// Name a session after what was first asked of it, if nothing named it.
+    ///
+    /// Every front end had a placeholder of its own — `chat`, `tui`, `web`,
+    /// `acp <cwd>` — and two of the four already used the first line of the
+    /// prompt instead. Twenty sessions called `chat` is a list you have to open
+    /// one at a time.
+    pub fn name_session_from(&self, session: u128, prompt: &str) -> Result<()> {
+        let Some(mut meta) = self.store.get_session(session)? else { return Ok(()) };
+        if !meta.title.trim().is_empty() {
+            return Ok(());
+        }
+        meta.title = prompt
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .unwrap_or_default()
+            .chars()
+            .take(72)
+            .collect();
+        self.store.create_session(&meta)?;
+        Ok(())
+    }
+
     pub fn session_named(&self, spec: &str) -> Result<u128> {
         session_named(spec, &self.workspace, &self.session_summaries()?)
     }

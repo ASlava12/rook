@@ -207,11 +207,12 @@ fn dispatch(
         })),
 
         "session/new" => {
-            let request: protocol::NewSession =
+            // Parsed to reject a malformed request before a session exists for
+            // it, though nothing in it is needed: the workspace is the one the
+            // process was started in, and the title comes from the first prompt.
+            let _: protocol::NewSession =
                 serde_json::from_value(params).map_err(|e| Error::invalid_params(e.to_string()))?;
-            let session = rook
-                .start_session(&format!("acp {}", request.cwd))
-                .map_err(|e| Error::internal(e.to_string()))?;
+            let session = rook.start_session("").map_err(|e| Error::internal(e.to_string()))?;
             Ok(serde_json::json!({
                 "sessionId": rook_store::format_session_id(session),
                 "modes": protocol::modes(settings.policy.mode()),

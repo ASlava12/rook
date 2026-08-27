@@ -45,7 +45,7 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
 
     let mut session = match resume {
         Some(id) => rook.session_named(&id)?,
-        None => rook.start_session("chat")?,
+        None => rook.start_session("")?,
     };
 
     let mcp = runtime.block_on(rook.connect_mcp());

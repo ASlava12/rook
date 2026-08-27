@@ -301,6 +301,13 @@ what unblocks the most.
   before checking containment, so a link inside the workspace pointing out of it
   is refused rather than followed, and the refusal says where the path really
   led. Widened only by `sandbox.allow_outside_workspace`. 6 tests.
+- **A session named after what was asked of it** — each front end had a
+  placeholder of its own — `chat`, `tui`, `web`, `acp <cwd>` — and two of the
+  four already took the first line of the prompt instead, by writing out the
+  same expression. Twenty sessions called `chat` is a list you have to open one
+  at a time. Sessions start unnamed and the loop names them from the first
+  prompt, which no front end can forget and a name the user chose survives.
+  1 test.
 - **A session list scoped to the project it belongs to** — `session ls` printed
   every session on the machine, which for anyone standing in a project is mostly
   someone else's work; it lists this workspace and says how many it left out and

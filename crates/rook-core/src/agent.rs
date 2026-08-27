@@ -601,6 +601,7 @@ impl<'a> AgentLoop<'a> {
         prompt: &str,
         mut on_progress: F,
     ) -> Result<TurnOutcome> {
+        self.rook.name_session_from(self.session, prompt).ok();
         self.run_session_hooks().await;
         let gate = self
             .hooks

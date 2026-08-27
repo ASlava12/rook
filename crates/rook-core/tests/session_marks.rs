@@ -171,3 +171,28 @@ fn asking_for_last_where_nothing_has_run_says_so_rather_than_naming_a_session() 
     let err = rook.session_named("not-an-id").unwrap_err().to_string();
     assert!(err.contains("neither a session id nor `last`"), "{err}");
 }
+
+#[test]
+fn a_session_is_named_by_what_was_first_asked_of_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let rook = rook(dir.path());
+    let session = rook.start_session("").unwrap();
+
+    rook.name_session_from(session, "\n\n  find the bug in src/main.rs\nand fix it\n").unwrap();
+    assert_eq!(
+        rook.store.get_session(session).unwrap().unwrap().title,
+        "find the bug in src/main.rs",
+        "the first line with something on it, not the first line"
+    );
+
+    rook.name_session_from(session, "something else entirely").unwrap();
+    assert_eq!(
+        rook.store.get_session(session).unwrap().unwrap().title,
+        "find the bug in src/main.rs",
+        "a session keeps the name it has: the second turn is not what it was for"
+    );
+
+    let named = rook.start_session("a name the user chose").unwrap();
+    rook.name_session_from(named, "a prompt").unwrap();
+    assert_eq!(rook.store.get_session(named).unwrap().unwrap().title, "a name the user chose");
+}

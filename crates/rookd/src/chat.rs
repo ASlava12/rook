@@ -135,7 +135,7 @@ async fn turn(
 
     let session = match session.as_deref().and_then(rook_store::parse_session_id) {
         Some(id) => id,
-        None => match rook.start_session(prompt.lines().next().unwrap_or("web")) {
+        None => match rook.start_session("") {
             Ok(id) => id,
             Err(e) => return report(&outbound, e.to_string()),
         },

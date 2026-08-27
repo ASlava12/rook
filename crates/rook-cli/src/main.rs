@@ -573,7 +573,7 @@ fn cmd_run(
         let prompt = with_piped_input(&asked, provider.context_window())?;
         let session = match session {
             Some(s) => rook.session_named(&s)?,
-            None => rook.start_session(&first_line(&prompt))?,
+            None => rook.start_session("")?,
         };
         let mut agent = rook_core::agent::AgentLoop::new(&rook, provider.into(), session);
         // `run` is scripted more often than watched, so it refuses what it cannot
@@ -692,10 +692,6 @@ fn compact(args: &serde_json::Value) -> String {
 /// Cache hits only matter when there are any; a constant "0 cached" is noise.
 pub fn cached(tokens: u32) -> String {
     if tokens == 0 { String::new() } else { format!(" ({tokens} cached)") }
-}
-
-fn first_line(s: &str) -> String {
-    s.lines().next().unwrap_or("session").chars().take(72).collect()
 }
 
 fn cmd_models(workspace: Option<PathBuf>, json: bool) -> Result<()> {
@@ -846,7 +842,10 @@ fn show_sessions(sessions: &[SessionSummary], workspace: &Path, all: bool, json:
                         (Some(_), None) => "↳ ".into(),
                         _ => String::new(),
                     },
-                    s.meta.title.chars().take(40).collect::<String>()
+                    match s.meta.title.trim().is_empty() {
+                        true => "(untitled)".into(),
+                        false => s.meta.title.chars().take(40).collect::<String>(),
+                    }
                 ),
                 s.meta.event_count.to_string(),
                 format!("{}/{}", s.meta.tokens_in, s.meta.tokens_out),

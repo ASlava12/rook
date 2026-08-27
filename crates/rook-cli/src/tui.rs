@@ -448,7 +448,7 @@ impl App {
     /// past the choices works here exactly as it does in the plain CLI.
     fn command(&mut self, command: &str) {
         let mut session =
-            self.chat.session.unwrap_or_else(|| self.rook.start_session("tui").unwrap_or_default());
+            self.chat.session.unwrap_or_else(|| self.rook.start_session("").unwrap_or_default());
         let said =
             self.runtime.block_on(crate::chat::dispatch(&self.rook, &mut session, &self.shared, command));
         self.chat.session = Some(session);
@@ -529,7 +529,7 @@ impl App {
         self.turn = Some(self.runtime.spawn(async move {
             let session = match session {
                 Some(id) => id,
-                None => match rook.start_session(prompt.lines().next().unwrap_or("tui")) {
+                None => match rook.start_session("") {
                     Ok(id) => {
                         let _ = to_loop.send(TurnEvent::Started(id));
                         id
@@ -780,7 +780,10 @@ impl App {
             .map(|s| {
                 ListItem::new(vec![
                     Line::from(Span::styled(
-                        s.meta.title.chars().take(40).collect::<String>(),
+                        match s.meta.title.trim().is_empty() {
+                            true => "(untitled)".to_string(),
+                            false => s.meta.title.chars().take(40).collect::<String>(),
+                        },
                         Style::default().add_modifier(Modifier::BOLD),
                     )),
                     Line::from(Span::styled(
