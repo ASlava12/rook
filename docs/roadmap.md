@@ -118,6 +118,11 @@ what unblocks the most.
   a skill scoped away and explained by `skills why`, capture and rollback, a
   broken config that fails loudly, and the daemon path where a read goes over
   HTTP and a write says where the lock is.
+- **The chat REPL under test** — its dozen slash commands were reachable only
+  through an interactive prompt and checked by nobody. Driven from a pipe they
+  need no model, so three tests now cover what each says with nothing to report,
+  that a goal survives within a session and not into a new one, and that an
+  unknown command is refused rather than sent to the provider.
 - **`readonly` that is actually read-only** — the loop implements some tools
   itself and handled them before the policy gate, so `write_skill` wrote to disk
   in a mode whose whole promise is that nothing changes the machine. The gate

@@ -40,6 +40,23 @@ Add a row when you implement something after reading a reference. Add it to
 moved; what follows is what was done with it, so a dismissal is a decision rather
 than an omission.
 
+**2026-08-27 (tenth pass)** — hermes advanced 25 commits.
+
+- hermes `1dc552d5` *terminal: honest schema, pager defaults in the env
+  (837 → 670 tok/call)* — **measured, nothing to change.** Their fix sets pager
+  and colour variables so a command's output is not full of escapes. Probed ours
+  with `TERM=xterm-256color` and `CLICOLOR_FORCE=1` inherited: `git log`, `git
+  status` and `cargo` all returned clean text, because stdout is a pipe and they
+  detect it. stdin is already `/dev/null`, so an interactive prompt gets EOF
+  rather than hanging to the timeout. Their schema-size half we did in the
+  fourth pass.
+- hermes `1f4d095f`, `830e4a29`, `42046b45`, `f1d05ce7` and the rest of the
+  browser series, plus the PROOF workflows — **not applicable**: copying a real
+  Chrome profile with its cookie database, and the Windows file-locking that
+  makes it hard. Rook has no browser tool.
+- hermes `f780cb36` *drop the cua_browser_* route*, `791e2ae3` *JS formatting* —
+  **not applicable.**
+
 **2026-08-27 (ninth pass)** — codex and goose advanced.
 
 - goose `caf5951` *enforce permission policy for app tool calls* — **does not

@@ -20,6 +20,24 @@ impl Rook {
         rook
     }
 
+    /// The chat REPL, driven from a pipe. Every slash command is reachable
+    /// without a model; only sending a prompt needs one.
+    fn chat(&self, lines: &str) -> String {
+        use std::io::Write;
+        let mut child = Command::new(env!("CARGO_BIN_EXE_rook"))
+            .env("ROOK_HOME", self.home.path())
+            .env("ROOK_LOG", "error")
+            .args(["--workspace", self.workspace.path().to_str().unwrap(), "chat"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(lines.as_bytes()).unwrap();
+        let out = child.wait_with_output().unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
     fn run(&self, args: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_rook"))
             .env("ROOK_HOME", self.home.path())
@@ -313,4 +331,48 @@ fn doctor_carries_the_advice_rather_than_only_the_failure() {
     let model = out.split("model:").nth(1).unwrap();
     assert!(model.contains("cannot reach"), "{model}");
     assert!(model.contains("Start the server"), "doctor exists to say what to do: {model}");
+}
+
+#[test]
+fn every_slash_command_answers_on_an_empty_session() {
+    let rook = Rook::new();
+    let out = rook
+        .chat("/help\n/context\n/session\n/skills\n/memory\n/search nothing\n/diff\n/mcp\n/goal\n/quit\n");
+
+    // Each line is what that command says when there is nothing to report,
+    // which is the state every new session starts in.
+    for expected in [
+        "/context [window]",
+        "usable tokens",
+        "0 events",
+        "nothing remembered yet",
+        "nothing matched",
+        "nothing changed on disk yet",
+        "no tool servers connected",
+        "no goal set",
+    ] {
+        assert!(out.contains(expected), "no sign of {expected:?} in:\n{out}");
+    }
+}
+
+#[test]
+fn the_repl_carries_a_goal_and_starts_a_fresh_session_on_request() {
+    let rook = Rook::new();
+    let out = rook.chat("/goal ship the release\n/goal\n/new later\n/session\n/goal\n/quit\n");
+
+    assert!(out.contains("goal set"), "{out}");
+    assert!(out.contains("ship the release"), "{out}");
+    assert!(
+        out.matches("no goal set").count() == 1,
+        "a new session starts without the old one's goal:\n{out}"
+    );
+}
+
+#[test]
+fn an_unknown_command_says_so_rather_than_being_sent_to_the_model() {
+    let rook = Rook::new();
+    let out = rook.chat("/nonsense\n/quit\n");
+
+    assert!(out.to_lowercase().contains("nonsense"), "{out}");
+    assert!(!out.contains("cannot reach"), "it must not have gone to the provider:\n{out}");
 }
