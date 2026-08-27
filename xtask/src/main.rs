@@ -9,28 +9,68 @@ use std::process::{Command, ExitCode};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
-/// Platforms Rook ships for.
+/// Platforms Rook ships for, and what CI actually does with each.
 ///
-/// Tier 1 is built and tested in CI. Tier 2 is built but not tested, because no
-/// hosted runner offers it — which is exactly how FreeBSD support rots in other
-/// projects, so it is at least kept compiling.
-const TARGETS: &[(&str, &str, Tier)] = &[
-    ("x86_64-unknown-linux-gnu", "linux", Tier::One),
-    ("aarch64-unknown-linux-gnu", "linux", Tier::One),
-    ("x86_64-unknown-linux-musl", "linux (static)", Tier::One),
-    ("x86_64-apple-darwin", "macos", Tier::One),
-    ("aarch64-apple-darwin", "macos", Tier::One),
-    ("x86_64-pc-windows-msvc", "windows", Tier::One),
-    ("aarch64-pc-windows-msvc", "windows", Tier::Two),
-    // Built and tested natively in a VM; see .github/workflows/ci.yml.
-    ("x86_64-unknown-freebsd", "freebsd", Tier::One),
-    ("aarch64-unknown-freebsd", "freebsd", Tier::Two),
+/// The last column is the string in `.github/workflows/ci.yml` that backs the
+/// claim; `tests/ci_matrix.rs` looks for it. FreeBSD support in other projects
+/// rots because a matrix outlives the job that justified it, and nothing notices.
+const TARGETS: &[Target] = &[
+    Target::tested("x86_64-unknown-linux-gnu", "linux", "ubuntu-latest"),
+    Target::tested("aarch64-apple-darwin", "macos", "macos-latest"),
+    Target::tested("x86_64-pc-windows-msvc", "windows", "windows-latest"),
+    Target::tested("x86_64-unknown-freebsd", "freebsd", "freebsd-vm"),
+    Target::checked("aarch64-unknown-linux-gnu", "linux"),
+    Target::checked("x86_64-unknown-linux-musl", "linux (static)"),
+    Target::checked("x86_64-apple-darwin", "macos"),
+    Target::untried("aarch64-pc-windows-msvc", "windows"),
+    Target::untried("aarch64-unknown-freebsd", "freebsd"),
 ];
 
+struct Target {
+    triple: &'static str,
+    platform: &'static str,
+    coverage: Coverage,
+}
+
 #[derive(Clone, Copy, PartialEq)]
-enum Tier {
-    One,
-    Two,
+enum Coverage {
+    /// A CI job runs the whole suite on it, on the named runner.
+    Tested(&'static str),
+    /// A CI job compiles it. Cross-checking never links against the target's
+    /// libc, which is the whole reason FreeBSD gets a VM instead.
+    Checked,
+    /// Supported, but no hosted runner offers it. Best effort.
+    Untried,
+}
+
+impl Target {
+    const fn tested(triple: &'static str, platform: &'static str, runner: &'static str) -> Self {
+        Self { triple, platform, coverage: Coverage::Tested(runner) }
+    }
+    const fn checked(triple: &'static str, platform: &'static str) -> Self {
+        Self { triple, platform, coverage: Coverage::Checked }
+    }
+    const fn untried(triple: &'static str, platform: &'static str) -> Self {
+        Self { triple, platform, coverage: Coverage::Untried }
+    }
+
+    fn describe_ci(&self) -> String {
+        match self.coverage {
+            Coverage::Tested(_) => format!("tested on {}", self.witness()),
+            Coverage::Checked => "compiled".into(),
+            Coverage::Untried => "best effort".into(),
+        }
+    }
+
+    /// What must appear in the workflow for `describe_ci` to be true — a cross-
+    /// checked target is named there by its own triple.
+    fn witness(&self) -> &'static str {
+        match self.coverage {
+            Coverage::Tested(runner) => runner,
+            Coverage::Checked => self.triple,
+            Coverage::Untried => "",
+        }
+    }
 }
 
 #[derive(Parser)]
@@ -46,9 +86,9 @@ enum Task {
     Ci,
     /// Print the supported target matrix.
     Targets,
-    /// Check that every target still compiles. Needs the toolchains installed.
+    /// Compile the targets CI cross-checks. Needs the toolchains installed.
     CrossCheck {
-        /// Include tier-2 targets.
+        /// Include the targets CI does not build either.
         #[arg(long)]
         all: bool,
     },
@@ -156,13 +196,10 @@ fn run() -> Result<()> {
             Ok(())
         }
         Task::Targets => {
-            println!("{:<32} {:<16} tier", "target", "platform");
+            println!("{:<32} {:<16} ci", "target", "platform");
             println!("{}", "─".repeat(58));
-            for (triple, platform, tier) in TARGETS {
-                println!(
-                    "{triple:<32} {platform:<16} {}",
-                    if *tier == Tier::One { "1 (built + tested)" } else { "2 (built only)" }
-                );
+            for t in TARGETS {
+                println!("{:<32} {:<16} {}", t.triple, t.platform, t.describe_ci());
             }
             println!(
                 "\nEvery dependency is pure Rust except `zstd-sys` and `ring`, which vendor C.\n\
@@ -173,14 +210,12 @@ fn run() -> Result<()> {
             Ok(())
         }
         Task::CrossCheck { all } => {
+            let wanted = |c: Coverage| c == Coverage::Checked || (all && c == Coverage::Untried);
             let mut failed = Vec::new();
-            for (triple, _, tier) in TARGETS {
-                if *tier == Tier::Two && !all {
-                    continue;
-                }
-                println!("── {triple}");
-                if cargo(&["check", "--workspace", "--target", triple]).is_err() {
-                    failed.push(*triple);
+            for t in TARGETS.iter().filter(|t| wanted(t.coverage)) {
+                println!("── {}", t.triple);
+                if cargo(&["check", "--workspace", "--target", t.triple]).is_err() {
+                    failed.push(t.triple);
                 }
             }
             if !failed.is_empty() {
@@ -393,4 +428,45 @@ fn cargo(args: &[&str]) -> Result<()> {
         bail!("cargo {} failed", args.join(" "));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn workflow() -> String {
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../.github/workflows/ci.yml"))
+            .expect("the workflow the target matrix claims to describe")
+    }
+
+    #[test]
+    fn every_target_gets_the_coverage_the_matrix_claims_for_it() {
+        let ci = workflow();
+        for t in TARGETS {
+            match t.coverage {
+                Coverage::Untried => assert!(
+                    !ci.contains(t.triple),
+                    "{} is in the workflow, so the matrix understates it as {}",
+                    t.triple,
+                    t.describe_ci()
+                ),
+                _ => assert!(
+                    ci.contains(t.witness()),
+                    "the matrix says {} is {}, but `{}` is nowhere in ci.yml",
+                    t.triple,
+                    t.describe_ci(),
+                    t.witness()
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn the_gate_is_defined_once_and_ci_runs_that_one() {
+        assert!(
+            workflow().contains("cargo xtask ci"),
+            "ci.yml spells the gate out itself instead of running `cargo xtask ci`, \
+             so the two can drift"
+        );
+    }
 }

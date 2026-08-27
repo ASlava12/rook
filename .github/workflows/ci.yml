@@ -23,10 +23,12 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all --check
-        if: matrix.os == 'ubuntu-latest'
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      - run: cargo xtask ci
+
+      # The Intel slice of macOS has no hosted runner any more, but its SDK is
+      # right here on the Apple-silicon one, so it is at least kept compiling.
+      - run: rustup target add x86_64-apple-darwin && cargo check --workspace --target x86_64-apple-darwin
+        if: matrix.os == 'macos-latest'
 
   # FreeBSD is a supported target and GitHub offers no runner for it. A real VM
   # is used rather than a cross-compile check, because the two dependencies that

@@ -3,17 +3,26 @@
 Linux, macOS, Windows and FreeBSD are supported targets. `cargo xtask targets`
 prints the current matrix.
 
-| target | platform | tier |
+| target | platform | ci |
 |---|---|---|
-| `x86_64-unknown-linux-gnu` | Linux | 1 — built + tested |
-| `aarch64-unknown-linux-gnu` | Linux | 1 |
-| `x86_64-unknown-linux-musl` | Linux (static) | 1 |
-| `x86_64-apple-darwin` | macOS | 1 |
-| `aarch64-apple-darwin` | macOS | 1 |
-| `x86_64-pc-windows-msvc` | Windows | 1 |
-| `x86_64-unknown-freebsd` | FreeBSD | 1 — tested in a VM |
-| `aarch64-pc-windows-msvc` | Windows | 2 — built only |
-| `aarch64-unknown-freebsd` | FreeBSD | 2 — built only |
+| `x86_64-unknown-linux-gnu` | Linux | tested on `ubuntu-latest` |
+| `aarch64-apple-darwin` | macOS | tested on `macos-latest` |
+| `x86_64-pc-windows-msvc` | Windows | tested on `windows-latest` |
+| `x86_64-unknown-freebsd` | FreeBSD | tested in a VM |
+| `aarch64-unknown-linux-gnu` | Linux | compiled |
+| `x86_64-unknown-linux-musl` | Linux (static) | compiled |
+| `x86_64-apple-darwin` | macOS | compiled |
+| `aarch64-pc-windows-msvc` | Windows | best effort |
+| `aarch64-unknown-freebsd` | FreeBSD | best effort |
+
+*Tested* means a CI job runs the whole suite there. *Compiled* means a job builds
+it and nothing more — a cross-check never links against the target's libc, which
+is the entire reason FreeBSD gets a VM instead. *Best effort* means no hosted
+runner offers it; the code is written for it, and that is the extent of the claim.
+
+Each row is backed by a string in [`ci.yml`](../.github/workflows/ci.yml) that backs
+it, and `cargo test -p xtask` fails if that string is missing — so a row cannot
+outlive the job that justified it, which is how this table would otherwise rot.
 
 ## What actually constrains portability
 

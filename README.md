@@ -386,8 +386,9 @@ upstream work nobody has looked at yet. See [references/README.md](references/RE
 
 Linux, macOS, Windows and FreeBSD. FreeBSD is built **and tested** in a real VM in
 CI rather than cross-checked, because the two dependencies that vendor C are
-exactly what a cross-check cannot exercise. Details and the target tier list:
-[docs/platforms.md](docs/platforms.md), or `cargo xtask targets`.
+exactly what a cross-check cannot exercise. Nine targets are claimed; `cargo xtask targets` prints which are tested, which
+are only compiled, and which are best effort, and a test fails if a row claims
+more than CI actually does. Details: [docs/platforms.md](docs/platforms.md).
 
 ## What is not done yet
 
