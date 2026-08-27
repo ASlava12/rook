@@ -83,7 +83,7 @@ async fn an_unreachable_endpoint_reports_transport_rather_than_hanging() {
     let provider = provider("http://127.0.0.1:1/v1".into());
     let started = std::time::Instant::now();
     let Err(err) = provider.models().await else { panic!("nothing is listening there") };
-    assert!(matches!(err, LlmError::Transport(_)), "{err}");
+    assert!(matches!(err, LlmError::Unreachable { .. }), "{err}");
     assert!(started.elapsed() < Duration::from_secs(20));
 }
 

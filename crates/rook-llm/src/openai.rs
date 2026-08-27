@@ -50,7 +50,7 @@ impl OpenAiCompatible {
             .timeout(std::time::Duration::from_secs(600))
             .connect_timeout(std::time::Duration::from_secs(15))
             .build()
-            .map_err(|e| LlmError::Transport(e.to_string()))?;
+            .map_err(|e| LlmError::unreachable(&config.base_url, e))?;
         Ok(Self { id: id.to_string(), model: model.to_string(), config, http })
     }
 }
@@ -72,7 +72,7 @@ impl Provider for OpenAiCompatible {
     async fn complete(&self, request: Request) -> Result<Response> {
         let resp = self.send(&request, false).await?;
         let status = resp.status();
-        let text = resp.text().await.map_err(|e| LlmError::Transport(e.to_string()))?;
+        let text = resp.text().await.map_err(|e| LlmError::unreachable(&self.config.base_url, e))?;
         if !status.is_success() {
             return Err(LlmError::Status { status: status.as_u16(), body: truncate(&text, 2000) });
         }
@@ -147,10 +147,10 @@ impl Provider for OpenAiCompatible {
             .timeout(std::time::Duration::from_secs(20))
             .send()
             .await
-            .map_err(|e| LlmError::Transport(e.to_string()))?;
+            .map_err(|e| LlmError::unreachable(&self.config.base_url, e))?;
 
         let status = response.status();
-        let text = response.text().await.map_err(|e| LlmError::Transport(e.to_string()))?;
+        let text = response.text().await.map_err(|e| LlmError::unreachable(&self.config.base_url, e))?;
         if !status.is_success() {
             return Err(LlmError::Status { status: status.as_u16(), body: truncate(&text, 500) });
         }
@@ -172,6 +172,7 @@ impl Provider for OpenAiCompatible {
         }
 
         let idle = self.config.stream_idle_timeout;
+        let endpoint = self.config.base_url.clone();
         let fallback_model = self.model.clone();
 
         Ok(Box::pin(async_stream::try_stream! {
@@ -190,7 +191,7 @@ impl Provider for OpenAiCompatible {
                 let chunk = match tokio::time::timeout(idle, bytes.next()).await {
                     Err(_) => Err(LlmError::Stalled { secs: idle.as_secs() })?,
                     Ok(None) => break,
-                    Ok(Some(chunk)) => chunk.map_err(|e| LlmError::Transport(e.to_string()))?,
+                    Ok(Some(chunk)) => chunk.map_err(|e| LlmError::unreachable(&endpoint, e))?,
                 };
                 buffer.push_str(&String::from_utf8_lossy(&chunk));
                 if buffer.len() > MAX_FRAME_BYTES {
@@ -291,7 +292,7 @@ impl OpenAiCompatible {
         if let Some(key) = &self.config.api_key {
             req = req.bearer_auth(key);
         }
-        req.send().await.map_err(|e| LlmError::Transport(e.to_string()))
+        req.send().await.map_err(|e| LlmError::unreachable(&self.config.base_url, e))
     }
 }
 

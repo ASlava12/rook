@@ -22,8 +22,8 @@ use async_trait::async_trait;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LlmError {
-    #[error("transport error: {0}")]
-    Transport(String),
+    #[error("cannot reach {endpoint}: {detail}\n{}", advice(.endpoint))]
+    Unreachable { endpoint: String, detail: String },
     #[error("provider returned {status}: {body}")]
     Status { status: u16, body: String },
     #[error("could not parse the provider's response: {0}")]
@@ -36,6 +36,40 @@ pub enum LlmError {
     Stalled { secs: u64 },
     #[error("{0}")]
     Other(String),
+}
+
+impl LlmError {
+    pub fn unreachable(endpoint: &str, source: impl std::fmt::Display) -> Self {
+        Self::Unreachable { endpoint: origin(endpoint), detail: source.to_string() }
+    }
+}
+
+/// What to try, which depends only on where the endpoint is.
+///
+/// A local one that answers nothing means the server is not running; a remote
+/// one usually means the network or a missing key. Naming the wrong one wastes
+/// the user's time, so this says both only when it cannot tell.
+fn advice(endpoint: &str) -> String {
+    // The whole 127/8 range, not just the usual address: a local server moved
+    // off 127.0.0.1 is exactly the case where the wrong advice costs most.
+    let local = ["://127.", "localhost", "[::1]", "://0.0.0.0"].iter().any(|h| endpoint.contains(h));
+    match local {
+        true => "Nothing is listening there. Start the server, or point `[agent] model` at one \
+                 that is running — `rook models` lists what an endpoint offers."
+            .to_string(),
+        false => "Check the network, and that the provider's API key is set.".to_string(),
+    }
+}
+
+/// Scheme and authority only: the path a request happened to use is noise, and
+/// the same endpoint should read the same however it was reached.
+fn origin(url: &str) -> String {
+    let (scheme, rest) = url.split_once("://").unwrap_or(("", url));
+    let authority = rest.split('/').next().unwrap_or(rest);
+    match scheme.is_empty() {
+        true => authority.to_string(),
+        false => format!("{scheme}://{authority}"),
+    }
 }
 
 pub type Result<T> = std::result::Result<T, LlmError>;
@@ -116,8 +150,17 @@ pub fn from_spec_with(
             openai::Config::new(env_or("LMSTUDIO_HOST", "http://127.0.0.1:1234") + "/v1", None, 32_768)
         }
         "anthropic" | "claude" => {
-            let key = std::env::var("ANTHROPIC_API_KEY")
-                .map_err(|_| LlmError::Other("set ANTHROPIC_API_KEY".into()))?;
+            // Empty counts as unset: an exported-but-blank variable is the
+            // usual way this goes wrong, and a 401 does not say which.
+            let key = std::env::var("ANTHROPIC_API_KEY").ok().filter(|k| !k.trim().is_empty()).ok_or_else(
+                || {
+                    LlmError::Other(
+                        "ANTHROPIC_API_KEY is not set. Export it, or set `[agent] model` to a \
+                         local provider such as `ollama/…`."
+                            .into(),
+                    )
+                },
+            )?;
             let base = env_or("ANTHROPIC_BASE_URL", "https://api.anthropic.com");
             let mut config = anthropic::Config::new(base, key, model);
             config.stream_idle_timeout = stream_idle;
@@ -132,8 +175,13 @@ pub fn from_spec_with(
             128_000,
         ),
         "openai-compatible" => openai::Config::new(
-            std::env::var("ROOK_LLM_BASE_URL")
-                .map_err(|_| LlmError::Other("set ROOK_LLM_BASE_URL for openai-compatible".into()))?,
+            std::env::var("ROOK_LLM_BASE_URL").ok().filter(|u| !u.trim().is_empty()).ok_or_else(|| {
+                LlmError::Other(
+                    "ROOK_LLM_BASE_URL is not set, and `openai-compatible` has no default \
+                         endpoint to fall back to."
+                        .into(),
+                )
+            })?,
             std::env::var("ROOK_LLM_API_KEY").ok(),
             32_768,
         ),

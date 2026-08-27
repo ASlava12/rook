@@ -290,3 +290,27 @@ fn the_store_is_readable_again_once_the_daemon_stops() {
     }
     panic!("the lock outlived the daemon");
 }
+
+#[test]
+fn the_first_command_a_new_user_runs_says_what_to_do_when_it_fails() {
+    let rook = Rook::new();
+    // No model is reachable on a fresh machine, which is the ordinary case and
+    // the worst first impression the tool can make.
+    let out = rook.run(&["models"]);
+
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("cannot reach"), "{err}");
+    assert!(err.contains("Start the server"), "a raw transport error is not actionable: {err}");
+    assert!(err.contains("rook models"), "{err}");
+}
+
+#[test]
+fn doctor_carries_the_advice_rather_than_only_the_failure() {
+    let rook = Rook::new();
+    let out = rook.ok(&["doctor"]);
+
+    let model = out.split("model:").nth(1).unwrap();
+    assert!(model.contains("cannot reach"), "{model}");
+    assert!(model.contains("Start the server"), "doctor exists to say what to do: {model}");
+}

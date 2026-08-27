@@ -383,7 +383,14 @@ fn cmd_doctor(rook: &Rook, json: bool) -> Result<()> {
     println!("model:");
     match probe_provider(rook) {
         Ok(note) => println!("  {note}"),
-        Err(e) => println!("  {} — {e}", rook.config.agent.model),
+        Err(e) => {
+            // Indented as one block: the advice belongs to the failure above it,
+            // and doctor is read top to bottom.
+            println!("  {}", rook.config.agent.model);
+            for line in e.to_string().lines() {
+                println!("  {line}");
+            }
+        }
     }
 
     let servers =
