@@ -301,6 +301,12 @@ what unblocks the most.
   before checking containment, so a link inside the workspace pointing out of it
   is refused rather than followed, and the refusal says where the path really
   led. Widened only by `sandbox.allow_outside_workspace`. 6 tests.
+- **A search that does not read a file into memory to look at it** — every file
+  in the workspace was read whole, so a text log the size of memory was read into
+  it, and a search is not where anyone wants to find that out. It reads a line at
+  a time, which bounds it by the longest line rather than the largest file, and
+  gives up on a file whose line runs past a megabyte — a minified bundle, or a
+  blob whose first pages happened to hold no zero byte. 4 tests.
 - **A command that writes to both streams does not hang** — stdout was drained
   to end-of-file before stderr was read at all, so a command that filled the
   stderr pipe blocked on the write, never finished stdout, and the drain never

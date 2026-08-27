@@ -5,7 +5,13 @@ use serde_json::json;
 
 use rook_llm::ToolSpec;
 
+use std::io::{BufRead, Read};
+
 use crate::{Result, Tool, ToolContext, ToolError, ToolOutcome, arg_str, arg_usize};
+
+/// Past this a line is not source: a minified bundle, or a blob whose first
+/// pages happened to hold no zero byte.
+const MAX_LINE: u64 = 1 << 20;
 
 pub struct Search;
 
@@ -66,22 +72,43 @@ impl Tool for Search {
                 {
                     continue;
                 }
-                let Ok(bytes) = std::fs::read(path) else { continue };
-                // Skip binaries cheaply rather than regexing megabytes of them.
-                if bytes.iter().take(4096).any(|b| *b == 0) {
+                let Ok(file) = std::fs::File::open(path) else { continue };
+                let mut reader = std::io::BufReader::new(file);
+                // Skip binaries cheaply rather than regexing megabytes of them,
+                // and without reading the rest of the file to find out.
+                let Ok(prefix) = reader.fill_buf() else { continue };
+                if prefix.iter().take(4096).any(|b| *b == 0) {
                     continue;
                 }
                 files_scanned += 1;
-                let text = String::from_utf8_lossy(&bytes);
-                for (n, line) in text.lines().enumerate() {
-                    if !re.is_match(line) {
+
+                // A line at a time: reading whole files meant a text log the
+                // size of memory was read into it, and a search is not the place
+                // to find that out.
+                let mut line = Vec::new();
+                let mut n = 0usize;
+                loop {
+                    line.clear();
+                    match reader.by_ref().take(MAX_LINE).read_until(b'\n', &mut line) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => n += 1,
+                    }
+                    // Longer than any source line: a minified bundle or a blob
+                    // with no NUL in its first pages. Nothing after it is worth
+                    // the read either.
+                    if !line.ends_with(b"\n") && line.len() as u64 == MAX_LINE {
+                        break;
+                    }
+                    let text = String::from_utf8_lossy(&line);
+                    let text = text.trim_end_matches(['\n', '\r']);
+                    if !re.is_match(text) {
                         continue;
                     }
                     total += 1;
                     if hits.len() < limit {
                         let rel = path.strip_prefix(&root).unwrap_or(path);
-                        let shown: String = line.chars().take(400).collect();
-                        hits.push(format!("{}:{}:{}", rel.display(), n + 1, shown));
+                        let shown: String = text.chars().take(400).collect();
+                        hits.push(format!("{}:{}:{}", rel.display(), n, shown));
                     }
                 }
             }
