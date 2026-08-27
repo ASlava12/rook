@@ -1472,6 +1472,16 @@ fn cmd_memory(rook: &Rook, cmd: MemoryCmd, json: bool) -> Result<()> {
             if !all && facts.len() < book.facts.len() {
                 println!("\n{} more scoped to other workspaces (--all)", book.facts.len() - facts.len());
             }
+            // Pinning wins over relevance and not over the budget, so past this
+            // point pinning one more fact costs another one its place.
+            let budget = rook.config.memory.context_budget_tokens;
+            let pinned: usize = facts.iter().filter(|f| f.pinned).map(|f| f.tokens()).sum();
+            if pinned > budget {
+                println!(
+                    "\npinned facts come to ~{pinned} tokens against a recall budget of {budget} \
+                     — some of them will not reach the model"
+                );
+            }
         }
 
         MemoryCmd::Search { query } => {

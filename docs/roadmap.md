@@ -301,6 +301,14 @@ what unblocks the most.
   before checking containment, so a link inside the workspace pointing out of it
   is refused rather than followed, and the refusal says where the path really
   led. Widened only by `sandbox.allow_outside_workspace`. 6 tests.
+- **Pinning wins over relevance, not over the budget** — a pinned fact went into
+  every request whatever it cost, so the bound on recall was however many facts
+  somebody had pinned, which is not a bound. `remember` lets the model pin, so an
+  agent pinning freely for a month would spend the window on its own memory
+  before reading the prompt: two hundred pinned facts came to 2392 tokens against
+  a budget of 100. Pinned facts are taken first and still counted, `memory ls`
+  says when they have outgrown the budget, and the tool no longer promises
+  "always". 4 tests.
 - **What `doctor` could not say about approvals and hooks** — it reported the
   machine, the model and the skills, and nothing about the two things a user
   configures to control the agent. It lists the mode, the rules that will not

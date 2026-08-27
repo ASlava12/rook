@@ -487,7 +487,7 @@ impl<'a> AgentLoop<'a> {
                         "text": { "type": "string", "description": "One self-contained fact." },
                         "tags": { "type": "array", "items": { "type": "string" } },
                         "scope": { "type": "string", "enum": ["global", "project"], "default": "project" },
-                        "pinned": { "type": "boolean", "description": "Always keep in context." }
+                        "pinned": { "type": "boolean", "description": "Recall this ahead of anything that merely matches. It still costs context, so pin only what is true every turn." }
                     },
                     "required": ["text"]
                 }),

@@ -303,13 +303,20 @@ pub(crate) fn terms_of(text: &str) -> BTreeSet<String> {
         .collect()
 }
 
-/// Pick what fits in `budget` tokens: everything pinned, then the best matches.
+/// Pick what fits in `budget` tokens: pinned first, then the best matches.
+///
+/// Pinning wins over relevance and not over the budget. It used to win over
+/// both — a pinned fact went in whatever it cost — and `remember` lets the model
+/// pin, so an agent that pinned freely for a month would have spent the whole
+/// window on its own memory before reading a word of the prompt.
 pub fn select<'a>(facts: impl Iterator<Item = &'a Fact>, query: &str, budget: usize) -> Vec<Fact> {
     let mut chosen: Vec<Fact> = Vec::new();
     let mut used = 0;
-    for hit in search(facts, query) {
+    let hits = search(facts, query);
+    let by_pin = hits.iter().filter(|h| h.fact.pinned).chain(hits.iter().filter(|h| !h.fact.pinned));
+    for hit in by_pin {
         let cost = hit.fact.tokens();
-        if !hit.fact.pinned && used + cost > budget {
+        if used + cost > budget {
             continue;
         }
         // Two ways of saying one thing spend the budget twice and tell the model
@@ -318,7 +325,7 @@ pub fn select<'a>(facts: impl Iterator<Item = &'a Fact>, query: &str, budget: us
             continue;
         }
         used += cost;
-        chosen.push(hit.fact);
+        chosen.push(hit.fact.clone());
     }
     chosen
 }

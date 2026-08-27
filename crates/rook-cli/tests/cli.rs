@@ -599,3 +599,18 @@ fn doctor_lists_the_hooks_and_the_matcher_that_does_not_parse() {
     assert!(!said.contains("PreTool"), "{said}");
     assert!(said.contains("runs on every subject"), "and what the broken pattern costs: {said}");
 }
+
+/// Past the recall budget, pinning one more fact costs another one its place —
+/// and the place it loses is in the context, where nobody can see it happen.
+#[test]
+fn memory_ls_says_when_pinning_has_outgrown_the_recall_budget() {
+    let rook = Rook::new();
+    rook.write_config("[memory]\ncontext_budget_tokens = 20\n");
+    for i in 0..6 {
+        rook.ok(&["memory", "add", "--pin", &format!("a pinned fact number {i} about this and that")]);
+    }
+
+    let said = rook.ok(&["memory", "ls"]);
+    assert!(said.contains("recall budget of 20"), "{said}");
+    assert!(said.contains("will not reach the model"), "{said}");
+}
