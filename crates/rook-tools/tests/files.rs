@@ -174,11 +174,24 @@ async fn a_page_of_no_lines_is_not_a_page() {
     std::fs::write(dir.path().join("f.txt"), "a\nb\nc\n").unwrap();
     let ctx = ToolContext::new(dir.path().to_path_buf());
 
-    let out = files::ReadFile
-        .call(&ctx, &serde_json::json!({ "path": "f.txt", "limit": 0 }))
-        .await
-        .unwrap();
+    let out = files::ReadFile.call(&ctx, &serde_json::json!({ "path": "f.txt", "limit": 0 })).await.unwrap();
 
     assert!(!out.content.contains("offset=0"), "an answer that says to repeat the call: {}", out.content);
     assert!(out.content.contains('c'), "it pages rather than refusing, so it answers: {}", out.content);
+}
+
+/// A model that mistypes a tool name has already spent a step; `unknown tool
+/// "read_fil"` spends the next one too.
+#[tokio::test]
+async fn an_unknown_tool_names_the_ones_it_might_have_meant() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ToolContext::new(dir.path().to_path_buf());
+    let tools = rook_tools::ToolBox::standard();
+
+    let said = tools.call(&ctx, "read_fil", &serde_json::json!({})).await.unwrap_err().to_string();
+    assert!(said.contains("read_fil"), "{said}");
+    assert!(said.contains("read_file"), "the one it meant: {said}");
+
+    let unrelated = tools.call(&ctx, "zzzzzzzzzz", &serde_json::json!({})).await.unwrap_err().to_string();
+    assert!(!unrelated.contains("did you mean"), "nothing is close, so nothing is offered: {unrelated}");
 }

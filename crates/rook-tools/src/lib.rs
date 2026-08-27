@@ -30,8 +30,8 @@ use rook_llm::ToolSpec;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {
-    #[error("unknown tool {0:?}")]
-    Unknown(String),
+    #[error("unknown tool {name:?}{}", suggest(nearest))]
+    Unknown { name: String, nearest: Vec<String> },
     #[error("{tool}: {message}")]
     Invalid { tool: String, message: String },
     #[error("io error at {path}: {source}")]
@@ -344,9 +344,49 @@ impl ToolBox {
     }
 
     pub async fn call(&self, ctx: &ToolContext, name: &str, args: &serde_json::Value) -> Result<ToolOutcome> {
-        let tool = self.get(name).ok_or_else(|| ToolError::Unknown(name.to_string()))?;
+        let tool = self
+            .get(name)
+            .ok_or_else(|| ToolError::Unknown { name: name.to_string(), nearest: self.nearest(name) })?;
         tool.call(ctx, args).await
     }
+
+    /// A model that typed `read_fil` has already spent a step, and "unknown
+    /// tool" spends another. The names it might have meant cost nothing to say.
+    fn nearest(&self, name: &str) -> Vec<String> {
+        let mut scored: Vec<(usize, &str)> = self
+            .names()
+            .into_iter()
+            .filter(|known| known.contains(name) || name.contains(known) || edits(name, known) <= 3)
+            .map(|known| (edits(name, known), known))
+            .collect();
+        scored.sort();
+        scored.into_iter().take(3).map(|(_, known)| known.to_string()).collect()
+    }
+}
+
+fn suggest(nearest: &[String]) -> String {
+    match nearest {
+        [] => String::new(),
+        near => format!(" — did you mean {}?", near.join(", ")),
+    }
+}
+
+/// Levenshtein, over two short names: a dependency for this would cost more
+/// than the ten lines it saves.
+fn edits(a: &str, b: &str) -> usize {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, x) in a.iter().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, y) in b.iter().enumerate() {
+            let cost = usize::from(x != y);
+            let next = (row[j] + 1).min(row[j + 1] + 1).min(diagonal + cost);
+            diagonal = row[j + 1];
+            row[j + 1] = next;
+        }
+    }
+    row[b.len()]
 }
 
 pub(crate) fn arg_str(args: &serde_json::Value, tool: &str, key: &str) -> Result<String> {

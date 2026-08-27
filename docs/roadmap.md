@@ -301,6 +301,14 @@ what unblocks the most.
   before checking containment, so a link inside the workspace pointing out of it
   is refused rather than followed, and the refusal says where the path really
   led. Widened only by `sandbox.allow_outside_workspace`. 6 tests.
+- **A tool call that misses says what it might have meant** — `unknown tool
+  "read_fil"` told the model nothing it could act on, so the step that mistyped
+  the name cost a second one finding out. The near misses are named, by edit
+  distance over the registered names, and nothing is offered when nothing is
+  close. `read_file` with `limit: 0` had the same shape: it returned no lines and
+  a note to call again from where it stopped, which is where it started — and a
+  tool that pages rather than refusing should answer, so a limit that cannot page
+  gets the default one. 2 tests.
 - **An edit that cannot mean anything is refused** — an empty `old` matches
   between every pair of characters: `replace_all` interleaved the replacement
   through the whole file and reported it as a success, and without it the count
