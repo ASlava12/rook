@@ -520,11 +520,7 @@ impl App {
                 agent.approver = approver;
                 agent.ask_via(asker);
             }
-            for (server, tools) in &mcp.servers {
-                agent.tools.register_server(server.clone(), tools.clone());
-            }
-            agent.servers = servers.clone();
-            rook_core::lsp::register(&mut agent.tools, servers);
+            rook_core::agent::equip(&mut agent, servers, &mcp);
 
             let emit = to_loop.clone();
             let result = agent

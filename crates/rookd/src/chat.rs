@@ -161,11 +161,7 @@ async fn turn(
     agent.effort = connection.settings.effort();
     agent.approver = connection.approver;
     agent.ask_via(connection.asker);
-    agent.servers = shared.servers.clone();
-    rook_core::lsp::register(&mut agent.tools, shared.servers.clone());
-    for (server, tools) in &shared.mcp.servers {
-        agent.tools.register_server(server.clone(), tools.clone());
-    }
+    rook_core::agent::equip(&mut agent, shared.servers.clone(), &shared.mcp);
 
     let emit = outbound.clone();
     let result = agent

@@ -29,6 +29,24 @@ use crate::error::{CoreError, Result};
 use crate::hooks::{self, Hooks};
 use crate::service::Rook;
 
+/// Hand a loop the long-lived parts the front end owns.
+///
+/// A new `AgentLoop` is built for every turn and these are not, so what a turn
+/// inherits is one question — and it was being answered separately by the CLI,
+/// the TUI, the daemon and the editor bridge. Whatever is added here reaches all
+/// four; three of four is how a capability quietly goes missing from one.
+pub fn equip(
+    agent: &mut AgentLoop<'_>,
+    servers: std::sync::Arc<crate::lsp::Servers>,
+    mcp: &crate::McpSession,
+) {
+    agent.servers = servers.clone();
+    crate::lsp::register(&mut agent.tools, servers);
+    for (server, tools) in &mcp.servers {
+        agent.tools.register_server(server.clone(), tools.clone());
+    }
+}
+
 /// Build the language-server pool from configuration.
 ///
 /// Exposed for the same reason as [`policy_for`], and more urgently: a pool

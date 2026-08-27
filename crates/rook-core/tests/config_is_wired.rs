@@ -82,3 +82,59 @@ fn a_disabled_language_server_is_gone_from_every_answer() {
     assert_eq!(effective.len(), 1, "only the enabled one is asked for");
     assert_eq!(effective[0].language, "on");
 }
+
+/// The wiring a turn inherits from its front end was written out four times, and
+/// `rook run` had two thirds of it: MCP servers but no language servers, so a
+/// one-shot turn could not ask the type checker anything the chat could.
+#[test]
+fn equipping_a_loop_gives_it_both_halves() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = rook_store::Store::open(dir.path()).unwrap();
+    let (skills, _) = rook_skills::SkillIndex::discover(&[]);
+    let env = rook_skills::Environment::bare("linux", "x86_64", "0.1.0");
+    let rook = rook_core::Rook::from_parts(
+        store,
+        rook_core::Config::default(),
+        env,
+        skills,
+        dir.path().to_path_buf(),
+    );
+
+    let session = rook.start_session("equipped").unwrap();
+    let provider = std::sync::Arc::new(Silent);
+    let mut agent = rook_core::agent::AgentLoop::new(&rook, provider, session);
+    let before = agent.tools.specs().len();
+
+    let servers = rook_core::lsp::Servers::new(
+        vec![rook_lsp::ServerConfig {
+            language: "rust".into(),
+            command: "does-not-need-to-exist".into(),
+            extensions: vec!["rs".into()],
+            ..Default::default()
+        }],
+        dir.path(),
+    );
+    rook_core::agent::equip(&mut agent, servers, &rook_core::McpSession::default());
+
+    let after: Vec<String> = agent.tools.specs().into_iter().map(|t| t.name).collect();
+    assert!(after.len() > before, "the language-server tools are the ones being counted: {after:?}");
+    assert!(
+        after.iter().any(|n| n.contains("diagnostics")),
+        "a turn that cannot ask what is wrong with a file is missing the point: {after:?}"
+    );
+}
+
+struct Silent;
+
+#[async_trait::async_trait]
+impl rook_llm::Provider for Silent {
+    fn id(&self) -> &str {
+        "test/silent"
+    }
+    fn context_window(&self) -> usize {
+        8192
+    }
+    async fn complete(&self, _: rook_llm::Request) -> rook_llm::Result<rook_llm::Response> {
+        Err(rook_llm::LlmError::Other("not called".into()))
+    }
+}

@@ -172,8 +172,6 @@ async fn turn(
     prompt: &str,
 ) {
     let mut agent = AgentLoop::new(rook, provider.into(), session);
-    agent.servers = shared.servers.clone();
-    rook_core::lsp::register(&mut agent.tools, shared.servers.clone());
     // Even under `--yes`: approving every command is not the same as never
     // wanting to be asked which one to run.
     agent.ask_via(std::sync::Arc::new(crate::approve::Terminal));
@@ -183,9 +181,7 @@ async fn turn(
         agent.policy = shared.policy.clone();
         agent.approver = std::sync::Arc::new(crate::approve::Terminal);
     }
-    for (server, tools) in &shared.mcp.servers {
-        agent.tools.register_server(server.clone(), tools.clone());
-    }
+    rook_core::agent::equip(&mut agent, shared.servers.clone(), &shared.mcp);
     agent.effort = shared.effort.get();
 
     let mut out = std::io::stdout();

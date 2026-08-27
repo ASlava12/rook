@@ -541,9 +541,7 @@ fn cmd_run(
             agent.allow_everything_not_denied();
         }
         let mcp = rook.connect_mcp().await;
-        for (server, tools) in &mcp.servers {
-            agent.tools.register_server(server.clone(), tools.clone());
-        }
+        rook_core::agent::equip(&mut agent, rook_core::agent::servers_for(&rook), &mcp);
         for (name, error) in &mcp.failures {
             eprintln!("mcp {name}: {error}");
         }

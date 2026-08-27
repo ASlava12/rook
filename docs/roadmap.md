@@ -301,6 +301,11 @@ what unblocks the most.
   before checking containment, so a link inside the workspace pointing out of it
   is refused rather than followed, and the refusal says where the path really
   led. Widened only by `sandbox.allow_outside_workspace`. 6 tests.
+- **One answer to what a turn inherits** — the language-server pool and the MCP
+  servers were handed to a new loop by four front ends writing the same three
+  lines, and `rook run` had written two of the three: a one-shot turn could not
+  ask the type checker anything the chat could. `agent::equip` is the one place
+  now, so a part added there reaches all five rather than four. 1 test.
 - **Plugins that package skills and servers together** — `SkillSource::Plugin`
   was declared, ranked against the other sources and given a label, and nothing
   ever constructed it: an API advertising a feature that was not there. A
