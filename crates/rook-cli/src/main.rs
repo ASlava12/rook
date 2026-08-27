@@ -51,14 +51,16 @@ enum Command {
     Doctor,
     /// Talk to the agent interactively.
     Chat {
-        /// Continue an existing session instead of starting one.
+        /// Continue an existing session instead of starting one. `last` is the
+        /// most recent in this workspace.
         #[arg(long)]
         session: Option<String>,
     },
     /// Run a single turn against the configured model.
     Run {
         prompt: Vec<String>,
-        /// Continue an existing session instead of starting one.
+        /// Continue an existing session instead of starting one. `last` is the
+        /// most recent in this workspace.
         #[arg(long)]
         session: Option<String>,
     },
@@ -563,7 +565,7 @@ fn cmd_run(
         .with_context(|| format!("configuring model {:?}", rook.config.agent.model))?;
         let prompt = with_piped_input(&asked, provider.context_window())?;
         let session = match session {
-            Some(s) => session_id(&s)?,
+            Some(s) => rook.session_named(&s)?,
             None => rook.start_session(&first_line(&prompt))?,
         };
         let mut agent = rook_core::agent::AgentLoop::new(&rook, provider.into(), session);

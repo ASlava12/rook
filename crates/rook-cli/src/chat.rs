@@ -44,7 +44,7 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
     .with_context(|| format!("configuring model {:?}", rook.config.agent.model))?;
 
     let mut session = match resume {
-        Some(id) => crate::session_id(&id)?,
+        Some(id) => rook.session_named(&id)?,
         None => rook.start_session("chat")?,
     };
 

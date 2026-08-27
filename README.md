@@ -75,6 +75,7 @@ rook models                                # what the configured provider serves
 
 rook                                       # talk to it
 rook run "summarise what changed in src/"  # one turn, streamed, for scripts
+rook chat --session last                   # pick up where you left off here
 cargo test 2>&1 | rook run "why does this fail?"   # stdin joins the prompt
 rook --json run "..." | jq .outcome.reply  # one object: reply, tokens, changes
                                            # exit 2 if the turn did not finish

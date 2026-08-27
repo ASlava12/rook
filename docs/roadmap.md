@@ -301,6 +301,13 @@ what unblocks the most.
   before checking containment, so a link inside the workspace pointing out of it
   is refused rather than followed, and the refusal says where the path really
   led. Widened only by `sandbox.allow_outside_workspace`. 6 tests.
+- **Picking up where you left off** — continuing meant knowing a session id,
+  twenty-six characters of base32 nobody remembers, so the usual way back to
+  yesterday's work was to list every session and read. `--session last` is the
+  most recent one in *this* workspace; another project's would carry its whole
+  conversation into this one. Sessions of the same second used to come back in
+  whichever order the index held them, so the listing every front end reads now
+  breaks the tie by id, which is time-ordered anyway. 2 tests.
 - **A turn can be stopped from every front end** — the chat REPL cancelled on
   ctrl-c and the browser had a button, and the TUI could only be killed, taking
   the browsing state and any approval granted for the run with it. Ctrl-c stops

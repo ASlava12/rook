@@ -135,3 +135,39 @@ fn deleting_a_session_takes_what_was_kept_beside_it() {
         "retention deletes sessions on a timer, so anything it leaves behind grows without bound"
     );
 }
+
+#[test]
+fn last_means_the_most_recent_session_in_this_workspace() {
+    let dir = tempfile::tempdir().unwrap();
+    let rook = rook(dir.path());
+
+    let elsewhere = rook.start_session("another project").unwrap();
+    let mut meta = rook.store.get_session(elsewhere).unwrap().unwrap();
+    meta.workspace = "/somewhere/else".into();
+    meta.updated_at = rook_store::now_unix() + 3_600;
+    rook.store.create_session(&meta).unwrap();
+
+    let older = rook.start_session("here, first").unwrap();
+    let newer = rook.start_session("here, second").unwrap();
+
+    assert_eq!(
+        rook.session_named("last").unwrap(),
+        newer,
+        "the newest of this workspace, not the newest overall"
+    );
+    assert_eq!(rook.session_named(&rook_store::format_session_id(older)).unwrap(), older);
+    assert!(rook.session_named("LAST").is_ok(), "the word is what matters, not its case");
+}
+
+#[test]
+fn asking_for_last_where_nothing_has_run_says_so_rather_than_naming_a_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let rook = rook(dir.path());
+
+    let err = rook.session_named("last").unwrap_err().to_string();
+    assert!(err.contains("no session has been started"), "{err}");
+    assert!(err.contains(&dir.path().display().to_string()), "and where it looked: {err}");
+
+    let err = rook.session_named("not-an-id").unwrap_err().to_string();
+    assert!(err.contains("neither a session id nor `last`"), "{err}");
+}

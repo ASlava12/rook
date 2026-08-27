@@ -309,8 +309,32 @@ impl Rook {
 
     pub fn sessions(&self) -> Result<Vec<SessionMeta>> {
         let mut list = self.store.list_sessions()?;
-        list.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
+        // The id breaks ties: `updated_at` is whole seconds, and two sessions
+        // started in the same one would otherwise come back in whichever order
+        // the index happened to hold them. A ULID is time-ordered, so this is
+        // the same sort at a finer grain.
+        list.sort_by_key(|s| std::cmp::Reverse((s.updated_at, s.id)));
         Ok(list)
+    }
+
+    /// What a user typed where a session was wanted: an id, or `last` for the
+    /// most recent one in this workspace.
+    ///
+    /// `last` because an id is 26 characters of base32 that nobody remembers,
+    /// and the session you mean is almost always the one you were just in.
+    /// Scoped to the workspace: continuing a session from another project would
+    /// carry its whole conversation into this one.
+    pub fn session_named(&self, spec: &str) -> Result<u128> {
+        if !spec.eq_ignore_ascii_case("last") {
+            return rook_store::parse_session_id(spec)
+                .ok_or_else(|| CoreError::Other(format!("{spec:?} is neither a session id nor `last`")));
+        }
+        let here = self.workspace.display().to_string();
+        self.sessions()?
+            .into_iter()
+            .find(|s| s.workspace == here)
+            .map(|s| s.id)
+            .ok_or_else(|| CoreError::Other(format!("no session has been started in {here} yet")))
     }
 
     /// Sessions as every front end lists them: the stored record joined with the
