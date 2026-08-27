@@ -48,20 +48,36 @@ impl Pty {
     ///
     /// Not "until it goes quiet": the app redraws on a 60ms tick whether or not
     /// anything changed, so the stream never is.
+    /// Waits for a frame, not for a byte: entering the alternate screen writes
+    /// before anything is drawn, and whatever the app does in between — opening
+    /// a store, probing the machine for what skills apply — lands in that gap.
     fn screen(&mut self, cols: usize, rows: usize) -> Vec<String> {
+        let painted = |seen: &str| grid(seen, cols, rows).iter().filter(|line| !line.is_empty()).count();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while painted(&self.seen) <= 3 && std::time::Instant::now() < deadline {
+            assert!(self.read_more(200), "the app drew nothing at all");
+        }
+        // A redraw emits only the cells that changed, so keep accumulating for a
+        // moment rather than stopping at the first frame that looks complete.
+        let settle = std::time::Instant::now() + std::time::Duration::from_millis(400);
+        while std::time::Instant::now() < settle && self.read_more(100) {}
+        grid(&self.seen, cols, rows)
+    }
+
+    /// Whether anything arrived, so a closed pty ends the wait instead of
+    /// spinning it out to the deadline.
+    fn read_more(&mut self, timeout_ms: i32) -> bool {
         let mut chunk = [0u8; 8192];
-        // Generous for the first byte — starting up opens a store and connects
-        // whatever is configured — then a short window to collect the frame.
-        assert!(readable(&self.master, 20_000), "the app drew nothing at all");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(800);
-        while std::time::Instant::now() < deadline && readable(&self.master, 100) {
-            match self.master.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(n) => self.seen.push_str(&String::from_utf8_lossy(&chunk[..n])),
-                Err(_) => break,
+        if !readable(&self.master, timeout_ms) {
+            return true;
+        }
+        match self.master.read(&mut chunk) {
+            Ok(0) | Err(_) => false,
+            Ok(n) => {
+                self.seen.push_str(&String::from_utf8_lossy(&chunk[..n]));
+                true
             }
         }
-        grid(&self.seen, cols, rows)
     }
 
     fn send(&mut self, keys: &str) {

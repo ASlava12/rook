@@ -223,7 +223,7 @@ impl<'a> AgentLoop<'a> {
     /// varies per turn invalidates the cached prefix behind it. Recalled memory
     /// used to live here and now travels next to the prompt instead.
     pub fn system_prompt(&self) -> String {
-        let env = &self.rook.env;
+        let env = self.rook.env();
         let mut s = String::new();
         s.push_str(
             "You are Rook, an autonomous agent working in a local workspace.\n\
@@ -304,7 +304,7 @@ impl<'a> AgentLoop<'a> {
         let mut left = self.budget.window / 4;
         let mut shown = 0;
         for card in applicable {
-            let Ok(resolved) = self.rook.skills().resolve(&card.name, &self.rook.env) else { continue };
+            let Ok(resolved) = self.rook.skills().resolve(&card.name, self.rook.env()) else { continue };
             if card.body_tokens > left {
                 break;
             }
@@ -721,7 +721,7 @@ impl<'a> AgentLoop<'a> {
 
         if call.name == LOAD_SKILL {
             let name = call.arguments.get("name").and_then(|v| v.as_str()).unwrap_or_default();
-            return match self.rook.skills().resolve(name, &self.rook.env) {
+            return match self.rook.skills().resolve(name, self.rook.env()) {
                 Ok(resolved) => {
                     outcome.skills_loaded.push(resolved.skill.id());
                     let body = format!("{}{}", resolved.body, bundled(&resolved.skill));
@@ -734,7 +734,7 @@ impl<'a> AgentLoop<'a> {
                 // otherwise invisible when reading the transcript afterwards.
                 Err(e) => {
                     let mut message = format!("could not load skill {name:?}: {e}");
-                    for card in self.rook.skills().search(name, &self.rook.env, 5) {
+                    for card in self.rook.skills().search(name, self.rook.env(), 5) {
                         message.push_str(&format!("\n- {}: {}", card.name, card.description));
                     }
                     self.rook.log(self.session, EventKind::Error, LOAD_SKILL, &message).ok();

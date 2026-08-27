@@ -119,7 +119,9 @@ into a grid before asserting on it, give the pty a window size or the app draws
 into a zero-sized terminal and emits nothing, and accumulate the stream across
 frames — a redraw after a keypress emits only the cells that changed. Do not
 wait for the output to go quiet: it redraws on a 60 ms tick whether or not
-anything changed.
+anything changed. Wait for a frame rather than for the first byte: entering the
+alternate screen writes before anything is drawn, so work the app does between
+the two lands in the gap and a byte-triggered capture reads a blank screen.
 
 ## Storage changes
 

@@ -311,7 +311,7 @@ pub async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command
             put!("{}", fmt::table(&["", "name", "version", "description"], &rows));
         }
         "skills" => {
-            let resolved = rook.skills().resolve(rest, &rook.env)?;
+            let resolved = rook.skills().resolve(rest, rook.env())?;
             say!("{}", resolved.body);
         }
 

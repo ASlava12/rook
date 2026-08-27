@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
@@ -28,7 +29,10 @@ const MEMORY_LOG: &str = "memory/h/";
 pub struct Rook {
     pub store: Store,
     pub config: Config,
-    pub env: Environment,
+    /// Detected on first use, not on open. Probing sixteen toolchains costs
+    /// about a third of a second warm and over a second cold — more than the
+    /// whole of `session ls`, which never asks what version of Java is here.
+    env: OnceLock<Environment>,
     /// Behind a lock so a skill written mid-run is found by the next turn
     /// without restarting: the front ends hold `Rook` shared and cannot take it
     /// mutably.
@@ -40,6 +44,11 @@ pub struct Rook {
 }
 
 impl Rook {
+    /// The environment skills are resolved against.
+    pub fn env(&self) -> &Environment {
+        self.env.get_or_init(|| Environment::detect(AGENT_VERSION))
+    }
+
     pub fn open(workspace: Option<PathBuf>) -> Result<Self> {
         paths::ensure_dirs().map_err(|e| CoreError::Io { path: paths::home(), source: e })?;
         let workspace =
@@ -47,9 +56,8 @@ impl Rook {
         let config = Config::load()?;
         let mut store = Store::open(paths::store_dir())?;
         store.set_level(config.storage.compression_level);
-        let env = Environment::detect(AGENT_VERSION);
         let (skills, skill_errors) = Self::discover_skills(&workspace);
-        Ok(Self { store, config, env, skills: skills.into(), workspace, skill_errors })
+        Ok(Self { store, config, env: OnceLock::new(), skills: skills.into(), workspace, skill_errors })
     }
 
     /// Assemble a `Rook` from parts instead of from the user's home directory.
@@ -64,7 +72,14 @@ impl Rook {
         skills: SkillIndex,
         workspace: PathBuf,
     ) -> Self {
-        Self { store, config, env, skills: skills.into(), workspace, skill_errors: Vec::new() }
+        Self {
+            store,
+            config,
+            env: OnceLock::from(env),
+            skills: skills.into(),
+            workspace,
+            skill_errors: Vec::new(),
+        }
     }
 
     fn discover_skills(workspace: &Path) -> (SkillIndex, Vec<String>) {
@@ -91,7 +106,7 @@ impl Rook {
     }
 
     pub fn catalog(&self) -> Vec<SkillCard> {
-        self.skills().catalog(&self.env)
+        self.skills().catalog(self.env())
     }
 
     // ------------------------------------------------------- skill versioning
@@ -172,7 +187,7 @@ impl Rook {
         let _ = self.capture_skill(name, Some("automatic capture before rollback".into()));
         let dest = self
             .skills()
-            .resolve(name, &self.env)
+            .resolve(name, self.env())
             .map(|r| r.skill.dir.clone())
             .unwrap_or_else(|_| paths::user_skills_dir().join(name));
         let restored = set.restore(&self.store, &dest)?;
@@ -210,7 +225,7 @@ impl Rook {
                 "{name:?} is not a usable skill name — lower-case letters, digits and hyphens only"
             )));
         }
-        if let Ok(existing) = self.skills().resolve(name, &self.env)
+        if let Ok(existing) = self.skills().resolve(name, self.env())
             && existing.skill.source != SkillSource::User
         {
             return Err(CoreError::Other(format!(
@@ -249,7 +264,7 @@ impl Rook {
         }
         std::fs::create_dir_all(dir.join("references"))
             .map_err(|e| CoreError::Io { path: dir.clone(), source: e })?;
-        let body = skill_template(name, description, &self.env);
+        let body = skill_template(name, description, self.env());
         std::fs::write(dir.join("SKILL.md"), body)
             .map_err(|e| CoreError::Io { path: dir.join("SKILL.md"), source: e })?;
         Ok(dir)
@@ -987,4 +1002,39 @@ fn skill_template(name: &str, description: &str, env: &Environment) -> String {
          1. ...\n",
         os = env.os,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unprobed(dir: &Path) -> Rook {
+        let (skills, _) = SkillIndex::discover(&[]);
+        Rook {
+            store: Store::open(dir).unwrap(),
+            config: Config::default(),
+            env: OnceLock::new(),
+            skills: skills.into(),
+            workspace: dir.to_path_buf(),
+            skill_errors: Vec::new(),
+        }
+    }
+
+    /// Detection spawns sixteen processes — `java -version` starts a JVM — and
+    /// took longer than the whole of `session ls`, which never asks.
+    #[test]
+    fn nothing_that_ignores_skills_pays_for_probing_the_machine() {
+        let dir = tempfile::tempdir().unwrap();
+        let rook = unprobed(dir.path());
+
+        let session = rook.start_session("no skills involved").unwrap();
+        rook.set_goal(session, "prove the probes stay unspawned").unwrap();
+        rook.sessions().unwrap();
+        rook.stats().unwrap();
+        rook.transcript(session, 0, 10, 100).unwrap();
+        assert!(rook.env.get().is_none(), "the machine was probed for a command that ignores it");
+
+        rook.catalog();
+        assert!(rook.env.get().is_some(), "and probed once something has to be resolved against it");
+    }
 }

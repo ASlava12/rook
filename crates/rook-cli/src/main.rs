@@ -355,10 +355,10 @@ fn cmd_init(workspace: Option<PathBuf>) -> Result<()> {
 
 fn cmd_doctor(rook: &Rook, json: bool) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string_pretty(&rook.env)?);
+        println!("{}", serde_json::to_string_pretty(rook.env())?);
         return Ok(());
     }
-    let env = &rook.env;
+    let env = rook.env();
     println!("rook {AGENT_VERSION}");
     println!("os        {} ({} userland)", env.os, env.userland);
     println!("arch      {}", env.arch);
@@ -1065,7 +1065,7 @@ fn cmd_skills(source: &Source, cmd: SkillCmd, json: bool) -> Result<()> {
     match cmd {
         SkillCmd::Ls { .. } => unreachable!("routed above"),
         SkillCmd::Show { name } => {
-            let resolved = rook.skills().resolve(&name, &rook.env)?;
+            let resolved = rook.skills().resolve(&name, rook.env())?;
             if json {
                 println!(
                     "{}",
@@ -1098,10 +1098,15 @@ fn cmd_skills(source: &Source, cmd: SkillCmd, json: bool) -> Result<()> {
             if versions.is_empty() {
                 bail!("no skill named {name:?}");
             }
-            println!("environment: {} / {} / {} userland", rook.env.os, rook.env.arch, rook.env.userland);
+            println!(
+                "environment: {} / {} / {} userland",
+                rook.env().os,
+                rook.env().arch,
+                rook.env().userland
+            );
             println!();
             for skill in &versions {
-                let mismatches = skill.manifest.requires.check(&rook.env);
+                let mismatches = skill.manifest.requires.check(rook.env());
                 if mismatches.is_empty() {
                     println!("  ✓ {} [{}] applies", skill.id(), skill.source.label());
                 } else {
@@ -1112,7 +1117,7 @@ fn cmd_skills(source: &Source, cmd: SkillCmd, json: bool) -> Result<()> {
                 }
             }
             println!();
-            match rook.skills().resolve(&name, &rook.env) {
+            match rook.skills().resolve(&name, rook.env()) {
                 Ok(r) => println!("chosen: {} [{}]", r.skill.id(), r.skill.source.label()),
                 Err(e) => println!("chosen: none — {e}"),
             }

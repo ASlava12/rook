@@ -46,7 +46,7 @@ fn a_written_skill_is_loadable_without_restarting() {
     let f = fixture();
     f.rook.write_skill(&skill("reproducible-build", "Run `cargo xtask ci`.")).unwrap();
 
-    let resolved = f.rook.skills().resolve("reproducible-build", &f.rook.env).unwrap();
+    let resolved = f.rook.skills().resolve("reproducible-build", f.rook.env()).unwrap();
     assert!(resolved.body.contains("cargo xtask ci"));
     assert_eq!(resolved.skill.manifest.description, "Build this project reproducibly.");
     assert_eq!(resolved.skill.manifest.keywords, ["build"]);
@@ -60,7 +60,7 @@ fn a_written_skill_is_captured_as_a_version() {
 
     let history = f.rook.skill_history("versioned").unwrap();
     assert_eq!(history.len(), 2, "rewriting keeps the old version: {history:?}");
-    assert!(f.rook.skills().resolve("versioned", &f.rook.env).unwrap().body.contains("Second"));
+    assert!(f.rook.skills().resolve("versioned", f.rook.env()).unwrap().body.contains("Second"));
 }
 
 #[test]
@@ -70,7 +70,7 @@ fn requirements_travel_into_the_frontmatter_and_gate_the_skill() {
     authored.requires = Requirements { os: vec!["freebsd".into()], ..Default::default() };
     f.rook.write_skill(&authored).unwrap();
 
-    let err = f.rook.skills().resolve("bsd-only", &f.rook.env).unwrap_err().to_string();
+    let err = f.rook.skills().resolve("bsd-only", f.rook.env()).unwrap_err().to_string();
     assert!(err.contains("freebsd"), "a skill that claims freebsd must not fire on linux: {err}");
 
     let card = f.rook.catalog().into_iter().find(|c| c.name == "bsd-only").unwrap();

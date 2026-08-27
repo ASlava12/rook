@@ -301,6 +301,11 @@ what unblocks the most.
   before checking containment, so a link inside the workspace pointing out of it
   is refused rather than followed, and the refusal says where the path really
   led. Widened only by `sandbox.allow_outside_workspace`. 6 tests.
+- **The machine is probed when a skill needs it, not when the store opens** —
+  `Rook::open` detected sixteen toolchains, `java -version` among them, before
+  running anything: about a third of a second warm and over a second cold, on
+  every command. `session ls` went from 450 ms to 49 ms; the commands that
+  resolve a skill pay it once, where it buys something. 1 test.
 - **A server's tools are not trusted because the server says so** — an MCP tool
   fell through to the trait's default risk, which is read-only, and read-only
   returns before the deny list, before `readonly` mode and before every rule: any

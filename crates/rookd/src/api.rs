@@ -90,8 +90,8 @@ async fn health(State(s): State<Shared>) -> ApiResult<Health> {
         api_version: API_VERSION,
         store_root: rook.store.root().display().to_string(),
         workspace: rook.workspace.display().to_string(),
-        os: rook.env.os.clone(),
-        arch: rook.env.arch.clone(),
+        os: rook.env().os.clone(),
+        arch: rook.env().arch.clone(),
         uptime_secs: s.started.elapsed().as_secs(),
     }))
 }
@@ -332,7 +332,7 @@ async fn skills(State(s): State<Shared>) -> ApiResult<Page<rook_skills::SkillCar
 
 async fn skill(State(s): State<Shared>, Path(name): Path<String>) -> ApiResult<serde_json::Value> {
     let rook = s.rook.read().await;
-    let resolved = rook.skills().resolve(&name, &rook.env).map_err(CoreError::from)?;
+    let resolved = rook.skills().resolve(&name, rook.env()).map_err(CoreError::from)?;
     Ok(Json(serde_json::json!({
         "name": resolved.skill.manifest.name,
         "version": resolved.skill.version().to_string(),

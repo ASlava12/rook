@@ -272,7 +272,7 @@ async fn the_loop_stops_at_max_steps_instead_of_spinning() {
     let rook = Rook::from_parts(
         Store::open(f._store_dir.path().join("second")).unwrap(),
         config,
-        f.rook.env.clone(),
+        f.rook.env().clone(),
         SkillIndex::default(),
         PathBuf::from(f.workspace.path()),
     );
@@ -713,7 +713,7 @@ async fn the_deny_list_holds_even_with_everything_else_allowed() {
     let rook = Rook::from_parts(
         Store::open(f._store_dir.path().join("deny")).unwrap(),
         config,
-        f.rook.env.clone(),
+        f.rook.env().clone(),
         SkillIndex::default(),
         PathBuf::from(f.workspace.path()),
     );
@@ -859,7 +859,7 @@ fn hooked(f: &Fixture, hooks: Vec<rook_core::hooks::HookConfig>) -> Rook {
     Rook::from_parts(
         Store::open(f._store_dir.path().join(format!("h{}", hooks_seed()))).unwrap(),
         config,
-        f.rook.env.clone(),
+        f.rook.env().clone(),
         SkillIndex::default(),
         PathBuf::from(f.workspace.path()),
     )
@@ -910,7 +910,7 @@ async fn a_hook_cannot_unlock_what_the_deny_list_forbids() {
     let rook = Rook::from_parts(
         Store::open(f._store_dir.path().join("hook-deny")).unwrap(),
         config,
-        f.rook.env.clone(),
+        f.rook.env().clone(),
         SkillIndex::default(),
         PathBuf::from(f.workspace.path()),
     );
@@ -1092,7 +1092,7 @@ async fn the_parallel_limit_is_respected() {
     let rook = Rook::from_parts(
         Store::open(f._store_dir.path().join("serial")).unwrap(),
         config,
-        f.rook.env.clone(),
+        f.rook.env().clone(),
         SkillIndex::default(),
         PathBuf::from(f.workspace.path()),
     );
@@ -1249,7 +1249,7 @@ async fn planning_can_be_turned_off() {
     let rook = Rook::from_parts(
         Store::open(f._store_dir.path().join("noplan")).unwrap(),
         config,
-        f.rook.env.clone(),
+        f.rook.env().clone(),
         SkillIndex::default(),
         PathBuf::from(f.workspace.path()),
     );
@@ -1369,7 +1369,7 @@ async fn the_configured_effort_reaches_the_request() {
     let rook = Rook::from_parts(
         Store::open(f._store_dir.path().join("effort")).unwrap(),
         config,
-        f.rook.env.clone(),
+        f.rook.env().clone(),
         SkillIndex::default(),
         PathBuf::from(f.workspace.path()),
     );
@@ -1723,7 +1723,7 @@ fn with_config(f: &Fixture, name: &str, config: Config) -> Rook {
     Rook::from_parts(
         Store::open(f._store_dir.path().join(name)).unwrap(),
         config,
-        f.rook.env.clone(),
+        f.rook.env().clone(),
         skills,
         PathBuf::from(f.workspace.path()),
     )
@@ -1909,7 +1909,7 @@ async fn a_loaded_skill_names_the_files_bundled_with_it() {
     let rook = Rook::from_parts(
         Store::open(f._store_dir.path().join("bundled")).unwrap(),
         Config::default(),
-        f.rook.env.clone(),
+        f.rook.env().clone(),
         skills,
         PathBuf::from(f.workspace.path()),
     );
