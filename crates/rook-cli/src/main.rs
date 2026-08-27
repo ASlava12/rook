@@ -235,9 +235,10 @@ enum SessionCmd {
     /// Show what a session is costing in context, and of what.
     Context {
         id: String,
-        /// Model context window to measure against.
-        #[arg(long, default_value_t = 128_000)]
-        window: usize,
+        /// Model context window to measure against. Defaults to the configured
+        /// model's own, which is the number the agent budgets against.
+        #[arg(long)]
+        window: Option<usize>,
     },
     /// What a session changed on disk, from its own checkpoints.
     Diff {
@@ -1100,6 +1101,9 @@ fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, json: bool) -
             }
         }
         SessionCmd::Context { id, window } => {
+            // A constant here reported a percentage of a window the agent does
+            // not have: a session at 55% of a 6k model reads as 1% of 128k.
+            let window = window.unwrap_or_else(|| configured_window(rook));
             let usage = rook.context_usage(rook.session_named(&id)?, window)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&usage)?);
@@ -1581,6 +1585,16 @@ fn cmd_memory(rook: &Rook, cmd: MemoryCmd, json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// What the agent would budget against: the override if there is one, else what
+/// the provider says its model holds.
+fn configured_window(rook: &Rook) -> usize {
+    rook.config.agent.context_window.unwrap_or_else(|| {
+        rook_llm::from_spec_with(&rook.config.agent.model, rook.config.agent.stream_idle(), None)
+            .map(|p| p.context_window())
+            .unwrap_or(128_000)
+    })
 }
 
 fn cmd_mcp(workspace: Option<PathBuf>, cmd: McpCmd, json: bool) -> Result<()> {

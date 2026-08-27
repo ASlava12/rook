@@ -543,6 +543,12 @@ like to something that has to act on it.
   say what it was about to do, says that no other tool and no sub-agent gets past
   it, and addresses the remedies to the user. The same task: four steps, 8,498
   tokens, twenty-three seconds, and an answer worth reading. 1 test.
+- **`session context` measured against a window nobody had** — it defaulted to
+  128,000 tokens whatever model was configured, so a session at 55% of a 6k
+  window read as 1% — the difference between "about to compact" and "nothing to
+  think about". It uses the configured model's own window, and `--window` still
+  asks about another. Found while watching compaction run against a live model.
+  1 test.
 - **A turn says what it changed about what it believes** — the live run that
   found the above also showed an agent deleting a fact the user had asked it to
   remember, and saying nothing about it in any front end. `facts_learned` was

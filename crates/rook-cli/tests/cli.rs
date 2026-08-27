@@ -614,3 +614,19 @@ fn memory_ls_says_when_pinning_has_outgrown_the_recall_budget() {
     assert!(said.contains("recall budget of 20"), "{said}");
     assert!(said.contains("will not reach the model"), "{said}");
 }
+
+/// The window was a constant, so the report described a model nobody was using:
+/// a session at 55% of a 6k window read as 1% of 128k, which is the difference
+/// between "about to compact" and "nothing to think about".
+#[test]
+fn session_context_measures_against_the_model_that_is_configured() {
+    let rook = Rook::new();
+    rook.write_config("[agent]\nmodel = \"ollama/small\"\ncontext_window = 6000\n");
+    rook.chat("/quit\n");
+
+    let said = rook.ok(&["session", "context", "last"]);
+    assert!(said.contains("window            6000"), "{said}");
+
+    let overridden = rook.ok(&["session", "context", "last", "--window", "128000"]);
+    assert!(overridden.contains("128000"), "and it can still be asked about another: {overridden}");
+}
