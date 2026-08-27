@@ -301,6 +301,15 @@ what unblocks the most.
   before checking containment, so a link inside the workspace pointing out of it
   is refused rather than followed, and the refusal says where the path really
   led. Widened only by `sandbox.allow_outside_workspace`. 6 tests.
+- **A question to a person cannot wait forever, or lose its answer** — how long
+  to wait was a number written out four times, twice as 300 seconds and twice as
+  600, and configurable nowhere; it is `[agent] answer_timeout_secs` now. Over
+  ACP there was no bound at all: an editor that showed the dialog and never
+  answered held the turn, its language servers and the store's write lock for
+  the life of the connection, and the unanswered request stayed in the map
+  beside them. Both sides also resolved answers under `try_lock` and dropped the
+  answer when it failed — rare, and not reproducible on demand, which is why the
+  branch is gone rather than guarded. 3 tests.
 - **A turn a script can read** — `rook run` is the command the README calls
   "for scripts" and the only one that ignored `--json`, so a caller had to parse
   a stream meant for a person. It emits one object: the reply, why the turn

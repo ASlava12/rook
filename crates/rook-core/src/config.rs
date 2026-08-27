@@ -74,6 +74,11 @@ pub struct AgentConfig {
     /// year would otherwise pay for all of them; the ones left out are still
     /// reachable, because `load_skill` answers a miss with what it does have.
     pub max_skill_cards: usize,
+    /// How long a question put to the person — an approval, or the `ask` tool —
+    /// waits before it counts as unanswered. A closed tab or an abandoned
+    /// terminal would otherwise hold the turn, and the store's write lock with
+    /// it, for as long as the process lives.
+    pub answer_timeout_secs: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -160,6 +165,7 @@ impl Default for AgentConfig {
             max_parallel_subagents: 4,
             max_skill_cards: 50,
             stream_idle_timeout_secs: 90,
+            answer_timeout_secs: 600,
         }
     }
 }
@@ -237,6 +243,10 @@ impl AgentConfig {
     /// reason to stop working.
     pub fn effort(&self) -> rook_llm::Effort {
         rook_llm::Effort::parse(&self.effort).unwrap_or_default()
+    }
+
+    pub fn answer_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.answer_timeout_secs)
     }
 
     pub fn stream_idle(&self) -> std::time::Duration {

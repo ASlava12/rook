@@ -318,3 +318,33 @@ merges duplicate rows in a Go usage table. openhands #16931 skips onboarding
 when a local backend already has a usable model — a good idea for a first run,
 but Rook's first failure already names what to do, and detecting a running
 Ollama is a separate piece of work rather than this one.
+
+**2026-08-27 (fifteenth pass)** — hermes 21, codex 2.
+
+hermes' approval work — clamping `approvals.timeout` at the config-read
+chokepoint (#83220), failing closed when the deadline import is missing,
+enforcing an explicit timeout on the guardian call, clamping the authorization
+gate's lock timeout — is one concern in four commits: a question put to a person
+must be bounded, and must fail closed when it is not answered. Rook was bounded
+in two front ends and unbounded in the third. Over ACP an editor that opened the
+permission dialog and never answered held the turn, its language servers and the
+store's single write lock for the life of the connection. The bound was also a
+number written out four times, twice as 300 seconds and twice as 600, and
+settable nowhere.
+
+Their `fix(hermes_cli): stop config set/unset from wiping user overrides on
+invalid YAML` was checked here and does not apply: `Config::load` refuses a
+malformed file and nothing writes over one it could not read — `rook init`
+against a broken `config.toml` fails and leaves the file untouched.
+
+codex #41094 requires synchronous review for sensitive MCP actions, a follow-up
+to the #41072 acted on last pass. Rook has no deferred-approval path to make
+synchronous: `decide` returns `Ask`, the approver is awaited, and the default
+approver refuses. What it did lack was the bound above, which is the same
+concern from the other end.
+
+Dismissed: hermes' remaining seventeen are internals of their own desktop,
+gateway, cron and conformance work. codex #41087 exposes usage metadata in
+completion events; Rook carries it on `Delta::Done` and accumulates it in the
+turn's outcome, but does not report a running total mid-turn — worth doing, and
+not this.

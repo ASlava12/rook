@@ -84,7 +84,7 @@ where
         // A reply to something we asked, rather than a request of its own.
         if message.method.is_none() {
             if let Some(id) = message.id.as_ref().and_then(|i| i.as_u64()) {
-                peer.resolve(id, message.result.unwrap_or(serde_json::Value::Null));
+                peer.resolve(id, message.result.unwrap_or(serde_json::Value::Null)).await;
             }
             continue;
         }
@@ -319,7 +319,11 @@ async fn prompt(
     let mut agent = AgentLoop::new(&rook, provider.into(), session);
     agent.policy = shared.policy.clone();
     rook_core::agent::equip(&mut agent, shared.servers.clone(), &shared.mcp);
-    let editor = Arc::new(EditorApprover { peer: peer.clone(), session: request.session_id.clone() });
+    let editor = Arc::new(EditorApprover {
+        peer: peer.clone(),
+        session: request.session_id.clone(),
+        patience: rook.config.agent.answer_timeout(),
+    });
     agent.approver = editor.clone();
     agent.ask_via(editor);
     agent.effort = setup.effort;
@@ -420,17 +424,36 @@ impl Peer {
     }
 
     async fn request(&self, method: &str, params: serde_json::Value) -> Option<serde_json::Value> {
+        self.request_within(method, params, None).await
+    }
+
+    /// `None` waits as long as the client takes, which is right for a terminal
+    /// whose command is still running and wrong for a question to a person who
+    /// may never come back to it.
+    async fn request_within(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        limit: Option<std::time::Duration>,
+    ) -> Option<serde_json::Value> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.waiting.lock().await.insert(id, tx);
         self.send(&protocol::Request { jsonrpc: "2.0", id, method, params });
-        rx.await.ok()
+        let answer = match limit {
+            None => rx.await.ok(),
+            Some(limit) => tokio::time::timeout(limit, rx).await.ok().and_then(Result::ok),
+        };
+        if answer.is_none() {
+            // Nothing will resolve it now, and the entry would otherwise sit in
+            // the map for the life of the connection.
+            self.waiting.lock().await.remove(&id);
+        }
+        answer
     }
 
-    fn resolve(&self, id: u64, result: serde_json::Value) {
-        if let Ok(mut waiting) = self.waiting.try_lock()
-            && let Some(tx) = waiting.remove(&id)
-        {
+    async fn resolve(&self, id: u64, result: serde_json::Value) {
+        if let Some(tx) = self.waiting.lock().await.remove(&id) {
             let _ = tx.send(result);
         }
     }
@@ -440,6 +463,7 @@ impl Peer {
 struct EditorApprover {
     peer: Arc<Peer>,
     session: String,
+    patience: std::time::Duration,
 }
 
 #[async_trait]
@@ -455,8 +479,14 @@ impl Approver for EditorApprover {
             ],
         });
 
-        let Some(answer) = self.peer.request("session/request_permission", params).await else {
-            return Approval::Deny("the editor closed the connection".into());
+        let Some(answer) =
+            self.peer.request_within("session/request_permission", params, Some(self.patience)).await
+        else {
+            return Approval::Deny(format!(
+                "the editor did not answer within {}s — raise `[agent] answer_timeout_secs` if that \
+                 is too short",
+                self.patience.as_secs()
+            ));
         };
         // A `cancelled` outcome means the turn is being torn down, not that the
         // user chose to refuse this one thing.
@@ -509,7 +539,7 @@ impl EditorApprover {
 
         let picked = self
             .peer
-            .request("session/request_permission", params)
+            .request_within("session/request_permission", params, Some(self.patience))
             .await
             .filter(|a| a.pointer("/outcome/outcome").and_then(|o| o.as_str()) == Some("selected"))
             .and_then(|a| a.pointer("/outcome/optionId")?.as_str()?.parse::<usize>().ok())

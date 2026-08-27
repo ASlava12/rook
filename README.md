@@ -243,6 +243,10 @@ select in the browser, and a session config option over ACP — all the same
 policy. `rook --yes` skips the prompts for one run. Unattended runs with no `--yes`
 refuse rather than improvise, and say what would have made it possible.
 
+A question put to a person is bounded by `[agent] answer_timeout_secs` (ten
+minutes). A closed tab or an abandoned terminal would otherwise hold the turn —
+and the store's single write lock with it — for as long as the process lives.
+
 Logs go to stderr and to `$ROOK_HOME/logs/rook.log`, at `telemetry.log_level`
 unless `ROOK_LOG` says otherwise, rotated once at `telemetry.max_log_bytes` so
 they cost at most twice it. Nothing is uploaded anywhere; `telemetry.upload`

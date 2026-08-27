@@ -186,6 +186,7 @@ impl App {
 
         // Connected before the struct takes the runtime, since it needs both.
         let mcp = Arc::new(runtime.block_on(rook.connect_mcp()));
+        let patience = rook.config.agent.answer_timeout();
 
         let mut app = Self {
             rook: rook.clone(),
@@ -193,8 +194,8 @@ impl App {
             chat: Chat::default(),
             events,
             to_loop,
-            approver: Arc::new(ChannelApprover::new(requests, Duration::from_secs(600))),
-            asker: Arc::new(ChannelAsker::new(questions, Duration::from_secs(600))),
+            approver: Arc::new(ChannelApprover::new(requests, patience)),
+            asker: Arc::new(ChannelAsker::new(questions, patience)),
             shared: crate::chat::Session {
                 policy: rook_core::agent::policy_for(&rook),
                 effort: std::cell::Cell::new(rook.config.agent.effort()),

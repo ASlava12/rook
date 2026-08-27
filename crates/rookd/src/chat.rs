@@ -40,8 +40,9 @@ async fn serve(socket: WebSocket, state: Arc<AppState>) {
         }
     });
 
-    let (approver, relay) = approver(outbound.clone());
-    let (asker, ask_relay) = asker(outbound.clone());
+    let patience = state.rook.read().await.config.agent.answer_timeout();
+    let (approver, relay) = approver(outbound.clone(), patience);
+    let (asker, ask_relay) = asker(outbound.clone(), patience);
     // Per connection, not per prompt: connecting MCP servers and starting
     // language servers is expensive, and an approval granted for the run has to
     // survive the turn it was granted in.
@@ -243,7 +244,10 @@ impl Settings {
 }
 
 /// Relays the agent's questions to the browser and routes the answers back.
-fn asker(outbound: mpsc::UnboundedSender<ChatEvent>) -> (Arc<ChannelAsker>, tokio::task::JoinHandle<()>) {
+fn asker(
+    outbound: mpsc::UnboundedSender<ChatEvent>,
+    patience: std::time::Duration,
+) -> (Arc<ChannelAsker>, tokio::task::JoinHandle<()>) {
     let (requests, mut incoming) = mpsc::unbounded_channel::<AskRequest>();
     let relay = tokio::spawn(async move {
         while let Some(request) = incoming.recv().await {
@@ -257,12 +261,13 @@ fn asker(outbound: mpsc::UnboundedSender<ChatEvent>) -> (Arc<ChannelAsker>, toki
             }
         }
     });
-    (Arc::new(ChannelAsker::new(requests, std::time::Duration::from_secs(300))), relay)
+    (Arc::new(ChannelAsker::new(requests, patience)), relay)
 }
 
 /// Relays approval requests to the browser and routes the answers back.
 fn approver(
     outbound: mpsc::UnboundedSender<ChatEvent>,
+    patience: std::time::Duration,
 ) -> (Arc<ChannelApprover>, tokio::task::JoinHandle<()>) {
     let (requests, mut incoming) = mpsc::unbounded_channel::<rook_tools::policy::ApprovalRequest>();
     let relay = tokio::spawn(async move {
@@ -277,5 +282,5 @@ fn approver(
             }
         }
     });
-    (Arc::new(ChannelApprover::new(requests, std::time::Duration::from_secs(300))), relay)
+    (Arc::new(ChannelApprover::new(requests, patience)), relay)
 }

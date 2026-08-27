@@ -8,7 +8,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use tokio::sync::{Mutex, mpsc::UnboundedSender, oneshot};
+use std::sync::Mutex;
+
+use tokio::sync::{mpsc::UnboundedSender, oneshot};
 
 #[derive(Debug)]
 pub enum Unanswered {
@@ -31,6 +33,10 @@ impl std::fmt::Display for Unanswered {
 
 pub struct Pending<Q, A> {
     requests: UnboundedSender<Q>,
+    /// A plain mutex, never held across an await: the answer arrives on a key
+    /// press in the TUI, which is not async, and `try_lock` there dropped the
+    /// answer on the floor whenever a second question was in flight — the person
+    /// had answered and then waited out the whole timeout for nothing.
     waiting: Mutex<HashMap<String, oneshot::Sender<A>>>,
     next_id: AtomicU64,
     patience: Duration,
@@ -47,17 +53,17 @@ impl<Q, A> Pending<Q, A> {
     pub async fn ask(&self, build: impl FnOnce(String) -> Q) -> Result<A, Unanswered> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed).to_string();
         let (tx, rx) = oneshot::channel();
-        self.waiting.lock().await.insert(id.clone(), tx);
+        self.hold().insert(id.clone(), tx);
 
         if self.requests.send(build(id.clone())).is_err() {
-            self.waiting.lock().await.remove(&id);
+            self.hold().remove(&id);
             return Err(Unanswered::NoListener);
         }
         match tokio::time::timeout(self.patience, rx).await {
             Ok(Ok(answer)) => Ok(answer),
             Ok(Err(_)) => Err(Unanswered::Dropped),
             Err(_) => {
-                self.waiting.lock().await.remove(&id);
+                self.hold().remove(&id);
                 Err(Unanswered::Silence(self.patience))
             }
         }
@@ -66,10 +72,14 @@ impl<Q, A> Pending<Q, A> {
     /// Ignored when the id is unknown, which is what a late or duplicate answer
     /// looks like after the wait has already given up.
     pub fn answer(&self, id: &str, answer: A) {
-        if let Ok(mut waiting) = self.waiting.try_lock()
-            && let Some(tx) = waiting.remove(id)
-        {
+        if let Some(tx) = self.hold().remove(id) {
             let _ = tx.send(answer);
         }
+    }
+
+    /// A poisoned map is one a panicking asker left mid-insert; the entries are
+    /// still sound, and refusing to answer anything afterwards is worse.
+    fn hold(&self) -> std::sync::MutexGuard<'_, HashMap<String, oneshot::Sender<A>>> {
+        self.waiting.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
