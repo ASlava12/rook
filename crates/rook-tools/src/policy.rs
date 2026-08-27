@@ -51,6 +51,14 @@ pub enum Risk {
     ReadOnly,
     Write(Vec<String>),
     Execute(String),
+    /// A call into an MCP server's tool. Rook cannot see what one does, and the
+    /// protocol's `readOnlyHint` is the claim of the very party whose behaviour
+    /// is in question — so it goes through the policy like anything else that
+    /// leaves the agent, and the claim is only repeated to the user.
+    External {
+        name: String,
+        claims_read_only: bool,
+    },
 }
 
 impl Risk {
@@ -65,6 +73,7 @@ impl Risk {
             Risk::ReadOnly => Some(Vec::new()),
             Risk::Write(paths) => Some(paths.clone()),
             Risk::Execute(line) => commands_in(line),
+            Risk::External { name, .. } => Some(vec![name.clone()]),
         }
     }
 
@@ -74,6 +83,7 @@ impl Risk {
             Risk::ReadOnly => String::new(),
             Risk::Write(paths) => paths.join(" "),
             Risk::Execute(command) => command.clone(),
+            Risk::External { name, .. } => name.clone(),
         }
     }
 
@@ -82,6 +92,10 @@ impl Risk {
             Risk::ReadOnly => "read".into(),
             Risk::Write(paths) => format!("write {}", paths.join(", ")),
             Risk::Execute(command) => format!("run `{command}`"),
+            Risk::External { name, claims_read_only } => format!(
+                "call the MCP tool `{name}`{}",
+                if *claims_read_only { ", which its server calls read-only" } else { "" }
+            ),
         }
     }
 }

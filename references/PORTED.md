@@ -292,3 +292,29 @@ thirty-odd commits under `agent`, `tools`, `context`, `tui`, `cli` and `memory`.
 - opencode `c2eacd7`, codex `daa3eaf`, hermes `15b673d` — **not applicable**:
   a Next.js redirect fix, a model-gating rule, and a provider change with no
   counterpart here.
+
+**2026-08-27 (fourteenth pass)** — cline 5, hermes 4, codex 2, opencode 1,
+openhands 1.
+
+One of the thirteen was worth acting on, and it found a hole here rather than
+something to port. codex #41072 forwards the model's confirmation policy to
+tools reached through MCP; Rook did not have that policy to forward. `McpTool`
+never implemented `risk`, so it inherited the trait's default — `ReadOnly` — and
+`Policy::decide` returns `Allow` for read-only before it consults the deny list,
+before it checks `readonly` mode and before any rule. Every tool of every
+connected server ran unasked, in every mode. MCP tools are now their own risk,
+matched by the namespaced name they are called by.
+
+The protocol offers `readOnlyHint`, which is the obvious thing to trust and the
+wrong thing to trust: it is the claim of the party whose behaviour is in
+question. It is parsed, shown to the user in the approval prompt, and does not
+decide.
+
+Dismissed: cline's Windows Authenticode installer (#13607) is the certificate
+problem already on the roadmap; its desktop work on scheduled-task output,
+schedule listing and voice-badge tooltips (#13610–13613) has no counterpart
+here. hermes' four are internals of their own compression path. opencode #45503
+merges duplicate rows in a Go usage table. openhands #16931 skips onboarding
+when a local backend already has a usable model — a good idea for a first run,
+but Rook's first failure already names what to do, and detecting a running
+Ollama is a separate piece of work rather than this one.

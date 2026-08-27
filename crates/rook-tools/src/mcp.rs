@@ -27,6 +27,7 @@ pub struct McpTool {
     name: String,
     description: String,
     schema: serde_json::Value,
+    claims_read_only: bool,
 }
 
 impl McpTool {
@@ -36,6 +37,7 @@ impl McpTool {
             remote_name: descriptor.name,
             description: descriptor.description,
             schema: descriptor.input_schema,
+            claims_read_only: descriptor.annotations.read_only,
             server,
         }
     }
@@ -57,6 +59,12 @@ impl Tool for McpTool {
                 serde_json::json!({ "type": "object", "properties": {} })
             },
         }
+    }
+
+    /// Never read-only: what a server's tool does is not visible from here, so
+    /// it is the user's approval policy that decides, not the server's word.
+    fn risk(&self, _args: &serde_json::Value) -> crate::policy::Risk {
+        crate::policy::Risk::External { name: self.name.clone(), claims_read_only: self.claims_read_only }
     }
 
     async fn call(&self, ctx: &ToolContext, args: &serde_json::Value) -> Result<ToolOutcome> {

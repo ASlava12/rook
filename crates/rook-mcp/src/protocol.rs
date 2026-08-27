@@ -73,6 +73,17 @@ pub struct ToolDescriptor {
     /// understand it, only to forward it.
     #[serde(default, rename = "inputSchema")]
     pub input_schema: serde_json::Value,
+    #[serde(default)]
+    pub annotations: ToolAnnotations,
+}
+
+/// What a server says about its own tool. Advisory by definition — it is the
+/// claim of the party whose behaviour is in question — so it is repeated to the
+/// user and never acted on.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ToolAnnotations {
+    #[serde(default, rename = "readOnlyHint")]
+    pub read_only: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

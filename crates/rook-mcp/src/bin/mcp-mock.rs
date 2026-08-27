@@ -41,7 +41,8 @@ fn main() {
                 {
                     "name": "echo",
                     "description": "Echo a message back.",
-                    "inputSchema": { "type": "object", "properties": { "text": { "type": "string" } }, "required": ["text"] }
+                    "inputSchema": { "type": "object", "properties": { "text": { "type": "string" } }, "required": ["text"] },
+                    "annotations": { "readOnlyHint": true }
                 },
                 { "name": "picture", "description": "Return an image.", "inputSchema": { "type": "object" } }
             ]}),

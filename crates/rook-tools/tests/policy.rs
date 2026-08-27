@@ -256,3 +256,51 @@ mod writing {
         assert!(!allowed("crates/build.rs"), "someone who wrote an anchor meant it");
     }
 }
+
+fn mcp(name: &str, claims_read_only: bool) -> Risk {
+    Risk::External { name: name.into(), claims_read_only }
+}
+
+/// An MCP tool inherited the trait's default risk, which is `ReadOnly` — and
+/// `ReadOnly` returns before the deny list, before read-only mode and before
+/// every rule. Any tool any connected server advertised ran unasked.
+#[test]
+fn an_mcp_tool_is_not_read_only_just_because_its_server_says_so() {
+    let p = policy(Mode::Ask, &[], &[], &[]);
+    assert_eq!(p.decide(&mcp("gh__create_issue", false)), Decision::Ask);
+    assert_eq!(
+        p.decide(&mcp("gh__search", true)),
+        Decision::Ask,
+        "the hint is the claim of the party whose behaviour is in question"
+    );
+}
+
+#[test]
+fn read_only_mode_stops_a_call_into_a_server_it_cannot_see_inside() {
+    let p = policy(Mode::ReadOnly, &[], &[], &[]);
+    assert!(matches!(p.decide(&mcp("gh__search", true)), Decision::Deny(_)));
+}
+
+#[test]
+fn an_mcp_tool_can_be_denied_and_allowed_by_name() {
+    let p = policy(Mode::Auto, &["gh__"], &[], &["/gh__delete_/"]);
+    assert_eq!(p.decide(&mcp("gh__list_issues", false)), Decision::Allow);
+    assert!(
+        matches!(p.decide(&mcp("gh__delete_repo", false)), Decision::Deny(_)),
+        "denial is final, and it has to be reachable for a tool from a server"
+    );
+    assert_eq!(
+        p.decide(&mcp("other__anything", false)),
+        Decision::Allow,
+        "auto mode still allows what no rule covers"
+    );
+}
+
+#[test]
+fn what_the_user_is_asked_names_the_tool_and_repeats_the_claim() {
+    assert_eq!(mcp("gh__search", false).describe(), "call the MCP tool `gh__search`");
+    assert_eq!(
+        mcp("gh__search", true).describe(),
+        "call the MCP tool `gh__search`, which its server calls read-only"
+    );
+}

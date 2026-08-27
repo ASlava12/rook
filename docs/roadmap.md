@@ -297,6 +297,12 @@ what unblocks the most.
   before checking containment, so a link inside the workspace pointing out of it
   is refused rather than followed, and the refusal says where the path really
   led. Widened only by `sandbox.allow_outside_workspace`. 6 tests.
+- **A server's tools are not trusted because the server says so** — an MCP tool
+  fell through to the trait's default risk, which is read-only, and read-only
+  returns before the deny list, before `readonly` mode and before every rule: any
+  tool any connected server advertised ran unasked. They are now their own risk,
+  matched by the namespaced name, and `readOnlyHint` is repeated to the user
+  rather than believed. 6 tests.
 - **Where a session was cut, without reading it** — the last compaction was found
   by scanning every event, at the start of every turn, and where a fork left its
   parent was legible only inside a title string. Both are now recorded beside the

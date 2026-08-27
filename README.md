@@ -252,6 +252,12 @@ asked about rather than assumed. Against a path, a plain rule lines up with a
 directory boundary, so `src/` is not `notsrc/`; a regular expression is left to
 say what it says.
 
+A tool from an MCP server is asked about like anything else. Rook cannot see
+what one does, and the protocol's `readOnlyHint` is the claim of the very party
+whose behaviour is in question, so the claim is repeated in the prompt and never
+acted on — rules match the namespaced tool name, so `allow = ["gh__"]` trusts one
+server and a deny rule can take a single tool away.
+
 File tools are bounded by the workspace, and the boundary is where a path leads
 rather than how it is spelled: a symlink inside the workspace that points out of
 it is refused, and the refusal names where it really went.

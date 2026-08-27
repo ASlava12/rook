@@ -31,6 +31,12 @@ async fn tools_are_listed_with_their_schemas_intact() {
     let echo = tools.iter().find(|t| t.name == "echo").unwrap();
     assert_eq!(echo.description, "Echo a message back.");
     assert_eq!(echo.input_schema["properties"]["text"]["type"], "string");
+
+    // Carried so the approval prompt can repeat what the server claims. It is
+    // never what decides — see `Risk::External`.
+    assert!(echo.annotations.read_only, "readOnlyHint reaches the caller");
+    let picture = tools.iter().find(|t| t.name == "picture").unwrap();
+    assert!(!picture.annotations.read_only, "and a tool that says nothing claims nothing");
     server.shutdown().await;
 }
 
