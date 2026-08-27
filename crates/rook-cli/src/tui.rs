@@ -28,7 +28,7 @@ use tokio::sync::mpsc;
 
 use crate::fmt;
 
-const TABS: [&str; 5] = ["Chat", "Sessions", "Skills", "Store", "Help"];
+const TABS: [&str; 6] = ["Chat", "Sessions", "Memory", "Skills", "Store", "Help"];
 
 /// How often the loop wakes to drain turn events when no key is pressed.
 const TICK: Duration = Duration::from_millis(60);
@@ -154,6 +154,7 @@ struct App {
     /// its transcript is being read at all.
     selected: Option<Selected>,
     transcript_scroll: u16,
+    facts: Vec<rook_core::Fact>,
     skills: Vec<SkillCard>,
     skill_state: ListState,
     objects: Vec<(String, String, u64, u64)>,
@@ -211,6 +212,7 @@ impl App {
             transcript: Vec::new(),
             selected: None,
             transcript_scroll: 0,
+            facts: Vec::new(),
             skills: Vec::new(),
             skill_state: ListState::default(),
             objects: Vec::new(),
@@ -225,6 +227,9 @@ impl App {
     fn reload(&mut self) {
         self.sessions = self.rook.sessions().unwrap_or_default();
         self.skills = self.rook.catalog();
+        let workspace = self.rook.workspace.display().to_string();
+        self.facts =
+            self.rook.memory().map(|book| book.in_scope(&workspace).cloned().collect()).unwrap_or_default();
         self.stats = self.rook.stats().ok();
         self.objects = self
             .rook
@@ -344,7 +349,7 @@ impl App {
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
             KeyCode::Tab | KeyCode::Right => self.tab = (self.tab + 1) % TABS.len(),
             KeyCode::BackTab | KeyCode::Left => self.tab = (self.tab + TABS.len() - 1) % TABS.len(),
-            KeyCode::Char(c @ '1'..='5') => self.tab = c as usize - '1' as usize,
+            KeyCode::Char(c @ '1'..='6') => self.tab = c as usize - '1' as usize,
             KeyCode::Char('r') => self.reload(),
             KeyCode::Char('j') | KeyCode::Down => self.move_selection(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_selection(-1),
@@ -529,7 +534,7 @@ impl App {
     fn move_selection(&mut self, delta: isize) {
         let (state, len) = match self.tab {
             1 => (&mut self.session_state, self.sessions.len()),
-            2 => (&mut self.skill_state, self.skills.len()),
+            3 => (&mut self.skill_state, self.skills.len()),
             _ => {
                 self.transcript_scroll = self.transcript_scroll.saturating_add_signed(delta as i16 * 3);
                 return;
@@ -564,8 +569,9 @@ impl App {
         match self.tab {
             0 => self.draw_chat(f, body),
             1 => self.draw_sessions(f, body),
-            2 => self.draw_skills(f, body),
-            3 => self.draw_store(f, body),
+            2 => self.draw_memory(f, body),
+            3 => self.draw_skills(f, body),
+            4 => self.draw_store(f, body),
             _ => self.draw_help(f, body),
         }
 
@@ -770,6 +776,38 @@ impl App {
                 .wrap(Wrap { trim: false })
                 .scroll((self.transcript_scroll, 0)),
             right,
+        );
+    }
+
+    fn draw_memory(&mut self, f: &mut Frame, area: Rect) {
+        let rows: Vec<Vec<String>> = self
+            .facts
+            .iter()
+            .map(|fact| {
+                vec![
+                    fact.id.clone(),
+                    if fact.pinned { "pin".into() } else { String::new() },
+                    fact.scope.label().rsplit('/').next().unwrap_or("global").to_string(),
+                    fact.text.chars().take(70).collect(),
+                    fact.tags.join(" "),
+                ]
+            })
+            .collect();
+
+        let mut lines: Vec<Line> = Vec::new();
+        if rows.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "nothing remembered yet — the agent writes here as it learns, and \
+                 `rook memory rm <id>` corrects it",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        for row in fmt::table(&["id", "", "scope", "fact", "tags"], &rows).lines() {
+            lines.push(Line::from(Span::raw(row.to_string())));
+        }
+        f.render_widget(
+            Paragraph::new(lines).block(bordered(&format!(" Memory ({}) ", self.facts.len()))),
+            area,
         );
     }
 

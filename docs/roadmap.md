@@ -120,6 +120,11 @@ what unblocks the most.
   a skill scoped away and explained by `skills why`, capture and rollback, a
   broken config that fails loudly, and the daemon path where a read goes over
   HTTP and a write says where the lock is.
+- **Memory visible, and correctable, outside the CLI** — what the agent believes
+  about you steers every later turn, and the only way to see or fix it was
+  `rook memory`. Both the TUI and the browser now have a Memory view over a new
+  `/api/memory`, and the browser can forget a fact: one nobody can remove is one
+  that quietly steers everything. 4 tests, including the tab drawn on a pty.
 - **What a session was for and what it did, in every view** — the goal and the
   files it changed were reachable only through `/goal` and `/diff` in the chat.
   The session browser in both the TUI and the web now leads with them, which is

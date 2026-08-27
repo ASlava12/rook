@@ -27,6 +27,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/sessions", get(sessions))
         .route("/api/sessions/{id}/transcript", get(transcript))
         .route("/api/sessions/{id}/changes", get(changes))
+        .route("/api/memory", get(memory).post(forget))
         .route("/api/skills", get(skills))
         .route("/api/skills/{name}", get(skill))
         .route("/api/skills/{name}/history", get(skill_history))
@@ -252,6 +253,49 @@ async fn changes(
     Ok(Json(rook.changes(sid, q.diff)?))
 }
 
+#[derive(Deserialize)]
+struct MemoryQuery {
+    /// Facts from every workspace, not only this one.
+    #[serde(default)]
+    all: bool,
+    /// Rank against this instead of listing, the way a turn would recall.
+    #[serde(default)]
+    q: Option<String>,
+}
+
+async fn memory(
+    State(s): State<Shared>,
+    Query(query): Query<MemoryQuery>,
+) -> ApiResult<Page<rook_core::Fact>> {
+    let rook = s.rook.read().await;
+    let book = rook.memory()?;
+    let workspace = rook.workspace.display().to_string();
+    let facts: Vec<rook_core::Fact> = match &query.q {
+        // The budget a turn would spend, doubled: this is a person reading, and
+        // seeing one fact more than the agent gets is not a problem.
+        Some(text) => rook.recall(text, rook.config.memory.context_budget_tokens * 2)?,
+        None if query.all => book.facts.clone(),
+        None => book.in_scope(&workspace).cloned().collect(),
+    };
+    Ok(Json(Page::new(facts)))
+}
+
+#[derive(Deserialize)]
+struct Forget {
+    /// An id or the exact text, the same two things `rook memory rm` takes.
+    id: String,
+}
+
+async fn forget(State(s): State<Shared>, Json(body): Json<Forget>) -> ApiResult<serde_json::Value> {
+    let rook = s.rook.read().await;
+    match rook.forget(&body.id, Some("forgotten from the web UI".into()))? {
+        Some(fact) => Ok(Json(serde_json::json!({ "forgot": fact }))),
+        None => {
+            Err(Fail(StatusCode::NOT_FOUND, ApiError::new("not_found", format!("no fact {:?}", body.id))))
+        }
+    }
+}
+
 async fn skills(State(s): State<Shared>) -> ApiResult<Page<rook_skills::SkillCard>> {
     let rook = s.rook.read().await;
     Ok(Json(Page::new(rook.catalog())))
@@ -366,6 +410,25 @@ mod tests {
         Fixture { _home: home, _workspace: workspace, router: router(state.clone()), state, session }
     }
 
+    async fn post(f: &Fixture, path: &str, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+        let response = f
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 4 << 20).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+
     async fn get(f: &Fixture, path: &str) -> (StatusCode, serde_json::Value) {
         let response = f
             .router
@@ -467,6 +530,34 @@ mod tests {
         let (_, sessions) = get(&f, "/api/sessions").await;
         let session = &sessions["items"][0];
         assert_eq!(session["goal"], "find the leak", "the goal is joined in: {session}");
+    }
+
+    #[tokio::test]
+    async fn memory_is_listed_scoped_and_can_be_corrected() {
+        let f = fixture();
+        {
+            let rook = f.state.rook.read().await;
+            let here = rook_core::Scope::Project(rook.workspace.display().to_string());
+            rook.remember(rook_core::Fact::new("prefer tabs", here), None).unwrap();
+            rook.remember(
+                rook_core::Fact::new("somebody else's project", rook_core::Scope::Project("/nowhere".into())),
+                None,
+            )
+            .unwrap();
+        }
+
+        let (_, here) = get(&f, "/api/memory").await;
+        assert_eq!(here["items"].as_array().unwrap().len(), 1, "scoped to this workspace: {here}");
+        let (_, everywhere) = get(&f, "/api/memory?all=true").await;
+        assert_eq!(everywhere["items"].as_array().unwrap().len(), 2, "{everywhere}");
+
+        let id = here["items"][0]["id"].as_str().unwrap().to_string();
+        let forgotten = post(&f, "/api/memory", serde_json::json!({ "id": id })).await;
+        assert_eq!(forgotten.0, StatusCode::OK, "{:?}", forgotten.1);
+        assert_eq!(forgotten.1["forgot"]["text"], "prefer tabs");
+
+        let (status, _) = post(&f, "/api/memory", serde_json::json!({ "id": id })).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "forgetting twice is not a success");
     }
 
     #[tokio::test]

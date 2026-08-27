@@ -43,7 +43,9 @@ Reproduce it yourself: `cargo xtask compaction`.
 
 **Memory is inspectable.** `rook store stat` tells you what your history costs and
 where it went. `rook session show` prints any transcript by sequence number.
-`rook store cat` prints any object. The TUI and the web UI show the same data.
+`rook store cat` prints any object. What the agent has learned about you is a list
+you can read and delete from, because a fact nobody can remove is one that quietly
+steers every later turn. The TUI and the web UI show the same data.
 
 **Skills are versioned and environment-aware.** A skill declares the environment it
 is valid in — OS, userland, arch, language and tool versions — and can carry

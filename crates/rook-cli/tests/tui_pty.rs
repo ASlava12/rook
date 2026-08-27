@@ -199,3 +199,27 @@ fn the_footer_shows_the_settings_and_f2_changes_them() {
 
     assert!(after.contains("readonly/high"), "F2 cycles approvals:\n{after}");
 }
+
+#[test]
+fn the_memory_tab_shows_what_the_agent_remembers() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+
+    let added = std::process::Command::new(env!("CARGO_BIN_EXE_rook"))
+        .env("ROOK_HOME", home.path())
+        .args(["--workspace", workspace.path().to_str().unwrap()])
+        .args(["memory", "add", "prefer tabs in Makefiles", "--tag", "style"])
+        .status()
+        .unwrap();
+    assert!(added.success());
+
+    let mut pty = tui(home.path(), workspace.path());
+    pty.screen(100, 30);
+    // Tabs, not "3": on the chat tab a digit is a character in the message.
+    pty.send("\t\t");
+    let screen = pty.screen(100, 30).join("\n");
+
+    assert!(screen.contains("Memory"), "the tab must be there:\n{screen}");
+    assert!(screen.contains("prefer tabs in Makefiles"), "and the fact:\n{screen}");
+    assert!(screen.contains("style"), "with its tags:\n{screen}");
+}
