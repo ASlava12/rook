@@ -150,45 +150,6 @@ fn rook_core_config_deny() -> Vec<&'static str> {
     ]
 }
 
-/// A guard against the drift hermes had to correct: their one tool grew to 924
-/// tokens a call before anyone measured it.
-#[test]
-fn the_advertised_tool_schemas_stay_within_a_budget() {
-    let mut tools = rook_tools::ToolBox::standard();
-    // What an interactive front end advertises, which is the expensive case.
-    tools
-        .register(std::sync::Arc::new(rook_tools::ask::AskUser(std::sync::Arc::new(rook_tools::ask::NoOne))));
-    let cost = |t: &rook_llm::ToolSpec| {
-        (t.name.len() + t.description.len() + t.parameters.to_string().len()).div_ceil(4)
-    };
-
-    let full: usize = tools.specs().iter().map(cost).sum();
-    let stubs: usize = tools.stubs().iter().map(cost).sum();
-
-    assert!(
-        full < 800,
-        "the built-in schemas cost ~{full} tokens on every eager request; \
-         trim a description or merge an argument before raising this"
-    );
-    // The number that is actually paid, since lazy loading is the default.
-    assert!(stubs < 350, "the stubs cost ~{stubs} tokens on every request");
-    assert!(
-        stubs * 2 < full,
-        "stubs ({stubs}) must be much cheaper than full schemas ({full}), or lazy loading buys nothing"
-    );
-    for spec in tools.stubs() {
-        let d = &spec.description;
-        assert!(
-            d.len() < 90 && d.ends_with('.'),
-            "{}'s first sentence has to stand alone as the whole stub: {d:?}",
-            spec.name
-        );
-    }
-    for spec in tools.specs() {
-        assert!(cost(&spec) < 200, "{} alone costs ~{} tokens", spec.name, cost(&spec));
-    }
-}
-
 /// Every tool reports facts a hook or a UI can act on. They were computed and
 /// discarded for a long time; a tool that stops reporting them is a regression
 /// nothing else would see.

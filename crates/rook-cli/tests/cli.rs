@@ -268,16 +268,32 @@ struct Daemon {
     address: String,
 }
 
-/// `CARGO_BIN_EXE_` is only set for this package's own binaries, and both land
-/// in the same directory. `cargo test --workspace`, which the CI gate runs,
-/// builds it; a lone `-p rook-cli` may not have.
+/// `CARGO_BIN_EXE_` is only set for this package's own binaries, so the daemon
+/// has to be found rather than named.
+///
+/// Built here if it is not there. Assuming `cargo test --workspace` had already
+/// built it was true of every incremental run and false of a clean one: the
+/// crates compile in dependency order and this test binary can run before the
+/// daemon is linked — which is what CI does, every time.
 fn rookd() -> PathBuf {
+    static BUILT: std::sync::Once = std::sync::Once::new();
     let path = PathBuf::from(env!("CARGO_BIN_EXE_rook")).with_file_name(if cfg!(windows) {
         "rookd.exe"
     } else {
         "rookd"
     });
-    assert!(path.exists(), "{} is not built — run `cargo test --workspace`", path.display());
+
+    BUILT.call_once(|| {
+        if path.exists() {
+            return;
+        }
+        let built = Command::new(env!("CARGO"))
+            .args(["build", "-p", "rookd"])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .status();
+        assert!(built.is_ok_and(|s| s.success()), "could not build rookd for the daemon tests");
+    });
+    assert!(path.exists(), "{} is still not there after building it", path.display());
     path
 }
 

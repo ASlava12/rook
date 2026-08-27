@@ -118,7 +118,7 @@ using it.
 **A tool description opens with a sentence that stands alone.** Under lazy
 loading only that first sentence is advertised; the rest is guidance on writing
 the arguments, which only matters once the model has decided to call the tool.
-`cargo run -p rook-tools --example schema-cost` prices both forms.
+`cargo run -p rook-core --example schema-cost` prices both forms — from core, because the loop adds six tools of its own and the two largest are among them.
 
 **Verifying the TUI.** `crates/rook-cli/tests/tui_pty.rs` does it; add to that
 rather than starting again. A pty capture is not readable as text: ratatui

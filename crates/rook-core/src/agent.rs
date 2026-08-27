@@ -520,7 +520,7 @@ impl<'a> AgentLoop<'a> {
         if self.rook.config.memory.enabled {
             push(ToolSpec {
                 name: REMEMBER.into(),
-                description: "Remember something for future sessions. Use it for durable facts                               — preferences, conventions, decisions — not for what is already in                               this conversation."
+                description: "Remember something for future sessions. Use it for durable facts — preferences, conventions, decisions — not for what is already in this conversation."
                     .into(),
                 parameters: json!({
                     "type": "object",
@@ -555,19 +555,18 @@ impl<'a> AgentLoop<'a> {
         if self.depth < MAX_DEPTH {
             push(ToolSpec {
                 name: DELEGATE.into(),
-                description: "Hand a self-contained sub-task to a fresh agent and get back only                               its conclusion. Use it when a step would otherwise fill this                               conversation with detail you do not need to keep — a wide search,                               a long file survey, an independent verification."
+                description: "Hand a self-contained sub-task to a fresh agent and get back only its conclusion. Use it when a step would otherwise fill this conversation with detail you do not need to keep — a wide search, a long file survey, an independent verification."
                     .into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
-                        "task": {
-                            "type": "string",
-                            "description": "The whole assignment. The sub-agent cannot see this conversation."
-                        },
+                        // A bare `task` is still accepted, and deliberately not
+                        // advertised: a model that saw both filled both, which
+                        // ran every sub-task twice.
                         "tasks": {
                             "type": "array",
                             "items": { "type": "string" },
-                            "description": "Several independent assignments, run at the same time.                                             Use this rather than calling delegate repeatedly."
+                            "description": "One assignment per entry, run at the same time. A sub-agent cannot see this conversation, so each has to stand alone. Use this rather than calling delegate repeatedly."
                         },
                         "context": {
                             "type": "string",

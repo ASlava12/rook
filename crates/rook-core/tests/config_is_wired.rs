@@ -190,3 +190,51 @@ fn why_a_turn_ended_has_one_vocabulary() {
     assert!(spellings.contains(&"end_turn"), "the one the loop writes by hand has to be among them");
     assert!(spellings.contains(&"max_tokens"));
 }
+
+/// What every request pays for its tool list, all of it.
+///
+/// A guard against the drift hermes had to correct: one of their tools reached
+/// 924 tokens a call before anyone measured it. It used to live in `rook-tools`,
+/// where the six the loop adds are invisible — so it guarded 729 tokens of a
+/// list that costs 1,476, and the two largest entries were the ones it could
+/// not see.
+#[test]
+fn the_whole_advertised_tool_list_stays_within_a_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let (skills, _) = rook_skills::SkillIndex::discover(&[]);
+    let cost = |t: &rook_llm::ToolSpec| {
+        (t.name.len() + t.description.len() + t.parameters.to_string().len()).div_ceil(4)
+    };
+
+    let priced = |lazy: bool| {
+        let config = rook_core::Config {
+            agent: rook_core::config::AgentConfig { lazy_tools: lazy, ..Default::default() },
+            ..Default::default()
+        };
+        let rook = rook_core::Rook::from_parts(
+            rook_store::Store::open(dir.path()).unwrap(),
+            config,
+            rook_skills::Environment::bare("linux", "x86_64", "0.1.0"),
+            skills.clone(),
+            dir.path().to_path_buf(),
+        );
+        let session = rook.start_session("pricing").unwrap();
+        let mut agent = rook_core::agent::AgentLoop::new(&rook, std::sync::Arc::new(Silent), session);
+        // What an interactive front end advertises, which is the expensive case.
+        agent.ask_via(std::sync::Arc::new(rook_tools::ask::NoOne));
+        agent.tool_specs().iter().map(cost).sum::<usize>()
+    };
+
+    let (full, stubs) = (priced(false), priced(true));
+    assert!(
+        full < 1_700,
+        "the whole list costs ~{full} tokens on every eager request; trim a description or \
+         merge an argument before raising this"
+    );
+    // The number actually paid, since lazy loading is the default.
+    assert!(stubs < 700, "the stubs cost ~{stubs} tokens on every request");
+    assert!(
+        stubs * 2 < full,
+        "stubs ({stubs}) must be much cheaper than full schemas ({full}), or lazy loading buys nothing"
+    );
+}

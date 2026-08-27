@@ -543,6 +543,16 @@ like to something that has to act on it.
   say what it was about to do, says that no other tool and no sub-agent gets past
   it, and addresses the remedies to the user. The same task: four steps, 8,498
   tokens, twenty-three seconds, and an answer worth reading. 1 test.
+- **The tool list is priced whole, and the daemon tests build what they need** —
+  the schema budget and the tool that prints it both lived in `rook-tools`,
+  which cannot see the six tools the loop adds: they guarded 729 tokens of a
+  list that costs 1,476, and the two largest entries were the ones they could
+  not see. Both moved to `rook-core`. Three model-facing descriptions were also
+  carrying runs of source indentation as literal spaces, which is 44 tokens a
+  call on `delegate` alone.
+  A clean-tree run then found the CLI's daemon tests assuming `rookd` was
+  already linked — true of every incremental run, false of the clean build CI
+  does every time. They build it if it is missing. 1 test moved, 1 fixed.
 - **A turn stops compacting once it stops helping** — a span too small to
   summarise leaves the context exactly as full as it was, so the check at the
   top of the next step is true again, and the step after that: seven
