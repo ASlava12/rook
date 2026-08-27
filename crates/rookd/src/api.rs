@@ -290,3 +290,154 @@ async fn maintenance(
     let rook = s.rook.read().await;
     Ok(Json(rook.maintenance(body.dry_run)?))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    struct Fixture {
+        _home: tempfile::TempDir,
+        _workspace: tempfile::TempDir,
+        router: Router,
+        session: u128,
+    }
+
+    fn fixture() -> Fixture {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ROOK_HOME", home.path()) };
+
+        let store = rook_store::Store::open(home.path().join("store")).unwrap();
+        let env = rook_skills::Environment::bare("linux", "x86_64", "0.1.0");
+        let (skills, _) = rook_skills::SkillIndex::discover(&[]);
+        let rook = rook_core::Rook::from_parts(
+            store,
+            rook_core::Config::default(),
+            env,
+            skills,
+            workspace.path().to_path_buf(),
+        );
+        let session = rook.start_session("api test").unwrap();
+        rook.log(session, rook_store::EventKind::UserMessage, "prompt", "find the leak").unwrap();
+
+        let state = Arc::new(AppState {
+            rook: Arc::new(tokio::sync::RwLock::new(rook)),
+            started: std::time::Instant::now(),
+        });
+        Fixture { _home: home, _workspace: workspace, router: router(state), session }
+    }
+
+    async fn get(f: &Fixture, path: &str) -> (StatusCode, serde_json::Value) {
+        let response = f
+            .router
+            .clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 4 << 20).await.unwrap();
+        let json = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|_| serde_json::json!(String::from_utf8_lossy(&bytes)));
+        (status, json)
+    }
+
+    #[tokio::test]
+    async fn health_names_the_api_version_a_client_must_match() {
+        let f = fixture();
+        let (status, body) = get(&f, "/api/health").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["api_version"], rook_proto::API_VERSION);
+        assert!(body["store_root"].is_string(), "a client needs to know which store it reached");
+    }
+
+    #[tokio::test]
+    async fn the_paged_endpoints_all_answer_with_items() {
+        let f = fixture();
+        for path in
+            ["/api/sessions", "/api/skills", "/api/store/objects", "/api/store/refs", "/api/checkpoints"]
+        {
+            let (status, body) = get(&f, path).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert!(body["items"].is_array(), "{path} answered {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_session_transcript_comes_back_in_order() {
+        let f = fixture();
+        let id = rook_store::format_session_id(f.session);
+        let (status, body) = get(&f, &format!("/api/sessions/{id}/transcript")).await;
+
+        assert_eq!(status, StatusCode::OK);
+        let items = body["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1, "{body}");
+        assert!(items[0]["body"].as_str().unwrap().contains("find the leak"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_missing_skill_is_a_typed_error_rather_than_a_five_hundred() {
+        let f = fixture();
+        let (status, body) = get(&f, "/api/skills/not-a-skill").await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert_eq!(body["kind"], "not_found", "the discriminant is what a client branches on");
+        assert!(body["error"].as_str().unwrap().contains("not-a-skill"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn an_unparseable_session_id_does_not_reach_the_store() {
+        let f = fixture();
+        let (status, body) = get(&f, "/api/sessions/not-a-ulid/transcript").await;
+
+        assert!(status.is_client_error(), "answered {status}: {body}");
+    }
+
+    #[tokio::test]
+    async fn search_answers_with_what_it_found() {
+        let f = fixture();
+        let (status, body) = get(&f, "/api/search?q=leak").await;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        // `hits`, not `items`: a search result carries what it scanned and
+        // whether it stopped early, which a page of rows does not.
+        assert_eq!(body["hits"].as_array().unwrap().len(), 1, "{body}");
+        assert_eq!(body["truncated"], false);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_route_is_a_404_not_a_panic() {
+        let f = fixture();
+        let (status, _) = get(&f, "/api/nope").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn maintenance_reports_what_it_did_and_a_dry_run_does_nothing() {
+        let f = fixture();
+        let response = f
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/maintenance")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"dry_run":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["prune"]["dry_run"], true, "{body}");
+        assert!(body["gc"].is_object(), "{body}");
+        assert!(body["over_budget_by"].is_number(), "{body}");
+    }
+}

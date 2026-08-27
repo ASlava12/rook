@@ -47,3 +47,44 @@ fn serve(path: &str) -> Response {
         None => (StatusCode::NOT_FOUND, "not found").into_response(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    async fn fetch(path: &str) -> (StatusCode, String, String) {
+        let response =
+            router().oneshot(Request::builder().uri(path).body(Body::empty()).unwrap()).await.unwrap();
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .map(|v| v.to_str().unwrap_or_default().to_string())
+            .unwrap_or_default();
+        let bytes = axum::body::to_bytes(response.into_body(), 8 << 20).await.unwrap();
+        (status, content_type, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// The page is embedded at build time, so a missing or renamed file is a
+    /// binary that starts and serves nothing — and nothing else would notice.
+    #[tokio::test]
+    async fn the_page_is_embedded_in_the_binary() {
+        let (status, content_type, body) = fetch("/").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(content_type.starts_with("text/html"), "{content_type}");
+        assert!(body.contains("<title>"), "the served bytes are not the page");
+        assert!(body.contains("/api/chat"), "the page must know where the socket is");
+    }
+
+    #[tokio::test]
+    async fn an_unknown_path_falls_back_to_the_page_rather_than_a_blank_404() {
+        let (status, _, body) = fetch("/sessions/01ABC").await;
+
+        assert_eq!(status, StatusCode::OK, "a client-side route must still load the app");
+        assert!(body.contains("<title>"));
+    }
+}

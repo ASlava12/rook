@@ -107,6 +107,14 @@ what unblocks the most.
   work out, scoped by `requires` to where it actually holds, validated by reading
   it back, and captured as a version so a rewrite keeps the old one. The index
   reloads in place, so the next turn's catalog has it without a restart. 7 tests.
+- **An API with tests** — `rookd` had none, though it is the surface the web UI
+  and now the CLI both read through. 10 cover the paged endpoints, the typed
+  error shape, a session id that is not one, and that the page is actually
+  embedded in the binary — a rename in `web/dist` would otherwise ship a daemon
+  that starts and serves nothing.
+- **Maintenance from the browser** — the endpoint existed and no client called
+  it, so the store tab now offers it, dry run first because deletion is not
+  undoable.
 - **The CLI reads through a running daemon** — `rookd` holds the store's single
   write lock, so a CLI started while it runs used to refuse. `store stat`,
   `session ls` and `skills ls` now go over its API instead and print the same

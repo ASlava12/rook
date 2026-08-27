@@ -56,7 +56,10 @@ td.t{font-family:inherit}
 form.ask{display:flex;gap:.5rem;margin-top:.8rem}
 form.ask input{flex:1;padding:.55rem .7rem;border:1px solid var(--line);border-radius:6px;
   background:var(--bg);color:var(--fg);font:inherit}
-form.ask button,.approve button{padding:.5rem .9rem;border:1px solid var(--line);border-radius:6px;
+.row{display:flex;gap:.5rem;margin:.5rem 0}
+.muted{color:var(--dim);font-size:.82rem}
+#maintenance-report{white-space:pre-wrap;font-family:var(--mono);margin:0}
+form.ask button,.row button,.approve button{padding:.5rem .9rem;border:1px solid var(--line);border-radius:6px;
   background:var(--panel);color:var(--fg);cursor:pointer;font:inherit}
 form.ask button[disabled]{opacity:.5;cursor:default}
 .approve{border:1px solid var(--warn);border-radius:6px;padding:.6rem .8rem;margin:.5rem 0;
@@ -110,11 +113,15 @@ const ago = ts => {
   if (d < 86400) return `${Math.floor(d/3600)}h ago`;
   return `${Math.floor(d/86400)}d ago`;
 };
-const api = async (path) => {
-  const r = await fetch(path);
-  const body = await r.json().catch(() => ({ error: r.statusText, kind: 'transport' }));
-  if (!r.ok) throw body;
-  return body;
+const api = async (path, body) => {
+  const r = await fetch(path, body === undefined ? undefined : {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const parsed = await r.json().catch(() => ({ error: r.statusText, kind: 'transport' }));
+  if (!r.ok) throw parsed;
+  return parsed;
 };
 
 const state = { tab: 'chat', session: null, skill: null, query: '', chat: { log: [], session: null, busy: false } };
@@ -379,6 +386,27 @@ async function renderSkills() {
     el('div', {class:'card'}, el('h2', {}, `skills (${items.length})`), list), right));
 }
 
+// Deletion is not undoable, so the dry run is offered first and reported in the
+// same place as the real one.
+async function runMaintenance(dryRun) {
+  const out = $('#maintenance-report');
+  out.textContent = dryRun ? 'checking…' : 'running…';
+  try {
+    const r = await api('/api/maintenance', { dry_run: dryRun });
+    out.textContent = [
+      `${dryRun ? 'would delete' : 'deleted'} ${r.prune.sessions_deleted} session(s), ` +
+        `${r.prune.events_deleted} event(s), ${r.prune.protected} protected`,
+      `${dryRun ? 'would collect' : 'collected'} ${r.gc.collected} object(s), ${bytes(r.gc.bytes_freed)} freed`,
+      r.dictionaries_trained.length
+        ? `trained ${r.dictionaries_trained.map(d => `${d[0]} from ${d[1]}`).join(', ')}` : null,
+      r.over_budget_by ? `still ${bytes(r.over_budget_by)} over the size budget` : null,
+    ].filter(Boolean).join('\n');
+    if (!dryRun) render();
+  } catch (e) {
+    out.textContent = `failed: ${e.error || e}`;
+  }
+}
+
 async function renderStore() {
   const s = await api('/api/store/stats');
   const { items } = await api('/api/store/objects?limit=200');
@@ -408,6 +436,14 @@ async function renderStore() {
           el('td', {}, bytes(k.bytes_stored)),
           el('td', {}, (k.bytes_raw/Math.max(1,k.bytes_stored)).toFixed(1)+'×'),
           el('td', {}, el('span', {class:'bar', style:`width:${(k.bytes_stored/max*100).toFixed(0)}%`})))))),
+
+    el('div', {class:'card'}, el('h2', {}, 'maintenance'),
+      el('p', {class:'muted'},
+        'Prune to the retention policy, collect what that frees, and enforce the size budget.'),
+      el('div', {class:'row'},
+        el('button', {onclick: () => runMaintenance(true)}, 'Dry run'),
+        el('button', {onclick: () => runMaintenance(false)}, 'Run')),
+      el('pre', {id: 'maintenance-report', class: 'muted'}, '')),
 
     el('div', {class:'card'}, el('h2', {}, `objects (newest ${items.length})`),
       el('div', {class:'scroll'}, el('table', {},
