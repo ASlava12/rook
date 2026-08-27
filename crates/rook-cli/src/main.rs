@@ -411,12 +411,25 @@ fn cmd_doctor(rook: &Rook, json: bool) -> Result<()> {
     if servers.is_empty() {
         println!("  none found on PATH (rust-analyzer, gopls, clangd, …)");
     }
+    let here: Vec<String> = rook_core::lsp::for_workspace(&rook.config, &rook.workspace)
+        .into_iter()
+        .map(|c| c.language)
+        .collect();
     for (config, started) in probe_servers(&servers, &rook.workspace) {
+        // Installed and working is one question; used in this workspace is
+        // another, and a ✓ against a language with no files here reads as the
+        // first answering the second.
+        let used = match here.contains(&config.language) {
+            true => String::new(),
+            false => format!("  · no {} files here", config.extensions.join("/")),
+        };
+        // Whether it starts and whether it is wanted here are independent, so a
+        // server that fails both says both.
         match started {
-            Ok(()) => println!("  ✓ {:<10} {}", config.language, config.command),
+            Ok(()) => println!("  ✓ {:<10} {}{used}", config.language, config.command),
             Err(why) => {
                 let why = why.strip_prefix(&format!("{}: ", config.language)).unwrap_or(&why);
-                println!("  ✗ {:<10} {} — {why}", config.language, config.command)
+                println!("  ✗ {:<10} {}{used} — {why}", config.language, config.command)
             }
         }
     }
@@ -1425,10 +1438,16 @@ fn cmd_lsp(workspace: Option<PathBuf>, cmd: LspCmd, json: bool) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     runtime.block_on(async move {
         let rook = Rook::open(workspace)?;
-        let configs =
-            if rook.config.lsp.is_empty() { rook_core::lsp::detected() } else { rook.config.lsp.clone() };
+        // What the agent would have, not what is installed: the comment below
+        // claims this cannot drift from a turn, and a copy of the expression it
+        // was built from is how it did.
+        let configs = rook_core::lsp::for_workspace(&rook.config, &rook.workspace);
         if configs.is_empty() {
-            bail!("no language server found on PATH, and none configured under [[lsp]]");
+            bail!(
+                "no language server applies here — none is configured under [[lsp]], or none of \
+                 the ones on PATH handles a file in {}",
+                rook.workspace.display()
+            );
         }
         let servers = rook_core::lsp::Servers::new(configs, &rook.workspace);
 

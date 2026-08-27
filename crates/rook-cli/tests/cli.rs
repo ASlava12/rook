@@ -630,3 +630,30 @@ fn session_context_measures_against_the_model_that_is_configured() {
     let overridden = rook.ok(&["session", "context", "last", "--window", "128000"]);
     assert!(overridden.contains("128000"), "and it can still be asked about another: {overridden}");
 }
+
+/// Installed and working is one question; used in this workspace is another,
+/// and a ✓ against a language with no files here answered the first as if it
+/// were the second.
+#[test]
+fn doctor_marks_a_server_this_workspace_has_no_files_for() {
+    let rook = Rook::new();
+    rook.write_config(
+        "[[lsp]]\nlanguage = \"go\"\ncommand = \"gopls\"\nextensions = [\"go\"]\nstartup_timeout_secs = 2\n",
+    );
+
+    let said = rook.ok(&["doctor"]);
+    assert!(said.contains("no go files here"), "the workspace is Rust and a text file: {said}");
+}
+
+#[test]
+fn asking_a_language_server_where_none_applies_says_why() {
+    let rook = Rook::new();
+    rook.write_config(
+        "[[lsp]]\nlanguage = \"go\"\ncommand = \"gopls\"\nextensions = [\"go\"]\nstartup_timeout_secs = 2\n",
+    );
+
+    let out = rook.run(&["lsp", "servers"]);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("no language server applies here"), "{said}");
+    assert!(said.contains("handles a file in"), "and what would have made one apply: {said}");
+}

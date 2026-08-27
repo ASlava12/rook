@@ -552,7 +552,13 @@ like to something that has to act on it.
   with none now.
   Once that was true, filtering bit: only servers with files they handle in this
   workspace are offered, so a Python project is not given rust-analyzer's four
-  tool schemas — 1,401 input tokens for a question that cost 3,450. 3 tests.
+  tool schemas — 1,401 input tokens for a question that cost 3,450.
+  A sweep for the other expressions unified today found one more survivor:
+  `rook lsp` built the same list its own way, under a comment claiming it could
+  not drift from what a turn sees. It asks the same question now, and refuses
+  with the reason none applies; `doctor` marks a server that starts but has no
+  files here, since installed and working is not the same question as used.
+  5 tests.
 - **A language server that will not start is found out once** — a live turn in a
   Python project asked about a symbol, and the pool always offered the first
   configured server: a `rust-analyzer` shim, which rustup installs whether or
