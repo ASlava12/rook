@@ -103,13 +103,20 @@ what unblocks the most.
   without joining it, recorded as a note the history replay skips. 2 tests.
 - **Conversation continuity** — every turn replays the session log, so `--session`
   and the chat both continue a conversation rather than starting one.
+- **A workspace that cannot be left** — file tools resolve through symlinks
+  before checking containment, so a link inside the workspace pointing out of it
+  is refused rather than followed, and the refusal says where the path really
+  led. Widened only by `sandbox.allow_outside_workspace`. 6 tests.
 - **Four platforms** — Linux, macOS, Windows tested on hosted runners; FreeBSD
   built and tested in a VM.
 
 ## Next
 
-**Triage the reference backlog.** `cargo xtask refs status` reports drift from
-seven upstream agents; nothing has been read past their issue trackers yet.
+**Keep triaging the reference backlog.** `cargo xtask refs advance` moves a
+pointer and prints what landed; the log in
+[references/PORTED.md](../references/PORTED.md) says what was done with each
+commit, so a dismissal is a decision. Five passes so far — three of them found a
+defect here rather than something to port.
 
 **A live-model smoke test in CI.** An Ollama service container running a small
 model, so the HTTP provider and one full turn are exercised for real rather than
@@ -142,6 +149,11 @@ fork diverged without reading it.
 **MCP provenance in tool results.** A result carries the namespaced tool name but
 nothing about which server produced it; codex exposes that to its lifecycle hooks
 and it belongs in ours too.
+
+**Signed release binaries.** `cargo xtask dist` ships unsigned, so Windows
+SmartScreen warns on every download and macOS Gatekeeper needs a right-click to
+open. cline signs with Azure Trusted Signing; both need a certificate this
+repository does not have.
 
 **Agent Plugins 1.0 packaging.** `plugin.json` bundling skills and MCP servers.
 Defers to Agent Skills for the skill format, so skills authored today package

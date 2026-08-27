@@ -22,7 +22,7 @@ use rook_core::{Rook, TranscriptEntry};
 use rook_llm::Delta;
 use rook_skills::SkillCard;
 use rook_store::{SessionMeta, StoreStats};
-use rook_tools::ask::{AskRequest, ChannelAsker, Question};
+use rook_tools::ask::{Answer, AskRequest, ChannelAsker, Question};
 use rook_tools::policy::{Approval, ApprovalRequest, ChannelApprover};
 use tokio::sync::mpsc;
 
@@ -80,6 +80,36 @@ struct Asking {
 impl Asking {
     fn current(&self) -> &Question {
         &self.questions[self.at]
+    }
+
+    /// Takes one typed answer and moves on. Complete once it has taken one for
+    /// every question, which is when the batch goes back to the agent.
+    fn record(&mut self, typed: &str) -> Answer {
+        let answer = self.current().interpret(typed);
+        self.chosen.push(answer.chosen.clone());
+        self.at += 1;
+        answer
+    }
+
+    fn complete(&self) -> bool {
+        self.at >= self.questions.len()
+    }
+
+    fn title(&self) -> String {
+        format!(" question {} of {} ", self.at + 1, self.questions.len())
+    }
+
+    /// The panel's height comes from these lines, so it cannot disagree with
+    /// what it is showing.
+    fn panel(&self) -> Vec<Line<'static>> {
+        let q = self.current();
+        let mut lines = vec![Line::from(Span::styled(q.question.clone(), Style::default().fg(Color::Cyan)))];
+        for (i, choice) in q.choices.iter().enumerate() {
+            let recommended = if i == 0 && !q.multi { "  (recommended)" } else { "" };
+            lines.push(Line::from(format!("  {}. {choice}{recommended}", i + 1)));
+        }
+        lines.push(Line::from(Span::styled(q.ask_line().to_string(), Style::default().fg(Color::DarkGray))));
+        lines
     }
 }
 
@@ -331,15 +361,11 @@ impl App {
     /// past the choices works here exactly as it does in the plain CLI.
     fn answer(&mut self) {
         let Some(mut asking) = self.chat.asking.take() else { return };
-        let typed = std::mem::take(&mut self.chat.input);
-        let answer = asking.current().interpret(&typed);
-        self.chat.push("stat", &format!("  {} → {}", asking.current().question, display(&answer.chosen)));
-        asking.chosen.push(answer.chosen);
-        asking.at += 1;
-        if asking.at < asking.questions.len() {
-            self.chat.asking = Some(asking);
-        } else {
-            self.asker.answer(&asking.id, asking.chosen);
+        let answer = asking.record(&std::mem::take(&mut self.chat.input));
+        self.chat.push("stat", &format!("  {} → {}", answer.question, display(&answer.chosen)));
+        match asking.complete() {
+            true => self.asker.answer(&asking.id, asking.chosen),
+            false => self.chat.asking = Some(asking),
         }
     }
 
@@ -507,7 +533,7 @@ impl App {
         // have to be running for a question to arrive.
         let blocking = match (&self.chat.pending, &self.chat.asking) {
             (Some(_), _) => 4,
-            (_, Some(asking)) => 4 + asking.current().choices.len() as u16,
+            (_, Some(asking)) => asking.panel().len() as u16 + 2,
             _ => 0,
         };
         let [log, ask, input] =
@@ -569,19 +595,7 @@ impl App {
                 ask,
             );
         } else if let Some(asking) = &self.chat.asking {
-            let q = asking.current();
-            let mut lines =
-                vec![Line::from(Span::styled(q.question.clone(), Style::default().fg(Color::Cyan)))];
-            for (i, choice) in q.choices.iter().enumerate() {
-                let recommended = if i == 0 && !q.multi { "  (recommended)" } else { "" };
-                lines.push(Line::from(format!("  {}. {choice}{recommended}", i + 1)));
-            }
-            lines.push(Line::from(Span::styled(
-                q.ask_line().to_string(),
-                Style::default().fg(Color::DarkGray),
-            )));
-            let title = format!(" question {} of {} ", asking.at + 1, asking.questions.len());
-            f.render_widget(Paragraph::new(lines).block(bordered(&title)), ask);
+            f.render_widget(Paragraph::new(asking.panel()).block(bordered(&asking.title())), ask);
         }
 
         let prompt = if self.chat.busy && self.chat.asking.is_none() { "  working… " } else { "› " };
@@ -858,4 +872,98 @@ fn kind_style(kind: &str) -> Style {
         _ => Color::Gray,
     };
     Style::default().fg(color)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn asking(questions: Vec<Question>) -> Asking {
+        Asking { id: "1".into(), questions, at: 0, chosen: Vec::new() }
+    }
+
+    fn question(text: &str, choices: &[&str], multi: bool) -> Question {
+        Question { question: text.into(), choices: choices.iter().map(|c| c.to_string()).collect(), multi }
+    }
+
+    /// A ratatui buffer holds characters cell by cell, so what the screen shows
+    /// has to be read back a row at a time rather than searched as text.
+    fn screen(asking: &Asking, width: u16) -> Vec<String> {
+        let height = asking.panel().len() as u16 + 2;
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|f| {
+                f.render_widget(Paragraph::new(asking.panel()).block(bordered(&asking.title())), f.area());
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..height)
+            .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect::<String>().trim_end().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn a_question_shows_its_choices_numbered_and_the_first_as_recommended() {
+        let lines = screen(&asking(vec![question("Which target?", &["staging", "prod"], false)]), 50);
+
+        assert!(lines[0].contains("question 1 of 1"), "{lines:?}");
+        assert!(lines[1].contains("Which target?"), "{lines:?}");
+        assert!(lines[2].contains("1. staging  (recommended)"), "{lines:?}");
+        assert!(lines[3].contains("2. prod") && !lines[3].contains("recommended"), "{lines:?}");
+        assert!(lines[4].contains("a number, or your own answer"), "{lines:?}");
+    }
+
+    #[test]
+    fn the_panel_is_exactly_as_tall_as_what_it_draws() {
+        let asking = asking(vec![question("Which?", &["a", "b", "c"], true)]);
+        let lines = screen(&asking, 40);
+
+        assert_eq!(lines.len(), asking.panel().len() + 2, "one border row above and below");
+        assert!(lines.last().unwrap().starts_with('╰'), "the last row is the border: {lines:?}");
+        assert!(!lines[2].contains("recommended"), "a multi-select recommends nothing: {lines:?}");
+        assert!(lines[5].contains("numbers, comma-separated"), "{lines:?}");
+    }
+
+    #[test]
+    fn a_free_text_question_draws_no_choice_rows() {
+        let lines = screen(&asking(vec![question("Why?", &[], false)]), 40);
+
+        assert_eq!(lines.len(), 4, "border, question, prompt, border: {lines:?}");
+        assert!(lines[2].contains("your answer:"), "{lines:?}");
+    }
+
+    #[test]
+    fn a_batch_is_answered_one_question_at_a_time_and_kept_in_order() {
+        let mut a = asking(vec![
+            question("Which target?", &["staging", "prod"], false),
+            question("Why?", &[], false),
+        ]);
+
+        assert_eq!(a.record("2").chosen, ["prod"]);
+        assert!(!a.complete(), "a batch is not done until every question is");
+        assert_eq!(a.record("the canary is unhealthy").chosen, ["the canary is unhealthy"]);
+
+        assert!(a.complete());
+        assert_eq!(a.chosen, vec![vec!["prod".to_string()], vec!["the canary is unhealthy".into()]]);
+    }
+
+    #[test]
+    fn an_empty_line_answers_the_question_it_was_typed_at_not_the_next_one() {
+        let mut a = asking(vec![question("first", &["a", "b"], false), question("second", &[], false)]);
+
+        let answer = a.record("");
+        assert_eq!(answer.question, "first");
+        assert_eq!(answer.chosen, ["a"], "enter takes the recommendation");
+        assert_eq!(a.record("").chosen, Vec::<String>::new(), "free text has none to take");
+    }
+
+    #[test]
+    fn the_title_counts_through_the_batch() {
+        let mut a = asking(vec![question("first", &[], false), question("second", &[], false)]);
+        assert!(screen(&a, 40)[0].contains("question 1 of 2"));
+        a.at = 1;
+        let lines = screen(&a, 40);
+        assert!(lines[0].contains("question 2 of 2"), "{lines:?}");
+        assert!(lines[1].contains("second"), "{lines:?}");
+    }
 }

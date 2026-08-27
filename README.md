@@ -218,10 +218,15 @@ mode  = "ask"                      # auto | ask | readonly
 allow = ["git status", '/^(ls|cat|rg)\b/']   # plain string, or /regex/
 ask   = ["git push"]                          # prompts even in auto mode
 deny  = ['/\brm\s+(-[a-zA-Z]+\s+)*\/(\s|\*|$)/']
+allow_outside_workspace = false    # file tools stay inside, symlinks included
 ```
 
 `rook --yes` skips the prompts for one run. Unattended runs with no `--yes`
 refuse rather than improvise, and say what would have made it possible.
+
+File tools are bounded by the workspace, and the boundary is where a path leads
+rather than how it is spelled: a symlink inside the workspace that points out of
+it is refused, and the refusal names where it really went.
 
 ### Delegation
 
@@ -372,7 +377,8 @@ lose people's trust:
   benchmark ([ADR-0010](docs/adr/0010-no-todo-tool.md)). There is nothing for a
   UI to render as progress.
 - **Permissions are pattern matching, not a sandbox.** They raise the floor;
-  `curl … | sh` is one obfuscation away from any rule. Not a jail.
+  `curl … | sh` is one obfuscation away from any rule. Not a jail. The workspace
+  boundary binds the file tools, not commands the agent runs.
 
 ## Development
 

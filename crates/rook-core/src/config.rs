@@ -124,6 +124,10 @@ pub struct SandboxConfig {
     /// summarised rather than pasted into context.
     pub max_output_bytes: usize,
     pub command_timeout_secs: u64,
+    /// Lets file tools read and write outside the workspace, including through
+    /// a symlink that leads out of it. Off by default: a workspace that cannot
+    /// be left is the one boundary a prompt cannot argue its way past.
+    pub allow_outside_workspace: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -200,6 +204,7 @@ impl Default for SandboxConfig {
             .collect(),
             max_output_bytes: 256 * 1024,
             command_timeout_secs: 120,
+            allow_outside_workspace: false,
         }
     }
 }

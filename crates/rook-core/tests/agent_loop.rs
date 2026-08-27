@@ -1055,18 +1055,14 @@ async fn several_sub_tasks_run_at_the_same_time() {
     let spans = Arc::new(Mutex::new(Vec::new()));
     let provider = Arc::new(TimedProvider { script: Mutex::new(script), spans: spans.clone(), delay });
 
-    let started = std::time::Instant::now();
     let outcome = AgentLoop::new(&f.rook, provider, session).run("check three things").await.unwrap();
-    let elapsed = started.elapsed();
 
     assert_eq!(outcome.delegated.len(), 3, "every sub-task should report its session");
     assert!(outcome.reply.contains("all three checked"));
 
-    // Five model calls happen; serial they would cost five delays, concurrent
-    // children collapse three of them into one. Compared against that bound
-    // rather than a fixed millisecond count, which only measures the machine.
-    assert!(elapsed < delay * 5, "five calls took {elapsed:?}, no better than running them one at a time");
-
+    // Overlapping spans, not elapsed time. A wall-clock bound measures the
+    // machine: five 200ms calls exceed a one-second budget on a loaded box while
+    // still running concurrently, which is the failure this test used to report.
     let spans = spans.lock().unwrap();
     let overlapping =
         spans.iter().enumerate().any(|(i, a)| spans.iter().skip(i + 1).any(|b| a.0 < b.1 && b.0 < a.1));

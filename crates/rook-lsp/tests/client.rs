@@ -159,12 +159,13 @@ async fn syncing_an_unchanged_file_costs_nothing() {
     server.sync(&workspace.file(), "rust").await.unwrap();
     let first = server.diagnostics(&workspace.file()).await;
 
-    // No edit: the second sync must not discard the analysis and wait again.
-    let started = std::time::Instant::now();
+    // No edit: the second sync must not discard the analysis and ask again. The
+    // server counts what it was asked to analyse, so this is what happened
+    // rather than how long it took — a timing bound measures the machine.
     server.sync(&workspace.file(), "rust").await.unwrap();
     let second = server.diagnostics(&workspace.file()).await;
 
     assert_eq!(first[0].message, second[0].message);
-    assert!(started.elapsed() < std::time::Duration::from_millis(500), "it re-analysed anyway");
+    assert!(second[0].message.contains("analysis 1"), "it re-analysed anyway: {}", second[0].message);
     server.shutdown().await;
 }

@@ -110,18 +110,50 @@ impl ToolContext {
         let candidate = PathBuf::from(raw);
         let joined = if candidate.is_absolute() { candidate } else { self.workspace.join(candidate) };
         let normalized = normalize(&joined);
-        if !self.allow_outside_workspace {
-            let root = normalize(&self.workspace);
-            if !normalized.starts_with(&root) {
-                return Err(ToolError::Denied(format!(
-                    "{} is outside the workspace {}",
-                    normalized.display(),
-                    root.display()
-                )));
-            }
+        if self.allow_outside_workspace {
+            return Ok(normalized);
         }
-        Ok(normalized)
+
+        let root = through_symlinks(&normalize(&self.workspace));
+        let real = through_symlinks(&normalized);
+        if !real.starts_with(&root) {
+            let via = if real == normalized {
+                String::new()
+            } else {
+                format!(" (it is {} through a symlink)", real.display())
+            };
+            return Err(ToolError::Denied(format!(
+                "{} is outside the workspace {}{via} — run in a workspace that contains it \
+                 (`rook -C`), or set sandbox.allow_outside_workspace",
+                normalized.display(),
+                root.display()
+            )));
+        }
+        Ok(real)
     }
+}
+
+/// Where a path really leads. Lexical normalisation cannot see a symlink, and a
+/// symlink inside the workspace pointing out of it is a way straight through
+/// the wall: the file is read or written outside while every path involved
+/// still looks contained.
+///
+/// Canonicalises the deepest ancestor that exists and re-appends the rest, so a
+/// file that is about to be created still resolves.
+pub fn through_symlinks(path: &std::path::Path) -> PathBuf {
+    let mut probe = path.to_path_buf();
+    let mut rest = Vec::new();
+    while let Some(name) = probe.file_name().map(|n| n.to_os_string()) {
+        if let Ok(real) = probe.canonicalize() {
+            return rest.iter().rev().fold(real, |p, part| p.join(part));
+        }
+        rest.push(name);
+        probe.pop();
+    }
+    probe
+        .canonicalize()
+        .map(|real| rest.iter().rev().fold(real, |p, part| p.join(part)))
+        .unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Lexical normalisation: resolve `.` and `..` without touching the filesystem.

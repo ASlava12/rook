@@ -29,6 +29,7 @@ Add a row when you implement something after reading a reference. Add it to
 | Speaking ACP to editors | `references/acp` schema v1 — read the JSON schema for exact field names and enum values rather than the prose | source | `rook-acp`, `rook acp` |
 | Delegating a sub-task to a fresh context | codex `codex_delegate.rs`, `session/multi_agents.rs` — took the `fork_turns` idea (how much parent context a child inherits), left the async spawn/wait protocol | source | `AgentLoop::delegate`, `rook session ls` |
 | Asking the user structured questions | hermes `7d6c6ae4` *clarify: schema diet + single questions[] interface (880 → 335 tok/call)* — took the one-questions[]-shape and the rule that options must never be written into the question text, and cut further: no per-question id, and the answer's own text is the "Other" row | source, via `refs advance` | `rook-tools/src/ask.rs`, `AgentLoop::ask_via` |
+| A workspace boundary that a symlink cannot cross | codex `2926014` *make filesystem policy matching URI-native* — their case was encoded and case-variant paths, ours was a symlink out of the workspace that lexical containment could not see | source, via `refs advance` | `ToolContext::resolve`, `through_symlinks`, `sandbox.allow_outside_workspace` |
 | Durable memory with provenance and history | hermes ([#12238](https://github.com/NousResearch/hermes-agent/issues/12238)); read `hermes/tools/memory_tool.py` and `goose/crates/goose-mcp/src/memory` | source | `rook-core/src/memory.rs`, `rook memory` |
 | Bounded logging and retention | codex SQLite growth ([#28224](https://github.com/openai/codex/issues/28224), [#17320](https://github.com/openai/codex/issues/17320)) | issues, not source | `RetentionPolicy`, `TelemetryConfig` |
 
@@ -37,6 +38,30 @@ Add a row when you implement something after reading a reference. Add it to
 `cargo xtask refs advance` prints what landed upstream since the pointer was last
 moved; what follows is what was done with it, so a dismissal is a decision rather
 than an omission.
+
+**2026-08-27 (fifth pass)** — acp, cline and codex advanced.
+
+- codex `2926014` *make filesystem policy matching URI-native* — **does not
+  port, but found a hole in ours.** Their concern was case-variant and encoded
+  paths; ours was worse. `ToolContext::resolve` compared paths lexically, so a
+  symlink inside the workspace pointing out of it went straight through: a probe
+  read a file from outside and planted another one there, while every path in
+  the error-free output looked contained. `resolve` now canonicalises the
+  deepest existing ancestor before checking containment, and the refusal names
+  where the path really led. It also exposed `allow_outside_workspace` as a dead
+  field — nothing set it — so the refusal advised something impossible; it is now
+  `sandbox.allow_outside_workspace`.
+- cline `89970ea` *sign Windows CLI binaries with Azure Trusted Signing* —
+  **worth revisiting, cannot do here.** `cargo xtask dist` ships unsigned
+  binaries, so Windows SmartScreen will warn on every download. Signing needs a
+  certificate this repository does not have. Roadmap, not done.
+- codex `e56e492` *standalone tool outputs in `turn/start`* — **not applicable**:
+  a turn here starts from a prompt or a replayed log, and there is no out-of-band
+  tool result to inject.
+- codex `ae357e7` *attach verified access context to plugin MCP calls*,
+  `f374188` *harden managed proxy listener handoff*, acp `ae596e1` *docs: update
+  registry agents* — **not applicable**: ChatGPT account entitlements, managed
+  proxy internals, and an upstream documentation list.
 
 **2026-08-27 (fourth pass)** — hermes advanced 13 commits.
 

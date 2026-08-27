@@ -9,6 +9,7 @@ use std::io::{BufRead, Read, Write};
 fn main() {
     let mut stdin = std::io::BufReader::new(std::io::stdin());
     let mut out = std::io::stdout();
+    let mut analyses = 0u32;
 
     while let Some(length) = read_content_length(&mut stdin) {
         let mut body = vec![0u8; length];
@@ -20,8 +21,10 @@ fn main() {
 
         if method == "textDocument/didOpen" || method == "textDocument/didChange" {
             let uri = message.pointer("/params/textDocument/uri").cloned().unwrap_or_default();
-            // Echo back what the client last said the file contains, so a test
-            // can tell a refreshed analysis from a stale one.
+            // Echo back what the client last said the file contains, and how
+            // many analyses it has asked for, so a test can tell a refreshed
+            // analysis from a stale one and a skipped one from a fast one.
+            analyses += 1;
             let seen = message
                 .pointer("/params/textDocument/text")
                 .or_else(|| message.pointer("/params/contentChanges/0/text"))
@@ -40,7 +43,7 @@ fn main() {
                             "range": { "start": { "line": 3, "character": 4 }, "end": { "line": 3, "character": 9 } },
                             "severity": 1,
                             "source": "mock",
-                            "message": format!("cannot find value `oops` in this scope ({seen} lines seen)")
+                            "message": format!("cannot find value `oops` in this scope ({seen} lines seen, analysis {analyses})")
                         }]
                     }
                 }),

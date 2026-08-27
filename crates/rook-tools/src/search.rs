@@ -50,7 +50,9 @@ impl Tool for Search {
             let mut hits = Vec::new();
             let mut total = 0usize;
             let mut files_scanned = 0usize;
-            for entry in ignore::WalkBuilder::new(&root).build().flatten() {
+            // Not following links is the default; stated because it is the
+            // workspace boundary, and a default is not a decision.
+            for entry in ignore::WalkBuilder::new(&root).follow_links(false).build().flatten() {
                 if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
                     continue;
                 }

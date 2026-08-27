@@ -109,6 +109,7 @@ impl<'a> AgentLoop<'a> {
         let mut tool_ctx = ToolContext::new(rook.workspace.clone());
         tool_ctx.max_output_bytes = rook.config.sandbox.max_output_bytes;
         tool_ctx.command_timeout = std::time::Duration::from_secs(rook.config.sandbox.command_timeout_secs);
+        tool_ctx.allow_outside_workspace = rook.config.sandbox.allow_outside_workspace;
 
         let configured =
             if rook.config.lsp.is_empty() { crate::lsp::detected() } else { rook.config.lsp.clone() };

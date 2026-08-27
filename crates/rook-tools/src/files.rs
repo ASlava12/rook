@@ -236,7 +236,11 @@ impl Tool for ListDir {
 
         let mut entries = Vec::new();
         let mut total = 0usize;
-        for entry in ignore::WalkBuilder::new(&root).max_depth(Some(depth)).build().flatten() {
+        // Not following links is the default; stated because it is the
+        // workspace boundary, and a default is not a decision.
+        for entry in
+            ignore::WalkBuilder::new(&root).max_depth(Some(depth)).follow_links(false).build().flatten()
+        {
             if entry.depth() == 0 {
                 continue;
             }
