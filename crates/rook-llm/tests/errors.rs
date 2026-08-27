@@ -153,3 +153,27 @@ async fn a_base_url_that_serves_nothing_is_not_reported_as_a_missing_model() {
     assert!(!said.contains("no model"), "a guess dressed as a diagnosis: {said}");
     assert!(said.contains("404"), "{said}");
 }
+
+#[test]
+fn an_unknown_provider_names_the_ones_that_exist() {
+    let Err(err) = rook_llm::from_spec("googl/gemini-2.5-pro", std::time::Duration::from_secs(1)) else {
+        panic!("a typo must not resolve")
+    };
+    let said = err.to_string();
+    assert!(said.contains("googl"), "{said}");
+    for known in rook_llm::PROVIDERS {
+        assert!(said.contains(known), "{known} is missing from the list: {said}");
+    }
+}
+
+/// The list is prose about a `match`, so it drifts unless something checks.
+#[test]
+fn every_listed_provider_is_one_the_code_actually_dispatches() {
+    for name in rook_llm::PROVIDERS {
+        let spec = format!("{name}/some-model");
+        // A missing key or endpoint is the environment's business, not the
+        // question being asked here.
+        let built = rook_llm::from_spec(&spec, std::time::Duration::from_secs(1));
+        assert!(!matches!(built, Err(LlmError::UnknownProvider { .. })), "{name} is listed and not handled");
+    }
+}

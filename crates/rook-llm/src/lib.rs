@@ -36,8 +36,11 @@ pub enum LlmError {
          larger window."
     )]
     ContextOverflow { used: usize, window: usize },
-    #[error("no provider configured for {0:?}")]
-    UnknownProvider(String),
+    #[error(
+        "no provider called {name:?}. `[agent] model` is `provider/model`, and provider is one of: {}",
+        PROVIDERS.join(", ")
+    )]
+    UnknownProvider { name: String },
     #[error("the model stopped sending for {secs}s; giving up on the stream")]
     Stalled { secs: u64 },
     #[error("no model {model:?} on the server at {endpoint} — {}", offers(available))]
@@ -175,6 +178,12 @@ pub trait Provider: Send + Sync {
     }
 }
 
+/// Every dialect a spec can name, in the order they are tried. Beside the match
+/// that dispatches on them, and checked against it by a test: a list that has
+/// drifted from the code is worse than no list.
+pub const PROVIDERS: &[&str] =
+    &["anthropic", "claude", "google", "gemini", "openai", "openai-compatible", "ollama", "lmstudio"];
+
 /// Split a `provider/model` spec, e.g. `ollama/qwen3-coder:30b`.
 pub fn split_spec(spec: &str) -> (&str, &str) {
     match spec.split_once('/') {
@@ -240,7 +249,7 @@ pub fn from_spec_with(
             std::env::var("ROOK_LLM_API_KEY").ok(),
             32_768,
         ),
-        other => return Err(LlmError::UnknownProvider(other.to_string())),
+        other => return Err(LlmError::UnknownProvider { name: other.to_string() }),
     };
     cfg.stream_idle_timeout = stream_idle;
     if let Some(window) = context_window {
