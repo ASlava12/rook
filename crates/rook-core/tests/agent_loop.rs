@@ -1734,7 +1734,7 @@ fn turning_off_lazy_skills_puts_the_bodies_in_the_prompt() {
 
     assert!(eager.contains("Always greet in the user's own language"), "inline: {eager}");
     assert!(!lazy.contains("Always greet"), "and lazily it must not be");
-    assert!(lazy.contains("greeting (1.0.0)"), "lazily it is a card");
+    assert!(lazy.contains("greeting: How to greet"), "lazily it is a card");
 }
 
 #[test]
@@ -1772,4 +1772,18 @@ async fn remembering_something_already_said_names_the_older_fact() {
     let last = requests.last().unwrap().messages.iter().rev().find(|m| m.role == Role::Tool).unwrap();
     assert!(last.content.contains("close to ["), "the restatement must be flagged: {}", last.content);
     assert!(last.content.contains("forget"), "and say what to do about it: {}", last.content);
+}
+
+#[test]
+fn the_catalog_names_only_what_the_model_can_act_on() {
+    let f = fixture();
+    let prompt = loop_for(&f).system_prompt();
+
+    let catalog = prompt.split("## Skills").nth(1).unwrap();
+    assert!(catalog.contains("- greeting:"), "{catalog}");
+    assert!(
+        !catalog.contains("1.0.0"),
+        "load_skill takes a name and resolve picks the version, so a version here is \
+         cost with no effect: {catalog}"
+    );
 }

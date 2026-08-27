@@ -39,6 +39,20 @@ Add a row when you implement something after reading a reference. Add it to
 moved; what follows is what was done with it, so a dismissal is a decision rather
 than an omission.
 
+**2026-08-27 (seventh pass)** — codex and openhands advanced.
+
+- codex `7c37479` *reduce skill catalog prompts with path aliases* — **does not
+  port; the design it optimises is one we do not have.** Their catalog carries a
+  locator per skill, so a shared root repeats fifty times and is worth aliasing.
+  Ours carries name and description and no path at all. It did prompt the right
+  question, though: the catalog also carried a version, and `load_skill` takes a
+  name while `resolve` picks the version from the environment — so it was ~100
+  tokens per fifty skills the model could not act on. Removed from the card,
+  kept on the heading of a body that is actually loaded, where it is provenance.
+- openhands `a917e36` *remove unused random tip code*, `1d6dcaf`, `9c83fdf`
+  *documentation* — **not applicable**: their own dead code and contributor
+  guidelines.
+
 **2026-08-27 (sixth pass)** — cline and hermes advanced.
 
 - hermes `e1e72f10` *register stdio MCP helper children in the spawn ledger and

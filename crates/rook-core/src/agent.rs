@@ -227,7 +227,10 @@ impl<'a> AgentLoop<'a> {
         s.push_str(&format!("Call `{LOAD_SKILL}` with a name to read its instructions before using it.\n"));
         let cap = self.rook.config.agent.max_skill_cards;
         for c in applicable.iter().take(cap) {
-            s.push_str(&format!("- {} ({}): {}\n", c.name, c.version, c.description));
+            // No version: `load_skill` takes a name, and `resolve` picks the
+            // version from the environment — so a version here is ~100 tokens
+            // per fifty skills that the model cannot act on.
+            s.push_str(&format!("- {}: {}\n", c.name, c.description));
         }
         applicable.len().min(cap)
     }
@@ -640,8 +643,7 @@ impl<'a> AgentLoop<'a> {
                 Err(e) => {
                     let mut message = format!("could not load skill {name:?}: {e}");
                     for card in self.rook.skills().search(name, &self.rook.env, 5) {
-                        message
-                            .push_str(&format!("\n- {} ({}): {}", card.name, card.version, card.description));
+                        message.push_str(&format!("\n- {}: {}", card.name, card.description));
                     }
                     self.rook.log(self.session, EventKind::Error, LOAD_SKILL, &message).ok();
                     message

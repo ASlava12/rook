@@ -107,6 +107,11 @@ what unblocks the most.
   work out, scoped by `requires` to where it actually holds, validated by reading
   it back, and captured as a version so a rewrite keeps the old one. The index
   reloads in place, so the next turn's catalog has it without a restart. 7 tests.
+- **The CLI tested as a user meets it** — 12 tests drive the real binary against
+  a real store: every read command on an empty store, `--json` that parses,
+  a skill scoped away and explained by `skills why`, capture and rollback, a
+  broken config that fails loudly, and the daemon path where a read goes over
+  HTTP and a write says where the lock is.
 - **Memory that stops repeating itself** — recall spends its budget once on a
   fact said twice, and `remember` names an older fact that says nearly the same
   thing so the model can supersede it. Two thresholds, because the costs differ:
