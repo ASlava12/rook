@@ -301,6 +301,14 @@ what unblocks the most.
   before checking containment, so a link inside the workspace pointing out of it
   is refused rather than followed, and the refusal says where the path really
   led. Widened only by `sandbox.allow_outside_workspace`. 6 tests.
+- **An edit that cannot mean anything is refused** — an empty `old` matches
+  between every pair of characters: `replace_all` interleaved the replacement
+  through the whole file and reported it as a success, and without it the count
+  said "appears 412 times; add surrounding context or set replace_all" — an
+  instruction to do the destructive thing. Both are refused, and the refusal
+  names `write_file`, which is what replacing a file is for. An edit whose `old`
+  and `new` are the same is refused too: a step that changed nothing must not
+  read as progress. 2 tests.
 - **A session named after what was asked of it** — each front end had a
   placeholder of its own — `chat`, `tui`, `web`, `acp <cwd>` — and two of the
   four already took the first line of the prompt instead, by writing out the

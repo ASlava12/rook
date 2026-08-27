@@ -141,3 +141,33 @@ async fn a_file_outside_the_workspace_is_refused_before_it_is_read() {
 
     assert!(err.contains("outside the workspace"), "{err}");
 }
+
+/// The empty string matches between every pair of characters. With
+/// `replace_all` that interleaved the replacement through the whole file and
+/// reported it as a success — and without it, the count said "appears 12 times;
+/// add surrounding context or set replace_all", which is an instruction to do
+/// exactly that.
+#[tokio::test]
+async fn an_empty_old_is_refused_rather_than_matched_everywhere() {
+    let f = File::with("let a = 1;\n");
+
+    for args in [
+        serde_json::json!({"edits": [{"old": "", "new": "// header\n"}]}),
+        serde_json::json!({"edits": [{"old": "", "new": "X", "replace_all": true}]}),
+    ] {
+        let out = f.edit(args).await;
+        assert!(out.is_error, "an edit that matches everywhere is not an edit: {}", out.content);
+        assert!(out.content.contains("write_file"), "and it names what does work: {}", out.content);
+    }
+    assert_eq!(f.contents(), "let a = 1;\n", "nothing was written");
+}
+
+#[tokio::test]
+async fn an_edit_that_would_change_nothing_says_so_instead_of_reporting_a_replacement() {
+    let f = File::with("let a = 1;\n");
+
+    let out = f.edit(serde_json::json!({"edits": [{"old": "let a = 1;", "new": "let a = 1;"}]})).await;
+
+    assert!(out.is_error, "a step that did nothing must not read as progress: {}", out.content);
+    assert_eq!(f.contents(), "let a = 1;\n");
+}

@@ -305,6 +305,18 @@ fn parse_edits(args: &serde_json::Value) -> Result<Vec<Edit>> {
 }
 
 fn apply(text: &str, edit: &Edit) -> std::result::Result<(String, usize), String> {
+    // The empty string matches between every pair of characters, so `replace_all`
+    // would interleave `new` through the whole file and report it as a success —
+    // and the ambiguity message below is what would send a model there.
+    if edit.old.is_empty() {
+        return Err("`old` is empty, which matches everywhere. To put text at a \
+                    particular place, match the line it goes next to; to replace the \
+                    file, use write_file"
+            .into());
+    }
+    if edit.old == edit.new {
+        return Err("`old` and `new` are the same, so this edit would change nothing".into());
+    }
     match text.matches(&edit.old).count() {
         0 => Err("that text is not in the file as given — read it again, it may have changed".into()),
         n if n > 1 && !edit.replace_all => {
