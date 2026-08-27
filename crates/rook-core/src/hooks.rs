@@ -32,6 +32,20 @@ pub enum Event {
     TurnEnd,
 }
 
+impl Event {
+    /// The spelling the user writes in `config.toml`, which is what they should
+    /// read back — the debug name is a Rust identifier.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Event::SessionStart => "session_start",
+            Event::Prompt => "prompt",
+            Event::PreTool => "pre_tool",
+            Event::PostTool => "post_tool",
+            Event::TurnEnd => "turn_end",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HookConfig {

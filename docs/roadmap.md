@@ -301,6 +301,14 @@ what unblocks the most.
   before checking containment, so a link inside the workspace pointing out of it
   is refused rather than followed, and the refusal says where the path really
   led. Widened only by `sandbox.allow_outside_workspace`. 6 tests.
+- **What `doctor` could not say about approvals and hooks** — it reported the
+  machine, the model and the skills, and nothing about the two things a user
+  configures to control the agent. It lists the mode, the rules that will not
+  compile, every hook with the event spelling from `config.toml`, and a `match`
+  pattern that does not parse — which makes its hook fire on every subject
+  rather than none, deliberately, and read as the hook misbehaving. Two Rust
+  names that were reaching users are gone with it: `PreTool` for `pre_tool`, and
+  the TUI answering an approval with `ForRun`. 3 tests.
 - **A boundary that would not compile is not silently absent** — a sandbox rule
   the user mis-spelled was dropped with a line in the log file. In `allow` that
   fails safe: being asked more often is not a hazard. In `deny` it left exactly

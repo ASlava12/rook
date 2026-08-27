@@ -435,6 +435,20 @@ fn cmd_doctor(rook: &Rook, json: bool) -> Result<()> {
         println!("  a rule that does not compile is not applied — a broken deny rule stops the agent");
     }
 
+    if !rook.config.hooks.is_empty() {
+        let (_, unusable) = rook_core::hooks::Hooks::compile(&rook.config.hooks);
+        println!();
+        println!("hooks: {}", rook.config.hooks.len());
+        for hook in &rook.config.hooks {
+            println!("  {:<14} {}", hook.event.as_str(), hook.command);
+        }
+        for error in &unusable {
+            // Not dropped: it fires on everything instead, which is louder than
+            // never firing and easier to mistake for the hook simply misbehaving.
+            println!("  ✗ {error} — this hook runs on every subject until the pattern parses");
+        }
+    }
+
     if !rook.plugins.is_empty() {
         println!();
         println!("plugins:");

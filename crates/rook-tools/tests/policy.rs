@@ -1,4 +1,4 @@
-use rook_tools::policy::{Decision, Mode, Policy, Risk, Rule};
+use rook_tools::policy::{Approval, Decision, Mode, Policy, Risk, Rule};
 
 fn policy(mode: Mode, allow: &[&str], ask: &[&str], deny: &[&str]) -> Policy {
     let owned = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
@@ -336,4 +336,11 @@ fn an_allow_rule_that_does_not_compile_is_dropped_and_reported() {
     assert_eq!(errors.len(), 1, "{errors:?}");
     assert_eq!(p.decide(&run("git status")), Decision::Allow, "the rule that did compile still works");
     assert_eq!(p.decide(&run("git push")), Decision::Ask);
+}
+
+#[test]
+fn what_the_user_is_told_after_answering_is_not_a_rust_name() {
+    assert_eq!(Approval::ForRun.describe(), "allowed for the rest of the run");
+    assert_eq!(Approval::Once.describe(), "allowed once");
+    assert!(Approval::Deny("the user declined".into()).describe().contains("the user declined"));
 }

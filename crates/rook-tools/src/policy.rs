@@ -293,6 +293,18 @@ pub enum Approval {
     Deny(String),
 }
 
+impl Approval {
+    /// What the user is shown after answering. `ForRun` is a Rust name, and the
+    /// TUI was printing it back at them.
+    pub fn describe(&self) -> String {
+        match self {
+            Approval::Once => "allowed once".into(),
+            Approval::ForRun => "allowed for the rest of the run".into(),
+            Approval::Deny(why) => format!("refused — {why}"),
+        }
+    }
+}
+
 #[async_trait]
 pub trait Approver: Send + Sync {
     async fn ask(&self, tool: &str, risk: &Risk) -> Approval;

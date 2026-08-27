@@ -421,7 +421,7 @@ impl App {
                 KeyCode::Char('n') | KeyCode::Esc => Approval::Deny("the user declined".into()),
                 _ => return,
             };
-            self.chat.push("stat", &format!("  {} → {approval:?}", request.action));
+            self.chat.push("stat", &format!("  {} → {}", request.action, approval.describe()));
             self.approver.answer(&request.id, approval);
             self.chat.pending = None;
             return;

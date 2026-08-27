@@ -584,3 +584,18 @@ fn doctor_names_a_sandbox_rule_that_does_not_compile() {
     assert!(said.contains("rm -rf (["), "the rule that is wrong: {said}");
     assert!(said.contains("stops the agent"), "and what it costs: {said}");
 }
+
+/// A hook whose `match` will not parse fires on every subject instead of the
+/// one it names — deliberately, since never firing is worse — but that was only
+/// ever said in the log file, where it reads as the hook simply misbehaving.
+#[test]
+fn doctor_lists_the_hooks_and_the_matcher_that_does_not_parse() {
+    let rook = Rook::new();
+    rook.write_config("[[hooks]]\nevent = \"pre_tool\"\nmatch = \"/([/\"\ncommand = \"my-policy-check\"\n");
+
+    let said = rook.ok(&["doctor"]);
+    assert!(said.contains("hooks: 1"), "{said}");
+    assert!(said.contains("pre_tool"), "the spelling from config.toml, not the Rust name: {said}");
+    assert!(!said.contains("PreTool"), "{said}");
+    assert!(said.contains("runs on every subject"), "and what the broken pattern costs: {said}");
+}
