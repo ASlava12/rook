@@ -26,6 +26,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/store/refs", get(refs))
         .route("/api/sessions", get(sessions))
         .route("/api/sessions/{id}/transcript", get(transcript))
+        .route("/api/sessions/{id}/changes", get(changes))
         .route("/api/skills", get(skills))
         .route("/api/skills/{name}", get(skill))
         .route("/api/skills/{name}/history", get(skill_history))
@@ -185,9 +186,24 @@ async fn refs(State(s): State<Shared>, Query(q): Query<PrefixQuery>) -> ApiResul
     Ok(Json(Page::new(items)))
 }
 
-async fn sessions(State(s): State<Shared>) -> ApiResult<Page<rook_store::SessionMeta>> {
+/// Sessions with their goals folded in. The goal lives in the `kv` table rather
+/// than on `SessionMeta`, because adding a field to a postcard record breaks
+/// every one already written — so it is joined here instead.
+async fn sessions(State(s): State<Shared>) -> ApiResult<Page<serde_json::Value>> {
     let rook = s.rook.read().await;
-    Ok(Json(Page::new(rook.sessions()?)))
+    let items = rook
+        .sessions()?
+        .into_iter()
+        .map(|meta| {
+            let goal = rook.goal(meta.id).ok().flatten();
+            let mut value = serde_json::to_value(&meta).unwrap_or_default();
+            if let (Some(object), Some(goal)) = (value.as_object_mut(), goal) {
+                object.insert("goal".into(), goal.into());
+            }
+            value
+        })
+        .collect();
+    Ok(Json(Page::new(items)))
 }
 
 #[derive(Deserialize)]
@@ -215,6 +231,25 @@ async fn transcript(
     let entries = rook.transcript(sid, q.from, q.limit.min(2000), q.max_body.min(1 << 20))?;
     let next = entries.last().map(|e| (e.seq + 1).to_string());
     Ok(Json(Page::new(entries).with_cursor(next)))
+}
+
+#[derive(Deserialize)]
+struct DiffQuery {
+    #[serde(default)]
+    diff: bool,
+}
+
+/// What a session did to the workspace, from its own checkpoints. The diffs are
+/// opt-in: a session that rewrote a large file is a large answer.
+async fn changes(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+    Query(q): Query<DiffQuery>,
+) -> ApiResult<rook_core::changes::Changes> {
+    let rook = s.rook.read().await;
+    let sid = rook_store::parse_session_id(&id)
+        .ok_or_else(|| Fail(StatusCode::BAD_REQUEST, ApiError::new("bad_request", "not a session id")))?;
+    Ok(Json(rook.changes(sid, q.diff)?))
 }
 
 async fn skills(State(s): State<Shared>) -> ApiResult<Page<rook_skills::SkillCard>> {
@@ -302,6 +337,7 @@ mod tests {
         _home: tempfile::TempDir,
         _workspace: tempfile::TempDir,
         router: Router,
+        state: Shared,
         session: u128,
     }
 
@@ -327,7 +363,7 @@ mod tests {
             rook: Arc::new(tokio::sync::RwLock::new(rook)),
             started: std::time::Instant::now(),
         });
-        Fixture { _home: home, _workspace: workspace, router: router(state), session }
+        Fixture { _home: home, _workspace: workspace, router: router(state.clone()), state, session }
     }
 
     async fn get(f: &Fixture, path: &str) -> (StatusCode, serde_json::Value) {
@@ -414,6 +450,30 @@ mod tests {
         let f = fixture();
         let (status, _) = get(&f, "/api/nope").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_session_reports_its_goal_and_what_it_changed() {
+        let f = fixture();
+        // Set here rather than in the fixture: recording a goal writes an event,
+        // and every other test counts them.
+        f.state.rook.read().await.set_goal(f.session, "find the leak").unwrap();
+        let id = rook_store::format_session_id(f.session);
+
+        let (status, body) = get(&f, &format!("/api/sessions/{id}/changes")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body["files"].is_array(), "a session that changed nothing is an empty list: {body}");
+
+        let (_, sessions) = get(&f, "/api/sessions").await;
+        let session = &sessions["items"][0];
+        assert_eq!(session["goal"], "find the leak", "the goal is joined in: {session}");
+    }
+
+    #[tokio::test]
+    async fn a_changes_request_for_something_that_is_not_a_session_is_a_client_error() {
+        let f = fixture();
+        let (status, _) = get(&f, "/api/sessions/not-a-ulid/changes").await;
+        assert!(status.is_client_error(), "answered {status}");
     }
 
     #[tokio::test]

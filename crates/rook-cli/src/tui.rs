@@ -54,6 +54,11 @@ enum TurnEvent {
     Error(String),
 }
 
+struct Selected {
+    goal: Option<String>,
+    changes: rook_core::changes::Changes,
+}
+
 #[derive(Default)]
 struct Chat {
     input: String,
@@ -145,6 +150,9 @@ struct App {
     sessions: Vec<SessionMeta>,
     session_state: ListState,
     transcript: Vec<TranscriptEntry>,
+    /// What the selected session was for and what it did, which is usually why
+    /// its transcript is being read at all.
+    selected: Option<Selected>,
     transcript_scroll: u16,
     skills: Vec<SkillCard>,
     skill_state: ListState,
@@ -201,6 +209,7 @@ impl App {
             sessions: Vec::new(),
             session_state: ListState::default(),
             transcript: Vec::new(),
+            selected: None,
             transcript_scroll: 0,
             skills: Vec::new(),
             skill_state: ListState::default(),
@@ -249,12 +258,19 @@ impl App {
 
     fn load_transcript(&mut self) {
         self.transcript.clear();
+        self.selected = None;
         self.transcript_scroll = 0;
         let Some(i) = self.session_state.selected() else { return };
         let Some(session) = self.sessions.get(i) else { return };
         // Bounded on purpose: viewing a session with a huge tool result must not
         // itself become the memory problem.
         self.transcript = self.rook.transcript(session.id, 0, 500, 4_000).unwrap_or_default();
+        self.selected = Some(Selected {
+            goal: self.rook.goal(session.id).ok().flatten(),
+            // No diffs: the header is a summary, and a session that rewrote a
+            // large file would take the pane over.
+            changes: self.rook.changes(session.id, false).unwrap_or_default(),
+        });
     }
 
     fn run(mut self, terminal: &mut DefaultTerminal) -> Result<()> {
@@ -698,6 +714,29 @@ impl App {
         );
 
         let mut lines: Vec<Line> = Vec::new();
+        if let Some(selected) = &self.selected {
+            if let Some(goal) = &selected.goal {
+                lines.push(Line::from(Span::styled(
+                    format!("goal: {goal}"),
+                    Style::default().fg(Color::Cyan),
+                )));
+            }
+            if selected.changes.touched() > 0 {
+                lines.push(Line::from(Span::styled(
+                    format!("changed {}", selected.changes.summary()),
+                    Style::default().fg(Color::Yellow),
+                )));
+                for file in selected.changes.files.iter().filter(|f| f.lines_added + f.lines_removed > 0) {
+                    lines.push(Line::from(Span::styled(
+                        format!("  {} +{} -{}", file.path, file.lines_added, file.lines_removed),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+            }
+            if !lines.is_empty() {
+                lines.push(Line::from(""));
+            }
+        }
         for e in &self.transcript {
             lines.push(Line::from(vec![
                 Span::styled(format!("#{:<4} ", e.seq), Style::default().fg(Color::DarkGray)),

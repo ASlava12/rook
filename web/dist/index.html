@@ -339,10 +339,23 @@ async function renderSessions() {
       onclick: () => { state.session = s.id; render(); }
     },
     el('div', {class:'name'}, s.title || '(untitled)'),
-    el('div', {class:'sub'}, `${ago(s.updated_at)} · ${s.event_count} events · ${s.model||'—'}`))));
+    el('div', {class:'sub'}, `${ago(s.updated_at)} · ${s.event_count} events · ${s.model||'—'}`),
+    s.goal ? el('div', {class:'sub'}, `goal: ${s.goal}`) : null)));
 
   const right = el('div', {class:'card'}, el('h2', {}, 'transcript'));
   if (state.session) {
+    // What it changed on disk, before what it said: that is the question a
+    // transcript is usually being read to answer.
+    const changed = await api(`/api/sessions/${state.session}/changes`);
+    if (changed.files.length) {
+      right.append(el('table', {},
+        el('tr', {}, ['file', '', '+', '−'].map(h => el('th', {}, h))),
+        changed.files.map(f => el('tr', {},
+          el('td', {class:'t'}, f.path),
+          el('td', {class:'tag'}, String(f.change).toLowerCase()),
+          el('td', {}, `+${f.lines_added}`),
+          el('td', {}, `−${f.lines_removed}`)))));
+    }
     const { items: entries } = await api(`/api/sessions/${state.session}/transcript?limit=200`);
     const box = el('div', {class:'scroll'});
     if (!entries.length) box.append(el('p', {class:'empty'}, 'no events yet'));

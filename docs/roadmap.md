@@ -120,6 +120,11 @@ what unblocks the most.
   a skill scoped away and explained by `skills why`, capture and rollback, a
   broken config that fails loudly, and the daemon path where a read goes over
   HTTP and a write says where the lock is.
+- **What a session was for and what it did, in every view** — the goal and the
+  files it changed were reachable only through `/goal` and `/diff` in the chat.
+  The session browser in both the TUI and the web now leads with them, which is
+  usually the question a transcript is being read to answer, over a new
+  `/api/sessions/{id}/changes`.
 - **Approvals and effort changeable everywhere** — `/mode` and `/effort` in the
   chat REPL, F2 and F3 in the TUI with both shown in its footer, two selects in
   the browser, and `configOptions` over ACP. All four reach the same policy;
