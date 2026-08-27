@@ -107,8 +107,25 @@ pub enum ClientMessage {
         id: String,
         decision: ApprovalDecision,
     },
+    /// Answers to a [`ChatEvent::Ask`], in the order the questions came, one
+    /// entry each. An empty `chosen` is a question the user skipped.
+    Answers {
+        id: String,
+        answers: Vec<Vec<String>>,
+    },
     /// Stop the turn in flight, leaving what it already did in the log.
     Cancel,
+}
+
+/// One question on a form the agent put to the user.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AskQuestion {
+    pub question: String,
+    /// Empty means free text.
+    #[serde(default)]
+    pub choices: Vec<String>,
+    #[serde(default)]
+    pub multi: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -140,6 +157,11 @@ pub enum ChatEvent {
         id: String,
         tool: String,
         action: String,
+    },
+    /// The turn is blocked until a [`ClientMessage::Answers`] with this id.
+    Ask {
+        id: String,
+        questions: Vec<AskQuestion>,
     },
     /// The turn was stopped before it finished. Sent instead of `Done`, so a
     /// client waiting on one of them is never left waiting.

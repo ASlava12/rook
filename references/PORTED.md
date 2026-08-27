@@ -28,6 +28,7 @@ Add a row when you implement something after reading a reference. Add it to
 | Hooks at points in a turn | codex `codex-rs/hooks/schema/generated` — took the allow/ask/deny decision and added-context ideas, left twelve events and a schema each for five events and one reply shape | source | `rook-core/src/hooks.rs` |
 | Speaking ACP to editors | `references/acp` schema v1 — read the JSON schema for exact field names and enum values rather than the prose | source | `rook-acp`, `rook acp` |
 | Delegating a sub-task to a fresh context | codex `codex_delegate.rs`, `session/multi_agents.rs` — took the `fork_turns` idea (how much parent context a child inherits), left the async spawn/wait protocol | source | `AgentLoop::delegate`, `rook session ls` |
+| Asking the user structured questions | hermes `7d6c6ae4` *clarify: schema diet + single questions[] interface (880 → 335 tok/call)* — took the one-questions[]-shape and the rule that options must never be written into the question text, and cut further: no per-question id, and the answer's own text is the "Other" row | source, via `refs advance` | `rook-tools/src/ask.rs`, `AgentLoop::ask_via` |
 | Durable memory with provenance and history | hermes ([#12238](https://github.com/NousResearch/hermes-agent/issues/12238)); read `hermes/tools/memory_tool.py` and `goose/crates/goose-mcp/src/memory` | source | `rook-core/src/memory.rs`, `rook memory` |
 | Bounded logging and retention | codex SQLite growth ([#28224](https://github.com/openai/codex/issues/28224), [#17320](https://github.com/openai/codex/issues/17320)) | issues, not source | `RetentionPolicy`, `TelemetryConfig` |
 
@@ -36,6 +37,30 @@ Add a row when you implement something after reading a reference. Add it to
 `cargo xtask refs advance` prints what landed upstream since the pointer was last
 moved; what follows is what was done with it, so a dismissal is a decision rather
 than an omission.
+
+**2026-08-27 (fourth pass)** — hermes advanced 13 commits.
+
+- hermes `7d6c6ae4` *clarify: schema diet + single questions[] interface* —
+  **ported, and it found a gap.** Rook had no way for the agent to ask the user
+  anything: it could only write prose and hope. Took the single `questions[]`
+  shape and the rule that options belong in `choices` and never in the question
+  text, dropped the per-question id (answers echo their question instead), and
+  let a typed answer stand in for the "Other" row. Its own lesson applied to
+  ourselves: `ask` came in at 227 tokens a call, the most expensive tool we have,
+  and was trimmed to 191 before it shipped.
+- The same commit's measurement exposed a second defect: `ToolSpec::stub` copied
+  the whole description, so lazy loading was advertising every tool's argument
+  guidance to save only its schema. A stub is now the first sentence, which took
+  the lazy path from 340 to 152 tokens a call.
+- hermes `df3d41ee` *sweep aborted-fetch tmp_pack debris before it corrupts the
+  pack directory* — **already handled**: payloads are written to `tmp/` and
+  renamed, and `gc` reclaims orphans left by a crash in between.
+- hermes `5d7ed70e` / `2812d612` *guard the post-update fleet check against PID
+  reuse* — **not applicable**: Rook does not outlive a process to re-check a PID
+  it recorded earlier.
+- hermes `790e1eb6`, `b2c01136`, `f9135c18`, `ccdd7f41`, `f0045c53`, `5609ccbe`,
+  `de2a9de7`, `77001a6b`, `8fdda828` — **not applicable**: Windows gateway
+  service supervision, venv update recovery, and JS dependency hygiene.
 
 **2026-08-27 (third pass)** — codex, cline and hermes advanced.
 

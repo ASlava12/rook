@@ -154,7 +154,10 @@ fn rook_core_config_deny() -> Vec<&'static str> {
 /// tokens a call before anyone measured it.
 #[test]
 fn the_advertised_tool_schemas_stay_within_a_budget() {
-    let tools = rook_tools::ToolBox::standard();
+    let mut tools = rook_tools::ToolBox::standard();
+    // What an interactive front end advertises, which is the expensive case.
+    tools
+        .register(std::sync::Arc::new(rook_tools::ask::AskUser(std::sync::Arc::new(rook_tools::ask::NoOne))));
     let cost = |t: &rook_llm::ToolSpec| {
         (t.name.len() + t.description.len() + t.parameters.to_string().len()).div_ceil(4)
     };
@@ -168,9 +171,17 @@ fn the_advertised_tool_schemas_stay_within_a_budget() {
          trim a description or merge an argument before raising this"
     );
     assert!(
-        stubs * 2 < full,
+        stubs * 4 < full,
         "stubs ({stubs}) must be much cheaper than full schemas ({full}), or lazy loading buys nothing"
     );
+    for spec in tools.stubs() {
+        let d = &spec.description;
+        assert!(
+            d.len() < 90 && d.ends_with('.'),
+            "{}'s first sentence has to stand alone as the whole stub: {d:?}",
+            spec.name
+        );
+    }
     for spec in tools.specs() {
         assert!(cost(&spec) < 200, "{} alone costs ~{} tokens", spec.name, cost(&spec));
     }

@@ -29,6 +29,12 @@ what unblocks the most.
   separates what a fresh turn would carry from what is merely stored.
 - **Tools** — paged `read_file`, `write_file`, unambiguous `edit_file`, `list_dir`,
   regex `search`, `run_command` with timeout, output cap and deny list.
+- **Asking the user** — `ask` puts a form of independent questions to whoever is
+  driving: numbered choices in the CLI and TUI, radio and checkbox rows in the
+  browser, the approval dialog over ACP. Typing past the options is always the
+  answer, so no front end has to render an "Other" row. Registered only where
+  someone can actually answer, so an unattended run neither advertises it nor
+  pays for its schema. 21 tests.
 - **Compaction** — the model summarises the span it replaces, into goal / done /
   open sections, and the summary is recorded in the log as a durable checkpoint:
   later turns and later processes start from it instead of replaying the span.

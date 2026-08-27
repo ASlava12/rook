@@ -14,7 +14,9 @@ use tokio::sync::mpsc;
 
 use rook_core::agent::AgentLoop;
 use rook_llm::Delta;
+use rook_proto::AskQuestion;
 use rook_proto::{ApprovalDecision, ChatEvent, ClientMessage};
+use rook_tools::ask::{AskRequest, ChannelAsker};
 use rook_tools::policy::{Approval, ChannelApprover};
 
 use crate::AppState;
@@ -39,8 +41,7 @@ async fn serve(socket: WebSocket, state: Arc<AppState>) {
     });
 
     let (approver, relay) = approver(outbound.clone());
-    // Per connection, not per prompt: an approval granted for "the run" has to
-    // survive the turn it was granted in.
+    let (asker, ask_relay) = asker(outbound.clone());
     // Per connection, not per prompt: connecting MCP servers and starting
     // language servers is expensive, and an approval granted for the run has to
     // survive the turn it was granted in.
@@ -60,6 +61,7 @@ async fn serve(socket: WebSocket, state: Arc<AppState>) {
                     ApprovalDecision::Deny => Approval::Deny("the user declined".into()),
                 },
             ),
+            ClientMessage::Answers { id, answers } => asker.answer(&id, answers),
             ClientMessage::Cancel => {
                 if let Some(handle) = running.take() {
                     handle.abort();
@@ -78,6 +80,7 @@ async fn serve(socket: WebSocket, state: Arc<AppState>) {
                 running = Some(tokio::spawn(turn(
                     state.clone(),
                     approver.clone(),
+                    asker.clone(),
                     shared.clone(),
                     outbound.clone(),
                     session,
@@ -91,6 +94,7 @@ async fn serve(socket: WebSocket, state: Arc<AppState>) {
         handle.abort();
     }
     relay.abort();
+    ask_relay.abort();
     drop(outbound);
     let _ = writer.await;
 }
@@ -98,6 +102,7 @@ async fn serve(socket: WebSocket, state: Arc<AppState>) {
 async fn turn(
     state: Arc<AppState>,
     approver: Arc<ChannelApprover>,
+    asker: Arc<ChannelAsker>,
     shared: Arc<tokio::sync::OnceCell<Shared>>,
     outbound: mpsc::UnboundedSender<ChatEvent>,
     session: Option<String>,
@@ -137,6 +142,7 @@ async fn turn(
     let mut agent = AgentLoop::new(&rook, provider.into(), session);
     agent.policy = shared.policy.clone();
     agent.approver = approver;
+    agent.ask_via(asker);
     agent.servers = shared.servers.clone();
     rook_core::lsp::register(&mut agent.tools, shared.servers.clone());
     for (server, tools) in &shared.mcp.servers {
@@ -179,6 +185,24 @@ struct Shared {
     policy: Arc<rook_tools::policy::Policy>,
     servers: Arc<rook_core::lsp::Servers>,
     mcp: Arc<rook_core::McpSession>,
+}
+
+/// Relays the agent's questions to the browser and routes the answers back.
+fn asker(outbound: mpsc::UnboundedSender<ChatEvent>) -> (Arc<ChannelAsker>, tokio::task::JoinHandle<()>) {
+    let (requests, mut incoming) = mpsc::unbounded_channel::<AskRequest>();
+    let relay = tokio::spawn(async move {
+        while let Some(request) = incoming.recv().await {
+            let questions = request
+                .questions
+                .into_iter()
+                .map(|q| AskQuestion { question: q.question, choices: q.choices, multi: q.multi })
+                .collect();
+            if outbound.send(ChatEvent::Ask { id: request.id, questions }).is_err() {
+                break;
+            }
+        }
+    });
+    (Arc::new(ChannelAsker::new(requests, std::time::Duration::from_secs(300))), relay)
 }
 
 /// Relays approval requests to the browser and routes the answers back.

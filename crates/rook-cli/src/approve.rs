@@ -3,6 +3,7 @@
 use std::io::{BufRead, Write};
 
 use async_trait::async_trait;
+use rook_tools::ask::{Answer, Question};
 use rook_tools::policy::{Approval, Approver, Risk};
 
 pub struct Terminal;
@@ -30,5 +31,38 @@ impl Approver for Terminal {
         })
         .await
         .unwrap_or_else(|_| Approval::Deny("the prompt failed".into()))
+    }
+}
+
+#[async_trait]
+impl rook_tools::ask::Asker for Terminal {
+    async fn ask(&self, questions: &[Question]) -> Vec<Answer> {
+        let asked = questions.to_vec();
+        // stdin is blocking, and blocking it on the runtime's worker would stall
+        // every other task in the turn.
+        tokio::task::spawn_blocking(move || asked.iter().map(prompt).collect())
+            .await
+            .unwrap_or_else(|_| questions.iter().map(unanswered).collect())
+    }
+}
+
+fn unanswered(q: &Question) -> Answer {
+    q.unanswered()
+}
+
+fn prompt(q: &Question) -> Answer {
+    let mut out = std::io::stdout();
+    let _ = writeln!(out, "\n  {}", q.question);
+    for (i, choice) in q.choices.iter().enumerate() {
+        let recommended = if i == 0 && !q.multi { "  (recommended)" } else { "" };
+        let _ = writeln!(out, "    {}. {choice}{recommended}", i + 1);
+    }
+    let _ = write!(out, "  {}", q.ask_line());
+    let _ = out.flush();
+
+    let mut answer = String::new();
+    match std::io::stdin().lock().read_line(&mut answer) {
+        Ok(_) => q.interpret(&answer),
+        Err(_) => q.unanswered(),
     }
 }

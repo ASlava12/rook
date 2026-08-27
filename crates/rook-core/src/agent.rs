@@ -140,6 +140,13 @@ impl<'a> AgentLoop<'a> {
         }
     }
 
+    /// Give the model a way to put a question to the person, which registers
+    /// the tool rather than storing a handle: a front end that cannot reach
+    /// anyone never advertises it, and never pays for its schema.
+    pub fn ask_via(&mut self, asker: std::sync::Arc<dyn rook_tools::ask::Asker>) {
+        self.tools.register(std::sync::Arc::new(rook_tools::ask::AskUser(asker)));
+    }
+
     /// The system prompt: identity, environment, and the skill catalog.
     ///
     /// The environment block matters more than it looks. A model told it is on
@@ -657,6 +664,9 @@ impl<'a> AgentLoop<'a> {
         child.tool_ctx = self.tool_ctx.clone();
         child.policy = self.policy.clone();
         child.approver = self.approver.clone();
+        // Deliberately not `ask_via`: a subagent the user did not start should
+        // not interrupt them, and its parent is the one holding the context to
+        // judge the answer.
         child.hooks = self.hooks.clone();
         child.servers = self.servers.clone();
         // A sub-task is a bounded errand, and lower effort means fewer and more

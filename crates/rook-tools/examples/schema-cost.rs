@@ -1,5 +1,7 @@
 fn main() {
-    let tools = rook_tools::ToolBox::standard();
+    let mut tools = rook_tools::ToolBox::standard();
+    tools
+        .register(std::sync::Arc::new(rook_tools::ask::AskUser(std::sync::Arc::new(rook_tools::ask::NoOne))));
     let estimate = |t: &rook_llm::ToolSpec| {
         (t.name.len() + t.description.len() + t.parameters.to_string().len()).div_ceil(4)
     };

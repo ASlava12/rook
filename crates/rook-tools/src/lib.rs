@@ -11,9 +11,11 @@
 //! * Every tool returns structured [`ToolOutcome`], so a failure carries a reason
 //!   the model can act on rather than a bare error string.
 
+pub mod ask;
 pub mod exec;
 pub mod files;
 pub mod mcp;
+pub mod pending;
 pub mod policy;
 pub mod search;
 

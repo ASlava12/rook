@@ -69,18 +69,42 @@ pub struct ToolSpec {
 
 impl ToolSpec {
     /// The one-line form used when tool schemas are loaded lazily: name and
-    /// description only, deferring the schema until the model asks for it.
+    /// first sentence, deferring the schema until the model asks for it.
     ///
     /// Full schemas for a few dozen tools cost thousands of tokens on every
     /// single request, and on local models a tool-heavy prompt is an order of
     /// magnitude slower to process than plain text.
+    ///
+    /// The rest of the description is guidance on writing the arguments, which
+    /// only matters once the model has decided to use the tool — so it travels
+    /// with the schema. This is why a tool description must open with a
+    /// sentence that stands on its own.
     pub fn stub(&self) -> Self {
         Self {
             name: self.name.clone(),
-            description: self.description.clone(),
+            description: first_sentence(&self.description).to_string(),
             parameters: serde_json::json!({ "type": "object", "properties": {} }),
         }
     }
+}
+
+/// Up to and including the first full stop that ends a sentence, meaning the
+/// text after it does not continue in lower case and the word it closes is not
+/// a dotted abbreviation. Both conditions are needed: `e.g. cargo` fails the
+/// first, `v1.2. Then` the second, while `.gitignore. Output` and
+/// ``a file. `old` `` are real boundaries. Cutting in the wrong place truncates
+/// a stub, so the rule keeps too much rather than too little.
+fn first_sentence(description: &str) -> &str {
+    let ends_sentence = |i: &usize| {
+        let word = description[..*i].rsplit(char::is_whitespace).next().unwrap_or("");
+        let abbreviation = word.len() <= 4 && word.contains('.');
+        !abbreviation && !description[i + 2..].starts_with(char::is_lowercase)
+    };
+    description
+        .match_indices(". ")
+        .find(|(i, _)| ends_sentence(i))
+        .map(|(i, _)| &description[..=i])
+        .unwrap_or(description)
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -173,4 +197,46 @@ pub struct ModelInfo {
     /// Reported context length, where the endpoint gives one. Most do not.
     #[serde(default)]
     pub context_window: Option<usize>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec(description: &str) -> ToolSpec {
+        ToolSpec {
+            name: "t".into(),
+            description: description.into(),
+            parameters: serde_json::json!({"type": "object", "properties": {"a": {"type": "string"}}}),
+        }
+    }
+
+    #[test]
+    fn a_stub_keeps_the_first_sentence_and_drops_the_argument_guidance() {
+        let s = spec("Read a text file. Pass an absolute path. Binary files are refused.").stub();
+        assert_eq!(s.description, "Read a text file.");
+        assert_eq!(s.parameters["properties"], serde_json::json!({}), "the schema is what is deferred");
+    }
+
+    #[test]
+    fn a_one_sentence_description_survives_whole() {
+        assert_eq!(spec("List a directory.").stub().description, "List a directory.");
+        assert_eq!(spec("List a directory").stub().description, "List a directory");
+    }
+
+    #[test]
+    fn an_abbreviation_does_not_cut_the_sentence_in_half() {
+        let s = spec("Run a command, e.g. cargo test. Escapes are your own problem.").stub();
+        assert_eq!(s.description, "Run a command, e.g. cargo test.");
+        let s = spec("Pin v1.2. Then build.").stub();
+        assert_eq!(s.description, "Pin v1.2. Then build.", "a version is not a sentence end either");
+    }
+
+    #[test]
+    fn a_dotted_filename_and_a_code_span_are_still_sentence_boundaries() {
+        let s = spec("List a directory, honouring .gitignore. Output is capped.").stub();
+        assert_eq!(s.description, "List a directory, honouring .gitignore.");
+        let s = spec("Replace an exact string. `old` must appear once.").stub();
+        assert_eq!(s.description, "Replace an exact string.");
+    }
 }

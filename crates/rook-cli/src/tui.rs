@@ -22,6 +22,7 @@ use rook_core::{Rook, TranscriptEntry};
 use rook_llm::Delta;
 use rook_skills::SkillCard;
 use rook_store::{SessionMeta, StoreStats};
+use rook_tools::ask::{AskRequest, ChannelAsker, Question};
 use rook_tools::policy::{Approval, ApprovalRequest, ChannelApprover};
 use tokio::sync::mpsc;
 
@@ -47,6 +48,7 @@ enum TurnEvent {
     Reasoning(String),
     Tool(String),
     Approval(ApprovalRequest),
+    Ask(AskRequest),
     Done(String),
     Error(String),
 }
@@ -58,7 +60,27 @@ struct Chat {
     session: Option<u128>,
     busy: bool,
     pending: Option<ApprovalRequest>,
+    asking: Option<Asking>,
     scroll: u16,
+}
+
+/// One batch of questions, answered one at a time through the input line so the
+/// TUI needs no second editor.
+fn display(chosen: &[String]) -> String {
+    if chosen.is_empty() { "(skipped)".into() } else { chosen.join(", ") }
+}
+
+struct Asking {
+    id: String,
+    questions: Vec<Question>,
+    at: usize,
+    chosen: Vec<Vec<String>>,
+}
+
+impl Asking {
+    fn current(&self) -> &Question {
+        &self.questions[self.at]
+    }
 }
 
 impl Chat {
@@ -80,6 +102,7 @@ struct App {
     events: mpsc::UnboundedReceiver<TurnEvent>,
     to_loop: mpsc::UnboundedSender<TurnEvent>,
     approver: Arc<ChannelApprover>,
+    asker: Arc<ChannelAsker>,
     policy: Arc<rook_tools::policy::Policy>,
     servers: Arc<rook_core::lsp::Servers>,
     mcp: Arc<rook_core::McpSession>,
@@ -111,6 +134,16 @@ impl App {
             }
         });
 
+        let (questions, mut asked) = mpsc::unbounded_channel::<AskRequest>();
+        let relay = to_loop.clone();
+        runtime.spawn(async move {
+            while let Some(request) = asked.recv().await {
+                if relay.send(TurnEvent::Ask(request)).is_err() {
+                    break;
+                }
+            }
+        });
+
         // Connected before the struct takes the runtime, since it needs both.
         let mcp = Arc::new(runtime.block_on(rook.connect_mcp()));
 
@@ -122,6 +155,7 @@ impl App {
             events,
             to_loop,
             approver: Arc::new(ChannelApprover::new(requests, Duration::from_secs(600))),
+            asker: Arc::new(ChannelAsker::new(questions, Duration::from_secs(600))),
             policy: rook_core::agent::policy_for(&rook),
             servers: rook_core::agent::servers_for(&rook),
             // Connected once: every turn would otherwise spawn each server,
@@ -215,6 +249,14 @@ impl App {
                 TurnEvent::Reasoning(text) => self.chat.push("think", &text),
                 TurnEvent::Tool(name) => self.chat.push("tool", &format!("  · {name}")),
                 TurnEvent::Approval(request) => self.chat.pending = Some(request),
+                TurnEvent::Ask(request) => {
+                    self.chat.asking = Some(Asking {
+                        id: request.id,
+                        questions: request.questions,
+                        at: 0,
+                        chosen: Vec::new(),
+                    })
+                }
                 TurnEvent::Done(note) => {
                     self.chat.push("stat", &note);
                     self.chat.busy = false;
@@ -273,6 +315,7 @@ impl App {
             KeyCode::BackTab => self.tab = (self.tab + TABS.len() - 1) % TABS.len(),
             KeyCode::Esc if self.chat.input.is_empty() => self.quit = true,
             KeyCode::Esc => self.chat.input.clear(),
+            KeyCode::Enter if self.chat.asking.is_some() => self.answer(),
             KeyCode::Enter => self.send(),
             KeyCode::Backspace => {
                 self.chat.input.pop();
@@ -281,6 +324,22 @@ impl App {
             KeyCode::PageDown => self.chat.scroll = self.chat.scroll.saturating_add(10),
             KeyCode::Char(c) => self.chat.input.push(c),
             _ => {}
+        }
+    }
+
+    /// One question per Enter. The input line is the answer field, so typing
+    /// past the choices works here exactly as it does in the plain CLI.
+    fn answer(&mut self) {
+        let Some(mut asking) = self.chat.asking.take() else { return };
+        let typed = std::mem::take(&mut self.chat.input);
+        let answer = asking.current().interpret(&typed);
+        self.chat.push("stat", &format!("  {} → {}", asking.current().question, display(&answer.chosen)));
+        asking.chosen.push(answer.chosen);
+        asking.at += 1;
+        if asking.at < asking.questions.len() {
+            self.chat.asking = Some(asking);
+        } else {
+            self.asker.answer(&asking.id, asking.chosen);
         }
     }
 
@@ -297,6 +356,7 @@ impl App {
         let rook = self.rook.clone();
         let to_loop = self.to_loop.clone();
         let approver = self.approver.clone();
+        let asker = self.asker.clone();
         let policy = self.policy.clone();
         let servers = self.servers.clone();
         let mcp = self.mcp.clone();
@@ -345,6 +405,7 @@ impl App {
             } else {
                 agent.policy = policy;
                 agent.approver = approver;
+                agent.ask_via(asker);
             }
             for (server, tools) in &mcp.servers {
                 agent.tools.register_server(server.clone(), tools.clone());
@@ -442,13 +503,16 @@ impl App {
     }
 
     fn draw_chat(&mut self, f: &mut Frame, area: Rect) {
-        let approval_height = if self.chat.pending.is_some() { 4 } else { 0 };
-        let [log, ask, input] = Layout::vertical([
-            Constraint::Min(3),
-            Constraint::Length(approval_height),
-            Constraint::Length(3),
-        ])
-        .areas(area);
+        // Only one of the two can be up: an approval blocks the turn that would
+        // have to be running for a question to arrive.
+        let blocking = match (&self.chat.pending, &self.chat.asking) {
+            (Some(_), _) => 4,
+            (_, Some(asking)) => 4 + asking.current().choices.len() as u16,
+            _ => 0,
+        };
+        let [log, ask, input] =
+            Layout::vertical([Constraint::Min(3), Constraint::Length(blocking), Constraint::Length(3)])
+                .areas(area);
 
         let mut lines: Vec<Line> = Vec::new();
         for (kind, body) in &self.chat.log {
@@ -504,9 +568,23 @@ impl App {
                 .block(bordered(" approval ")),
                 ask,
             );
+        } else if let Some(asking) = &self.chat.asking {
+            let q = asking.current();
+            let mut lines =
+                vec![Line::from(Span::styled(q.question.clone(), Style::default().fg(Color::Cyan)))];
+            for (i, choice) in q.choices.iter().enumerate() {
+                let recommended = if i == 0 && !q.multi { "  (recommended)" } else { "" };
+                lines.push(Line::from(format!("  {}. {choice}{recommended}", i + 1)));
+            }
+            lines.push(Line::from(Span::styled(
+                q.ask_line().to_string(),
+                Style::default().fg(Color::DarkGray),
+            )));
+            let title = format!(" question {} of {} ", asking.at + 1, asking.questions.len());
+            f.render_widget(Paragraph::new(lines).block(bordered(&title)), ask);
         }
 
-        let prompt = if self.chat.busy { "  working… " } else { "› " };
+        let prompt = if self.chat.busy && self.chat.asking.is_none() { "  working… " } else { "› " };
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(prompt, Style::default().fg(Color::DarkGray)),
@@ -515,7 +593,9 @@ impl App {
             .block(bordered("")),
             input,
         );
-        if !self.chat.busy && self.chat.pending.is_none() {
+        // Visible while a question is up, even though the turn is busy: the
+        // input line is where the answer is typed.
+        if (!self.chat.busy || self.chat.asking.is_some()) && self.chat.pending.is_none() {
             f.set_cursor_position((
                 input.x + 1 + prompt.chars().count() as u16 + self.chat.input.chars().count() as u16,
                 input.y + 1,
@@ -746,6 +826,7 @@ impl App {
             Line::from("  In Chat:    Enter sends · Esc clears, then quits"),
             Line::from("              /btw <question> asks without joining the conversation"),
             Line::from("              y / a / n answer an approval"),
+            Line::from("              enter     answer a question, one at a time"),
         ];
         f.render_widget(Paragraph::new(text).block(bordered(" Help ")), area);
     }

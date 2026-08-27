@@ -164,6 +164,9 @@ async fn turn(
     let mut agent = AgentLoop::new(rook, provider.into(), session);
     agent.servers = shared.servers.clone();
     rook_core::lsp::register(&mut agent.tools, shared.servers.clone());
+    // Even under `--yes`: approving every command is not the same as never
+    // wanting to be asked which one to run.
+    agent.ask_via(std::sync::Arc::new(crate::approve::Terminal));
     if shared.yes {
         agent.allow_everything_not_denied();
     } else {

@@ -22,6 +22,7 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use rook_core::Rook;
 use rook_core::agent::AgentLoop;
 use rook_llm::Delta;
+use rook_tools::ask::{Answer, Question};
 use rook_tools::policy::{Approval, Approver, Risk};
 
 use protocol::{ContentBlock, Error, Incoming, PROTOCOL_VERSION};
@@ -241,7 +242,9 @@ async fn prompt(
     for (server, tools) in &shared.mcp.servers {
         agent.tools.register_server(server.clone(), tools.clone());
     }
-    agent.approver = Arc::new(EditorApprover { peer: peer.clone(), session: request.session_id.clone() });
+    let editor = Arc::new(EditorApprover { peer: peer.clone(), session: request.session_id.clone() });
+    agent.approver = editor.clone();
+    agent.ask_via(editor);
 
     let calls = AtomicU64::new(0);
     let result = agent
@@ -355,5 +358,53 @@ impl Approver for EditorApprover {
             },
             _ => Approval::Deny("the request was cancelled".into()),
         }
+    }
+}
+
+/// Puts the agent's questions to the editor as its approval dialog, which is
+/// the only thing ACP offers that a person answers.
+///
+/// It renders options and nothing else, so a free-text question comes back
+/// skipped rather than pretending: the model is then told to decide for itself,
+/// which is the honest outcome of asking somewhere no one can type.
+#[async_trait]
+impl rook_tools::ask::Asker for EditorApprover {
+    async fn ask(&self, questions: &[Question]) -> Vec<Answer> {
+        let mut answers = Vec::with_capacity(questions.len());
+        for (i, q) in questions.iter().enumerate() {
+            answers.push(match q.choices.is_empty() {
+                true => q.unanswered(),
+                false => self.choose(i, q).await,
+            });
+        }
+        answers
+    }
+}
+
+impl EditorApprover {
+    async fn choose(&self, index: usize, q: &Question) -> Answer {
+        let options: Vec<_> = q
+            .choices
+            .iter()
+            .enumerate()
+            .map(|(i, choice)| {
+                serde_json::json!({ "optionId": i.to_string(), "name": choice, "kind": "allow_once" })
+            })
+            .collect();
+        let params = serde_json::json!({
+            "sessionId": self.session,
+            "toolCall": { "toolCallId": format!("ask_{index}"), "title": q.question },
+            "options": options,
+        });
+
+        let picked = self
+            .peer
+            .request("session/request_permission", params)
+            .await
+            .filter(|a| a.pointer("/outcome/outcome").and_then(|o| o.as_str()) == Some("selected"))
+            .and_then(|a| a.pointer("/outcome/optionId")?.as_str()?.parse::<usize>().ok())
+            .and_then(|i| q.choices.get(i).cloned());
+
+        Answer { question: q.question.clone(), chosen: picked.into_iter().collect() }
     }
 }

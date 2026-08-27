@@ -62,6 +62,12 @@ form.ask button[disabled]{opacity:.5;cursor:default}
 .approve{border:1px solid var(--warn);border-radius:6px;padding:.6rem .8rem;margin:.5rem 0;
   display:flex;gap:.5rem;align-items:center;flex-wrap:wrap}
 .approve span{flex:1;font-family:var(--mono);font-size:.82rem}
+.ask-form{border:1px solid var(--accent);border-radius:6px;padding:.6rem .8rem;margin:.5rem 0}
+.ask-form p{margin:0 0 .4rem;font-family:var(--mono);font-size:.82rem}
+.ask-form label{display:block;padding:.15rem 0;cursor:pointer;font-size:.85rem}
+.ask-form input[type=text]{width:100%;padding:.4rem;border:1px solid var(--line);border-radius:4px;
+  background:var(--panel);color:var(--fg);font:inherit}
+.ask-form fieldset{border:0;padding:0;margin:0 0 .7rem}
 .scroll{max-height:74vh;overflow:auto}
 </style>
 </head>
@@ -164,6 +170,7 @@ function connect() {
     else if (e.type === 'error') { say('err', `\n${e.message}\n`); done(); }
     else if (e.type === 'cancelled') { say('stat', '\n[stopped]\n\n'); done(); }
     else if (e.type === 'approval') askApproval(e);
+    else if (e.type === 'ask') askUser(e);
     else if (e.type === 'done') {
       say('stat', `\n[${e.steps} steps · ${e.input_tokens} in / ${e.output_tokens} out` +
         (e.compactions ? ` · ${e.compactions} compactions` : '') +
@@ -193,6 +200,43 @@ function askApproval(request) {
     el('button', { onclick: () => decide('for_run') }, 'Always'),
     el('button', { onclick: () => decide('deny') }, 'Deny'));
   out.append(box);
+  out.scrollTop = out.scrollHeight;
+}
+
+// One form for every question in the call: the agent asked them together
+// because they are independent, and a chain of dialogs would undo that.
+function askUser(request) {
+  const out = chatOut();
+  const fields = request.questions.map((q, i) => {
+    const name = `q${request.id}_${i}`;
+    const rows = q.choices.map((choice) => el('label', {},
+      el('input', { type: q.multi ? 'checkbox' : 'radio', name, value: choice }), ` ${choice}`));
+    // Always a free-text row: the answer worth having is often not on the list.
+    const other = el('input', { type: 'text', name: `${name}_other`,
+      placeholder: q.choices.length ? 'or type your own answer' : 'your answer' });
+    return el('fieldset', {}, el('p', {}, q.question), ...rows, other);
+  });
+
+  const submit = (answers) => {
+    socket.send(JSON.stringify({ type: 'answers', id: request.id, answers }));
+    form.replaceWith(el('div', { class: 'stat' },
+      answers.map((a) => `  answered: ${a.join(', ') || '(skipped)'}`).join('\n') + '\n'));
+  };
+  const typed = (q, i) => {
+    const name = `q${request.id}_${i}`;
+    // A typed answer wins: someone who wrote past the options meant to.
+    const own = form.querySelector(`[name="${name}_other"]`).value.trim();
+    return own ? [own] : [...form.querySelectorAll(`[name="${name}"]:checked`)].map((n) => n.value);
+  };
+
+  const form = el('form', { class: 'ask-form', onsubmit: (e) => {
+      e.preventDefault();
+      submit(request.questions.map(typed));
+    } },
+    ...fields,
+    el('button', { type: 'submit' }, 'Answer'),
+    el('button', { type: 'button', onclick: () => submit(request.questions.map(() => [])) }, 'Skip'));
+  out.append(form);
   out.scrollTop = out.scrollHeight;
 }
 

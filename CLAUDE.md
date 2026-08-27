@@ -77,6 +77,11 @@ forgotten.
 exposed by the CLI, the API and the TUI. A feature reachable from one front end
 and not the others is a bug — the approver is shared for exactly this reason.
 
+**A tool description opens with a sentence that stands alone.** Under lazy
+loading only that first sentence is advertised; the rest is guidance on writing
+the arguments, which only matters once the model has decided to call the tool.
+`cargo run -p rook-tools --example schema-cost` prices both forms.
+
 **Verifying the TUI.** A pty capture is not readable as text: ratatui places
 characters cell by cell, so a substring the screen clearly shows never appears
 contiguously in the byte stream. Reconstruct the grid from the cursor-positioning
