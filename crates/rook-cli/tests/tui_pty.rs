@@ -223,3 +223,32 @@ fn the_memory_tab_shows_what_the_agent_remembers() {
     assert!(screen.contains("prefer tabs in Makefiles"), "and the fact:\n{screen}");
     assert!(screen.contains("style"), "with its tags:\n{screen}");
 }
+
+#[test]
+fn the_tui_chat_answers_the_same_slash_commands_as_the_plain_cli() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let mut pty = tui(home.path(), workspace.path());
+    pty.screen(100, 30);
+
+    pty.send("/goal ship the release\r");
+    pty.send("/goal\r");
+    let screen = pty.screen(100, 30).join("\n");
+
+    assert!(screen.contains("goal set"), "the command must run, not be sent to a model:\n{screen}");
+    assert!(screen.contains("ship the release"), "and read back:\n{screen}");
+}
+
+#[test]
+fn an_unknown_slash_command_in_the_tui_says_so() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let mut pty = tui(home.path(), workspace.path());
+    pty.screen(100, 30);
+
+    pty.send("/nonsense\r");
+    let screen = pty.screen(100, 30).join("\n");
+
+    assert!(screen.contains("unknown command"), "{screen}");
+    assert!(!screen.contains("cannot reach"), "it must not have gone to the provider:\n{screen}");
+}

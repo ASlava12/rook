@@ -120,6 +120,10 @@ what unblocks the most.
   a skill scoped away and explained by `skills why`, capture and rollback, a
   broken config that fails loudly, and the daemon path where a read goes over
   HTTP and a write says where the lock is.
+- **One set of slash commands, not two** — the TUI's chat understood `/btw` and
+  nothing else, so a TUI user could not set a goal, see what a turn costs, undo,
+  or start a session. The commands now return text instead of printing it, and
+  both the terminal chat and the TUI render the same answers from the same code.
 - **Memory visible, and correctable, outside the CLI** — what the agent believes
   about you steers every later turn, and the only way to see or fix it was
   `rook memory`. Both the TUI and the browser now have a Memory view over a new

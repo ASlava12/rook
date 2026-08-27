@@ -71,7 +71,7 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
     // One policy for the whole session, so "always this run" means the session
     // and not the single turn it was granted in.
     let shared = Session {
-        mcp,
+        mcp: std::sync::Arc::new(mcp),
         policy: rook_core::agent::policy_for(&rook),
         // Likewise the language servers: a pool dropped per turn restarts
         // rust-analyzer, and it indexes the workspace every time it starts.
@@ -101,8 +101,12 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
                 }
                 if let Some(command) = line.strip_prefix('/') {
                     match runtime.block_on(dispatch(&rook, &mut session, &shared, command)) {
-                        Ok(true) => break,
-                        Ok(false) => {}
+                        Ok(said) => {
+                            print!("{}", said.text);
+                            if said.quit {
+                                break;
+                            }
+                        }
                         Err(e) => println!("{e}"),
                     }
                     continue;
@@ -133,12 +137,12 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
 async fn aside(rook: &Rook, provider: Box<dyn rook_llm::Provider>, session: u128, question: &str) {
     let agent = AgentLoop::new(rook, provider.into(), session);
     let mut out = std::io::stdout();
-    let _ = write!(out, "\x1b[2m");
+    print!("\x1b[2m");
     let _ = out.flush();
     let result = agent
         .aside(question, |delta| {
             if let Delta::Text(text) = delta {
-                let _ = write!(out, "{text}");
+                print!("{text}");
                 let _ = out.flush();
             }
         })
@@ -150,14 +154,14 @@ async fn aside(rook: &Rook, provider: Box<dyn rook_llm::Provider>, session: u128
 }
 
 /// What a session keeps between turns, so a turn does not rebuild it.
-struct Session {
-    mcp: rook_core::McpSession,
-    policy: std::sync::Arc<rook_tools::policy::Policy>,
-    servers: std::sync::Arc<rook_core::lsp::Servers>,
+pub struct Session {
+    pub mcp: std::sync::Arc<rook_core::McpSession>,
+    pub policy: std::sync::Arc<rook_tools::policy::Policy>,
+    pub servers: std::sync::Arc<rook_core::lsp::Servers>,
     /// The policy holds the mode; effort has nowhere else to live and is worth
     /// changing per task, so it sits beside it for the whole session.
-    effort: std::cell::Cell<rook_llm::Effort>,
-    yes: bool,
+    pub effort: std::cell::Cell<rook_llm::Effort>,
+    pub yes: bool,
 }
 
 async fn turn(
@@ -187,15 +191,15 @@ async fn turn(
     let mut out = std::io::stdout();
     let running = agent.run_with(prompt, |progress| match progress {
         Progress::Delta(Delta::Text(text)) => {
-            let _ = write!(out, "{text}");
+            print!("{text}");
             let _ = out.flush();
         }
         Progress::Delta(Delta::ToolCall(call)) => {
-            let _ = write!(out, "\n  · {}", call.name);
+            print!("\n  · {}", call.name);
             let _ = out.flush();
         }
         Progress::ToolDone { failed, .. } => {
-            let _ = writeln!(out, "{}", if failed { " ✗" } else { " ✓" });
+            println!("{}", if failed { " ✗" } else { " ✓" });
             let _ = out.flush();
         }
         _ => {}
@@ -231,42 +235,60 @@ async fn turn(
     }
 }
 
-/// Returns true when the session should end.
-async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command: &str) -> Result<bool> {
+/// What a slash command produced, and whether it ends the session.
+///
+/// Text rather than printing, so every front end renders it its own way instead
+/// of growing a copy of the command set — which is how the TUI came to have one
+/// of the fourteen.
+#[derive(Default)]
+pub struct Said {
+    pub text: String,
+    pub quit: bool,
+}
+
+pub async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command: &str) -> Result<Said> {
     let mcp = &shared.mcp;
+    let out = &mut String::new();
+    // Blocks, so they can stand where a match arm expects an expression.
+    macro_rules! put {
+        ($($arg:tt)*) => {{ out.push_str(&format!($($arg)*)) }};
+    }
+    macro_rules! say {
+        ($($arg:tt)*) => {{ put!($($arg)*); out.push('\n') }};
+    }
     let (name, rest) = command.split_once(' ').unwrap_or((command, ""));
     let rest = rest.trim();
 
     match name {
-        "quit" | "exit" | "q" => return Ok(true),
-        "help" | "?" => println!("{HELP}"),
+        "quit" | "exit" | "q" => return Ok(Said { text: String::new(), quit: true }),
+        "help" | "?" => say!("{HELP}"),
 
-        "mode" if rest.is_empty() => println!("{}", shared.policy.mode().as_str()),
+        "mode" if rest.is_empty() => say!("{}", shared.policy.mode().as_str()),
         "mode" => match rook_tools::policy::Mode::parse(rest) {
             Some(mode) => shared.policy.set_mode(mode),
-            None => println!("no mode {rest:?} — auto, ask or readonly"),
+            None => say!("no mode {rest:?} — auto, ask or readonly"),
         },
 
-        "effort" if rest.is_empty() => println!("{}", shared.effort.get().as_str()),
+        "effort" if rest.is_empty() => say!("{}", shared.effort.get().as_str()),
         "effort" => match rook_llm::Effort::parse(rest) {
             Some(effort) => shared.effort.set(effort),
-            None => println!("no effort {rest:?} — low, medium, high, xhigh or max"),
+            None => say!("no effort {rest:?} — low, medium, high, xhigh or max"),
         },
 
         "context" => {
             let window = rest.parse().unwrap_or(128_000);
             let usage = rook.context_usage(*session, window)?;
             let pct = usage.live_tokens as f64 / usage.usable.max(1) as f64 * 100.0;
-            println!("~{} of {} usable tokens ({pct:.0}%)", usage.live_tokens, usage.usable);
+            say!("~{} of {} usable tokens ({pct:.0}%)", usage.live_tokens, usage.usable);
             if usage.needs_compaction {
-                println!("over the compaction threshold — the next turn will compact");
+                say!("over the compaction threshold — the next turn will compact");
             }
             let rows: Vec<Vec<String>> = usage
                 .by_kind
                 .iter()
                 .map(|(kind, u)| vec![kind.clone(), u.events.to_string(), format!("~{}", u.tokens)])
                 .collect();
-            print!("{}", fmt::table(&["kind", "events", "tokens"], &rows));
+            put!("{}", fmt::table(&["kind", "events", "tokens"], &rows));
         }
 
         "skills" if rest.is_empty() => {
@@ -282,46 +304,40 @@ async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command: &s
                     ]
                 })
                 .collect();
-            print!("{}", fmt::table(&["", "name", "version", "description"], &rows));
+            put!("{}", fmt::table(&["", "name", "version", "description"], &rows));
         }
         "skills" => {
             let resolved = rook.skills().resolve(rest, &rook.env)?;
-            println!("{}", resolved.body);
+            say!("{}", resolved.body);
         }
 
         "goal" if rest.is_empty() => match rook.goal(*session)? {
-            Some(goal) => println!("{goal}"),
-            None => println!("no goal set — /goal <text> to set one"),
+            Some(goal) => say!("{goal}"),
+            None => say!("no goal set — /goal <text> to set one"),
         },
         "goal" => {
             rook.set_goal(*session, rest)?;
-            println!("goal set");
+            say!("goal set");
         }
 
         "diff" => {
             let changes = rook.changes(*session, false)?;
             if changes.touched() == 0 {
-                println!("nothing changed on disk yet");
+                say!("nothing changed on disk yet");
             }
             for file in changes.files.iter().filter(|f| f.change != rook_core::changes::Change::Unchanged) {
-                println!(
-                    "{} {}  +{} -{}",
-                    file.change.sigil(),
-                    file.path,
-                    file.lines_added,
-                    file.lines_removed
-                );
+                say!("{} {}  +{} -{}", file.change.sigil(), file.path, file.lines_added, file.lines_removed);
             }
         }
 
         "search" if !rest.is_empty() => {
             let found = rook.search(rest, &Default::default())?;
             if found.hits.is_empty() {
-                println!("nothing matched in {} object(s)", found.objects_scanned);
+                say!("nothing matched in {} object(s)", found.objects_scanned);
             }
             for hit in found.hits.iter().take(10) {
-                println!("\x1b[2m{} #{} {}\x1b[0m", &hit.session[..12], hit.seq, hit.kind);
-                println!("  {}", hit.snippet);
+                say!("\x1b[2m{} #{} {}\x1b[0m", &hit.session[..12], hit.seq, hit.kind);
+                say!("  {}", hit.snippet);
             }
         }
 
@@ -337,32 +353,32 @@ async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command: &s
                     .collect()
             };
             if facts.is_empty() {
-                println!("nothing remembered yet");
+                say!("nothing remembered yet");
             }
             for fact in facts {
                 let pin = if fact.pinned { "* " } else { "  " };
-                println!("{pin}[{}] {}", fact.id, fact.text);
+                say!("{pin}[{}] {}", fact.id, fact.text);
             }
         }
 
         "session" => {
             let meta = rook.store.get_session(*session)?.context("session vanished")?;
-            println!("{}", rook_store::format_session_id(meta.id));
-            println!("{} events · {} in / {} out tokens", meta.event_count, meta.tokens_in, meta.tokens_out);
+            say!("{}", rook_store::format_session_id(meta.id));
+            say!("{} events · {} in / {} out tokens", meta.event_count, meta.tokens_in, meta.tokens_out);
             if let Some(goal) = rook.goal(*session)? {
-                println!("goal: {goal}");
+                say!("goal: {goal}");
             }
             if let Some(parent) = meta.parent {
-                println!("forked from {}", rook_store::format_session_id(parent));
+                say!("forked from {}", rook_store::format_session_id(parent));
             }
         }
 
         "mcp" => {
             if mcp.servers.is_empty() {
-                println!("no tool servers connected");
+                say!("no tool servers connected");
             }
             for (server, tools) in &mcp.servers {
-                println!("{} — {} tool(s)", server.name(), tools.len());
+                say!("{} — {} tool(s)", server.name(), tools.len());
             }
         }
 
@@ -378,12 +394,12 @@ async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command: &s
         "new" => {
             let title = if rest.is_empty() { "chat" } else { rest };
             *session = rook.start_session(title)?;
-            println!("session {}", rook_store::format_session_id(*session));
+            say!("session {}", rook_store::format_session_id(*session));
         }
 
-        other => println!("unknown command /{other} — /help lists them"),
+        other => say!("unknown command /{other} — /help lists them"),
     }
-    Ok(false)
+    Ok(Said { text: std::mem::take(out), quit: false })
 }
 
 fn rewind_to(rook: &Rook, session: &mut u128, seq: u64) -> Result<()> {

@@ -133,18 +133,14 @@ impl Chat {
 struct App {
     rook: Arc<Rook>,
     runtime: tokio::runtime::Runtime,
-    yes: bool,
     chat: Chat,
     events: mpsc::UnboundedReceiver<TurnEvent>,
     to_loop: mpsc::UnboundedSender<TurnEvent>,
     approver: Arc<ChannelApprover>,
     asker: Arc<ChannelAsker>,
-    policy: Arc<rook_tools::policy::Policy>,
-    /// Beside the policy, which holds the mode: both are worth changing per task
-    /// and neither belongs to a single turn.
-    effort: rook_llm::Effort,
-    servers: Arc<rook_core::lsp::Servers>,
-    mcp: Arc<rook_core::McpSession>,
+    /// The same state the chat REPL keeps, so the slash commands are one
+    /// implementation rather than two that drift.
+    shared: crate::chat::Session,
     turn: Option<tokio::task::JoinHandle<()>>,
     tab: usize,
     sessions: Vec<SessionMeta>,
@@ -193,18 +189,20 @@ impl App {
         let mut app = Self {
             rook: rook.clone(),
             runtime,
-            yes,
             chat: Chat::default(),
             events,
             to_loop,
             approver: Arc::new(ChannelApprover::new(requests, Duration::from_secs(600))),
             asker: Arc::new(ChannelAsker::new(questions, Duration::from_secs(600))),
-            policy: rook_core::agent::policy_for(&rook),
-            effort: rook.config.agent.effort(),
-            servers: rook_core::agent::servers_for(&rook),
-            // Connected once: every turn would otherwise spawn each server,
-            // wait out its handshake and kill it again.
-            mcp,
+            shared: crate::chat::Session {
+                policy: rook_core::agent::policy_for(&rook),
+                effort: std::cell::Cell::new(rook.config.agent.effort()),
+                servers: rook_core::agent::servers_for(&rook),
+                // Connected once: every turn would otherwise spawn each server,
+                // wait out its handshake and kill it again.
+                mcp,
+                yes,
+            },
             turn: None,
             tab: 0,
             sessions: Vec::new(),
@@ -395,27 +393,46 @@ impl App {
 
     /// One question per Enter. The input line is the answer field, so typing
     /// past the choices works here exactly as it does in the plain CLI.
+    fn command(&mut self, command: &str) {
+        let mut session =
+            self.chat.session.unwrap_or_else(|| self.rook.start_session("tui").unwrap_or_default());
+        let said =
+            self.runtime.block_on(crate::chat::dispatch(&self.rook, &mut session, &self.shared, command));
+        self.chat.session = Some(session);
+        match said {
+            Ok(said) if said.quit => self.quit = true,
+            Ok(said) => {
+                for line in said.text.lines() {
+                    self.chat.push("stat", line);
+                }
+                self.reload();
+            }
+            Err(e) => self.chat.push("err", &format!("{e}")),
+        }
+    }
+
     fn cycle_mode(&mut self) {
         use rook_tools::policy::Mode;
-        let next = match self.policy.mode() {
+        let next = match self.shared.policy.mode() {
             Mode::Auto => Mode::Ask,
             Mode::Ask => Mode::ReadOnly,
             Mode::ReadOnly => Mode::Auto,
         };
-        self.policy.set_mode(next);
+        self.shared.policy.set_mode(next);
         self.chat.push("stat", &format!("  approvals: {}", next.as_str()));
     }
 
     fn cycle_effort(&mut self) {
         use rook_llm::Effort::*;
-        self.effort = match self.effort {
+        let next = match self.shared.effort.get() {
             Low => Medium,
             Medium => High,
             High => XHigh,
             XHigh => Max,
             Max => Low,
         };
-        self.chat.push("stat", &format!("  effort: {}", self.effort.as_str()));
+        self.shared.effort.set(next);
+        self.chat.push("stat", &format!("  effort: {}", next.as_str()));
     }
 
     fn answer(&mut self) {
@@ -433,6 +450,13 @@ impl App {
         if prompt.is_empty() || self.chat.busy {
             return;
         }
+        // `/btw` is a turn without tools, so it goes down the normal path; every
+        // other slash command is answered here, by the same code the plain CLI
+        // runs.
+        if let Some(command) = prompt.strip_prefix('/').filter(|c| !c.starts_with("btw ")) {
+            self.chat.push("you", &format!("› {prompt}"));
+            return self.command(command);
+        }
         let aside = prompt.strip_prefix("/btw ").map(|q| q.trim().to_string());
         self.chat.push("you", &format!("› {prompt}"));
         self.chat.busy = true;
@@ -442,12 +466,12 @@ impl App {
         let to_loop = self.to_loop.clone();
         let approver = self.approver.clone();
         let asker = self.asker.clone();
-        let policy = self.policy.clone();
-        let effort = self.effort;
-        let servers = self.servers.clone();
-        let mcp = self.mcp.clone();
+        let policy = self.shared.policy.clone();
+        let effort = self.shared.effort.get();
+        let servers = self.shared.servers.clone();
+        let mcp = self.shared.mcp.clone();
         let session = self.chat.session;
-        let yes = self.yes;
+        let yes = self.shared.yes;
 
         self.turn = Some(self.runtime.spawn(async move {
             let session = match session {
@@ -590,8 +614,8 @@ impl App {
                 Span::styled("F2/F3 ", Style::default().fg(Color::Cyan)),
                 Span::raw(format!(
                     "{}/{}    {}",
-                    self.policy.mode().as_str(),
-                    self.effort.as_str(),
+                    self.shared.policy.mode().as_str(),
+                    self.shared.effort.get().as_str(),
                     self.status
                 )),
             ]))
@@ -968,6 +992,7 @@ impl App {
             Line::from("              /btw <question> asks without joining the conversation"),
             Line::from("              y / a / n answer an approval"),
             Line::from("              enter     answer a question, one at a time"),
+            Line::from("              /…        the chat takes the same commands as `rook chat`"),
             Line::from("              F2 / F3   cycle approvals / reasoning effort"),
         ];
         f.render_widget(Paragraph::new(text).block(bordered(" Help ")), area);
