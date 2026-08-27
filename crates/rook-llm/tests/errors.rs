@@ -5,7 +5,40 @@
 use rook_llm::LlmError;
 
 fn message(endpoint: &str) -> String {
-    LlmError::unreachable(endpoint, "connection refused").to_string()
+    LlmError::unreachable(endpoint, std::io::Error::other("connection refused")).to_string()
+}
+
+/// What a client actually hands over: its own message names the url and never
+/// the reason, and the reason is at the bottom of the chain.
+#[derive(Debug)]
+struct Wrapped(std::io::Error);
+
+impl std::fmt::Display for Wrapped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "error sending request for url (http://127.0.0.1:11434/v1/models)")
+    }
+}
+
+impl std::error::Error for Wrapped {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
+#[test]
+fn the_reason_is_reported_rather_than_the_url_a_second_time() {
+    let said = LlmError::unreachable(
+        "http://127.0.0.1:11434/v1",
+        Wrapped(std::io::Error::other("Connection refused (os error 61)")),
+    )
+    .to_string();
+
+    assert!(said.contains("Connection refused"), "the cause is what distinguishes the fixes: {said}");
+    assert!(
+        !said.contains("/v1/models"),
+        "the path is stripped and must not come back in the detail: {said}"
+    );
+    assert!(!said.contains("error sending request"), "and the client's own wrapper says nothing: {said}");
 }
 
 #[test]

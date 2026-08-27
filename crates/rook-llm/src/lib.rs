@@ -55,8 +55,8 @@ fn offers(available: &[String]) -> String {
 }
 
 impl LlmError {
-    pub fn unreachable(endpoint: &str, source: impl std::fmt::Display) -> Self {
-        Self::Unreachable { endpoint: origin(endpoint), detail: source.to_string() }
+    pub fn unreachable(endpoint: &str, source: impl std::error::Error) -> Self {
+        Self::Unreachable { endpoint: origin(endpoint), detail: root_cause(&source) }
     }
 }
 
@@ -75,6 +75,17 @@ fn advice(endpoint: &str) -> String {
             .to_string(),
         false => "Check the network, and that the provider's API key is set.".to_string(),
     }
+}
+
+/// The innermost cause. An HTTP client's own message is the url again and never
+/// the reason; "Connection refused" and "dns error" are different problems with
+/// different fixes, and only the bottom of the chain says which one happened.
+fn root_cause(error: &dyn std::error::Error) -> String {
+    let mut cause = error;
+    while let Some(inner) = cause.source() {
+        cause = inner;
+    }
+    cause.to_string()
 }
 
 /// Scheme and authority only: the path a request happened to use is noise, and

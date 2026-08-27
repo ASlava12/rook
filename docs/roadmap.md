@@ -301,6 +301,14 @@ what unblocks the most.
   before checking containment, so a link inside the workspace pointing out of it
   is refused rather than followed, and the refusal says where the path really
   led. Widened only by `sandbox.allow_outside_workspace`. 6 tests.
+- **A failure names its cause, not the url a second time** — `cannot reach
+  http://127.0.0.1:11434: error sending request for url
+  (http://127.0.0.1:11434/v1/models)` repeated the endpoint, put back the path
+  that was deliberately stripped, and never said what went wrong. The innermost
+  cause is reported instead — `Connection refused (os error 61)` — because
+  refused, timed out and DNS are three different fixes. And when there are no
+  skills at all, `doctor` says they are packaged beside the binary and a plain
+  `cargo build` does not put them there, rather than reporting zero. 3 tests.
 - **The machine is probed when a skill needs it, not when the store opens** —
   `Rook::open` detected sixteen toolchains, `java -version` among them, before
   running anything: about a third of a second warm and over a second cold, on

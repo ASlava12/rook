@@ -45,7 +45,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Create the store, the config file and a sample skill.
+    /// Create the store and the config file, and say where skills go.
     Init,
     /// Report what Rook detected about this machine and what it means for skills.
     Doctor,
@@ -410,6 +410,14 @@ fn cmd_doctor(rook: &Rook, json: bool) -> Result<()> {
     let (ok, blocked): (Vec<_>, Vec<_>) = cards.iter().partition(|c| c.applicable);
     println!();
     println!("skills: {} usable, {} blocked here", ok.len(), blocked.len());
+    // The built-in ones live next to the binary, which a plain `cargo build`
+    // does not put them there — the commonest reason a fresh install has none,
+    // and invisible from a count of zero.
+    if cards.is_empty() && rook_core::paths::builtin_skills_dir().is_none() {
+        println!("  none are installed next to {}", std::env::current_exe().unwrap_or_default().display());
+        println!("  `cargo xtask dist` packages them there, or set ROOK_BUILTIN_SKILLS");
+        println!("  your own go in {}", rook_core::paths::user_skills_dir().display());
+    }
     for c in blocked {
         println!("  {} — {}", c.name, c.mismatches.join("; "));
     }

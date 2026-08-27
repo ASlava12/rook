@@ -49,6 +49,22 @@ impl Rook {
             .unwrap()
     }
 
+    /// Same, with the built-in skills pointed somewhere real — a plain
+    /// `cargo build` leaves none beside the binary.
+    fn with_builtin_skills(&self, args: &[&str]) -> String {
+        let skills = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../skills");
+        let out = Command::new(env!("CARGO_BIN_EXE_rook"))
+            .env("ROOK_HOME", self.home.path())
+            .env("ROOK_LOG", "error")
+            .env("ROOK_BUILTIN_SKILLS", skills)
+            .arg("--workspace")
+            .arg(self.workspace.path())
+            .args(args)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
     fn ok(&self, args: &[&str]) -> String {
         let out = self.run(args);
         assert!(
@@ -397,4 +413,27 @@ fn a_setting_the_repl_does_not_have_is_refused_by_name() {
 
     assert!(out.contains(r#"no mode "yolo""#), "{out}");
     assert!(out.contains(r#"no effort "glacial""#), "{out}");
+}
+
+/// The built-in skills are packaged beside the binary by `cargo xtask dist`, so
+/// anyone who builds and copies the binary alone has none — and a count of zero
+/// says nothing about why, in the one command whose job is to explain.
+#[test]
+fn doctor_says_where_the_skills_would_have_come_from() {
+    let rook = Rook::new();
+    let said = rook.ok(&["doctor"]);
+
+    assert!(said.contains("skills: 0 usable"), "{said}");
+    assert!(said.contains("none are installed next to"), "{said}");
+    assert!(said.contains("cargo xtask dist"), "and what puts them there: {said}");
+    assert!(said.contains("ROOK_BUILTIN_SKILLS"), "and the way round it: {said}");
+}
+
+#[test]
+fn doctor_stops_explaining_once_the_skills_are_there() {
+    let rook = Rook::new();
+    let said = rook.with_builtin_skills(&["doctor"]);
+
+    assert!(!said.contains("skills: 0 usable, 0 blocked"), "the shipped skills were found: {said}");
+    assert!(!said.contains("none are installed next to"), "{said}");
 }
