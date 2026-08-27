@@ -103,6 +103,14 @@ what unblocks the most.
   work out, scoped by `requires` to where it actually holds, validated by reading
   it back, and captured as a version so a rewrite keeps the old one. The index
   reloads in place, so the next turn's catalog has it without a restart. 7 tests.
+- **The CLI reads through a running daemon** — `rookd` holds the store's single
+  write lock, so a CLI started while it runs used to refuse. `store stat`,
+  `session ls` and `skills ls` now go over its API instead and print the same
+  thing; `--json` output is byte-identical either way. The daemon publishes its
+  address on start and removes it on either signal, and a file left by a crash
+  is ignored because nothing answers there. Commands that write still say
+  plainly that the daemon holds the lock
+  ([ADR-0006](adr/0006-single-writer-store.md)). 3 tests.
 - **Logs that go somewhere and stop growing** — both binaries share one setup:
   stderr and `$ROOK_HOME/logs/rook.log`, at `telemetry.log_level` unless
   `ROOK_LOG` overrides it, rotated once at `max_log_bytes` so the logs cost at
@@ -135,10 +143,6 @@ defect here rather than something to port.
 **A live-model smoke test in CI.** An Ollama service container running a small
 model, so the HTTP provider and one full turn are exercised for real rather than
 against a stub.
-
-**CLI through the daemon.** Detect a running `rookd` and route through its API,
-falling back to direct access. Removes the single-writer papercut
-([ADR-0006](adr/0006-single-writer-store.md)).
 
 ## After that
 

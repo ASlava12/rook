@@ -3,6 +3,7 @@
 mod approve;
 mod chat;
 mod fmt;
+mod source;
 mod tui;
 
 use std::io::Write;
@@ -11,8 +12,11 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
+use crate::source::Source;
 use rook_core::{AGENT_VERSION, Rook};
+use rook_skills::SkillCard;
 use rook_store::{Kind, ObjectId};
+use rook_store::{SessionMeta, StoreStats};
 
 #[derive(Parser)]
 #[command(
@@ -322,9 +326,9 @@ fn main() -> Result<()> {
         Some(Command::Models) => cmd_models(cli.workspace, cli.json),
         Some(Command::Acp) => cmd_acp(cli.workspace),
         Some(Command::Serve { port }) => cmd_serve(port),
-        Some(Command::Store(c)) => cmd_store(&Rook::open(cli.workspace)?, c, cli.json),
-        Some(Command::Session(c)) => cmd_session(&Rook::open(cli.workspace)?, c, cli.json),
-        Some(Command::Skills(c)) => cmd_skills(&Rook::open(cli.workspace)?, c, cli.json),
+        Some(Command::Store(c)) => cmd_store(&Source::open(cli.workspace)?, c, cli.json),
+        Some(Command::Session(c)) => cmd_session(&Source::open(cli.workspace)?, c, cli.json),
+        Some(Command::Skills(c)) => cmd_skills(&Source::open(cli.workspace)?, c, cli.json),
         Some(Command::Checkpoint(c)) => cmd_checkpoint(&Rook::open(cli.workspace)?, c, cli.json),
         Some(Command::Mcp(c)) => cmd_mcp(cli.workspace, c, cli.json),
         Some(Command::Memory(c)) => cmd_memory(&Rook::open(cli.workspace)?, c, cli.json),
@@ -611,59 +615,93 @@ fn cmd_serve(port: Option<u16>) -> Result<()> {
     )
 }
 
-fn cmd_store(rook: &Rook, cmd: StoreCmd, json: bool) -> Result<()> {
+fn show_stats(s: &StoreStats, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(&s)?);
+        return Ok(());
+    }
+    println!(
+        "objects        {:>12}  ({} inline, {} external)",
+        s.objects, s.inline_objects, s.external_objects
+    );
+    println!("logical size   {:>12}", fmt::bytes(s.bytes_raw));
+    println!(
+        "stored size    {:>12}  ({:.1}x compression)",
+        fmt::bytes(s.bytes_stored),
+        s.compression_ratio()
+    );
+    println!("saved by dedup {:>12}", fmt::bytes(s.dedup_saved_hint));
+    println!(
+        "on disk        {:>12}  (index {}, objects {})",
+        fmt::bytes(s.disk_bytes()),
+        fmt::bytes(s.index_bytes),
+        fmt::bytes(s.external_bytes)
+    );
+    println!("sessions       {:>12}", s.sessions);
+    println!("events         {:>12}", s.events);
+    println!("refs           {:>12}", s.refs);
+    if !s.dictionaries.is_empty() {
+        let d: Vec<String> = s.dictionaries.iter().map(|(k, v)| format!("{k} {}", fmt::bytes(*v))).collect();
+        println!("dictionaries   {}", d.join(", "));
+    } else {
+        println!("dictionaries   none yet — run `rook store train` once you have some history");
+    }
+    println!();
+    let max = s.per_kind.iter().map(|k| k.bytes_stored).max().unwrap_or(0);
+    let rows: Vec<Vec<String>> = s
+        .per_kind
+        .iter()
+        .map(|k| {
+            vec![
+                k.kind.clone(),
+                k.objects.to_string(),
+                fmt::bytes(k.bytes_raw),
+                fmt::bytes(k.bytes_stored),
+                format!("{:.1}x", k.ratio()),
+                fmt::bar(k.bytes_stored, max, 20),
+            ]
+        })
+        .collect();
+    print!("{}", fmt::table(&["kind", "objects", "logical", "stored", "ratio", ""], &rows));
+    Ok(())
+}
+
+fn show_sessions(sessions: &[SessionMeta], json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(&sessions)?);
+        return Ok(());
+    }
+    let rows: Vec<Vec<String>> = sessions
+        .iter()
+        .map(|s| {
+            vec![
+                rook_store::format_session_id(s.id),
+                // Sub-tasks are listed alongside their parents; the
+                // marker is what tells them apart at a glance.
+                format!(
+                    "{}{}",
+                    if s.parent.is_some() { "↳ " } else { "" },
+                    s.title.chars().take(40).collect::<String>()
+                ),
+                s.event_count.to_string(),
+                format!("{}/{}", s.tokens_in, s.tokens_out),
+                fmt::ago(s.updated_at),
+                s.workspace.clone(),
+            ]
+        })
+        .collect();
+    print!("{}", fmt::table(&["id", "title", "events", "tok in/out", "updated", "workspace"], &rows));
+    Ok(())
+}
+
+fn cmd_store(source: &Source, cmd: StoreCmd, json: bool) -> Result<()> {
+    // Routed before the store is opened, because the daemon may be holding it.
+    if let StoreCmd::Stat = cmd {
+        return show_stats(&source.stats()?, json);
+    }
+    let rook = source.local()?;
     match cmd {
-        StoreCmd::Stat => {
-            let s = rook.stats()?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&s)?);
-                return Ok(());
-            }
-            println!(
-                "objects        {:>12}  ({} inline, {} external)",
-                s.objects, s.inline_objects, s.external_objects
-            );
-            println!("logical size   {:>12}", fmt::bytes(s.bytes_raw));
-            println!(
-                "stored size    {:>12}  ({:.1}x compression)",
-                fmt::bytes(s.bytes_stored),
-                s.compression_ratio()
-            );
-            println!("saved by dedup {:>12}", fmt::bytes(s.dedup_saved_hint));
-            println!(
-                "on disk        {:>12}  (index {}, objects {})",
-                fmt::bytes(s.disk_bytes()),
-                fmt::bytes(s.index_bytes),
-                fmt::bytes(s.external_bytes)
-            );
-            println!("sessions       {:>12}", s.sessions);
-            println!("events         {:>12}", s.events);
-            println!("refs           {:>12}", s.refs);
-            if !s.dictionaries.is_empty() {
-                let d: Vec<String> =
-                    s.dictionaries.iter().map(|(k, v)| format!("{k} {}", fmt::bytes(*v))).collect();
-                println!("dictionaries   {}", d.join(", "));
-            } else {
-                println!("dictionaries   none yet — run `rook store train` once you have some history");
-            }
-            println!();
-            let max = s.per_kind.iter().map(|k| k.bytes_stored).max().unwrap_or(0);
-            let rows: Vec<Vec<String>> = s
-                .per_kind
-                .iter()
-                .map(|k| {
-                    vec![
-                        k.kind.clone(),
-                        k.objects.to_string(),
-                        fmt::bytes(k.bytes_raw),
-                        fmt::bytes(k.bytes_stored),
-                        format!("{:.1}x", k.ratio()),
-                        fmt::bar(k.bytes_stored, max, 20),
-                    ]
-                })
-                .collect();
-            print!("{}", fmt::table(&["kind", "objects", "logical", "stored", "ratio", ""], &rows));
-        }
+        StoreCmd::Stat => unreachable!("routed above"),
         StoreCmd::Ls { kind, limit } => {
             let want = kind.as_deref().map(parse_kind).transpose()?;
             let objects = rook.store.list_objects(want, limit)?;
@@ -823,35 +861,13 @@ fn parse_kind(s: &str) -> Result<Kind> {
     })
 }
 
-fn cmd_session(rook: &Rook, cmd: SessionCmd, json: bool) -> Result<()> {
+fn cmd_session(source: &Source, cmd: SessionCmd, json: bool) -> Result<()> {
+    if let SessionCmd::Ls = cmd {
+        return show_sessions(&source.sessions()?, json);
+    }
+    let rook = source.local()?;
     match cmd {
-        SessionCmd::Ls => {
-            let sessions = rook.sessions()?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&sessions)?);
-                return Ok(());
-            }
-            let rows: Vec<Vec<String>> = sessions
-                .iter()
-                .map(|s| {
-                    vec![
-                        rook_store::format_session_id(s.id),
-                        // Sub-tasks are listed alongside their parents; the
-                        // marker is what tells them apart at a glance.
-                        format!(
-                            "{}{}",
-                            if s.parent.is_some() { "↳ " } else { "" },
-                            s.title.chars().take(40).collect::<String>()
-                        ),
-                        s.event_count.to_string(),
-                        format!("{}/{}", s.tokens_in, s.tokens_out),
-                        fmt::ago(s.updated_at),
-                        s.workspace.clone(),
-                    ]
-                })
-                .collect();
-            print!("{}", fmt::table(&["id", "title", "events", "tok in/out", "updated", "workspace"], &rows));
-        }
+        SessionCmd::Ls => unreachable!("routed above"),
         SessionCmd::Show { id, from, limit, max_body } => {
             let entries = rook.transcript(session_id(&id)?, from, limit, max_body)?;
             if json {
@@ -988,34 +1004,41 @@ fn cmd_session(rook: &Rook, cmd: SessionCmd, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_skills(rook: &Rook, cmd: SkillCmd, json: bool) -> Result<()> {
+fn show_skills(catalog: &[SkillCard], all: bool, json: bool) -> Result<()> {
+    let cards: Vec<_> = catalog.iter().filter(|c| all || c.applicable).collect();
+    if json {
+        println!("{}", serde_json::to_string_pretty(&cards)?);
+        return Ok(());
+    }
+    let rows: Vec<Vec<String>> = cards
+        .iter()
+        .map(|c| {
+            vec![
+                if c.applicable { "✓".into() } else { "·".into() },
+                c.name.clone(),
+                c.version.clone(),
+                c.source.clone(),
+                format!("~{}", c.body_tokens),
+                c.description.chars().take(60).collect(),
+            ]
+        })
+        .collect();
+    print!("{}", fmt::table(&["", "name", "version", "source", "tokens", "description"], &rows));
+    if !all {
+        println!(
+            "\n(`--all` also shows skills blocked by this environment; `rook skills why <name>` explains one)"
+        );
+    }
+    Ok(())
+}
+
+fn cmd_skills(source: &Source, cmd: SkillCmd, json: bool) -> Result<()> {
+    if let SkillCmd::Ls { all } = cmd {
+        return show_skills(&source.catalog()?, all, json);
+    }
+    let rook = source.local()?;
     match cmd {
-        SkillCmd::Ls { all } => {
-            let cards: Vec<_> = rook.catalog().into_iter().filter(|c| all || c.applicable).collect();
-            if json {
-                println!("{}", serde_json::to_string_pretty(&cards)?);
-                return Ok(());
-            }
-            let rows: Vec<Vec<String>> = cards
-                .iter()
-                .map(|c| {
-                    vec![
-                        if c.applicable { "✓".into() } else { "·".into() },
-                        c.name.clone(),
-                        c.version.clone(),
-                        c.source.clone(),
-                        format!("~{}", c.body_tokens),
-                        c.description.chars().take(60).collect(),
-                    ]
-                })
-                .collect();
-            print!("{}", fmt::table(&["", "name", "version", "source", "tokens", "description"], &rows));
-            if !all {
-                println!(
-                    "\n(`--all` also shows skills blocked by this environment; `rook skills why <name>` explains one)"
-                );
-            }
-        }
+        SkillCmd::Ls { .. } => unreachable!("routed above"),
         SkillCmd::Show { name } => {
             let resolved = rook.skills().resolve(&name, &rook.env)?;
             if json {

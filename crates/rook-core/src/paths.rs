@@ -44,6 +44,13 @@ pub fn user_skills_dir() -> PathBuf {
     home().join("skills")
 }
 
+/// Where a running `rookd` records the address it is listening on, so the CLI
+/// can reach it instead of guessing a port from config that may not be the one
+/// in use. Absent when no daemon is running — it is removed on shutdown.
+pub fn daemon_address_file() -> PathBuf {
+    home().join("rookd.addr")
+}
+
 pub fn logs_dir() -> PathBuf {
     home().join("logs")
 }

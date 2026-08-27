@@ -67,11 +67,14 @@ async fn main() -> Result<()> {
     let addr = SocketAddr::new(bind, port);
     let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("binding {addr}"))?;
     tracing::info!("rookd listening on http://{addr}");
+    let address_file = rook_core::paths::daemon_address_file();
+    std::fs::write(&address_file, format!("http://{addr}")).ok();
     println!("rook web UI:  http://{addr}");
     println!("rook API:     http://{addr}/api/health");
 
     axum::serve(listener, app).with_graceful_shutdown(shutdown()).await.context("serving")?;
     maintenance.abort();
+    std::fs::remove_file(&address_file).ok();
     Ok(())
 }
 
@@ -98,7 +101,18 @@ async fn maintain(state: Arc<AppState>, every_hours: u32) {
     }
 }
 
+/// Both signals, because the address file and the store lock are released on
+/// the way out and a service manager sends SIGTERM, not SIGINT.
 async fn shutdown() {
+    #[cfg(unix)]
+    {
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
     let _ = tokio::signal::ctrl_c().await;
     tracing::info!("shutting down");
 }
