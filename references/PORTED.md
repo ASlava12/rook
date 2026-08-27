@@ -32,6 +32,7 @@ Add a row when you implement something after reading a reference. Add it to
 | A workspace boundary that a symlink cannot cross | codex `2926014` *make filesystem policy matching URI-native* — their case was encoded and case-variant paths, ours was a symlink out of the workspace that lexical containment could not see | source, via `refs advance` | `ToolContext::resolve`, `through_symlinks`, `sandbox.allow_outside_workspace` |
 | Widening a fact's scope instead of keeping the first | hermes `3b672a68` *delete-path drops every scope of a removed id* — the fix does not apply (identity here is the text, not an id per scope), but its subject exposed the same hazard in ours | source, via `refs advance` | `MemoryBook::learn`, `Scope::within` |
 | Reporting a search hit inside a captured file | codex `57e2edc` *encrypt sensitive history and notes tool arguments* — encryption does not fit a store whose point is that it is readable, but the question behind it exposed a search that scanned files and could not report them | source, via `refs advance` | `Rook::captured_as`, `Hit::file` |
+| Summarising only what the model was shown | hermes `1341dfbd` *exclude operational notifications from the tail anchor* — the same mismatch: their notifications, our checkpoint manifests and asides | source, via `refs advance` | `AgentLoop::summarise_span`, `replayed` |
 | Durable memory with provenance and history | hermes ([#12238](https://github.com/NousResearch/hermes-agent/issues/12238)); read `hermes/tools/memory_tool.py` and `goose/crates/goose-mcp/src/memory` | source | `rook-core/src/memory.rs`, `rook memory` |
 | Bounded logging and retention | codex SQLite growth ([#28224](https://github.com/openai/codex/issues/28224), [#17320](https://github.com/openai/codex/issues/17320)) | issues, not source | `RetentionPolicy`, `TelemetryConfig` |
 
@@ -40,6 +41,23 @@ Add a row when you implement something after reading a reference. Add it to
 `cargo xtask refs advance` prints what landed upstream since the pointer was last
 moved; what follows is what was done with it, so a dismissal is a decision rather
 than an omission.
+
+**2026-08-27 (twelfth pass)** — hermes advanced 26 commits.
+
+- hermes `1341dfbd` *exclude operational notifications from the tail anchor* —
+  **ported, and it was the same defect.** Compaction summarised the whole
+  transcript while the replay that builds the model's messages uses five event
+  kinds. So a checkpoint manifest, an aside and a failed skill load were
+  summarised as if they were conversation, and the model was handed a summary of
+  things it had never seen. Compaction now reads what the replay reads.
+- hermes `11cf59d9` *adopt live compression config on the next turn* —
+  **partly here already**: approvals and effort are live in every front end. The
+  storage settings still need a restart, which is a smaller thing and stays open.
+- hermes `0a4d3aba` *fail closed when a profile's state.db will not open* —
+  **already the behaviour**: `Store::open` errors and names the path and the
+  probable holder.
+- The remaining 23 — Electron desktop model pickers, gateway dial guards, SSH
+  update fleets, WSL2 keepalive windows, voice-note relay — **not applicable.**
 
 **2026-08-27 (eleventh pass)** — codex and openhands advanced.
 

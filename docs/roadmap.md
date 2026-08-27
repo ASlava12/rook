@@ -120,6 +120,10 @@ what unblocks the most.
   a skill scoped away and explained by `skills why`, capture and rollback, a
   broken config that fails loudly, and the daemon path where a read goes over
   HTTP and a write says where the lock is.
+- **Compaction that summarises the conversation, not the bookkeeping** — it read
+  the whole transcript while the replay that builds the model's messages uses
+  five event kinds, so checkpoint manifests, asides and failed skill loads were
+  summarised as if they had been said. Both now read the same thing.
 - **Search that can find a file's contents** — captured files were scanned and
   could never be reported, because only an object that is the body of an event
   became a hit. A match in a file now names the path and the capture, including

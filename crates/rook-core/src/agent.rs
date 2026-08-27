@@ -90,6 +90,12 @@ pub enum Progress<'a> {
     ToolDone { name: &'a str, failed: bool },
 }
 
+/// The event kinds `AgentLoop::history` turns into messages, and so the only
+/// ones the model has ever seen.
+fn replayed(kind: &str) -> bool {
+    matches!(kind, "user" | "assistant" | "tool-call" | "tool-result" | "skill")
+}
+
 /// Pseudo-tools: implemented by the loop rather than the toolbox, because they
 /// need the agent's own state.
 pub const LOAD_SKILL: &str = "load_skill";
@@ -1057,6 +1063,12 @@ impl<'a> AgentLoop<'a> {
 /// produced — a provider error, a span that will not fit — it falls back to a
 /// marker, since a failed compaction must not wedge the turn.
 impl AgentLoop<'_> {
+    /// Public so a test can drive it: the alternative is filling a context
+    /// window to make it happen, which measures the budget rather than this.
+    pub async fn compact_now(&self) {
+        self.compact().await
+    }
+
     async fn compact(&self) {
         let note = match self.summarise_span().await {
             Ok(note) => note,
@@ -1070,7 +1082,15 @@ impl AgentLoop<'_> {
 
     async fn summarise_span(&self) -> Result<String> {
         let (from_seq, previous) = self.rook.last_compaction(self.session)?;
-        let entries = self.rook.transcript(self.session, from_seq, usize::MAX, 8_000)?;
+        // Only what the model was actually shown. The log also holds checkpoint
+        // manifests, asides and errors, and summarising those spends the budget
+        // on bookkeeping and hands back a summary of things it never saw.
+        let entries: Vec<_> = self
+            .rook
+            .transcript(self.session, from_seq, usize::MAX, 8_000)?
+            .into_iter()
+            .filter(|e| replayed(&e.kind))
+            .collect();
 
         // Keep the recent tail live; only what falls before it is summarised.
         let keep = self.budget.threshold() / 3;

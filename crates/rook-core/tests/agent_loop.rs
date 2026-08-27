@@ -1951,3 +1951,41 @@ async fn a_skill_that_is_only_a_markdown_file_gains_nothing() {
 
     assert!(!loaded.content.contains("Bundled with"), "most skills pay nothing: {}", loaded.content);
 }
+
+#[tokio::test]
+async fn compaction_summarises_only_what_the_model_was_shown() {
+    let f = fixture();
+    let session = f.rook.start_session("noise").unwrap();
+    // A conversation, and the bookkeeping the log keeps alongside it.
+    // The bookkeeping goes first, so it lands in the span that gets summarised
+    // rather than in the live tail — where it would be excluded anyway and the
+    // test would prove nothing.
+    f.rook
+        .log(session, rook_store::EventKind::Note, "write_skill", "wrote skill \"unrelated-bookkeeping\"")
+        .unwrap();
+    f.rook
+        .log(session, rook_store::EventKind::Error, "load_skill", "could not load skill \"missing\"")
+        .unwrap();
+    f.rook
+        .log(session, rook_store::EventKind::Checkpoint, "before", r#"{"root":"/tmp/ws","files":{}}"#)
+        .unwrap();
+    // Enough that the live tail cannot hold it all, or there is nothing to
+    // summarise and the test proves nothing either.
+    for i in 0..40 {
+        let question = format!("question {i} about the parser. {}", "detail ".repeat(80));
+        f.rook.log(session, rook_store::EventKind::UserMessage, "prompt", &question).unwrap();
+        f.rook.log(session, rook_store::EventKind::AssistantMessage, "m", &format!("answer {i}")).unwrap();
+    }
+
+    let provider = Arc::new(ScriptedProvider::new(vec![reply("a summary"), reply("done")]));
+    AgentLoop::new(&f.rook, provider.clone(), session).compact_now().await;
+
+    let sent = provider.share();
+    let requests = sent.lock().unwrap();
+    let material = &requests[0].messages.last().unwrap().content;
+
+    assert!(material.contains("about the parser"), "the conversation must be in it");
+    assert!(!material.contains("unrelated-bookkeeping"), "an aside is not conversation: {material}");
+    assert!(!material.contains("could not load skill"), "nor is an error: {material}");
+    assert!(!material.contains("\"root\""), "nor a checkpoint manifest: {material}");
+}
