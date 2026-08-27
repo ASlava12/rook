@@ -543,6 +543,16 @@ like to something that has to act on it.
   say what it was about to do, says that no other tool and no sub-agent gets past
   it, and addresses the remedies to the user. The same task: four steps, 8,498
   tokens, twenty-three seconds, and an answer worth reading. 1 test.
+- **The pool a front end hands over is the one that answers** — `AgentLoop::new`
+  built its own language-server pool from a third copy of the "configured or
+  detected" expression, and registered the tools from it. `equip` then set the
+  loop's pool and re-registered — but the tools already there held the pool they
+  were made with, so what a front end handed over never answered. A loop is
+  rebuilt every turn, which is precisely why it should not build this. It starts
+  with none now.
+  Once that was true, filtering bit: only servers with files they handle in this
+  workspace are offered, so a Python project is not given rust-analyzer's four
+  tool schemas — 1,401 input tokens for a question that cost 3,450. 3 tests.
 - **A language server that will not start is found out once** — a live turn in a
   Python project asked about a symbol, and the pool always offered the first
   configured server: a `rust-analyzer` shim, which rustup installs whether or

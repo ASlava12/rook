@@ -64,6 +64,39 @@ pub fn configured(config: &crate::Config) -> Vec<ServerConfig> {
     listed.into_iter().filter(|c| c.enabled).collect()
 }
 
+/// The configured servers that have something to work on here.
+///
+/// A `rust-analyzer` on `PATH` was offered to a Python project, and the model
+/// spent a step asking it about a symbol. A server for a language the workspace
+/// does not contain costs the prompt its four tool schemas and buys nothing —
+/// and when none of them qualify, the tools are not advertised at all.
+pub fn for_workspace(config: &crate::Config, root: &Path) -> Vec<ServerConfig> {
+    let configured = configured(config);
+    if configured.is_empty() {
+        return configured;
+    }
+    // Bounded: the answer is "is there one of these anywhere near the top", and
+    // a monorepo should not be walked to the bottom to find out.
+    const LOOKED_AT: usize = 4_000;
+    let mut wanted: Vec<bool> = vec![false; configured.len()];
+    for entry in ignore::WalkBuilder::new(root)
+        .max_depth(Some(6))
+        .follow_links(false)
+        .require_git(false)
+        .build()
+        .flatten()
+        .take(LOOKED_AT)
+    {
+        for (i, server) in configured.iter().enumerate() {
+            wanted[i] |= server.handles(entry.path());
+        }
+        if wanted.iter().all(|w| *w) {
+            break;
+        }
+    }
+    configured.into_iter().zip(wanted).filter(|(_, wanted)| *wanted).map(|(c, _)| c).collect()
+}
+
 /// The language servers available in one workspace.
 pub struct Servers {
     configs: Vec<ServerConfig>,

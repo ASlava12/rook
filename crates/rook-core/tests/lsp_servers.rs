@@ -55,3 +55,54 @@ async fn a_broken_first_server_does_not_hide_the_rest() {
     let Err(complaint) = servers.any().await else { panic!("neither can start") };
     assert!(complaint.to_string().contains("nor-this-one"), "{complaint}");
 }
+
+/// A `rust-analyzer` on `PATH` was offered to a Python project, and a live
+/// model spent a step asking it about a symbol. Four tool schemas in the prompt,
+/// bought nothing, and pointed at a language the workspace does not contain.
+#[test]
+fn only_the_servers_this_workspace_has_files_for_are_offered() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("main.py"), "x = 1\n").unwrap();
+    std::fs::create_dir_all(dir.path().join("deep/er")).unwrap();
+    std::fs::write(dir.path().join("deep/er/mod.go"), "package main\n").unwrap();
+
+    let config = rook_core::Config {
+        lsp: vec![server("rust", "rust-analyzer"), python(), go()],
+        ..Default::default()
+    };
+
+    let offered: Vec<String> =
+        rook_core::lsp::for_workspace(&config, dir.path()).into_iter().map(|c| c.language).collect();
+
+    assert!(offered.contains(&"python".to_string()), "{offered:?}");
+    assert!(offered.contains(&"go".to_string()), "found below the top level too: {offered:?}");
+    assert!(!offered.contains(&"rust".to_string()), "no .rs here: {offered:?}");
+}
+
+#[test]
+fn a_workspace_no_server_covers_is_offered_none() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("notes.md"), "just prose\n").unwrap();
+
+    let config = rook_core::Config { lsp: vec![server("rust", "rust-analyzer")], ..Default::default() };
+
+    assert!(rook_core::lsp::for_workspace(&config, dir.path()).is_empty(), "and so the tools are not");
+}
+
+fn python() -> ServerConfig {
+    ServerConfig {
+        language: "python".into(),
+        command: "pyright-langserver".into(),
+        extensions: vec!["py".into()],
+        ..Default::default()
+    }
+}
+
+fn go() -> ServerConfig {
+    ServerConfig {
+        language: "go".into(),
+        command: "gopls".into(),
+        extensions: vec!["go".into()],
+        ..Default::default()
+    }
+}

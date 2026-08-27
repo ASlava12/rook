@@ -83,6 +83,32 @@ fn a_disabled_language_server_is_gone_from_every_answer() {
     assert_eq!(effective[0].language, "on");
 }
 
+/// A loop built its own language-server pool and registered the tools from it,
+/// so what `equip` handed over afterwards was never what answered: the tools
+/// held the pool they were made with. A workspace with no Rust in it was offered
+/// rust-analyzer for exactly that reason.
+#[test]
+fn a_loop_has_no_language_servers_until_a_front_end_gives_it_some() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = rook_store::Store::open(dir.path()).unwrap();
+    let (skills, _) = rook_skills::SkillIndex::discover(&[]);
+    let rook = rook_core::Rook::from_parts(
+        store,
+        rook_core::Config::default(),
+        rook_skills::Environment::bare("linux", "x86_64", "0.1.0"),
+        skills,
+        dir.path().to_path_buf(),
+    );
+    let session = rook.start_session("unequipped").unwrap();
+    let agent = rook_core::agent::AgentLoop::new(&rook, std::sync::Arc::new(Silent), session);
+
+    let offered: Vec<String> = agent.tools.specs().into_iter().map(|t| t.name).collect();
+    assert!(
+        !offered.iter().any(|n| n == "find_symbol"),
+        "a pool built here is rebuilt every turn, and its tools outlive being replaced: {offered:?}"
+    );
+}
+
 /// The wiring a turn inherits from its front end was written out four times, and
 /// `rook run` had two thirds of it: MCP servers but no language servers, so a
 /// one-shot turn could not ask the type checker anything the chat could.

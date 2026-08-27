@@ -53,7 +53,7 @@ pub fn equip(
 /// dropped at the end of a turn takes its running servers with it, and
 /// rust-analyzer spends seconds indexing the workspace every time it starts.
 pub fn servers_for(rook: &Rook) -> std::sync::Arc<crate::lsp::Servers> {
-    crate::lsp::Servers::new(crate::lsp::configured(&rook.config), &rook.workspace)
+    crate::lsp::Servers::new(crate::lsp::for_workspace(&rook.config, &rook.workspace), &rook.workspace)
 }
 
 /// Build the approval policy from configuration.
@@ -237,11 +237,13 @@ impl<'a> AgentLoop<'a> {
         tool_ctx.command_timeout = std::time::Duration::from_secs(rook.config.sandbox.command_timeout_secs);
         tool_ctx.allow_outside_workspace = rook.config.sandbox.allow_outside_workspace;
 
-        let configured =
-            if rook.config.lsp.is_empty() { crate::lsp::detected() } else { rook.config.lsp.clone() };
-        let servers = crate::lsp::Servers::new(configured, &rook.workspace);
-        let mut tools = ToolBox::standard();
-        crate::lsp::register(&mut tools, servers.clone());
+        // No language servers until a front end hands them over with `equip`.
+        // A loop is rebuilt for every turn, so a pool built here is rebuilt with
+        // it — and worse, the tools registered from it hold that pool, so what
+        // `equip` set afterwards was never what answered. A workspace with no
+        // Rust in it was offered rust-analyzer for exactly this reason.
+        let servers = crate::lsp::Servers::new(Vec::new(), &rook.workspace);
+        let tools = ToolBox::standard();
 
         let (hooks, bad_hooks) = Hooks::compile(&rook.config.hooks);
         for error in bad_hooks {
