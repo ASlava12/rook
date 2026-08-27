@@ -101,6 +101,18 @@ pub enum Progress<'a> {
     },
 }
 
+/// Answer a tool call the log never answered.
+///
+/// A process killed between logging a call and logging its result leaves the
+/// pair half-written. Every provider refuses a request where an assistant asked
+/// for a tool and nothing replied, so without this the session could never be
+/// resumed — and saying what happened is more use to the model than a blank.
+fn close_open_call(messages: &mut Vec<Message>, open: &mut Option<String>) {
+    if let Some(id) = open.take() {
+        messages.push(Message::tool_result(id, "no result was recorded: the turn did not finish"));
+    }
+}
+
 /// Pseudo-tools: implemented by the loop rather than the toolbox, because they
 /// need the agent's own state.
 pub const LOAD_SKILL: &str = "load_skill";
@@ -313,7 +325,9 @@ impl<'a> AgentLoop<'a> {
     /// The log is the only record of a turn; without replaying it every call
     /// would start from nothing, and `--session` would continue a session in
     /// name only. Tool calls and their results are paired by adjacency, which
-    /// holds because the loop logs each call immediately before its result.
+    /// holds because the loop logs each call immediately before its result —
+    /// except when the process died between the two, and then the pairing has
+    /// to be completed here or the session can never be resumed.
     fn history(&self) -> Result<Vec<Message>> {
         let (from_seq, summary) = self.rook.last_compaction(self.session)?;
         let events = self.rook.store.events(self.session, from_seq, usize::MAX)?;
@@ -332,12 +346,19 @@ impl<'a> AgentLoop<'a> {
                 Err(_) => continue,
             };
             match event.record.kind {
-                EventKind::UserMessage => messages.push(Message::user(body)),
-                EventKind::AssistantMessage => messages.push(Message::assistant(body)),
+                EventKind::UserMessage => {
+                    close_open_call(&mut messages, &mut open_call);
+                    messages.push(Message::user(body))
+                }
+                EventKind::AssistantMessage => {
+                    close_open_call(&mut messages, &mut open_call);
+                    messages.push(Message::assistant(body))
+                }
                 EventKind::SkillLoaded => {
                     messages.push(Message::user(format!("[skill {} loaded]\n{body}", event.record.label)))
                 }
                 EventKind::ToolCall => {
+                    close_open_call(&mut messages, &mut open_call);
                     let id = format!("call_{}", event.seq);
                     messages.push(Message {
                         role: Role::Assistant,
@@ -363,6 +384,7 @@ impl<'a> AgentLoop<'a> {
                 _ => {}
             }
         }
+        close_open_call(&mut messages, &mut open_call);
         Ok(messages)
     }
 

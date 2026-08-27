@@ -120,6 +120,13 @@ what unblocks the most.
   a skill scoped away and explained by `skills why`, capture and rollback, a
   broken config that fails loudly, and the daemon path where a read goes over
   HTTP and a write says where the lock is.
+- **A session killed mid-tool-call can be resumed** — the replay paired calls
+  with results by adjacency, which holds until a process dies between logging
+  the two. Every provider refuses a request where an assistant asked for a tool
+  and nothing answered, so such a session could never be used again — and only a
+  real server would have said so, which is why the test is one of the ones that
+  runs over a socket. The replay now answers an unfinished call by saying that
+  is what it was. 2 tests.
 - **A delegation that says how it is going** — three sub-tasks ran concurrently
   and the parent waited for all of them, so a front end showed `· delegate` and
   then minutes of silence that could not be told from a hang. Each one is now

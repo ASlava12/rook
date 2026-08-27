@@ -225,3 +225,57 @@ async fn the_prompt_is_logged_before_the_provider_is_called() {
         events.iter().map(|e| &e.kind).collect::<Vec<_>>()
     );
 }
+
+#[tokio::test]
+async fn a_session_killed_mid_tool_call_can_still_be_resumed() {
+    let f = fixture();
+    let session = f.rook.start_session("crashed").unwrap();
+    f.rook.log(session, rook_store::EventKind::UserMessage, "prompt", "do it").unwrap();
+    // What a process killed between logging a call and logging its result
+    // leaves behind. Every provider refuses a request where an assistant asked
+    // for a tool and nothing answered.
+    f.rook.log(session, rook_store::EventKind::ToolCall, "read_file", r#"{"path":"a.txt"}"#).unwrap();
+
+    let (base, seen) = serve(vec![answer("carrying on")]).await;
+    let outcome = AgentLoop::new(&f.rook, provider(&base), session).run("and again").await.unwrap();
+
+    assert_eq!(outcome.reply, "carrying on");
+
+    let sent = seen.lock().unwrap();
+    let messages = sent[0]["messages"].as_array().unwrap();
+    let asked = messages.iter().position(|m| !m["tool_calls"].is_null()).unwrap();
+    let answered = messages
+        .iter()
+        .position(|m| m["role"] == "tool" && m["tool_call_id"] == messages[asked]["tool_calls"][0]["id"]);
+
+    assert!(
+        answered.is_some_and(|i| i == asked + 1),
+        "the call must be answered, and immediately: {:?}",
+        sent[0]["messages"]
+    );
+    assert!(
+        messages[answered.unwrap()]["content"].as_str().unwrap().contains("did not finish"),
+        "and say what happened rather than leave a blank"
+    );
+}
+
+#[tokio::test]
+async fn several_unanswered_calls_are_each_answered_in_place() {
+    let f = fixture();
+    let session = f.rook.start_session("crashed twice").unwrap();
+    for i in 0..2 {
+        f.rook.log(session, rook_store::EventKind::ToolCall, "read_file", &format!("{{\"n\":{i}}}")).unwrap();
+    }
+    f.rook.log(session, rook_store::EventKind::UserMessage, "prompt", "carry on").unwrap();
+
+    let (base, seen) = serve(vec![answer("fine")]).await;
+    AgentLoop::new(&f.rook, provider(&base), session).run("again").await.unwrap();
+
+    let sent = seen.lock().unwrap();
+    let messages = sent[0]["messages"].as_array().unwrap();
+    let calls = messages.iter().filter(|m| !m["tool_calls"].is_null()).count();
+    let results = messages.iter().filter(|m| m["role"] == "tool").count();
+
+    assert_eq!(calls, 2, "{:?}", sent[0]["messages"]);
+    assert_eq!(results, 2, "one answer each, not one for the pair: {:?}", sent[0]["messages"]);
+}
