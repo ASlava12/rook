@@ -302,16 +302,41 @@ fn clean(all: bool) -> Result<()> {
     Ok(())
 }
 
+/// What the disk actually gives up, which is not what the file lengths add up
+/// to: cargo hardlinks one built artifact into several places, so summing
+/// lengths counted a `target/` directory at more than twice its real size — and
+/// the whole point of this command is to answer "how much will I get back".
 fn dir_size(path: &std::path::Path) -> u64 {
+    let mut counted = std::collections::HashSet::new();
+    walk(path, &mut counted)
+}
+
+type Inode = (u64, u64);
+
+fn walk(path: &std::path::Path, counted: &mut std::collections::HashSet<Inode>) -> u64 {
     let mut total = 0;
     for entry in std::fs::read_dir(path).into_iter().flatten().flatten() {
         match entry.metadata() {
-            Ok(m) if m.is_dir() => total += dir_size(&entry.path()),
-            Ok(m) => total += m.len(),
+            Ok(m) if m.is_dir() => total += walk(&entry.path(), counted),
+            Ok(m) => total += charge(&m, counted),
             Err(_) => {}
         }
     }
     total
+}
+
+#[cfg(unix)]
+fn charge(m: &std::fs::Metadata, counted: &mut std::collections::HashSet<Inode>) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    if m.nlink() > 1 && !counted.insert((m.dev(), m.ino())) {
+        return 0;
+    }
+    m.blocks() * 512
+}
+
+#[cfg(not(unix))]
+fn charge(m: &std::fs::Metadata, _counted: &mut std::collections::HashSet<Inode>) -> u64 {
+    m.len()
 }
 
 fn gib(bytes: u64) -> String {
@@ -459,6 +484,25 @@ mod tests {
                 ),
             }
         }
+    }
+
+    /// cargo hardlinks one built artifact into `deps/` and the profile root, so
+    /// charging for every link reported `target/` at more than twice its size —
+    /// in a command whose entire job is to say how much the disk will get back.
+    #[cfg(unix)]
+    #[test]
+    fn a_hardlinked_artifact_costs_the_disk_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let artifact = dir.path().join("libfoo.rlib");
+        std::fs::write(&artifact, vec![7u8; 64 * 1024]).unwrap();
+        std::fs::create_dir(dir.path().join("deps")).unwrap();
+        std::fs::hard_link(&artifact, dir.path().join("deps/libfoo.rlib")).unwrap();
+
+        let size = dir_size(dir.path());
+        assert!(
+            (64 * 1024..96 * 1024).contains(&size),
+            "one 64 KiB artifact under two names should cost about 64 KiB, not {size} bytes"
+        );
     }
 
     #[test]
