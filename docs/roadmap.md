@@ -297,16 +297,18 @@ what unblocks the most.
   before checking containment, so a link inside the workspace pointing out of it
   is refused rather than followed, and the refusal says where the path really
   led. Widened only by `sandbox.allow_outside_workspace`. 6 tests.
-- **Four platforms** — Linux, macOS, Windows tested on hosted runners; FreeBSD
-  built and tested in a VM.
+- **Four platforms** — Linux, macOS and Windows tested on hosted runners, FreeBSD
+  in a VM; three more targets compiled and two supported best-effort. Each row of
+  the matrix names the CI job behind it and a test fails if that job is gone, so
+  the table cannot outlive its evidence.
 
 ## Next
 
 **Keep triaging the reference backlog.** `cargo xtask refs advance` moves a
 pointer and prints what landed; the log in
 [references/PORTED.md](../references/PORTED.md) says what was done with each
-commit, so a dismissal is a decision. Five passes so far — three of them found a
-defect here rather than something to port.
+commit, so a dismissal is a decision. Every pass so far is dated there, and more
+of them found a defect here than found something worth porting.
 
 **A live-model smoke test in CI.** An Ollama service container running a small
 model, so a turn is exercised against something with judgement. The wire itself
