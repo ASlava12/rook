@@ -59,6 +59,12 @@ pub fn logs_dir() -> PathBuf {
     home().join("logs")
 }
 
+/// Where a skill source is kept between searches, so asking twice does not
+/// fetch twice. Nothing here is authoritative — deleting it costs a download.
+pub fn sources_cache() -> PathBuf {
+    home().join("cache").join("sources")
+}
+
 pub fn project_skills_dir(workspace: &Path) -> PathBuf {
     workspace.join(".rook").join("skills")
 }

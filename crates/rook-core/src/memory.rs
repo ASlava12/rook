@@ -292,7 +292,13 @@ fn akin(a: &str, b: &str) -> bool {
 
 /// Words worth matching on: lowercase, de-punctuated, minus the ones that carry
 /// no signal and would match everything.
-pub(crate) fn terms_of(text: &str) -> BTreeSet<String> {
+/// The words in `text` worth matching on: no punctuation, no single letters,
+/// and none of the two dozen that appear in every sentence ever written.
+///
+/// Shared with the skill catalogue rather than written twice — "which words
+/// carry meaning" has one answer, and a search that ranks by how often "a"
+/// appears ranks nothing.
+pub fn terms_of(text: &str) -> BTreeSet<String> {
     const NOISE: &[&str] = &[
         "the", "a", "an", "and", "or", "but", "is", "are", "was", "were", "be", "to", "of", "in", "on", "at",
         "for", "with", "that", "this", "it", "as", "by", "from", "i", "you", "we",

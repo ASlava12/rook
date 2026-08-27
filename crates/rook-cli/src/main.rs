@@ -282,6 +282,19 @@ enum SkillCmd {
     Show { name: String },
     /// Explain which version was chosen and why the others were not.
     Why { name: String },
+    /// What the configured sources offer, best match first.
+    Search {
+        /// Words to match against a name or description. Empty lists everything.
+        #[arg(default_value = "")]
+        query: String,
+        /// Fetch the sources again before looking.
+        #[arg(long)]
+        refresh: bool,
+    },
+    /// Install a skill a source offers, by name.
+    Install { name: String },
+    /// Where `search` and `install` look.
+    Sources,
     /// Scaffold a new skill.
     New {
         name: String,
@@ -1327,6 +1340,55 @@ fn cmd_skills(source: &Source, cmd: SkillCmd, json: bool) -> Result<()> {
             match rook.skills().resolve(&name, rook.env()) {
                 Ok(r) => println!("chosen: {} [{}]", r.skill.id(), r.skill.source.label()),
                 Err(e) => println!("chosen: none — {e}"),
+            }
+        }
+        SkillCmd::Search { query, refresh } => {
+            let (offered, errors) = rook.skills_offered(&query, refresh);
+            if json {
+                let items: Vec<_> = offered
+                    .iter()
+                    .map(|o| {
+                        serde_json::json!({
+                            "name": o.name, "description": o.description, "source": o.source,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&items)?);
+                return Ok(());
+            }
+            let installed: Vec<String> = rook.catalog().iter().map(|c| c.name.clone()).collect();
+            let rows: Vec<Vec<String>> = offered
+                .iter()
+                .map(|o| {
+                    vec![
+                        o.name.clone(),
+                        if installed.contains(&o.name) { "installed".into() } else { String::new() },
+                        o.description.chars().take(72).collect(),
+                    ]
+                })
+                .collect();
+            if rows.is_empty() {
+                println!("nothing offered matches {query:?} — `rook skills sources` lists where it looked");
+            } else {
+                print!("{}", fmt::table(&["name", "", "description"], &rows));
+                println!("\n`rook skills install <name>` puts one here.");
+            }
+            for error in &errors {
+                println!("✗ {error}");
+            }
+        }
+        SkillCmd::Install { name } => {
+            let path = rook.install_skill(&name)?;
+            println!("installed {}", path.display());
+            println!("read it before trusting it: {}", path.join("SKILL.md").display());
+        }
+        SkillCmd::Sources => {
+            let sources = &rook.config.skill_sources;
+            if sources.is_empty() {
+                println!("none configured — add them under `[skill_sources]` in config.toml");
+            }
+            for source in sources {
+                println!("  {source}");
             }
         }
         SkillCmd::New { name, description } => {

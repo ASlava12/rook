@@ -154,3 +154,25 @@ fn a_file_that_tries_to_leave_the_skill_is_refused() {
         assert!(err.contains("inside the skill"), "{escape}: {err}");
     }
 }
+
+/// The point of a card: a skill installed from a source can be large — the one
+/// this was written against carries about 1,900 tokens of instructions and five
+/// files — and none of that is in a request until the model asks for it.
+#[test]
+fn a_large_skill_costs_its_description_until_it_is_loaded() {
+    let f = fixture();
+    let body = "## Step\nDo the thing, carefully and at length.\n".repeat(200);
+    let mut authored = skill("weighty", &body);
+    authored.description = "Handle the weighty case.".into();
+    f.rook.write_skill(&authored).unwrap();
+
+    let card = f.rook.catalog().into_iter().find(|c| c.name == "weighty").expect("it is in the catalog");
+    assert!(card.body_tokens > 500, "the body is big, or this proves nothing: {}", card.body_tokens);
+
+    let named = format!("- {}: {}", card.name, card.description);
+    assert!(named.len() < 200, "what a request carries is the description: {named}");
+    assert!(!named.contains("Do the thing"), "and not the body");
+
+    let loaded = f.rook.skills().resolve("weighty", f.rook.env()).unwrap();
+    assert!(loaded.body.contains("Do the thing"), "which arrives when it is asked for");
+}

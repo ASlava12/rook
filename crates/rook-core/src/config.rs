@@ -18,7 +18,6 @@ pub enum ConfigError {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
-#[derive(Default)]
 pub struct Config {
     pub agent: AgentConfig,
     pub storage: StorageConfig,
@@ -30,6 +29,11 @@ pub struct Config {
     /// on `PATH` are used.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub lsp: Vec<rook_lsp::ServerConfig>,
+    /// Where `skills search` and `skills install` look: a git repository or a
+    /// directory. Nothing is fetched until one of those is run, or the agent
+    /// asks and is approved.
+    #[serde(default = "default_skill_sources")]
+    pub skill_sources: Vec<String>,
     /// Commands run at points in a turn, as `[[hooks]]` tables.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub hooks: Vec<crate::hooks::HookConfig>,
@@ -39,6 +43,33 @@ pub struct Config {
     /// way of adding the first server.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub mcp: Vec<rook_mcp::ServerConfig>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        // Spelled out rather than derived: a `#[serde(default = "…")]` applies
+        // when a field is missing from a file, and says nothing about the
+        // config a machine with no file at all gets.
+        Self {
+            agent: AgentConfig::default(),
+            storage: StorageConfig::default(),
+            sandbox: SandboxConfig::default(),
+            telemetry: TelemetryConfig::default(),
+            memory: MemoryConfig::default(),
+            server: Default::default(),
+            lsp: Vec::new(),
+            mcp: Vec::new(),
+            hooks: Vec::new(),
+            skill_sources: default_skill_sources(),
+        }
+    }
+}
+
+/// The Agent Skills repository, which is where the format's own examples live.
+/// Replace it or add to it; it is a starting point rather than a blessing, and
+/// installing from anywhere means reading what you installed.
+fn default_skill_sources() -> Vec<String> {
+    vec!["https://github.com/anthropics/skills".into()]
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

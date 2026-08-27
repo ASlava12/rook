@@ -362,6 +362,12 @@ rook skills diff <objA> <objB>
 rook skills rollback my-skill <obj>
 ```
 
+Skills arrive three ways: written by hand, written by the agent — `write_skill`
+takes the files a procedure needs, so a python helper and the instructions that
+call it land together — or installed from a source with `rook skills search` and
+`rook skills install`. However one arrives, a request carries its one-line card
+and not its body; `load_skill` fetches that when the model asks.
+
 A skill is a directory with a `SKILL.md` — the
 [Agent Skills](https://www.webfuse.com/agent-skills-cheat-sheet) format, so skills
 written for other agents work unchanged. A directory under `~/.rook/plugins` with

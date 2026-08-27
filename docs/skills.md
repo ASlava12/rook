@@ -245,6 +245,36 @@ runnable; a template is not. Names are relative and inside the skill, so a
 where, because instructions referring to a script the model cannot locate are
 instructions it cannot follow.
 
+**Somebody else wrote it.** `[skill_sources]` in `config.toml` lists places to
+look — a git repository or a directory — and defaults to the Agent Skills
+repository, which is where the format's own examples live. That is a starting
+point rather than a blessing: installing from anywhere means reading what you
+installed, and `skills install` says so and prints the path.
+
+```sh
+rook skills sources                 # where it looks
+rook skills search pdf              # what those places offer
+rook skills install pdf             # the whole directory, scripts included
+```
+
+Nothing is fetched until one of those runs. Opening the store, starting a turn
+and listing what is installed touch no network. The agent has the same two in
+one tool, `find_skill`: searching reads, installing is approved like any other
+write, because it puts instructions on the machine that later sessions follow.
+
+A source needs no index and no API — its skills are read from the `SKILL.md`
+files in it, which is the format everything here already speaks.
+
+### None of this loads until it is needed
+
+Installing twenty skills does not put twenty skills in a request. What a request
+carries is one line each — name and description, the card — and the body arrives
+only when the model calls `load_skill`. The `pdf` skill from the repository above
+is about 1,900 tokens of instructions across five files; its card is sixty. The
+catalog itself is capped by `agent.max_skill_cards`, and what does not fit is
+still reachable, because `load_skill` answers an unknown name with the skills
+that match it.
+
 ## Interoperability
 
 Rook implements the Agent Skills format, and Agent Plugins packaging around it.

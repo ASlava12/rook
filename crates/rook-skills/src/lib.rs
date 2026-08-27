@@ -20,4 +20,4 @@ pub mod manifest;
 pub use env::Environment;
 pub use error::{Result, SkillError};
 pub use index::{Resolved, Skill, SkillCard, SkillIndex, SkillSource};
-pub use manifest::{Mismatch, Requirements, SkillManifest, Variant};
+pub use manifest::{Mismatch, Requirements, SkillManifest, Variant, parse as parse_manifest};

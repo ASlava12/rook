@@ -299,6 +299,45 @@ impl Rook {
         }
     }
 
+    /// What the configured sources offer, best match first.
+    ///
+    /// An empty query lists everything they have. `refresh` is what decides
+    /// whether the network is touched.
+    pub fn skills_offered(&self, query: &str, refresh: bool) -> (Vec<crate::catalog::Offered>, Vec<String>) {
+        let (offered, errors) = crate::catalog::offered(&self.config.skill_sources, refresh);
+        let matched: Vec<_> = crate::catalog::matching(&offered, query).into_iter().cloned().collect();
+        (matched, errors)
+    }
+
+    /// Install one by name, and prove it loads before saying so.
+    pub fn install_skill(&self, name: &str) -> Result<PathBuf> {
+        let (offered, errors) = crate::catalog::offered(&self.config.skill_sources, false);
+        let Some(skill) = offered.iter().find(|o| o.name == name) else {
+            let near = crate::catalog::matching(&offered, name);
+            let suggestion = match near.first() {
+                Some(o) => format!(" — closest is {:?} from {}", o.name, o.source),
+                None if errors.is_empty() => String::new(),
+                None => format!(" ({})", errors.join("; ")),
+            };
+            return Err(CoreError::Other(format!("no source offers a skill called {name:?}{suggestion}")));
+        };
+        let path = crate::catalog::install(skill, &paths::user_skills_dir())?;
+        let load_errors = self.reload_skills();
+        if self.skills().versions_of(name).is_empty() {
+            let reason = load_errors
+                .iter()
+                .find(|e| e.contains(name))
+                .cloned()
+                .unwrap_or_else(|| "it did not parse".into());
+            return Err(CoreError::Other(format!(
+                "installed {} but it does not load: {reason}",
+                path.display()
+            )));
+        }
+        self.capture_skill(name, Some(format!("installed from {}", skill.source)))?;
+        Ok(path)
+    }
+
     pub fn new_skill(&self, name: &str, description: &str) -> Result<PathBuf> {
         let dir = paths::user_skills_dir().join(name);
         if dir.exists() {

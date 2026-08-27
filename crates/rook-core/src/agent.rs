@@ -174,6 +174,7 @@ fn close_open_call(messages: &mut Vec<Message>, open: &mut Option<String>) {
 /// need the agent's own state.
 pub const LOAD_SKILL: &str = "load_skill";
 pub const WRITE_SKILL: &str = "write_skill";
+pub const FIND_SKILL: &str = "find_skill";
 pub const REMEMBER: &str = "remember";
 pub const FORGET: &str = "forget";
 pub const RECALL: &str = "recall";
@@ -487,16 +488,29 @@ impl<'a> AgentLoop<'a> {
             }),
         });
         push(ToolSpec {
+            name: FIND_SKILL.into(),
+            description: "Search the configured sources for a skill, and install one by name. \
+                          For when nothing here covers what is being asked and fetching beats \
+                          writing from scratch. Installing is approved like any write: it puts \
+                          instructions on the machine that later sessions follow."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "words to match against a name or description" },
+                    "install": { "type": "string", "description": "the exact name to install. Search first: a name no source offers comes back with the closest one." }
+                }
+            }),
+        });
+        push(ToolSpec {
             name: WRITE_SKILL.into(),
-            description: "Write down a repeatable procedure so a later session does not work it \
-                          out again, with the tools it needs beside it. For what took real \
-                          effort to establish — a build incantation, a deployment sequence, a \
-                          platform quirk — not for what this conversation already says or for a \
-                          one-off. When no tool does the job, write one into `files` and have \
-                          the body call it; a script with a shebang is made runnable. `requires` \
-                          scopes it to where it actually holds, and a skill that claims to apply \
-                          everywhere will misfire elsewhere. Rewriting your own skill keeps the \
-                          old version."
+            description: "Write down a repeatable procedure, with the tools it needs beside it, \
+                          so a later session does not work it out again. For what took real \
+                          effort — a build incantation, a platform quirk — not for what this \
+                          conversation already says. When no tool does the job, put one in \
+                          `files` and have the body call it; a shebang makes it runnable. \
+                          `requires` scopes it to where it holds, and a skill claiming to apply \
+                          everywhere misfires elsewhere. Rewriting your own keeps the old one."
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -825,6 +839,51 @@ impl<'a> AgentLoop<'a> {
                         message.push_str(&format!("\n- {}: {}", card.name, card.description));
                     }
                     self.rook.log(self.session, EventKind::Error, LOAD_SKILL, &message).ok();
+                    (message, true)
+                }
+            };
+        }
+
+        if call.name == FIND_SKILL {
+            let query = call.arguments.get("query").and_then(|q| q.as_str()).unwrap_or_default();
+            let Some(name) = call.arguments.get("install").and_then(|n| n.as_str()) else {
+                // Searching reads; only installing writes.
+                let (offered, errors) = self.rook.skills_offered(query, false);
+                let listed: Vec<String> = offered
+                    .iter()
+                    .take(10)
+                    .map(|o| format!("- {}: {}", o.name, o.description.chars().take(160).collect::<String>()))
+                    .collect();
+                let text = match listed.is_empty() {
+                    true => format!("no source offers a skill matching {query:?}. {}", errors.join("; ")),
+                    false => format!(
+                        "{}\n\nInstall one by name with `install`, or write your own.",
+                        listed.join("\n")
+                    ),
+                };
+                self.rook.log(self.session, EventKind::ToolResult, FIND_SKILL, &text).ok();
+                return (text, false);
+            };
+
+            let target = crate::paths::user_skills_dir().join(name);
+            let risk = rook_tools::policy::Risk::Write(vec![target.display().to_string()]);
+            if let Some(refusal) = self.gate_risk(FIND_SKILL, &call.arguments, risk).await {
+                self.rook.log(self.session, EventKind::Error, FIND_SKILL, &refusal).ok();
+                return (refusal, true);
+            }
+            return match self.rook.install_skill(name) {
+                Ok(path) => {
+                    outcome.skills_written.push(name.to_string());
+                    let message = format!(
+                        "installed skill {name:?} to {}. Load it to see what it says.",
+                        path.display()
+                    );
+                    self.rook.log(self.session, EventKind::Note, FIND_SKILL, &message).ok();
+                    (message, false)
+                }
+                Err(e) => {
+                    let message = format!("could not install {name:?}: {e}");
+                    self.rook.log(self.session, EventKind::Error, FIND_SKILL, &message).ok();
                     (message, true)
                 }
             };

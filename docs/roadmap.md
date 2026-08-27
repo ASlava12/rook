@@ -543,6 +543,18 @@ like to something that has to act on it.
   say what it was about to do, says that no other tool and no sub-agent gets past
   it, and addresses the remedies to the user. The same task: four steps, 8,498
   tokens, twenty-three seconds, and an answer worth reading. 1 test.
+- **Two ways to get a skill that is not here** — writing one by hand was the
+  only one. Now: the agent writes the tool and the instructions together
+  (`write_skill` takes `files`, a shebang makes one runnable, `../` is refused),
+  or it searches the configured sources and installs — `rook skills search` /
+  `install`, and `find_skill` for the agent, where searching reads and
+  installing is approved like any write. A source is a git repository or a
+  directory with `SKILL.md` files in it: no index, no API. Nothing is fetched
+  until one of those runs.
+  Neither loads anything into a request: a `pdf` skill of 1,900 tokens across
+  five files costs sixty as a card until `load_skill` asks for it. Ranking
+  reuses `memory::terms_of`, because scoring on "a" and "the" ranks whichever
+  description is longest — measured, on the first test written. 9 tests.
 - **An MCP server that dies is restarted, a few times** — a subprocess that
   crashed took its tools out for the rest of the run: every later call returned
   the same transport error and nothing tried again. A transport failure — the
