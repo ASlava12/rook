@@ -51,8 +51,12 @@ impl Tool for Search {
             let mut total = 0usize;
             let mut files_scanned = 0usize;
             // Not following links is the default; stated because it is the
-            // workspace boundary, and a default is not a decision.
-            for entry in ignore::WalkBuilder::new(&root).follow_links(false).build().flatten() {
+            // workspace boundary, and a default is not a decision. `require_git`
+            // is not the default: without it a `.gitignore` is silently ignored
+            // outside a repository, and a Rook workspace need not be one.
+            for entry in
+                ignore::WalkBuilder::new(&root).follow_links(false).require_git(false).build().flatten()
+            {
                 if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
                     continue;
                 }

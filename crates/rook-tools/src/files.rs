@@ -58,32 +58,88 @@ impl Tool for ReadFile {
         let text = String::from_utf8_lossy(&bytes);
         let lines: Vec<&str> = text.lines().collect();
         let total_lines = lines.len();
-        let end = offset.saturating_add(limit).min(total_lines);
-        let slice = if offset >= total_lines { &[][..] } else { &lines[offset..end] };
 
-        let mut body = String::with_capacity(slice.len() * 80);
-        for (i, line) in slice.iter().enumerate() {
-            body.push_str(&format!("{:>6}\t{}\n", offset + i + 1, line));
+        if offset > 0 && offset >= total_lines {
+            return Ok(ToolOutcome::error(format!(
+                "{} has {total_lines} line(s); there is nothing at offset {offset}",
+                path.display()
+            ))
+            .with("total_lines", total_lines as u64));
         }
 
-        let truncated = end < total_lines || offset > 0;
-        if end < total_lines {
-            body.push_str(&format!(
-                "\n[{} more lines; call read_file again with offset={end}]\n",
-                total_lines - end
+        let end = offset.saturating_add(limit).min(total_lines);
+        // Room reserved for the "call again with offset=" line, which is added
+        // after the budget is spent and would otherwise push the reply over it.
+        let budget = ctx.max_output_bytes.saturating_sub(80);
+        let mut page = page(&lines[offset..end], offset, budget);
+
+        let stopped_at = offset + page.shown;
+        if stopped_at < total_lines {
+            page.body.push_str(&format!(
+                "\n[{} more lines; call read_file again with offset={stopped_at}]\n",
+                total_lines - stopped_at
             ));
         }
 
         Ok(ToolOutcome {
-            content: body,
+            content: page.body,
             is_error: false,
-            truncated,
+            truncated: page.cut || stopped_at < total_lines || offset > 0,
             full_bytes: total_bytes,
             meta: Default::default(),
         }
         .with("total_lines", total_lines as u64)
-        .with("returned_lines", slice.len() as u64))
+        .with("returned_lines", page.shown as u64))
     }
+}
+
+/// Numbered lines up to a byte budget.
+///
+/// The budget is the point: `limit` counts lines, and one line of a minified
+/// bundle can be larger than the whole context window. A line that does not fit
+/// on its own is cut rather than dropped, so the caller still sees what is there.
+fn page(lines: &[&str], offset: usize, max_bytes: usize) -> Page {
+    let mut page = Page { body: String::new(), shown: lines.len(), cut: false };
+    for (i, line) in lines.iter().enumerate() {
+        let prefix = format!("{:>6}\t", offset + i + 1);
+        let room = max_bytes.saturating_sub(page.body.len() + prefix.len() + 1);
+        if room == 0 {
+            page.shown = i;
+            return page;
+        }
+        page.body.push_str(&prefix);
+        if line.len() <= room {
+            page.body.push_str(line);
+        } else {
+            let note = format!(" … [{} more bytes on this line]", line.len());
+            let cut = char_boundary_at_or_before(line, room.saturating_sub(note.len()));
+            page.body.push_str(&line[..cut]);
+            page.body.push_str(&note);
+            page.cut = true;
+        }
+        page.body.push('\n');
+    }
+    page
+}
+
+/// `str::floor_char_boundary` says this in one call and is stable only from
+/// 1.91; the declared minimum here is 1.90.
+fn char_boundary_at_or_before(s: &str, mut i: usize) -> usize {
+    i = i.min(s.len());
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+struct Page {
+    body: String,
+    /// Lines that fit whole or in part. Fewer than asked for when the budget ran
+    /// out first.
+    shown: usize,
+    /// A line was too long for the budget by itself. `offset` cannot page past
+    /// it, since it addresses lines.
+    cut: bool,
 }
 
 pub struct WriteFile;
@@ -293,9 +349,15 @@ impl Tool for ListDir {
         let mut entries = Vec::new();
         let mut total = 0usize;
         // Not following links is the default; stated because it is the
-        // workspace boundary, and a default is not a decision.
-        for entry in
-            ignore::WalkBuilder::new(&root).max_depth(Some(depth)).follow_links(false).build().flatten()
+        // workspace boundary, and a default is not a decision. `require_git`
+        // is not the default: without it a `.gitignore` is silently ignored
+        // outside a repository, and a Rook workspace need not be one.
+        for entry in ignore::WalkBuilder::new(&root)
+            .max_depth(Some(depth))
+            .follow_links(false)
+            .require_git(false)
+            .build()
+            .flatten()
         {
             if entry.depth() == 0 {
                 continue;
