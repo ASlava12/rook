@@ -531,6 +531,9 @@ impl App {
                         Progress::Delta(Delta::Text(text)) => TurnEvent::Text(text.clone()),
                         Progress::Delta(Delta::Reasoning(text)) => TurnEvent::Reasoning(text.clone()),
                         Progress::Delta(Delta::ToolCall(call)) => TurnEvent::Tool(call.name.clone()),
+                        Progress::Delegated { task, done, total } => {
+                            TurnEvent::Reasoning(format!("\n  [{done}/{total}] {task}"))
+                        }
                         Progress::ToolDone { name, failed } => TurnEvent::ToolDone(name.to_string(), failed),
                         Progress::Delta(Delta::Done { .. }) => return,
                     };

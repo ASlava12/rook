@@ -2033,3 +2033,53 @@ async fn the_reported_cost_matches_the_request_that_gets_built() {
     // The prompt just run is logged too, so the request carries a little more.
     assert!(carried <= reported + 20, "context says {reported} tokens and the request carries {carried}");
 }
+
+#[tokio::test]
+async fn a_delegation_reports_each_sub_task_as_it_lands() {
+    let f = fixture();
+    let session = f.rook.start_session("fanout").unwrap();
+    let mut script =
+        vec![call("delegate", serde_json::json!({ "tasks": ["check a", "check b", "check c"] }))];
+    script.extend((0..3).map(|i| reply(&format!("finding {i}"))));
+    script.push(reply("all three checked"));
+
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
+    let mut reported: Vec<String> = Vec::new();
+    agent
+        .run_with("check three things", |progress| {
+            if let rook_core::agent::Progress::Delegated { task, done, total } = progress {
+                reported.push(format!("{done}/{total} {task}"));
+            }
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(reported.len(), 3, "one report per sub-task: {reported:?}");
+    assert!(reported[0].starts_with("1/3"), "counted as they land: {reported:?}");
+    assert!(reported[2].starts_with("3/3"), "{reported:?}");
+    let mut named: Vec<&str> = reported.iter().map(|r| &r[4..]).collect();
+    named.sort();
+    assert_eq!(named, ["check a", "check b", "check c"], "each names its own task");
+}
+
+#[tokio::test]
+async fn the_report_keeps_the_order_the_tasks_were_asked_in() {
+    let f = fixture();
+    let session = f.rook.start_session("fanout").unwrap();
+    let mut script = vec![call("delegate", serde_json::json!({ "tasks": ["first", "second"] }))];
+    script.extend(["answer to first", "answer to second"].map(reply));
+    script.push(reply("done"));
+
+    let outcome = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session)
+        .run("two things")
+        .await
+        .unwrap();
+
+    // The sub-tasks finish in whatever order they finish; the report must not.
+    let transcript = f.rook.transcript(session, 0, 200, 4000).unwrap();
+    let report = transcript.iter().rev().find(|e| e.label == "delegate").unwrap();
+    let first = report.body.find("### first").unwrap();
+    let second = report.body.find("### second").unwrap();
+    assert!(first < second, "{}", report.body);
+    assert_eq!(outcome.delegated.len(), 2);
+}

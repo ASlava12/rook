@@ -120,6 +120,12 @@ what unblocks the most.
   a skill scoped away and explained by `skills why`, capture and rollback, a
   broken config that fails loudly, and the daemon path where a read goes over
   HTTP and a write says where the lock is.
+- **A delegation that says how it is going** — three sub-tasks ran concurrently
+  and the parent waited for all of them, so a front end showed `· delegate` and
+  then minutes of silence that could not be told from a hang. Each one is now
+  reported as it lands, counted, and named, in all five front ends. The report
+  still comes back in the order the tasks were asked for rather than the order
+  they finished. 2 tests.
 - **A context figure that matches the request** — `session context` counted
   every event but checkpoints as live, so asides, errors and reasoning inflated
   the number the command exists to explain, and could report a session over the
@@ -276,9 +282,9 @@ against a server that speaks the OpenAI dialect and checks what it was sent.
 
 ## After that
 
-**Supervising sub-agents while they run.** Delegation fans out and waits for all
-of them. codex's `spawn_agent`/`wait_agent` lets a parent send messages to a child
-mid-run, which is a different feature rather than a deeper version of this one.
+**Talking to a sub-agent while it runs.** Each one now reports when it lands, so
+a delegation is no longer silence — but the parent still cannot send anything to
+a child mid-run, which is what codex's `spawn_agent`/`wait_agent` is for.
 
 **Auto-installing language servers.** Detection is done; the other half of
 codex #8745 asks for installation too, which means downloading and running a

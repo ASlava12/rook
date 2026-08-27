@@ -87,7 +87,18 @@ fn bundled(skill: &rook_skills::Skill) -> String {
 /// with only the deltas shows every call as still working.
 pub enum Progress<'a> {
     Delta(&'a Delta),
-    ToolDone { name: &'a str, failed: bool },
+    ToolDone {
+        name: &'a str,
+        failed: bool,
+    },
+    /// One delegated sub-task finished. They run concurrently and the parent
+    /// waits for all of them, so without this a delegation is minutes of
+    /// silence that cannot be told from a hang.
+    Delegated {
+        task: &'a str,
+        done: usize,
+        total: usize,
+    },
 }
 
 /// Pseudo-tools: implemented by the loop rather than the toolbox, because they
@@ -636,7 +647,7 @@ impl<'a> AgentLoop<'a> {
 
             messages.push(response.message.clone());
             for call in &response.message.tool_calls {
-                let (result, failed) = self.dispatch(call, &mut outcome).await;
+                let (result, failed) = self.dispatch(call, &mut outcome, &mut on_progress).await;
                 on_progress(Progress::ToolDone { name: &call.name, failed });
                 messages.push(Message::tool_result(&call.id, result));
             }
@@ -649,13 +660,18 @@ impl<'a> AgentLoop<'a> {
 
     /// The text the model sees, and whether the call failed — which the outcome
     /// knows and the text only hints at.
-    async fn dispatch(&self, call: &rook_llm::ToolCall, outcome: &mut TurnOutcome) -> (String, bool) {
+    async fn dispatch(
+        &self,
+        call: &rook_llm::ToolCall,
+        outcome: &mut TurnOutcome,
+        on_progress: &mut impl FnMut(Progress<'_>),
+    ) -> (String, bool) {
         self.rook.log(self.session, EventKind::ToolCall, &call.name, &call.arguments.to_string()).ok();
 
         outcome.tools_called.push(call.name.clone());
 
         if call.name == DELEGATE {
-            let text = self.delegate(&call.arguments, outcome).await;
+            let text = self.delegate(&call.arguments, outcome, on_progress).await;
             self.rook.log(self.session, EventKind::ToolResult, DELEGATE, &text).ok();
             return (text, false);
         }
@@ -774,7 +790,12 @@ impl<'a> AgentLoop<'a> {
     /// The child's full transcript stays in the store, linked to this session by
     /// its parent, so the detail is recoverable without ever entering this
     /// conversation's context — which is the entire point.
-    async fn delegate(&self, args: &serde_json::Value, outcome: &mut TurnOutcome) -> String {
+    async fn delegate(
+        &self,
+        args: &serde_json::Value,
+        outcome: &mut TurnOutcome,
+        on_progress: &mut impl FnMut(Progress<'_>),
+    ) -> String {
         let tasks = requested_tasks(args);
         if tasks.is_empty() {
             return "delegate needs a task, or a list of tasks".into();
@@ -790,18 +811,34 @@ impl<'a> AgentLoop<'a> {
         let limit = std::sync::Arc::new(tokio::sync::Semaphore::new(
             self.rook.config.agent.max_parallel_subagents.max(1),
         ));
-        let running = tasks.iter().map(|task| {
-            let limit = limit.clone();
-            let inherited = inherited.clone();
-            async move {
-                let _permit = limit.acquire().await;
-                self.run_subtask(task, inherited.as_deref(), max_steps).await
-            }
-        });
+        let total = tasks.len();
+        let running: futures_util::stream::FuturesUnordered<_> = tasks
+            .iter()
+            .enumerate()
+            .map(|(i, task)| {
+                let limit = limit.clone();
+                let inherited = inherited.clone();
+                async move {
+                    let _permit = limit.acquire().await;
+                    (i, self.run_subtask(task, inherited.as_deref(), max_steps).await)
+                }
+            })
+            .collect();
 
-        let results = futures_util::future::join_all(running).await;
-        let mut report = Vec::with_capacity(results.len());
-        for (task, result) in tasks.iter().zip(results) {
+        // Unordered so each one is reported the moment it lands, then put back
+        // in the order they were asked for: a report that shuffles itself by
+        // finishing time is harder to read than the list that produced it.
+        let mut results: Vec<Option<_>> = (0..total).map(|_| None).collect();
+        let mut done = 0;
+        let mut stream = running;
+        while let Some((i, result)) = stream.next().await {
+            done += 1;
+            on_progress(Progress::Delegated { task: &tasks[i], done, total });
+            results[i] = Some(result);
+        }
+
+        let mut report = Vec::with_capacity(total);
+        for (task, result) in tasks.iter().zip(results.into_iter().flatten()) {
             match result {
                 Ok((id, child)) => {
                     outcome.delegated.push(id.clone());

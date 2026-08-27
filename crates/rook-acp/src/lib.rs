@@ -362,6 +362,11 @@ async fn prompt(
                     &call.name,
                     protocol::tool_kind(&call.name),
                 ),
+                // The editor already has a tool call open for the delegation;
+                // this is progress within it, which reads as a thought.
+                Progress::Delegated { task, done, total } => {
+                    protocol::agent_thought_chunk(&request.session_id, &format!("[{done}/{total}] {task}\n"))
+                }
                 Progress::ToolDone { failed, .. } => protocol::tool_call_done(
                     &request.session_id,
                     &format!("call_{}", finished.fetch_add(1, Ordering::Relaxed)),

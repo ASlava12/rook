@@ -174,6 +174,9 @@ async fn turn(
                 Progress::Delta(Delta::Text(text)) => ChatEvent::Text { text: text.clone() },
                 Progress::Delta(Delta::Reasoning(text)) => ChatEvent::Reasoning { text: text.clone() },
                 Progress::Delta(Delta::ToolCall(call)) => ChatEvent::Tool { name: call.name.clone() },
+                Progress::Delegated { task, done, total } => {
+                    ChatEvent::Reasoning { text: format!("\n  [{done}/{total}] {task}") }
+                }
                 Progress::ToolDone { name, failed } => ChatEvent::ToolDone { name: name.to_string(), failed },
                 Progress::Delta(Delta::Done { .. }) => return,
             };
