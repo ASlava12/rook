@@ -256,6 +256,15 @@ impl Rook {
         let path = dir.join("SKILL.md");
         std::fs::write(&path, skill.to_skill_md()?)
             .map_err(|e| CoreError::Io { path: path.clone(), source: e })?;
+        for (rel, contents) in &skill.files {
+            let file = dir.join(Self::safe_relative(rel)?);
+            if let Some(parent) = file.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| CoreError::Io { path: parent.to_path_buf(), source: e })?;
+            }
+            std::fs::write(&file, contents).map_err(|e| CoreError::Io { path: file.clone(), source: e })?;
+            make_runnable(&file, contents);
+        }
 
         // Validated by reading it back rather than by trusting the writer: a
         // skill that does not parse is one the next session silently lacks.
@@ -272,6 +281,22 @@ impl Rook {
         }
         self.capture_skill(name, Some(format!("written by the agent: {}", skill.description)))?;
         Ok(path)
+    }
+
+    /// A path inside the skill's own directory, or an error naming why not.
+    /// These come from the model, and `../` in one of them would write wherever
+    /// it liked with the skill directory's permission.
+    fn safe_relative(rel: &str) -> Result<PathBuf> {
+        let path = PathBuf::from(rel);
+        let sane = !rel.trim().is_empty()
+            && path.is_relative()
+            && path.components().all(|c| matches!(c, std::path::Component::Normal(_)));
+        match sane {
+            true => Ok(path),
+            false => Err(CoreError::Other(format!(
+                "{rel:?} is not a name inside the skill — no absolute paths, no `..`"
+            ))),
+        }
     }
 
     pub fn new_skill(&self, name: &str, description: &str) -> Result<PathBuf> {
@@ -1066,6 +1091,13 @@ pub struct AuthoredSkill {
     /// being platform- or version-specific instead of misfiring elsewhere.
     #[serde(default)]
     pub requires: rook_skills::Requirements,
+    /// Files to lay down beside `SKILL.md`, by relative path.
+    ///
+    /// A procedure often needs a tool that does not exist yet. Writing the
+    /// script and the instructions for it together is what makes the skill
+    /// repeatable — instructions describing a helper nobody has are not.
+    #[serde(default)]
+    pub files: BTreeMap<String, String>,
 }
 
 impl AuthoredSkill {
@@ -1085,6 +1117,20 @@ impl AuthoredSkill {
         Ok(manifest.to_skill_md(&self.body)?)
     }
 }
+
+/// A shebang is the author saying how the file is meant to be run, so it is
+/// made runnable. Nothing else is: a template or a data file has no business
+/// being executable.
+#[cfg(unix)]
+fn make_runnable(path: &Path, contents: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    if contents.starts_with("#!") {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).ok();
+    }
+}
+
+#[cfg(not(unix))]
+fn make_runnable(_path: &Path, _contents: &str) {}
 
 fn skill_template(name: &str, description: &str, env: &Environment) -> String {
     format!(

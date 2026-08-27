@@ -38,6 +38,7 @@ fn skill(name: &str, body: &str) -> AuthoredSkill {
         body: body.into(),
         keywords: vec!["build".into()],
         requires: Requirements::default(),
+        files: Default::default(),
     }
 }
 
@@ -97,4 +98,59 @@ fn a_skill_that_would_not_load_is_reported_rather_than_left_broken() {
 
     let err = f.rook.write_skill(&authored).unwrap_err().to_string();
     assert!(err.contains("does not load"), "{err}");
+}
+
+/// A procedure often needs a tool that does not exist. Instructions describing a
+/// helper nobody has are not repeatable, and the agent could not write one: the
+/// file tools stop at the workspace, and skills live outside it.
+#[test]
+fn a_skill_can_carry_the_tool_its_instructions_call() {
+    let f = fixture();
+    let mut authored = skill("csv-report", "Run `python3 report.py <file>` and read what it prints.");
+    authored
+        .files
+        .insert("report.py".into(), "#!/usr/bin/env python3\nimport sys\nprint(sys.argv[1])\n".into());
+    authored.files.insert("template.md".into(), "# Report\n".into());
+
+    let path = f.rook.write_skill(&authored).unwrap();
+    let dir = path.parent().unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(dir.join("report.py")).unwrap().lines().next(),
+        Some("#!/usr/bin/env python3")
+    );
+    assert!(dir.join("template.md").exists());
+
+    let loaded = f.rook.skills().resolve("csv-report", f.rook.env()).unwrap();
+    let resources: Vec<String> = loaded.skill.resources().iter().map(|r| r.display().to_string()).collect();
+    assert!(resources.contains(&"report.py".to_string()), "the skill knows what it carries: {resources:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_script_with_a_shebang_is_runnable_and_a_template_is_not() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let f = fixture();
+    let mut authored = skill("runnable", "Call the script.");
+    authored.files.insert("go.sh".into(), "#!/bin/sh\necho hi\n".into());
+    authored.files.insert("notes.md".into(), "not a program\n".into());
+
+    let dir = f.rook.write_skill(&authored).unwrap().parent().unwrap().to_path_buf();
+    let mode = |name: &str| std::fs::metadata(dir.join(name)).unwrap().permissions().mode() & 0o111;
+
+    assert_ne!(mode("go.sh"), 0, "a shebang is the author saying how it is meant to be run");
+    assert_eq!(mode("notes.md"), 0, "and a template has no business being executable");
+}
+
+#[test]
+fn a_file_that_tries_to_leave_the_skill_is_refused() {
+    let f = fixture();
+    for escape in ["../../elsewhere.sh", "/etc/cron.d/rook", "a/../../out.txt"] {
+        let mut authored = skill("escaping", "Nothing good.");
+        authored.files.insert(escape.into(), "#!/bin/sh\n".into());
+
+        let err = f.rook.write_skill(&authored).unwrap_err().to_string();
+        assert!(err.contains("inside the skill"), "{escape}: {err}");
+    }
 }

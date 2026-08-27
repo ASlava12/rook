@@ -232,6 +232,19 @@ rook skills why my-skill       # if it does not
 rook skills capture my-skill -m "first version"
 ```
 
+## Where a skill comes from
+
+Two ways, besides writing one by hand.
+
+**The agent writes it, with the tool it needs.** `write_skill` takes `files`
+alongside the instructions, so when no tool does the job the agent can write one
+and document it in the same breath — a `report.py` beside the `SKILL.md` that
+says how to call it. A file whose contents begin with a shebang is made
+runnable; a template is not. Names are relative and inside the skill, so a
+`../` is refused rather than written. The loaded skill lists what it carries and
+where, because instructions referring to a script the model cannot locate are
+instructions it cannot follow.
+
 ## Interoperability
 
 Rook implements the Agent Skills format, and Agent Plugins packaging around it.

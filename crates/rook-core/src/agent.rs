@@ -489,10 +489,12 @@ impl<'a> AgentLoop<'a> {
         push(ToolSpec {
             name: WRITE_SKILL.into(),
             description: "Write down a repeatable procedure so a later session does not work it \
-                          out again. For what took real effort to establish — a build \
-                          incantation, a deployment sequence, a platform quirk — not for what \
-                          this conversation already says or for a one-off. `requires` scopes it \
-                          to where it actually holds, and a skill that claims to apply \
+                          out again, with the tools it needs beside it. For what took real \
+                          effort to establish — a build incantation, a deployment sequence, a \
+                          platform quirk — not for what this conversation already says or for a \
+                          one-off. When no tool does the job, write one into `files` and have \
+                          the body call it; a script with a shebang is made runnable. `requires` \
+                          scopes it to where it actually holds, and a skill that claims to apply \
                           everywhere will misfire elsewhere. Rewriting your own skill keeps the \
                           old version."
                 .into(),
@@ -503,6 +505,11 @@ impl<'a> AgentLoop<'a> {
                     "description": { "type": "string", "description": "when to use it, in one line" },
                     "body": { "type": "string", "description": "markdown instructions" },
                     "keywords": { "type": "array", "items": { "type": "string" } },
+                    "files": {
+                        "type": "object",
+                        "additionalProperties": { "type": "string" },
+                        "description": "Files laid beside the instructions, by relative name: a script the body runs, a template it fills. The loaded skill lists them with their path."
+                    },
                     "requires": {
                         "type": "object",
                         "properties": {
@@ -828,7 +835,14 @@ impl<'a> AgentLoop<'a> {
             // policy like any other write.
             let target = crate::paths::user_skills_dir()
                 .join(call.arguments.get("name").and_then(|n| n.as_str()).unwrap_or("?"));
-            let risk = rook_tools::policy::Risk::Write(vec![target.display().to_string()]);
+            // Every file by name, not just the directory: a skill that lays
+            // down a script is asking to write a program, and the approval
+            // should say which.
+            let mut writing = vec![target.join("SKILL.md").display().to_string()];
+            if let Some(files) = call.arguments.get("files").and_then(|f| f.as_object()) {
+                writing.extend(files.keys().map(|rel| target.join(rel).display().to_string()));
+            }
+            let risk = rook_tools::policy::Risk::Write(writing);
             if let Some(refusal) = self.gate_risk(WRITE_SKILL, &call.arguments, risk).await {
                 self.rook.log(self.session, EventKind::Error, WRITE_SKILL, &refusal).ok();
                 return (refusal, true);
