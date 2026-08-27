@@ -175,3 +175,47 @@ pub fn tool_kind(name: &str) -> &'static str {
         _ => "other",
     }
 }
+
+/// The approval modes, as an editor offers them.
+///
+/// The same three the CLI and the config have, so switching from an editor's
+/// menu and editing `sandbox.mode` reach the same policy.
+pub fn modes(current: rook_tools::policy::Mode) -> serde_json::Value {
+    serde_json::json!({
+        "currentModeId": mode_id(current),
+        "availableModes": [
+            { "id": "auto", "name": "Auto",
+              "description": "Run anything the deny list does not forbid, without asking." },
+            { "id": "ask", "name": "Ask",
+              "description": "Ask before anything that changes the machine." },
+            { "id": "readonly", "name": "Read only",
+              "description": "Nothing that changes the machine runs at all." },
+        ],
+    })
+}
+
+pub fn mode_id(mode: rook_tools::policy::Mode) -> &'static str {
+    match mode {
+        rook_tools::policy::Mode::Auto => "auto",
+        rook_tools::policy::Mode::Ask => "ask",
+        rook_tools::policy::Mode::ReadOnly => "readonly",
+    }
+}
+
+pub fn mode_from_id(id: &str) -> Option<rook_tools::policy::Mode> {
+    match id {
+        "auto" => Some(rook_tools::policy::Mode::Auto),
+        "ask" => Some(rook_tools::policy::Mode::Ask),
+        "readonly" => Some(rook_tools::policy::Mode::ReadOnly),
+        _ => None,
+    }
+}
+
+/// Told to the editor when the mode changes for any other reason, so its menu
+/// does not drift from what the policy is actually doing.
+pub fn current_mode_update(session: &str, mode: rook_tools::policy::Mode) -> serde_json::Value {
+    serde_json::json!({
+        "sessionId": session,
+        "update": { "sessionUpdate": "current_mode_update", "currentModeId": mode_id(mode) },
+    })
+}

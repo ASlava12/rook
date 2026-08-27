@@ -126,9 +126,11 @@ async fn loading_a_session_that_does_not_exist_is_an_error_not_a_new_one() {
 #[tokio::test]
 async fn an_unknown_method_gets_method_not_found_rather_than_silence() {
     let mut editor = Editor::start();
-    let reply = editor.call(1, "session/set_mode", serde_json::json!({})).await;
+    // Deliberately not a method anyone might implement later: this test named
+    // `session/set_mode` until that became one.
+    let reply = editor.call(1, "session/no_such_method", serde_json::json!({})).await;
     assert_eq!(reply["error"]["code"], -32601, "{reply}");
-    assert!(reply["error"]["message"].as_str().unwrap().contains("session/set_mode"));
+    assert!(reply["error"]["message"].as_str().unwrap().contains("session/no_such_method"));
 }
 
 #[tokio::test]
@@ -241,13 +243,18 @@ async fn provider_lock() -> tokio::sync::MutexGuard<'static, ()> {
 /// A model that asks to read one file and then answers, over the wire, so the
 /// whole path is exercised: editor → agent → tool → back to the editor.
 async fn scripted_model(path: String) -> String {
+    scripted_call("read_file", serde_json::json!({ "path": path })).await
+}
+
+/// A model that asks for one tool call and then answers.
+async fn scripted_call(tool: &str, arguments: serde_json::Value) -> String {
     use tokio::net::TcpListener;
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let frames = [
         serde_json::json!({"id": "1", "choices": [{"index": 0, "delta": {"role": "assistant",
             "tool_calls": [{"index": 0, "id": "c1", "type": "function",
-                "function": {"name": "read_file", "arguments": format!("{{\"path\":{path:?}}}")}}]},
+                "function": {"name": tool, "arguments": arguments.to_string()}}]},
             "finish_reason": "tool_calls"}], "usage": {"prompt_tokens": 1, "completion_tokens": 1}}),
         serde_json::json!({"id": "1", "choices": [{"index": 0, "delta": {"role": "assistant",
             "content": "read it"}, "finish_reason": "stop"}],
@@ -355,4 +362,76 @@ async fn a_client_that_cannot_serve_files_is_never_asked() {
     for message in editor.drain(Duration::from_millis(1500)).await {
         assert_ne!(message["method"], "fs/read_text_file", "the protocol forbids asking: {message}");
     }
+}
+
+#[tokio::test]
+async fn a_new_session_offers_the_approval_modes_and_says_which_is_on() {
+    let mut editor = Editor::start();
+    editor.call(1, "initialize", serde_json::json!({ "protocolVersion": 1 })).await;
+
+    let modes =
+        editor.call(2, "session/new", serde_json::json!({ "cwd": "." })).await["result"]["modes"].clone();
+
+    assert_eq!(modes["currentModeId"], "ask", "the configured default");
+    let ids: Vec<&str> =
+        modes["availableModes"].as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["auto", "ask", "readonly"], "{modes}");
+    for mode in modes["availableModes"].as_array().unwrap() {
+        assert!(mode["name"].is_string(), "an editor renders the name: {mode}");
+        assert!(mode["description"].is_string(), "and explains it: {mode}");
+    }
+}
+
+#[tokio::test]
+async fn setting_a_mode_takes_effect_and_an_unknown_one_is_refused() {
+    let mut editor = Editor::start();
+    editor.call(1, "initialize", serde_json::json!({ "protocolVersion": 1 })).await;
+    let id = editor.call(2, "session/new", serde_json::json!({ "cwd": "." })).await["result"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let set = editor
+        .call(3, "session/set_mode", serde_json::json!({ "sessionId": id, "modeId": "readonly" }))
+        .await;
+    assert!(set["error"].is_null(), "{set}");
+
+    let modes =
+        editor.call(4, "session/new", serde_json::json!({ "cwd": "." })).await["result"]["modes"].clone();
+    assert_eq!(modes["currentModeId"], "readonly", "the change must outlive the request");
+
+    let bad =
+        editor.call(5, "session/set_mode", serde_json::json!({ "sessionId": id, "modeId": "yolo" })).await;
+    assert_eq!(bad["error"]["code"], -32602, "{bad}");
+    assert!(bad["error"]["message"].as_str().unwrap().contains("yolo"), "{bad}");
+}
+
+#[tokio::test]
+async fn switching_to_readonly_stops_the_next_turn_writing() {
+    let _turn = provider_lock().await;
+    let base = scripted_call("write_file", serde_json::json!({ "path": "new.txt", "content": "x" })).await;
+    unsafe { std::env::set_var("OLLAMA_HOST", &base) };
+
+    let mut config = Config::default();
+    config.agent.model = "ollama/scripted".into();
+    // Auto to begin with: the point is that the editor can take it away.
+    config.sandbox.mode = rook_tools::policy::Mode::Auto;
+    let mut editor = Editor::start_with(config, |_| {});
+    let written = editor.workspace.join("new.txt");
+
+    editor.call(1, "initialize", serde_json::json!({ "protocolVersion": 1 })).await;
+    let id = editor.call(2, "session/new", serde_json::json!({ "cwd": "." })).await["result"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    editor.call(3, "session/set_mode", serde_json::json!({ "sessionId": id, "modeId": "readonly" })).await;
+
+    let prompt = serde_json::json!({
+        "jsonrpc": "2.0", "id": 4, "method": "session/prompt",
+        "params": { "sessionId": id, "prompt": [{ "type": "text", "text": "write a file" }] }
+    });
+    editor.stdin.write_all(format!("{prompt}\n").as_bytes()).await.unwrap();
+    let _ = editor.drain(Duration::from_millis(2500)).await;
+
+    assert!(!written.exists(), "the mode the editor set must reach the turn that follows it");
 }

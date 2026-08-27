@@ -11,7 +11,8 @@
 //!
 //! When the client says it can serve them, file reads and writes go to the
 //! editor rather than the disk, so the agent sees the buffer the user is
-//! looking at instead of the version last saved.
+//! looking at instead of the version last saved. The approval modes are offered
+//! as session modes, so an editor's menu and `sandbox.mode` are the same knob.
 
 pub mod protocol;
 
@@ -115,7 +116,7 @@ where
                 if method == "initialize" {
                     *client_files.lock().await = ClientFiles::from_initialize(&params);
                 }
-                let outcome = dispatch(&rook, &method, params);
+                let outcome = dispatch(&rook, &policy, &method, params);
                 peer.respond(&id, outcome);
             }
             // A notification we do not handle is not an error.
@@ -133,8 +134,21 @@ where
     Ok(())
 }
 
-fn dispatch(rook: &Rook, method: &str, params: serde_json::Value) -> Result<serde_json::Value, Error> {
+fn dispatch(
+    rook: &Rook,
+    policy: &rook_tools::policy::Policy,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, Error> {
     match method {
+        "session/set_mode" => {
+            let id = params["modeId"].as_str().unwrap_or_default();
+            let mode =
+                protocol::mode_from_id(id).ok_or_else(|| Error::invalid_params(format!("no mode {id:?}")))?;
+            policy.set_mode(mode);
+            Ok(serde_json::json!({}))
+        }
+
         "initialize" => Ok(serde_json::json!({
             "protocolVersion": PROTOCOL_VERSION,
             "agentInfo": { "name": "rook", "version": rook_core::AGENT_VERSION },
@@ -151,7 +165,10 @@ fn dispatch(rook: &Rook, method: &str, params: serde_json::Value) -> Result<serd
             let session = rook
                 .start_session(&format!("acp {}", request.cwd))
                 .map_err(|e| Error::internal(e.to_string()))?;
-            Ok(serde_json::json!({ "sessionId": rook_store::format_session_id(session) }))
+            Ok(serde_json::json!({
+                "sessionId": rook_store::format_session_id(session),
+                "modes": protocol::modes(policy.mode()),
+            }))
         }
 
         // Resuming an existing session needs nothing beyond checking it exists:
@@ -162,7 +179,7 @@ fn dispatch(rook: &Rook, method: &str, params: serde_json::Value) -> Result<serd
             let id = rook_store::parse_session_id(&request.session_id)
                 .ok_or_else(|| Error::invalid_params("not a session id"))?;
             match rook.store.get_session(id) {
-                Ok(Some(_)) => Ok(serde_json::json!({})),
+                Ok(Some(_)) => Ok(serde_json::json!({ "modes": protocol::modes(policy.mode()) })),
                 Ok(None) => Err(Error::invalid_params("no such session")),
                 Err(e) => Err(Error::internal(e.to_string())),
             }

@@ -118,6 +118,11 @@ what unblocks the most.
   a skill scoped away and explained by `skills why`, capture and rollback, a
   broken config that fails loudly, and the daemon path where a read goes over
   HTTP and a write says where the lock is.
+- **Approval mode from the editor** — the three modes are offered on
+  `session/new` and `session/set_mode` changes the one in force, so a user can
+  drop to read-only from the editor's menu instead of editing `config.toml` and
+  restarting. The same policy the CLI and the config reach. 3 tests, one of them
+  proving a mode set before a turn is the mode that turn obeys.
 - **Skills that can carry scripts** — the format allows bundled files and the
   layout is documented, but a loaded skill named neither them nor its own
   directory, so a body saying `scripts/check.sh` could not be followed. Now it
@@ -232,8 +237,8 @@ against a server that speaks the OpenAI dialect and checks what it was sent.
 of them. codex's `spawn_agent`/`wait_agent` lets a parent send messages to a child
 mid-run, which is a different feature rather than a deeper version of this one.
 
-**ACP beyond the basics.** Modes, config options and terminals are defined and
-unimplemented. `fs/*` delegation is done.
+**ACP beyond the basics.** Config options and terminals are defined and
+unimplemented. `fs/*` delegation and session modes are done.
 
 **Auto-installing language servers.** Detection is done; the other half of
 codex #8745 asks for installation too, which means downloading and running a

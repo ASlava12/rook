@@ -225,7 +225,7 @@ fn the_workspace_is_where_the_flag_says_it_is() {
 /// when it was written and would be verified by hand every time it changed.
 struct Daemon {
     child: std::process::Child,
-    port: u16,
+    address: String,
 }
 
 /// `CARGO_BIN_EXE_` is only set for this package's own binaries, and both land
@@ -242,25 +242,29 @@ fn rookd() -> PathBuf {
 }
 
 impl Daemon {
-    fn start(rook: &Rook, port: u16) -> Self {
-        let child = Command::new(rookd())
+    /// Port 0: the OS picks a free one and rookd writes where it landed, so two
+    /// tests can never collide over a number someone chose.
+    fn start(rook: &Rook) -> Self {
+        let mut child = Command::new(rookd())
             .env("ROOK_HOME", rook.home.path())
             .env("ROOK_LOG", "error")
             .args(["--workspace", rook.workspace.path().to_str().unwrap()])
-            .args(["--port", &port.to_string()])
+            .args(["--port", "0"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
             .unwrap();
-        let daemon = Self { child, port };
+        let address_file = rook.home.path().join("rookd.addr");
         for _ in 0..80 {
-            if rook.home.path().join("rookd.addr").exists() {
+            if let Ok(address) = std::fs::read_to_string(&address_file) {
                 std::thread::sleep(std::time::Duration::from_millis(150));
-                return daemon;
+                return Self { child, address: address.trim().to_string() };
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        panic!("rookd never published its address on port {port}");
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("rookd never published its address");
     }
 }
 
@@ -282,7 +286,7 @@ fn a_read_routes_through_the_daemon_and_answers_the_same() {
     let direct = rook.json(&["skills", "ls"]);
     let direct_stats = rook.json(&["store", "stat"]);
 
-    let daemon = Daemon::start(&rook, 18211);
+    let daemon = Daemon::start(&rook);
 
     assert_eq!(rook.json(&["skills", "ls"]), direct, "routed output must be identical");
     assert_eq!(rook.json(&["store", "stat"]), direct_stats);
@@ -290,14 +294,14 @@ fn a_read_routes_through_the_daemon_and_answers_the_same() {
     let write = rook.run(&["store", "gc"]);
     assert!(!write.status.success(), "a write cannot go over the API");
     let err = String::from_utf8_lossy(&write.stderr);
-    assert!(err.contains(&daemon.port.to_string()), "and must say where the lock is: {err}");
+    assert!(err.contains(&daemon.address), "and must say where the lock is: {err}");
 }
 
 #[test]
 fn the_store_is_readable_again_once_the_daemon_stops() {
     let rook = Rook::new();
     {
-        let _daemon = Daemon::start(&rook, 18212);
+        let _daemon = Daemon::start(&rook);
         assert!(!rook.run(&["store", "gc"]).status.success(), "the daemon holds the lock");
     }
     for _ in 0..40 {

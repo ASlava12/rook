@@ -8,7 +8,7 @@
 //! having.
 
 use std::collections::HashSet;
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -86,7 +86,9 @@ pub enum Decision {
 
 #[derive(Default)]
 pub struct Policy {
-    pub mode: Mode,
+    /// Behind a lock so a front end can change it mid-run: the policy is shared
+    /// and the editor offers the modes as a control.
+    mode: RwLock<Mode>,
     pub allow: Vec<Rule>,
     pub ask: Vec<Rule>,
     pub deny: Vec<Rule>,
@@ -96,7 +98,15 @@ pub struct Policy {
 
 impl Policy {
     pub fn new(mode: Mode) -> Self {
-        Self { mode, ..Default::default() }
+        Self { mode: RwLock::new(mode), ..Default::default() }
+    }
+
+    pub fn mode(&self) -> Mode {
+        *self.mode.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn set_mode(&self, mode: Mode) {
+        *self.mode.write().unwrap_or_else(|e| e.into_inner()) = mode;
     }
 
     /// Build from configured patterns, reporting the ones that would not compile
@@ -117,7 +127,7 @@ impl Policy {
                 .collect()
         };
         let policy = Self {
-            mode,
+            mode: RwLock::new(mode),
             allow: build(allow),
             ask: build(ask),
             deny: build(deny),
@@ -137,7 +147,7 @@ impl Policy {
         if let Some(rule) = self.deny.iter().find(|r| r.matches(&subject)) {
             return Decision::Deny(format!("matches the deny rule {rule:?}"));
         }
-        if self.mode == Mode::ReadOnly {
+        if self.mode() == Mode::ReadOnly {
             return Decision::Deny("read-only mode: nothing may change the machine".into());
         }
         if self.granted.lock().is_ok_and(|g| g.contains(&subject)) {
@@ -149,7 +159,7 @@ impl Policy {
         if self.ask.iter().any(|r| r.matches(&subject)) {
             return Decision::Ask;
         }
-        match self.mode {
+        match self.mode() {
             Mode::Auto => Decision::Allow,
             _ => Decision::Ask,
         }

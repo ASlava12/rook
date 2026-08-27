@@ -66,6 +66,9 @@ async fn main() -> Result<()> {
 
     let addr = SocketAddr::new(bind, port);
     let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("binding {addr}"))?;
+    // Where it landed, not where it asked: `--port 0` means the OS chooses, and
+    // an address file naming port 0 is one nothing can reach.
+    let addr = listener.local_addr().unwrap_or(addr);
     tracing::info!("rookd listening on http://{addr}");
     let address_file = rook_core::paths::daemon_address_file();
     std::fs::write(&address_file, format!("http://{addr}")).ok();
