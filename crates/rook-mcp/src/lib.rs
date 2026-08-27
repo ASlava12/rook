@@ -42,6 +42,15 @@ pub enum McpError {
     NotConfigured { server: String },
 }
 
+impl McpError {
+    /// The pipe, not the server: something a restart could fix. A server that
+    /// answered — with an rpc error, or an unparseable response — is working,
+    /// and restarting it would only throw the answer away.
+    pub fn is_transport(&self) -> bool {
+        matches!(self, McpError::Transport { .. } | McpError::Closed { .. })
+    }
+}
+
 pub type Result<T> = std::result::Result<T, McpError>;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -84,29 +93,52 @@ impl Default for ServerConfig {
 pub struct Server {
     name: String,
     info: ServerInfo,
-    transport: Box<dyn Transport>,
+    /// Replaceable, because a subprocess that dies would otherwise take its
+    /// tools out for the rest of the run: every later call returned the same
+    /// transport error and nothing tried again.
+    transport: tokio::sync::RwLock<Box<dyn Transport>>,
     call_timeout: Duration,
+    config: ServerConfig,
+    restarts: std::sync::atomic::AtomicU32,
 }
+
+/// Enough to survive a crash and a restart loop's first turns, and few enough
+/// that a server dying on every call is not respawned on every call.
+const MOST_RESTARTS: u32 = 3;
 
 impl Server {
     /// Connect and complete the MCP handshake, over whichever transport the
     /// configuration describes.
     pub async fn connect(config: &ServerConfig) -> Result<Self> {
-        let transport: Box<dyn Transport> = match config.url.as_deref() {
-            Some(url) if !url.is_empty() => Box::new(http::Http::new(&config.name, url, &config.headers)?),
-            _ if !config.command.trim().is_empty() => Box::new(stdio::Stdio::spawn(config)?),
-            _ => return Err(McpError::NotConfigured { server: config.name.clone() }),
-        };
-
-        let server = Self {
+        let transport = Self::transport_for(config)?;
+        let info = Self::handshake(transport.as_ref(), config).await?;
+        Ok(Self {
             name: config.name.clone(),
-            info: ServerInfo::default(),
-            transport,
+            info,
+            transport: tokio::sync::RwLock::new(transport),
             call_timeout: Duration::from_secs(config.call_timeout_secs),
-        };
+            config: config.clone(),
+            restarts: std::sync::atomic::AtomicU32::new(0),
+        })
+    }
 
-        let info: ServerInfo = server
-            .request_with(
+    fn transport_for(config: &ServerConfig) -> Result<Box<dyn Transport>> {
+        match config.url.as_deref() {
+            Some(url) if !url.is_empty() => {
+                Ok(Box::new(http::Http::new(&config.name, url, &config.headers)?))
+            }
+            _ if !config.command.trim().is_empty() => Ok(Box::new(stdio::Stdio::spawn(config)?)),
+            _ => Err(McpError::NotConfigured { server: config.name.clone() }),
+        }
+    }
+
+    /// Straight at the transport, never through the retrying path: a server
+    /// that cannot complete its handshake is not one a restart brings back, and
+    /// routing this through `request_with` would have restart call connect call
+    /// restart.
+    async fn handshake(transport: &dyn Transport, config: &ServerConfig) -> Result<ServerInfo> {
+        let message = transport
+            .request(
                 "initialize",
                 Some(serde_json::json!({
                     "protocolVersion": protocol::PROTOCOL_VERSION,
@@ -116,9 +148,19 @@ impl Server {
                 Duration::from_secs(config.startup_timeout_secs),
             )
             .await?;
-
-        server.transport.notify("notifications/initialized", None).await?;
-        Ok(Self { info, ..server })
+        if let Some(error) = message.error {
+            return Err(McpError::Rpc { server: config.name.clone(), method: "initialize".into(), error });
+        }
+        let info =
+            serde_json::from_value(message.result.unwrap_or(serde_json::Value::Null)).map_err(|e| {
+                McpError::Decode {
+                    server: config.name.clone(),
+                    method: "initialize".into(),
+                    message: e.to_string(),
+                }
+            })?;
+        transport.notify("notifications/initialized", None).await?;
+        Ok(info)
     }
 
     pub fn name(&self) -> &str {
@@ -129,8 +171,8 @@ impl Server {
         &self.info
     }
 
-    pub fn child_pid(&self) -> Option<u32> {
-        self.transport.child_pid()
+    pub async fn child_pid(&self) -> Option<u32> {
+        self.transport.read().await.child_pid()
     }
 
     pub async fn list_tools(&self) -> Result<Vec<ToolDescriptor>> {
@@ -148,7 +190,7 @@ impl Server {
     }
 
     pub async fn shutdown(&self) {
-        self.transport.shutdown().await;
+        self.transport.read().await.shutdown().await;
     }
 
     async fn request<T: for<'de> Deserialize<'de>>(
@@ -159,13 +201,43 @@ impl Server {
         self.request_with(method, params, self.call_timeout).await
     }
 
+    /// Replace a dead transport, up to a few times per run. `false` when the
+    /// cap is reached or the server will not come back, and then the caller
+    /// reports what actually went wrong.
+    async fn restart(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        if self.restarts.fetch_add(1, Ordering::Relaxed) >= MOST_RESTARTS {
+            return false;
+        }
+        let Ok(fresh) = Self::transport_for(&self.config) else { return false };
+        if Self::handshake(fresh.as_ref(), &self.config).await.is_err() {
+            return false;
+        }
+        tracing::warn!(server = %self.name, "restarted after a transport failure");
+        *self.transport.write().await = fresh;
+        true
+    }
+
     async fn request_with<T: for<'de> Deserialize<'de>>(
         &self,
         method: &str,
         params: Option<serde_json::Value>,
         timeout: Duration,
     ) -> Result<T> {
-        let message = self.transport.request(method, params, timeout).await?;
+        // Bound, so the read guard is dropped before the arms below run: a
+        // guard in the scrutinee lives to the end of the match, and `restart`
+        // wants the write side of the same lock.
+        let first = self.transport.read().await.request(method, params.clone(), timeout).await;
+        let message = match first {
+            Ok(message) => message,
+            // A dead subprocess is worth one restart and one retry. Anything the
+            // server itself answered — an rpc error, a decode failure — is the
+            // server working, and restarting it would only lose the answer.
+            Err(e) if e.is_transport() && self.restart().await => {
+                self.transport.read().await.request(method, params, timeout).await?
+            }
+            Err(e) => return Err(e),
+        };
         if let Some(error) = message.error {
             return Err(McpError::Rpc { server: self.name.clone(), method: method.into(), error });
         }

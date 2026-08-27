@@ -8,6 +8,12 @@
 
 use std::io::{BufRead, Write};
 
+/// A file rather than process state: the point is to die, and what survives
+/// dying is on disk. The path comes from the caller so two tests cannot collide.
+fn died_marker() -> String {
+    std::env::var("MCP_MOCK_MARKER").unwrap_or_else(|_| "/tmp/rook-mcp-mock-died".into())
+}
+
 fn main() {
     let mode = std::env::args().nth(1).unwrap_or_else(|| "ok".into());
     let stdin = std::io::stdin();
@@ -19,6 +25,12 @@ fn main() {
         let Some(id) = message.get("id").and_then(|i| i.as_u64()) else { continue };
 
         if mode == "crash" && method == "tools/call" {
+            std::process::exit(1);
+        }
+        // Dies once and serves afterwards, which is what a server crashing on a
+        // bad input and being restarted looks like.
+        if mode == "crash-once" && method == "tools/call" && !std::path::Path::new(&died_marker()).exists() {
+            std::fs::write(died_marker(), "1").ok();
             std::process::exit(1);
         }
         if mode == "slow" && method != "initialize" {

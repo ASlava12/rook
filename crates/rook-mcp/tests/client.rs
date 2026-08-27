@@ -129,7 +129,7 @@ async fn dropping_a_server_takes_its_child_process_with_it() {
     };
 
     let server = Server::connect(&mock("ok")).await.unwrap();
-    let pid = server.child_pid().expect("a stdio server has a child");
+    let pid = server.child_pid().await.expect("a stdio server has a child");
     assert!(alive(pid), "the server should be running while it is connected");
 
     drop(server);
@@ -141,4 +141,36 @@ async fn dropping_a_server_takes_its_child_process_with_it() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     panic!("the child outlived the session it belonged to");
+}
+
+/// A server that dies took its tools out for the rest of the run: every later
+/// call returned the same transport error and nothing tried again. One restart
+/// and one retry per call, a few per run.
+#[tokio::test]
+async fn a_server_that_dies_once_is_restarted_and_the_call_answered() {
+    // Held, or the directory goes with the temporary and the mock has nowhere
+    // to record having died.
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("died");
+    let mut config = mock("crash-once");
+    config.env.insert("MCP_MOCK_MARKER".into(), marker.display().to_string());
+
+    let server = Server::connect(&config).await.unwrap();
+    let result = server.call_tool("echo", &serde_json::json!({ "text": "still here" })).await;
+
+    assert!(marker.exists(), "the server has to have died for this to be about anything");
+    let answered = result.expect("the retry after the restart answers");
+    assert!(answered.to_text().contains("still here"), "{:?}", answered.to_text());
+    server.shutdown().await;
+}
+
+/// A server dying on every call must not be respawned on every call.
+#[tokio::test]
+async fn restarts_are_capped_and_the_last_error_is_the_real_one() {
+    let server = Server::connect(&mock("crash")).await.unwrap();
+
+    for _ in 0..6 {
+        let err = server.call_tool("echo", &serde_json::json!({})).await.unwrap_err();
+        assert!(err.is_transport(), "{err}");
+    }
 }

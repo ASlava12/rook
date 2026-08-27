@@ -543,6 +543,15 @@ like to something that has to act on it.
   say what it was about to do, says that no other tool and no sub-agent gets past
   it, and addresses the remedies to the user. The same task: four steps, 8,498
   tokens, twenty-three seconds, and an answer worth reading. 1 test.
+- **An MCP server that dies is restarted, a few times** — a subprocess that
+  crashed took its tools out for the rest of the run: every later call returned
+  the same transport error and nothing tried again. A transport failure — the
+  pipe, not the server — now gets one restart and one retry per call, capped at
+  three per server per run so one that dies on every call is not respawned on
+  every call. An rpc error or an unparseable answer is the server working, and
+  restarting it would only throw the answer away. Named in the seventeenth
+  triage pass as considered and not done; hermes had reached it from two
+  directions. 2 tests.
 - **The tool list is priced whole, and the daemon tests build what they need** —
   the schema budget and the tool that prints it both lived in `rook-tools`,
   which cannot see the six tools the loop adds: they guarded 729 tokens of a
