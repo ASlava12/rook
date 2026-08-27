@@ -131,6 +131,18 @@ full sweep is O(objects) and runs in well under a second at realistic sizes.
 Refcounting was rejected: refcounts drift after a crash or a manual edit, and a
 store that miscounts silently deletes live data.
 
+## What ends up in here
+
+Everything, in the clear. A checkpoint captures the workspace as it stands,
+`.gitignore` notwithstanding — it has to, or a rewind could not put back a file
+the agent changed — so a `.env` is in the store the moment one is taken. Tool
+results keep whatever a command printed, secrets included.
+
+Nothing leaves the machine and nothing is encrypted. `rook search` answers the
+question that follows from that: it scans captured files as well as the
+conversation, and a hit in a file names the path and the capture it came from.
+`rook session rm <id>` then `rook store gc` is how it goes away.
+
 ## Integrity
 
 - Every read re-hashes the decoded bytes and fails on mismatch.

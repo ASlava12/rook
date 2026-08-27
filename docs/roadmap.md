@@ -120,6 +120,10 @@ what unblocks the most.
   a skill scoped away and explained by `skills why`, capture and rollback, a
   broken config that fails loudly, and the daemon path where a read goes over
   HTTP and a write says where the lock is.
+- **Search that can find a file's contents** — captured files were scanned and
+  could never be reported, because only an object that is the body of an event
+  became a hit. A match in a file now names the path and the capture, including
+  a checkpoint someone made by hand, which has no session at all. 4 tests.
 - **One set of slash commands, not two** — the TUI's chat understood `/btw` and
   nothing else, so a TUI user could not set a goal, see what a turn costs, undo,
   or start a session. The commands now return text instead of printing it, and

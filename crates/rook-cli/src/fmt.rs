@@ -97,3 +97,16 @@ pub fn bar(value: u64, max: u64, width: usize) -> String {
     let filled = ((value as f64 / max as f64) * width as f64).round() as usize;
     format!("{}{}", "█".repeat(filled.min(width)), "·".repeat(width.saturating_sub(filled)))
 }
+
+/// Where a search hit came from, in one column.
+///
+/// A hit in something said belongs to a session and a sequence number; one in a
+/// captured file belongs to the capture and the path, and a checkpoint someone
+/// made by hand has no session at all.
+pub fn hit_where(hit: &rook_core::search::Hit) -> String {
+    match (&hit.file, hit.session.is_empty()) {
+        (Some(path), true) => format!("{}:{path}", hit.title),
+        (Some(path), false) => format!("{}:{path}", &hit.session[..12]),
+        (None, _) => format!("{}  #{:<4}", &hit.session[..12], hit.seq),
+    }
+}

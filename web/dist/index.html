@@ -317,7 +317,8 @@ async function renderSearch() {
       el('div', { class: 'hd' },
         el('span', {}, h.title || '(untitled)'),
         el('span', { class: 'tag' }, h.kind),
-        el('span', {}, `#${h.seq}`),
+        // A file hit belongs to a path, not to a place in a transcript.
+        el('span', {}, h.file ? h.file : `#${h.seq}`),
         el('span', {}, ago(h.when))),
       el('pre', {}, h.snippet))),
       el('p', { class: 'sub' },

@@ -31,6 +31,7 @@ Add a row when you implement something after reading a reference. Add it to
 | Asking the user structured questions | hermes `7d6c6ae4` *clarify: schema diet + single questions[] interface (880 → 335 tok/call)* — took the one-questions[]-shape and the rule that options must never be written into the question text, and cut further: no per-question id, and the answer's own text is the "Other" row | source, via `refs advance` | `rook-tools/src/ask.rs`, `AgentLoop::ask_via` |
 | A workspace boundary that a symlink cannot cross | codex `2926014` *make filesystem policy matching URI-native* — their case was encoded and case-variant paths, ours was a symlink out of the workspace that lexical containment could not see | source, via `refs advance` | `ToolContext::resolve`, `through_symlinks`, `sandbox.allow_outside_workspace` |
 | Widening a fact's scope instead of keeping the first | hermes `3b672a68` *delete-path drops every scope of a removed id* — the fix does not apply (identity here is the text, not an id per scope), but its subject exposed the same hazard in ours | source, via `refs advance` | `MemoryBook::learn`, `Scope::within` |
+| Reporting a search hit inside a captured file | codex `57e2edc` *encrypt sensitive history and notes tool arguments* — encryption does not fit a store whose point is that it is readable, but the question behind it exposed a search that scanned files and could not report them | source, via `refs advance` | `Rook::captured_as`, `Hit::file` |
 | Durable memory with provenance and history | hermes ([#12238](https://github.com/NousResearch/hermes-agent/issues/12238)); read `hermes/tools/memory_tool.py` and `goose/crates/goose-mcp/src/memory` | source | `rook-core/src/memory.rs`, `rook memory` |
 | Bounded logging and retention | codex SQLite growth ([#28224](https://github.com/openai/codex/issues/28224), [#17320](https://github.com/openai/codex/issues/17320)) | issues, not source | `RetentionPolicy`, `TelemetryConfig` |
 
@@ -39,6 +40,26 @@ Add a row when you implement something after reading a reference. Add it to
 `cargo xtask refs advance` prints what landed upstream since the pointer was last
 moved; what follows is what was done with it, so a dismissal is a decision rather
 than an omission.
+
+**2026-08-27 (eleventh pass)** — codex and openhands advanced.
+
+- codex `57e2edc` *encrypt sensitive history and notes tool arguments* — **does
+  not port, and asked a question we had not answered.** Encrypting at rest is
+  the wrong shape here: the store's whole claim is that it is inspectable, and a
+  key would have to live beside it. But the question behind it — what happens
+  when a secret reaches the store — turned up a real defect. A checkpoint
+  captures `.env` because it must, and `rook search` scanned those objects and
+  could never report them: only an object that was the body of an event became a
+  hit. So the one tool for finding where a secret went could not find it. Fixed,
+  and the exposure is now stated in the README and `docs/storage.md` along with
+  the remedy that already existed.
+- codex `72c9659` *preserve tool authority for TUI delegation prompts* —
+  **already the shape here**: a sub-agent inherits the parent's approver and
+  policy rather than being given its own.
+- openhands `1697faa` *validate api key before advancing* — **already covered**:
+  an empty key reads as unset and says so, and `rook doctor` probes the provider.
+- codex `f1433fc` *developer instructions for persistent mode* — **not
+  applicable**: their own contributor documentation.
 
 **2026-08-27 (tenth pass)** — hermes advanced 25 commits.
 

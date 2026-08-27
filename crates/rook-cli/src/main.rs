@@ -1197,13 +1197,7 @@ fn cmd_search(
         return Ok(());
     }
     for hit in &found.hits {
-        println!(
-            "\x1b[2m{}  #{:<4} {:<12} {}\x1b[0m",
-            &hit.session[..12],
-            hit.seq,
-            hit.kind,
-            fmt::ago(hit.when)
-        );
+        println!("\x1b[2m{}  {:<12} {}\x1b[0m", fmt::hit_where(hit), hit.kind, fmt::ago(hit.when));
         println!("  {}", hit.snippet);
     }
     println!(

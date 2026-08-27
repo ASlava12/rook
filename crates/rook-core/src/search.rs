@@ -29,6 +29,22 @@ pub struct Hit {
     /// The matching line, with enough either side to recognise it.
     pub snippet: String,
     pub score: f32,
+    /// The file this came from, when the match is in a captured file rather
+    /// than in something said. A checkpoint keeps whatever was on disk,
+    /// `.env` included, and "where did that end up" is the question that
+    /// needs answering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+}
+
+/// Where a captured file came from. Empty `session` means a checkpoint someone
+/// made by hand rather than one a turn took.
+struct Captured {
+    session: String,
+    title: String,
+    seq: u64,
+    when: i64,
+    path: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -86,6 +102,7 @@ impl Rook {
         }
 
         let mut hits = Vec::new();
+        let mut found_in_events: std::collections::HashSet<ObjectId> = Default::default();
         for session in self.sessions()? {
             if options.session.is_some_and(|only| only != session.id) {
                 continue;
@@ -100,8 +117,30 @@ impl Rook {
                     when: event.record.ts,
                     snippet: snippet.clone(),
                     score: *score,
+                    file: None,
                 });
+                found_in_events.insert(event.record.body);
             }
+        }
+
+        // Whatever matched but is not the body of an event is a captured file:
+        // scanned, and until now unreportable, which made the flag that includes
+        // them a promise nothing kept.
+        for (id, (score, snippet)) in &matched {
+            if found_in_events.contains(id) {
+                continue;
+            }
+            let Some(capture) = self.captured_as(id)? else { continue };
+            hits.push(Hit {
+                session: capture.session,
+                title: capture.title,
+                seq: capture.seq,
+                kind: "file".into(),
+                when: capture.when,
+                snippet: snippet.clone(),
+                score: *score,
+                file: Some(capture.path),
+            });
         }
 
         hits.sort_by(|a, b| {
@@ -112,6 +151,60 @@ impl Rook {
         });
         hits.truncate(options.limit);
         Ok(Found { hits, objects_scanned: scanned, truncated })
+    }
+}
+
+impl Rook {
+    /// Which capture this object came from, and as which file.
+    ///
+    /// Both the captures a turn made and the ones a person made by hand: a
+    /// `rook checkpoint create` is a ref rather than a session event, and that
+    /// is exactly the case someone asking "where did that file go" is in.
+    ///
+    /// Walked rather than indexed: a store holds a few thousand captures at
+    /// most, and this runs only for the objects a search matched outside the
+    /// conversation.
+    fn captured_as(&self, object: &ObjectId) -> Result<Option<Captured>> {
+        let hex = object.to_hex();
+        let found = |set: &crate::fileset::FileSet| {
+            set.files.iter().find(|(_, id)| **id == hex).map(|(path, _)| path.clone())
+        };
+
+        for session in self.sessions()? {
+            for event in self.store.events(session.id, 0, usize::MAX)? {
+                if event.record.kind != rook_store::EventKind::Checkpoint {
+                    continue;
+                }
+                let Ok(set) = crate::fileset::FileSet::load(&self.store, &event.record.body) else {
+                    continue;
+                };
+                if let Some(path) = found(&set) {
+                    return Ok(Some(Captured {
+                        session: rook_store::format_session_id(session.id),
+                        title: session.title.clone(),
+                        seq: event.seq,
+                        when: event.record.ts,
+                        path,
+                    }));
+                }
+            }
+        }
+
+        for (_, id) in self.store.list_refs("")? {
+            let Ok(set) = crate::fileset::FileSet::load(&self.store, &id) else { continue };
+            if let Some(path) = found(&set) {
+                return Ok(Some(Captured {
+                    session: String::new(),
+                    // The name someone gave it, not the ref key, which carries a
+                    // timestamp and a hash nobody reads.
+                    title: format!("{} {}", set.kind, set.name),
+                    seq: 0,
+                    when: set.captured_at,
+                    path,
+                }));
+            }
+        }
+        Ok(None)
     }
 }
 

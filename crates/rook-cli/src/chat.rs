@@ -336,7 +336,7 @@ pub async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command
                 say!("nothing matched in {} object(s)", found.objects_scanned);
             }
             for hit in found.hits.iter().take(10) {
-                say!("\x1b[2m{} #{} {}\x1b[0m", &hit.session[..12], hit.seq, hit.kind);
+                say!("\x1b[2m{} {}\x1b[0m", fmt::hit_where(hit), hit.kind);
                 say!("  {}", hit.snippet);
             }
         }

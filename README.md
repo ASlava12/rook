@@ -395,6 +395,12 @@ lose people's trust:
   not to keep a checklist — deliberately, on the strength of someone else's
   benchmark ([ADR-0010](docs/adr/0010-no-todo-tool.md)). There is nothing for a
   UI to render as progress.
+- **Everything the agent reads and runs is stored in the clear.** A checkpoint
+  keeps whatever was on disk, a `.env` included, and a tool result keeps whatever
+  a command printed. Nothing leaves the machine, but nothing is encrypted either,
+  and `rook store cat` prints any of it back. `rook search` finds where a secret
+  ended up — it names the file and the capture — and `rook session rm` followed
+  by `rook store gc` removes it.
 - **Permissions are pattern matching, not a sandbox.** They raise the floor;
   `curl … | sh` is one obfuscation away from any rule. Not a jail. The workspace
   boundary binds the file tools, not commands the agent runs.
