@@ -572,13 +572,13 @@ impl Rook {
 
     /// Returns whether the fact was new. A repeat that folds in new tags or
     /// pinning is still written — otherwise the merge would be silently lost.
-    pub fn remember(&self, fact: Fact, note: Option<String>) -> Result<bool> {
+    pub fn remember(&self, fact: Fact, note: Option<String>) -> Result<memory::Learned> {
         let mut book = self.memory()?;
         let learned = book.learn(fact);
         if learned != memory::Learned::Unchanged {
             self.save_memory(&book, note)?;
         }
-        Ok(learned == memory::Learned::New)
+        Ok(learned)
     }
 
     pub fn forget(&self, id_or_text: &str, note: Option<String>) -> Result<Option<Fact>> {

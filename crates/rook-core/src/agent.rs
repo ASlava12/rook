@@ -832,8 +832,16 @@ impl<'a> AgentLoop<'a> {
                 // the older fact, narrows it, or contradicts it.
                 let close = self.rook.similar_facts(&fact.text).unwrap_or_default();
                 match self.rook.remember(fact, Some(format!("learned in turn {}", outcome.steps))) {
-                    Ok(true) => {
-                        outcome.facts_learned.push(id.clone());
+                    Ok(crate::memory::Learned::ScopedElsewhere(scope)) => format!(
+                        "already remembered as [{id}], but scoped to {} — this workspace will \
+                         not see it. Remember it with scope \"global\" to widen it.",
+                        scope.label()
+                    ),
+                    Ok(crate::memory::Learned::Unchanged) => format!("already remembered as [{id}]"),
+                    Ok(learned) => {
+                        if learned == crate::memory::Learned::New {
+                            outcome.facts_learned.push(id.clone());
+                        }
                         let mut reply = format!("remembered as [{id}]");
                         for other in close {
                             reply.push_str(&format!(
@@ -843,7 +851,6 @@ impl<'a> AgentLoop<'a> {
                         }
                         reply
                     }
-                    Ok(false) => format!("already remembered as [{id}]"),
                     Err(e) => format!("could not remember: {e}"),
                 }
             }

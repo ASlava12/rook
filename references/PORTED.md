@@ -30,6 +30,7 @@ Add a row when you implement something after reading a reference. Add it to
 | Delegating a sub-task to a fresh context | codex `codex_delegate.rs`, `session/multi_agents.rs` — took the `fork_turns` idea (how much parent context a child inherits), left the async spawn/wait protocol | source | `AgentLoop::delegate`, `rook session ls` |
 | Asking the user structured questions | hermes `7d6c6ae4` *clarify: schema diet + single questions[] interface (880 → 335 tok/call)* — took the one-questions[]-shape and the rule that options must never be written into the question text, and cut further: no per-question id, and the answer's own text is the "Other" row | source, via `refs advance` | `rook-tools/src/ask.rs`, `AgentLoop::ask_via` |
 | A workspace boundary that a symlink cannot cross | codex `2926014` *make filesystem policy matching URI-native* — their case was encoded and case-variant paths, ours was a symlink out of the workspace that lexical containment could not see | source, via `refs advance` | `ToolContext::resolve`, `through_symlinks`, `sandbox.allow_outside_workspace` |
+| Widening a fact's scope instead of keeping the first | hermes `3b672a68` *delete-path drops every scope of a removed id* — the fix does not apply (identity here is the text, not an id per scope), but its subject exposed the same hazard in ours | source, via `refs advance` | `MemoryBook::learn`, `Scope::within` |
 | Durable memory with provenance and history | hermes ([#12238](https://github.com/NousResearch/hermes-agent/issues/12238)); read `hermes/tools/memory_tool.py` and `goose/crates/goose-mcp/src/memory` | source | `rook-core/src/memory.rs`, `rook memory` |
 | Bounded logging and retention | codex SQLite growth ([#28224](https://github.com/openai/codex/issues/28224), [#17320](https://github.com/openai/codex/issues/17320)) | issues, not source | `RetentionPolicy`, `TelemetryConfig` |
 
@@ -38,6 +39,23 @@ Add a row when you implement something after reading a reference. Add it to
 `cargo xtask refs advance` prints what landed upstream since the pointer was last
 moved; what follows is what was done with it, so a dismissal is a decision rather
 than an omission.
+
+**2026-08-27 (eighth pass)** — hermes advanced 12 commits.
+
+- hermes `3b672a68` *delete-path drops every scope of a removed id* — **does not
+  port, and found ours.** They delete an id across scopes; here a fact's
+  identity is its text alone, so the same sentence learned globally and in a
+  project is one fact and the *first* scope won. Probed both directions: the
+  harmless one keeps the wider scope, and the harmful one leaves a fact the
+  model asked to remember globally scoped to a single project, answered
+  "already remembered", and silently absent everywhere else. `learn` now widens
+  to the containing scope, and reports the case where neither contains the other
+  rather than picking one.
+- hermes `50d3c53f` *count log growth as watchdog progress* — **already the
+  behaviour**: the stream watchdog is reset by any frame, not only by content.
+- hermes `7a1aafb4`, `dc91b6b5`, `80be4890`, `91c475bf`, `71823be9`, `03f5302a`,
+  `266d8ce2`, `2f0cec8e`, `adb29d85`, `79b8703d` — **not applicable**: Windows
+  desktop updater recovery, PowerShell line endings, and JS formatting.
 
 **2026-08-27 (seventh pass)** — codex and openhands advanced.
 

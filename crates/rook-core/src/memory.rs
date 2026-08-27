@@ -39,6 +39,15 @@ impl Scope {
         }
     }
 
+    /// True when everything this scope covers, the other one covers too.
+    pub fn within(&self, other: &Scope) -> bool {
+        match (self, other) {
+            (_, Scope::Global) => true,
+            (Scope::Global, Scope::Project(_)) => false,
+            (Scope::Project(mine), Scope::Project(theirs)) => mine.starts_with(theirs.as_str()),
+        }
+    }
+
     pub fn label(&self) -> String {
         match self {
             Scope::Global => "global".into(),
@@ -116,12 +125,16 @@ pub enum Change {
     Forgotten,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Learned {
     New,
-    /// The fact was already known; tags or pinning were folded into it.
+    /// The fact was already known; tags, pinning or a wider scope were folded
+    /// into it.
     Merged,
     Unchanged,
+    /// Already known, but somewhere this one does not reach — and neither scope
+    /// contains the other, so widening would either leak it or lose it.
+    ScopedElsewhere(Scope),
 }
 
 impl MemoryBook {
@@ -145,14 +158,27 @@ impl MemoryBook {
             return Learned::New;
         };
 
-        let before = (existing.tags.clone(), existing.pinned, existing.source.clone());
+        // Identity is the text, so the same sentence learned globally and in a
+        // project is one fact. Keeping the first scope silently means a fact
+        // asked for globally never applies anywhere else.
+        let elsewhere = (!existing.scope.within(&fact.scope) && !fact.scope.within(&existing.scope))
+            .then(|| existing.scope.clone());
+        let before =
+            (existing.tags.clone(), existing.pinned, existing.source.clone(), existing.scope.clone());
+        if existing.scope.within(&fact.scope) {
+            existing.scope = fact.scope;
+        }
         existing.tags.extend(fact.tags);
         existing.tags.sort();
         existing.tags.dedup();
         existing.pinned |= fact.pinned;
         existing.source = existing.source.clone().or(fact.source);
 
-        if before == (existing.tags.clone(), existing.pinned, existing.source.clone()) {
+        if let Some(scope) = elsewhere {
+            return Learned::ScopedElsewhere(scope);
+        }
+        if before == (existing.tags.clone(), existing.pinned, existing.source.clone(), existing.scope.clone())
+        {
             Learned::Unchanged
         } else {
             self.updated_at = rook_store::now_unix();

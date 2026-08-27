@@ -516,8 +516,13 @@ async fn a_pinned_fact_is_always_present() {
 async fn remembering_the_same_thing_twice_does_not_duplicate_it() {
     let f = fixture();
     let fact = || rook_core::Fact::new("the build needs a C compiler", rook_core::Scope::Global);
-    assert!(f.rook.remember(fact(), None).unwrap());
-    assert!(!f.rook.remember(fact().with_tags(vec!["build".into()]), None).unwrap());
+    use rook_core::memory::Learned;
+    assert_eq!(f.rook.remember(fact(), None).unwrap(), Learned::New);
+    assert_eq!(
+        f.rook.remember(fact().with_tags(vec!["build".into()]), None).unwrap(),
+        Learned::Merged,
+        "the repeat folds into the fact rather than making a second one"
+    );
 
     let book = f.rook.memory().unwrap();
     assert_eq!(book.facts.len(), 1);

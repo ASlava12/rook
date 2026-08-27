@@ -116,6 +116,10 @@ what unblocks the most.
   a skill scoped away and explained by `skills why`, capture and rollback, a
   broken config that fails loudly, and the daemon path where a read goes over
   HTTP and a write says where the lock is.
+- **Memory scoped where it was asked for** — a fact's identity is its text, so
+  the same sentence learned globally and in a project is one fact. It now keeps
+  the wider scope rather than the first one, and says so when neither scope
+  contains the other instead of silently picking. 5 tests.
 - **Memory that stops repeating itself** — recall spends its budget once on a
   fact said twice, and `remember` names an older fact that says nearly the same
   thing so the model can supersede it. Two thresholds, because the costs differ:

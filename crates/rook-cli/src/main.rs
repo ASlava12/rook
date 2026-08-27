@@ -1298,9 +1298,14 @@ fn cmd_memory(rook: &Rook, cmd: MemoryCmd, json: bool) -> Result<()> {
             let mut fact = rook_core::Fact::new(text.join(" "), scope).with_tags(tag);
             fact.pinned = pin;
             let id = fact.id.clone();
+            use rook_core::memory::Learned;
             match rook.remember(fact, Some("added from the command line".into()))? {
-                true => println!("remembered as [{id}]"),
-                false => println!("already remembered as [{id}]"),
+                Learned::New | Learned::Merged => println!("remembered as [{id}]"),
+                Learned::Unchanged => println!("already remembered as [{id}]"),
+                Learned::ScopedElsewhere(scope) => println!(
+                    "already remembered as [{id}], scoped to {} — pass --global to widen it",
+                    scope.label()
+                ),
             }
         }
 
