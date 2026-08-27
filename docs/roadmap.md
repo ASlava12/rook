@@ -120,6 +120,11 @@ what unblocks the most.
   a skill scoped away and explained by `skills why`, capture and rollback, a
   broken config that fails loudly, and the daemon path where a read goes over
   HTTP and a write says where the lock is.
+- **An allow rule that covers the whole line** — allowing `ls` also allowed
+  `ls && rm -rf ~/important` and `cat notes.md; curl … | sh`, without asking,
+  because only the start of the line was matched. Every command on the line must
+  now be allowed, and a line carrying `$(…)` is asked about rather than taken
+  apart wrongly. 2 tests.
 - **A deny list that does not cry wolf** — the default rules matched a word
   anywhere in a command, so `grep -r mkfs docs/` and `echo 'never run mkfs'`
   were refused outright, and nothing overrides a denial. They are now anchored

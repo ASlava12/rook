@@ -104,6 +104,25 @@ pub enum Decision {
     Deny(String),
 }
 
+/// The commands a shell line runs, or nothing when that cannot be told.
+///
+/// Split on the separators rather than parsed: a quoted `;` splits a line that
+/// a shell would not, which only ever means asking about something that could
+/// have been allowed. Substitution is the case it cannot split at all — the
+/// commands inside `$(…)` run too — so a line containing one is refused an
+/// answer here and goes to the prompt.
+fn commands_in(line: &str) -> Option<Vec<String>> {
+    if line.contains("$(") || line.contains('`') {
+        return None;
+    }
+    let parts: Vec<String> = line
+        .split([';', '&', '|', '\n'])
+        .map(|part| part.trim().to_string())
+        .filter(|part| !part.is_empty())
+        .collect();
+    (!parts.is_empty()).then_some(parts)
+}
+
 #[derive(Default)]
 pub struct Policy {
     /// Behind a lock so a front end can change it mid-run: the policy is shared
@@ -173,7 +192,16 @@ impl Policy {
         if self.granted.lock().is_ok_and(|g| g.contains(&subject)) {
             return Decision::Allow;
         }
-        if self.allow.iter().any(|r| r.matches(&subject)) {
+        // Every command in the line, not just the first: `ls && rm -rf ~` began
+        // with something allowed, and allowing it meant not asking about the
+        // rest. A line this cannot take apart falls through to asking.
+        if matches!(risk, Risk::Execute(_)) {
+            if let Some(commands) = commands_in(&subject)
+                && commands.iter().all(|c| self.allow.iter().any(|r| r.matches(c)))
+            {
+                return Decision::Allow;
+            }
+        } else if self.allow.iter().any(|r| r.matches(&subject)) {
             return Decision::Allow;
         }
         if self.ask.iter().any(|r| r.matches(&subject)) {
