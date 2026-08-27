@@ -307,7 +307,10 @@ what unblocks the most.
   most recent one in *this* workspace; another project's would carry its whole
   conversation into this one. Sessions of the same second used to come back in
   whichever order the index held them, so the listing every front end reads now
-  breaks the tie by id, which is time-ordered anyway. 2 tests.
+  breaks the tie by id, which is time-ordered anyway. Every command that takes a
+  session takes it — `show`, `context`, `diff`, `fork`, `rewind`, `rm`, `goal` —
+  because a vocabulary understood in two places out of nine is a worse answer
+  than none. 4 tests.
 - **A turn can be stopped from every front end** — the chat REPL cancelled on
   ctrl-c and the browser had a button, and the TUI could only be killed, taking
   the browsing state and any approval granted for the run with it. Ctrl-c stops

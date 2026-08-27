@@ -317,24 +317,8 @@ impl Rook {
         Ok(list)
     }
 
-    /// What a user typed where a session was wanted: an id, or `last` for the
-    /// most recent one in this workspace.
-    ///
-    /// `last` because an id is 26 characters of base32 that nobody remembers,
-    /// and the session you mean is almost always the one you were just in.
-    /// Scoped to the workspace: continuing a session from another project would
-    /// carry its whole conversation into this one.
     pub fn session_named(&self, spec: &str) -> Result<u128> {
-        if !spec.eq_ignore_ascii_case("last") {
-            return rook_store::parse_session_id(spec)
-                .ok_or_else(|| CoreError::Other(format!("{spec:?} is neither a session id nor `last`")));
-        }
-        let here = self.workspace.display().to_string();
-        self.sessions()?
-            .into_iter()
-            .find(|s| s.workspace == here)
-            .map(|s| s.id)
-            .ok_or_else(|| CoreError::Other(format!("no session has been started in {here} yet")))
+        session_named(spec, &self.workspace, &self.session_summaries()?)
     }
 
     /// Sessions as every front end lists them: the stored record joined with the
@@ -938,6 +922,29 @@ pub struct ContextUsage {
     /// represented by the last compaction's summary.
     pub replay_from: u64,
     pub by_kind: Vec<(String, KindUsage)>,
+}
+
+/// What a user typed where a session was wanted: an id, or `last` for the most
+/// recent one in `workspace`.
+///
+/// `last` because an id is 26 characters of base32 that nobody remembers, and
+/// the session you mean is almost always the one you were just in. Scoped to the
+/// workspace: continuing a session from another project would carry its whole
+/// conversation into this one.
+///
+/// Takes the listing rather than fetching it, so the rule is the same whether
+/// the sessions came from the store or from a running daemon over HTTP.
+pub fn session_named(spec: &str, workspace: &Path, sessions: &[SessionSummary]) -> Result<u128> {
+    if !spec.eq_ignore_ascii_case("last") {
+        return rook_store::parse_session_id(spec)
+            .ok_or_else(|| CoreError::Other(format!("{spec:?} is neither a session id nor `last`")));
+    }
+    let here = workspace.display().to_string();
+    sessions
+        .iter()
+        .find(|s| s.meta.workspace == here)
+        .map(|s| s.meta.id)
+        .ok_or_else(|| CoreError::Other(format!("no session has been started in {here} yet")))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

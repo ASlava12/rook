@@ -514,3 +514,29 @@ fn a_pipe_too_large_for_the_window_is_refused_and_says_what_to_do_instead() {
     assert!(said.contains("16-token window"), "the bound is the model's, not a constant: {said}");
     assert!(said.contains("file"), "and a file is read in pages, which is the way out: {said}");
 }
+
+/// The CLI understood `last` where a turn was continued and nowhere else, so
+/// `session show last` answered that it was not a session id.
+#[test]
+fn every_command_that_takes_a_session_takes_last() {
+    let rook = Rook::new();
+    // The REPL starts a session as it opens, which is the cheapest way to have
+    // one without a model to talk to.
+    rook.chat("/quit\n");
+
+    for command in
+        [vec!["session", "show", "last"], vec!["session", "context", "last"], vec!["session", "diff", "last"]]
+    {
+        let out = rook.run(&command);
+        assert!(
+            out.status.success(),
+            "`rook {}` refused `last`: {}",
+            command.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    let refused = rook.run(&["session", "show", "not-an-id"]);
+    let said = String::from_utf8_lossy(&refused.stderr);
+    assert!(said.contains("neither a session id nor `last`"), "{said}");
+}

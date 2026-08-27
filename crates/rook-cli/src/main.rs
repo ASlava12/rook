@@ -1016,7 +1016,7 @@ fn cmd_session(source: &Source, cmd: SessionCmd, json: bool) -> Result<()> {
     match cmd {
         SessionCmd::Ls => unreachable!("routed above"),
         SessionCmd::Show { id, from, limit, max_body } => {
-            let entries = rook.transcript(session_id(&id)?, from, limit, max_body)?;
+            let entries = rook.transcript(rook.session_named(&id)?, from, limit, max_body)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&entries)?);
                 return Ok(());
@@ -1035,7 +1035,7 @@ fn cmd_session(source: &Source, cmd: SessionCmd, json: bool) -> Result<()> {
             }
         }
         SessionCmd::Context { id, window } => {
-            let usage = rook.context_usage(session_id(&id)?, window)?;
+            let usage = rook.context_usage(rook.session_named(&id)?, window)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&usage)?);
                 return Ok(());
@@ -1073,7 +1073,7 @@ fn cmd_session(source: &Source, cmd: SessionCmd, json: bool) -> Result<()> {
             print!("{}", fmt::table(&["kind", "events", "bytes", "tokens", ""], &rows));
         }
         SessionCmd::Diff { id, stat } => {
-            let changes = rook.changes(session_id(&id)?, !stat)?;
+            let changes = rook.changes(rook.session_named(&id)?, !stat)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&changes)?);
                 return Ok(());
@@ -1105,7 +1105,7 @@ fn cmd_session(source: &Source, cmd: SessionCmd, json: bool) -> Result<()> {
             println!("\n{}", changes.summary());
         }
         SessionCmd::Goal { id, goal } => {
-            let session = session_id(&id)?;
+            let session = rook.session_named(&id)?;
             if goal.is_empty() {
                 match rook.goal(session)? {
                     Some(goal) => println!("{goal}"),
@@ -1117,7 +1117,7 @@ fn cmd_session(source: &Source, cmd: SessionCmd, json: bool) -> Result<()> {
             }
         }
         SessionCmd::Fork { id, at } => {
-            let source = session_id(&id)?;
+            let source = rook.session_named(&id)?;
             let meta = rook.store.get_session(source)?.context("no such session")?;
             let forked = rook.store.fork_session(
                 source,
@@ -1132,7 +1132,7 @@ fn cmd_session(source: &Source, cmd: SessionCmd, json: bool) -> Result<()> {
             );
         }
         SessionCmd::Rewind { id, to, keep_files } => {
-            let report = rook.rewind(session_id(&id)?, to, !keep_files)?;
+            let report = rook.rewind(rook.session_named(&id)?, to, !keep_files)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
                 return Ok(());
@@ -1147,7 +1147,7 @@ fn cmd_session(source: &Source, cmd: SessionCmd, json: bool) -> Result<()> {
             }
         }
         SessionCmd::Rm { id } => {
-            let removed = rook.store.delete_session(session_id(&id)?)?;
+            let removed = rook.store.delete_session(rook.session_named(&id)?)?;
             println!("removed session with {removed} events; run `rook store gc` to reclaim space");
         }
     }
