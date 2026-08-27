@@ -301,6 +301,13 @@ what unblocks the most.
   before checking containment, so a link inside the workspace pointing out of it
   is refused rather than followed, and the refusal says where the path really
   led. Widened only by `sandbox.allow_outside_workspace`. 6 tests.
+- **A sub-task that says what it is doing, not only that it finished** — a
+  delegation reported each child as it landed, so a child running for minutes
+  left a counter that did not move, which reads the same as a hang. Each child's
+  tool calls reach the parent named by their task. They run concurrently, so the
+  reports arrive down a channel and are rendered from the one place that owns
+  the callback; the channel carries a tool name per step the children are already
+  bounded to. 1 test.
 - **A chat pane that does not keep the whole afternoon** — the TUI kept every
   word of every turn for the life of the process, and the browser kept every
   block in the document. Both are scrollback rather than the record: the session

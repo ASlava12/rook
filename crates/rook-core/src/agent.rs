@@ -115,6 +115,13 @@ pub enum Progress<'a> {
         done: usize,
         total: usize,
     },
+    /// A sub-task called a tool. Several run at once, so the task is named
+    /// alongside: without this a delegation that takes minutes shows a counter
+    /// that does not move, which reads the same as a hang.
+    Delegating {
+        task: &'a str,
+        tool: &'a str,
+    },
     /// What the turn has spent, after each reply from the model. A turn that
     /// runs for minutes across a dozen steps otherwise shows no cost at all
     /// until it is over and the number can no longer change a decision.
@@ -879,18 +886,23 @@ impl<'a> AgentLoop<'a> {
             self.rook.config.agent.max_parallel_subagents.max(1),
         ));
         let total = tasks.len();
+        let (doing, mut steps) = tokio::sync::mpsc::unbounded_channel::<(usize, String)>();
         let running: futures_util::stream::FuturesUnordered<_> = tasks
             .iter()
             .enumerate()
             .map(|(i, task)| {
                 let limit = limit.clone();
                 let inherited = inherited.clone();
+                let doing = doing.clone();
                 async move {
                     let _permit = limit.acquire().await;
-                    (i, self.run_subtask(task, inherited.as_deref(), max_steps).await)
+                    (i, self.run_subtask(task, inherited.as_deref(), max_steps, doing, i).await)
                 }
             })
             .collect();
+        // The senders the children hold are clones; this one would keep the
+        // channel open after the last of them finished.
+        drop(doing);
 
         // Unordered so each one is reported the moment it lands, then put back
         // in the order they were asked for: a report that shuffles itself by
@@ -898,10 +910,20 @@ impl<'a> AgentLoop<'a> {
         let mut results: Vec<Option<_>> = (0..total).map(|_| None).collect();
         let mut done = 0;
         let mut stream = running;
-        while let Some((i, result)) = stream.next().await {
-            done += 1;
-            on_progress(Progress::Delegated { task: &tasks[i], done, total });
-            results[i] = Some(result);
+        loop {
+            tokio::select! {
+                Some((i, tool)) = steps.recv() => {
+                    on_progress(Progress::Delegating { task: &tasks[i], tool: &tool });
+                }
+                landed = stream.next() => match landed {
+                    Some((i, result)) => {
+                        done += 1;
+                        on_progress(Progress::Delegated { task: &tasks[i], done, total });
+                        results[i] = Some(result);
+                    }
+                    None => break,
+                },
+            }
         }
 
         let mut report = Vec::with_capacity(total);
@@ -927,6 +949,8 @@ impl<'a> AgentLoop<'a> {
         task: &str,
         inherited: Option<&str>,
         max_steps: Option<u32>,
+        doing: tokio::sync::mpsc::UnboundedSender<(usize, String)>,
+        index: usize,
     ) -> Result<(String, TurnOutcome)> {
         let session = self.rook.fork_for_subtask(self.session, task)?;
         if let Some(context) = inherited {
@@ -951,8 +975,15 @@ impl<'a> AgentLoop<'a> {
             child.max_steps = steps;
         }
 
-        // Boxed because this is `run` calling itself through a tool call.
-        let outcome = Box::pin(child.run(task)).await?;
+        // Boxed because this is `run` calling itself through a tool call. The
+        // channel carries only tool names, so it holds at most one short string
+        // per step the children are already bounded to.
+        let outcome = Box::pin(child.run_with(task, |progress| {
+            if let Progress::Delta(Delta::ToolCall(call)) = progress {
+                let _ = doing.send((index, call.name.clone()));
+            }
+        }))
+        .await?;
         Ok((rook_store::format_session_id(session), outcome))
     }
 

@@ -2115,3 +2115,32 @@ async fn an_edit_that_could_not_be_checkpointed_says_so_where_it_will_be_read() 
     );
     assert_eq!(std::fs::read_to_string(&big).unwrap(), "{}", "the edit still happened");
 }
+
+/// A sub-task can run for minutes, and the parent only heard when it landed —
+/// so the counter sat still, which reads the same as a hang.
+#[tokio::test]
+async fn a_sub_task_says_what_it_is_doing_before_it_is_done() {
+    let f = fixture();
+    std::fs::write(f.workspace.path().join("a.txt"), "one\n").unwrap();
+    let session = f.rook.start_session("watching").unwrap();
+
+    let script = vec![
+        call("delegate", serde_json::json!({ "tasks": ["look at a.txt"] })),
+        call("read_file", serde_json::json!({ "path": "a.txt" })),
+        reply("it says one"),
+        reply("done"),
+    ];
+
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
+    let mut doing: Vec<String> = Vec::new();
+    agent
+        .run_with("look", |progress| {
+            if let rook_core::agent::Progress::Delegating { task, tool } = progress {
+                doing.push(format!("{task}: {tool}"));
+            }
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(doing, ["look at a.txt: read_file"], "the parent sees the child working: {doing:?}");
+}

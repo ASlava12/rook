@@ -598,6 +598,9 @@ impl App {
                         Progress::Delegated { task, done, total } => {
                             TurnEvent::Reasoning(format!("\n  [{done}/{total}] {task}"))
                         }
+                        Progress::Delegating { task, tool } => {
+                            TurnEvent::Reasoning(format!("\n    {task}: {tool}"))
+                        }
                         Progress::ToolDone { name, failed } => TurnEvent::ToolDone(name.to_string(), failed),
                         Progress::Spent { input, output, cached } => {
                             TurnEvent::Spent { input, output, cached }

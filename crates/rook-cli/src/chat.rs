@@ -198,6 +198,10 @@ async fn turn(
             let _ = writeln!(out, "\n  [{done}/{total}] {task}");
             let _ = out.flush();
         }
+        Progress::Delegating { task, tool } => {
+            let _ = writeln!(out, "\n    {task}: {tool}");
+            let _ = out.flush();
+        }
         Progress::ToolDone { failed, .. } => {
             println!("{}", if failed { " ✗" } else { " ✓" });
             let _ = out.flush();

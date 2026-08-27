@@ -368,6 +368,9 @@ async fn prompt(
                 Progress::Delegated { task, done, total } => {
                     protocol::agent_thought_chunk(&request.session_id, &format!("[{done}/{total}] {task}\n"))
                 }
+                Progress::Delegating { task, tool } => {
+                    protocol::agent_thought_chunk(&request.session_id, &format!("  {task}: {tool}\n"))
+                }
                 Progress::ToolDone { failed, .. } => protocol::tool_call_done(
                     &request.session_id,
                     &format!("call_{}", finished.fetch_add(1, Ordering::Relaxed)),

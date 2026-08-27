@@ -174,6 +174,9 @@ async fn turn(
                 Progress::Delegated { task, done, total } => {
                     ChatEvent::Reasoning { text: format!("\n  [{done}/{total}] {task}") }
                 }
+                Progress::Delegating { task, tool } => {
+                    ChatEvent::Reasoning { text: format!("\n    {task}: {tool}") }
+                }
                 Progress::ToolDone { name, failed } => ChatEvent::ToolDone { name: name.to_string(), failed },
                 Progress::Spent { input, output, cached } => {
                     ChatEvent::Spent { input_tokens: input, output_tokens: output, cached_tokens: cached }
