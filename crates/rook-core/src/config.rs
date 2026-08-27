@@ -105,6 +105,10 @@ pub struct StorageConfig {
     pub train_dictionaries_after: usize,
     pub dictionary_bytes: usize,
     pub retention: RetentionPolicy,
+    /// Never collect an object written this recently, whatever the marking says.
+    /// It is unreachable between being written and the event that names it, and
+    /// maintenance runs on a timer while turns do.
+    pub gc_grace_secs: i64,
     /// Run prune + gc on daemon start and then on this interval.
     pub maintenance_interval_hours: u32,
 }
@@ -174,6 +178,7 @@ impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             compression_level: 9,
+            gc_grace_secs: 600,
             train_dictionaries_after: 512,
             dictionary_bytes: 16 * 1024,
             retention: RetentionPolicy::default(),

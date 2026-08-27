@@ -821,9 +821,11 @@ impl Rook {
     pub fn maintenance(&self, dry_run: bool) -> Result<MaintenanceReport> {
         let policy = &self.config.storage.retention;
         let mut prune = self.store.prune(policy, dry_run)?;
+        let grace = self.config.storage.gc_grace_secs;
         let mut gc = self.store.gc(&GcOptions {
             expand: Some(&fileset::gc_expander),
             dry_run,
+            min_age_secs: grace,
             ..Default::default()
         })?;
 
@@ -848,9 +850,11 @@ impl Rook {
                     prune.sessions_deleted += 1;
                     prune.events_deleted += self.store.delete_session(id)?;
                 }
-                let round = self
-                    .store
-                    .gc(&GcOptions { expand: Some(&fileset::gc_expander), ..Default::default() })?;
+                let round = self.store.gc(&GcOptions {
+                    expand: Some(&fileset::gc_expander),
+                    min_age_secs: grace,
+                    ..Default::default()
+                })?;
                 gc.collected += round.collected;
                 gc.bytes_freed += round.bytes_freed;
                 over_budget_by = self.content_bytes()?.saturating_sub(cap);

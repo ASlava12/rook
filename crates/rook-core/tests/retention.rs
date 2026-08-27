@@ -32,6 +32,9 @@ fn fixture(count: usize, cap: Option<u64>) -> (Fixture, Vec<u128>) {
 
     let mut config = Config::default();
     config.storage.retention.max_total_bytes = cap;
+    // The grace period is for objects written while a turn is in flight; here
+    // every object is seconds old and the point is the byte budget.
+    config.storage.gc_grace_secs = 0;
     config.storage.retention.protect_tags = vec!["keep".into()];
     config.storage.train_dictionaries_after = usize::MAX;
 

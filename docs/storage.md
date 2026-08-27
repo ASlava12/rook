@@ -139,6 +139,15 @@ full sweep is O(objects) and runs in well under a second at realistic sizes.
 Refcounting was rejected: refcounts drift after a crash or a manual edit, and a
 store that miscounts silently deletes live data.
 
+Anything written in the last ten minutes is left alone whatever the marking says.
+An object is unreachable between being written and the event that names it being
+appended — and a checkpoint writes every captured file before the manifest that
+holds them — so a collection landing in that window would take live data whose
+only fault is being new. The daemon runs maintenance on a timer while turns are
+running, which is exactly when that window is open. `rook store gc` says how many
+it held back, so a store full of garbage that collects none of it explains
+itself.
+
 ## What ends up in here
 
 Everything, in the clear. A checkpoint captures the workspace as it stands,

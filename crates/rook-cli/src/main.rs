@@ -968,6 +968,15 @@ fn cmd_store(source: &Source, cmd: StoreCmd, json: bool) -> Result<()> {
                 fmt::bytes(report.bytes_freed),
                 report.orphan_files_removed
             );
+            // Otherwise a store with garbage in it reports collecting none of
+            // it, and the reason is invisible.
+            if report.too_new > 0 {
+                println!(
+                    "{} unreachable object(s) held back for being newly written — a checkpoint \
+                     in flight looks exactly like garbage until the event naming it lands",
+                    report.too_new
+                );
+            }
         }
         StoreCmd::Prune { dry_run } => {
             let report = rook.store.prune(&rook.config.storage.retention, dry_run)?;

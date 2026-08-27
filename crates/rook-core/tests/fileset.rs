@@ -142,11 +142,12 @@ fn gc_keeps_files_that_only_a_manifest_references() {
     store.set_ref("checkpoint/c/0", &id).unwrap();
 
     // Without the expander the file blob looks unreachable and would be lost.
-    let naive = store.gc(&GcOptions { dry_run: true, ..Default::default() }).unwrap();
+    // `min_age_secs` off, because the grace period would hide that on its own.
+    let naive = store.gc(&GcOptions { dry_run: true, min_age_secs: 0, ..Default::default() }).unwrap();
     assert_eq!(naive.collected, 1);
 
     let report =
-        store.gc(&GcOptions { expand: Some(&gc_expander), dry_run: false, ..Default::default() }).unwrap();
+        store.gc(&GcOptions { expand: Some(&gc_expander), min_age_secs: 0, ..Default::default() }).unwrap();
     assert_eq!(report.collected, 0, "the manifest's files must survive");
 }
 

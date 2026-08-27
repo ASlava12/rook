@@ -152,11 +152,11 @@ fn gc_collects_only_unreachable_objects() {
     s.set_ref("skills/keep@1.0.0", &pinned).unwrap();
     let loose = s.put(Kind::ToolResult, b"output nobody references ...............").unwrap();
 
-    let dry = s.gc(&rook_store::GcOptions { dry_run: true, ..Default::default() }).unwrap();
+    let dry = s.gc(&rook_store::GcOptions { dry_run: true, min_age_secs: 0, ..Default::default() }).unwrap();
     assert_eq!(dry.collected, 1, "exactly the unreferenced object should be doomed");
     assert!(s.has(&loose).unwrap(), "dry run must not delete");
 
-    let report = s.gc(&Default::default()).unwrap();
+    let report = s.gc(&rook_store::GcOptions { min_age_secs: 0, ..Default::default() }).unwrap();
     assert_eq!(report.collected, 1);
     assert!(!s.has(&loose).unwrap(), "unreachable object should be gone");
     assert!(s.has(&pinned).unwrap(), "ref-reachable object must survive");
@@ -171,13 +171,19 @@ fn gc_honours_the_expander_for_container_objects() {
     s.set_ref("snapshots/latest", &manifest).unwrap();
 
     // Without an expander the leaf looks unreachable.
-    assert_eq!(s.gc(&rook_store::GcOptions { dry_run: true, ..Default::default() }).unwrap().collected, 1);
+    assert_eq!(
+        s.gc(&rook_store::GcOptions { dry_run: true, min_age_secs: 0, ..Default::default() })
+            .unwrap()
+            .collected,
+        1
+    );
 
     let expand = |_kind: Kind, body: &[u8]| -> Vec<ObjectId> {
         std::str::from_utf8(body).ok().and_then(ObjectId::from_hex).into_iter().collect()
     };
-    let report =
-        s.gc(&rook_store::GcOptions { expand: Some(&expand), dry_run: false, ..Default::default() }).unwrap();
+    let report = s
+        .gc(&rook_store::GcOptions { expand: Some(&expand), min_age_secs: 0, ..Default::default() })
+        .unwrap();
     assert_eq!(report.collected, 0, "expander must keep the manifest's children alive");
     assert!(s.has(&leaf).unwrap());
 }
@@ -426,4 +432,24 @@ fn each_kind_is_trained_on_its_own_and_only_with_enough_to_learn_from() {
         !trained.contains(&"snapshot".to_string()),
         "eight samples is not enough to learn a dictionary from: {trained:?}"
     );
+}
+
+/// An object is unreachable between being written and the event that names it
+/// being appended, and a checkpoint writes every captured file before the
+/// manifest holding them. The daemon runs maintenance on a timer while turns
+/// are running, so a collection can land in that window — and what it would
+/// take is live data whose only fault is being new.
+#[test]
+fn gc_leaves_alone_what_was_only_just_written() {
+    let (_d, s) = tmp_store();
+    let in_flight = s.put(Kind::FileBlob, b"captured, not yet named by any event .....").unwrap();
+
+    let report = s.gc(&Default::default()).unwrap();
+
+    assert_eq!(report.collected, 0, "nothing old enough to be certain about");
+    assert_eq!(report.too_new, 1, "and it says what it held back");
+    assert!(s.has(&in_flight).unwrap(), "the checkpoint can still be written");
+
+    let swept = s.gc(&rook_store::GcOptions { min_age_secs: 0, ..Default::default() }).unwrap();
+    assert_eq!(swept.collected, 1, "once the window has passed it is ordinary garbage");
 }

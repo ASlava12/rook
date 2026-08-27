@@ -23,7 +23,6 @@ use crate::schema;
 /// references.
 pub type Expander<'a> = &'a dyn Fn(Kind, &[u8]) -> Vec<ObjectId>;
 
-#[derive(Default)]
 pub struct GcOptions<'a> {
     /// Objects to treat as reachable regardless of the index, e.g. the working
     /// set of a session currently in flight.
@@ -31,6 +30,20 @@ pub struct GcOptions<'a> {
     pub expand: Option<Expander<'a>>,
     /// Report what would be collected without deleting anything.
     pub dry_run: bool,
+    /// Leave anything written this recently alone.
+    ///
+    /// An object is unreachable between being written and the event that names
+    /// it being appended, and a checkpoint writes every captured file before the
+    /// manifest that holds them. The daemon runs maintenance on a timer while
+    /// turns are running, so that window is one a collection can land in — and
+    /// what it would delete is live data whose only sin is being new.
+    pub min_age_secs: i64,
+}
+
+impl Default for GcOptions<'_> {
+    fn default() -> Self {
+        Self { extra_roots: Vec::new(), expand: None, dry_run: false, min_age_secs: 600 }
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -39,6 +52,8 @@ pub struct GcReport {
     pub reachable: u64,
     pub collected: u64,
     pub bytes_freed: u64,
+    /// Unreachable, and left alone for being younger than `min_age_secs`.
+    pub too_new: u64,
     /// Files in `objects/` with no index entry — the residue of a crash between
     /// writing a payload and committing its metadata.
     pub orphan_files_removed: u64,
@@ -123,6 +138,7 @@ impl Store {
         }
         report.reachable = reachable.len() as u64;
 
+        let now = crate::now_unix();
         let mut doomed: Vec<(ObjectId, ObjectMeta)> = Vec::new();
         {
             let txn = self.db.begin_read()?;
@@ -137,7 +153,12 @@ impl Store {
                 if reachable.contains(&raw) {
                     continue;
                 }
-                doomed.push((ObjectId(raw), postcard::from_bytes(v.value())?));
+                let meta: ObjectMeta = postcard::from_bytes(v.value())?;
+                if now.saturating_sub(meta.created_at) < opts.min_age_secs {
+                    report.too_new += 1;
+                    continue;
+                }
+                doomed.push((ObjectId(raw), meta));
             }
         }
 

@@ -301,6 +301,15 @@ what unblocks the most.
   before checking containment, so a link inside the workspace pointing out of it
   is refused rather than followed, and the refusal says where the path really
   led. Widened only by `sandbox.allow_outside_workspace`. 6 tests.
+- **Garbage collection that cannot take a checkpoint in flight** — an object is
+  unreachable between being written and the event that names it, and a checkpoint
+  writes every captured file before the manifest holding them. The daemon runs
+  maintenance on a timer while turns are running, so a sweep could land in that
+  window and delete live data whose only fault was being new — and the checkpoint
+  would then name an object that was not there, which is the undo failing exactly
+  when it is needed. Anything written in the last ten minutes is left alone, and
+  the report says how many, so a store that collects nothing explains why.
+  1 test.
 - **A compaction that fails still moves the session on** — when the summary could
   not be produced, the fallback was a compaction event whose body was a sentence
   rather than a position. Nothing could read a position out of it, so the span
