@@ -27,6 +27,8 @@ pub fn router(state: Shared) -> Router {
         .route("/api/sessions", get(sessions))
         .route("/api/sessions/{id}/transcript", get(transcript))
         .route("/api/sessions/{id}/changes", get(changes))
+        .route("/api/sessions/{id}/goal", post(set_goal))
+        .route("/api/sessions/{id}/rewind", post(rewind))
         .route("/api/memory", get(memory).post(forget))
         .route("/api/skills", get(skills))
         .route("/api/skills/{name}", get(skill))
@@ -248,9 +250,12 @@ async fn changes(
     Query(q): Query<DiffQuery>,
 ) -> ApiResult<rook_core::changes::Changes> {
     let rook = s.rook.read().await;
-    let sid = rook_store::parse_session_id(&id)
-        .ok_or_else(|| Fail(StatusCode::BAD_REQUEST, ApiError::new("bad_request", "not a session id")))?;
-    Ok(Json(rook.changes(sid, q.diff)?))
+    Ok(Json(rook.changes(session_id(&id)?, q.diff)?))
+}
+
+fn session_id(id: &str) -> std::result::Result<u128, Fail> {
+    rook_store::parse_session_id(id)
+        .ok_or_else(|| Fail(StatusCode::BAD_REQUEST, ApiError::new("bad_request", "not a session id")))
 }
 
 #[derive(Deserialize)]
@@ -294,6 +299,42 @@ async fn forget(State(s): State<Shared>, Json(body): Json<Forget>) -> ApiResult<
             Err(Fail(StatusCode::NOT_FOUND, ApiError::new("not_found", format!("no fact {:?}", body.id))))
         }
     }
+}
+
+#[derive(Deserialize)]
+struct GoalBody {
+    goal: String,
+}
+
+async fn set_goal(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+    Json(body): Json<GoalBody>,
+) -> ApiResult<serde_json::Value> {
+    let rook = s.rook.read().await;
+    rook.set_goal(session_id(&id)?, &body.goal)?;
+    Ok(Json(serde_json::json!({ "goal": body.goal })))
+}
+
+#[derive(Deserialize)]
+struct RewindBody {
+    /// Where to rewind to. The transcript numbers every event.
+    to_seq: u64,
+    /// Put the workspace files back as well. Off is a fork of the conversation
+    /// alone, which is the reversible half.
+    #[serde(default)]
+    restore_files: bool,
+}
+
+/// Forks rather than truncating, so the rewound-past turns stay readable —
+/// which is why this is a POST that answers with a new session id.
+async fn rewind(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+    Json(body): Json<RewindBody>,
+) -> ApiResult<rook_core::Rewind> {
+    let rook = s.rook.read().await;
+    Ok(Json(rook.rewind(session_id(&id)?, body.to_seq, body.restore_files)?))
 }
 
 async fn skills(State(s): State<Shared>) -> ApiResult<Page<rook_skills::SkillCard>> {
@@ -558,6 +599,51 @@ mod tests {
 
         let (status, _) = post(&f, "/api/memory", serde_json::json!({ "id": id })).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "forgetting twice is not a success");
+    }
+
+    #[tokio::test]
+    async fn a_goal_can_be_set_and_reads_back_with_the_session() {
+        let f = fixture();
+        let id = rook_store::format_session_id(f.session);
+
+        let (status, said) =
+            post(&f, &format!("/api/sessions/{id}/goal"), serde_json::json!({ "goal": "ship it" })).await;
+        assert_eq!(status, StatusCode::OK, "{said}");
+
+        let (_, sessions) = get(&f, "/api/sessions").await;
+        assert_eq!(sessions["items"][0]["goal"], "ship it", "{sessions}");
+    }
+
+    #[tokio::test]
+    async fn a_rewind_forks_rather_than_truncating() {
+        let f = fixture();
+        let id = rook_store::format_session_id(f.session);
+
+        let (status, done) = post(
+            &f,
+            &format!("/api/sessions/{id}/rewind"),
+            serde_json::json!({ "to_seq": 0, "restore_files": false }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{done}");
+        assert_eq!(done["parent"], id, "the original is what it forked from: {done}");
+        assert_ne!(done["session"], id, "and the answer is a new one: {done}");
+
+        let (_, sessions) = get(&f, "/api/sessions").await;
+        assert_eq!(sessions["items"].as_array().unwrap().len(), 2, "nothing was thrown away");
+    }
+
+    #[tokio::test]
+    async fn a_goal_or_rewind_for_something_that_is_not_a_session_is_a_client_error() {
+        let f = fixture();
+        for (path, body) in [
+            ("/api/sessions/not-a-ulid/goal", serde_json::json!({ "goal": "x" })),
+            ("/api/sessions/not-a-ulid/rewind", serde_json::json!({ "to_seq": 0 })),
+        ] {
+            let (status, _) = post(&f, path, body).await;
+            assert!(status.is_client_error(), "{path} answered {status}");
+        }
     }
 
     #[tokio::test]

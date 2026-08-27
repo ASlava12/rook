@@ -58,8 +58,12 @@ form.ask input{flex:1;padding:.55rem .7rem;border:1px solid var(--line);border-r
   background:var(--bg);color:var(--fg);font:inherit}
 .row{display:flex;gap:.5rem;margin:.5rem 0;align-items:center}
 .row label{color:var(--dim);font-size:.82rem}
-.row select{background:var(--panel);color:var(--fg);border:1px solid var(--line);
+.row select,.row input{background:var(--panel);color:var(--fg);border:1px solid var(--line);
   border-radius:4px;padding:.2rem .3rem;font:inherit}
+.row input{flex:1}
+button.quiet{background:none;border:0;color:var(--dim);cursor:pointer;font:inherit;
+  font-size:.75rem;padding:.1rem 0}
+button.quiet:hover{color:var(--fg)}
 .muted{color:var(--dim);font-size:.82rem}
 #maintenance-report{white-space:pre-wrap;font-family:var(--mono);margin:0}
 form.ask button,.row button,.approve button{padding:.5rem .9rem;border:1px solid var(--line);border-radius:6px;
@@ -334,6 +338,19 @@ async function renderSearch() {
   if (state.query) look();
 }
 
+async function rewindTo(seq) {
+  const files = confirm(`Rewind to #${seq}. Put the workspace files back too?\n\n` +
+    'Cancel forks the conversation alone, which changes nothing on disk.');
+  try {
+    const done = await api(`/api/sessions/${state.session}/rewind`,
+      { to_seq: seq, restore_files: files });
+    state.session = done.session;
+    render();
+  } catch (e) {
+    alert(e.error || e);
+  }
+}
+
 async function renderSessions() {
   const { items } = await api('/api/sessions');
   if (!state.session && items.length) state.session = items[0].id;
@@ -347,6 +364,15 @@ async function renderSessions() {
 
   const right = el('div', {class:'card'}, el('h2', {}, 'transcript'));
   if (state.session) {
+    right.append(el('div', { class: 'row' },
+      el('label', {}, 'goal '),
+      el('input', { id: 'goal', placeholder: 'what this session is for',
+        value: (items.find(s => String(s.id) === String(state.session)) || {}).goal || '' }),
+      el('button', { onclick: async () => {
+        await api(`/api/sessions/${state.session}/goal`, { goal: $('#goal').value });
+        render();
+      } }, 'Set')));
+
     // What it changed on disk, before what it said: that is the question a
     // transcript is usually being read to answer.
     const changed = await api(`/api/sessions/${state.session}/changes`);
@@ -370,7 +396,10 @@ async function renderSessions() {
           e.label ? el('span', {}, e.label) : null,
           el('span', {}, `${bytes(e.bytes)} → ${bytes(e.stored_bytes)}`),
           e.truncated ? el('span', {class:'warn'}, 'elided') : null),
-        el('pre', {}, e.body)));
+        el('pre', {}, e.body),
+        // Rewinding forks rather than truncating, so nothing is lost — but it
+        // does put files back, which is why it asks first.
+        el('button', { class: 'quiet', onclick: () => rewindTo(e.seq) }, `rewind to #${e.seq}`)));
     }
     right.append(box);
   } else {

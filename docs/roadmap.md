@@ -120,6 +120,11 @@ what unblocks the most.
   a skill scoped away and explained by `skills why`, capture and rollback, a
   broken config that fails loudly, and the daemon path where a read goes over
   HTTP and a write says where the lock is.
+- **The browser can set a goal and rewind** — the last two conversational
+  actions it could not reach. A goal field on the session view, and a rewind on
+  every entry in a transcript that asks whether to put the files back, since
+  forking the conversation alone changes nothing on disk. All four front ends
+  now reach every one of them. 3 tests.
 - **A prompt too large to send is refused, not sent** — compaction summarises
   history and cannot make one message smaller, so a pasted build log went to the
   provider whole and came back as an error about a limit the user never saw. It
