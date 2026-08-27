@@ -65,6 +65,25 @@ impl Rook {
         String::from_utf8_lossy(&out.stdout).into_owned()
     }
 
+    /// With something on stdin, which is how a one-shot turn is usually reached.
+    fn piped(&self, args: &[&str], input: &str) -> String {
+        use std::io::Write;
+        let mut child = Command::new(env!("CARGO_BIN_EXE_rook"))
+            .env("ROOK_HOME", self.home.path())
+            .env("ROOK_LOG", "error")
+            .arg("--workspace")
+            .arg(self.workspace.path())
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+        let out = child.wait_with_output().unwrap();
+        format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
+    }
+
     fn write_config(&self, toml: &str) {
         std::fs::create_dir_all(self.home.path()).unwrap();
         std::fs::write(self.home.path().join("config.toml"), toml).unwrap();
@@ -466,4 +485,32 @@ fn doctor_says_when_no_language_server_is_configured_at_all() {
 
     let said = rook.ok(&["doctor"]);
     assert!(said.contains("none found on PATH"), "{said}");
+}
+
+/// `cargo test 2>&1 | rook run "why?"` is how a one-shot turn is usually
+/// reached, and the pipe used to be dropped without a word.
+#[test]
+fn run_takes_what_is_piped_into_it() {
+    let rook = Rook::new();
+    let said = rook.piped(&["run"], "error: cannot borrow `x` as mutable\n");
+
+    assert!(!said.contains("nothing to do"), "the pipe is the prompt when there is no other: {said}");
+}
+
+#[test]
+fn run_with_neither_a_prompt_nor_a_pipe_says_both_are_possible() {
+    let rook = Rook::new();
+    let said = rook.piped(&["run"], "");
+
+    assert!(said.contains("pass a prompt, or pipe one in"), "{said}");
+}
+
+#[test]
+fn a_pipe_too_large_for_the_window_is_refused_and_says_what_to_do_instead() {
+    let rook = Rook::new();
+    rook.write_config("[agent]\nmodel = \"ollama/small\"\ncontext_window = 16\n");
+
+    let said = rook.piped(&["run", "explain"], &"x".repeat(4_096));
+    assert!(said.contains("16-token window"), "the bound is the model's, not a constant: {said}");
+    assert!(said.contains("file"), "and a file is read in pages, which is the way out: {said}");
 }

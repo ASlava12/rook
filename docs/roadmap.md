@@ -301,6 +301,13 @@ what unblocks the most.
   before checking containment, so a link inside the workspace pointing out of it
   is refused rather than followed, and the refusal says where the path really
   led. Widened only by `sandbox.allow_outside_workspace`. 6 tests.
+- **A pipe reaches the prompt** — `cargo test 2>&1 | rook run "why?"` is how a
+  one-shot turn is usually reached, and the pipe was read by nobody: the model
+  answered a question with none of the evidence. Piped text joins the prompt, or
+  becomes it when there is no other. Bounded by what the model's window could
+  hold, because reading a larger pipe only to be refused for it spends the memory
+  and the time both — and the refusal names the window and says to pass a file,
+  which is read in pages. 3 tests.
 - **One answer to what a turn inherits** — the language-server pool and the MCP
   servers were handed to a new loop by four front ends writing the same three
   lines, and `rook run` had written two of the three: a one-shot turn could not

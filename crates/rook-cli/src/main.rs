@@ -511,16 +511,44 @@ fn probe_provider(rook: &Rook) -> Result<String> {
     Ok(note)
 }
 
+/// The prompt, plus whatever was piped in — `cargo test 2>&1 | rook run "why?"`
+/// is how a one-shot turn is usually reached, and dropping the pipe silently
+/// answered a question nobody asked.
+///
+/// Bounded by what the window could ever hold: reading a larger pipe only to be
+/// refused for it spends the memory and the time both, and the refusal is more
+/// useful than a truncation nobody was told about.
+fn with_piped_input(asked: &str, window: usize) -> Result<String> {
+    use std::io::{IsTerminal, Read};
+
+    let mut piped = String::new();
+    if !std::io::stdin().is_terminal() {
+        // One byte past the cap, so a pipe exactly at it is not called too big.
+        let limit = window.saturating_mul(4);
+        std::io::stdin().take(limit as u64 + 1).read_to_string(&mut piped)?;
+        if piped.len() > limit {
+            bail!(
+                "the piped input is larger than the model's {window}-token window. \
+                 Write it to a file and ask for that instead — reading a file is paged."
+            );
+        }
+    }
+    let piped = piped.trim();
+    match (asked.trim(), piped) {
+        ("", "") => bail!("nothing to do: pass a prompt, or pipe one in"),
+        ("", text) => Ok(text.to_string()),
+        (asked, "") => Ok(asked.to_string()),
+        (asked, text) => Ok(format!("{asked}\n\n## Piped in\n{text}")),
+    }
+}
+
 fn cmd_run(
     workspace: Option<PathBuf>,
     prompt: Vec<String>,
     session: Option<String>,
     yes: bool,
 ) -> Result<()> {
-    let prompt = prompt.join(" ");
-    if prompt.trim().is_empty() {
-        bail!("nothing to do: pass a prompt");
-    }
+    let asked = prompt.join(" ");
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     runtime.block_on(async move {
         let rook = Rook::open(workspace)?;
@@ -530,6 +558,7 @@ fn cmd_run(
             rook.config.agent.context_window,
         )
         .with_context(|| format!("configuring model {:?}", rook.config.agent.model))?;
+        let prompt = with_piped_input(&asked, provider.context_window())?;
         let session = match session {
             Some(s) => session_id(&s)?,
             None => rook.start_session(&first_line(&prompt))?,

@@ -75,6 +75,7 @@ rook models                                # what the configured provider serves
 
 rook                                       # talk to it
 rook run "summarise what changed in src/"  # one turn, streamed, for scripts
+cargo test 2>&1 | rook run "why does this fail?"   # stdin joins the prompt
 rook tui                                   # full terminal UI: chat plus a store browser
 rookd                                      # http://127.0.0.1:7717 — web UI + API
 ```
