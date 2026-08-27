@@ -2402,9 +2402,9 @@ async fn a_turn_stops_compacting_once_it_stops_helping() {
     agent.set_window_for_test(4_000);
     let outcome = agent.run("carry on").await.unwrap();
 
-    assert!(
-        outcome.compactions <= 1,
-        "it tried {} times to summarise a span that cannot shrink",
-        outcome.compactions
+    assert_eq!(
+        outcome.compactions, 1,
+        "one attempt, and one is needed — a turn that never compacted would pass a `<= 1` \
+         assertion without exercising anything"
     );
 }

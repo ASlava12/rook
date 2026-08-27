@@ -1140,6 +1140,8 @@ mod tests {
             chat.push("tool", &format!("  · a tool call number {i}: {filler}"));
         }
 
+        let pushed = 4_000 * (filler.len() + 32);
+        assert!(pushed > MAX_SCROLLBACK, "the test has to exceed the bound to be about it: {pushed}");
         let held: usize = chat.log.iter().map(|(_, body)| body.len()).sum();
         assert!(held <= MAX_SCROLLBACK, "{held} bytes held against a bound of {MAX_SCROLLBACK}");
         assert!(

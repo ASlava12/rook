@@ -60,6 +60,15 @@ non-obvious choice was made — usually a failure mode being avoided.
 **Tests are named as claims.** `a_capture_refuses_to_run_away_instead_of_thrashing`,
 not `test_capture_2`. Assertion messages print the actual values.
 
+**A test for a bound asserts that the bound was reached.** Three passed here
+while proving nothing: a scrollback test whose 5,000 short lines never came near
+the megabyte it was capping, a step-limit test whose config never reached the
+binary so the turn ran to the default of two hundred, and a compaction test whose
+message sat under the threshold so nothing compacted either way. Each asserted
+the outcome and not the precondition, and each passed with the code it was
+testing removed. Assert the setup bit — that the total exceeded the cap, that the
+limit in force was the one the test set — and then assert the behaviour.
+
 **The front of a request must not vary per turn.** Prompt caching is a prefix
 match, so anything interpolated into the system prompt — recalled memory, a
 timestamp, a reordered tool list — invalidates everything behind it. Keep the

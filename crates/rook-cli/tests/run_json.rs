@@ -172,6 +172,10 @@ fn a_turn_that_ran_out_of_steps_says_so_to_the_caller() {
 
     let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
     assert_eq!(parsed["outcome"]["stopped"], "max_steps", "stdout stays the machine channel");
+    assert_eq!(
+        parsed["outcome"]["steps"], 2,
+        "against the limit this test set, not the default it would reach anyway: {parsed}"
+    );
 }
 
 #[test]
