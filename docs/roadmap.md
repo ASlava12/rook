@@ -301,6 +301,16 @@ what unblocks the most.
   before checking containment, so a link inside the workspace pointing out of it
   is refused rather than followed, and the refusal says where the path really
   led. Widened only by `sandbox.allow_outside_workspace`. 6 tests.
+- **A compaction that fails still moves the session on** — when the summary could
+  not be produced, the fallback was a compaction event whose body was a sentence
+  rather than a position. Nothing could read a position out of it, so the span
+  was never dropped: the next turn compacted again, and the one after that, each
+  adding an event and freeing nothing, until the window filled anyway. The record
+  now carries the position and a summary saying the span could not be
+  summarised and that `session show` reads it back — compaction stops replaying
+  events, it never deletes them. A session with nothing worth compacting records
+  no compaction at all, where it used to record one and poison the position it
+  was meant to describe. 2 tests.
 - **A sub-task that says what it is doing, not only that it finished** — a
   delegation reported each child as it landed, so a child running for minutes
   left a counter that did not move, which reads the same as a hang. Each child's

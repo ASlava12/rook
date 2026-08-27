@@ -826,10 +826,11 @@ async fn a_failed_summary_does_not_wedge_the_turn() {
     let entries = f.rook.transcript(session, 0, usize::MAX, 4096).unwrap();
     let compaction = entries.iter().find(|e| e.kind == "compaction").expect("compaction was recorded");
     assert!(
-        compaction.body.contains("without a summary"),
-        "a failed summary must be recorded as such: {}",
+        compaction.body.contains("through_seq"),
+        "with a position in it, or it frees nothing and the next turn does this again: {}",
         compaction.body
     );
+    assert!(compaction.body.contains("could not be summarised"), "{}", compaction.body);
 }
 
 #[tokio::test]
@@ -2201,4 +2202,66 @@ async fn a_sub_task_can_load_the_skills_its_parent_could() {
         "the child loaded the parent's skill, at a version: {:?}",
         loaded.iter().map(|e| (&e.kind, &e.label)).collect::<Vec<_>>()
     );
+}
+
+/// Answers the turn and refuses the summarisation, which is the shape of a
+/// transient provider failure at exactly the wrong moment.
+struct NoSummaries(ScriptedProvider);
+
+#[async_trait]
+impl Provider for NoSummaries {
+    fn id(&self) -> &str {
+        "scripted/no-summaries"
+    }
+    fn context_window(&self) -> usize {
+        16_000
+    }
+    async fn complete(&self, request: Request) -> rook_llm::Result<Response> {
+        if request.messages.first().is_some_and(|m| m.content.contains("compacting an agent")) {
+            return Err(LlmError::Other("the summariser is down".into()));
+        }
+        self.0.complete(request).await
+    }
+}
+
+/// A failed summary was recorded as a compaction whose body was a sentence
+/// rather than a position. Nothing could read a position out of it, so the span
+/// was never dropped: the next turn compacted again, and the one after that,
+/// each adding an event and freeing nothing.
+#[tokio::test]
+async fn a_compaction_whose_summary_failed_still_moves_the_session_on() {
+    let f = fixture();
+    let session = long_session(&f, 40);
+
+    let provider = NoSummaries(ScriptedProvider::new(vec![reply("carrying on")]));
+    let seen = provider.0.share();
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), session);
+    agent.set_window_for_test(4_000);
+    agent.run("and now?").await.unwrap();
+
+    let (from, summary) = f.rook.last_compaction(session).unwrap();
+    assert!(from > 0, "the position was recorded, so the span is behind us");
+    let summary = summary.expect("something stands in for the span");
+    assert!(summary.contains("could not be summarised"), "{summary}");
+    assert!(summary.contains("session show"), "and where to read what it stood for: {summary}");
+
+    let turn = seen.lock().unwrap().clone();
+    let carried: String = turn[0].messages.iter().map(|m| m.content.clone()).collect();
+    assert!(!carried.contains("question 0"), "the span is not carried: {carried}");
+}
+
+/// A session with nothing worth compacting recorded a compaction anyway, which
+/// poisoned the position it was supposed to describe.
+#[tokio::test]
+async fn nothing_worth_compacting_records_no_compaction() {
+    let f = fixture();
+    let session = f.rook.start_session("short").unwrap();
+
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(vec![reply("hi")])), session);
+    agent.set_window_for_test(4_000);
+    agent.compact_now().await;
+
+    assert_eq!(f.rook.last_compaction(session).unwrap(), (0, None), "nothing was compacted");
+    let entries = f.rook.transcript(session, 0, 100, 512).unwrap();
+    assert!(entries.iter().all(|e| e.kind != "compaction"), "{entries:?}");
 }

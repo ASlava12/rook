@@ -1213,14 +1213,18 @@ impl AgentLoop<'_> {
     }
 
     async fn compact(&self) {
-        let note = match self.summarise_span().await {
-            Ok(note) => note,
-            Err(e) => {
-                tracing::warn!("summarising for compaction failed: {e}");
-                format!("compacted without a summary: {e}")
+        match self.summarise_span().await {
+            Ok(note) => {
+                self.rook.log(self.session, EventKind::Compaction, "auto", &note).ok();
             }
-        };
-        self.rook.log(self.session, EventKind::Compaction, "auto", &note).ok();
+            // Not recorded as a compaction: one with no position in it frees no
+            // context, so the next turn compacts again, and the one after that,
+            // while the log grows an event each time and the recorded position
+            // points at something nothing can read.
+            Err(e) => {
+                self.rook.log(self.session, EventKind::Error, "compaction", &e.to_string()).ok();
+            }
+        }
     }
 
     async fn summarise_span(&self) -> Result<String> {
@@ -1263,6 +1267,29 @@ impl AgentLoop<'_> {
         let room = (self.budget.usable() / 2).saturating_sub(estimate_tokens(&carried));
         let material = format!("{carried}{}", render_span(span, room));
 
+        // A summary that cannot be produced still leaves a compaction worth
+        // recording: the span is dropped from the request either way, and the
+        // events themselves are not deleted, so the note says where to read
+        // them rather than pretending they are gone.
+        let summary = match self.ask_for_summary(material).await {
+            Ok(text) => text,
+            Err(e) => format!(
+                "The transcript before this point could not be summarised ({e}). It is still in \
+                 the session log — `rook session show` reads it back — so ask before assuming \
+                 what is in it."
+            ),
+        };
+
+        Ok(serde_json::to_string(&serde_json::json!({
+            "through_seq": through_seq,
+            "dropped_events": span.len(),
+            "summary": summary,
+        }))?)
+    }
+}
+
+impl AgentLoop<'_> {
+    async fn ask_for_summary(&self, material: String) -> Result<String> {
         let request = Request::new(vec![Message::system(SUMMARY_INSTRUCTIONS), Message::user(material)]);
         let mut stream = self.provider.stream(request).await.map_err(|e| CoreError::Other(e.to_string()))?;
         let mut assembler = Assembler::default();
@@ -1270,15 +1297,10 @@ impl AgentLoop<'_> {
             assembler.push(delta.map_err(|e| CoreError::Other(e.to_string()))?);
         }
         let summary = assembler.finish().message.content;
-        if summary.trim().is_empty() {
-            return Err(CoreError::Other("the model returned an empty summary".into()));
+        match summary.trim().is_empty() {
+            true => Err(CoreError::Other("the model returned an empty summary".into())),
+            false => Ok(summary),
         }
-
-        Ok(serde_json::to_string(&serde_json::json!({
-            "through_seq": through_seq,
-            "dropped_events": span.len(),
-            "summary": summary,
-        }))?)
     }
 }
 
