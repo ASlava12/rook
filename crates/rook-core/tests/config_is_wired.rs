@@ -138,3 +138,29 @@ impl rook_llm::Provider for Silent {
         Err(rook_llm::LlmError::Other("not called".into()))
     }
 }
+
+/// `stopped` is read by `session show`, by the delegation report and by
+/// `run --json`, and it was written three ways: two hand-written snake_case
+/// strings and the debug spelling of the enum, `EndTurn`, beside them.
+#[test]
+fn why_a_turn_ended_has_one_vocabulary() {
+    let spellings: Vec<&str> = [
+        rook_llm::StopReason::EndTurn,
+        rook_llm::StopReason::ToolUse,
+        rook_llm::StopReason::MaxTokens,
+        rook_llm::StopReason::Refusal,
+        rook_llm::StopReason::Other,
+    ]
+    .into_iter()
+    .map(|r| r.as_str())
+    .collect();
+
+    for spelling in &spellings {
+        assert!(
+            spelling.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+            "{spelling} is a Rust name reaching a user"
+        );
+    }
+    assert!(spellings.contains(&"end_turn"), "the one the loop writes by hand has to be among them");
+    assert!(spellings.contains(&"max_tokens"));
+}

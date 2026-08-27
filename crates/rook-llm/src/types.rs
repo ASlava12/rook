@@ -147,6 +147,21 @@ pub enum StopReason {
     Other,
 }
 
+impl StopReason {
+    /// One vocabulary for why a turn ended, reported by `session show`, by the
+    /// delegation report and by `run --json`. The debug spelling reached all
+    /// three as `EndTurn` beside a hand-written `end_turn`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StopReason::EndTurn => "end_turn",
+            StopReason::ToolUse => "tool_use",
+            StopReason::MaxTokens => "max_tokens",
+            StopReason::Refusal => "refusal",
+            StopReason::Other => "other",
+        }
+    }
+}
+
 /// How much thinking and overall token spend to allow.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

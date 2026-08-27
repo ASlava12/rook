@@ -690,7 +690,7 @@ impl<'a> AgentLoop<'a> {
             }
 
             if response.stop_reason != StopReason::ToolUse || response.message.tool_calls.is_empty() {
-                outcome.stopped = format!("{:?}", response.stop_reason);
+                outcome.stopped = response.stop_reason.as_str().into();
                 self.finish(&outcome).await;
                 return Ok(outcome);
             }

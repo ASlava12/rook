@@ -301,6 +301,14 @@ what unblocks the most.
   before checking containment, so a link inside the workspace pointing out of it
   is refused rather than followed, and the refusal says where the path really
   led. Widened only by `sandbox.allow_outside_workspace`. 6 tests.
+- **A turn a script can read** — `rook run` is the command the README calls
+  "for scripts" and the only one that ignored `--json`, so a caller had to parse
+  a stream meant for a person. It emits one object: the reply, why the turn
+  ended, steps, tokens, the tools called and what changed on disk. Two tests
+  drive the binary through a whole turn against a socket, which nothing else in
+  the CLI suite did — every other test stopped where a model would be needed.
+  Why a turn ended had three spellings, `EndTurn` among them; it has one now.
+  3 tests.
 - **A pipe reaches the prompt** — `cargo test 2>&1 | rook run "why?"` is how a
   one-shot turn is usually reached, and the pipe was read by nobody: the model
   answered a question with none of the evidence. Piped text joins the prompt, or

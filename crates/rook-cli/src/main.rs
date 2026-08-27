@@ -324,7 +324,7 @@ fn main() -> Result<()> {
         Some(Command::Init) => cmd_init(cli.workspace),
         Some(Command::Doctor) => cmd_doctor(&Rook::open(cli.workspace)?, cli.json),
         Some(Command::Chat { session }) => chat::run(cli.workspace, session, cli.yes),
-        Some(Command::Run { prompt, session }) => cmd_run(cli.workspace, prompt, session, cli.yes),
+        Some(Command::Run { prompt, session }) => cmd_run(cli.workspace, prompt, session, cli.yes, cli.json),
         Some(Command::Models) => cmd_models(cli.workspace, cli.json),
         Some(Command::Acp) => cmd_acp(cli.workspace),
         Some(Command::Serve { port }) => cmd_serve(port),
@@ -547,6 +547,7 @@ fn cmd_run(
     prompt: Vec<String>,
     session: Option<String>,
     yes: bool,
+    json: bool,
 ) -> Result<()> {
     let asked = prompt.join(" ");
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
@@ -575,8 +576,11 @@ fn cmd_run(
             eprintln!("mcp {name}: {error}");
         }
         let mut out = std::io::stdout();
+        // Under `--json` the turn's one output is the object at the end, so the
+        // stream that a person would watch would only corrupt it.
         let outcome = agent
             .run_with(&prompt, |progress| match progress {
+                _ if json => {}
                 Progress::Delta(rook_llm::Delta::Text(text)) => {
                     let _ = write!(out, "{text}");
                     let _ = out.flush();
@@ -596,14 +600,24 @@ fn cmd_run(
                 _ => {}
             })
             .await?;
-        println!();
         mcp.shutdown().await;
+        let changes = rook.changes(session, false).ok();
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "session": rook_store::format_session_id(session),
+                    "outcome": outcome,
+                    "changes": changes,
+                }))?
+            );
+            return anyhow::Ok(());
+        }
+        println!();
         for id in &outcome.delegated {
             eprintln!("sub-agent {id} — `rook session show {id}` for its detail");
         }
-        if let Ok(changes) = rook.changes(session, false)
-            && changes.touched() > 0
-        {
+        if let Some(changes) = changes.filter(|c| c.touched() > 0) {
             eprintln!(
                 "{} — `rook session diff {}`",
                 changes.summary(),
