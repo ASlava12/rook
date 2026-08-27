@@ -67,12 +67,20 @@ fn answered(content: &'static str) -> &'static str {
 }
 
 fn run(args: &[&str], endpoint: &str) -> (String, String) {
+    let (stdout, stderr, _) = run_with_status(args, endpoint, "");
+    (stdout, stderr)
+}
+
+fn run_with_status(args: &[&str], endpoint: &str, extra_config: &str) -> (String, String, i32) {
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     // `openai-compatible` is the dialect with no endpoint of its own, which is
     // what makes it the one a test can point anywhere.
-    std::fs::write(home.path().join("config.toml"), "[agent]\nmodel = \"openai-compatible/test-model\"\n")
-        .unwrap();
+    std::fs::write(
+        home.path().join("config.toml"),
+        format!("[agent]\nmodel = \"openai-compatible/test-model\"\n{extra_config}"),
+    )
+    .unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_rook"))
         .env("ROOK_HOME", home.path())
         .env("ROOK_LOG", "error")
@@ -83,7 +91,11 @@ fn run(args: &[&str], endpoint: &str) -> (String, String) {
         .stdin(Stdio::null())
         .output()
         .unwrap();
-    (String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.code().unwrap_or(-1),
+    )
 }
 
 #[test]
@@ -108,4 +120,65 @@ fn a_turn_run_for_a_script_is_one_object_and_nothing_else() {
     assert_eq!(parsed["outcome"]["stopped"], "end_turn", "a script has to know it finished");
     assert_eq!(parsed["outcome"]["input_tokens"], 10);
     assert!(parsed["session"].as_str().is_some_and(|s| !s.is_empty()), "{parsed}");
+}
+
+/// Answers every request with the same tool call, so the loop never reaches an
+/// end of its own and runs into the step limit.
+fn serve_forever(reply: &'static str) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        while let Ok((mut socket, _)) = listener.accept() {
+            read_request(&mut socket);
+            let body = format!("data: {reply}\n\ndata: [DONE]\n\n");
+            let _ = socket.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            );
+            let _ = socket.flush();
+        }
+    });
+    format!("http://{addr}/v1")
+}
+
+fn asked_for_a_tool() -> &'static str {
+    Box::leak(
+        serde_json::json!({
+            "id": "1",
+            "choices": [{"index": 0, "delta": {"role": "assistant", "tool_calls": [{
+                "index": 0, "id": "call_1", "type": "function",
+                "function": {"name": "list_dir", "arguments": "{\"path\":\".\"}"}
+            }]}, "finish_reason": "tool_calls"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5}
+        })
+        .to_string()
+        .into_boxed_str(),
+    )
+}
+
+/// Running out of steps leaves the work half done, and it came back as success:
+/// a script piping the output onward could not tell it from a finished turn.
+#[test]
+fn a_turn_that_ran_out_of_steps_says_so_to_the_caller() {
+    let endpoint = serve_forever(asked_for_a_tool());
+    let (stdout, stderr, code) =
+        run_with_status(&["--json", "run", "list everything"], &endpoint, "max_steps = 2\n");
+
+    assert_eq!(code, 2, "an unfinished turn is not a success: {stderr}");
+    assert!(stderr.contains("step limit"), "and it says which limit and what to change: {stderr}");
+
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(parsed["outcome"]["stopped"], "max_steps", "stdout stays the machine channel");
+}
+
+#[test]
+fn a_turn_that_finished_exits_cleanly() {
+    let endpoint = serve_one(answered("done"));
+    let (_, stderr, code) = run_with_status(&["run", "what colour?"], &endpoint, "");
+
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!stderr.contains("rather than finishing"), "{stderr}");
 }

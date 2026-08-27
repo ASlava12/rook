@@ -551,7 +551,9 @@ fn cmd_run(
 ) -> Result<()> {
     let asked = prompt.join(" ");
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-    runtime.block_on(async move {
+    // The exit code is decided inside and taken here, after the store has been
+    // dropped: exiting from within would skip closing it cleanly.
+    let unfinished = runtime.block_on(async move {
         let rook = Rook::open(workspace)?;
         let provider = rook_llm::from_spec_with(
             &rook.config.agent.model,
@@ -602,6 +604,10 @@ fn cmd_run(
             .await?;
         mcp.shutdown().await;
         let changes = rook.changes(session, false).ok();
+        // A script that pipes this into something else has to be able to tell a
+        // finished turn from one that ran out of steps or was refused, and both
+        // of those come back as Ok with the work half done.
+        let finished = outcome.stopped == "end_turn";
         if json {
             println!(
                 "{}",
@@ -611,7 +617,7 @@ fn cmd_run(
                     "changes": changes,
                 }))?
             );
-            return anyhow::Ok(());
+            return anyhow::Ok(unfinished(finished, &outcome.stopped));
         }
         println!();
         for id in &outcome.delegated {
@@ -638,8 +644,30 @@ fn cmd_run(
                 String::new()
             }
         );
-        anyhow::Ok(())
-    })
+        anyhow::Ok(unfinished(finished, &outcome.stopped))
+    })?;
+    if unfinished {
+        std::process::exit(2);
+    }
+    Ok(())
+}
+
+/// Whether the caller should hear that the work was not done. stdout is the
+/// machine channel — under `--json` the object already carries `stopped` — so
+/// the sentence goes to stderr either way.
+fn unfinished(finished: bool, stopped: &str) -> bool {
+    if finished {
+        return false;
+    }
+    eprintln!(
+        "{}",
+        match stopped {
+            "max_steps" =>
+                "stopped at the step limit — raise `[agent] max_steps` or narrow the task".to_string(),
+            other => format!("the turn ended as {other:?} rather than finishing"),
+        }
+    );
+    true
 }
 
 /// One-line form of tool arguments, for the progress line.

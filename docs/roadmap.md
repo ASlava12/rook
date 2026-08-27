@@ -308,7 +308,10 @@ what unblocks the most.
   drive the binary through a whole turn against a socket, which nothing else in
   the CLI suite did — every other test stopped where a model would be needed.
   Why a turn ended had three spellings, `EndTurn` among them; it has one now.
-  3 tests.
+  A turn that ran out of steps exited 0, so a script could not tell half-done
+  work from finished: it exits 2 and says which limit and what to change. The
+  code is decided inside the runtime and taken after the store is dropped, since
+  exiting from within would skip closing it. 5 tests.
 - **A pipe reaches the prompt** — `cargo test 2>&1 | rook run "why?"` is how a
   one-shot turn is usually reached, and the pipe was read by nobody: the model
   answered a question with none of the evidence. Piped text joins the prompt, or
