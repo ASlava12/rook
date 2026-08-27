@@ -39,6 +39,7 @@ pub struct Hit {
 
 /// Where a captured file came from. Empty `session` means a checkpoint someone
 /// made by hand rather than one a turn took.
+#[derive(Clone)]
 struct Captured {
     session: String,
     title: String,
@@ -126,20 +127,24 @@ impl Rook {
         // Whatever matched but is not the body of an event is a captured file:
         // scanned, and until now unreportable, which made the flag that includes
         // them a promise nothing kept.
+        let captures = match matched.keys().any(|id| !found_in_events.contains(id)) {
+            true => self.captures()?,
+            false => HashMap::new(),
+        };
         for (id, (score, snippet)) in &matched {
             if found_in_events.contains(id) {
                 continue;
             }
-            let Some(capture) = self.captured_as(id)? else { continue };
+            let Some(capture) = captures.get(id) else { continue };
             hits.push(Hit {
-                session: capture.session,
-                title: capture.title,
+                session: capture.session.clone(),
+                title: capture.title.clone(),
                 seq: capture.seq,
                 kind: "file".into(),
                 when: capture.when,
                 snippet: snippet.clone(),
                 score: *score,
-                file: Some(capture.path),
+                file: Some(capture.path.clone()),
             });
         }
 
@@ -155,19 +160,25 @@ impl Rook {
 }
 
 impl Rook {
-    /// Which capture this object came from, and as which file.
+    /// Every captured object, and where it came from.
+    ///
+    /// Built once and looked up, rather than walked per object: a repository
+    /// checkpointed twenty times is thousands of file objects, and a common word
+    /// matches most of them. Walking the store for each match was a second on a
+    /// store of six hundred.
     ///
     /// Both the captures a turn made and the ones a person made by hand: a
     /// `rook checkpoint create` is a ref rather than a session event, and that
     /// is exactly the case someone asking "where did that file go" is in.
-    ///
-    /// Walked rather than indexed: a store holds a few thousand captures at
-    /// most, and this runs only for the objects a search matched outside the
-    /// conversation.
-    fn captured_as(&self, object: &ObjectId) -> Result<Option<Captured>> {
-        let hex = object.to_hex();
-        let found = |set: &crate::fileset::FileSet| {
-            set.files.iter().find(|(_, id)| **id == hex).map(|(path, _)| path.clone())
+    fn captures(&self) -> Result<HashMap<ObjectId, Captured>> {
+        let mut out: HashMap<ObjectId, Captured> = HashMap::new();
+        let mut record = |set: &crate::fileset::FileSet, at: &Captured| {
+            for (path, hex) in &set.files {
+                let Some(id) = ObjectId::from_hex(hex) else { continue };
+                // The first capture that holds it wins, which is the earliest
+                // and so the one that says where it came from.
+                out.entry(id).or_insert_with(|| Captured { path: path.clone(), ..at.clone() });
+            }
         };
 
         for session in self.sessions()? {
@@ -178,33 +189,35 @@ impl Rook {
                 let Ok(set) = crate::fileset::FileSet::load(&self.store, &event.record.body) else {
                     continue;
                 };
-                if let Some(path) = found(&set) {
-                    return Ok(Some(Captured {
+                record(
+                    &set,
+                    &Captured {
                         session: rook_store::format_session_id(session.id),
                         title: session.title.clone(),
                         seq: event.seq,
                         when: event.record.ts,
-                        path,
-                    }));
-                }
+                        path: String::new(),
+                    },
+                );
             }
         }
 
         for (_, id) in self.store.list_refs("")? {
             let Ok(set) = crate::fileset::FileSet::load(&self.store, &id) else { continue };
-            if let Some(path) = found(&set) {
-                return Ok(Some(Captured {
+            record(
+                &set,
+                &Captured {
                     session: String::new(),
                     // The name someone gave it, not the ref key, which carries a
                     // timestamp and a hash nobody reads.
                     title: format!("{} {}", set.kind, set.name),
                     seq: 0,
                     when: set.captured_at,
-                    path,
-                }));
-            }
+                    path: String::new(),
+                },
+            );
         }
-        Ok(None)
+        Ok(out)
     }
 }
 
