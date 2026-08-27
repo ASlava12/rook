@@ -246,7 +246,11 @@ what unblocks the most.
   `transport error: error sending request for url (…)`. It now names the
   endpoint without the path, says whether anything is listening there, and gives
   the command that lists what an endpoint offers. An exported-but-blank API key
-  reads as unset rather than as a 401. 6 tests.
+  reads as unset rather than as a 401. A server that is running but has not been
+  given the model — the default spec names one that must be pulled first, so this
+  is the second thing a new user hits — is asked which it does have, and the
+  refusal names them. A base URL that serves nothing keeps its 404, because
+  "the model is missing" would there be a guess. 9 tests.
 - **What a tool measured reaches the hooks** — every tool records facts about
   its call (which MCP server answered, whether a command timed out, how much of
   a file came back) and every one of them was thrown away by the loop. A

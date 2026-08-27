@@ -39,8 +39,19 @@ pub enum LlmError {
     UnknownProvider(String),
     #[error("the model stopped sending for {secs}s; giving up on the stream")]
     Stalled { secs: u64 },
+    #[error("no model {model:?} on the server at {endpoint} — {}", offers(available))]
+    NoSuchModel { model: String, endpoint: String, available: Vec<String> },
     #[error("{0}")]
     Other(String),
+}
+
+/// The answer to "which model, then" is on the same server that just refused, so
+/// it is fetched and named rather than left for the user to go and look up.
+fn offers(available: &[String]) -> String {
+    match available {
+        [] => "it has none. Pull one, or point `[agent] model` somewhere else.".into(),
+        have => format!("it has {}. Set `[agent] model` to one of them, or pull it.", have.join(", ")),
+    }
 }
 
 impl LlmError {
@@ -68,7 +79,7 @@ fn advice(endpoint: &str) -> String {
 
 /// Scheme and authority only: the path a request happened to use is noise, and
 /// the same endpoint should read the same however it was reached.
-fn origin(url: &str) -> String {
+pub(crate) fn origin(url: &str) -> String {
     let (scheme, rest) = url.split_once("://").unwrap_or(("", url));
     let authority = rest.split('/').next().unwrap_or(rest);
     match scheme.is_empty() {

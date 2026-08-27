@@ -46,3 +46,77 @@ fn an_empty_api_key_is_reported_as_unset_rather_than_sent() {
     assert!(err.contains("ANTHROPIC_API_KEY is not set"), "an exported blank is the usual slip: {err}");
     assert!(err.contains("ollama"), "and it should name a way out: {err}");
 }
+
+/// A server that answers by path and keeps answering, because finding out what
+/// a refusal meant takes a second request to the same server.
+async fn serve(routes: &'static [(&'static str, &'static str, &'static str)]) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let mut scratch = [0u8; 8192];
+            let read = socket.read(&mut scratch).await.unwrap_or(0);
+            let head = String::from_utf8_lossy(&scratch[..read]).to_string();
+            let (status, body) = routes
+                .iter()
+                .find(|(path, _, _)| head.contains(path))
+                .map(|(_, status, body)| (*status, *body))
+                .unwrap_or(("404 Not Found", "{}"));
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+        }
+    });
+    format!("http://{addr}/v1")
+}
+
+async fn ask(url: String, model: &str) -> LlmError {
+    use rook_llm::openai::{Config, OpenAiCompatible};
+    use rook_llm::{Provider, Request};
+
+    let provider = OpenAiCompatible::new("test/model", model, Config::new(url, None, 8192)).unwrap();
+    provider.complete(Request::new(Vec::new())).await.unwrap_err()
+}
+
+/// The default spec names a model that has to be pulled first, so this is the
+/// failure a new user with Ollama running actually hits.
+#[tokio::test]
+async fn a_model_the_server_does_not_have_is_told_what_it_does_have() {
+    let url = serve(&[
+        ("/chat/completions", "404 Not Found", r#"{"error":"model not found"}"#),
+        ("/models", "200 OK", r#"{"data":[{"id":"llama3.2"},{"id":"qwen2.5-coder:7b"}]}"#),
+    ])
+    .await;
+
+    let said = ask(url, "qwen3-coder:30b").await.to_string();
+    assert!(said.contains("qwen3-coder:30b"), "names the one that is missing: {said}");
+    assert!(said.contains("llama3.2") && said.contains("qwen2.5-coder:7b"), "and the ones present: {said}");
+    assert!(said.contains("`[agent] model`"), "and what to change: {said}");
+}
+
+#[tokio::test]
+async fn a_server_with_nothing_pulled_says_so_rather_than_listing_nothing() {
+    let url = serve(&[
+        ("/chat/completions", "404 Not Found", r#"{"error":"model not found"}"#),
+        ("/models", "200 OK", r#"{"data":[]}"#),
+    ])
+    .await;
+
+    let said = ask(url, "qwen3-coder:30b").await.to_string();
+    assert!(said.contains("it has none"), "{said}");
+}
+
+#[tokio::test]
+async fn a_base_url_that_serves_nothing_is_not_reported_as_a_missing_model() {
+    // Both requests 404, which is what a wrong base URL looks like — the model
+    // may be perfectly fine and guessing otherwise sends the user after it.
+    let url = serve(&[]).await;
+
+    let said = ask(url, "qwen3-coder:30b").await.to_string();
+    assert!(!said.contains("no model"), "a guess dressed as a diagnosis: {said}");
+    assert!(said.contains("404"), "{said}");
+}

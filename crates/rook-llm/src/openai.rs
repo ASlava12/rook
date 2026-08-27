@@ -74,7 +74,7 @@ impl Provider for OpenAiCompatible {
         let status = resp.status();
         let text = resp.text().await.map_err(|e| LlmError::unreachable(&self.config.base_url, e))?;
         if !status.is_success() {
-            return Err(LlmError::Status { status: status.as_u16(), body: truncate(&text, 2000) });
+            return Err(self.refused(status, &text).await);
         }
 
         let wire: WireResponse = serde_json::from_str(&text)
@@ -168,7 +168,7 @@ impl Provider for OpenAiCompatible {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(LlmError::Status { status: status.as_u16(), body: truncate(&body, 2000) });
+            return Err(self.refused(status, &body).await);
         }
 
         let idle = self.config.stream_idle_timeout;
@@ -263,6 +263,25 @@ impl Provider for OpenAiCompatible {
 }
 
 impl OpenAiCompatible {
+    /// A 404 from a server that is otherwise answering means the model is not
+    /// there — the common first-run failure, because the default spec names a
+    /// model nobody has pulled yet. The server knows which it does have.
+    async fn refused(&self, status: reqwest::StatusCode, body: &str) -> LlmError {
+        if status != reqwest::StatusCode::NOT_FOUND {
+            return LlmError::Status { status: status.as_u16(), body: truncate(body, 2000) };
+        }
+        // If the listing does not answer either, the base URL is the likelier
+        // fault and "the model is missing" would be a guess: say what happened.
+        let Ok(models) = self.models().await else {
+            return LlmError::Status { status: status.as_u16(), body: truncate(body, 2000) };
+        };
+        LlmError::NoSuchModel {
+            model: self.model.clone(),
+            endpoint: crate::origin(&self.config.base_url),
+            available: models.into_iter().map(|m| m.id).collect(),
+        }
+    }
+
     async fn send(&self, request: &Request, stream: bool) -> Result<reqwest::Response> {
         let body = WireRequest {
             model: &self.model,
