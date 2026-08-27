@@ -118,6 +118,10 @@ what unblocks the most.
   a skill scoped away and explained by `skills why`, capture and rollback, a
   broken config that fails loudly, and the daemon path where a read goes over
   HTTP and a write says where the lock is.
+- **`readonly` that is actually read-only** — the loop implements some tools
+  itself and handled them before the policy gate, so `write_skill` wrote to disk
+  in a mode whose whole promise is that nothing changes the machine. The gate
+  now takes a supplied risk, so a pseudo-tool that writes answers to it too.
 - **A whole turn over a real socket** — every other loop test hands the agent a
   scripted provider and skips the wire, so a mis-shaped tool schema or an
   unpaired `tool_call_id` would pass all of them and fail against the first real

@@ -140,6 +140,10 @@ rather than scaffolding one, writes into the user skills directory, and captures
 the result as a version — rewriting a skill keeps the old one, reachable through
 `rook skills history` and `rook skills rollback`.
 
+It answers to the permission policy like any other write — a skill changes how
+every later session behaves, which is worth one approval — so `readonly` refuses
+it outright and `auto` lets it through.
+
 Two things are checked before it counts as written. The name has to be a
 directory name, and the skill has to parse: it is read back from disk, and a
 `SKILL.md` that does not load is reported rather than left for the next session

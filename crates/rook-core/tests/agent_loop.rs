@@ -1635,7 +1635,11 @@ async fn a_skill_the_agent_writes_is_there_for_the_next_turn() {
         reply("written down"),
     ]));
 
-    let outcome = AgentLoop::new(&f.rook, provider, session).run("remember how to do that").await.unwrap();
+    // Writing a skill changes how every later session behaves, so it asks like
+    // any other write.
+    let mut agent = AgentLoop::new(&f.rook, provider, session);
+    agent.allow_everything_not_denied();
+    let outcome = agent.run("remember how to do that").await.unwrap();
 
     assert_eq!(outcome.skills_written, ["cross-compile-freebsd"]);
 
@@ -1819,4 +1823,42 @@ async fn a_post_tool_hook_is_given_the_facts_the_tool_measured() {
     let result = requests.last().unwrap().messages.iter().rev().find(|m| m.role == Role::Tool).unwrap();
     assert!(result.content.contains("total_lines"), "the hook saw no meta: {}", result.content);
     assert!(result.content.contains("error=False"), "nor the error flag: {}", result.content);
+}
+
+#[tokio::test]
+async fn readonly_stops_the_agent_writing_a_skill_as_well_as_a_file() {
+    let f = fixture();
+    let mut config = Config::default();
+    config.sandbox.mode = rook_tools::policy::Mode::ReadOnly;
+    let rook = with_config(&f, "readonly-skill", config);
+    let session = rook.start_session("readonly").unwrap();
+
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("write_skill", serde_json::json!({"name": "sneaky", "description": "d", "body": "b"})),
+        call("write_file", serde_json::json!({"path": "sneaky.txt", "content": "x"})),
+        reply("done"),
+    ]));
+    let outcome = AgentLoop::new(&rook, provider, session).run("go").await.unwrap();
+
+    assert!(outcome.skills_written.is_empty(), "readonly means nothing changes the machine");
+    assert_eq!(rook.skills().versions_of("sneaky").len(), 0, "and nothing reached the disk");
+    assert!(!f.workspace.path().join("sneaky.txt").exists());
+}
+
+#[tokio::test]
+async fn a_skill_is_still_written_when_the_policy_allows_it() {
+    let f = fixture();
+    let mut config = Config::default();
+    config.sandbox.mode = rook_tools::policy::Mode::Auto;
+    let rook = with_config(&f, "auto-skill", config);
+    let session = rook.start_session("auto").unwrap();
+
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("write_skill", serde_json::json!({"name": "allowed", "description": "d", "body": "b"})),
+        reply("done"),
+    ]));
+    let outcome = AgentLoop::new(&rook, provider, session).run("go").await.unwrap();
+
+    assert_eq!(outcome.skills_written, ["allowed"], "gating it must not disable it");
+    assert_eq!(rook.skills().versions_of("allowed").len(), 1, "and it reached the disk");
 }

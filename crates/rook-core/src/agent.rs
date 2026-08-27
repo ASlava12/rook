@@ -652,6 +652,15 @@ impl<'a> AgentLoop<'a> {
         }
 
         if call.name == WRITE_SKILL {
+            // It writes files a user would call theirs, so it answers to the
+            // policy like any other write.
+            let target = crate::paths::user_skills_dir()
+                .join(call.arguments.get("name").and_then(|n| n.as_str()).unwrap_or("?"));
+            let risk = rook_tools::policy::Risk::Write(vec![target.display().to_string()]);
+            if let Some(refusal) = self.gate_risk(WRITE_SKILL, &call.arguments, risk).await {
+                self.rook.log(self.session, EventKind::Error, WRITE_SKILL, &refusal).ok();
+                return refusal;
+            }
             return match serde_json::from_value(call.arguments.clone())
                 .map_err(|e| CoreError::Other(format!("{WRITE_SKILL}: {e}")))
                 .and_then(|skill: crate::service::AuthoredSkill| {
@@ -941,19 +950,29 @@ impl<'a> AgentLoop<'a> {
     /// is to ask. Returns the refusal to hand back to the model, or `None` when
     /// the call may proceed.
     async fn gate(&self, call: &rook_llm::ToolCall) -> Option<String> {
-        let tool = self.tools.get(&call.name)?;
-        let risk = tool.risk(&call.arguments);
+        let risk = self.tools.get(&call.name)?.risk(&call.arguments);
+        self.gate_risk(&call.name, &call.arguments, risk).await
+    }
 
+    /// The same decision for something the toolbox does not own. A pseudo-tool
+    /// that changes the machine has to pass here too, or `readonly` means
+    /// "readonly except for the tools the loop implements itself".
+    async fn gate_risk(
+        &self,
+        name: &str,
+        arguments: &serde_json::Value,
+        risk: rook_tools::policy::Risk,
+    ) -> Option<String> {
         // The policy runs first so a hook cannot unlock what the deny list
         // forbids; everything else, a hook may override.
         let mut decision = self.policy.decide(&risk);
         if !matches!(decision, Decision::Deny(_)) && !self.hooks.is_empty() {
             let payload = self.payload(serde_json::json!({
-                "tool": call.name,
-                "input": call.arguments,
+                "tool": name,
+                "input": arguments,
                 "action": risk.describe(),
             }));
-            let outcome = self.hooks.run(hooks::Event::PreTool, &call.name, &payload).await;
+            let outcome = self.hooks.run(hooks::Event::PreTool, name, &payload).await;
             if let Some(hooked) = outcome.decision {
                 decision = hooked;
             }
@@ -962,7 +981,7 @@ impl<'a> AgentLoop<'a> {
         match decision {
             Decision::Allow => None,
             Decision::Deny(why) => Some(format!("refused: {why}")),
-            Decision::Ask => match self.approver.ask(&call.name, &risk).await {
+            Decision::Ask => match self.approver.ask(name, &risk).await {
                 rook_tools::policy::Approval::Once => None,
                 rook_tools::policy::Approval::ForRun => {
                     self.policy.grant_for_run(&risk.subject());

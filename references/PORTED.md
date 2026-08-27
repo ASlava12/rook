@@ -40,6 +40,23 @@ Add a row when you implement something after reading a reference. Add it to
 moved; what follows is what was done with it, so a dismissal is a decision rather
 than an omission.
 
+**2026-08-27 (ninth pass)** — codex and goose advanced.
+
+- goose `caf5951` *enforce permission policy for app tool calls* — **does not
+  port, and found ours.** They had a path where tool calls skipped the policy;
+  here `write_skill` was one. It is implemented by the loop rather than the
+  toolbox, and the loop handled every pseudo-tool before the gate — so in
+  `readonly` mode, whose whole promise is that nothing changes the machine, the
+  agent still wrote files into `~/.rook/skills` and captured them into the
+  store. Probed and confirmed before changing anything: `write_file` refused,
+  `write_skill` did not. The gate now takes a supplied risk so a pseudo-tool
+  that changes the machine answers to it too.
+- codex `81e1800` *scope extension capabilities to invocation lifetimes* —
+  **already the shape here**: an approval granted "for the run" lives on the
+  policy the front end owns, and a sub-agent inherits it rather than widening it.
+- codex `5af6979`, `307ce6c`, `eed1dee` — **not applicable**: their exec-server
+  test pin, Guardian analytics, and gRPC trace propagation.
+
 **2026-08-27 (eighth pass)** — hermes advanced 12 commits.
 
 - hermes `3b672a68` *delete-path drops every scope of a removed id* — **does not
