@@ -11,7 +11,9 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use crate::stream::{Delta, ResponseStream, ToolCallBuffer};
-use crate::{LlmError, Message, Provider, Request, Response, Result, Role, StopReason, ToolCall, Usage};
+use crate::{
+    LlmError, Message, Provider, Request, Response, Result, Role, StopReason, ToolCall, Usage, truncate,
+};
 
 /// A frame this large is a broken or hostile endpoint, not a long answer: the
 /// dialect sends one small JSON object per frame.
@@ -323,17 +325,6 @@ fn finish_reason(raw: &str) -> StopReason {
         "stop" => StopReason::EndTurn,
         _ => StopReason::Other,
     }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        return s.to_string();
-    }
-    let mut end = max;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", &s[..end])
 }
 
 #[derive(Serialize)]

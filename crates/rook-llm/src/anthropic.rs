@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::stream::{Delta, ResponseStream};
 use crate::{
     LlmError, Message, ModelInfo, Provider, Request, Response, Result, Role, StopReason, ToolCall, Usage,
+    truncate,
 };
 
 const API_VERSION: &str = "2023-06-01";
@@ -424,14 +425,6 @@ fn text_block(text: &str, cache: bool) -> serde_json::Value {
 
 fn ephemeral() -> serde_json::Value {
     serde_json::json!({ "type": "ephemeral" })
-}
-
-fn truncate(text: &str, max: usize) -> String {
-    if text.len() <= max {
-        return text.to_string();
-    }
-    let cut = (0..=max).rev().find(|i| text.is_char_boundary(*i)).unwrap_or(0);
-    format!("{}…", &text[..cut])
 }
 
 #[derive(Deserialize)]

@@ -301,6 +301,13 @@ what unblocks the most.
   before checking containment, so a link inside the workspace pointing out of it
   is refused rather than followed, and the refusal says where the path really
   led. Widened only by `sandbox.allow_outside_workspace`. 6 tests.
+- **Google's own dialect** — reachable through the OpenAI shim, but not fully:
+  `generateContent` has two roles and no system one, carries the system prompt
+  beside the conversation, makes tool calls and their results parts of a message
+  rather than a parallel array, sends a result back inside a *user* turn, and
+  gives a call no id to pair a result with. It also reports `STOP` for a turn
+  that ended in a tool call, so the calls are what says the turn is not over.
+  8 tests against the wire.
 - **A language server that is there and does not work** — detection asked
   whether the command was on `PATH`, and rustup installs a `rust-analyzer` shim
   whether or not the component is: `doctor` reported it, then every request
@@ -371,9 +378,6 @@ repository does not have.
 **Agent Plugins 1.0 packaging.** `plugin.json` bundling skills and MCP servers.
 Defers to Agent Skills for the skill format, so skills authored today package
 unchanged.
-
-**A Google native provider.** The OpenAI dialect covers a great deal but not
-`generateContent`'s own shape.
 
 **Real sandboxing.** Today's boundary is a workspace path check and pattern
 rules ([ADR-0009](adr/0009-ask-before-acting.md)) — text matching, not containment.

@@ -11,6 +11,7 @@
 //! contain a branch on which vendor is answering.
 
 pub mod anthropic;
+pub mod google;
 pub mod openai;
 pub mod stream;
 pub mod types;
@@ -75,6 +76,33 @@ fn advice(endpoint: &str) -> String {
             .to_string(),
         false => "Check the network, and that the provider's API key is set.".to_string(),
     }
+}
+
+/// The first of `names` that is set to something. Empty counts as unset: an
+/// exported-but-blank variable is the usual way this goes wrong, and a 401 does
+/// not say which.
+fn required_key(names: &[&str]) -> Result<String> {
+    names.iter().find_map(|name| std::env::var(name).ok().filter(|k| !k.trim().is_empty())).ok_or_else(|| {
+        let (first, rest) = names.split_first().unwrap_or((&"", &[]));
+        let alternatives = match rest {
+            [] => String::new(),
+            more => format!(" (or {})", more.join(", ")),
+        };
+        LlmError::Other(format!(
+            "{first}{alternatives} is not set. Export it, or set `[agent] model` to a \
+                 local provider such as `ollama/…`."
+        ))
+    })
+}
+
+/// A prefix of `text`, cut on a character boundary. Provider bodies reach the
+/// user in error messages, and a body can be a megabyte of HTML.
+pub(crate) fn truncate(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_string();
+    }
+    let cut = (0..=max).rev().find(|i| text.is_char_boundary(*i)).unwrap_or(0);
+    format!("{}…", &text[..cut])
 }
 
 /// The innermost cause. An HTTP client's own message is the url again and never
@@ -177,17 +205,7 @@ pub fn from_spec_with(
             openai::Config::new(env_or("LMSTUDIO_HOST", "http://127.0.0.1:1234") + "/v1", None, 32_768)
         }
         "anthropic" | "claude" => {
-            // Empty counts as unset: an exported-but-blank variable is the
-            // usual way this goes wrong, and a 401 does not say which.
-            let key = std::env::var("ANTHROPIC_API_KEY").ok().filter(|k| !k.trim().is_empty()).ok_or_else(
-                || {
-                    LlmError::Other(
-                        "ANTHROPIC_API_KEY is not set. Export it, or set `[agent] model` to a \
-                         local provider such as `ollama/…`."
-                            .into(),
-                    )
-                },
-            )?;
+            let key = required_key(&["ANTHROPIC_API_KEY"])?;
             let base = env_or("ANTHROPIC_BASE_URL", "https://api.anthropic.com");
             let mut config = anthropic::Config::new(base, key, model);
             config.stream_idle_timeout = stream_idle;
@@ -195,6 +213,16 @@ pub fn from_spec_with(
                 config.context_window = window;
             }
             return Ok(Box::new(anthropic::Anthropic::new(spec, model, config)?));
+        }
+        "google" | "gemini" => {
+            let key = required_key(&["GEMINI_API_KEY", "GOOGLE_API_KEY"])?;
+            let base = env_or("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta");
+            let mut config = google::Config::new(base, key, model);
+            config.stream_idle_timeout = stream_idle;
+            if let Some(window) = context_window {
+                config.context_window = window;
+            }
+            return Ok(Box::new(google::Google::new(spec, model, config)?));
         }
         "openai" => openai::Config::new(
             env_or("OPENAI_BASE_URL", "https://api.openai.com/v1"),
