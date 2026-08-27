@@ -59,7 +59,7 @@ git clone https://github.com/ASlava12/rook && cd rook
 cargo xtask dist               # builds, packages the built-in skills, prints the sizes
 ```
 
-Two binaries, no runtime and no shared libraries — 5.3 MiB and 5.0 MiB at the
+Two binaries, no runtime and no shared libraries — 5.4 MiB and 5.3 MiB at the
 time of writing, which `dist` prints so the number here can be checked rather
 than believed.
 
