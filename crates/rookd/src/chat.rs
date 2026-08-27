@@ -12,7 +12,7 @@ use axum::response::Response;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 
-use rook_core::agent::AgentLoop;
+use rook_core::agent::{AgentLoop, Progress};
 use rook_llm::Delta;
 use rook_proto::AskQuestion;
 use rook_proto::{ApprovalDecision, ChatEvent, ClientMessage};
@@ -151,12 +151,13 @@ async fn turn(
 
     let emit = outbound.clone();
     let result = agent
-        .run_with(&prompt, |delta| {
-            let event = match delta {
-                Delta::Text(text) => ChatEvent::Text { text: text.clone() },
-                Delta::Reasoning(text) => ChatEvent::Reasoning { text: text.clone() },
-                Delta::ToolCall(call) => ChatEvent::Tool { name: call.name.clone() },
-                Delta::Done { .. } => return,
+        .run_with(&prompt, |progress| {
+            let event = match progress {
+                Progress::Delta(Delta::Text(text)) => ChatEvent::Text { text: text.clone() },
+                Progress::Delta(Delta::Reasoning(text)) => ChatEvent::Reasoning { text: text.clone() },
+                Progress::Delta(Delta::ToolCall(call)) => ChatEvent::Tool { name: call.name.clone() },
+                Progress::ToolDone { name, failed } => ChatEvent::ToolDone { name: name.to_string(), failed },
+                Progress::Delta(Delta::Done { .. }) => return,
             };
             let _ = emit.send(event);
         })

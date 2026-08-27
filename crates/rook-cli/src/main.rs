@@ -13,6 +13,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
 use crate::source::Source;
+use rook_core::agent::Progress;
 use rook_core::{AGENT_VERSION, Rook};
 use rook_skills::SkillCard;
 use rook_store::{Kind, ObjectId};
@@ -493,13 +494,17 @@ fn cmd_run(
         }
         let mut out = std::io::stdout();
         let outcome = agent
-            .run_with(&prompt, |delta| match delta {
-                rook_llm::Delta::Text(text) => {
+            .run_with(&prompt, |progress| match progress {
+                Progress::Delta(rook_llm::Delta::Text(text)) => {
                     let _ = write!(out, "{text}");
                     let _ = out.flush();
                 }
-                rook_llm::Delta::ToolCall(call) => {
-                    let _ = writeln!(out, "\n  · {}({})", call.name, compact(&call.arguments));
+                Progress::Delta(rook_llm::Delta::ToolCall(call)) => {
+                    let _ = write!(out, "\n  · {}({})", call.name, compact(&call.arguments));
+                    let _ = out.flush();
+                }
+                Progress::ToolDone { failed, .. } => {
+                    let _ = writeln!(out, "{}", if failed { " ✗" } else { " ✓" });
                     let _ = out.flush();
                 }
                 _ => {}

@@ -54,6 +54,16 @@ pub fn policy_for(rook: &Rook) -> std::sync::Arc<Policy> {
     std::sync::Arc::new(policy)
 }
 
+/// What a turn reports as it goes.
+///
+/// Stream deltas, and what only the loop knows: the provider's stream ends when
+/// the model stops asking for a tool, not when the tool has run. A front end
+/// with only the deltas shows every call as still working.
+pub enum Progress<'a> {
+    Delta(&'a Delta),
+    ToolDone { name: &'a str, failed: bool },
+}
+
 /// Pseudo-tools: implemented by the loop rather than the toolbox, because they
 /// need the agent's own state.
 pub const LOAD_SKILL: &str = "load_skill";
@@ -500,10 +510,14 @@ impl<'a> AgentLoop<'a> {
 
     /// Run a turn, reporting each fragment as it arrives.
     ///
-    /// `on_delta` sees text as the model produces it and tool calls once they
+    /// `on_progress` sees text as the model produces it and tool calls once they
     /// are complete; the turn's bookkeeping is unaffected by whether anyone is
     /// watching.
-    pub async fn run_with<F: FnMut(&Delta)>(&mut self, prompt: &str, mut on_delta: F) -> Result<TurnOutcome> {
+    pub async fn run_with<F: FnMut(Progress<'_>)>(
+        &mut self,
+        prompt: &str,
+        mut on_progress: F,
+    ) -> Result<TurnOutcome> {
         self.run_session_hooks().await;
         let gate = self
             .hooks
@@ -562,7 +576,7 @@ impl<'a> AgentLoop<'a> {
             let mut assembler = Assembler::default();
             while let Some(delta) = stream.next().await {
                 let delta = delta.map_err(|e| CoreError::Other(e.to_string()))?;
-                on_delta(&delta);
+                on_progress(Progress::Delta(&delta));
                 assembler.push(delta);
             }
             if !assembler.reasoning().is_empty() {
@@ -596,7 +610,8 @@ impl<'a> AgentLoop<'a> {
 
             messages.push(response.message.clone());
             for call in &response.message.tool_calls {
-                let result = self.dispatch(call, &mut outcome).await;
+                let (result, failed) = self.dispatch(call, &mut outcome).await;
+                on_progress(Progress::ToolDone { name: &call.name, failed });
                 messages.push(Message::tool_result(&call.id, result));
             }
         }
@@ -606,7 +621,9 @@ impl<'a> AgentLoop<'a> {
         Ok(outcome)
     }
 
-    async fn dispatch(&self, call: &rook_llm::ToolCall, outcome: &mut TurnOutcome) -> String {
+    /// The text the model sees, and whether the call failed — which the outcome
+    /// knows and the text only hints at.
+    async fn dispatch(&self, call: &rook_llm::ToolCall, outcome: &mut TurnOutcome) -> (String, bool) {
         self.rook.log(self.session, EventKind::ToolCall, &call.name, &call.arguments.to_string()).ok();
 
         outcome.tools_called.push(call.name.clone());
@@ -614,14 +631,14 @@ impl<'a> AgentLoop<'a> {
         if call.name == DELEGATE {
             let text = self.delegate(&call.arguments, outcome).await;
             self.rook.log(self.session, EventKind::ToolResult, DELEGATE, &text).ok();
-            return text;
+            return (text, false);
         }
 
         match call.name.as_str() {
             REMEMBER | FORGET | RECALL => {
                 let text = self.memory_tool(&call.name, &call.arguments, outcome);
                 self.rook.log(self.session, EventKind::ToolResult, &call.name, &text).ok();
-                return text;
+                return (text, false);
             }
             _ => {}
         }
@@ -634,7 +651,7 @@ impl<'a> AgentLoop<'a> {
                     self.rook
                         .log(self.session, EventKind::SkillLoaded, &resolved.skill.id(), &resolved.body)
                         .ok();
-                    resolved.body
+                    (resolved.body, false)
                 }
                 // The reason matters: "needs docker >=27" is actionable, "not
                 // found" sends the model looking for a typo that is not there.
@@ -646,7 +663,7 @@ impl<'a> AgentLoop<'a> {
                         message.push_str(&format!("\n- {}: {}", card.name, card.description));
                     }
                     self.rook.log(self.session, EventKind::Error, LOAD_SKILL, &message).ok();
-                    message
+                    (message, true)
                 }
             };
         }
@@ -659,7 +676,7 @@ impl<'a> AgentLoop<'a> {
             let risk = rook_tools::policy::Risk::Write(vec![target.display().to_string()]);
             if let Some(refusal) = self.gate_risk(WRITE_SKILL, &call.arguments, risk).await {
                 self.rook.log(self.session, EventKind::Error, WRITE_SKILL, &refusal).ok();
-                return refusal;
+                return (refusal, true);
             }
             return match serde_json::from_value(call.arguments.clone())
                 .map_err(|e| CoreError::Other(format!("{WRITE_SKILL}: {e}")))
@@ -673,19 +690,19 @@ impl<'a> AgentLoop<'a> {
                     // is a record older builds cannot decode, and the log is
                     // just as readable with the fact in the label.
                     self.rook.log(self.session, EventKind::Note, WRITE_SKILL, &message).ok();
-                    message
+                    (message, false)
                 }
                 Err(e) => {
                     let message = format!("could not write the skill: {e}");
                     self.rook.log(self.session, EventKind::Error, WRITE_SKILL, &message).ok();
-                    message
+                    (message, true)
                 }
             };
         }
 
         if let Some(refusal) = self.gate(call).await {
             self.rook.log(self.session, EventKind::ToolResult, &call.name, &refusal).ok();
-            return refusal;
+            return (refusal, true);
         }
 
         self.checkpoint_before(call);
@@ -698,7 +715,7 @@ impl<'a> AgentLoop<'a> {
             None => outcome.content,
         };
         self.rook.log(self.session, EventKind::ToolResult, &call.name, &text).ok();
-        text
+        (text, outcome.is_error)
     }
 
     /// `post_tool` hooks, whose output the model sees appended to the result.

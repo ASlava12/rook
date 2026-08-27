@@ -118,6 +118,11 @@ what unblocks the most.
   a skill scoped away and explained by `skills why`, capture and rollback, a
   broken config that fails loudly, and the daemon path where a read goes over
   HTTP and a write says where the lock is.
+- **A tool call that visibly finishes** — the provider's stream ends when the
+  model stops asking for a tool, not when the tool has run, so every front end
+  showed calls starting and none finishing. ACP had the `tool_call_update`
+  message written and never sent. A turn now reports completion and whether it
+  failed, and the editor, the browser, the TUI and both CLI paths all show it.
 - **The editor's buffers, not the disk** — under ACP, a client that advertises
   `fs.readTextFile` now serves every file read and write, so the agent sees what
   the user is looking at rather than the last saved version and does not edit

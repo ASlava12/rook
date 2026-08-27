@@ -39,3 +39,13 @@ fn a_question_with_no_choices_is_free_text() {
     let asked: AskQuestion = serde_json::from_str(r#"{"question":"Why?"}"#).unwrap();
     assert!(asked.choices.is_empty() && !asked.multi);
 }
+
+#[test]
+fn a_finished_tool_call_is_reported_as_its_own_event() {
+    let event = ChatEvent::ToolDone { name: "read_file".into(), failed: false };
+    assert_eq!(
+        serde_json::to_value(&event).unwrap(),
+        serde_json::json!({ "type": "tool_done", "name": "read_file", "failed": false }),
+        "the browser branches on this tag by hand"
+    );
+}

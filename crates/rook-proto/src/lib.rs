@@ -152,6 +152,11 @@ pub enum ChatEvent {
     Tool {
         name: String,
     },
+    /// The call named by the most recent [`ChatEvent::Tool`] has finished.
+    ToolDone {
+        name: String,
+        failed: bool,
+    },
     /// The turn is blocked until an [`ClientMessage::Approval`] with this id.
     Approval {
         id: String,

@@ -1862,3 +1862,37 @@ async fn a_skill_is_still_written_when_the_policy_allows_it() {
     assert_eq!(outcome.skills_written, ["allowed"], "gating it must not disable it");
     assert_eq!(rook.skills().versions_of("allowed").len(), 1, "and it reached the disk");
 }
+
+#[tokio::test]
+async fn a_turn_reports_a_tool_finishing_as_well_as_starting() {
+    let f = fixture();
+    std::fs::write(f.workspace.path().join("a.txt"), "x\n").unwrap();
+    let session = f.rook.start_session("progress").unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("read_file", serde_json::json!({"path": "a.txt"})),
+        call("read_file", serde_json::json!({"path": "missing.txt"})),
+        reply("done"),
+    ]));
+
+    let mut agent = AgentLoop::new(&f.rook, provider, session);
+    agent.allow_everything_not_denied();
+    let mut seen: Vec<String> = Vec::new();
+    agent
+        .run_with("read them", |progress| match progress {
+            rook_core::agent::Progress::Delta(rook_llm::Delta::ToolCall(c)) => {
+                seen.push(format!("start {}", c.name))
+            }
+            rook_core::agent::Progress::ToolDone { name, failed } => {
+                seen.push(format!("done {name} failed={failed}"))
+            }
+            _ => {}
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        seen,
+        ["start read_file", "done read_file failed=false", "start read_file", "done read_file failed=true",],
+        "every call is followed by the report that it finished, and by how"
+    );
+}

@@ -173,7 +173,8 @@ function connect() {
     if (e.type === 'started') { state.chat.session = e.session; }
     else if (e.type === 'text') say('text', e.text);
     else if (e.type === 'reasoning') say('think', e.text);
-    else if (e.type === 'tool') say('tool', `\n  · ${e.name}\n`);
+    else if (e.type === 'tool') say('tool', `\n  · ${e.name}`);
+    else if (e.type === 'tool_done') say('tool', e.failed ? ' ✗\n' : ' ✓\n');
     else if (e.type === 'error') { say('err', `\n${e.message}\n`); done(); }
     else if (e.type === 'cancelled') { say('stat', '\n[stopped]\n\n'); done(); }
     else if (e.type === 'approval') askApproval(e);

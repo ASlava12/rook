@@ -17,7 +17,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph, Tabs, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 
-use rook_core::agent::AgentLoop;
+use rook_core::agent::{AgentLoop, Progress};
 use rook_core::{Rook, TranscriptEntry};
 use rook_llm::Delta;
 use rook_skills::SkillCard;
@@ -47,6 +47,7 @@ enum TurnEvent {
     Text(String),
     Reasoning(String),
     Tool(String),
+    ToolDone(String, bool),
     Approval(ApprovalRequest),
     Ask(AskRequest),
     Done(String),
@@ -278,6 +279,9 @@ impl App {
                 TurnEvent::Text(text) => self.chat.push("text", &text),
                 TurnEvent::Reasoning(text) => self.chat.push("think", &text),
                 TurnEvent::Tool(name) => self.chat.push("tool", &format!("  · {name}")),
+                TurnEvent::ToolDone(name, failed) => {
+                    self.chat.push("tool", &format!("  · {name} {}", if failed { "✗" } else { "✓" }))
+                }
                 TurnEvent::Approval(request) => self.chat.pending = Some(request),
                 TurnEvent::Ask(request) => {
                     self.chat.asking = Some(Asking {
@@ -441,12 +445,13 @@ impl App {
 
             let emit = to_loop.clone();
             let result = agent
-                .run_with(&prompt, |delta| {
-                    let event = match delta {
-                        Delta::Text(text) => TurnEvent::Text(text.clone()),
-                        Delta::Reasoning(text) => TurnEvent::Reasoning(text.clone()),
-                        Delta::ToolCall(call) => TurnEvent::Tool(call.name.clone()),
-                        Delta::Done { .. } => return,
+                .run_with(&prompt, |progress| {
+                    let event = match progress {
+                        Progress::Delta(Delta::Text(text)) => TurnEvent::Text(text.clone()),
+                        Progress::Delta(Delta::Reasoning(text)) => TurnEvent::Reasoning(text.clone()),
+                        Progress::Delta(Delta::ToolCall(call)) => TurnEvent::Tool(call.name.clone()),
+                        Progress::ToolDone { name, failed } => TurnEvent::ToolDone(name.to_string(), failed),
+                        Progress::Delta(Delta::Done { .. }) => return,
                     };
                     let _ = emit.send(event);
                 })

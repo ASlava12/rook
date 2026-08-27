@@ -25,7 +25,7 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufRea
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 use rook_core::Rook;
-use rook_core::agent::AgentLoop;
+use rook_core::agent::{AgentLoop, Progress};
 use rook_llm::Delta;
 use rook_tools::ask::{Answer, Question};
 use rook_tools::policy::{Approval, Approver, Risk};
@@ -266,19 +266,32 @@ async fn prompt(
         }));
     }
 
-    let calls = AtomicU64::new(0);
+    // Ids are handed out in call order and consumed in the same order, which is
+    // how a completion is matched to the call it finishes: the loop dispatches
+    // a step's calls in the order the model asked for them.
+    let started = AtomicU64::new(0);
+    let finished = AtomicU64::new(0);
     let result = agent
-        .run_with(&text, |delta| {
-            let update = match delta {
-                Delta::Text(text) => protocol::agent_message_chunk(&request.session_id, text),
-                Delta::Reasoning(text) => protocol::agent_thought_chunk(&request.session_id, text),
-                Delta::ToolCall(call) => protocol::tool_call(
+        .run_with(&text, |progress| {
+            let update = match progress {
+                Progress::Delta(Delta::Text(text)) => {
+                    protocol::agent_message_chunk(&request.session_id, text)
+                }
+                Progress::Delta(Delta::Reasoning(text)) => {
+                    protocol::agent_thought_chunk(&request.session_id, text)
+                }
+                Progress::Delta(Delta::ToolCall(call)) => protocol::tool_call(
                     &request.session_id,
-                    &format!("call_{}", calls.fetch_add(1, Ordering::Relaxed)),
+                    &format!("call_{}", started.fetch_add(1, Ordering::Relaxed)),
                     &call.name,
                     protocol::tool_kind(&call.name),
                 ),
-                Delta::Done { .. } => return,
+                Progress::ToolDone { failed, .. } => protocol::tool_call_done(
+                    &request.session_id,
+                    &format!("call_{}", finished.fetch_add(1, Ordering::Relaxed)),
+                    failed,
+                ),
+                Progress::Delta(Delta::Done { .. }) => return,
             };
             peer.notify("session/update", update);
         })

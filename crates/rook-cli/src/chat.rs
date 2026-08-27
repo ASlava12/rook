@@ -7,7 +7,7 @@
 use std::io::Write;
 
 use anyhow::{Context, Result};
-use rook_core::agent::AgentLoop;
+use rook_core::agent::{AgentLoop, Progress};
 use rook_core::{Rook, TranscriptEntry};
 use rook_llm::Delta;
 use rook_store::EventKind;
@@ -178,13 +178,17 @@ async fn turn(
     }
 
     let mut out = std::io::stdout();
-    let running = agent.run_with(prompt, |delta| match delta {
-        Delta::Text(text) => {
+    let running = agent.run_with(prompt, |progress| match progress {
+        Progress::Delta(Delta::Text(text)) => {
             let _ = write!(out, "{text}");
             let _ = out.flush();
         }
-        Delta::ToolCall(call) => {
-            let _ = writeln!(out, "\n  · {}", call.name);
+        Progress::Delta(Delta::ToolCall(call)) => {
+            let _ = write!(out, "\n  · {}", call.name);
+            let _ = out.flush();
+        }
+        Progress::ToolDone { failed, .. } => {
+            let _ = writeln!(out, "{}", if failed { " ✗" } else { " ✓" });
             let _ = out.flush();
         }
         _ => {}
