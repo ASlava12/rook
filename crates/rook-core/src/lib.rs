@@ -16,6 +16,7 @@ pub mod memory;
 pub mod paths;
 pub mod search;
 pub mod service;
+pub mod telemetry;
 
 pub use config::{Config, ConfigError};
 pub use error::{CoreError, Result};

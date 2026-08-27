@@ -1700,3 +1700,57 @@ fn a_lazily_advertised_tool_can_still_be_called() {
         }
     }
 }
+
+/// Every disclosure flag must change what goes on the wire. `lazy_tools` and
+/// `lazy_skills` both shipped as fields nothing read — a config knob that does
+/// nothing is worse than one that is missing, because it is documented.
+fn loop_for(f: &Fixture) -> AgentLoop<'_> {
+    let session = f.rook.start_session("default").unwrap();
+    AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(vec![reply("ok")])), session)
+}
+
+fn with_config(f: &Fixture, name: &str, config: Config) -> Rook {
+    let (skills, _) = SkillIndex::discover(&[(f._skill_dir.path().to_path_buf(), SkillSource::User)]);
+    Rook::from_parts(
+        Store::open(f._store_dir.path().join(name)).unwrap(),
+        config,
+        f.rook.env.clone(),
+        skills,
+        PathBuf::from(f.workspace.path()),
+    )
+}
+
+#[test]
+fn turning_off_lazy_skills_puts_the_bodies_in_the_prompt() {
+    let f = fixture();
+    let mut config = Config::default();
+    config.agent.lazy_skills = false;
+    let rook = with_config(&f, "eager-skills", config);
+    let session = rook.start_session("s").unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![reply("ok")]));
+
+    let eager = AgentLoop::new(&rook, provider, session).system_prompt();
+    let lazy = loop_for(&f).system_prompt();
+
+    assert!(eager.contains("Always greet in the user's own language"), "inline: {eager}");
+    assert!(!lazy.contains("Always greet"), "and lazily it must not be");
+    assert!(lazy.contains("greeting (1.0.0)"), "lazily it is a card");
+}
+
+#[test]
+fn turning_off_lazy_tools_restores_the_argument_descriptions() {
+    let f = fixture();
+    let mut config = Config::default();
+    config.agent.lazy_tools = false;
+    let rook = with_config(&f, "eager-tools", config);
+    let session = rook.start_session("s").unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![reply("ok")]));
+
+    let eager = AgentLoop::new(&rook, provider, session).tool_specs();
+    let read = |specs: &[rook_llm::ToolSpec]| {
+        specs.iter().find(|s| s.name == "read_file").unwrap().parameters.to_string()
+    };
+
+    assert!(read(&eager).contains("description"), "eager schemas carry their guidance");
+    assert!(!read(&loop_for(&f).tool_specs()).contains("description"), "lazy ones do not");
+}

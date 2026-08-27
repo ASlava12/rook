@@ -12,6 +12,7 @@ mod web;
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -43,12 +44,9 @@ pub struct AppState {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    tracing_subscriber::fmt()
-        .with_env_filter(std::env::var("ROOK_LOG").unwrap_or_else(|_| "info".into()))
-        .init();
-
     let rook = Rook::open(args.workspace).context("opening the store")?;
     let config = rook.config.clone();
+    rook_core::telemetry::init(&config.telemetry);
     let port = args.port.unwrap_or(config.server.port);
     let bind: IpAddr =
         args.bind.unwrap_or(config.server.bind.clone()).parse().context("--bind must be an IP address")?;
@@ -64,6 +62,8 @@ async fn main() -> Result<()> {
     let state = Arc::new(AppState { rook: Arc::new(RwLock::new(rook)), started: std::time::Instant::now() });
     let app = api::router(state.clone()).merge(web::router());
 
+    let maintenance = tokio::spawn(maintain(state.clone(), config.storage.maintenance_interval_hours));
+
     let addr = SocketAddr::new(bind, port);
     let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("binding {addr}"))?;
     tracing::info!("rookd listening on http://{addr}");
@@ -71,7 +71,31 @@ async fn main() -> Result<()> {
     println!("rook API:     http://{addr}/api/health");
 
     axum::serve(listener, app).with_graceful_shutdown(shutdown()).await.context("serving")?;
+    maintenance.abort();
     Ok(())
+}
+
+/// Prune, collect and enforce the size budget on a schedule, because a daemon
+/// left running is exactly where an unbounded store grows unnoticed.
+///
+/// Takes the write lock for as long as it runs, so a turn started meanwhile
+/// waits. That is the single-writer store showing through, and it is why this
+/// is hourly at its most frequent rather than continuous.
+async fn maintain(state: Arc<AppState>, every_hours: u32) {
+    let period = Duration::from_secs(u64::from(every_hours.max(1)) * 3600);
+    loop {
+        match state.rook.write().await.maintenance(false) {
+            Ok(report) => tracing::info!(
+                sessions = report.prune.sessions_deleted,
+                collected = report.gc.collected,
+                freed = report.gc.bytes_freed,
+                over_budget_by = report.over_budget_by,
+                "maintenance"
+            ),
+            Err(e) => tracing::warn!("maintenance failed: {e}"),
+        }
+        tokio::time::sleep(period).await;
+    }
 }
 
 async fn shutdown() {

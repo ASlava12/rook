@@ -103,6 +103,13 @@ what unblocks the most.
   work out, scoped by `requires` to where it actually holds, validated by reading
   it back, and captured as a version so a rewrite keeps the old one. The index
   reloads in place, so the next turn's catalog has it without a restart. 7 tests.
+- **Logs that go somewhere and stop growing** — both binaries share one setup:
+  stderr and `$ROOK_HOME/logs/rook.log`, at `telemetry.log_level` unless
+  `ROOK_LOG` overrides it, rotated once at `max_log_bytes` so the logs cost at
+  most twice it. 3 tests.
+- **Scheduled maintenance** — `rookd` runs prune, collect and the size budget on
+  `storage.maintenance_interval_hours`, which until now was a documented setting
+  that did nothing.
 - **A bounded skill catalog** — capped by `agent.max_skill_cards`; what does not
   fit is counted rather than hidden, and `load_skill` answers an unknown name
   with the skills that match it.

@@ -306,10 +306,9 @@ enum CheckpointCmd {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    tracing_subscriber::fmt()
-        .with_env_filter(std::env::var("ROOK_LOG").unwrap_or_else(|_| "warn".into()))
-        .with_writer(std::io::stderr)
-        .init();
+    // Defaults if the config is unreadable: logging must not be what reports a
+    // broken config, and the command about to run will report it properly.
+    rook_core::telemetry::init(&rook_core::Config::load().unwrap_or_default().telemetry);
 
     match cli.command {
         // Bare `rook` opens a conversation: talking to the agent is the point,

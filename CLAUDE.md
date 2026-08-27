@@ -77,6 +77,13 @@ forgotten.
 exposed by the CLI, the API and the TUI. A feature reachable from one front end
 and not the others is a bug — the approver is shared for exactly this reason.
 
+**A config field nothing reads is a lie, not a stub.** Four shipped that way —
+`sandbox.allow`, `allow_outside_workspace`, `lazy_skills`, and
+`storage.maintenance_interval_hours`, which `docs/storage.md` described as
+working. `every_config_field_is_read_somewhere` now fails the build for a field
+mentioned fewer than three times: its declaration, its default, and somebody
+using it.
+
 **A tool description opens with a sentence that stands alone.** Under lazy
 loading only that first sentence is advertised; the rest is guidance on writing
 the arguments, which only matters once the model has decided to call the tool.

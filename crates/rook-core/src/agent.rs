@@ -205,23 +205,52 @@ impl<'a> AgentLoop<'a> {
         let cards = self.rook.catalog();
         let applicable: Vec<_> = cards.iter().filter(|c| c.applicable).collect();
         if !applicable.is_empty() {
-            let cap = self.rook.config.agent.max_skill_cards;
-            s.push_str(&format!(
-                "\n## Skills\nCall `{LOAD_SKILL}` with a name to read its instructions before using it.\n"
-            ));
-            for c in applicable.iter().take(cap) {
-                s.push_str(&format!("- {} ({}): {}\n", c.name, c.version, c.description));
-            }
+            s.push_str("\n## Skills\n");
+            let listed = if self.rook.config.agent.lazy_skills {
+                self.skill_cards(&mut s, &applicable)
+            } else {
+                self.skill_bodies(&mut s, &applicable)
+            };
             // Named rather than silently dropped: a model that cannot see a
             // skill and is not told any exist will not go looking for one.
-            if let Some(omitted) = applicable.len().checked_sub(cap).filter(|n| *n > 0) {
+            if let Some(omitted) = applicable.len().checked_sub(listed).filter(|n| *n > 0) {
                 s.push_str(&format!(
-                    "…and {omitted} more not listed. `{LOAD_SKILL}` answers an unknown name with \
+                    "\n…and {omitted} more not shown. `{LOAD_SKILL}` answers an unknown name with \
                      what it does have, so describe what you need.\n"
                 ));
             }
         }
         s
+    }
+
+    fn skill_cards(&self, s: &mut String, applicable: &[&rook_skills::SkillCard]) -> usize {
+        s.push_str(&format!("Call `{LOAD_SKILL}` with a name to read its instructions before using it.\n"));
+        let cap = self.rook.config.agent.max_skill_cards;
+        for c in applicable.iter().take(cap) {
+            s.push_str(&format!("- {} ({}): {}\n", c.name, c.version, c.description));
+        }
+        applicable.len().min(cap)
+    }
+
+    /// Every applicable skill's instructions inline, for a model too small to be
+    /// trusted to call `load_skill` for itself.
+    ///
+    /// Bounded by a share of the context window rather than a count: bodies vary
+    /// from a paragraph to several pages, and a library that filled the window
+    /// would leave no room for the work.
+    fn skill_bodies(&self, s: &mut String, applicable: &[&rook_skills::SkillCard]) -> usize {
+        let mut left = self.budget.window / 4;
+        let mut shown = 0;
+        for card in applicable {
+            let Ok(resolved) = self.rook.skills().resolve(&card.name, &self.rook.env) else { continue };
+            if card.body_tokens > left {
+                break;
+            }
+            left -= card.body_tokens;
+            shown += 1;
+            s.push_str(&format!("\n### {} ({})\n{}\n", card.name, card.version, resolved.body.trim()));
+        }
+        shown
     }
 
     /// Rebuild the conversation from the session log, starting after the most

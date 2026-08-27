@@ -224,6 +224,11 @@ allow_outside_workspace = false    # file tools stay inside, symlinks included
 `rook --yes` skips the prompts for one run. Unattended runs with no `--yes`
 refuse rather than improvise, and say what would have made it possible.
 
+Logs go to stderr and to `$ROOK_HOME/logs/rook.log`, at `telemetry.log_level`
+unless `ROOK_LOG` says otherwise, rotated once at `telemetry.max_log_bytes` so
+they cost at most twice it. Nothing is uploaded anywhere; `telemetry.upload`
+exists so that answer is findable rather than assumed.
+
 File tools are bounded by the workspace, and the boundary is where a path leads
 rather than how it is spelled: a symlink inside the workspace that points out of
 it is refused, and the refusal names where it really went.
