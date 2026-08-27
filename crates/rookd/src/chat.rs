@@ -175,6 +175,9 @@ async fn turn(
                     ChatEvent::Reasoning { text: format!("\n  [{done}/{total}] {task}") }
                 }
                 Progress::ToolDone { name, failed } => ChatEvent::ToolDone { name: name.to_string(), failed },
+                Progress::Spent { input, output, cached } => {
+                    ChatEvent::Spent { input_tokens: input, output_tokens: output, cached_tokens: cached }
+                }
                 Progress::Delta(Delta::Done { .. }) => return,
             };
             let _ = emit.send(event);

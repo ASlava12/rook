@@ -115,6 +115,14 @@ pub enum Progress<'a> {
         done: usize,
         total: usize,
     },
+    /// What the turn has spent, after each reply from the model. A turn that
+    /// runs for minutes across a dozen steps otherwise shows no cost at all
+    /// until it is over and the number can no longer change a decision.
+    Spent {
+        input: u32,
+        output: u32,
+        cached: u32,
+    },
 }
 
 /// Answer a tool call the log never answered.
@@ -674,6 +682,11 @@ impl<'a> AgentLoop<'a> {
             outcome.input_tokens += response.usage.input_tokens;
             outcome.output_tokens += response.usage.output_tokens;
             outcome.cached_tokens += response.usage.cache_read_tokens;
+            on_progress(Progress::Spent {
+                input: outcome.input_tokens,
+                output: outcome.output_tokens,
+                cached: outcome.cached_tokens,
+            });
 
             if !response.message.content.is_empty() {
                 self.rook.store.append_event(

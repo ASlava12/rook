@@ -268,3 +268,16 @@ fn an_unknown_slash_command_in_the_tui_says_so() {
     assert!(screen.contains("unknown command"), "{screen}");
     assert!(!screen.contains("cannot reach"), "it must not have gone to the provider:\n{screen}");
 }
+
+/// Nothing is spent before a turn runs, and the footer has to say the settings
+/// without a stray separator where the total will go.
+#[test]
+fn the_footer_shows_no_running_total_before_there_is_one() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let mut pty = tui(home.path(), workspace.path());
+
+    let screen = pty.screen(100, 30).join("\n");
+    assert!(screen.contains("ask/high"), "{screen}");
+    assert!(!screen.contains(" in / "), "a total nobody has spent yet:\n{screen}");
+}

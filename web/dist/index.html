@@ -133,7 +133,7 @@ const api = async (path, body) => {
 };
 
 const state = { tab: 'chat', session: null, skill: null, query: '',
-  chat: { log: [], session: null, busy: false, settings: null } };
+  chat: { log: [], session: null, busy: false, settings: null, spent: null } };
 
 async function boot() {
   try {
@@ -180,12 +180,13 @@ function connect() {
   socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/chat`);
   socket.onmessage = (event) => {
     const e = JSON.parse(event.data);
-    if (e.type === 'started') { state.chat.session = e.session; }
+    if (e.type === 'started') { state.chat.session = e.session; state.chat.spent = null; }
     else if (e.type === 'text') say('text', e.text);
     else if (e.type === 'reasoning') say('think', e.text);
     else if (e.type === 'tool') say('tool', `\n  · ${e.name}`);
     else if (e.type === 'tool_done') say('tool', e.failed ? ' ✗\n' : ' ✓\n');
     else if (e.type === 'settings') { state.chat.settings = e; renderSettings(); }
+    else if (e.type === 'spent') { state.chat.spent = e; renderSettings(); }
     else if (e.type === 'error') { say('err', `\n${e.message}\n`); done(); }
     else if (e.type === 'cancelled') { say('stat', '\n[stopped]\n\n'); done(); }
     else if (e.type === 'approval') askApproval(e);
@@ -269,9 +270,15 @@ function renderSettings() {
     el('select', { onchange: (e) => socket.send(JSON.stringify(
         { type: 'setting', name, value: e.target.value })) },
       values.map(v => el('option', { value: v, ...(v === current ? { selected: '' } : {}) }, v))));
+  const spent = state.chat.spent;
   bar.replaceChildren(
     pick('mode', ['auto', 'ask', 'readonly'], state.chat.settings.mode),
-    pick('effort', ['low', 'medium', 'high', 'xhigh', 'max'], state.chat.settings.effort));
+    pick('effort', ['low', 'medium', 'high', 'xhigh', 'max'], state.chat.settings.effort),
+    // Beside the settings rather than in the transcript: it changes on every
+    // step, and a running total that scrolled away would be no use.
+    spent ? el('span', { class: 'sub' },
+      `${spent.input_tokens} in / ${spent.output_tokens} out` +
+      (spent.cached_tokens ? ` (${spent.cached_tokens} cached)` : '')) : null);
 }
 
 async function renderChat() {

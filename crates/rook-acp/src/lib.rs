@@ -372,7 +372,9 @@ async fn prompt(
                     &format!("call_{}", finished.fetch_add(1, Ordering::Relaxed)),
                     failed,
                 ),
-                Progress::Delta(Delta::Done { .. }) => return,
+                // The protocol has no slot for a running total, and inventing
+                // one as a thought would put accounting in the transcript.
+                Progress::Spent { .. } | Progress::Delta(Delta::Done { .. }) => return,
             };
             peer.notify("session/update", update);
         })

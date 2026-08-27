@@ -163,6 +163,13 @@ pub enum ChatEvent {
         name: String,
         failed: bool,
     },
+    /// What the turn has spent so far, sent after each reply from the model so
+    /// a long turn shows its cost while it can still change a decision.
+    Spent {
+        input_tokens: u32,
+        output_tokens: u32,
+        cached_tokens: u32,
+    },
     /// The turn is blocked until an [`ClientMessage::Approval`] with this id.
     Approval {
         id: String,

@@ -48,6 +48,7 @@ enum TurnEvent {
     Reasoning(String),
     Tool(String),
     ToolDone(String, bool),
+    Spent { input: u32, output: u32, cached: u32 },
     Approval(ApprovalRequest),
     Ask(AskRequest),
     Done(String),
@@ -69,6 +70,26 @@ struct Chat {
     pending: Option<ApprovalRequest>,
     asking: Option<Asking>,
     scroll: u16,
+    /// Input, output and cached tokens so far in this turn.
+    spent: Option<(u32, u32, u32)>,
+}
+
+/// Short enough for the footer, which already carries the mode, the effort and
+/// whatever the last command said.
+fn spent(totals: Option<(u32, u32, u32)>) -> String {
+    let Some((input, output, cached)) = totals else { return String::new() };
+    let cached = match cached {
+        0 => String::new(),
+        n => format!(" ({} cached)", thousands(n)),
+    };
+    format!("{} in / {} out{cached}", thousands(input), thousands(output))
+}
+
+fn thousands(n: u32) -> String {
+    match n {
+        0..=999 => n.to_string(),
+        _ => format!("{:.1}k", n as f64 / 1000.0),
+    }
 }
 
 /// One batch of questions, answered one at a time through the input line so the
@@ -308,6 +329,7 @@ impl App {
                 TurnEvent::ToolDone(name, failed) => {
                     self.chat.push("tool", &format!("  · {name} {}", if failed { "✗" } else { "✓" }))
                 }
+                TurnEvent::Spent { input, output, cached } => self.chat.spent = Some((input, output, cached)),
                 TurnEvent::Approval(request) => self.chat.pending = Some(request),
                 TurnEvent::Ask(request) => {
                     self.chat.asking = Some(Asking {
@@ -534,6 +556,9 @@ impl App {
                             TurnEvent::Reasoning(format!("\n  [{done}/{total}] {task}"))
                         }
                         Progress::ToolDone { name, failed } => TurnEvent::ToolDone(name.to_string(), failed),
+                        Progress::Spent { input, output, cached } => {
+                            TurnEvent::Spent { input, output, cached }
+                        }
                         Progress::Delta(Delta::Done { .. }) => return,
                     };
                     let _ = emit.send(event);
@@ -615,9 +640,10 @@ impl App {
                 Span::raw("quit  "),
                 Span::styled("F2/F3 ", Style::default().fg(Color::Cyan)),
                 Span::raw(format!(
-                    "{}/{}    {}",
+                    "{}/{}  {}  {}",
                     self.shared.policy.mode().as_str(),
                     self.shared.effort.get().as_str(),
+                    spent(self.chat.spent),
                     self.status
                 )),
             ]))

@@ -301,6 +301,15 @@ what unblocks the most.
   before checking containment, so a link inside the workspace pointing out of it
   is refused rather than followed, and the refusal says where the path really
   led. Widened only by `sandbox.allow_outside_workspace`. 6 tests.
+- **What a turn is spending, while it is spending it** — the totals were
+  reported once, at the end, when the number can no longer change a decision;
+  a turn running a dozen steps over several minutes said nothing. They are
+  emitted after every reply and shown where there is somewhere to put them: the
+  TUI footer beside the mode, and the browser beside the settings. The chat REPL
+  and `rook run` stream into a scrolling terminal that has no status line, so
+  they keep the summary at the end — a rendering decision, not a missing
+  capability, and ACP has no slot for it in the protocol. Adapted from codex
+  #41087. 3 tests.
 - **A question to a person cannot wait forever, or lose its answer** — how long
   to wait was a number written out four times, twice as 300 seconds and twice as
   600, and configurable nowhere; it is `[agent] answer_timeout_secs` now. Over

@@ -326,3 +326,27 @@ async fn the_prompt_is_still_logged_when_it_is_refused_for_size() {
     let events = f.rook.transcript(session, 0, 10, 50).unwrap();
     assert!(!events.is_empty(), "a refused turn still asked something, and the log is the record");
 }
+
+/// A turn that runs for minutes across a dozen steps reported nothing about
+/// what it was spending until it was over, when the number can no longer change
+/// a decision.
+#[tokio::test]
+async fn a_turn_says_what_it_has_spent_after_every_reply() {
+    let f = fixture();
+    let session = f.rook.start_session("running total").unwrap();
+    let (base, _seen) =
+        serve(vec![tool_call("list_dir", serde_json::json!({ "path": "." })), answer("done")]).await;
+
+    let mut totals = Vec::new();
+    AgentLoop::new(&f.rook, provider(&base), session)
+        .run_with("go", |progress| {
+            if let rook_core::agent::Progress::Spent { input, output, .. } = progress {
+                totals.push((input, output));
+            }
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(totals.len(), 2, "one after each reply, not one at the end: {totals:?}");
+    assert!(totals[1].0 > totals[0].0, "and it is the running total, not the last step: {totals:?}");
+}
