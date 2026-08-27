@@ -65,6 +65,11 @@ impl Rook {
         String::from_utf8_lossy(&out.stdout).into_owned()
     }
 
+    fn write_config(&self, toml: &str) {
+        std::fs::create_dir_all(self.home.path()).unwrap();
+        std::fs::write(self.home.path().join("config.toml"), toml).unwrap();
+    }
+
     fn ok(&self, args: &[&str]) -> String {
         let out = self.run(args);
         assert!(
@@ -436,4 +441,29 @@ fn doctor_stops_explaining_once_the_skills_are_there() {
 
     assert!(!said.contains("skills: 0 usable, 0 blocked"), "the shipped skills were found: {said}");
     assert!(!said.contains("none are installed next to"), "{said}");
+}
+
+/// rustup installs a `rust-analyzer` shim whether or not the component is, so
+/// "the command exists" reported a server that fails on its first request. Any
+/// command that is not a language server stands in for it here.
+#[test]
+fn doctor_reports_a_language_server_that_does_not_actually_run() {
+    let rook = Rook::new();
+    rook.write_config(&format!(
+        "[[lsp]]\nlanguage = \"rust\"\ncommand = {:?}\nextensions = [\"rs\"]\nstartup_timeout_secs = 5\n",
+        env!("CARGO_BIN_EXE_rook")
+    ));
+
+    let said = rook.ok(&["doctor"]);
+    assert!(said.contains("✗ rust"), "a binary that is present but is not a server: {said}");
+    assert!(!said.contains("✓ rust"), "presence must not be reported as capability: {said}");
+}
+
+#[test]
+fn doctor_says_when_no_language_server_is_configured_at_all() {
+    let rook = Rook::new();
+    rook.write_config("[[lsp]]\nlanguage = \"none\"\ncommand = \"\"\nextensions = []\nenabled = false\n");
+
+    let said = rook.ok(&["doctor"]);
+    assert!(said.contains("none found on PATH"), "{said}");
 }

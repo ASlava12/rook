@@ -395,15 +395,20 @@ fn cmd_doctor(rook: &Rook, json: bool) -> Result<()> {
         }
     }
 
-    let servers =
-        if rook.config.lsp.is_empty() { rook_core::lsp::detected() } else { rook.config.lsp.clone() };
+    let servers = rook_core::lsp::configured(&rook.config);
     println!();
-    print!("language servers: ");
+    println!("language servers:");
     if servers.is_empty() {
-        println!("none found on PATH (rust-analyzer, gopls, clangd, …)");
-    } else {
-        let names: Vec<String> = servers.iter().map(|s| format!("{} ({})", s.language, s.command)).collect();
-        println!("{}", names.join(", "));
+        println!("  none found on PATH (rust-analyzer, gopls, clangd, …)");
+    }
+    for (config, started) in probe_servers(&servers, &rook.workspace) {
+        match started {
+            Ok(()) => println!("  ✓ {:<10} {}", config.language, config.command),
+            Err(why) => {
+                let why = why.strip_prefix(&format!("{}: ", config.language)).unwrap_or(&why);
+                println!("  ✗ {:<10} {} — {why}", config.language, config.command)
+            }
+        }
     }
 
     let cards = rook.catalog();
@@ -433,6 +438,33 @@ fn cmd_doctor(rook: &Rook, json: bool) -> Result<()> {
 
 /// Ask the endpoint what it serves, which answers "is it up" and "is the model
 /// configured actually there" in one round trip.
+/// Start each one and shut it down again. Being on `PATH` is not the same as
+/// working — rustup installs a `rust-analyzer` shim whether or not the component
+/// is, and it fails on the first request — and doctor is where that difference
+/// has to show up rather than in the middle of a turn.
+fn probe_servers(
+    configs: &[rook_lsp::ServerConfig],
+    root: &std::path::Path,
+) -> Vec<(rook_lsp::ServerConfig, std::result::Result<(), String>)> {
+    let Ok(runtime) = tokio::runtime::Builder::new_multi_thread().enable_all().build() else {
+        return Vec::new();
+    };
+    runtime.block_on(async {
+        let mut out = Vec::new();
+        for config in configs {
+            let started = match rook_lsp::Server::start(config, root).await {
+                Ok(server) => {
+                    server.shutdown().await;
+                    Ok(())
+                }
+                Err(e) => Err(e.to_string()),
+            };
+            out.push((config.clone(), started));
+        }
+        out
+    })
+}
+
 fn probe_provider(rook: &Rook) -> Result<String> {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     let (_, configured) = rook_llm::split_spec(&rook.config.agent.model);

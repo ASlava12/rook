@@ -53,6 +53,17 @@ fn on_path(command: &str) -> bool {
     })
 }
 
+/// The servers this configuration actually asks for: what was configured, or
+/// what was found when nothing was, minus the ones turned off.
+///
+/// Asked by the agent when it builds its tools and by `doctor` when it reports
+/// what is here, and they were answering it differently — doctor called a server
+/// the user had disabled broken.
+pub fn configured(config: &crate::Config) -> Vec<ServerConfig> {
+    let listed = if config.lsp.is_empty() { detected() } else { config.lsp.clone() };
+    listed.into_iter().filter(|c| c.enabled).collect()
+}
+
 /// The language servers available in one workspace.
 pub struct Servers {
     configs: Vec<ServerConfig>,
@@ -63,7 +74,7 @@ pub struct Servers {
 impl Servers {
     pub fn new(configs: Vec<ServerConfig>, root: &Path) -> Arc<Self> {
         Arc::new(Self {
-            configs: configs.into_iter().filter(|c| c.enabled).collect(),
+            configs,
             // Canonical, because a server answers in whatever spelling it
             // resolved to: on macOS `/tmp` and `/private/tmp` are the same
             // directory and results arrive under both.

@@ -301,6 +301,12 @@ what unblocks the most.
   before checking containment, so a link inside the workspace pointing out of it
   is refused rather than followed, and the refusal says where the path really
   led. Widened only by `sandbox.allow_outside_workspace`. 6 tests.
+- **A language server that is there and does not work** — detection asked
+  whether the command was on `PATH`, and rustup installs a `rust-analyzer` shim
+  whether or not the component is: `doctor` reported it, then every request
+  failed. It starts each one and shuts it down again, which is the only check
+  that is not a guess. A server the user disabled was skipped by the agent and
+  called broken by doctor; both now ask `lsp::configured`. 3 tests.
 - **A failure names its cause, not the url a second time** — `cannot reach
   http://127.0.0.1:11434: error sending request for url
   (http://127.0.0.1:11434/v1/models)` repeated the endpoint, put back the path

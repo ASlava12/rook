@@ -60,3 +60,25 @@ fn every_config_field_is_read_somewhere() {
 
     assert!(unread.is_empty(), "configurable but read by nothing, so setting it does nothing: {unread:?}");
 }
+
+/// A server the user turned off was skipped when the agent built its tools and
+/// reported as broken by `doctor`, which asked the same question its own way.
+#[test]
+fn a_disabled_language_server_is_gone_from_every_answer() {
+    let config = rook_core::Config {
+        lsp: vec![
+            rook_lsp::ServerConfig { language: "on".into(), command: "a".into(), ..Default::default() },
+            rook_lsp::ServerConfig {
+                language: "off".into(),
+                command: "b".into(),
+                enabled: false,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+
+    let effective = rook_core::lsp::configured(&config);
+    assert_eq!(effective.len(), 1, "only the enabled one is asked for");
+    assert_eq!(effective[0].language, "on");
+}

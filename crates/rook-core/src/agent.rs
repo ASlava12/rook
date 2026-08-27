@@ -35,9 +35,7 @@ use crate::service::Rook;
 /// dropped at the end of a turn takes its running servers with it, and
 /// rust-analyzer spends seconds indexing the workspace every time it starts.
 pub fn servers_for(rook: &Rook) -> std::sync::Arc<crate::lsp::Servers> {
-    let configured =
-        if rook.config.lsp.is_empty() { crate::lsp::detected() } else { rook.config.lsp.clone() };
-    crate::lsp::Servers::new(configured, &rook.workspace)
+    crate::lsp::Servers::new(crate::lsp::configured(&rook.config), &rook.workspace)
 }
 
 /// Build the approval policy from configuration.
