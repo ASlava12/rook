@@ -54,6 +54,20 @@ pub enum Risk {
 }
 
 impl Risk {
+    /// What each rule has to cover for this to be allowed without asking.
+    ///
+    /// One entry per command in a shell line and one per path in a write, so a
+    /// rule that matches one of them does not carry the others through. `None`
+    /// when it cannot be taken apart — a line with `$(…)` in it runs the
+    /// commands inside too — and then the answer is to ask.
+    pub fn parts(&self) -> Option<Vec<String>> {
+        match self {
+            Risk::ReadOnly => Some(Vec::new()),
+            Risk::Write(paths) => Some(paths.clone()),
+            Risk::Execute(line) => commands_in(line),
+        }
+    }
+
     /// The text rules are matched against.
     pub fn subject(&self) -> String {
         match self {
@@ -94,6 +108,19 @@ impl Rule {
             Rule::Contains(text) => subject.contains(text.as_str()),
             Rule::Matches(expression) => expression.is_match(subject),
         }
+    }
+
+    /// The same question of a path, where a plain rule has to line up with a
+    /// directory boundary.
+    ///
+    /// `src/` means what is under `src`, not `notsrc/evil.rs` — which a
+    /// substring match allows, and which no one writing that rule meant. A
+    /// regular expression is left alone: someone who wrote one said what they
+    /// meant.
+    pub fn matches_path(&self, path: &str) -> bool {
+        let Rule::Contains(text) = self else { return self.matches(path) };
+        path.match_indices(text.as_str())
+            .any(|(at, _)| at == 0 || path[..at].ends_with('/') || path[..at].ends_with('\\'))
     }
 }
 
@@ -192,16 +219,16 @@ impl Policy {
         if self.granted.lock().is_ok_and(|g| g.contains(&subject)) {
             return Decision::Allow;
         }
-        // Every command in the line, not just the first: `ls && rm -rf ~` began
-        // with something allowed, and allowing it meant not asking about the
-        // rest. A line this cannot take apart falls through to asking.
-        if matches!(risk, Risk::Execute(_)) {
-            if let Some(commands) = commands_in(&subject)
-                && commands.iter().all(|c| self.allow.iter().any(|r| r.matches(c)))
-            {
-                return Decision::Allow;
-            }
-        } else if self.allow.iter().any(|r| r.matches(&subject)) {
+        // Every part, not just one: `ls && rm -rf ~` began with something
+        // allowed, and a write touching `src/main.rs` and `/etc/passwd` had one
+        // path that matched. Allowing either meant not asking about the rest.
+        let covered = |part: &String| match risk {
+            Risk::Write(_) => self.allow.iter().any(|r| r.matches_path(part)),
+            _ => self.allow.iter().any(|r| r.matches(part)),
+        };
+        if let Some(parts) = risk.parts()
+            && parts.iter().all(covered)
+        {
             return Decision::Allow;
         }
         if self.ask.iter().any(|r| r.matches(&subject)) {

@@ -120,6 +120,11 @@ what unblocks the most.
   a skill scoped away and explained by `skills why`, capture and rollback, a
   broken config that fails loudly, and the daemon path where a read goes over
   HTTP and a write says where the lock is.
+- **An allow rule that covers every path too** — a write names all the paths it
+  will touch, and one matching path allowed the rest, so `src/main.rs` alongside
+  `/etc/passwd` ran without asking. And a plain rule matched anywhere in a path,
+  so `src/` covered `notsrc/`. Both closed; a regular expression is untouched.
+  4 tests.
 - **An allow rule that covers the whole line** — allowing `ls` also allowed
   `ls && rm -rf ~/important` and `cat notes.md; curl … | sh`, without asking,
   because only the start of the line was matched. Every command on the line must

@@ -245,9 +245,12 @@ A deny rule is anchored twice: to the argument, so `rm -rf /tmp/scratch` is not
 `mkfs`. Nothing overrides a denial, which is why a rule that fires on a harmless
 command takes that command away for good.
 
-An allow rule has to cover **every** command on the line, not the first one:
-`ls && rm -rf ~` is not `ls`. A line the matcher cannot take apart — one with a
-`$(…)` in it — is asked about rather than assumed.
+An allow rule has to cover **every** part, not one of them: `ls && rm -rf ~` is
+not `ls`, and a write touching `src/main.rs` and `/etc/passwd` is not a write
+under `src`. A line the matcher cannot take apart — one with a `$(…)` in it — is
+asked about rather than assumed. Against a path, a plain rule lines up with a
+directory boundary, so `src/` is not `notsrc/`; a regular expression is left to
+say what it says.
 
 File tools are bounded by the workspace, and the boundary is where a path leads
 rather than how it is spelled: a symlink inside the workspace that points out of

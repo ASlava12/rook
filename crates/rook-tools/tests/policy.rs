@@ -215,3 +215,44 @@ async fn each_tool_reports_what_it_measured() {
         .unwrap();
     assert_eq!(ran.meta["timed_out"], true);
 }
+
+/// A write names the paths it will touch, and the allow list decides whether to
+/// ask. Both halves of "which paths" have been wrong: a rule matching one path
+/// carried the others through, and a plain rule matched anywhere in a path.
+mod writing {
+    use rook_tools::policy::{Decision, Mode, Policy, Risk};
+
+    fn allows(paths: &[&str]) -> bool {
+        let allow = vec!["src/".to_string(), "docs/".to_string()];
+        let (policy, _) = Policy::compile(Mode::Ask, &allow, &[], &[]);
+        let risk = Risk::Write(paths.iter().map(|p| p.to_string()).collect());
+        matches!(policy.decide(&risk), Decision::Allow)
+    }
+
+    #[test]
+    fn a_path_under_an_allowed_directory_does_not_ask() {
+        assert!(allows(&["src/main.rs"]));
+        assert!(allows(&["src/a.rs", "docs/b.md"]), "every path is covered");
+    }
+
+    #[test]
+    fn one_allowed_path_does_not_carry_the_others() {
+        assert!(!allows(&["src/main.rs", "/etc/passwd"]), "the second path was never allowed");
+    }
+
+    #[test]
+    fn a_directory_rule_lines_up_with_a_directory() {
+        assert!(!allows(&["notsrc/evil.rs"]), "`src/` is not a substring rule about paths");
+        assert!(!allows(&["mydocs/secret"]));
+    }
+
+    #[test]
+    fn a_regular_expression_still_means_what_it_says() {
+        let allow = vec![r"/^build\.rs$/".to_string()];
+        let (policy, errors) = Policy::compile(Mode::Ask, &allow, &[], &[]);
+        assert!(errors.is_empty(), "{errors:?}");
+        let allowed = |p: &str| matches!(policy.decide(&Risk::Write(vec![p.to_string()])), Decision::Allow);
+        assert!(allowed("build.rs"));
+        assert!(!allowed("crates/build.rs"), "someone who wrote an anchor meant it");
+    }
+}
