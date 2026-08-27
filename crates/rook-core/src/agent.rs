@@ -680,28 +680,40 @@ impl<'a> AgentLoop<'a> {
         }
 
         self.checkpoint_before(call);
-        let result = self.tools.call(&self.tool_ctx, &call.name, &call.arguments).await;
-        let text = match result {
-            Ok(o) => o.content,
-            Err(e) => format!("tool error: {e}"),
+        let outcome = match self.tools.call(&self.tool_ctx, &call.name, &call.arguments).await {
+            Ok(o) => o,
+            Err(e) => rook_tools::ToolOutcome::error(format!("tool error: {e}")),
         };
-        let text = match self.after_tool(call, &text).await {
-            Some(extra) => format!("{text}\n\n{extra}"),
-            None => text,
+        let text = match self.after_tool(call, &outcome).await {
+            Some(extra) => format!("{}\n\n{extra}", outcome.content),
+            None => outcome.content,
         };
         self.rook.log(self.session, EventKind::ToolResult, &call.name, &text).ok();
         text
     }
 
     /// `post_tool` hooks, whose output the model sees appended to the result.
-    async fn after_tool(&self, call: &rook_llm::ToolCall, result: &str) -> Option<String> {
+    ///
+    /// The whole outcome, not just its text: `meta` is where a tool says which
+    /// MCP server answered, whether a command timed out, and how much of a file
+    /// was returned — the facts a hook would otherwise have to parse back out of
+    /// prose written for a model.
+    async fn after_tool(
+        &self,
+        call: &rook_llm::ToolCall,
+        outcome: &rook_tools::ToolOutcome,
+    ) -> Option<String> {
         if self.hooks.is_empty() {
             return None;
         }
         let payload = self.payload(serde_json::json!({
             "tool": call.name,
             "input": call.arguments,
-            "result": result,
+            "result": outcome.content,
+            "is_error": outcome.is_error,
+            "truncated": outcome.truncated,
+            "full_bytes": outcome.full_bytes,
+            "meta": outcome.meta,
         }));
         self.hooks.run(hooks::Event::PostTool, &call.name, &payload).await.context()
     }

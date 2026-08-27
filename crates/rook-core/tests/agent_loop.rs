@@ -1792,3 +1792,31 @@ fn the_catalog_names_only_what_the_model_can_act_on() {
          cost with no effect: {catalog}"
     );
 }
+
+#[tokio::test]
+async fn a_post_tool_hook_is_given_the_facts_the_tool_measured() {
+    let f = fixture();
+    // Echo the payload's meta back as context, which is the only way a hook can
+    // show what it was handed.
+    let rook = hooked(
+        &f,
+        vec![hook(
+            rook_core::hooks::Event::PostTool,
+            r#"python3 -c "import json,sys; p=json.load(sys.stdin); print(json.dumps({'context': f\"meta={p['meta']} error={p['is_error']}\"}))""#,
+        )],
+    );
+    let session = rook.start_session("meta").unwrap();
+    std::fs::write(f.workspace.path().join("notes.txt"), "one\ntwo\nthree\n").unwrap();
+
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("read_file", serde_json::json!({"path": "notes.txt"})),
+        reply("read it"),
+    ]));
+    AgentLoop::new(&rook, provider.clone(), session).run("read the notes").await.unwrap();
+
+    let sent = provider.share();
+    let requests = sent.lock().unwrap();
+    let result = requests.last().unwrap().messages.iter().rev().find(|m| m.role == Role::Tool).unwrap();
+    assert!(result.content.contains("total_lines"), "the hook saw no meta: {}", result.content);
+    assert!(result.content.contains("error=False"), "nor the error flag: {}", result.content);
+}

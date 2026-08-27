@@ -81,12 +81,9 @@ impl Tool for McpTool {
     }
 }
 
+/// The same rule commands get: a long result loses its middle, not its end.
 fn window(text: &str, max: usize) -> (String, bool) {
-    if text.len() <= max {
-        return (text.to_string(), false);
-    }
-    let cut = (0..=max).rev().find(|i| text.is_char_boundary(*i)).unwrap_or(0);
-    (format!("{}\n[{} more bytes elided]", &text[..cut], text.len() - cut), true)
+    (crate::elide_middle(text, max), text.len() > max)
 }
 
 impl ToolBox {

@@ -118,6 +118,11 @@ what unblocks the most.
   a skill scoped away and explained by `skills why`, capture and rollback, a
   broken config that fails loudly, and the daemon path where a read goes over
   HTTP and a write says where the lock is.
+- **What a tool measured reaches the hooks** — every tool records facts about
+  its call (which MCP server answered, whether a command timed out, how much of
+  a file came back) and every one of them was thrown away by the loop. A
+  `post_tool` hook now gets the whole outcome, so it can act on the fact rather
+  than parse it back out of prose written for a model.
 - **Memory scoped where it was asked for** — a fact's identity is its text, so
   the same sentence learned globally and in a project is one fact. It now keeps
   the wider scope rather than the first one, and says so when neither scope
@@ -194,10 +199,6 @@ binary on the user's behalf.
 **Fork and compaction positions on the session.** Both are recoverable from the
 log today; recording them on `SessionMeta` would let `session ls` show where a
 fork diverged without reading it.
-
-**MCP provenance in tool results.** A result carries the namespaced tool name but
-nothing about which server produced it; codex exposes that to its lifecycle hooks
-and it belongs in ours too.
 
 **Signed release binaries.** `cargo xtask dist` ships unsigned, so Windows
 SmartScreen warns on every download and macOS Gatekeeper needs a right-click to

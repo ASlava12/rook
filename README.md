@@ -178,7 +178,10 @@ command = "my-policy-check"              # {"decision":"deny","reason":"…"} on
 
 Five events: `session_start`, `prompt`, `pre_tool`, `post_tool`, `turn_end`. A
 hook reads JSON on stdin and may answer with JSON; plain output is treated as
-context for the model, so `echo` works. A `pre_tool` hook that fails blocks the
+context for the model, so `echo` works. A `post_tool` hook is given what the
+tool measured as well as what it said — `is_error`, `truncated`, `full_bytes`,
+and a `meta` object carrying whichever facts the tool records, such as the MCP
+server that answered or whether a command hit its timeout. A `pre_tool` hook that fails blocks the
 call it was guarding — a guard that cannot run is not approval — and no hook can
 unlock what the deny list forbids.
 

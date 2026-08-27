@@ -188,3 +188,30 @@ fn the_advertised_tool_schemas_stay_within_a_budget() {
         assert!(cost(&spec) < 200, "{} alone costs ~{} tokens", spec.name, cost(&spec));
     }
 }
+
+/// Every tool reports facts a hook or a UI can act on. They were computed and
+/// discarded for a long time; a tool that stops reporting them is a regression
+/// nothing else would see.
+#[tokio::test]
+async fn each_tool_reports_what_it_measured() {
+    use rook_tools::{Tool, ToolContext};
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "one\ntwo\n").unwrap();
+    let ctx = ToolContext::new(dir.path().to_path_buf());
+
+    let read = rook_tools::files::ReadFile.call(&ctx, &serde_json::json!({"path": "a.txt"})).await.unwrap();
+    assert_eq!(read.meta["total_lines"], 2);
+
+    let list = rook_tools::files::ListDir.call(&ctx, &serde_json::json!({"path": "."})).await.unwrap();
+    assert_eq!(list.meta["entries"], 1);
+
+    let found = rook_tools::search::Search.call(&ctx, &serde_json::json!({"pattern": "two"})).await.unwrap();
+    assert!(found.meta.contains_key("matches"), "{:?}", found.meta);
+
+    let ran = rook_tools::exec::RunCommand
+        .call(&ctx, &serde_json::json!({"command": "sleep 5", "timeout_secs": 1}))
+        .await
+        .unwrap();
+    assert_eq!(ran.meta["timed_out"], true);
+}

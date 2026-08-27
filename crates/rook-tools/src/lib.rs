@@ -158,6 +158,36 @@ pub fn through_symlinks(path: &std::path::Path) -> PathBuf {
         .unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// Keep both ends and drop the middle.
+///
+/// The tail carries the exit message and the last stack frame; the head carries
+/// a compiler's first error, which is the one that caused the rest. Keeping only
+/// the tail loses the reason and keeps the consequences.
+pub fn elide_middle(text: &str, budget: usize) -> String {
+    if text.len() <= budget {
+        return text.to_string();
+    }
+    // Weighted to the tail, which is where a run says how it ended.
+    let head = boundary_at_or_before(text, budget / 3);
+    let tail = boundary_at_or_after(text, text.len() - (budget - head));
+    format!("{}\n[{} bytes elided from the middle]\n{}", &text[..head], tail - head, &text[tail..])
+}
+
+fn boundary_at_or_before(text: &str, mut i: usize) -> usize {
+    i = i.min(text.len());
+    while i > 0 && !text.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+fn boundary_at_or_after(text: &str, mut i: usize) -> usize {
+    while i < text.len() && !text.is_char_boundary(i) {
+        i += 1;
+    }
+    i.min(text.len())
+}
+
 /// Lexical normalisation: resolve `.` and `..` without touching the filesystem.
 pub fn normalize(path: &std::path::Path) -> PathBuf {
     let mut out = PathBuf::new();
