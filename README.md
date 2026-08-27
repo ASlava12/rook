@@ -347,7 +347,9 @@ rook skills rollback my-skill <obj>
 
 A skill is a directory with a `SKILL.md` — the
 [Agent Skills](https://www.webfuse.com/agent-skills-cheat-sheet) format, so skills
-written for other agents work unchanged. Rook adds two optional blocks:
+written for other agents work unchanged. A directory under `~/.rook/plugins` with
+a `plugin.json` is an Agent Plugin, and brings its `skills/` and its `mcpServers`
+together; see [docs/skills.md](docs/skills.md). Rook adds two optional blocks:
 
 ```yaml
 ---

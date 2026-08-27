@@ -44,6 +44,10 @@ pub fn user_skills_dir() -> PathBuf {
     home().join("skills")
 }
 
+pub fn user_plugins_dir() -> PathBuf {
+    home().join("plugins")
+}
+
 /// Where a running `rookd` records the address it is listening on, so the CLI
 /// can reach it instead of guessing a port from config that may not be the one
 /// in use. Absent when no daemon is running — it is removed on shutdown.
@@ -57,6 +61,10 @@ pub fn logs_dir() -> PathBuf {
 
 pub fn project_skills_dir(workspace: &Path) -> PathBuf {
     workspace.join(".rook").join("skills")
+}
+
+pub fn project_plugins_dir(workspace: &Path) -> PathBuf {
+    workspace.join(".rook").join("plugins")
 }
 
 /// Skills shipped with the binary, if an install laid them down next to it.

@@ -411,6 +411,20 @@ fn cmd_doctor(rook: &Rook, json: bool) -> Result<()> {
         }
     }
 
+    if !rook.plugins.is_empty() {
+        println!();
+        println!("plugins:");
+        for plugin in &rook.plugins {
+            println!(
+                "  {} {} — {} skills, {} servers",
+                plugin.name,
+                plugin.version,
+                std::fs::read_dir(plugin.skills_dir()).into_iter().flatten().count(),
+                plugin.mcp.len()
+            );
+        }
+    }
+
     let cards = rook.catalog();
     let (ok, blocked): (Vec<_>, Vec<_>) = cards.iter().partition(|c| c.applicable);
     println!();
@@ -1427,7 +1441,7 @@ fn cmd_mcp(workspace: Option<PathBuf>, cmd: McpCmd, json: bool) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     runtime.block_on(async move {
         let rook = Rook::open(workspace)?;
-        if rook.config.mcp.is_empty() {
+        if rook.mcp_servers().is_empty() {
             println!("no servers configured. Add one to {}:\n", rook_core::paths::config_file().display());
             println!("  [[mcp]]\n  name = \"filesystem\"\n  command = \"npx\"\n  args = [\"-y\", \"@modelcontextprotocol/server-filesystem\", \".\"]");
             return anyhow::Ok(());

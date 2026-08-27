@@ -301,6 +301,14 @@ what unblocks the most.
   before checking containment, so a link inside the workspace pointing out of it
   is refused rather than followed, and the refusal says where the path really
   led. Widened only by `sandbox.allow_outside_workspace`. 6 tests.
+- **Plugins that package skills and servers together** — `SkillSource::Plugin`
+  was declared, ranked against the other sources and given a label, and nothing
+  ever constructed it: an API advertising a feature that was not there. A
+  directory under `~/.rook/plugins` or `<workspace>/.rook/plugins` with a
+  `plugin.json` now brings its `skills/` and its `mcpServers` — the ecosystem's
+  layout, not Rook's, so a plugin written for another agent works unchanged.
+  Servers are namespaced by plugin and run in it; a project's own skill still
+  wins over one a plugin ships. 6 tests.
 - **Google's own dialect** — reachable through the OpenAI shim, but not fully:
   `generateContent` has two roles and no system one, carries the system prompt
   beside the conversation, makes tool calls and their results parts of a message
@@ -374,10 +382,6 @@ binary on the user's behalf.
 SmartScreen warns on every download and macOS Gatekeeper needs a right-click to
 open. cline signs with Azure Trusted Signing; both need a certificate this
 repository does not have.
-
-**Agent Plugins 1.0 packaging.** `plugin.json` bundling skills and MCP servers.
-Defers to Agent Skills for the skill format, so skills authored today package
-unchanged.
 
 **Real sandboxing.** Today's boundary is a workspace path check and pattern
 rules ([ADR-0009](adr/0009-ask-before-acting.md)) — text matching, not containment.

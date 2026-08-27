@@ -8,6 +8,8 @@ use std::sync::OnceLock;
 use serde::{Deserialize, Serialize};
 
 use rook_skills::{Environment, SkillCard, SkillIndex, SkillSource};
+
+use crate::plugins::Plugin;
 use rook_store::{
     Event, EventKind, GcOptions, GcReport, ObjectId, PruneReport, SessionMeta, Store, StoreStats,
 };
@@ -38,9 +40,10 @@ pub struct Rook {
     /// mutably.
     skills: std::sync::RwLock<SkillIndex>,
     pub workspace: PathBuf,
-    /// Skills that failed to load, kept so the UIs can show them instead of
-    /// silently presenting a shorter catalog.
+    /// Skills and plugins that failed to load, kept so the UIs can show them
+    /// instead of silently presenting a shorter catalog.
     pub skill_errors: Vec<String>,
+    pub plugins: Vec<Plugin>,
 }
 
 impl Rook {
@@ -56,8 +59,18 @@ impl Rook {
         let config = Config::load()?;
         let mut store = Store::open(paths::store_dir())?;
         store.set_level(config.storage.compression_level);
-        let (skills, skill_errors) = Self::discover_skills(&workspace);
-        Ok(Self { store, config, env: OnceLock::new(), skills: skills.into(), workspace, skill_errors })
+        let (plugins, plugin_errors) = crate::plugins::discover(&workspace);
+        let (skills, mut skill_errors) = Self::discover_skills(&workspace, &plugins);
+        skill_errors.extend(plugin_errors);
+        Ok(Self {
+            store,
+            config,
+            env: OnceLock::new(),
+            skills: skills.into(),
+            workspace,
+            skill_errors,
+            plugins,
+        })
     }
 
     /// Assemble a `Rook` from parts instead of from the user's home directory.
@@ -79,13 +92,17 @@ impl Rook {
             skills: skills.into(),
             workspace,
             skill_errors: Vec::new(),
+            plugins: Vec::new(),
         }
     }
 
-    fn discover_skills(workspace: &Path) -> (SkillIndex, Vec<String>) {
+    fn discover_skills(workspace: &Path, plugins: &[Plugin]) -> (SkillIndex, Vec<String>) {
         let mut roots: Vec<(PathBuf, SkillSource)> = Vec::new();
         if let Some(builtin) = paths::builtin_skills_dir() {
             roots.push((builtin, SkillSource::Builtin));
+        }
+        for plugin in plugins {
+            roots.push((plugin.skills_dir(), SkillSource::Plugin(plugin.name.clone())));
         }
         roots.push((paths::user_skills_dir(), SkillSource::User));
         roots.push((paths::project_skills_dir(workspace), SkillSource::Project));
@@ -100,7 +117,7 @@ impl Rook {
     /// Rediscover from disk. Errors are kept rather than returned so a UI can
     /// show a broken skill instead of quietly presenting a shorter catalog.
     pub fn reload_skills(&self) -> Vec<String> {
-        let (index, errors) = Self::discover_skills(&self.workspace);
+        let (index, errors) = Self::discover_skills(&self.workspace, &self.plugins);
         *self.skills.write().unwrap_or_else(|e| e.into_inner()) = index;
         errors
     }
@@ -576,13 +593,25 @@ impl Rook {
         Ok(seq)
     }
 
+    /// Every server that will be connected: configured, plus the ones plugins
+    /// bring, minus the disabled. A plugin is a way of shipping a server, not a
+    /// different kind of one, so nothing downstream distinguishes them.
+    pub fn mcp_servers(&self) -> Vec<&rook_mcp::ServerConfig> {
+        self.config
+            .mcp
+            .iter()
+            .chain(self.plugins.iter().flat_map(|p| p.mcp.iter()))
+            .filter(|c| c.enabled)
+            .collect()
+    }
+
     /// Connect every enabled MCP server and collect what they offer.
     ///
     /// Servers are connected concurrently and failures are collected rather than
     /// propagated: one misconfigured server must not stop the agent from
     /// starting with the tools that do work.
     pub async fn connect_mcp(&self) -> McpSession {
-        let enabled: Vec<_> = self.config.mcp.iter().filter(|c| c.enabled).collect();
+        let enabled = self.mcp_servers();
         let connections = enabled.iter().map(|config| async move {
             match rook_mcp::Server::connect(config).await {
                 Ok(server) => {
@@ -1017,6 +1046,7 @@ mod tests {
             skills: skills.into(),
             workspace: dir.to_path_buf(),
             skill_errors: Vec::new(),
+            plugins: Vec::new(),
         }
     }
 

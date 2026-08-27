@@ -23,6 +23,13 @@ const CONVENTIONAL: &[&str] =
 /// a case nothing checked, so a prompt too large for the window went to the
 /// provider whole; `NoSuchSymbol` existed while two call sites formatted the
 /// same sentence by hand.
+///
+/// It asks only of enums named `*Error`, and it counts mentions rather than
+/// constructions — so a variant that is matched on but never built reads as
+/// used. `SkillSource::Plugin` sat that way, ranked and labelled and made by
+/// nothing. Widening it was tried: qualifying the name (`Enum::Variant`) to
+/// separate a value from a pattern flags eighteen variants that serde builds
+/// from the wire, and an exemption list that long proves less than it costs.
 #[test]
 fn every_error_variant_is_constructed_somewhere() {
     let root = repo_root();

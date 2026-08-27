@@ -14,6 +14,7 @@ pub mod hooks;
 pub mod lsp;
 pub mod memory;
 pub mod paths;
+pub mod plugins;
 pub mod search;
 pub mod service;
 pub mod telemetry;

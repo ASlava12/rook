@@ -234,7 +234,22 @@ rook skills capture my-skill -m "first version"
 
 ## Interoperability
 
-Rook implements the Agent Skills format today. Agent Plugins 1.0 packaging
-(`plugin.json` bundling skills and MCP servers) is on the
-[roadmap](roadmap.md) — it defers to Agent Skills for the skill format itself, so
-skills authored now will package without change.
+Rook implements the Agent Skills format, and Agent Plugins packaging around it.
+A plugin is one directory holding both halves of what an agent needs:
+
+```
+~/.rook/plugins/rust-pack/        or  <workspace>/.rook/plugins/rust-pack/
+  plugin.json                     name, description, version, mcpServers
+  skills/tidy/SKILL.md            ordinary skills, in the ordinary format
+  .mcp.json                       servers, if you prefer them beside the manifest
+```
+
+`.claude-plugin/plugin.json` is read too, since that is where the specification
+puts it. Nothing in the layout is Rook's own, so a plugin written for another
+agent works here unchanged and a skill authored today packages without being
+rewritten — the same argument as [ADR-0003](adr/0003-agent-skills-format.md).
+
+A plugin's servers are namespaced by its name, so two plugins shipping a `docs`
+server do not collide in the tool names the model sees, and each runs in its own
+directory. A skill from a plugin ranks above a built-in one and below the user's
+and the project's: something vendored into a workspace is there on purpose.
