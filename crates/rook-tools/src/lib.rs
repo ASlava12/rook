@@ -389,6 +389,11 @@ fn edits(a: &str, b: &str) -> usize {
     row[b.len()]
 }
 
+/// Past this a line is not source: a minified bundle, or a blob whose first
+/// pages happened to hold no zero byte. Read and searched a line at a time, this
+/// is what bounds the memory either costs.
+pub(crate) const MAX_LINE: u64 = 1 << 20;
+
 pub(crate) fn arg_str(args: &serde_json::Value, tool: &str, key: &str) -> Result<String> {
     args.get(key).and_then(|v| v.as_str()).map(str::to_string).ok_or_else(|| ToolError::Invalid {
         tool: tool.to_string(),

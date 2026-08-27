@@ -7,11 +7,7 @@ use rook_llm::ToolSpec;
 
 use std::io::{BufRead, Read};
 
-use crate::{Result, Tool, ToolContext, ToolError, ToolOutcome, arg_str, arg_usize};
-
-/// Past this a line is not source: a minified bundle, or a blob whose first
-/// pages happened to hold no zero byte.
-const MAX_LINE: u64 = 1 << 20;
+use crate::{MAX_LINE, Result, Tool, ToolContext, ToolError, ToolOutcome, arg_str, arg_usize};
 
 pub struct Search;
 

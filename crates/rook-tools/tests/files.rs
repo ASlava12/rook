@@ -195,3 +195,30 @@ async fn an_unknown_tool_names_the_ones_it_might_have_meant() {
     let unrelated = tools.call(&ctx, "zzzzzzzzzz", &serde_json::json!({})).await.unwrap_err().to_string();
     assert!(!unrelated.contains("did you mean"), "nothing is close, so nothing is offered: {unrelated}");
 }
+
+/// The file was read whole to return two thousand lines of it, so its size was
+/// the caller's problem in memory as well as in context.
+#[tokio::test]
+async fn a_large_file_is_paged_without_being_held() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut text = String::with_capacity(16 << 20);
+    for i in 0..300_000 {
+        text.push_str(&format!("line {i} of something long\n"));
+    }
+    std::fs::write(dir.path().join("huge.log"), &text).unwrap();
+    let ctx = ToolContext::new(dir.path().to_path_buf());
+
+    let out = files::ReadFile
+        .call(&ctx, &serde_json::json!({ "path": "huge.log", "offset": 299_990, "limit": 3 }))
+        .await
+        .unwrap();
+
+    assert!(out.content.contains("line 299990 of something long"), "{}", out.content);
+    assert!(!out.content.contains("line 299993"), "the window is the window: {}", out.content);
+    assert_eq!(
+        out.meta.get("total_lines").map(|v| v.to_string()),
+        Some("300000".into()),
+        "counting every line does not mean holding them: {:?}",
+        out.meta
+    );
+}

@@ -52,29 +52,23 @@ impl Tool for ReadFile {
             given => given,
         };
 
-        // Bytes when reading the disk, so a binary file is reported rather than
-        // pasted into context as mojibake. A front end that owns the files hands
-        // back text — an editor buffer is text by definition.
-        let text = match ctx.files {
-            Some(_) => ctx.read_text(&path).await?,
-            None => {
-                let bytes = tokio::fs::read(&path)
-                    .await
-                    .map_err(|e| ToolError::Io { path: path.clone(), source: e })?;
-                if bytes.iter().take(8192).any(|b| *b == 0) {
+        // The window rather than the file: reading a large file whole to return
+        // two thousand lines of it made its size the caller's problem in memory
+        // as well as in context.
+        let window = match ctx.files {
+            Some(_) => Window::of(&ctx.read_text(&path).await?, offset, limit),
+            None => match read_window(&path, offset, limit).await? {
+                Some(window) => window,
+                None => {
                     return Ok(ToolOutcome::error(format!(
-                        "{} looks binary ({} bytes); read_file only handles text",
-                        path.display(),
-                        bytes.len()
+                        "{} looks binary; read_file only handles text",
+                        path.display()
                     ))
                     .with("binary", true));
                 }
-                String::from_utf8_lossy(&bytes).into_owned()
-            }
+            },
         };
-        let total_bytes = text.len();
-        let lines: Vec<&str> = text.lines().collect();
-        let total_lines = lines.len();
+        let total_lines = window.total_lines;
 
         if offset > 0 && offset >= total_lines {
             return Ok(ToolOutcome::error(format!(
@@ -84,11 +78,11 @@ impl Tool for ReadFile {
             .with("total_lines", total_lines as u64));
         }
 
-        let end = offset.saturating_add(limit).min(total_lines);
         // Room reserved for the "call again with offset=" line, which is added
         // after the budget is spent and would otherwise push the reply over it.
         let budget = ctx.max_output_bytes.saturating_sub(80);
-        let mut page = page(&lines[offset..end], offset, budget);
+        let shown: Vec<&str> = window.lines.iter().map(String::as_str).collect();
+        let mut page = page(&shown, offset, budget);
 
         let stopped_at = offset + page.shown;
         if stopped_at < total_lines {
@@ -102,12 +96,84 @@ impl Tool for ReadFile {
             content: page.body,
             is_error: false,
             truncated: page.cut || stopped_at < total_lines || offset > 0,
-            full_bytes: total_bytes,
+            full_bytes: window.total_bytes,
             meta: Default::default(),
         }
         .with("total_lines", total_lines as u64)
         .with("returned_lines", page.shown as u64))
     }
+}
+
+/// The lines a read asked for, and what the file has around them.
+struct Window {
+    lines: Vec<String>,
+    total_lines: usize,
+    total_bytes: usize,
+}
+
+impl Window {
+    /// From text a front end already holds — an editor buffer is text by
+    /// definition, and it is the editor's memory, not ours.
+    fn of(text: &str, offset: usize, limit: usize) -> Self {
+        let all: Vec<&str> = text.lines().collect();
+        Self {
+            lines: all.iter().skip(offset).take(limit).map(|l| (*l).to_string()).collect(),
+            total_lines: all.len(),
+            total_bytes: text.len(),
+        }
+    }
+}
+
+/// `None` when the file is not text. The check reads the first buffered chunk
+/// rather than the whole file, so deciding a file is not worth reading does not
+/// read it.
+async fn read_window(path: &std::path::Path, offset: usize, limit: usize) -> Result<Option<Window>> {
+    let owned = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        use std::io::{BufRead, Read};
+
+        let file =
+            std::fs::File::open(&owned).map_err(|e| ToolError::Io { path: owned.clone(), source: e })?;
+        let total_bytes = file.metadata().map(|m| m.len() as usize).unwrap_or(0);
+        let mut reader = std::io::BufReader::new(file);
+
+        let prefix = reader.fill_buf().map_err(|e| ToolError::Io { path: owned.clone(), source: e })?;
+        if prefix.iter().take(8192).any(|b| *b == 0) {
+            return Ok(None);
+        }
+
+        let mut window = Window { lines: Vec::new(), total_lines: 0, total_bytes };
+        let mut raw = Vec::new();
+        loop {
+            raw.clear();
+            match reader.by_ref().take(crate::MAX_LINE).read_until(b'\n', &mut raw) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+            // A line past the cap: take what was read as the line and step over
+            // the rest of it, so the numbering still describes the file.
+            if raw.len() as u64 == crate::MAX_LINE && !raw.ends_with(b"\n") {
+                let mut skipped = Vec::new();
+                loop {
+                    skipped.clear();
+                    match reader.by_ref().take(crate::MAX_LINE).read_until(b'\n', &mut skipped) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) if skipped.ends_with(b"\n") => break,
+                        Ok(_) => {}
+                    }
+                }
+            }
+            let n = window.total_lines;
+            window.total_lines += 1;
+            if n >= offset && window.lines.len() < limit {
+                let text = String::from_utf8_lossy(&raw);
+                window.lines.push(text.trim_end_matches(['\n', '\r']).to_string());
+            }
+        }
+        Ok(Some(window))
+    })
+    .await
+    .map_err(|e| ToolError::Invalid { tool: "read_file".into(), message: e.to_string() })?
 }
 
 /// Numbered lines up to a byte budget.
