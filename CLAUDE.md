@@ -84,6 +84,12 @@ and `cargo xtask dist`, and are kept current. A test count in prose is not worth
 the same discipline — it was wrong by a factor of two before anyone noticed — so
 do not put one there.
 
+**One question, one answer.** Which events reach the model is asked in three
+places — the replay that builds a request, what compaction summarises, and what
+`session context` reports as the cost — and all three drifted apart before
+`context::reaches_the_model` existed. When two paths have to agree, give them one
+function to agree through, not two lists to keep in step.
+
 **Nothing here is exempt from being used.** Every crate is a library, so `pub`
 turns off the dead-code lint: a function that exists and is called from nowhere
 advertises an API that is not there. Three shipped that way —

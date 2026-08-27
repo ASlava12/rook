@@ -120,6 +120,11 @@ what unblocks the most.
   a skill scoped away and explained by `skills why`, capture and rollback, a
   broken config that fails loudly, and the daemon path where a read goes over
   HTTP and a write says where the lock is.
+- **A context figure that matches the request** — `session context` counted
+  every event but checkpoints as live, so asides, errors and reasoning inflated
+  the number the command exists to explain, and could report a session over the
+  compaction threshold that the loop would not compact. All three places that
+  ask which events reach the model now ask one function. 2 tests.
 - **Compaction that summarises the conversation, not the bookkeeping** — it read
   the whole transcript while the replay that builds the model's messages uses
   five event kinds, so checkpoint manifests, asides and failed skill loads were

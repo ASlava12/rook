@@ -90,12 +90,6 @@ pub enum Progress<'a> {
     ToolDone { name: &'a str, failed: bool },
 }
 
-/// The event kinds `AgentLoop::history` turns into messages, and so the only
-/// ones the model has ever seen.
-fn replayed(kind: &str) -> bool {
-    matches!(kind, "user" | "assistant" | "tool-call" | "tool-result" | "skill")
-}
-
 /// Pseudo-tools: implemented by the loop rather than the toolbox, because they
 /// need the agent's own state.
 pub const LOAD_SKILL: &str = "load_skill";
@@ -1089,7 +1083,7 @@ impl AgentLoop<'_> {
             .rook
             .transcript(self.session, from_seq, usize::MAX, 8_000)?
             .into_iter()
-            .filter(|e| replayed(&e.kind))
+            .filter(|e| crate::context::kind_reaches_the_model(&e.kind))
             .collect();
 
         // Keep the recent tail live; only what falls before it is summarised.

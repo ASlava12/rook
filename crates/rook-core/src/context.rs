@@ -83,3 +83,20 @@ fn ceil_char_boundary(data: &[u8], mut i: usize) -> usize {
 pub fn estimate_tokens(text: &str) -> usize {
     text.len().div_ceil(4)
 }
+
+/// Whether an event of this kind becomes a message the model sees.
+///
+/// One answer for everything that has to agree with the replay in
+/// `AgentLoop::history`: what a turn carries, what compaction summarises, and
+/// what `rook session context` reports as the cost. They drifted apart twice
+/// before this existed.
+pub fn reaches_the_model(kind: rook_store::EventKind) -> bool {
+    use rook_store::EventKind::*;
+    matches!(kind, UserMessage | AssistantMessage | ToolCall | ToolResult | SkillLoaded)
+}
+
+/// The same question asked of a kind's printed name, which is what a transcript
+/// entry carries.
+pub fn kind_reaches_the_model(kind: &str) -> bool {
+    matches!(kind, "user" | "assistant" | "tool-call" | "tool-result" | "skill")
+}

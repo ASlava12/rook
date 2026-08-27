@@ -381,12 +381,14 @@ impl Rook {
             entry.tokens += (bytes as usize).div_ceil(4);
         }
 
-        // What a fresh turn would carry: everything after the last compaction plus
-        // its summary. Checkpoints are storage, not context.
+        // What a fresh turn would carry: everything after the last compaction
+        // that becomes a message, plus its summary. Checkpoints are storage;
+        // asides, errors and the rest never reach the model either, and counting
+        // them made this overstate the very number it exists to explain.
         let (from_seq, summary) = self.last_compaction(session)?;
         let mut live = summary.as_deref().map(crate::context::estimate_tokens).unwrap_or(0);
         for event in self.store.events(session, from_seq, usize::MAX)? {
-            if event.record.kind == EventKind::Checkpoint {
+            if !crate::context::reaches_the_model(event.record.kind) {
                 continue;
             }
             let bytes = self.store.stat_object(&event.record.body)?.map(|m| m.size_raw as usize).unwrap_or(0);

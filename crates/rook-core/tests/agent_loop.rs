@@ -1989,3 +1989,47 @@ async fn compaction_summarises_only_what_the_model_was_shown() {
     assert!(!material.contains("could not load skill"), "nor is an error: {material}");
     assert!(!material.contains("\"root\""), "nor a checkpoint manifest: {material}");
 }
+
+#[tokio::test]
+async fn what_context_reports_is_what_a_turn_actually_carries() {
+    let f = fixture();
+    let session = f.rook.start_session("cost").unwrap();
+    f.rook.log(session, rook_store::EventKind::UserMessage, "prompt", "the question").unwrap();
+    f.rook.log(session, rook_store::EventKind::AssistantMessage, "m", "the answer").unwrap();
+
+    let before = f.rook.context_usage(session, 100_000).unwrap().live_tokens;
+
+    // Bookkeeping the model never sees: an aside, a failed load, a manifest.
+    f.rook.log(session, rook_store::EventKind::Note, "aside", &"noise ".repeat(500)).unwrap();
+    f.rook.log(session, rook_store::EventKind::Error, "load_skill", &"more ".repeat(500)).unwrap();
+    f.rook.log(session, rook_store::EventKind::Checkpoint, "before", &"manifest ".repeat(500)).unwrap();
+
+    let after = f.rook.context_usage(session, 100_000).unwrap();
+
+    assert_eq!(after.live_tokens, before, "none of that reaches a turn, so none of it is its cost");
+    assert!(after.logged_tokens > after.live_tokens, "but it is still what the store holds");
+}
+
+#[tokio::test]
+async fn the_reported_cost_matches_the_request_that_gets_built() {
+    let f = fixture();
+    let session = f.rook.start_session("cost").unwrap();
+    f.rook.log(session, rook_store::EventKind::UserMessage, "prompt", "the question").unwrap();
+    f.rook.log(session, rook_store::EventKind::Note, "aside", &"noise ".repeat(500)).unwrap();
+
+    let provider = Arc::new(ScriptedProvider::new(vec![reply("ok")]));
+    let mut agent = AgentLoop::new(&f.rook, provider.clone(), session);
+    let reported = f.rook.context_usage(session, 100_000).unwrap().live_tokens;
+    agent.run("go").await.unwrap();
+
+    let sent = provider.share();
+    let carried: usize = sent.lock().unwrap()[0]
+        .messages
+        .iter()
+        .skip(1) // the system prompt is not part of the log
+        .map(|m| rook_core::context::estimate_tokens(&m.content))
+        .sum();
+
+    // The prompt just run is logged too, so the request carries a little more.
+    assert!(carried <= reported + 20, "context says {reported} tokens and the request carries {carried}");
+}
