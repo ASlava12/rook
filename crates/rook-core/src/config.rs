@@ -69,6 +69,11 @@ pub struct AgentConfig {
     /// How long the model may go silent mid-stream before the turn gives up.
     /// A dropped connection is indistinguishable from deep thought without it.
     pub stream_idle_timeout_secs: u64,
+    /// How many skills the catalog names in the system prompt. The catalog is
+    /// paid for on every request, and a machine that has collected skills for a
+    /// year would otherwise pay for all of them; the ones left out are still
+    /// reachable, because `load_skill` answers a miss with what it does have.
+    pub max_skill_cards: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -153,6 +158,7 @@ impl Default for AgentConfig {
             plan_first: true,
             context_window: None,
             max_parallel_subagents: 4,
+            max_skill_cards: 50,
             stream_idle_timeout_secs: 90,
         }
     }

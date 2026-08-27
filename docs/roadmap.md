@@ -99,6 +99,13 @@ what unblocks the most.
   interruptible turns, a CLI with `--json` throughout, a ratatui browser, and a
   web UI that both reads the store and drives a turn over a websocket. All three
   run turns, stream them and answer approvals the same way, over one engine.
+- **Skills the agent writes** — `write_skill` records a procedure the turn had to
+  work out, scoped by `requires` to where it actually holds, validated by reading
+  it back, and captured as a version so a rewrite keeps the old one. The index
+  reloads in place, so the next turn's catalog has it without a restart. 7 tests.
+- **A bounded skill catalog** — capped by `agent.max_skill_cards`; what does not
+  fit is counted rather than hidden, and `load_skill` answers an unknown name
+  with the skills that match it.
 - **Asides** — `/btw` answers a question from the conversation without tools and
   without joining it, recorded as a note the history replay skips. 2 tests.
 - **Conversation continuity** — every turn replays the session log, so `--session`

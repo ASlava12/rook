@@ -113,6 +113,28 @@ variants:
 measured by how many constraints it names; if none match, the default body is used.
 `rook skills show <name>` prints which variant was selected.
 
+## Skills the agent writes
+
+`write_skill` lets a turn record a procedure it had to work out, so the next
+session starts from it instead of rediscovering it. It takes the finished body
+rather than scaffolding one, writes into the user skills directory, and captures
+the result as a version — rewriting a skill keeps the old one, reachable through
+`rook skills history` and `rook skills rollback`.
+
+Two things are checked before it counts as written. The name has to be a
+directory name, and the skill has to parse: it is read back from disk, and a
+`SKILL.md` that does not load is reported rather than left for the next session
+to silently lack. Parsing, not resolving — a skill whose `requires` excludes the
+machine that wrote it is doing its job.
+
+The agent can only write over its own. A skill that ships with the project or the
+system is refused by name, with the suggestion to pick another.
+
+```sh
+rook skills history cross-compile-freebsd   # every version the agent wrote
+rook skills rollback cross-compile-freebsd <object>
+```
+
 ## Progressive disclosure
 
 Skills are not injected into the prompt. The agent gets a *catalog* — one card per
@@ -123,6 +145,12 @@ This matters more than it sounds. Full bodies for a large library cost thousands
 tokens on every request, and on local models a tool-and-skill-heavy prompt is
 roughly an order of magnitude slower to process than plain text. A full catalog
 costs under 100 tokens; the test suite asserts it.
+
+The catalog itself is bounded by `agent.max_skill_cards` (50), because it is paid
+for on every request and a machine that has collected skills for a year would
+otherwise pay for all of them. Skills past the cap are counted, not hidden:
+`load_skill` answers a name it does not have with the ones that match it, so
+describing what you need finds a skill the catalog did not name.
 
 `rook skills ls` shows what loading each skill *would* cost:
 

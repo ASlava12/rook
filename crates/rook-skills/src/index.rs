@@ -241,6 +241,44 @@ impl SkillIndex {
     }
 
     /// Resolve `name` for `env`, honouring source precedence then version order.
+    /// Skills whose name, description or keywords answer a query, best first.
+    ///
+    /// What a failed `resolve` offers instead of "not found": the catalog in the
+    /// system prompt is capped, so a name the model has never seen may still be
+    /// a skill that exists.
+    pub fn search(&self, query: &str, env: &Environment, limit: usize) -> Vec<SkillCard> {
+        let terms: Vec<String> = query
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|t| t.len() > 2)
+            .map(str::to_lowercase)
+            .collect();
+        if terms.is_empty() {
+            return Vec::new();
+        }
+
+        let mut hits: Vec<(usize, SkillCard)> = self
+            .catalog(env)
+            .into_iter()
+            .filter_map(|card| {
+                let haystack =
+                    format!("{} {} {}", card.name, card.description, card.keywords.join(" ")).to_lowercase();
+                // A name match outranks a description match: someone asking for
+                // "docker" wants the docker skill, not the six that mention it.
+                let score: usize = terms
+                    .iter()
+                    .map(|t| match (card.name.to_lowercase().contains(t), haystack.contains(t)) {
+                        (true, _) => 4,
+                        (_, true) => 1,
+                        _ => 0,
+                    })
+                    .sum();
+                (score > 0).then_some((score, card))
+            })
+            .collect();
+        hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
+        hits.into_iter().take(limit).map(|(_, card)| card).collect()
+    }
+
     pub fn resolve(&self, name: &str, env: &Environment) -> Result<Resolved> {
         let mut candidates: Vec<&Skill> = self
             .skills

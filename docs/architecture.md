@@ -74,6 +74,19 @@ instead of tens of thousands, and on local models a tool-heavy prompt is roughly
 order of magnitude slower to process than plain text. Cards and stubs are the
 default; `lazy_skills` / `lazy_tools` in config turn them off, not on.
 
+The two are not the same trade. A skill card defers the *whole body*, and
+`load_skill` fetches it — the model asks by name. A tool stub defers only the
+prose: the first sentence of the description, and every argument's name and type
+without the guidance around them. There is nothing to fetch, because a tool
+advertised without its shape could not be called at all. Measured: 680 tokens
+full, 324 as stubs, and the whole advertised set — pseudo-tools included — is
+held under 800 by a test.
+
+The skill catalog is capped by `agent.max_skill_cards`, and what does not fit is
+named as a count rather than dropped silently: `load_skill` answers an unknown
+name with the skills that match it, so a skill off the end of the list is still
+reachable by description.
+
 **The environment in the system prompt.** The model is told the OS, arch and
 userland it is operating in, and which toolchains exist. This is cheap and it stops
 the most common cross-platform failure in agent transcripts — reaching for GNU

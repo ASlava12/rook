@@ -6,10 +6,12 @@
 //!
 //! Two behaviours are built in rather than bolted on:
 //!
-//! * **Progressive disclosure.** The system prompt carries skill *cards* and tool
-//!   *stubs*; bodies and full schemas arrive only when the model asks for them
-//!   via `load_skill`. A library of a hundred skills costs a few hundred tokens
-//!   a turn instead of tens of thousands.
+//! * **Progressive disclosure.** The system prompt carries skill *cards* and
+//!   tool *stubs*. A skill's body arrives only when the model asks for it via
+//!   `load_skill`, so a library of a hundred skills costs a few hundred tokens
+//!   a turn instead of tens of thousands. A tool stub keeps every argument's
+//!   name and type and drops only the prose around them — a tool advertised
+//!   without its shape cannot be called at all.
 //! * **Compaction before overflow.** The budget is checked before each request.
 //!   An agent that discovers the limit by being rejected has already lost the
 //!   turn, and usually the task with it.
@@ -55,6 +57,7 @@ pub fn policy_for(rook: &Rook) -> std::sync::Arc<Policy> {
 /// Pseudo-tools: implemented by the loop rather than the toolbox, because they
 /// need the agent's own state.
 pub const LOAD_SKILL: &str = "load_skill";
+pub const WRITE_SKILL: &str = "write_skill";
 pub const REMEMBER: &str = "remember";
 pub const FORGET: &str = "forget";
 pub const RECALL: &str = "recall";
@@ -76,6 +79,7 @@ pub struct TurnOutcome {
     pub cached_tokens: u32,
     pub tools_called: Vec<String>,
     pub skills_loaded: Vec<String>,
+    pub skills_written: Vec<String>,
     pub facts_learned: Vec<String>,
     /// Sessions of sub-agents this turn ran, for reading their detail later.
     pub delegated: Vec<String>,
@@ -201,11 +205,20 @@ impl<'a> AgentLoop<'a> {
         let cards = self.rook.catalog();
         let applicable: Vec<_> = cards.iter().filter(|c| c.applicable).collect();
         if !applicable.is_empty() {
+            let cap = self.rook.config.agent.max_skill_cards;
             s.push_str(&format!(
                 "\n## Skills\nCall `{LOAD_SKILL}` with a name to read its instructions before using it.\n"
             ));
-            for c in applicable {
+            for c in applicable.iter().take(cap) {
                 s.push_str(&format!("- {} ({}): {}\n", c.name, c.version, c.description));
+            }
+            // Named rather than silently dropped: a model that cannot see a
+            // skill and is not told any exist will not go looking for one.
+            if let Some(omitted) = applicable.len().checked_sub(cap).filter(|n| *n > 0) {
+                s.push_str(&format!(
+                    "…and {omitted} more not listed. `{LOAD_SKILL}` answers an unknown name with \
+                     what it does have, so describe what you need.\n"
+                ));
             }
         }
         s
@@ -291,20 +304,55 @@ impl<'a> AgentLoop<'a> {
         ))
     }
 
-    fn tool_specs(&self) -> Vec<ToolSpec> {
-        let mut specs =
-            if self.rook.config.agent.lazy_tools { self.tools.stubs() } else { self.tools.specs() };
-        specs.push(ToolSpec {
+    pub fn tool_specs(&self) -> Vec<ToolSpec> {
+        let lazy = self.rook.config.agent.lazy_tools;
+        let mut specs = if lazy { self.tools.stubs() } else { self.tools.specs() };
+        let mut push = |spec: ToolSpec| specs.push(if lazy { spec.stub() } else { spec });
+        push(ToolSpec {
             name: LOAD_SKILL.into(),
-            description: "Load a skill's full instructions into context by name.".into(),
+            description: "Load a skill's full instructions into context by name. An unknown \
+                          name comes back with the skills that do match it, so a description \
+                          works when the exact name is not known."
+                .into(),
             parameters: json!({
                 "type": "object",
                 "properties": { "name": { "type": "string" } },
                 "required": ["name"]
             }),
         });
+        push(ToolSpec {
+            name: WRITE_SKILL.into(),
+            description: "Write down a repeatable procedure so a later session does not work it \
+                          out again. For what took real effort to establish — a build \
+                          incantation, a deployment sequence, a platform quirk — not for what \
+                          this conversation already says or for a one-off. `requires` scopes it \
+                          to where it actually holds, and a skill that claims to apply \
+                          everywhere will misfire elsewhere. Rewriting your own skill keeps the \
+                          old version."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "lower-case, hyphenated" },
+                    "description": { "type": "string", "description": "when to use it, in one line" },
+                    "body": { "type": "string", "description": "markdown instructions" },
+                    "keywords": { "type": "array", "items": { "type": "string" } },
+                    "requires": {
+                        "type": "object",
+                        "properties": {
+                            "os": { "type": "array", "items": { "type": "string" } },
+                            "arch": { "type": "array", "items": { "type": "string" } },
+                            "userland": { "type": "array", "items": { "type": "string" } },
+                            "language": { "type": "object", "additionalProperties": { "type": "string" } },
+                            "tool": { "type": "object", "additionalProperties": { "type": "string" } }
+                        }
+                    }
+                },
+                "required": ["name", "description", "body"]
+            }),
+        });
         if self.rook.config.memory.enabled {
-            specs.push(ToolSpec {
+            push(ToolSpec {
                 name: REMEMBER.into(),
                 description: "Remember something for future sessions. Use it for durable facts                               — preferences, conventions, decisions — not for what is already in                               this conversation."
                     .into(),
@@ -319,7 +367,7 @@ impl<'a> AgentLoop<'a> {
                     "required": ["text"]
                 }),
             });
-            specs.push(ToolSpec {
+            push(ToolSpec {
                 name: FORGET.into(),
                 description: "Drop a remembered fact by its id, once it is wrong or stale.".into(),
                 parameters: json!({
@@ -328,7 +376,7 @@ impl<'a> AgentLoop<'a> {
                     "required": ["id"]
                 }),
             });
-            specs.push(ToolSpec {
+            push(ToolSpec {
                 name: RECALL.into(),
                 description: "Search memory for facts beyond the ones already in context.".into(),
                 parameters: json!({
@@ -339,7 +387,7 @@ impl<'a> AgentLoop<'a> {
             });
         }
         if self.depth < MAX_DEPTH {
-            specs.push(ToolSpec {
+            push(ToolSpec {
                 name: DELEGATE.into(),
                 description: "Hand a self-contained sub-task to a fresh agent and get back only                               its conclusion. Use it when a step would otherwise fill this                               conversation with detail you do not need to keep — a wide search,                               a long file survey, an independent verification."
                     .into(),
@@ -457,6 +505,7 @@ impl<'a> AgentLoop<'a> {
             cached_tokens: 0,
             tools_called: Vec::new(),
             skills_loaded: Vec::new(),
+            skills_written: Vec::new(),
             facts_learned: Vec::new(),
             delegated: Vec::new(),
             compactions: 0,
@@ -547,7 +596,7 @@ impl<'a> AgentLoop<'a> {
 
         if call.name == LOAD_SKILL {
             let name = call.arguments.get("name").and_then(|v| v.as_str()).unwrap_or_default();
-            return match self.rook.skills.resolve(name, &self.rook.env) {
+            return match self.rook.skills().resolve(name, &self.rook.env) {
                 Ok(resolved) => {
                     outcome.skills_loaded.push(resolved.skill.id());
                     self.rook
@@ -560,8 +609,35 @@ impl<'a> AgentLoop<'a> {
                 // It is logged as well as returned: a skill that never loaded is
                 // otherwise invisible when reading the transcript afterwards.
                 Err(e) => {
-                    let message = format!("could not load skill {name:?}: {e}");
+                    let mut message = format!("could not load skill {name:?}: {e}");
+                    for card in self.rook.skills().search(name, &self.rook.env, 5) {
+                        message
+                            .push_str(&format!("\n- {} ({}): {}", card.name, card.version, card.description));
+                    }
                     self.rook.log(self.session, EventKind::Error, LOAD_SKILL, &message).ok();
+                    message
+                }
+            };
+        }
+
+        if call.name == WRITE_SKILL {
+            return match serde_json::from_value(call.arguments.clone())
+                .map_err(|e| CoreError::Other(format!("{WRITE_SKILL}: {e}")))
+                .and_then(|skill: crate::service::AuthoredSkill| {
+                    self.rook.write_skill(&skill).map(|path| (skill.name, path))
+                }) {
+                Ok((name, path)) => {
+                    outcome.skills_written.push(name.clone());
+                    let message = format!("wrote skill {name:?} to {}", path.display());
+                    // A note rather than a kind of its own: a new `EventKind`
+                    // is a record older builds cannot decode, and the log is
+                    // just as readable with the fact in the label.
+                    self.rook.log(self.session, EventKind::Note, WRITE_SKILL, &message).ok();
+                    message
+                }
+                Err(e) => {
+                    let message = format!("could not write the skill: {e}");
+                    self.rook.log(self.session, EventKind::Error, WRITE_SKILL, &message).ok();
                     message
                 }
             };

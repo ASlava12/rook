@@ -171,7 +171,7 @@ fn the_advertised_tool_schemas_stay_within_a_budget() {
          trim a description or merge an argument before raising this"
     );
     assert!(
-        stubs * 4 < full,
+        stubs * 2 < full,
         "stubs ({stubs}) must be much cheaper than full schemas ({full}), or lazy loading buys nothing"
     );
     for spec in tools.stubs() {

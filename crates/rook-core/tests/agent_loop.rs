@@ -80,7 +80,17 @@ struct Fixture {
     rook: Rook,
 }
 
+/// Anything reached through `paths::` — the user skills directory, the config
+/// file — lands in the developer's real `~/.rook` unless this is set, and it is
+/// one variable for the whole process.
+fn redirect_home() {
+    static HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    let dir = HOME.get_or_init(|| tempfile::tempdir().unwrap());
+    unsafe { std::env::set_var("ROOK_HOME", dir.path()) };
+}
+
 fn fixture() -> Fixture {
+    redirect_home();
     let store_dir = tempfile::tempdir().unwrap();
     let skill_dir = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
@@ -1601,4 +1611,92 @@ async fn a_second_compaction_keeps_what_the_first_one_summarised() {
         summarised.find("1password") < summarised.find("filler"),
         "the carried summary comes first, so trimming takes the raw span and never it"
     );
+}
+
+#[tokio::test]
+async fn a_skill_the_agent_writes_is_there_for_the_next_turn() {
+    let f = fixture();
+    let session = f.rook.start_session("authoring").unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call(
+            "write_skill",
+            serde_json::json!({
+                "name": "cross-compile-freebsd",
+                "description": "Cross-compile for FreeBSD, which needs a C sysroot.",
+                "body": "Install the sysroot first; `zstd-sys` and `ring` will not build without it.",
+                "requires": { "language": { "rust": ">=1.85" } }
+            }),
+        ),
+        reply("written down"),
+    ]));
+
+    let outcome = AgentLoop::new(&f.rook, provider, session).run("remember how to do that").await.unwrap();
+
+    assert_eq!(outcome.skills_written, ["cross-compile-freebsd"]);
+
+    // The next turn's prompt, not this one's: the point of writing it down.
+    let later = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(vec![reply("ok")])), session);
+    assert!(
+        later.system_prompt().contains("cross-compile-freebsd"),
+        "a written skill must reach the catalog without restarting"
+    );
+    assert!(f.rook.skill_history("cross-compile-freebsd").unwrap().len() == 1, "and be versioned");
+}
+
+#[tokio::test]
+async fn a_skill_that_will_not_write_says_why_instead_of_failing_the_turn() {
+    let f = fixture();
+    let session = f.rook.start_session("authoring").unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("write_skill", serde_json::json!({ "name": "../escape", "description": "x", "body": "y" })),
+        reply("understood"),
+    ]));
+
+    let outcome = AgentLoop::new(&f.rook, provider, session).run("write a skill").await.unwrap();
+
+    assert!(outcome.skills_written.is_empty());
+    assert_eq!(outcome.reply, "understood", "the model gets to react rather than the turn dying");
+}
+
+/// Pseudo-tool schemas are on every request just as the toolbox's are, and are
+/// easier to miss because they are written inline rather than measured by
+/// `rook-tools`' example.
+#[test]
+fn the_pseudo_tool_schemas_stay_within_a_budget() {
+    let f = fixture();
+    let session = f.rook.start_session("budget").unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![reply("ok")]));
+    let agent = AgentLoop::new(&f.rook, provider, session);
+
+    let cost = |t: &rook_llm::ToolSpec| {
+        (t.name.len() + t.description.len() + t.parameters.to_string().len()).div_ceil(4)
+    };
+    let total: usize = agent.tool_specs().iter().map(cost).sum();
+
+    assert!(
+        total < 800,
+        "the advertised schemas cost ~{total} tokens on every request: {:?}",
+        agent.tool_specs().iter().map(|t| (t.name.clone(), cost(t))).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn a_lazily_advertised_tool_can_still_be_called() {
+    let f = fixture();
+    let session = f.rook.start_session("lazy").unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![reply("ok")]));
+    let agent = AgentLoop::new(&f.rook, provider, session);
+    assert!(f.rook.config.agent.lazy_tools, "this is the default, and what it costs is the point");
+
+    for spec in agent.tool_specs() {
+        let properties = spec.parameters["properties"].as_object().unwrap();
+        assert!(
+            !properties.is_empty(),
+            "{} advertises no arguments, so the model would have to guess them",
+            spec.name
+        );
+        for (name, schema) in properties {
+            assert!(schema.get("type").is_some(), "{}.{name} has no type", spec.name);
+        }
+    }
 }

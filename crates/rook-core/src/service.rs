@@ -26,7 +26,10 @@ pub struct Rook {
     pub store: Store,
     pub config: Config,
     pub env: Environment,
-    pub skills: SkillIndex,
+    /// Behind a lock so a skill written mid-run is found by the next turn
+    /// without restarting: the front ends hold `Rook` shared and cannot take it
+    /// mutably.
+    skills: std::sync::RwLock<SkillIndex>,
     pub workspace: PathBuf,
     /// Skills that failed to load, kept so the UIs can show them instead of
     /// silently presenting a shorter catalog.
@@ -43,7 +46,7 @@ impl Rook {
         store.set_level(config.storage.compression_level);
         let env = Environment::detect(AGENT_VERSION);
         let (skills, skill_errors) = Self::discover_skills(&workspace);
-        Ok(Self { store, config, env, skills, workspace, skill_errors })
+        Ok(Self { store, config, env, skills: skills.into(), workspace, skill_errors })
     }
 
     /// Assemble a `Rook` from parts instead of from the user's home directory.
@@ -58,7 +61,7 @@ impl Rook {
         skills: SkillIndex,
         workspace: PathBuf,
     ) -> Self {
-        Self { store, config, env, skills, workspace, skill_errors: Vec::new() }
+        Self { store, config, env, skills: skills.into(), workspace, skill_errors: Vec::new() }
     }
 
     fn discover_skills(workspace: &Path) -> (SkillIndex, Vec<String>) {
@@ -72,14 +75,20 @@ impl Rook {
         (index, errors.into_iter().map(|e| e.to_string()).collect())
     }
 
-    pub fn reload_skills(&mut self) {
+    pub fn skills(&self) -> std::sync::RwLockReadGuard<'_, SkillIndex> {
+        self.skills.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Rediscover from disk. Errors are kept rather than returned so a UI can
+    /// show a broken skill instead of quietly presenting a shorter catalog.
+    pub fn reload_skills(&self) -> Vec<String> {
         let (index, errors) = Self::discover_skills(&self.workspace);
-        self.skills = index;
-        self.skill_errors = errors;
+        *self.skills.write().unwrap_or_else(|e| e.into_inner()) = index;
+        errors
     }
 
     pub fn catalog(&self) -> Vec<SkillCard> {
-        self.skills.catalog(&self.env)
+        self.skills().catalog(&self.env)
     }
 
     // ------------------------------------------------------- skill versioning
@@ -90,9 +99,15 @@ impl Rook {
     /// This is what makes `rook skills history` and `rook skills rollback`
     /// possible: every edit the agent or the user makes to a skill becomes an
     /// addressable, restorable version rather than an overwrite.
+    /// Found by name rather than resolved, because a skill is versioned from
+    /// wherever it is edited: a FreeBSD-only skill has to be capturable from a
+    /// Linux machine, which is the whole point of `requires`.
     pub fn capture_skill(&self, name: &str, note: Option<String>) -> Result<(FileSet, ObjectId)> {
-        let resolved = self.skills.resolve(name, &self.env)?;
-        let skill = &resolved.skill;
+        let skills = self.skills();
+        let skill = *skills
+            .versions_of(name)
+            .first()
+            .ok_or_else(|| CoreError::Other(format!("no skill named {name:?}")))?;
         let version = skill.version().to_string();
         let (set, id) = FileSet::capture(
             &self.store,
@@ -153,7 +168,7 @@ impl Rook {
         // Capture the current state first, so a rollback is itself undoable.
         let _ = self.capture_skill(name, Some("automatic capture before rollback".into()));
         let dest = self
-            .skills
+            .skills()
             .resolve(name, &self.env)
             .map(|r| r.skill.dir.clone())
             .unwrap_or_else(|_| paths::user_skills_dir().join(name));
@@ -177,6 +192,53 @@ impl Rook {
     }
 
     /// Scaffold a new skill on disk and capture v0.1.0 of it.
+    /// Write a whole skill and record its first version, which is what the
+    /// agent does when it learns something worth keeping.
+    ///
+    /// Unlike [`Rook::new_skill`], which scaffolds a file for a person to edit,
+    /// this one takes the finished body. Rewriting an existing skill is allowed
+    /// and becomes another captured version, so nothing is lost — but only for
+    /// a skill in the user directory: one that ships with the project or the
+    /// system is not the agent's to overwrite.
+    pub fn write_skill(&self, skill: &AuthoredSkill) -> Result<PathBuf> {
+        let name = skill.name.trim();
+        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            return Err(CoreError::Other(format!(
+                "{name:?} is not a usable skill name — lower-case letters, digits and hyphens only"
+            )));
+        }
+        if let Ok(existing) = self.skills().resolve(name, &self.env)
+            && existing.skill.source != SkillSource::User
+        {
+            return Err(CoreError::Other(format!(
+                "{name:?} is a {} skill, not yours to rewrite — pick another name",
+                existing.skill.source.label()
+            )));
+        }
+
+        let dir = paths::user_skills_dir().join(name);
+        std::fs::create_dir_all(&dir).map_err(|e| CoreError::Io { path: dir.clone(), source: e })?;
+        let path = dir.join("SKILL.md");
+        std::fs::write(&path, skill.to_skill_md()?)
+            .map_err(|e| CoreError::Io { path: path.clone(), source: e })?;
+
+        // Validated by reading it back rather than by trusting the writer: a
+        // skill that does not parse is one the next session silently lacks.
+        // Parsing, not resolving — a skill whose `requires` excludes this
+        // machine is doing its job, not failing.
+        let errors = self.reload_skills();
+        if self.skills().versions_of(name).is_empty() {
+            let reason = errors
+                .iter()
+                .find(|e| e.contains(name))
+                .cloned()
+                .unwrap_or_else(|| "it did not parse".into());
+            return Err(CoreError::Other(format!("wrote {} but it does not load: {reason}", path.display())));
+        }
+        self.capture_skill(name, Some(format!("written by the agent: {}", skill.description)))?;
+        Ok(path)
+    }
+
     pub fn new_skill(&self, name: &str, description: &str) -> Result<PathBuf> {
         let dir = paths::user_skills_dir().join(name);
         if dir.exists() {
@@ -771,6 +833,38 @@ pub struct MaintenanceReport {
     pub dictionaries_trained: Vec<(String, usize)>,
     /// Stored bytes still above the cap once everything prunable is gone.
     pub over_budget_by: u64,
+}
+
+/// A skill as the agent supplies it, before it is a file.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct AuthoredSkill {
+    pub name: String,
+    pub description: String,
+    pub body: String,
+    #[serde(default)]
+    pub keywords: Vec<String>,
+    /// What the skill needs to apply, which is how a skill stays honest about
+    /// being platform- or version-specific instead of misfiring elsewhere.
+    #[serde(default)]
+    pub requires: rook_skills::Requirements,
+}
+
+impl AuthoredSkill {
+    fn to_skill_md(&self) -> Result<String> {
+        let manifest = rook_skills::SkillManifest {
+            name: self.name.trim().to_string(),
+            description: self.description.replace('\n', " "),
+            version: "0.1.0".into(),
+            keywords: self.keywords.clone(),
+            requires: self.requires.clone(),
+            license: None,
+            allowed_tools: Vec::new(),
+            variants: Vec::new(),
+            supersedes: Vec::new(),
+            extra: Default::default(),
+        };
+        Ok(manifest.to_skill_md(&self.body)?)
+    }
 }
 
 fn skill_template(name: &str, description: &str, env: &Environment) -> String {

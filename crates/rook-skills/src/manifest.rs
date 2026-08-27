@@ -215,6 +215,19 @@ impl SkillManifest {
     pub fn semver(&self) -> Version {
         Version::parse(&self.version).unwrap_or_else(|_| Version::new(0, 0, 0))
     }
+
+    /// The whole file: this manifest as frontmatter, then the body.
+    ///
+    /// Serialised rather than formatted by hand, so a field added to the
+    /// manifest is written as well as read, and `extra` carries another agent's
+    /// fields back out unchanged.
+    pub fn to_skill_md(&self, body: &str) -> Result<String> {
+        let front = serde_yaml_ng::to_string(self).map_err(|e| SkillError::BadFrontmatter {
+            path: PathBuf::from(&self.name),
+            reason: e.to_string(),
+        })?;
+        Ok(format!("---\n{front}---\n\n{}\n", body.trim()))
+    }
 }
 
 pub fn split_frontmatter<'a>(text: &'a str, path: &Path) -> Result<(&'a str, &'a str)> {

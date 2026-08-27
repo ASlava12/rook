@@ -68,22 +68,42 @@ pub struct ToolSpec {
 }
 
 impl ToolSpec {
-    /// The one-line form used when tool schemas are loaded lazily: name and
-    /// first sentence, deferring the schema until the model asks for it.
+    /// The lean form used when tool schemas are loaded lazily: the first
+    /// sentence, and each argument's name and type without its prose.
     ///
     /// Full schemas for a few dozen tools cost thousands of tokens on every
     /// single request, and on local models a tool-heavy prompt is an order of
-    /// magnitude slower to process than plain text.
+    /// magnitude slower to process than plain text. Most of that weight is
+    /// guidance — how to phrase a pattern, what a limit does — which only
+    /// matters once the model has decided to use the tool.
     ///
-    /// The rest of the description is guidance on writing the arguments, which
-    /// only matters once the model has decided to use the tool — so it travels
-    /// with the schema. This is why a tool description must open with a
-    /// sentence that stands on its own.
+    /// The argument *shape* stays, because a tool advertised without one cannot
+    /// be called: the model would have to guess the names. This is why a tool
+    /// description must open with a sentence that stands on its own.
     pub fn stub(&self) -> Self {
+        let properties = self
+            .parameters
+            .get("properties")
+            .and_then(|p| p.as_object())
+            .map(|props| {
+                props
+                    .iter()
+                    .map(|(name, schema)| {
+                        let kind = schema.get("type").cloned().unwrap_or(serde_json::json!("string"));
+                        (name.clone(), serde_json::json!({ "type": kind }))
+                    })
+                    .collect::<serde_json::Map<_, _>>()
+            })
+            .unwrap_or_default();
+
+        let mut parameters = serde_json::json!({ "type": "object", "properties": properties });
+        if let Some(required) = self.parameters.get("required") {
+            parameters["required"] = required.clone();
+        }
         Self {
             name: self.name.clone(),
             description: first_sentence(&self.description).to_string(),
-            parameters: serde_json::json!({ "type": "object", "properties": {} }),
+            parameters,
         }
     }
 }
@@ -207,7 +227,14 @@ mod tests {
         ToolSpec {
             name: "t".into(),
             description: description.into(),
-            parameters: serde_json::json!({"type": "object", "properties": {"a": {"type": "string"}}}),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "absolute, and it must exist" },
+                    "lines": { "type": "integer", "minimum": 1, "description": "how many" }
+                },
+                "required": ["path"]
+            }),
         }
     }
 
@@ -215,7 +242,24 @@ mod tests {
     fn a_stub_keeps_the_first_sentence_and_drops_the_argument_guidance() {
         let s = spec("Read a text file. Pass an absolute path. Binary files are refused.").stub();
         assert_eq!(s.description, "Read a text file.");
-        assert_eq!(s.parameters["properties"], serde_json::json!({}), "the schema is what is deferred");
+        assert_eq!(
+            s.parameters["properties"],
+            serde_json::json!({ "path": { "type": "string" }, "lines": { "type": "integer" } }),
+            "the prose goes, the shape stays"
+        );
+        assert_eq!(s.parameters["required"], serde_json::json!(["path"]));
+    }
+
+    #[test]
+    fn a_stub_without_the_argument_names_could_not_be_called() {
+        let s = spec("Read a text file.").stub();
+        let properties = s.parameters["properties"].as_object().unwrap();
+        assert!(properties.contains_key("path"), "the model would have to guess the name");
+        assert!(
+            properties["path"].as_object().unwrap().len() == 1,
+            "and nothing but the type survives: {:?}",
+            properties["path"]
+        );
     }
 
     #[test]

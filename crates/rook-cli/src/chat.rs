@@ -266,7 +266,7 @@ async fn dispatch(
             print!("{}", fmt::table(&["", "name", "version", "description"], &rows));
         }
         "skills" => {
-            let resolved = rook.skills.resolve(rest, &rook.env)?;
+            let resolved = rook.skills().resolve(rest, &rook.env)?;
             println!("{}", resolved.body);
         }
 

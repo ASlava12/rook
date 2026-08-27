@@ -224,7 +224,7 @@ async fn skills(State(s): State<Shared>) -> ApiResult<Page<rook_skills::SkillCar
 
 async fn skill(State(s): State<Shared>, Path(name): Path<String>) -> ApiResult<serde_json::Value> {
     let rook = s.rook.read().await;
-    let resolved = rook.skills.resolve(&name, &rook.env).map_err(CoreError::from)?;
+    let resolved = rook.skills().resolve(&name, &rook.env).map_err(CoreError::from)?;
     Ok(Json(serde_json::json!({
         "name": resolved.skill.manifest.name,
         "version": resolved.skill.version().to_string(),

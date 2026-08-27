@@ -1018,7 +1018,7 @@ fn cmd_skills(rook: &Rook, cmd: SkillCmd, json: bool) -> Result<()> {
             }
         }
         SkillCmd::Show { name } => {
-            let resolved = rook.skills.resolve(&name, &rook.env)?;
+            let resolved = rook.skills().resolve(&name, &rook.env)?;
             if json {
                 println!(
                     "{}",
@@ -1046,7 +1046,8 @@ fn cmd_skills(rook: &Rook, cmd: SkillCmd, json: bool) -> Result<()> {
             println!("{}", resolved.body);
         }
         SkillCmd::Why { name } => {
-            let versions = rook.skills.versions_of(&name);
+            let skills = rook.skills();
+            let versions = skills.versions_of(&name);
             if versions.is_empty() {
                 bail!("no skill named {name:?}");
             }
@@ -1064,7 +1065,7 @@ fn cmd_skills(rook: &Rook, cmd: SkillCmd, json: bool) -> Result<()> {
                 }
             }
             println!();
-            match rook.skills.resolve(&name, &rook.env) {
+            match rook.skills().resolve(&name, &rook.env) {
                 Ok(r) => println!("chosen: {} [{}]", r.skill.id(), r.skill.source.label()),
                 Err(e) => println!("chosen: none — {e}"),
             }
