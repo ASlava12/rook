@@ -62,7 +62,7 @@ impl Tool for RunCommand {
         let keep = ctx.max_output_bytes;
         let mut out = Ends::new(keep);
         let mut err = Ends::new(keep);
-        let timed_out = {
+        let overran = {
             // Together, not one after the other: a pipe holds about 64 KiB, and
             // a command that fills stderr while stdout is being drained blocks
             // on the write — so it never finishes stdout and the drain never
@@ -84,18 +84,13 @@ impl Tool for RunCommand {
             tokio::time::timeout(timeout, capture).await.is_err()
         };
 
-        if timed_out {
+        if overran {
             // The whole group, not the shell: `sh -c` may fork rather than
             // exec, and killing the shell alone leaves the real work running.
             let killed = kill_group(group);
-            return Ok(ToolOutcome::error(format!(
-                "command timed out after {}s{} — pass a larger `timeout_secs` if it needs \
-                 longer. What it printed first:\n{}",
-                timeout.as_secs(),
-                if killed { " and was killed" } else { " and could not be killed" },
-                joined(&out, &err),
-            ))
-            .with("timed_out", true));
+            return Ok(
+                ToolOutcome::error(timed_out(timeout, killed, &joined(&out, &err))).with("timed_out", true)
+            );
         }
         let status = child.wait().await;
 
@@ -141,11 +136,7 @@ async fn elsewhere(
 ) -> Result<ToolOutcome> {
     let ran = terminals.run(command, cwd, ctx.max_output_bytes).await?;
     if ran.timed_out {
-        return Ok(ToolOutcome::error(format!(
-            "command timed out after {}s and was killed: {command}",
-            timeout.as_secs()
-        ))
-        .with("timed_out", true));
+        return Ok(ToolOutcome::error(timed_out(timeout, true, &ran.output)).with("timed_out", true));
     }
     Ok(ToolOutcome {
         content: format!("exit {}\n{}", ran.exit_code, ran.output),
@@ -186,6 +177,18 @@ fn spawn_shell(command: &str, cwd: &std::path::Path) -> Result<tokio::process::C
 /// SIGKILL to the whole group. Windows has no equivalent that is not a job
 /// object, so there `kill_on_drop` takes the shell and its children are left —
 /// the timeout still reports what happened rather than claiming otherwise.
+/// The same sentence wherever a command ran out of time: what it had printed is
+/// the part worth reading, and a model told only that it timed out retries the
+/// same command against the same limit.
+fn timed_out(limit: std::time::Duration, killed: bool, printed: &str) -> String {
+    format!(
+        "command timed out after {}s{} — pass a larger `timeout_secs` if it needs longer. \
+         What it printed first:\n{printed}",
+        limit.as_secs(),
+        if killed { " and was killed" } else { " and could not be killed" },
+    )
+}
+
 /// Both streams as the model reads them, with stderr marked only when there is
 /// some: a command that printed nothing to it should not appear to have.
 fn joined(out: &Ends, err: &Ends) -> String {

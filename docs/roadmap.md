@@ -307,7 +307,9 @@ what unblocks the most.
   ended: any build with enough warnings hung until the timeout and then returned
   nothing at all. They are drained together, and a timeout now keeps what was
   printed before it — the part worth reading — and says that `timeout_secs` can
-  be raised. 2 tests.
+  be raised. The editor's terminal is the other way a command runs, and it threw
+  the same output away and said neither thing; both report a timeout through one
+  sentence now. 3 tests.
 - **A tool call that misses says what it might have meant** — `unknown tool
   "read_fil"` told the model nothing it could act on, so the step that mistyped
   the name cost a second one finding out. The near misses are named, by edit

@@ -98,3 +98,22 @@ async fn a_cwd_outside_the_workspace_never_reaches_the_panel() {
     assert!(err.contains("outside the workspace"), "{err}");
     assert!(panel.ran.lock().unwrap().is_empty(), "the boundary is checked first");
 }
+
+/// The two ways of running a command have to report a timeout the same way: the
+/// editor's panel discarded what it had collected and said nothing about the
+/// limit being raisable, while the local runner said both.
+#[tokio::test]
+async fn a_timeout_in_the_panel_reads_like_a_timeout_anywhere_else() {
+    let (_d, ctx, _panel) =
+        with(Ran { output: "compiling…\n".into(), exit_code: -1, truncated: false, timed_out: true });
+
+    let out = RunCommand
+        .call(&ctx, &serde_json::json!({"command": "cargo build", "timeout_secs": 3}))
+        .await
+        .unwrap();
+
+    assert!(out.is_error, "{}", out.content);
+    assert!(out.content.contains("timed out after 3s"), "{}", out.content);
+    assert!(out.content.contains("compiling"), "what it printed first survives here too: {}", out.content);
+    assert!(out.content.contains("timeout_secs"), "and the way to allow longer: {}", out.content);
+}
