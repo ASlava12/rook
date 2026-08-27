@@ -31,8 +31,10 @@ what unblocks the most.
   `list_dir`, regex `search`, `run_command` with timeout, output cap and deny
   list. Every edit to one file goes in one call, applied in order against the
   text as it then stands; a batch that cannot finish writes nothing. Every cap
-  is enforced while output is read rather than after, and a timeout kills the
-  whole process group rather than the shell in front of it. 24 tests.
+  is enforced while output is read rather than after, both ends of a long output
+  survive it — a compiler's first error is at the head and the reason for a
+  failure is not the consequences at the tail — and a timeout kills the whole
+  process group rather than the shell in front of it. 26 tests.
 - **Asking the user** — `ask` puts a form of independent questions to whoever is
   driving: numbered choices in the CLI and TUI, radio and checkbox rows in the
   browser, the approval dialog over ACP. Typing past the options is always the

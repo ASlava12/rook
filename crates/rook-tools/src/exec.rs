@@ -52,12 +52,12 @@ impl Tool for RunCommand {
         let mut stdout = child.stdout.take();
         let mut stderr = child.stderr.take();
 
-        // Twice the cap: enough to know the output overflowed and to keep a
-        // meaningful tail, without holding a runaway command's gigabytes.
-        let keep = ctx.max_output_bytes.saturating_mul(2);
+        // One cap at each end, so a runaway command costs bounded memory and
+        // both the first error and the last line survive it.
+        let keep = ctx.max_output_bytes;
         let capture = async {
-            let mut out = Tail::new(keep);
-            let mut err = Tail::new(keep);
+            let mut out = Ends::new(keep);
+            let mut err = Ends::new(keep);
             if let Some(s) = stdout.as_mut() {
                 out.drain(s).await;
             }
@@ -85,23 +85,14 @@ impl Tool for RunCommand {
 
         let code = status.ok().and_then(|s| s.code()).unwrap_or(-1);
         let full = out.seen + err.seen;
-        let mut combined = String::from_utf8_lossy(&out.kept).into_owned();
-        if !err.kept.is_empty() {
+        let mut combined = out.text();
+        if err.seen > 0 {
             combined.push_str("\n--- stderr ---\n");
-            combined.push_str(&String::from_utf8_lossy(&err.kept));
+            combined.push_str(&err.text());
         }
         let truncated = full > combined.len().min(ctx.max_output_bytes);
         if truncated {
-            // Keep the tail: exit messages and stack traces live at the end.
-            let start = combined.len() - ctx.max_output_bytes;
-            let start =
-                (start..combined.len()).find(|i| combined.is_char_boundary(*i)).unwrap_or(combined.len());
-            combined = format!(
-                "[{} bytes elided; showing the last {}]\n{}",
-                start,
-                combined.len() - start,
-                &combined[start..]
-            );
+            combined = elide_middle(&combined, ctx.max_output_bytes);
         }
 
         Ok(ToolOutcome {
@@ -151,6 +142,36 @@ fn spawn_shell(command: &str, cwd: &std::path::Path) -> Result<tokio::process::C
     cmd.spawn().map_err(|e| ToolError::Io { path: cwd.to_path_buf(), source: e })
 }
 
+/// Keep both ends and drop the middle.
+///
+/// The tail carries the exit message and the last stack frame; the head carries
+/// a compiler's first error, which is the one that caused the rest. Keeping only
+/// the tail loses the reason and keeps the consequences.
+fn elide_middle(text: &str, budget: usize) -> String {
+    if text.len() <= budget {
+        return text.to_string();
+    }
+    // Weighted to the tail, which is where a run says how it ended.
+    let head = boundary_at_or_before(text, budget / 3);
+    let tail = boundary_at_or_after(text, text.len() - (budget - head));
+    format!("{}\n[{} bytes elided from the middle]\n{}", &text[..head], tail - head, &text[tail..])
+}
+
+fn boundary_at_or_before(text: &str, mut i: usize) -> usize {
+    i = i.min(text.len());
+    while i > 0 && !text.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+fn boundary_at_or_after(text: &str, mut i: usize) -> usize {
+    while i < text.len() && !text.is_char_boundary(i) {
+        i += 1;
+    }
+    i.min(text.len())
+}
+
 /// SIGKILL to the whole group. Windows has no equivalent that is not a job
 /// object, so there `kill_on_drop` takes the shell and its children are left —
 /// the timeout still reports what happened rather than claiming otherwise.
@@ -164,19 +185,22 @@ fn kill_group(pid: Option<u32>) -> bool {
     }
 }
 
-/// The last `keep` bytes of a stream, and how many went past.
+/// Both ends of a stream, bounded, and how much went past.
 ///
-/// Reading to the end first and capping afterwards works until a command emits
-/// more than memory: the cap has to bound the read, not the reply.
-struct Tail {
-    kept: Vec<u8>,
+/// Reading to the end and cutting afterwards works until a command emits more
+/// than memory. Keeping only the tail is what that first became, and it loses a
+/// compiler's first error — the one that caused every later line. So both ends
+/// are kept while reading, and the middle never lands anywhere.
+struct Ends {
+    head: Vec<u8>,
+    tail: std::collections::VecDeque<u8>,
     seen: usize,
-    keep: usize,
+    cap: usize,
 }
 
-impl Tail {
-    fn new(keep: usize) -> Self {
-        Self { kept: Vec::new(), seen: 0, keep }
+impl Ends {
+    fn new(cap: usize) -> Self {
+        Self { head: Vec::new(), tail: Default::default(), seen: 0, cap }
     }
 
     async fn drain(&mut self, reader: &mut (impl tokio::io::AsyncRead + Unpin)) {
@@ -186,11 +210,30 @@ impl Tail {
                 break;
             }
             self.seen += n;
-            self.kept.extend_from_slice(&chunk[..n]);
-            if self.kept.len() > self.keep {
-                let cut = self.kept.len() - self.keep;
-                self.kept.drain(..cut);
+            for &byte in &chunk[..n] {
+                if self.head.len() < self.cap {
+                    self.head.push(byte);
+                    continue;
+                }
+                self.tail.push_back(byte);
+                if self.tail.len() > self.cap {
+                    self.tail.pop_front();
+                }
             }
         }
+    }
+
+    fn text(&self) -> String {
+        let head = String::from_utf8_lossy(&self.head);
+        if self.tail.is_empty() {
+            return head.into_owned();
+        }
+        let tail: Vec<u8> = self.tail.iter().copied().collect();
+        let dropped = self.seen - self.head.len() - self.tail.len();
+        let gap = match dropped {
+            0 => String::new(),
+            n => format!("\n[{n} bytes elided from the middle]\n"),
+        };
+        format!("{head}{gap}{}", String::from_utf8_lossy(&tail))
     }
 }

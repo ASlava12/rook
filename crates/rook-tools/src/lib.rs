@@ -46,8 +46,10 @@ pub enum ToolError {
 
 pub type Result<T> = std::result::Result<T, ToolError>;
 
-/// `content` is what the model sees; `full_bytes` is what actually happened, so
-/// the store keeps the whole thing even when context gets only a window of it.
+/// `content` is what the model sees. `full_bytes` is how much there was, which
+/// is not the same thing: a tool that reads from disk can be asked again for the
+/// rest, while a command's output is gone once it has been elided. That is why
+/// truncation keeps both ends rather than one.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolOutcome {
     pub content: String,
