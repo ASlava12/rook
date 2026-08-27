@@ -28,7 +28,12 @@ pub enum LlmError {
     Status { status: u16, body: String },
     #[error("could not parse the provider's response: {0}")]
     Decode(String),
-    #[error("request exceeds the model's context window: {used} > {window} tokens")]
+    #[error(
+        "this turn needs about {used} tokens and the model's window holds {window}.\n\
+         Compacting cannot help when a single message is the problem — put the text in a file \
+         and ask for it to be read, which is paged, or point `[agent] model` at a model with a \
+         larger window."
+    )]
     ContextOverflow { used: usize, window: usize },
     #[error("no provider configured for {0:?}")]
     UnknownProvider(String),

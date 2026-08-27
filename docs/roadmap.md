@@ -120,6 +120,12 @@ what unblocks the most.
   a skill scoped away and explained by `skills why`, capture and rollback, a
   broken config that fails loudly, and the daemon path where a read goes over
   HTTP and a write says where the lock is.
+- **A prompt too large to send is refused, not sent** — compaction summarises
+  history and cannot make one message smaller, so a pasted build log went to the
+  provider whole and came back as an error about a limit the user never saw. It
+  now says how much the turn needs, how much fits, and that reading a file is
+  paged. `LlmError::ContextOverflow` had been declared for exactly this and
+  raised by nothing. 3 tests.
 - **A session killed mid-tool-call can be resumed** — the replay paired calls
   with results by adjacency, which holds until a process dies between logging
   the two. Every provider refuses a request where an assistant asked for a tool

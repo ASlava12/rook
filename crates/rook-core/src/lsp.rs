@@ -245,7 +245,10 @@ impl Tool for Definition {
             Err(e) => return Ok(ToolOutcome::error(e.to_string())),
         };
         let Some(at) = rook_lsp::locate(&opened.text, &symbol) else {
-            return Ok(ToolOutcome::error(format!("{symbol:?} does not appear in {raw_path}")));
+            return Ok(ToolOutcome::error(
+                rook_lsp::LspError::NoSuchSymbol { symbol: symbol.clone(), path: raw_path.clone() }
+                    .to_string(),
+            ));
         };
         match opened.server.definition(&opened.path, at).await {
             Ok(found) if found.is_empty() => {
@@ -296,7 +299,10 @@ impl Tool for References {
             Err(e) => return Ok(ToolOutcome::error(e.to_string())),
         };
         let Some(at) = rook_lsp::locate(&opened.text, &symbol) else {
-            return Ok(ToolOutcome::error(format!("{symbol:?} does not appear in {raw_path}")));
+            return Ok(ToolOutcome::error(
+                rook_lsp::LspError::NoSuchSymbol { symbol: symbol.clone(), path: raw_path.clone() }
+                    .to_string(),
+            ));
         };
         match opened.server.references(&opened.path, at).await {
             Ok(found) if found.is_empty() => Ok(ToolOutcome::ok(format!("nothing refers to {symbol:?}"))),

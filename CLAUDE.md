@@ -92,9 +92,11 @@ function to agree through, not two lists to keep in step.
 
 **Nothing here is exempt from being used.** Every crate is a library, so `pub`
 turns off the dead-code lint: a function that exists and is called from nowhere
-advertises an API that is not there. Three shipped that way —
-`Skill::resources`, `protocol::tool_call_done`, `SkillIndex::from_skills` — and
-`every_public_function_is_called_somewhere` now fails the build for the next one.
+advertises an API that is not there, and an error variant nothing raises names a
+case nothing handles. `ContextOverflow` was declared for a prompt too large to
+send and nothing checked, so such a prompt went to the provider whole.
+`every_public_function_is_called_somewhere` and
+`every_error_variant_is_constructed_somewhere` fail the build for the next one.
 Either wire it up or delete it.
 
 **A config field nothing reads is a lie, not a stub.** Four shipped that way —

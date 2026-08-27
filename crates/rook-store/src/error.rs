@@ -13,8 +13,6 @@ pub enum StoreError {
     Db(String),
     #[error("object {0} not found")]
     MissingObject(String),
-    #[error("ref {0:?} not found")]
-    MissingRef(String),
     #[error("session {0} not found")]
     MissingSession(String),
     #[error("corrupt object {id}: {reason}")]

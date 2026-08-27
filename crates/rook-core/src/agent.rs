@@ -627,6 +627,18 @@ impl<'a> AgentLoop<'a> {
                 self.mark_stable_prefix(&mut messages);
             }
 
+            // Compaction summarises history; it cannot make one message smaller.
+            // A pasted build log larger than the window would otherwise be sent
+            // whole and come back as a provider error about a limit the user
+            // never saw.
+            let used = measure(&messages);
+            if used > self.budget.usable() {
+                return Err(CoreError::Llm(rook_llm::LlmError::ContextOverflow {
+                    used,
+                    window: self.budget.usable(),
+                }));
+            }
+
             let mut request = Request::new(messages.clone());
             request.tools = self.tool_specs();
             request.effort = Some(self.effort);

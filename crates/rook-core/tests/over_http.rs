@@ -279,3 +279,50 @@ async fn several_unanswered_calls_are_each_answered_in_place() {
     assert_eq!(calls, 2, "{:?}", sent[0]["messages"]);
     assert_eq!(results, 2, "one answer each, not one for the pair: {:?}", sent[0]["messages"]);
 }
+
+#[tokio::test]
+async fn a_prompt_larger_than_the_window_is_refused_before_it_is_sent() {
+    let f = fixture();
+    let session = f.rook.start_session("huge").unwrap();
+    let (base, seen) = serve(vec![answer("ok")]).await;
+
+    // A pasted build log. Compaction summarises history and cannot make one
+    // message smaller, so without this it goes out whole and comes back as a
+    // provider error about a limit the user never saw.
+    let huge = "error: something went wrong\n".repeat(20_000);
+    let err = AgentLoop::new(&f.rook, provider(&base), session).run(&huge).await.unwrap_err();
+    let said = err.to_string();
+
+    assert_eq!(seen.lock().unwrap().len(), 0, "nothing should have been sent");
+    assert!(said.contains("140112") || said.contains("tokens"), "it must say how much: {said}");
+    assert!(said.contains("28672"), "and how much fits: {said}");
+    assert!(said.contains("read"), "and what to do instead: {said}");
+}
+
+#[tokio::test]
+async fn a_turn_that_fits_is_not_touched_by_the_check() {
+    let f = fixture();
+    let session = f.rook.start_session("normal").unwrap();
+    let (base, seen) = serve(vec![answer("fine")]).await;
+
+    let outcome = AgentLoop::new(&f.rook, provider(&base), session)
+        .run(&"a reasonable question ".repeat(200))
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.reply, "fine");
+    assert_eq!(seen.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn the_prompt_is_still_logged_when_it_is_refused_for_size() {
+    let f = fixture();
+    let session = f.rook.start_session("huge").unwrap();
+    let (base, _) = serve(vec![]).await;
+
+    let huge = "x".repeat(600_000);
+    let _ = AgentLoop::new(&f.rook, provider(&base), session).run(&huge).await;
+
+    let events = f.rook.transcript(session, 0, 10, 50).unwrap();
+    assert!(!events.is_empty(), "a refused turn still asked something, and the log is the record");
+}
