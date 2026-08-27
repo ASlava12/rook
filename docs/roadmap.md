@@ -118,6 +118,12 @@ what unblocks the most.
   a skill scoped away and explained by `skills why`, capture and rollback, a
   broken config that fails loudly, and the daemon path where a read goes over
   HTTP and a write says where the lock is.
+- **The editor's buffers, not the disk** — under ACP, a client that advertises
+  `fs.readTextFile` now serves every file read and write, so the agent sees what
+  the user is looking at rather than the last saved version and does not edit
+  their unsaved work back. Asked only when advertised, as the protocol requires,
+  and the workspace boundary still applies — it is not the editor's to widen.
+  7 tests, including a turn driven end to end: editor to agent to tool and back.
 - **The chat REPL under test** — its dozen slash commands were reachable only
   through an interactive prompt and checked by nobody. Driven from a pipe they
   need no model, so three tests now cover what each says with nothing to report,
@@ -217,8 +223,8 @@ against a server that speaks the OpenAI dialect and checks what it was sent.
 of them. codex's `spawn_agent`/`wait_agent` lets a parent send messages to a child
 mid-run, which is a different feature rather than a deeper version of this one.
 
-**ACP beyond the basics.** Modes, config options, `fs/*` delegation to the
-editor's buffers, and terminals are all defined and unimplemented.
+**ACP beyond the basics.** Modes, config options and terminals are defined and
+unimplemented. `fs/*` delegation is done.
 
 **Auto-installing language servers.** Detection is done; the other half of
 codex #8745 asks for installation too, which means downloading and running a

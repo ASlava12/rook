@@ -10,21 +10,27 @@ use std::time::Duration;
 use rook_core::{Config, Rook};
 use rook_skills::{Environment, SkillIndex};
 use rook_store::Store;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 struct Editor {
     stdin: tokio::io::DuplexStream,
     lines: tokio::io::Lines<BufReader<tokio::io::DuplexStream>>,
+    workspace: PathBuf,
     _dirs: (tempfile::TempDir, tempfile::TempDir),
 }
 
 impl Editor {
     fn start() -> Self {
+        Self::start_with(Config::default(), |_| {})
+    }
+
+    fn start_with(config: Config, seed: impl FnOnce(&std::path::Path)) -> Self {
         let store_dir = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
+        seed(workspace.path());
         let rook = Rook::from_parts(
             Store::open(store_dir.path()).unwrap(),
-            Config::default(),
+            config,
             Environment::bare("linux", "x86_64", "0.1.0"),
             SkillIndex::default(),
             PathBuf::from(workspace.path()),
@@ -36,7 +42,12 @@ impl Editor {
             let _ = rook_acp::serve(rook, BufReader::new(server_in), server_out).await;
         });
 
-        Self { stdin: client_in, lines: BufReader::new(client_out).lines(), _dirs: (store_dir, workspace) }
+        Self {
+            stdin: client_in,
+            lines: BufReader::new(client_out).lines(),
+            workspace: workspace.path().to_path_buf(),
+            _dirs: (store_dir, workspace),
+        }
     }
 
     async fn call(&mut self, id: u64, method: &str, params: serde_json::Value) -> serde_json::Value {
@@ -218,4 +229,130 @@ async fn a_request_is_answered_exactly_once() {
 
     let alive = editor.call(8, "initialize", serde_json::json!({ "protocolVersion": 1 })).await;
     assert!(alive.get("result").is_some(), "the connection must survive repeated cancels");
+}
+
+/// `OLLAMA_HOST` is the only way to point the agent at a fake provider, and it
+/// is one variable for the whole process — so the tests that use it take turns.
+async fn provider_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(Default::default).lock().await
+}
+
+/// A model that asks to read one file and then answers, over the wire, so the
+/// whole path is exercised: editor → agent → tool → back to the editor.
+async fn scripted_model(path: String) -> String {
+    use tokio::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let frames = [
+        serde_json::json!({"id": "1", "choices": [{"index": 0, "delta": {"role": "assistant",
+            "tool_calls": [{"index": 0, "id": "c1", "type": "function",
+                "function": {"name": "read_file", "arguments": format!("{{\"path\":{path:?}}}")}}]},
+            "finish_reason": "tool_calls"}], "usage": {"prompt_tokens": 1, "completion_tokens": 1}}),
+        serde_json::json!({"id": "1", "choices": [{"index": 0, "delta": {"role": "assistant",
+            "content": "read it"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1}}),
+    ];
+    tokio::spawn(async move {
+        for frame in frames {
+            let Ok((mut socket, _)) = listener.accept().await else { return };
+            let mut scratch = [0u8; 32768];
+            let _ = socket.read(&mut scratch).await;
+            let _ = socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n")
+                .await;
+            let _ = socket.write_all(format!("data: {frame}\n\ndata: [DONE]\n\n").as_bytes()).await;
+            let _ = socket.flush().await;
+        }
+    });
+    format!("http://{addr}")
+}
+
+#[tokio::test]
+async fn a_turn_reads_the_editors_unsaved_buffer_rather_than_the_file() {
+    let _turn = provider_lock().await;
+    let base = scripted_model("notes.txt".into()).await;
+    unsafe { std::env::set_var("OLLAMA_HOST", &base) };
+
+    let mut config = Config::default();
+    config.agent.model = "ollama/scripted".into();
+    config.sandbox.mode = rook_tools::policy::Mode::Auto;
+    let mut editor = Editor::start_with(config, |workspace| {
+        std::fs::write(workspace.join("notes.txt"), "what the disk has\n").unwrap();
+    });
+    let wanted = editor.workspace.canonicalize().unwrap().join("notes.txt");
+
+    editor
+        .call(
+            1,
+            "initialize",
+            serde_json::json!({
+                "protocolVersion": 1,
+                "clientCapabilities": { "fs": { "readTextFile": true, "writeTextFile": true } }
+            }),
+        )
+        .await;
+    let id = editor.call(2, "session/new", serde_json::json!({ "cwd": "." })).await["result"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let prompt = serde_json::json!({
+        "jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+        "params": { "sessionId": id, "prompt": [{ "type": "text", "text": "read the notes" }] }
+    });
+    editor.stdin.write_all(format!("{prompt}\n").as_bytes()).await.unwrap();
+
+    // The agent must come back and ask for the file.
+    let mut asked = None;
+    for _ in 0..40 {
+        let message = editor.next().await;
+        if message["method"] == "fs/read_text_file" {
+            asked = Some(message.clone());
+            let reply = serde_json::json!({
+                "jsonrpc": "2.0", "id": message["id"],
+                "result": { "content": "what the editor has, unsaved\n" }
+            });
+            editor.stdin.write_all(format!("{reply}\n").as_bytes()).await.unwrap();
+            break;
+        }
+        if message.get("id").and_then(|i| i.as_u64()) == Some(3) {
+            break;
+        }
+    }
+
+    let asked = asked.expect("the agent read the disk instead of asking the editor");
+    assert_eq!(asked["params"]["sessionId"], id, "the request must name its session");
+    assert_eq!(asked["params"]["path"], wanted.display().to_string(), "{asked}");
+}
+
+#[tokio::test]
+async fn a_client_that_cannot_serve_files_is_never_asked() {
+    let _turn = provider_lock().await;
+    let base = scripted_model("notes.txt".into()).await;
+    unsafe { std::env::set_var("OLLAMA_HOST", &base) };
+
+    let mut config = Config::default();
+    config.agent.model = "ollama/scripted".into();
+    config.sandbox.mode = rook_tools::policy::Mode::Auto;
+    let mut editor = Editor::start_with(config, |workspace| {
+        std::fs::write(workspace.join("notes.txt"), "what the disk has\n").unwrap();
+    });
+
+    // No `fs` block at all, which the protocol says means do not ask.
+    editor.call(1, "initialize", serde_json::json!({ "protocolVersion": 1 })).await;
+    let id = editor.call(2, "session/new", serde_json::json!({ "cwd": "." })).await["result"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let prompt = serde_json::json!({
+        "jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+        "params": { "sessionId": id, "prompt": [{ "type": "text", "text": "read the notes" }] }
+    });
+    editor.stdin.write_all(format!("{prompt}\n").as_bytes()).await.unwrap();
+
+    for message in editor.drain(Duration::from_millis(1500)).await {
+        assert_ne!(message["method"], "fs/read_text_file", "the protocol forbids asking: {message}");
+    }
 }

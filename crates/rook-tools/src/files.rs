@@ -42,20 +42,27 @@ impl Tool for ReadFile {
         let offset = arg_usize(args, "offset", 0);
         let limit = arg_usize(args, "limit", 2000);
 
-        let bytes =
-            tokio::fs::read(&path).await.map_err(|e| ToolError::Io { path: path.clone(), source: e })?;
-        let total_bytes = bytes.len();
-
-        // Binary files are reported, not pasted into context as mojibake.
-        if bytes.iter().take(8192).any(|b| *b == 0) {
-            return Ok(ToolOutcome::error(format!(
-                "{} looks binary ({total_bytes} bytes); read_file only handles text",
-                path.display()
-            ))
-            .with("binary", true));
-        }
-
-        let text = String::from_utf8_lossy(&bytes);
+        // Bytes when reading the disk, so a binary file is reported rather than
+        // pasted into context as mojibake. A front end that owns the files hands
+        // back text — an editor buffer is text by definition.
+        let text = match ctx.files {
+            Some(_) => ctx.read_text(&path).await?,
+            None => {
+                let bytes = tokio::fs::read(&path)
+                    .await
+                    .map_err(|e| ToolError::Io { path: path.clone(), source: e })?;
+                if bytes.iter().take(8192).any(|b| *b == 0) {
+                    return Ok(ToolOutcome::error(format!(
+                        "{} looks binary ({} bytes); read_file only handles text",
+                        path.display(),
+                        bytes.len()
+                    ))
+                    .with("binary", true));
+                }
+                String::from_utf8_lossy(&bytes).into_owned()
+            }
+        };
+        let total_bytes = text.len();
         let lines: Vec<&str> = text.lines().collect();
         let total_lines = lines.len();
 
@@ -168,15 +175,8 @@ impl Tool for WriteFile {
     async fn call(&self, ctx: &ToolContext, args: &serde_json::Value) -> Result<ToolOutcome> {
         let path = ctx.resolve(&arg_str(args, self.name(), "path")?)?;
         let content = arg_str(args, self.name(), "content")?;
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| ToolError::Io { path: parent.to_path_buf(), source: e })?;
-        }
         let existed = path.exists();
-        tokio::fs::write(&path, &content)
-            .await
-            .map_err(|e| ToolError::Io { path: path.clone(), source: e })?;
+        ctx.write_text(&path, &content).await?;
         Ok(ToolOutcome::ok(format!(
             "{} {} ({} bytes)",
             if existed { "overwrote" } else { "created" },
@@ -243,9 +243,7 @@ impl Tool for EditFile {
         let path = ctx.resolve(&arg_str(args, self.name(), "path")?)?;
         let edits = parse_edits(args)?;
 
-        let original = tokio::fs::read_to_string(&path)
-            .await
-            .map_err(|e| ToolError::Io { path: path.clone(), source: e })?;
+        let original = ctx.read_text(&path).await?;
 
         // Applied to a copy: a later edit that cannot be placed must not leave
         // the earlier ones on disk.
@@ -269,7 +267,7 @@ impl Tool for EditFile {
             }
         }
 
-        tokio::fs::write(&path, &text).await.map_err(|e| ToolError::Io { path: path.clone(), source: e })?;
+        ctx.write_text(&path, &text).await?;
         Ok(ToolOutcome::ok(format!(
             "{} edit(s), {replaced} replacement(s) in {}",
             edits.len(),

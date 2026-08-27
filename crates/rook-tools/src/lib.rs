@@ -82,15 +82,68 @@ impl ToolOutcome {
     }
 }
 
+/// Where a text file is read from and written to.
+///
+/// The disk, unless a front end knows better. An editor holds unsaved buffers
+/// the disk has never seen: an agent that reads around them sees the file as it
+/// was before the user's last change, and edits it back.
+#[async_trait]
+pub trait Files: Send + Sync {
+    async fn read(&self, path: &std::path::Path) -> Result<String>;
+    async fn write(&self, path: &std::path::Path, contents: &str) -> Result<()>;
+}
+
 /// The workspace root bounds every path a tool will touch, unless the caller
 /// explicitly widens it.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ToolContext {
     pub workspace: PathBuf,
     pub max_output_bytes: usize,
     pub command_timeout: std::time::Duration,
     /// When false, tools refuse paths outside the workspace.
     pub allow_outside_workspace: bool,
+    /// Set by a front end whose environment owns the files — an editor, so far.
+    pub files: Option<Arc<dyn Files>>,
+}
+
+impl std::fmt::Debug for ToolContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolContext")
+            .field("workspace", &self.workspace)
+            .field("max_output_bytes", &self.max_output_bytes)
+            .field("command_timeout", &self.command_timeout)
+            .field("allow_outside_workspace", &self.allow_outside_workspace)
+            .field("files", &self.files.is_some())
+            .finish()
+    }
+}
+
+impl ToolContext {
+    /// Read a text file through whatever owns it.
+    pub async fn read_text(&self, path: &std::path::Path) -> Result<String> {
+        match &self.files {
+            Some(files) => files.read(path).await,
+            None => tokio::fs::read_to_string(path)
+                .await
+                .map_err(|e| ToolError::Io { path: path.to_path_buf(), source: e }),
+        }
+    }
+
+    pub async fn write_text(&self, path: &std::path::Path, contents: &str) -> Result<()> {
+        match &self.files {
+            Some(files) => files.write(path, contents).await,
+            None => {
+                if let Some(parent) = path.parent() {
+                    tokio::fs::create_dir_all(parent)
+                        .await
+                        .map_err(|e| ToolError::Io { path: parent.to_path_buf(), source: e })?;
+                }
+                tokio::fs::write(path, contents)
+                    .await
+                    .map_err(|e| ToolError::Io { path: path.to_path_buf(), source: e })
+            }
+        }
+    }
 }
 
 impl ToolContext {
@@ -100,6 +153,7 @@ impl ToolContext {
             max_output_bytes: 256 * 1024,
             command_timeout: std::time::Duration::from_secs(120),
             allow_outside_workspace: false,
+            files: None,
         }
     }
 

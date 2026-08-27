@@ -8,10 +8,15 @@
 //! notifications; the permission policy's approver becomes
 //! `session/request_permission`, so an editor's approval dialog and the
 //! terminal's `[y/a/n]` are the same decision reaching the same policy.
+//!
+//! When the client says it can serve them, file reads and writes go to the
+//! editor rather than the disk, so the agent sees the buffer the user is
+//! looking at instead of the version last saved.
 
 pub mod protocol;
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -56,6 +61,9 @@ where
     let policy = rook_core::agent::policy_for(&rook);
     let servers = rook_core::agent::servers_for(&rook);
     let mcp = Arc::new(rook.connect_mcp().await);
+    // Filled in by `initialize`, and read when a turn starts: the client may
+    // serve its unsaved buffers, and the protocol forbids asking if it cannot.
+    let client_files: Arc<Mutex<ClientFiles>> = Default::default();
 
     let peer = Arc::new(Peer::new(outbound));
     let mut lines = reader.lines();
@@ -96,6 +104,7 @@ where
                         rook.clone(),
                         peer.clone(),
                         Shared { policy: policy.clone(), servers: servers.clone(), mcp: mcp.clone() },
+                        *client_files.lock().await,
                         id,
                         params,
                         replied,
@@ -103,6 +112,9 @@ where
                 });
             }
             (_, Some(id)) => {
+                if method == "initialize" {
+                    *client_files.lock().await = ClientFiles::from_initialize(&params);
+                }
                 let outcome = dispatch(&rook, &method, params);
                 peer.respond(&id, outcome);
             }
@@ -204,6 +216,7 @@ async fn prompt(
     rook: Arc<Rook>,
     peer: Arc<Peer>,
     shared: Shared,
+    client_files: ClientFiles,
     id: serde_json::Value,
     params: serde_json::Value,
     replied: Arc<std::sync::atomic::AtomicBool>,
@@ -245,6 +258,13 @@ async fn prompt(
     let editor = Arc::new(EditorApprover { peer: peer.clone(), session: request.session_id.clone() });
     agent.approver = editor.clone();
     agent.ask_via(editor);
+    if client_files.read {
+        agent.tool_ctx.files = Some(Arc::new(EditorFiles {
+            peer: peer.clone(),
+            session: request.session_id.clone(),
+            can_write: client_files.write,
+        }));
+    }
 
     let calls = AtomicU64::new(0);
     let result = agent
@@ -406,5 +426,70 @@ impl EditorApprover {
             .and_then(|i| q.choices.get(i).cloned());
 
         Answer { question: q.question.clone(), chosen: picked.into_iter().collect() }
+    }
+}
+
+/// The editor's files, which include buffers it has not saved.
+///
+/// An agent that reads around them sees the file as it was before the user's
+/// last change and edits it back, which is the confusing failure this exists to
+/// prevent. Only used when the client said in `initialize` that it can serve
+/// them: the protocol requires the agent not to ask otherwise.
+struct EditorFiles {
+    peer: Arc<Peer>,
+    session: String,
+    can_write: bool,
+}
+
+#[async_trait]
+impl rook_tools::Files for EditorFiles {
+    async fn read(&self, path: &Path) -> rook_tools::Result<String> {
+        let params = serde_json::json!({ "sessionId": self.session, "path": path });
+        let answer = self.peer.request("fs/read_text_file", params).await.ok_or_else(|| {
+            rook_tools::ToolError::Io {
+                path: path.to_path_buf(),
+                source: std::io::Error::other("the editor closed the connection"),
+            }
+        })?;
+        answer["content"].as_str().map(str::to_string).ok_or_else(|| rook_tools::ToolError::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::other(format!("the editor answered {answer}")),
+        })
+    }
+
+    async fn write(&self, path: &Path, contents: &str) -> rook_tools::Result<()> {
+        if !self.can_write {
+            // Falling back rather than refusing: the client can read buffers and
+            // not write them, and a write to disk is still correct then.
+            if let Some(parent) = path.parent() {
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .map_err(|e| rook_tools::ToolError::Io { path: parent.to_path_buf(), source: e })?;
+            }
+            return tokio::fs::write(path, contents)
+                .await
+                .map_err(|e| rook_tools::ToolError::Io { path: path.to_path_buf(), source: e });
+        }
+        let params = serde_json::json!({ "sessionId": self.session, "path": path, "content": contents });
+        self.peer.request("fs/write_text_file", params).await.map(|_| ()).ok_or_else(|| {
+            rook_tools::ToolError::Io {
+                path: path.to_path_buf(),
+                source: std::io::Error::other("the editor closed the connection"),
+            }
+        })
+    }
+}
+
+/// What the client said it can do, from the `initialize` request.
+#[derive(Clone, Copy, Default)]
+struct ClientFiles {
+    read: bool,
+    write: bool,
+}
+
+impl ClientFiles {
+    fn from_initialize(params: &serde_json::Value) -> Self {
+        let fs = &params["clientCapabilities"]["fs"];
+        Self { read: fs["readTextFile"] == true, write: fs["writeTextFile"] == true }
     }
 }
