@@ -64,6 +64,21 @@ impl Pty {
         grid(&self.seen, cols, rows)
     }
 
+    /// The screen once `wanted` is on it, or the last one before giving up.
+    ///
+    /// A settling window is a guess about how long a redraw takes, and under a
+    /// full test run that guess is wrong: waiting for the thing being asserted
+    /// is the same lesson as waiting for a frame rather than for a byte.
+    fn screen_showing(&mut self, cols: usize, rows: usize, wanted: &str) -> Vec<String> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let screen = self.screen(cols, rows);
+            if screen.iter().any(|line| line.contains(wanted)) || std::time::Instant::now() >= deadline {
+                return screen;
+            }
+        }
+    }
+
     /// Whether anything arrived, so a closed pty ends the wait instead of
     /// spinning it out to the deadline.
     fn read_more(&mut self, timeout_ms: i32) -> bool {
@@ -190,7 +205,7 @@ fn the_browsing_tabs_render_without_a_model() {
 
     // Tab, not "3": on the chat tab a digit is a character in the message.
     pty.send("\t\t");
-    let screen = pty.screen(100, 30).join("\n");
+    let screen = pty.screen_showing(100, 30, "Skills").join("\n");
 
     assert!(screen.contains("Skills"), "the skills tab must render on an empty store:\n{screen}");
     assert!(
@@ -205,13 +220,13 @@ fn the_footer_shows_the_settings_and_f2_changes_them() {
     let workspace = tempfile::tempdir().unwrap();
     let mut pty = tui(home.path(), workspace.path());
 
-    let before = pty.screen(100, 30).join("\n");
+    let before = pty.screen_showing(100, 30, "ask/high").join("\n");
     assert!(before.contains("ask/high"), "the configured defaults, in the footer:\n{before}");
 
     // F2 as a VT sequence; crossterm reads both this and SS3, and a pty is not
     // a terminal that will translate one for us.
     pty.send("\u{1b}[12~");
-    let after = pty.screen(100, 30).join("\n");
+    let after = pty.screen_showing(100, 30, "readonly/high").join("\n");
 
     assert!(after.contains("readonly/high"), "F2 cycles approvals:\n{after}");
 }
@@ -233,7 +248,7 @@ fn the_memory_tab_shows_what_the_agent_remembers() {
     pty.screen(100, 30);
     // Tabs, not "3": on the chat tab a digit is a character in the message.
     pty.send("\t\t");
-    let screen = pty.screen(100, 30).join("\n");
+    let screen = pty.screen_showing(100, 30, "Memory").join("\n");
 
     assert!(screen.contains("Memory"), "the tab must be there:\n{screen}");
     assert!(screen.contains("prefer tabs in Makefiles"), "and the fact:\n{screen}");
@@ -249,7 +264,7 @@ fn the_tui_chat_answers_the_same_slash_commands_as_the_plain_cli() {
 
     pty.send("/goal ship the release\r");
     pty.send("/goal\r");
-    let screen = pty.screen(100, 30).join("\n");
+    let screen = pty.screen_showing(100, 30, "goal set").join("\n");
 
     assert!(screen.contains("goal set"), "the command must run, not be sent to a model:\n{screen}");
     assert!(screen.contains("ship the release"), "and read back:\n{screen}");
@@ -263,7 +278,7 @@ fn an_unknown_slash_command_in_the_tui_says_so() {
     pty.screen(100, 30);
 
     pty.send("/nonsense\r");
-    let screen = pty.screen(100, 30).join("\n");
+    let screen = pty.screen_showing(100, 30, "unknown command").join("\n");
 
     assert!(screen.contains("unknown command"), "{screen}");
     assert!(!screen.contains("cannot reach"), "it must not have gone to the provider:\n{screen}");
@@ -277,7 +292,7 @@ fn the_footer_shows_no_running_total_before_there_is_one() {
     let workspace = tempfile::tempdir().unwrap();
     let mut pty = tui(home.path(), workspace.path());
 
-    let screen = pty.screen(100, 30).join("\n");
+    let screen = pty.screen_showing(100, 30, "ask/high").join("\n");
     assert!(screen.contains("ask/high"), "{screen}");
     assert!(!screen.contains(" in / "), "a total nobody has spent yet:\n{screen}");
 }
@@ -316,7 +331,7 @@ fn ctrl_c_stops_a_running_turn_rather_than_the_whole_ui() {
     assert!(!running.contains("[stopped]"), "nothing has been stopped yet:\n{running}");
 
     pty.send("\u{3}");
-    let after = pty.screen(100, 30).join("\n");
+    let after = pty.screen_showing(100, 30, "[stopped]").join("\n");
     assert!(after.contains("[stopped]"), "ctrl-c stops the turn:\n{after}");
     assert!(after.contains("Chat"), "and the tabs are still drawn, so it did not quit:\n{after}");
 }
@@ -353,7 +368,7 @@ fn the_sessions_tab_names_the_workspace_only_when_it_is_another_one() {
     // Digits are characters in the message box on the chat tab, so the way to
     // the next tab is the key the footer names.
     pty.send("\t");
-    let screen = pty.screen(100, 30).join("\n");
+    let screen = pty.screen_showing(100, 30, "events · theirs").join("\n");
 
     assert!(screen.contains("events · theirs"), "a session from another project says which:\n{screen}");
     assert!(

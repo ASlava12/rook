@@ -121,7 +121,10 @@ frames — a redraw after a keypress emits only the cells that changed. Do not
 wait for the output to go quiet: it redraws on a 60 ms tick whether or not
 anything changed. Wait for a frame rather than for the first byte: entering the
 alternate screen writes before anything is drawn, so work the app does between
-the two lands in the gap and a byte-triggered capture reads a blank screen.
+the two lands in the gap and a byte-triggered capture reads a blank screen. And
+after a keypress, wait for the content being asserted rather than for a settling
+window — a window is a guess about redraw latency, and under a full `cargo xtask
+ci` that guess is wrong often enough to look like a product failure.
 
 ## Storage changes
 

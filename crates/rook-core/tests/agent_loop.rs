@@ -2144,3 +2144,61 @@ async fn a_sub_task_says_what_it_is_doing_before_it_is_done() {
 
     assert_eq!(doing, ["look at a.txt: read_file"], "the parent sees the child working: {doing:?}");
 }
+
+/// A hook that never answers must not become an approval by default. It is
+/// bounded by its own `timeout_secs`, and the timeout is a failure like any
+/// other — which for `pre_tool` means no.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_pre_tool_hook_that_hangs_refuses_rather_than_waits_or_allows() {
+    let f = fixture();
+    let rook = hooked(
+        &f,
+        vec![rook_core::hooks::HookConfig {
+            timeout_secs: 1,
+            ..hook(rook_core::hooks::Event::PreTool, "sleep 30")
+        }],
+    );
+    let session = rook.start_session("hung hook").unwrap();
+    let started = std::time::Instant::now();
+
+    let script =
+        vec![call("write_file", serde_json::json!({ "path": "a.txt", "content": "hi" })), reply("refused")];
+    let mut agent = AgentLoop::new(&rook, Arc::new(ScriptedProvider::new(script)), session);
+    agent.allow_everything_not_denied();
+    agent.run("write it").await.unwrap();
+
+    assert!(started.elapsed() < std::time::Duration::from_secs(20), "it waited the hook out");
+    assert!(
+        !f.workspace.path().join("a.txt").exists(),
+        "a hook that could not answer is not an answer of yes"
+    );
+}
+
+/// codex #41118 propagates the parent's trusted skills to a delegated worker.
+/// Here a child resolves against the same index and the same environment, so
+/// what the parent could load the child can — including a skill written during
+/// the run, since the index is behind a lock rather than copied.
+#[tokio::test]
+async fn a_sub_task_can_load_the_skills_its_parent_could() {
+    let f = fixture();
+    let session = f.rook.start_session("delegating").unwrap();
+
+    let script = vec![
+        call("delegate", serde_json::json!({ "tasks": ["greet someone"] })),
+        call("load_skill", serde_json::json!({ "name": "greeting" })),
+        reply("greeted"),
+        reply("done"),
+    ];
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
+    let outcome = agent.run("delegate a greeting").await.unwrap();
+
+    let child = outcome.delegated.first().expect("a sub-task ran");
+    let child = rook_store::parse_session_id(child).unwrap();
+    let loaded = f.rook.transcript(child, 0, 100, 4096).unwrap();
+    assert!(
+        loaded.iter().any(|e| e.kind == "skill" && e.label.starts_with("greeting@")),
+        "the child loaded the parent's skill, at a version: {:?}",
+        loaded.iter().map(|e| (&e.kind, &e.label)).collect::<Vec<_>>()
+    );
+}

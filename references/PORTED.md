@@ -348,3 +348,32 @@ gateway, cron and conformance work. codex #41087 exposes usage metadata in
 completion events; Rook carries it on `Delta::Done` and accumulates it in the
 turn's outcome, but does not report a running total mid-turn — worth doing, and
 not this.
+
+**2026-08-27 (sixteenth pass)** — hermes 36, codex 4, opencode 2, acp 1.
+
+Two were worth checking here and both found the behaviour already right, so what
+came of them is tests rather than fixes — a property nothing pins is one that can
+be removed by accident.
+
+hermes' `fix(hermes_cli): scope hook timeouts and fail closed on pre_tool_call`
+is two claims. Rook bounds a hook by its own `timeout_secs` rather than a shared
+one, and treats a timeout as a failure like any other — which for `pre_tool`
+means deny, since a hook that cannot answer must not become an approval. Pinned:
+a `pre_tool` hook that sleeps thirty seconds against a one-second timeout refuses
+the call and does not wait it out.
+
+codex #41118 propagates a parent's trusted skills to delegated workers. A child
+here resolves against the same index and the same environment — the index is
+behind a lock on the shared `Rook`, not copied — so what the parent could load
+the child can, including a skill written during the run. Pinned by delegating a
+task that loads one.
+
+Dismissed: codex #41117 freezes plugin roots in MCP tool attribution, which is
+already true here for a different reason — plugins are discovered once when the
+store opens, so a run's attribution cannot move under it. Guardian V2 metrics and
+async test timeouts are their own subsystem. hermes' remaining thirty-four are
+desktop, bots, gateway, cron and browser-daemon internals, an OpenRouter model
+catalogue, and contributor mappings; their browser work on recycling a wedged
+session after a timeout is about a daemon Rook does not have — the equivalent
+here is killing the process group, which `exec` does. opencode's two are a model
+mapping and generated code. acp's one is a documentation update.
