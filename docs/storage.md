@@ -36,16 +36,24 @@ Retraining never invalidates history: **every object records the codec it was
 written with**, so old objects keep decoding against the dictionary they were
 written against.
 
-Measured, on a synthetic transcript of 3,000 turns plus 300 tool results over 25
+Measured, on a synthetic transcript of 3,000 turns plus 320 tool results over 64
 distinct source files (`cargo xtask compaction`):
 
 | | size | ratio |
 |---|---:|---:|
-| logical bytes written by the agent | 21.88 MiB | — |
-| after dedup (distinct objects) | 2.54 MiB | 8.6× |
-| stored, standalone zstd | 0.60 MiB | 4.3× |
-| stored, trained dictionaries | 0.12 MiB | **20.7×** |
-| on disk, index + objects | 1.07 MiB | 20.5× end-to-end |
+| logical bytes written by the agent | 23.31 MiB | — |
+| after dedup (distinct objects) | 5.29 MiB | 4.4× |
+| stored, standalone zstd | 0.63 MiB | 8.4× |
+| stored, trained dictionaries | 0.14 MiB | **37.1×** |
+| on disk, index + objects | 1.07 MiB | 21.9× end-to-end |
+
+Sixty-four files rather than twenty-five, because a dictionary needs 32 samples
+of a kind before it is trained: at twenty-five the file blobs never got one, so
+the measurement exercised the message dictionary alone while the claim above is
+one dictionary per kind. Both are trained now, which is what the run prints.
+The end-to-end figure barely moved — 20.5× to 21.9× — but the split between
+dedup and compression did, because more distinct files means less to dedup and
+more for zstd to work on.
 
 Note the gap between "stored" and "on disk": the redb index has its own overhead,
 and at this scale it dominates. `rook store stat` reports both, because reporting

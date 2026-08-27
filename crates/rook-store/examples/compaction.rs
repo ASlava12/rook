@@ -38,8 +38,11 @@ fn mib(bytes: u64) -> f64 {
 
 fn main() {
     let turns = 3_000;
-    let files = 25;
-    let rereads = 12;
+    // Above the 32 samples a dictionary needs: at 25 the file blobs never got
+    // one, so the headline ratio measured the message dictionary alone while
+    // claiming a dictionary per kind.
+    let files = 64;
+    let rereads = 5;
 
     let dir = tempfile::tempdir().unwrap();
 

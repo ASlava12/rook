@@ -301,6 +301,13 @@ what unblocks the most.
   before checking containment, so a link inside the workspace pointing out of it
   is refused rather than followed, and the refusal says where the path really
   led. Widened only by `sandbox.allow_outside_workspace`. 6 tests.
+- **The storage claim measured on a store that exercises it** — the benchmark
+  behind the README's ratios read 25 distinct files, and a dictionary needs 32
+  samples of a kind before it is trained: the file blobs never got one, so the
+  headline measured the message dictionary alone while the claim beside it is a
+  dictionary per kind. At 64 files both are trained. End-to-end barely moved,
+  20.5× to 21.9×; the split between dedup and compression did, and the numbers in
+  `README.md`, `docs/storage.md` and `docs/platforms.md` follow the run. 1 test.
 - **What a turn is spending, while it is spending it** — the totals were
   reported once, at the end, when the number can no longer change a decision;
   a turn running a dozen steps over several minutes said nothing. They are

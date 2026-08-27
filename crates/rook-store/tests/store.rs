@@ -393,3 +393,37 @@ fn count_and_age_limits_delete_the_oldest_not_the_newest() {
         assert!(s.get_session(*id).unwrap().is_some(), "the newest three stay");
     }
 }
+
+/// One dictionary per object kind, which is the claim — and a kind below the
+/// sample floor gets none rather than a bad one trained on too little.
+#[test]
+fn each_kind_is_trained_on_its_own_and_only_with_enough_to_learn_from() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = Store::open(dir.path()).unwrap();
+
+    for i in 0..64 {
+        s.put(Kind::Message, &message(i)).unwrap();
+        s.put(Kind::FileBlob, format!("fn handler_{i}() {{ dispatch(ctx) }}\n").repeat(40).as_bytes())
+            .unwrap();
+    }
+    for i in 0..8 {
+        s.put(
+            Kind::Snapshot,
+            format!("{{\"root\":\"/ws\",\"files\":{{\"a{i}.rs\":\"deadbeef\"}}}}").as_bytes(),
+        )
+        .unwrap();
+    }
+
+    let trained: Vec<String> =
+        s.train_dictionaries(400, 16 * 1024).unwrap().into_iter().map(|(k, _)| k).collect();
+
+    assert!(trained.contains(&"message".to_string()), "{trained:?}");
+    assert!(
+        trained.contains(&"file".to_string()),
+        "file blobs are the bulk of a real store and had no dictionary of their own: {trained:?}"
+    );
+    assert!(
+        !trained.contains(&"snapshot".to_string()),
+        "eight samples is not enough to learn a dictionary from: {trained:?}"
+    );
+}

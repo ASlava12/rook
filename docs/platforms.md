@@ -60,7 +60,7 @@ cross-checking it. A cross-check would be cheaper and would skip the only two
 dependencies where an "unsupported platform" regression could actually land.
 
 **Why keep zstd**, given the cost: dictionary compression is where the storage
-ratio comes from — 20.7× against 4.3× for the pure-Rust alternatives that offer no
+ratio comes from — 37.1× against 8.4× for the pure-Rust alternatives that offer no
 dictionary support. Losing that would gut the central claim of the design.
 
 **Why `ring` rather than `aws-lc-rs`**: `rustls` defaults to `aws-lc-rs`, which

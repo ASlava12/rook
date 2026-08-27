@@ -28,15 +28,15 @@ Three things follow from it.
 
 **Memory is compact by construction.** Content addressing, zstd dictionaries
 trained per object kind, and small objects inlined into the index. On a synthetic
-transcript of 3,000 turns and 300 tool results:
+transcript of 3,000 turns and 320 tool results over 64 distinct files:
 
 ```
-logical bytes written by the agent :    21.88 MiB
-  after dedup (distinct objects)   :     2.54 MiB
-  cold store, standalone zstd      :     0.60 MiB   ratio  4.3x
-  warm store, trained dictionaries :     0.12 MiB   ratio 20.7x
+logical bytes written by the agent :    23.31 MiB
+  after dedup (distinct objects)   :     5.29 MiB
+  cold store, standalone zstd      :     0.63 MiB   ratio  8.4x
+  warm store, trained dictionaries :     0.14 MiB   ratio 37.1x
   on-disk total (index + objects)  :     1.07 MiB
-  end-to-end (logical -> on disk)  :     20.5x
+  end-to-end (logical -> on disk)  :     21.9x
 ```
 
 Reproduce it yourself: `cargo xtask compaction`.
