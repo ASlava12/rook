@@ -57,43 +57,51 @@ impl Tool for RunCommand {
         let mut stderr = child.stderr.take();
 
         // One cap at each end, so a runaway command costs bounded memory and
-        // both the first error and the last line survive it.
+        // both the first error and the last line survive it. Outside the future
+        // that fills them, so a timeout still has what was printed before it.
         let keep = ctx.max_output_bytes;
-        let capture = async {
-            let mut out = Ends::new(keep);
-            let mut err = Ends::new(keep);
-            if let Some(s) = stdout.as_mut() {
-                out.drain(s).await;
-            }
-            if let Some(s) = stderr.as_mut() {
-                err.drain(s).await;
-            }
-            let status = child.wait().await;
-            (out, err, status)
+        let mut out = Ends::new(keep);
+        let mut err = Ends::new(keep);
+        let timed_out = {
+            // Together, not one after the other: a pipe holds about 64 KiB, and
+            // a command that fills stderr while stdout is being drained blocks
+            // on the write — so it never finishes stdout and the drain never
+            // ends. Any build with enough warnings did exactly that, and hung
+            // until the timeout with nothing to show for it.
+            let capture = async {
+                let reading_out = async {
+                    if let Some(s) = stdout.as_mut() {
+                        out.drain(s).await;
+                    }
+                };
+                let reading_err = async {
+                    if let Some(s) = stderr.as_mut() {
+                        err.drain(s).await;
+                    }
+                };
+                tokio::join!(reading_out, reading_err);
+            };
+            tokio::time::timeout(timeout, capture).await.is_err()
         };
 
-        let (out, err, status) = match tokio::time::timeout(timeout, capture).await {
-            Ok(v) => v,
-            Err(_) => {
-                // The whole group, not the shell: `sh -c` may fork rather than
-                // exec, and killing the shell alone leaves the real work running.
-                let killed = kill_group(group);
-                return Ok(ToolOutcome::error(format!(
-                    "command timed out after {}s{}: {command}",
-                    timeout.as_secs(),
-                    if killed { " and was killed" } else { " and could not be killed" }
-                ))
-                .with("timed_out", true));
-            }
-        };
+        if timed_out {
+            // The whole group, not the shell: `sh -c` may fork rather than
+            // exec, and killing the shell alone leaves the real work running.
+            let killed = kill_group(group);
+            return Ok(ToolOutcome::error(format!(
+                "command timed out after {}s{} — pass a larger `timeout_secs` if it needs \
+                 longer. What it printed first:\n{}",
+                timeout.as_secs(),
+                if killed { " and was killed" } else { " and could not be killed" },
+                joined(&out, &err),
+            ))
+            .with("timed_out", true));
+        }
+        let status = child.wait().await;
 
         let code = status.ok().and_then(|s| s.code()).unwrap_or(-1);
         let full = out.seen + err.seen;
-        let mut combined = out.text();
-        if err.seen > 0 {
-            combined.push_str("\n--- stderr ---\n");
-            combined.push_str(&err.text());
-        }
+        let mut combined = joined(&out, &err);
         let truncated = full > combined.len().min(ctx.max_output_bytes);
         if truncated {
             combined = crate::elide_middle(&combined, ctx.max_output_bytes);
@@ -178,6 +186,17 @@ fn spawn_shell(command: &str, cwd: &std::path::Path) -> Result<tokio::process::C
 /// SIGKILL to the whole group. Windows has no equivalent that is not a job
 /// object, so there `kill_on_drop` takes the shell and its children are left —
 /// the timeout still reports what happened rather than claiming otherwise.
+/// Both streams as the model reads them, with stderr marked only when there is
+/// some: a command that printed nothing to it should not appear to have.
+fn joined(out: &Ends, err: &Ends) -> String {
+    let mut combined = out.text();
+    if err.seen > 0 {
+        combined.push_str("\n--- stderr ---\n");
+        combined.push_str(&err.text());
+    }
+    combined
+}
+
 fn kill_group(pid: Option<u32>) -> bool {
     match pid {
         #[cfg(unix)]

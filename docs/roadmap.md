@@ -301,6 +301,13 @@ what unblocks the most.
   before checking containment, so a link inside the workspace pointing out of it
   is refused rather than followed, and the refusal says where the path really
   led. Widened only by `sandbox.allow_outside_workspace`. 6 tests.
+- **A command that writes to both streams does not hang** — stdout was drained
+  to end-of-file before stderr was read at all, so a command that filled the
+  stderr pipe blocked on the write, never finished stdout, and the drain never
+  ended: any build with enough warnings hung until the timeout and then returned
+  nothing at all. They are drained together, and a timeout now keeps what was
+  printed before it — the part worth reading — and says that `timeout_secs` can
+  be raised. 2 tests.
 - **A tool call that misses says what it might have meant** — `unknown tool
   "read_fil"` told the model nothing it could act on, so the step that mistyped
   the name cost a second one finding out. The near misses are named, by edit

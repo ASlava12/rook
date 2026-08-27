@@ -147,3 +147,40 @@ async fn a_runaway_command_costs_bounded_memory_and_still_shows_both_ends() {
     assert!(out.content.len() < 8_000, "and the reply stayed small: {} bytes", out.content.len());
     assert!(out.full_bytes > 8_000_000, "what was produced is still reported");
 }
+
+/// stdout was drained to EOF before stderr was read at all. A command that
+/// fills the stderr pipe buffer — a build with warnings does it easily — blocks
+/// writing to it, so it never finishes writing stdout, so the drain never ends.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_command_that_writes_a_lot_to_stderr_does_not_deadlock() {
+    let (_dir, ctx) = ctx();
+    let started = std::time::Instant::now();
+
+    let out = run(
+        &ctx,
+        serde_json::json!({
+            "command": "head -c 200000 /dev/zero | tr '\\0' 'x' >&2; echo done",
+            "timeout_secs": 20
+        }),
+    )
+    .await;
+
+    assert!(started.elapsed() < std::time::Duration::from_secs(10), "it deadlocked until the timeout");
+    assert!(!out.is_error, "{}", out.content);
+    assert!(out.content.contains("done"), "stdout survived: {}", out.content);
+}
+
+/// A build that times out has usually printed the very thing worth reading, and
+/// the whole capture was dropped with the future that held it.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_timeout_keeps_what_the_command_had_already_printed() {
+    let (_dir, ctx) = ctx();
+
+    let out = run(&ctx, serde_json::json!({ "command": "echo starting; sleep 30", "timeout_secs": 1 })).await;
+
+    assert!(out.is_error, "{}", out.content);
+    assert!(out.content.contains("starting"), "what it printed first is the useful part: {}", out.content);
+    assert!(out.content.contains("timeout_secs"), "and it says how to allow longer: {}", out.content);
+}
