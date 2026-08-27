@@ -189,6 +189,12 @@ async fn turn(
 
     match result {
         Ok(outcome) => {
+            for text in &outcome.facts_learned {
+                let _ = outbound.send(ChatEvent::Remembered { text: text.clone() });
+            }
+            for text in &outcome.facts_forgotten {
+                let _ = outbound.send(ChatEvent::Forgot { text: text.clone() });
+            }
             let _ = outbound.send(ChatEvent::Done {
                 steps: outcome.steps,
                 input_tokens: outcome.input_tokens,

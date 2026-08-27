@@ -96,6 +96,21 @@ fn bundled(skill: &rook_skills::Skill) -> String {
     format!("\n\nBundled with this skill, under {}:{}{more}", skill.dir.display(), listed.join(""))
 }
 
+impl TurnOutcome {
+    /// What a turn changed about what the agent believes, for the same line
+    /// that reports what it changed on disk. Empty when it changed nothing.
+    pub fn memory_note(&self) -> Option<String> {
+        let mut said = Vec::new();
+        for text in &self.facts_learned {
+            said.push(format!("remembered: {text}"));
+        }
+        for text in &self.facts_forgotten {
+            said.push(format!("forgot: {text}"));
+        }
+        (!said.is_empty()).then(|| said.join("\n"))
+    }
+}
+
 /// The head of a sub-task, for a progress line. A task is a whole instruction —
 /// a live one ran to two hundred characters — and repeating it on every step
 /// buries what the step actually was.
@@ -181,7 +196,13 @@ pub struct TurnOutcome {
     pub tools_called: Vec<String>,
     pub skills_loaded: Vec<String>,
     pub skills_written: Vec<String>,
+    /// What the agent remembered, as text: the id is for `memory rm`, this is
+    /// for a person reading what a turn did.
     pub facts_learned: Vec<String>,
+    /// Facts the agent dropped. Reported beside what it learnt, because an
+    /// agent quietly removing what it was told to remember is the same failure
+    /// as one quietly remembering something nobody can see.
+    pub facts_forgotten: Vec<String>,
     /// Sessions of sub-agents this turn ran, for reading their detail later.
     pub delegated: Vec<String>,
     pub compactions: u32,
@@ -655,6 +676,7 @@ impl<'a> AgentLoop<'a> {
             skills_loaded: Vec::new(),
             skills_written: Vec::new(),
             facts_learned: Vec::new(),
+            facts_forgotten: Vec::new(),
             delegated: Vec::new(),
             compactions: 0,
         };
@@ -1036,7 +1058,7 @@ impl<'a> AgentLoop<'a> {
                     self.rook.store.get_session(self.session).ok().flatten().map(|m| m.next_seq).unwrap_or(0),
                 );
                 fact.pinned = args.get("pinned").and_then(|p| p.as_bool()).unwrap_or(false);
-                let id = fact.id.clone();
+                let (id, remembered) = (fact.id.clone(), fact.text.clone());
                 // Named, not merged: only the model knows whether this replaces
                 // the older fact, narrows it, or contradicts it.
                 let close = self.rook.similar_facts(&fact.text).unwrap_or_default();
@@ -1049,7 +1071,7 @@ impl<'a> AgentLoop<'a> {
                     Ok(crate::memory::Learned::Unchanged) => format!("already remembered as [{id}]"),
                     Ok(learned) => {
                         if learned == crate::memory::Learned::New {
-                            outcome.facts_learned.push(id.clone());
+                            outcome.facts_learned.push(remembered.clone());
                         }
                         let mut reply = format!("remembered as [{id}]");
                         for other in close {
@@ -1064,7 +1086,10 @@ impl<'a> AgentLoop<'a> {
                 }
             }
             FORGET => match self.rook.forget(&string("id"), Some("forgotten by the agent".into())) {
-                Ok(Some(fact)) => format!("forgot [{}] {}", fact.id, fact.text),
+                Ok(Some(fact)) => {
+                    outcome.facts_forgotten.push(fact.text.clone());
+                    format!("forgot [{}] {}", fact.id, fact.text)
+                }
                 Ok(None) => format!("no fact {:?} to forget", string("id")),
                 Err(e) => format!("could not forget: {e}"),
             },

@@ -543,6 +543,14 @@ like to something that has to act on it.
   say what it was about to do, says that no other tool and no sub-agent gets past
   it, and addresses the remedies to the user. The same task: four steps, 8,498
   tokens, twenty-three seconds, and an answer worth reading. 1 test.
+- **A turn says what it changed about what it believes** — the live run that
+  found the above also showed an agent deleting a fact the user had asked it to
+  remember, and saying nothing about it in any front end. `facts_learned` was
+  recorded on the outcome and read by nobody; there was no `facts_forgotten` at
+  all. Both are reported now, beside what the turn changed on disk, in the CLI,
+  the chat, the TUI and the browser — an agent quietly dropping what it was told
+  to remember is the same failure as one quietly remembering something nobody
+  can see. 1 test.
 - **"What changed today" was a diff and is a story** — told to remember
   something, the model recalled it in the next session, decided it did not match
   the workspace and forgot it. `memory since 1` then answered that nothing had

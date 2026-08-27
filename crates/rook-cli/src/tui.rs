@@ -613,7 +613,8 @@ impl App {
 
             let _ = match result {
                 Ok(outcome) => to_loop.send(TurnEvent::Done(format!(
-                    "[{} steps · {} in / {} out{}]",
+                    "{}[{} steps · {} in / {} out{}]",
+                    outcome.memory_note().map(|n| format!("{n}\n")).unwrap_or_default(),
                     outcome.steps,
                     outcome.input_tokens,
                     outcome.output_tokens,

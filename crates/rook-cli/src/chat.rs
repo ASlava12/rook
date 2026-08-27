@@ -214,6 +214,9 @@ async fn turn(
     tokio::select! {
         result = running => match result {
             Ok(outcome) => {
+                if let Some(note) = outcome.memory_note() {
+                    println!("\x1b[2m  {}\x1b[0m", note.replace('\n', "\n  "));
+                }
                 if let Ok(changes) = rook.changes(session, false)
                     && changes.touched() > 0
                 {

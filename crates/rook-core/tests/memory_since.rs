@@ -69,3 +69,34 @@ fn a_quiet_day_reports_nothing() {
 
     assert!(rook.memory_since(rook_store::now_unix() + 60).unwrap().is_empty());
 }
+
+#[test]
+fn a_turn_says_what_it_changed_about_what_it_believes() {
+    use rook_core::agent::TurnOutcome;
+
+    let quiet = TurnOutcome {
+        steps: 1,
+        stopped: "end_turn".into(),
+        reply: String::new(),
+        input_tokens: 0,
+        output_tokens: 0,
+        cached_tokens: 0,
+        tools_called: Vec::new(),
+        skills_loaded: Vec::new(),
+        skills_written: Vec::new(),
+        facts_learned: Vec::new(),
+        facts_forgotten: Vec::new(),
+        delegated: Vec::new(),
+        compactions: 0,
+    };
+    assert!(quiet.memory_note().is_none(), "a turn that changed nothing says nothing");
+
+    let busy = TurnOutcome {
+        facts_learned: vec!["deploys happen on fridays".into()],
+        facts_forgotten: vec!["deploys happen on tuesdays".into()],
+        ..quiet
+    };
+    let note = busy.memory_note().expect("something to say");
+    assert!(note.contains("remembered: deploys happen on fridays"), "{note}");
+    assert!(note.contains("forgot: deploys happen on tuesdays"), "{note}");
+}

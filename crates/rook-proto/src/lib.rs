@@ -163,6 +163,15 @@ pub enum ChatEvent {
         name: String,
         failed: bool,
     },
+    /// What a turn changed about what the agent believes, said the way file
+    /// changes are: an agent that quietly drops what it was told to remember is
+    /// as bad as one that quietly remembers something nobody sees.
+    Remembered {
+        text: String,
+    },
+    Forgot {
+        text: String,
+    },
     /// What the turn has spent so far, sent after each reply from the model so
     /// a long turn shows its cost while it can still change a decision.
     Spent {

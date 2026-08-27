@@ -193,6 +193,8 @@ function connect() {
     else if (e.type === 'tool_done') say('tool', e.failed ? ' ✗\n' : ' ✓\n');
     else if (e.type === 'settings') { state.chat.settings = e; renderSettings(); }
     else if (e.type === 'spent') { state.chat.spent = e; renderSettings(); }
+    else if (e.type === 'remembered') say('stat', `\nremembered: ${e.text}\n`);
+    else if (e.type === 'forgot') say('stat', `\nforgot: ${e.text}\n`);
     else if (e.type === 'error') { say('err', `\n${e.message}\n`); done(); }
     else if (e.type === 'cancelled') { say('stat', '\n[stopped]\n\n'); done(); }
     else if (e.type === 'approval') askApproval(e);

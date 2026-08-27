@@ -665,6 +665,9 @@ fn cmd_run(
         for id in &outcome.delegated {
             eprintln!("sub-agent {id} — `rook session show {id}` for its detail");
         }
+        if let Some(note) = outcome.memory_note() {
+            eprintln!("{note}");
+        }
         if let Some(changes) = changes.filter(|c| c.touched() > 0) {
             eprintln!(
                 "{} — `rook session diff {}`",
