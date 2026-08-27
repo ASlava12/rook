@@ -85,6 +85,14 @@ fn spent(totals: Option<(u32, u32, u32)>) -> String {
     format!("{} in / {} out{cached}", thousands(input), thousands(output))
 }
 
+/// The tail of a path, which is what tells two projects apart in a narrow list.
+fn elsewhere(workspace: &str) -> String {
+    std::path::Path::new(workspace)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| workspace.to_string())
+}
+
 fn thousands(n: u32) -> String {
     match n {
         0..=999 => n.to_string(),
@@ -764,6 +772,7 @@ impl App {
     fn draw_sessions(&mut self, f: &mut Frame, area: Rect) {
         let [left, right] =
             Layout::horizontal([Constraint::Percentage(34), Constraint::Percentage(66)]).areas(area);
+        let here = self.rook.workspace.display().to_string();
 
         let items: Vec<ListItem> = self
             .sessions
@@ -779,7 +788,14 @@ impl App {
                             "  {} · {} events · {}",
                             fmt::ago(s.meta.updated_at),
                             s.meta.event_count,
-                            s.meta.model
+                            // The pane is a third of the width and only one of
+                            // these fits. Which project a session came from
+                            // tells two rows apart; which model ran it does not,
+                            // and it is the same one for all of them anyway.
+                            match s.meta.workspace == here {
+                                true => s.meta.model.clone(),
+                                false => elsewhere(&s.meta.workspace),
+                            },
                         ),
                         Style::default().fg(Color::DarkGray),
                     )),

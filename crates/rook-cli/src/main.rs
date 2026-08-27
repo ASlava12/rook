@@ -7,7 +7,7 @@ mod source;
 mod tui;
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -213,7 +213,11 @@ enum StoreCmd {
 
 #[derive(Subcommand)]
 enum SessionCmd {
-    Ls,
+    Ls {
+        /// Every workspace, not just this one.
+        #[arg(long)]
+        all: bool,
+    },
     /// Print a session transcript.
     Show {
         id: String,
@@ -331,7 +335,10 @@ fn main() -> Result<()> {
         Some(Command::Acp) => cmd_acp(cli.workspace),
         Some(Command::Serve { port }) => cmd_serve(port),
         Some(Command::Store(c)) => cmd_store(&Source::open(cli.workspace)?, c, cli.json),
-        Some(Command::Session(c)) => cmd_session(&Source::open(cli.workspace)?, c, cli.json),
+        Some(Command::Session(c)) => {
+            let here = workspace_of(&cli.workspace);
+            cmd_session(&Source::open(cli.workspace)?, c, &here, cli.json)
+        }
         Some(Command::Skills(c)) => cmd_skills(&Source::open(cli.workspace)?, c, cli.json),
         Some(Command::Checkpoint(c)) => cmd_checkpoint(&Rook::open(cli.workspace)?, c, cli.json),
         Some(Command::Mcp(c)) => cmd_mcp(cli.workspace, c, cli.json),
@@ -808,7 +815,18 @@ fn show_stats(s: &StoreStats, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn show_sessions(sessions: &[SessionSummary], json: bool) -> Result<()> {
+/// The same rule `last` follows: sessions belong to the workspace they ran in,
+/// and a project's list is what you meant. What is hidden is said, so nobody
+/// concludes their history is gone.
+fn workspace_of(given: &Option<PathBuf>) -> PathBuf {
+    given.clone().or_else(|| std::env::current_dir().ok()).unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn show_sessions(sessions: &[SessionSummary], workspace: &Path, all: bool, json: bool) -> Result<()> {
+    let here = workspace.display().to_string();
+    let shown: Vec<&SessionSummary> = sessions.iter().filter(|s| all || s.meta.workspace == here).collect();
+    let elsewhere = sessions.len() - shown.len();
+    let sessions = shown;
     if json {
         println!("{}", serde_json::to_string_pretty(&sessions)?);
         return Ok(());
@@ -838,6 +856,9 @@ fn show_sessions(sessions: &[SessionSummary], json: bool) -> Result<()> {
         })
         .collect();
     print!("{}", fmt::table(&["id", "title", "events", "tok in/out", "updated", "goal / workspace"], &rows));
+    if elsewhere > 0 {
+        println!("\n({elsewhere} more in other workspaces — `rook session ls --all`)");
+    }
     Ok(())
 }
 
@@ -1008,13 +1029,13 @@ fn parse_kind(s: &str) -> Result<Kind> {
     })
 }
 
-fn cmd_session(source: &Source, cmd: SessionCmd, json: bool) -> Result<()> {
-    if let SessionCmd::Ls = cmd {
-        return show_sessions(&source.sessions()?, json);
+fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, json: bool) -> Result<()> {
+    if let SessionCmd::Ls { all } = cmd {
+        return show_sessions(&source.sessions()?, workspace, all, json);
     }
     let rook = source.local()?;
     match cmd {
-        SessionCmd::Ls => unreachable!("routed above"),
+        SessionCmd::Ls { .. } => unreachable!("routed above"),
         SessionCmd::Show { id, from, limit, max_body } => {
             let entries = rook.transcript(rook.session_named(&id)?, from, limit, max_body)?;
             if json {

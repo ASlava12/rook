@@ -301,6 +301,12 @@ what unblocks the most.
   before checking containment, so a link inside the workspace pointing out of it
   is refused rather than followed, and the refusal says where the path really
   led. Widened only by `sandbox.allow_outside_workspace`. 6 tests.
+- **A session list scoped to the project it belongs to** — `session ls` printed
+  every session on the machine, which for anyone standing in a project is mostly
+  someone else's work; it lists this workspace and says how many it left out and
+  how to see them (`--all`). The TUI's sessions tab named no workspace at all, so
+  another project's session read as one of this one's: it names the project
+  instead of the model, which is the same for every row anyway. 2 tests.
 - **Picking up where you left off** — continuing meant knowing a session id,
   twenty-six characters of base32 nobody remembers, so the usual way back to
   yesterday's work was to list every session and read. `--session last` is the

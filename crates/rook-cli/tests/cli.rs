@@ -540,3 +540,34 @@ fn every_command_that_takes_a_session_takes_last() {
     let said = String::from_utf8_lossy(&refused.stderr);
     assert!(said.contains("neither a session id nor `last`"), "{said}");
 }
+
+/// Sessions belong to the workspace they ran in — the same reasoning `last`
+/// follows — and a list of every session on the machine is not what someone
+/// standing in a project asked for.
+#[test]
+fn listing_sessions_shows_this_workspace_and_says_what_it_hid() {
+    let rook = Rook::new();
+    rook.chat("/quit\n");
+
+    let elsewhere = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_rook"))
+        .env("ROOK_HOME", rook.home.path())
+        .env("ROOK_LOG", "error")
+        .args(["--workspace", elsewhere.path().to_str().unwrap(), "chat"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    let mut child = out;
+    child.stdin.take().unwrap().write_all(b"/quit\n").unwrap();
+    child.wait().unwrap();
+
+    let here = rook.ok(&["session", "ls"]);
+    assert!(here.contains("1 more in other workspaces"), "and it says how to see them: {here}");
+    assert!(!here.contains(elsewhere.path().to_str().unwrap()), "{here}");
+
+    let all = rook.ok(&["session", "ls", "--all"]);
+    assert!(all.contains(elsewhere.path().to_str().unwrap()), "--all is the way back to everything: {all}");
+    assert!(!all.contains("more in other workspaces"), "nothing is hidden, so nothing is said: {all}");
+}

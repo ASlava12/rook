@@ -320,3 +320,44 @@ fn ctrl_c_stops_a_running_turn_rather_than_the_whole_ui() {
     assert!(after.contains("[stopped]"), "ctrl-c stops the turn:\n{after}");
     assert!(after.contains("Chat"), "and the tabs are still drawn, so it did not quit:\n{after}");
 }
+
+/// The store holds every workspace, and the sessions tab named none of them:
+/// another project's session read as one of this project's.
+#[test]
+fn the_sessions_tab_names_the_workspace_only_when_it_is_another_one() {
+    let home = tempfile::tempdir().unwrap();
+    // Named rather than random, because the pane is a third of the screen and a
+    // temporary directory's name does not fit in it.
+    let root = tempfile::tempdir().unwrap();
+    let here = root.path().join("mine");
+    let other = root.path().join("theirs");
+    std::fs::create_dir_all(&here).unwrap();
+    std::fs::create_dir_all(&other).unwrap();
+
+    for (workspace, title) in [(here.as_path(), "from here"), (other.as_path(), "from elsewhere")] {
+        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_rook"))
+            .env("ROOK_HOME", home.path())
+            .env("ROOK_LOG", "error")
+            .args(["--workspace", workspace.to_str().unwrap(), "chat"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        use std::io::Write;
+        child.stdin.take().unwrap().write_all(format!("{title}\n/quit\n").as_bytes()).unwrap();
+        child.wait().unwrap();
+    }
+
+    let mut pty = tui(home.path(), &here);
+    pty.screen(100, 30);
+    // Digits are characters in the message box on the chat tab, so the way to
+    // the next tab is the key the footer names.
+    pty.send("\t");
+    let screen = pty.screen(100, 30).join("\n");
+
+    assert!(screen.contains("events · theirs"), "a session from another project says which:\n{screen}");
+    assert!(
+        !screen.contains("events · mine"),
+        "and this one's own is not repeated on every row — the title bar already says it:\n{screen}"
+    );
+}
