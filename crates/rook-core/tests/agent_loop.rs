@@ -2377,3 +2377,34 @@ async fn recent_is_still_the_word_for_the_conversation_so_far() {
         "{handed:?}"
     );
 }
+
+/// A span too small to summarise leaves the context exactly as full as it was,
+/// so the check at the top of the next step is true again — and the step after
+/// that. Each one spends a summarisation call to stand still.
+#[tokio::test]
+async fn a_turn_stops_compacting_once_it_stops_helping() {
+    let f = fixture();
+    let session = f.rook.start_session("stuck").unwrap();
+
+    // One enormous message: compaction summarises history and cannot make a
+    // single message smaller, so there is nothing it can win here.
+    // Sized against the window below: over the compaction threshold of ~2,232
+    // tokens and under the usable ~2,976, so the turn compacts and does not
+    // refuse the request outright.
+    f.rook.log(session, rook_store::EventKind::UserMessage, "user", &"x ".repeat(5_000)).unwrap();
+
+    let script: Vec<_> = (0..6)
+        .map(|i| call("list_dir", serde_json::json!({ "path": format!("d{i}") })))
+        .chain([reply("done")])
+        .collect();
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
+    agent.allow_everything_not_denied();
+    agent.set_window_for_test(4_000);
+    let outcome = agent.run("carry on").await.unwrap();
+
+    assert!(
+        outcome.compactions <= 1,
+        "it tried {} times to summarise a span that cannot shrink",
+        outcome.compactions
+    );
+}

@@ -685,15 +685,22 @@ impl<'a> AgentLoop<'a> {
             compactions: 0,
         };
 
+        let mut worth_compacting = true;
         while outcome.steps < self.max_steps {
             outcome.steps += 1;
 
-            if self.budget.needs_compaction(measure(&messages)) {
+            // Once per turn that it achieves something. A span too small to
+            // summarise leaves the context where it was, so the next step would
+            // ask again, and the step after that — spending a summarisation
+            // call each time to stay exactly as full as it already is.
+            if worth_compacting && self.budget.needs_compaction(measure(&messages)) {
+                let before = measure(&messages);
                 outcome.compactions += 1;
                 self.compact().await;
                 messages = vec![cacheable(Message::system(self.system_prompt()))];
                 messages.extend(self.history()?);
                 self.mark_stable_prefix(&mut messages);
+                worth_compacting = measure(&messages) < before;
             }
 
             // Compaction summarises history; it cannot make one message smaller.

@@ -543,6 +543,12 @@ like to something that has to act on it.
   say what it was about to do, says that no other tool and no sub-agent gets past
   it, and addresses the remedies to the user. The same task: four steps, 8,498
   tokens, twenty-three seconds, and an answer worth reading. 1 test.
+- **A turn stops compacting once it stops helping** — a span too small to
+  summarise leaves the context exactly as full as it was, so the check at the
+  top of the next step is true again, and the step after that: seven
+  summarisation calls in one turn to stand still. It compacts once per turn that
+  it achieves something. Converges with codex #41152, which fails closed on
+  unbounded parent compactions. 1 test.
 - **The pool a front end hands over is the one that answers** — `AgentLoop::new`
   built its own language-server pool from a third copy of the "configured or
   detected" expression, and registered the tools from it. `equip` then set the

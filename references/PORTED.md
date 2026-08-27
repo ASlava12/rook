@@ -377,3 +377,23 @@ catalogue, and contributor mappings; their browser work on recycling a wedged
 session after a timeout is about a daemon Rook does not have — the equivalent
 here is killing the process group, which `exec` does. opencode's two are a model
 mapping and generated code. acp's one is a documentation update.
+
+**2026-08-27 (seventeenth pass)** — codex 9, openhands 2, and the four that were
+already up to date.
+
+codex #41152 fails closed on unbounded parent compactions, which is the same
+shape as a defect found here hours earlier from the other end. Theirs is about a
+parent compacting without a bound; here the bound was missing in a narrower way.
+A span too small to summarise leaves the context exactly as full as it was, so
+the check at the top of the next step is true again — and the step after that.
+Measured: seven summarisation calls in one turn to stand still. A turn compacts
+once per turn that it achieves something now.
+
+Dismissed with reasons: #41165 requires explicit requests for spawn model
+overrides, and a sub-task here shares the parent's provider — there is no
+override to request. #41162 resolves token budgets from each step's active
+model; one loop has one provider and one budget. #41143 limits inline diff
+previews in the TUI, which shows a change summary rather than diffs and says why
+in the code. #41159, #41158, #41151, #41150 and #41146 are Guardian V2 and their
+own skill machinery. openhands' two are a model catalogue and a cloud-only
+conversation rename.
