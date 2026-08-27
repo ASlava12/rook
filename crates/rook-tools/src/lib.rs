@@ -93,6 +93,26 @@ pub trait Files: Send + Sync {
     async fn write(&self, path: &std::path::Path, contents: &str) -> Result<()>;
 }
 
+/// Where a command runs.
+///
+/// The agent's own process, unless a front end has somewhere better. An editor
+/// has a terminal panel: running there lets the user watch a build instead of
+/// waiting for the agent to report on one.
+#[async_trait]
+pub trait Terminals: Send + Sync {
+    async fn run(&self, command: &str, cwd: &std::path::Path, output_limit: usize) -> Result<Ran>;
+}
+
+/// What a command did, however it was run.
+pub struct Ran {
+    pub output: String,
+    pub exit_code: i32,
+    /// The runner cut the output. Which end it kept is its own business — that
+    /// is the price of running somewhere the user can see.
+    pub truncated: bool,
+    pub timed_out: bool,
+}
+
 /// The workspace root bounds every path a tool will touch, unless the caller
 /// explicitly widens it.
 #[derive(Clone)]
@@ -104,6 +124,8 @@ pub struct ToolContext {
     pub allow_outside_workspace: bool,
     /// Set by a front end whose environment owns the files — an editor, so far.
     pub files: Option<Arc<dyn Files>>,
+    /// Set by a front end that has a terminal of its own to run in.
+    pub terminals: Option<Arc<dyn Terminals>>,
 }
 
 impl std::fmt::Debug for ToolContext {
@@ -114,6 +136,7 @@ impl std::fmt::Debug for ToolContext {
             .field("command_timeout", &self.command_timeout)
             .field("allow_outside_workspace", &self.allow_outside_workspace)
             .field("files", &self.files.is_some())
+            .field("terminals", &self.terminals.is_some())
             .finish()
     }
 }
@@ -154,6 +177,7 @@ impl ToolContext {
             command_timeout: std::time::Duration::from_secs(120),
             allow_outside_workspace: false,
             files: None,
+            terminals: None,
         }
     }
 

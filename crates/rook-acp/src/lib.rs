@@ -11,8 +11,10 @@
 //!
 //! When the client says it can serve them, file reads and writes go to the
 //! editor rather than the disk, so the agent sees the buffer the user is
-//! looking at instead of the version last saved. The approval modes are offered
-//! as session modes, so an editor's menu and `sandbox.mode` are the same knob.
+//! looking at instead of the version last saved. Commands run in the editor's
+//! terminal when it has one, so a build is watched rather than reported. The
+//! approval modes are offered as session modes, so an editor's menu and
+//! `sandbox.mode` are the same knob.
 
 pub mod protocol;
 
@@ -282,6 +284,13 @@ async fn prompt(
             can_write: client_files.write,
         }));
     }
+    if client_files.terminal {
+        agent.tool_ctx.terminals = Some(Arc::new(EditorTerminals {
+            peer: peer.clone(),
+            session: request.session_id.clone(),
+            timeout: agent.tool_ctx.command_timeout,
+        }));
+    }
 
     // Ids are handed out in call order and consumed in the same order, which is
     // how a completion is matched to the call it finishes: the loop dispatches
@@ -515,11 +524,90 @@ impl rook_tools::Files for EditorFiles {
 struct ClientFiles {
     read: bool,
     write: bool,
+    terminal: bool,
 }
 
 impl ClientFiles {
     fn from_initialize(params: &serde_json::Value) -> Self {
-        let fs = &params["clientCapabilities"]["fs"];
-        Self { read: fs["readTextFile"] == true, write: fs["writeTextFile"] == true }
+        let capabilities = &params["clientCapabilities"];
+        let fs = &capabilities["fs"];
+        Self {
+            read: fs["readTextFile"] == true,
+            write: fs["writeTextFile"] == true,
+            terminal: capabilities["terminal"] == true,
+        }
+    }
+}
+
+/// The editor's terminal, so a build the agent starts is one the user can watch.
+///
+/// Four calls per command — create, wait, read, release — because the protocol
+/// separates them. The release is not optional: the client holds the terminal
+/// open until the agent says it is done with it.
+struct EditorTerminals {
+    peer: Arc<Peer>,
+    session: String,
+    timeout: std::time::Duration,
+}
+
+impl EditorTerminals {
+    async fn call(&self, method: &str, params: serde_json::Value) -> rook_tools::Result<serde_json::Value> {
+        self.peer
+            .request(method, params)
+            .await
+            .ok_or_else(|| rook_tools::ToolError::Denied(format!("the editor did not answer {method}")))
+    }
+
+    fn about(&self, terminal: &str) -> serde_json::Value {
+        serde_json::json!({ "sessionId": self.session, "terminalId": terminal })
+    }
+}
+
+#[async_trait]
+impl rook_tools::Terminals for EditorTerminals {
+    async fn run(
+        &self,
+        command: &str,
+        cwd: &Path,
+        output_limit: usize,
+    ) -> rook_tools::Result<rook_tools::Ran> {
+        let (shell, flag) = if cfg!(windows) { ("cmd", "/C") } else { ("/bin/sh", "-c") };
+        let created = self
+            .call(
+                "terminal/create",
+                serde_json::json!({
+                    "sessionId": self.session,
+                    "command": shell,
+                    "args": [flag, command],
+                    "cwd": cwd,
+                    "outputByteLimit": output_limit,
+                }),
+            )
+            .await?;
+        let terminal = created["terminalId"]
+            .as_str()
+            .ok_or_else(|| rook_tools::ToolError::Denied(format!("no terminalId in {created}")))?
+            .to_string();
+
+        let waited =
+            tokio::time::timeout(self.timeout, self.call("terminal/wait_for_exit", self.about(&terminal)))
+                .await;
+        let timed_out = waited.is_err();
+        if timed_out {
+            let _ = self.call("terminal/kill", self.about(&terminal)).await;
+        }
+
+        // Read before releasing: the client is free to forget the terminal the
+        // moment it is released.
+        let read = self.call("terminal/output", self.about(&terminal)).await;
+        let _ = self.call("terminal/release", self.about(&terminal)).await;
+        let read = read?;
+
+        Ok(rook_tools::Ran {
+            output: read["output"].as_str().unwrap_or_default().to_string(),
+            exit_code: read["exitStatus"]["exitCode"].as_i64().unwrap_or(-1) as i32,
+            truncated: read["truncated"] == true,
+            timed_out,
+        })
     }
 }

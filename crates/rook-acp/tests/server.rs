@@ -435,3 +435,105 @@ async fn switching_to_readonly_stops_the_next_turn_writing() {
 
     assert!(!written.exists(), "the mode the editor set must reach the turn that follows it");
 }
+
+#[tokio::test]
+async fn a_command_runs_in_the_editors_terminal_when_it_has_one() {
+    let _turn = provider_lock().await;
+    let base = scripted_call("run_command", serde_json::json!({ "command": "make test" })).await;
+    unsafe { std::env::set_var("OLLAMA_HOST", &base) };
+
+    let mut config = Config::default();
+    config.agent.model = "ollama/scripted".into();
+    config.sandbox.mode = rook_tools::policy::Mode::Auto;
+    let mut editor = Editor::start_with(config, |_| {});
+
+    editor
+        .call(
+            1,
+            "initialize",
+            serde_json::json!({ "protocolVersion": 1, "clientCapabilities": { "terminal": true } }),
+        )
+        .await;
+    let id = editor.call(2, "session/new", serde_json::json!({ "cwd": "." })).await["result"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let prompt = serde_json::json!({
+        "jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+        "params": { "sessionId": id, "prompt": [{ "type": "text", "text": "run the tests" }] }
+    });
+    editor.stdin.write_all(format!("{prompt}\n").as_bytes()).await.unwrap();
+
+    // Serve the whole terminal exchange the way an editor would.
+    let mut methods = Vec::new();
+    let mut created = None;
+    for _ in 0..40 {
+        let message = editor.next().await;
+        let Some(method) = message["method"].as_str() else {
+            if message["id"] == 3 {
+                break;
+            }
+            continue;
+        };
+        if !method.starts_with("terminal/") {
+            continue;
+        }
+        methods.push(method.to_string());
+        let result = match method {
+            "terminal/create" => {
+                created = Some(message["params"].clone());
+                serde_json::json!({ "terminalId": "t1" })
+            }
+            "terminal/output" => serde_json::json!({
+                "output": "42 tests passed\n",
+                "truncated": false,
+                "exitStatus": { "exitCode": 0, "signal": null }
+            }),
+            _ => serde_json::json!({}),
+        };
+        let reply = serde_json::json!({ "jsonrpc": "2.0", "id": message["id"], "result": result });
+        editor.stdin.write_all(format!("{reply}\n").as_bytes()).await.unwrap();
+        if method == "terminal/release" {
+            break;
+        }
+    }
+
+    assert_eq!(
+        methods,
+        ["terminal/create", "terminal/wait_for_exit", "terminal/output", "terminal/release"],
+        "the protocol's four calls, in order, and the release is not optional"
+    );
+    let created = created.expect("nothing was created");
+    assert_eq!(created["sessionId"], id);
+    assert_eq!(created["args"][1], "make test", "the command the model asked for");
+    assert!(created["outputByteLimit"].as_u64().unwrap() > 0, "{created}");
+}
+
+#[tokio::test]
+async fn a_client_without_a_terminal_is_never_asked_for_one() {
+    let _turn = provider_lock().await;
+    let base = scripted_call("run_command", serde_json::json!({ "command": "echo hello" })).await;
+    unsafe { std::env::set_var("OLLAMA_HOST", &base) };
+
+    let mut config = Config::default();
+    config.agent.model = "ollama/scripted".into();
+    config.sandbox.mode = rook_tools::policy::Mode::Auto;
+    let mut editor = Editor::start_with(config, |_| {});
+
+    editor.call(1, "initialize", serde_json::json!({ "protocolVersion": 1 })).await;
+    let id = editor.call(2, "session/new", serde_json::json!({ "cwd": "." })).await["result"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let prompt = serde_json::json!({
+        "jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+        "params": { "sessionId": id, "prompt": [{ "type": "text", "text": "say hello" }] }
+    });
+    editor.stdin.write_all(format!("{prompt}\n").as_bytes()).await.unwrap();
+
+    for message in editor.drain(Duration::from_millis(2000)).await {
+        let method = message["method"].as_str().unwrap_or_default();
+        assert!(!method.starts_with("terminal/"), "the protocol forbids asking: {message}");
+    }
+}

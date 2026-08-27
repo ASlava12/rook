@@ -118,6 +118,11 @@ what unblocks the most.
   a skill scoped away and explained by `skills why`, capture and rollback, a
   broken config that fails loudly, and the daemon path where a read goes over
   HTTP and a write says where the lock is.
+- **Commands in the editor's terminal** — a client that advertises `terminal`
+  runs what the agent asks for in its own panel, so a build is something the
+  user watches rather than something they are told about afterwards. Create,
+  wait, read, release, in that order, with a kill on timeout; the tool reports
+  the same exit code and truncation flag wherever it ran. 7 tests.
 - **Approval mode from the editor** — the three modes are offered on
   `session/new` and `session/set_mode` changes the one in force, so a user can
   drop to read-only from the editor's menu instead of editing `config.toml` and
@@ -237,8 +242,8 @@ against a server that speaks the OpenAI dialect and checks what it was sent.
 of them. codex's `spawn_agent`/`wait_agent` lets a parent send messages to a child
 mid-run, which is a different feature rather than a deeper version of this one.
 
-**ACP beyond the basics.** Config options and terminals are defined and
-unimplemented. `fs/*` delegation and session modes are done.
+**ACP beyond the basics.** Session config options are defined and unimplemented.
+`fs/*` delegation, session modes and terminals are done.
 
 **Auto-installing language servers.** Detection is done; the other half of
 codex #8745 asks for installation too, which means downloading and running a

@@ -47,6 +47,10 @@ impl Tool for RunCommand {
             .map(std::time::Duration::from_secs)
             .unwrap_or(ctx.command_timeout);
 
+        if let Some(terminals) = &ctx.terminals {
+            return elsewhere(terminals.as_ref(), &command, &cwd, ctx, timeout).await;
+        }
+
         let mut child = spawn_shell(&command, &cwd)?;
         let group = child.id();
         let mut stdout = child.stdout.take();
@@ -114,6 +118,35 @@ impl RunCommand {
     fn command_of(args: &serde_json::Value) -> String {
         args.get("command").and_then(|c| c.as_str()).unwrap_or_default().to_string()
     }
+}
+
+/// Run it where the front end says, and report the same thing either way.
+///
+/// The runner does its own truncation, so the both-ends rule does not apply —
+/// what is gained instead is the user watching it happen.
+async fn elsewhere(
+    terminals: &dyn crate::Terminals,
+    command: &str,
+    cwd: &std::path::Path,
+    ctx: &ToolContext,
+    timeout: std::time::Duration,
+) -> Result<ToolOutcome> {
+    let ran = terminals.run(command, cwd, ctx.max_output_bytes).await?;
+    if ran.timed_out {
+        return Ok(ToolOutcome::error(format!(
+            "command timed out after {}s and was killed: {command}",
+            timeout.as_secs()
+        ))
+        .with("timed_out", true));
+    }
+    Ok(ToolOutcome {
+        content: format!("exit {}\n{}", ran.exit_code, ran.output),
+        is_error: ran.exit_code != 0,
+        truncated: ran.truncated,
+        full_bytes: ran.output.len(),
+        meta: Default::default(),
+    }
+    .with("exit_code", i64::from(ran.exit_code)))
 }
 
 fn spawn_shell(command: &str, cwd: &std::path::Path) -> Result<tokio::process::Child> {
