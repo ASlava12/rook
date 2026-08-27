@@ -543,6 +543,12 @@ like to something that has to act on it.
   say what it was about to do, says that no other tool and no sub-agent gets past
   it, and addresses the remedies to the user. The same task: four steps, 8,498
   tokens, twenty-three seconds, and an answer worth reading. 1 test.
+- **A language server that will not start is found out once** — a live turn in a
+  Python project asked about a symbol, and the pool always offered the first
+  configured server: a `rust-analyzer` shim, which rustup installs whether or
+  not the component is. It tries each in turn now, and remembers which would not
+  start, so a turn that asks three questions waits for one failure rather than
+  three. 2 tests.
 - **Context the parent writes out reaches the sub-task** — `delegate`'s `context`
   was an enum of two words, and a live model filled it with the file it had just
   read, expecting the child to start with it. The value was outside the enum, so

@@ -69,6 +69,10 @@ pub struct Servers {
     configs: Vec<ServerConfig>,
     root: PathBuf,
     running: Mutex<HashMap<String, Arc<Server>>>,
+    /// Why a server would not start, so the cost of finding out is paid once.
+    /// rustup installs a `rust-analyzer` shim whether or not the component is,
+    /// and a turn that asked it three questions waited for three failures.
+    failed: Mutex<HashMap<String, String>>,
 }
 
 impl Servers {
@@ -80,6 +84,7 @@ impl Servers {
             // directory and results arrive under both.
             root: root.canonicalize().unwrap_or_else(|_| root.to_path_buf()),
             running: Mutex::new(HashMap::new()),
+            failed: Mutex::new(HashMap::new()),
         })
     }
 
@@ -113,20 +118,42 @@ impl Servers {
 
     /// Any running or startable server, for questions that are not about one
     /// file — a workspace symbol search has to pick one.
+    ///
+    /// Each in turn rather than only the first: in a Python project with a
+    /// `rust-analyzer` shim on PATH, the first is the one that cannot start.
     pub async fn any(&self) -> rook_lsp::Result<Arc<Server>> {
-        let config =
-            self.configs.first().ok_or_else(|| rook_lsp::LspError::NoServer("this workspace".into()))?;
-        self.start(config).await
+        let mut last = None;
+        for config in &self.configs {
+            match self.start(config).await {
+                Ok(server) => return Ok(server),
+                Err(e) => last = Some(e),
+            }
+        }
+        Err(last.unwrap_or_else(|| rook_lsp::LspError::NoServer("this workspace".into())))
     }
 
     async fn start(&self, config: &ServerConfig) -> rook_lsp::Result<Arc<Server>> {
+        if let Some(complaint) = self.failed.lock().await.get(&config.language) {
+            return Err(rook_lsp::LspError::Closed {
+                server: config.language.clone(),
+                complaint: Some(complaint.clone()),
+            });
+        }
         let mut running = self.running.lock().await;
         if let Some(server) = running.get(&config.language) {
             return Ok(server.clone());
         }
-        let server = Arc::new(Server::start(config, &self.root).await?);
-        running.insert(config.language.clone(), server.clone());
-        Ok(server)
+        match Server::start(config, &self.root).await {
+            Ok(server) => {
+                let server = Arc::new(server);
+                running.insert(config.language.clone(), server.clone());
+                Ok(server)
+            }
+            Err(e) => {
+                self.failed.lock().await.insert(config.language.clone(), e.to_string());
+                Err(e)
+            }
+        }
     }
 
     pub async fn shutdown(&self) {
