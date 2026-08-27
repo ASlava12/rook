@@ -301,6 +301,14 @@ what unblocks the most.
   before checking containment, so a link inside the workspace pointing out of it
   is refused rather than followed, and the refusal says where the path really
   led. Widened only by `sandbox.allow_outside_workspace`. 6 tests.
+- **A boundary that would not compile is not silently absent** — a sandbox rule
+  the user mis-spelled was dropped with a line in the log file. In `allow` that
+  fails safe: being asked more often is not a hazard. In `deny` it left exactly
+  the boundary they had written and did not get, against a README that says
+  nothing overrides a denial. A deny rule that does not parse now refuses
+  everything that changes the machine, and says which rule and where; reads still
+  work, so the agent can open the file and say what is wrong. `doctor` lists
+  them. 3 tests.
 - **An edit nothing could checkpoint says so** — the loop captures a file before
   every mutating call, and `session rewind` restores from those captures. A file
   past the capture limit got none, the failure went to the log file as a warning,

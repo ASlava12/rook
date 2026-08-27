@@ -420,6 +420,21 @@ fn cmd_doctor(rook: &Rook, json: bool) -> Result<()> {
         }
     }
 
+    let (_, unusable) = rook_tools::policy::Policy::compile(
+        rook.config.sandbox.mode,
+        &rook.config.sandbox.allow,
+        &rook.config.sandbox.ask,
+        &rook.config.sandbox.deny,
+    );
+    println!();
+    println!("approvals: {} mode", rook.config.sandbox.mode.as_str());
+    for error in &unusable {
+        println!("  ✗ {error}");
+    }
+    if !unusable.is_empty() {
+        println!("  a rule that does not compile is not applied — a broken deny rule stops the agent");
+    }
+
     if !rook.plugins.is_empty() {
         println!();
         println!("plugins:");

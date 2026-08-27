@@ -172,6 +172,10 @@ pub struct Policy {
     pub allow: Vec<Rule>,
     pub ask: Vec<Rule>,
     pub deny: Vec<Rule>,
+    /// Deny patterns that would not compile, kept because a boundary the user
+    /// asked for and did not get is the one failure this policy must not have
+    /// quietly.
+    broken_deny: Vec<String>,
     /// Approvals the user extended to the rest of the run.
     granted: Mutex<HashSet<String>>,
 }
@@ -193,32 +197,52 @@ impl Policy {
     /// rather than dropping them — a rule that silently never matches is worse
     /// than no rule.
     pub fn compile(mode: Mode, allow: &[String], ask: &[String], deny: &[String]) -> (Self, Vec<String>) {
-        let mut errors = Vec::new();
-        let mut build = |patterns: &[String]| {
-            patterns
-                .iter()
-                .filter_map(|p| match Rule::parse(p) {
-                    Ok(rule) => Some(rule),
-                    Err(e) => {
-                        errors.push(e);
-                        None
-                    }
-                })
-                .collect()
-        };
+        fn build(patterns: &[String]) -> (Vec<Rule>, Vec<String>) {
+            let mut rules = Vec::new();
+            let mut unusable = Vec::new();
+            for pattern in patterns {
+                match Rule::parse(pattern) {
+                    Ok(rule) => rules.push(rule),
+                    Err(e) => unusable.push(e),
+                }
+            }
+            (rules, unusable)
+        }
+
+        let (allow_rules, mut errors) = build(allow);
+        let (ask_rules, bad_ask) = build(ask);
+        // A rule the user could not spell fails safe in two of the three lists:
+        // dropping an `allow` only means being asked more often. Dropping a
+        // `deny` means the boundary they asked for is not there, which is the
+        // one thing this promises cannot happen — so it is kept, as the reason
+        // nothing runs until it is fixed.
+        let (deny_rules, broken_deny) = build(deny);
+        errors.extend(bad_ask);
+        errors.extend(broken_deny.iter().cloned());
+
         let policy = Self {
             mode: RwLock::new(mode),
-            allow: build(allow),
-            ask: build(ask),
-            deny: build(deny),
+            allow: allow_rules,
+            ask: ask_rules,
+            deny: deny_rules,
+            broken_deny,
             granted: Mutex::new(HashSet::new()),
         };
         (policy, errors)
     }
 
     pub fn decide(&self, risk: &Risk) -> Decision {
+        // Reading still works, so the agent can open the file and say what is
+        // wrong with it.
         if *risk == Risk::ReadOnly {
             return Decision::Allow;
+        }
+        if !self.broken_deny.is_empty() {
+            return Decision::Deny(format!(
+                "a deny rule in config.toml does not compile, so nothing that changes the \
+                 machine runs until it is fixed: {}",
+                self.broken_deny.join("; ")
+            ));
         }
         let subject = risk.subject();
 

@@ -571,3 +571,16 @@ fn listing_sessions_shows_this_workspace_and_says_what_it_hid() {
     assert!(all.contains(elsewhere.path().to_str().unwrap()), "--all is the way back to everything: {all}");
     assert!(!all.contains("more in other workspaces"), "nothing is hidden, so nothing is said: {all}");
 }
+
+/// A rule that will not compile was a line in the log file, and the log file is
+/// not where anyone looks when the agent is behaving oddly.
+#[test]
+fn doctor_names_a_sandbox_rule_that_does_not_compile() {
+    let rook = Rook::new();
+    rook.write_config("[sandbox]\ndeny = ['/rm -rf ([/', 'git push --force']\n");
+
+    let said = rook.ok(&["doctor"]);
+    assert!(said.contains("approvals:"), "{said}");
+    assert!(said.contains("rm -rf (["), "the rule that is wrong: {said}");
+    assert!(said.contains("stops the agent"), "and what it costs: {said}");
+}

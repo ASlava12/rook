@@ -254,6 +254,14 @@ unless `ROOK_LOG` says otherwise, rotated once at `telemetry.max_log_bytes` so
 they cost at most twice it. Nothing is uploaded anywhere; `telemetry.upload`
 exists so that answer is findable rather than assumed.
 
+A rule that will not compile is not applied, and which list it was in decides
+what that costs. Dropping an `allow` only means being asked more often, so it is
+reported and dropped. Dropping a `deny` would leave a boundary the user asked for
+and did not get — so a deny rule that does not parse refuses everything that
+changes the machine until it is fixed, and says so. Reading still works, so the
+agent can open the file and tell you what is wrong with it. `rook doctor` lists
+them.
+
 A deny rule is anchored twice: to the argument, so `rm -rf /tmp/scratch` is not
 `rm -rf /`, and to the command position, so `grep -r mkfs docs/` is not running
 `mkfs`. Nothing overrides a denial, which is why a rule that fires on a harmless

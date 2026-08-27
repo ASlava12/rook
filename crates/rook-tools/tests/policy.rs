@@ -304,3 +304,36 @@ fn what_the_user_is_asked_names_the_tool_and_repeats_the_claim() {
         "call the MCP tool `gh__search`, which its server calls read-only"
     );
 }
+
+/// A deny rule that will not compile was dropped with a line in the log file:
+/// the user had written a boundary, and it silently was not there. That is the
+/// one failure a deny list must not have — "nothing overrides a denial" is the
+/// claim, and a rule nobody could parse overrode every one of them.
+#[test]
+fn a_deny_rule_that_does_not_compile_stops_everything_rather_than_nothing() {
+    let owned = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let (p, errors) = Policy::compile(Mode::Auto, &[], &[], &owned(&["/rm -rf ([/", "git push"]));
+
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    let Decision::Deny(why) = p.decide(&run("ls")) else { panic!("a broken boundary is not a boundary") };
+    assert!(why.contains("does not compile"), "{why}");
+    assert!(why.contains("config.toml"), "and where to fix it: {why}");
+
+    assert_eq!(
+        p.decide(&Risk::ReadOnly),
+        Decision::Allow,
+        "reading still works, so the agent can open the file and say what is wrong"
+    );
+}
+
+/// The other two lists fail safe when a rule is dropped: being asked more often
+/// is not a hazard, and refusing to run at all over a typo in `allow` would be.
+#[test]
+fn an_allow_rule_that_does_not_compile_is_dropped_and_reported() {
+    let owned = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let (p, errors) = Policy::compile(Mode::Ask, &owned(&["/([/", "git status"]), &[], &[]);
+
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(p.decide(&run("git status")), Decision::Allow, "the rule that did compile still works");
+    assert_eq!(p.decide(&run("git push")), Decision::Ask);
+}
