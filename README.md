@@ -166,6 +166,27 @@ after reading something and running nothing.
 It is not a sandbox: `run_command` can still write. It is the difference between
 a rule the model weighs and a tool it does not have.
 
+### More than one project at a time
+
+The store is one per `~/.rook` and takes a single writer; a workspace is one per
+project. Bound together, a second project meant a second process — and the second
+process was the one that could not open the store. They are separate now:
+
+```sh
+rookd                                              # one daemon
+ws://127.0.0.1:7717/api/chat?workspace=/path/to/a  # a conversation in one project
+ws://127.0.0.1:7717/api/chat?workspace=/path/to/b  # and another, at the same time
+```
+
+Each connection gets its own engine, looking at its own project, sharing one
+history, one memory and one search. Two connections naming the same workspace
+also run at once — the machinery allows it, and nothing yet stops them editing
+the same file, which is why that is on the [roadmap](docs/roadmap.md) rather than
+in this list.
+
+`rook run` in a second directory still opens the store directly and still meets
+the lock ([ADR-0006](docs/adr/0006-single-writer-store.md)).
+
 ### Rook as a tool for something else
 
 ```sh

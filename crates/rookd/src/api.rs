@@ -448,6 +448,7 @@ mod tests {
         };
         let state = Arc::new(AppState {
             rook: Arc::new(tokio::sync::RwLock::new(rook)),
+            elsewhere: tokio::sync::RwLock::new(std::collections::HashMap::new()),
             started: std::time::Instant::now(),
             about,
         });
@@ -669,6 +670,34 @@ mod tests {
         let f = fixture();
         let (status, _) = get(&f, "/api/sessions/not-a-ulid/changes").await;
         assert!(status.is_client_error(), "answered {status}");
+    }
+
+    /// A project this daemon was not started in is served all the same: the
+    /// store it holds is one per home, and a workspace is one per project.
+    #[tokio::test]
+    async fn a_connection_can_name_a_project_the_daemon_was_not_started_in() {
+        let f = fixture();
+        let elsewhere = tempfile::tempdir().unwrap();
+
+        let engine = f.state.engine_for(Some(elsewhere.path())).await.unwrap();
+        assert_eq!(
+            engine.read().await.workspace,
+            elsewhere.path().canonicalize().unwrap(),
+            "the engine has to be looking at the project that was named"
+        );
+        assert!(
+            std::ptr::eq(
+                std::sync::Arc::as_ptr(&engine.read().await.store),
+                std::sync::Arc::as_ptr(&f.state.rook.read().await.store)
+            ),
+            "and share the one store, or a second project is a second history"
+        );
+
+        let again = f.state.engine_for(Some(elsewhere.path())).await.unwrap();
+        assert!(std::sync::Arc::ptr_eq(&engine, &again), "built once and kept, not rebuilt per prompt");
+
+        let missing = f.state.engine_for(Some(std::path::Path::new("/no/such/project"))).await;
+        assert!(missing.is_err(), "a path that is not a directory is refused rather than created");
     }
 
     /// A websocket is not covered by the same-origin policy and is not

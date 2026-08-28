@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -29,7 +29,11 @@ const FORK_AT: &str = "fork-at";
 const MEMORY_LOG: &str = "memory/h/";
 
 pub struct Rook {
-    pub store: Store,
+    /// Shared, because one process may hold several of these. The store is one
+    /// per `ROOK_HOME` and takes a single writer; a workspace is one per
+    /// project. Binding the two together is what made a second project a second
+    /// process, and a second process the one that could not open the store.
+    pub store: Arc<Store>,
     pub config: Config,
     /// Detected on first use, not on open. Probing sixteen toolchains costs
     /// about a third of a second warm and over a second cold — more than the
@@ -63,7 +67,7 @@ impl Rook {
         let (skills, mut skill_errors) = Self::discover_skills(&workspace, &plugins);
         skill_errors.extend(plugin_errors);
         Ok(Self {
-            store,
+            store: Arc::new(store),
             config,
             env: OnceLock::new(),
             skills: skills.into(),
@@ -86,13 +90,37 @@ impl Rook {
         workspace: PathBuf,
     ) -> Self {
         Self {
-            store,
+            store: Arc::new(store),
             config,
             env: OnceLock::from(env),
             skills: skills.into(),
             workspace,
             skill_errors: Vec::new(),
             plugins: Vec::new(),
+        }
+    }
+
+    /// The same store and the same machine, looking at another project.
+    ///
+    /// Skills and plugins are rediscovered because both are partly the
+    /// workspace's own; everything else is shared, which is the point — one
+    /// memory, one history, one search across every project rather than a store
+    /// per directory.
+    pub fn for_workspace(&self, workspace: PathBuf) -> Self {
+        let (plugins, plugin_errors) = crate::plugins::discover(&workspace);
+        let (skills, mut skill_errors) = Self::discover_skills(&workspace, &plugins);
+        skill_errors.extend(plugin_errors);
+        Self {
+            store: self.store.clone(),
+            config: self.config.clone(),
+            env: match self.env.get() {
+                Some(env) => OnceLock::from(env.clone()),
+                None => OnceLock::new(),
+            },
+            skills: skills.into(),
+            workspace,
+            skill_errors,
+            plugins,
         }
     }
 
@@ -1304,7 +1332,7 @@ mod tests {
     fn unprobed(dir: &Path) -> Rook {
         let (skills, _) = SkillIndex::discover(&[]);
         Rook {
-            store: Store::open(dir).unwrap(),
+            store: Store::open(dir).unwrap().into(),
             config: Config::default(),
             env: OnceLock::new(),
             skills: skills.into(),

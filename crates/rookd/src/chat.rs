@@ -21,8 +21,24 @@ use rook_tools::policy::{Approval, ChannelApprover};
 
 use crate::AppState;
 
-pub async fn upgrade(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> Response {
-    ws.on_upgrade(move |socket| serve(socket, state))
+/// `?workspace=` names the project this conversation is in, defaulting to the
+/// daemon's own. A connection is bound to one for its life, because a project is
+/// what a conversation is about — not something a single prompt changes.
+#[derive(serde::Deserialize)]
+pub struct Where {
+    workspace: Option<std::path::PathBuf>,
+}
+
+pub async fn upgrade(
+    ws: WebSocketUpgrade,
+    axum::extract::Query(here): axum::extract::Query<Where>,
+    State(state): State<Arc<AppState>>,
+) -> Response {
+    let engine = match state.engine_for(here.workspace.as_deref()).await {
+        Ok(engine) => engine,
+        Err(why) => return (axum::http::StatusCode::BAD_REQUEST, why).into_response(),
+    };
+    ws.on_upgrade(move |socket| serve(socket, engine))
 }
 
 /// Refuses the upgrade before anything else looks at the request.
@@ -68,7 +84,7 @@ fn from_this_daemon(headers: &axum::http::HeaderMap) -> bool {
     origin.strip_prefix("http://").or_else(|| origin.strip_prefix("https://")) == Some(host)
 }
 
-async fn serve(socket: WebSocket, state: Arc<AppState>) {
+async fn serve(socket: WebSocket, engine: Arc<tokio::sync::RwLock<rook_core::Rook>>) {
     let (mut sink, mut stream) = socket.split();
     let (outbound, mut queued) = mpsc::unbounded_channel::<ChatEvent>();
 
@@ -83,7 +99,7 @@ async fn serve(socket: WebSocket, state: Arc<AppState>) {
         }
     });
 
-    let patience = state.rook.read().await.config.agent.answer_timeout();
+    let patience = engine.read().await.config.agent.answer_timeout();
     let (approver, relay) = approver(outbound.clone(), patience);
     let (asker, ask_relay) = asker(outbound.clone(), patience);
     // Per connection, not per prompt: connecting MCP servers and starting
@@ -92,7 +108,7 @@ async fn serve(socket: WebSocket, state: Arc<AppState>) {
     let shared: Arc<tokio::sync::OnceCell<Shared>> = Arc::new(tokio::sync::OnceCell::new());
     // Settings are cheap and wanted before the first prompt, so they are not in
     // the cell with the expensive things.
-    let settings = Arc::new(Settings::new(&*state.rook.read().await));
+    let settings = Arc::new(Settings::new(&*engine.read().await));
     let _ = outbound.send(settings.describe());
     let mut running: Option<tokio::task::JoinHandle<()>> = None;
 
@@ -132,7 +148,7 @@ async fn serve(socket: WebSocket, state: Arc<AppState>) {
                     continue;
                 }
                 running = Some(tokio::spawn(turn(
-                    state.clone(),
+                    engine.clone(),
                     Connection {
                         approver: approver.clone(),
                         asker: asker.clone(),
@@ -166,7 +182,7 @@ struct Connection {
 }
 
 async fn turn(
-    state: Arc<AppState>,
+    engine: Arc<tokio::sync::RwLock<rook_core::Rook>>,
     connection: Connection,
     shared: Arc<tokio::sync::OnceCell<Shared>>,
     outbound: mpsc::UnboundedSender<ChatEvent>,
@@ -174,7 +190,7 @@ async fn turn(
     prompt: String,
 ) {
     // Owned so the guard outlives this task's spawn point.
-    let rook = state.rook.clone().read_owned().await;
+    let rook = engine.read_owned().await;
 
     let session = match session.as_deref().and_then(rook_store::parse_session_id) {
         Some(id) => id,

@@ -38,12 +38,44 @@ pub struct AppState {
     /// An `Arc` so a websocket turn can take an owned read guard and outlive the
     /// request that spawned it.
     pub rook: Arc<RwLock<Rook>>,
+    /// One engine per project, all sharing the store this daemon holds.
+    ///
+    /// A workspace is per project and the store takes one writer, so binding the
+    /// two together made a second project a second process — and the second
+    /// process the one that could not open the store. Kept apart here: several
+    /// projects run at once against one history, one memory and one search.
+    pub elsewhere: RwLock<std::collections::HashMap<std::path::PathBuf, Arc<RwLock<Rook>>>>,
     pub started: std::time::Instant,
     /// Read once at startup rather than through the lock on every request: none
     /// of it changes while the process runs, and `/api/health` must be able to
     /// answer while a turn holds the store — a liveness check that waits reports
     /// a working daemon as a dead one.
     pub about: About,
+}
+
+impl AppState {
+    /// The engine for `workspace`, built once and kept.
+    ///
+    /// `None` is the daemon's own, which is what a client naming no project
+    /// gets. A path that is not a directory is refused rather than created: the
+    /// name arrives from a request, and a typo should not quietly become an
+    /// empty project.
+    pub async fn engine_for(
+        &self,
+        workspace: Option<&std::path::Path>,
+    ) -> std::result::Result<Arc<RwLock<Rook>>, String> {
+        let Some(asked) = workspace else { return Ok(self.rook.clone()) };
+        let here = asked.canonicalize().map_err(|e| format!("{}: {e}", asked.display()))?;
+        if !here.is_dir() {
+            return Err(format!("{} is not a directory", here.display()));
+        }
+        if let Some(known) = self.elsewhere.read().await.get(&here) {
+            return Ok(known.clone());
+        }
+        let built = Arc::new(RwLock::new(self.rook.read().await.for_workspace(here.clone())));
+        self.elsewhere.write().await.insert(here, built.clone());
+        Ok(built)
+    }
 }
 
 pub struct About {
@@ -77,8 +109,12 @@ async fn main() -> Result<()> {
         os: rook.env().os.clone(),
         arch: rook.env().arch.clone(),
     };
-    let state =
-        Arc::new(AppState { rook: Arc::new(RwLock::new(rook)), started: std::time::Instant::now(), about });
+    let state = Arc::new(AppState {
+        rook: Arc::new(RwLock::new(rook)),
+        elsewhere: RwLock::new(std::collections::HashMap::new()),
+        started: std::time::Instant::now(),
+        about,
+    });
     let app = api::router(state.clone()).merge(web::router());
 
     let maintenance = tokio::spawn(maintain(state.clone(), config.storage.maintenance_interval_hours));

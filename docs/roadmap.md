@@ -682,17 +682,28 @@ recorded so the design question survives the session that raised it.
    through the language server; what it cannot do is name the API of a crate by
    name. Doing it locally means rustdoc JSON, which is nightly-only, so this
    probably lands on (4).
-6. **Several projects at once.** Blocked on the shape of `Rook`, which bundles
-   the store — one per `ROOK_HOME`, one writer — with the workspace, one per
-   project. The store already records a workspace per session, so the split is
-   the work: workspace becomes a property of a session rather than of the
-   engine, and the daemon serves many. That is also the end state
-   [ADR-0006](adr/0006-single-writer-store.md) named.
-7. **Several agents in one project.** Falls out of (6) mechanically — the daemon
-   already runs concurrent turns — and does not fall out of it safely: two
-   agents editing one file is the failure, and checkpoints record it rather than
-   prevent it. Needs a claim on what each agent may touch, or detection of the
-   overlap before the write.
+6. **Several projects at once** — *done through the daemon*. The blocker was
+   never the workspace but the store: one per `ROOK_HOME`, one writer, and bound
+   to a workspace that is one per project — so a second project was a second
+   process, and the second process was the one that could not open the store.
+   The store is now shared (`Arc<Store>`) and `Rook::for_workspace` builds a
+   sibling looking at another project, rediscovering the skills and plugins that
+   are the workspace's own and sharing everything else. `rookd` keeps one engine
+   per project and a chat connection names its own with `?workspace=`, so
+   several projects run at once against one history, one memory and one search.
+
+   What is not done is the CLI: `rook run` in a second directory still opens the
+   store directly and still meets the lock. Routing it through a running daemon
+   is the rest of [ADR-0006](adr/0006-single-writer-store.md), and it is the
+   larger half — every command needs a client path as well as a direct one.
+7. **Several agents in one project** — *mechanically done, and not yet safe*.
+   Two connections naming the same workspace share one engine and run
+   concurrently, which is all the machinery needs. What is missing is the part
+   that matters: two agents editing one file is the failure, and a checkpoint
+   records it rather than prevents it. Wanted next is a claim on what each may
+   touch — the checkpoint already knows the paths a call is about to write, so
+   the question is whether another turn is holding one, and refusing is better
+   than merging.
 8. **Secrets the agent can use and cannot leak.** At the concept stage. The
    shape that fits: a secret is named, never valued, in everything the model
    sees — it asks for `deploy_token` and the substitution happens at the edge,
