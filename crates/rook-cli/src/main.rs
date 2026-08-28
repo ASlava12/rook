@@ -1239,6 +1239,13 @@ fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, json: bool) -
                     "  {} checkpoint(s) applied: {} file(s) restored, {} removed",
                     report.checkpoints_applied, report.files_restored, report.files_removed
                 );
+                if report.files_kept > 0 {
+                    println!(
+                        "  {} file(s) captured as they were first: `rook session rewind {} {}` \
+                         puts them back",
+                        report.files_kept, report.session, report.events_kept
+                    );
+                }
             }
         }
         SessionCmd::Rm { id } => {

@@ -624,6 +624,21 @@ impl Rook {
             }
         }
 
+        // Before writing over them. The checkpoints hold what the agent found;
+        // what is on disk now is whatever happened since, and an edit made by
+        // hand is in no checkpoint at all — so without this the restore is the
+        // one operation here that destroys something with no copy kept. It is
+        // logged on the fork, past the prefix it inherited, which makes
+        // rewinding the fork to that point the way back.
+        let touched: Vec<PathBuf> = restore.keys().cloned().chain(remove.iter().cloned()).collect();
+        let kept = match touched.is_empty() {
+            true => 0,
+            false => {
+                self.checkpoint_paths(forked.id, "before rewind", &touched, &CaptureLimits::default())?;
+                touched.len()
+            }
+        };
+
         let mut restored = 0;
         for (path, id) in &restore {
             let data = self.store.get(id)?;
@@ -643,22 +658,28 @@ impl Rook {
             checkpoints_applied: checkpoints,
             files_restored: restored,
             files_removed: removed,
+            files_kept: kept,
         })
     }
 
     /// Capture `paths` before something modifies them, and record it in the log.
-    pub fn checkpoint_paths(&self, session: u128, label: &str, paths: &[PathBuf]) -> Result<()> {
+    ///
+    /// `limits` because the two callers are different sizes: one tool call
+    /// touches a handful of paths, and a rewind's own checkpoint covers every
+    /// path the session ever touched. Sized for the first, the second would
+    /// refuse to protect a long session — which is when it matters most.
+    pub fn checkpoint_paths(
+        &self,
+        session: u128,
+        label: &str,
+        paths: &[PathBuf],
+        limits: &CaptureLimits,
+    ) -> Result<()> {
         if paths.is_empty() {
             return Ok(());
         }
-        let (set, _) = fileset::capture_paths(
-            &self.store,
-            "checkpoint",
-            label,
-            &self.workspace,
-            paths,
-            &CaptureLimits::for_skill(),
-        )?;
+        let (set, _) =
+            fileset::capture_paths(&self.store, "checkpoint", label, &self.workspace, paths, limits)?;
         self.store.append_event(
             session,
             rook_store::NewEvent::new(
@@ -1081,6 +1102,8 @@ pub struct Rewind {
     pub checkpoints_applied: usize,
     pub files_restored: usize,
     pub files_removed: usize,
+    /// Paths captured as they were just before the restore wrote over them.
+    pub files_kept: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

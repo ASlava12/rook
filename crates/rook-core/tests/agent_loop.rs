@@ -2408,3 +2408,125 @@ async fn a_turn_stops_compacting_once_it_stops_helping() {
          assertion without exercising anything"
     );
 }
+
+/// `max_steps` is a ceiling the configuration sets, and the child's value for it
+/// arrives in tool arguments the model wrote. Taken at face value it is the
+/// model that decides how long its own sub-agents may run.
+#[tokio::test]
+async fn a_child_cannot_be_given_a_bigger_step_budget_than_the_configuration_allows() {
+    let f = fixture();
+    let mut config = Config::default();
+    config.agent.max_steps = 3;
+    let rook = Rook::from_parts(
+        Store::open(f._store_dir.path().join("clamp")).unwrap(),
+        config,
+        f.rook.env().clone(),
+        SkillIndex::default(),
+        PathBuf::from(f.workspace.path()),
+    );
+    let session = rook.start_session("clamp").unwrap();
+
+    let mut script = vec![call("delegate", serde_json::json!({ "tasks": ["go"], "max_steps": 50 }))];
+    script.extend((0..8).map(|_| call("list_dir", serde_json::json!({}))));
+    script.push(reply("child done"));
+    script.push(reply("parent done"));
+
+    let mut agent = AgentLoop::new(&rook, Arc::new(ScriptedProvider::new(script)), session);
+    let outcome = agent.run("split this up").await.unwrap();
+
+    let child = rook_store::parse_session_id(&outcome.delegated[0]).unwrap();
+    let steps =
+        rook.transcript(child, 0, usize::MAX, 4096).unwrap().iter().filter(|e| e.kind == "tool-call").count();
+    assert!(
+        steps <= 3,
+        "the child took {steps} steps against a configured `max_steps = 3`, because the \
+         argument asked for 50"
+    );
+}
+
+/// The list of tasks comes from the model, and one delegation is as many turns
+/// as it has entries. Without a ceiling on the total, a single tool call is an
+/// unbounded number of model calls — and a child that delegates again multiplies
+/// it, which is why the count is shared with the children rather than reset.
+#[tokio::test]
+async fn a_turn_cannot_start_more_sub_agents_than_the_configured_ceiling() {
+    let f = fixture();
+    let mut config = Config::default();
+    config.agent.max_subagents_per_turn = 2;
+    let rook = Rook::from_parts(
+        Store::open(f._store_dir.path().join("fleet")).unwrap(),
+        config,
+        f.rook.env().clone(),
+        SkillIndex::default(),
+        PathBuf::from(f.workspace.path()),
+    );
+    let session = rook.start_session("fleet").unwrap();
+
+    let script = vec![
+        call("delegate", serde_json::json!({ "tasks": ["a", "b"] })),
+        reply("first child"),
+        reply("second child"),
+        call("delegate", serde_json::json!({ "tasks": ["c"] })),
+        reply("stopped asking"),
+        // Spare, so a ceiling that failed to hold runs the third child and
+        // fails the count below rather than running the script dry.
+        reply("unused"),
+    ];
+    let mut agent = AgentLoop::new(&rook, Arc::new(ScriptedProvider::new(script)), session);
+    let outcome = agent.run("check five things").await.unwrap();
+
+    assert_eq!(outcome.delegated.len(), 2, "the ceiling of two must actually be reached");
+    let refusal = rook
+        .transcript(session, 0, usize::MAX, 4096)
+        .unwrap()
+        .into_iter()
+        .rfind(|e| e.kind == "tool-result")
+        .expect("the second delegation must have answered something")
+        .body;
+    assert!(
+        refusal.contains("max_subagents_per_turn"),
+        "a refusal has to name the limit that was hit and what to do: {refusal}"
+    );
+}
+
+/// A rewind puts back what the checkpoints hold. What was on disk instead is
+/// whatever happened since — including edits the agent never saw, which no
+/// checkpoint holds and which the write therefore destroys with no copy left.
+#[tokio::test]
+async fn a_rewind_keeps_the_state_it_is_about_to_overwrite() {
+    let f = fixture();
+    let target = f.workspace.path().join("notes.txt");
+    std::fs::write(&target, "original\n").unwrap();
+    let session = f.rook.start_session("edit").unwrap();
+
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("write_file", serde_json::json!({ "path": "notes.txt", "content": "rewritten\n" })),
+        reply("done"),
+    ]));
+    let mut agent = AgentLoop::new(&f.rook, provider, session);
+    agent.allow_everything_not_denied();
+    agent.run("rewrite notes.txt").await.unwrap();
+
+    // Somebody edits it by hand afterwards. Nothing captured this.
+    std::fs::write(&target, "and then a person changed it\n").unwrap();
+
+    let seq = f
+        .rook
+        .transcript(session, 0, 100, 4096)
+        .unwrap()
+        .iter()
+        .find(|e| e.kind == "checkpoint")
+        .unwrap()
+        .seq;
+    let rewound = f.rook.rewind(session, seq, true).unwrap();
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "original\n");
+
+    // Rewinding the fork past its own arrival is the way back.
+    let fork = rook_store::parse_session_id(&rewound.session).unwrap();
+    f.rook.rewind(fork, rewound.events_kept, true).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "and then a person changed it\n",
+        "the hand edit the rewind wrote over has to still be reachable"
+    );
+}

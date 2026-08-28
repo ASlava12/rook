@@ -31,6 +31,8 @@ Add a row when you implement something after reading a reference. Add it to
 | Asking the user structured questions | hermes `7d6c6ae4` *clarify: schema diet + single questions[] interface (880 → 335 tok/call)* — took the one-questions[]-shape and the rule that options must never be written into the question text, and cut further: no per-question id, and the answer's own text is the "Other" row | source, via `refs advance` | `rook-tools/src/ask.rs`, `AgentLoop::ask_via` |
 | A workspace boundary that a symlink cannot cross | codex `2926014` *make filesystem policy matching URI-native* — their case was encoded and case-variant paths, ours was a symlink out of the workspace that lexical containment could not see | source, via `refs advance` | `ToolContext::resolve`, `through_symlinks`, `sandbox.allow_outside_workspace` |
 | Widening a fact's scope instead of keeping the first | hermes `3b672a68` *delete-path drops every scope of a removed id* — the fix does not apply (identity here is the text, not an id per scope), but its subject exposed the same hazard in ours | source, via `refs advance` | `MemoryBook::learn`, `Scope::within` |
+| A sub-agent's budget being its parent's, not its own | codex `4761851` *account subagent token usage toward root goals* — ours already charged the tokens; what it did not bound was the step budget the model writes into the call, or how many sub-agents one turn may start | source, via `refs advance` | `AgentLoop::delegate`, `agent.max_subagents_per_turn` |
+| Keeping what a restore is about to overwrite | cline `89c2efa` *refuse checkpoint workspace restore when HEAD moved past the checkpoint* — they refuse where a store that cannot keep the current state has no better option; ours can keep it, so a rewind became reversible instead of merely safe | source, via `refs advance` | `Rook::rewind`, `Rewind::files_kept` |
 | Reporting a search hit inside a captured file | codex `57e2edc` *encrypt sensitive history and notes tool arguments* — encryption does not fit a store whose point is that it is readable, but the question behind it exposed a search that scanned files and could not report them | source, via `refs advance` | `Rook::captured_as`, `Hit::file` |
 | Summarising only what the model was shown | hermes `1341dfbd` *exclude operational notifications from the tail anchor* — the same mismatch: their notifications, our checkpoint manifests and asides | source, via `refs advance` | `AgentLoop::summarise_span`, `replayed` |
 | A deny list anchored to command position | hermes *anchor the mkfs hardline pattern to command position* — the same half-anchoring, and the same reasoning: an unoverridable rule that fires on a mention takes a harmless command away for good | source, via `refs advance` | `config::COMMAND`, `deny_list.rs` |
@@ -42,6 +44,57 @@ Add a row when you implement something after reading a reference. Add it to
 `cargo xtask refs advance` prints what landed upstream since the pointer was last
 moved; what follows is what was done with it, so a dismissal is a decision rather
 than an omission.
+
+**2026-08-28 (fourteenth pass)** — all seven advanced: hermes 68 commits, codex
+33, cline 21, opencode 11, openhands 4, acp 2, goose 1.
+
+Three ports, and all three are the same shape — a limit that exists but is not
+the one in force at the point that matters.
+
+- codex `4761851` *account subagent token usage toward root goals* and `2d929eb`
+  *honor turn token budgets in Guardian review rollover* — **ported, twice, and
+  the defect was worse than theirs.** Our children's tokens were already charged
+  to the parent, so the accounting half was done. What was not: `max_steps` for a
+  child was read straight out of the tool arguments, so the configured ceiling
+  was whatever the model wrote — a probe asked for 50 against a configured 3 and
+  got 9 steps. And the list of tasks has no length, so one `delegate` call was
+  `tasks x max_steps` model calls with nothing bounding either factor. The step
+  budget now only ever shortens, and the sub-agent count is capped per turn and
+  shared with the children, so a child that delegates again spends the same
+  allowance rather than opening a new one.
+- cline `89c2efa` *refuse checkpoint workspace restore when HEAD moved past the
+  checkpoint* — **ported as the opposite answer, for the same reason.** Their
+  restore could destroy work committed after the checkpoint, so they refuse. Ours
+  could destroy an edit made by hand, which no checkpoint holds; but a
+  content-addressed store can keep it for the cost of a hash, so the restore now
+  captures what it is about to write over, onto the fork it just made. Refusing
+  makes a rewind safe; capturing makes it reversible.
+- cline `9e7c1a3` *CLI crash when a remote MCP server is offline but enabled* and
+  codex `124e560` *make the optional MCP startup grace configurable* — **already
+  held**: `connect_mcp` connects concurrently, collects failures instead of
+  propagating them, and each server's `startup_timeout_secs` is configurable.
+- hermes `2c6938dc3` *retry a stalled summary on the fallback chain* — **already
+  held**, by a different mechanism: the summarising call runs through the same
+  provider as the turn, so `stream_idle_timeout_secs` ends a stall, and the
+  fallback records a compaction that says where to read the span instead.
+- codex `1932143`, `dc031d4` *propagate executor OS / PowerShell version into
+  turn environments* — **not applicable**: one process, one machine; the
+  environment a skill is matched against is this one.
+- opencode `517ee73` *filter unreplayable Bedrock reasoning before caching* —
+  **not applicable**: reasoning is logged for a person to read and is not
+  replayed into a request, so there is nothing unreplayable to filter.
+- codex `6be2a6c` *let the history backend enforce tool output budgets* —
+  **already held**: `sandbox.max_output_bytes` bounds capture at the tool, not
+  at the store, which is the earlier of the two places.
+- cline `691fcb6` *discover global rules at ~/Cline/Rules*, `29530ca` *searchable
+  session history*, `2208d18` *discovery boundary for Agent Plugins* — **already
+  held**: user skills under `~/.rook/skills`, `rook search`, and `rook-core`'s
+  plugin loader respectively.
+- codex `7d6f808`, `f6726e8`, `e325e3a`, `8935ff1` and the Guardian, plugin
+  catalog and telemetry commits; hermes' desktop, cron, kanban and computer-use
+  work; opencode's Azure auth and console charts; openhands' Canvas frontend;
+  acp's registry docs; goose's model list — **not applicable**: product surfaces
+  and services that have no counterpart here.
 
 **2026-08-27 (thirteenth pass)** — hermes moved 1509 commits, codex one.
 

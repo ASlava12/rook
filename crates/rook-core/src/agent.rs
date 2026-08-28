@@ -229,6 +229,10 @@ pub struct AgentLoop<'a> {
     pub max_steps: u32,
     pub effort: rook_llm::Effort,
     budget: ContextBudget,
+    /// Sub-agents started so far, shared with every child so one that delegates
+    /// again is charged to the turn that began it rather than being handed a
+    /// fresh allowance at each level.
+    spawned: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl<'a> AgentLoop<'a> {
@@ -267,6 +271,7 @@ impl<'a> AgentLoop<'a> {
             max_steps: rook.config.agent.max_steps,
             effort: rook.config.agent.effort(),
             budget,
+            spawned: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
@@ -1000,7 +1005,29 @@ impl<'a> AgentLoop<'a> {
             Some("recent") => self.recent_exchanges(6).ok(),
             Some(given) => Some(given.to_string()),
         };
-        let max_steps = args.get("max_steps").and_then(|s| s.as_u64()).map(|s| s as u32);
+        // Only ever shortens: the ceiling is the parent's, and this argument was
+        // written by the model, so taken at face value it is the model that
+        // decides how long its own sub-agents may run.
+        let max_steps =
+            args.get("max_steps").and_then(|s| s.as_u64()).map(|s| (s as u32).min(self.max_steps));
+
+        // The list of tasks is written by the model too, and nothing else bounds
+        // its length: without this one tool call is tasks x max_steps model
+        // calls, and a child that delegates again multiplies that.
+        let ceiling = self.rook.config.agent.max_subagents_per_turn;
+        let claimed = self.spawned.fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |started| (started + tasks.len() <= ceiling).then_some(started + tasks.len()),
+        );
+        if let Err(started) = claimed {
+            return format!(
+                "this turn has started {started} sub-agents already and {} more would pass the \
+                 limit of {ceiling}. Do the rest here, delegate fewer at a time, or raise \
+                 `[agent] max_subagents_per_turn`.",
+                tasks.len()
+            );
+        }
 
         // Bounded rather than unbounded: the sub-tasks share one token budget and
         // one provider, and a model asked to check twenty things will ask for
@@ -1056,6 +1083,9 @@ impl<'a> AgentLoop<'a> {
                     outcome.delegated.push(id.clone());
                     outcome.input_tokens += child.input_tokens;
                     outcome.output_tokens += child.output_tokens;
+                    // Or the turn reports the children's input against only its
+                    // own cache, and the ratio a person reads is wrong.
+                    outcome.cached_tokens += child.cached_tokens;
                     report.push(format!(
                         "### {task}\nsub-agent {id}, {} steps ({}):\n{}",
                         child.steps, child.stopped, child.reply
@@ -1091,6 +1121,7 @@ impl<'a> AgentLoop<'a> {
         // judge the answer.
         child.hooks = self.hooks.clone();
         child.servers = self.servers.clone();
+        child.spawned = self.spawned.clone();
         // A sub-task is a bounded errand, and lower effort means fewer and more
         // consolidated tool calls rather than a worse answer.
         child.effort = rook_llm::Effort::Low;
@@ -1315,7 +1346,10 @@ impl<'a> AgentLoop<'a> {
         if paths.is_empty() {
             return None;
         }
-        let failure = self.rook.checkpoint_paths(self.session, &call.name, &paths).err()?;
+        let failure = self
+            .rook
+            .checkpoint_paths(self.session, &call.name, &paths, &crate::CaptureLimits::for_skill())
+            .err()?;
         let note = format!(
             "no checkpoint was taken first ({failure}), so `rook session rewind` cannot undo this one."
         );

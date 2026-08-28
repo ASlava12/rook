@@ -145,6 +145,10 @@ rook session rewind 01JQ… --to 12 --keep-files  # conversation only
 rook session fork 01JQ… --at 12                 # branch without touching files
 ```
 
+Restoring is the one step that writes over something, and what it writes over may
+be an edit made by hand that no checkpoint holds. So the state on disk is captured
+first, onto the fork it just made; the command prints the rewind that puts it back.
+
 All three front ends run turns, stream them, and ask for approvals the same way:
 `rook chat`, `rook tui`, and the web UI at `rookd`. Nothing is reachable from one
 that is not reachable from the others.
@@ -290,7 +294,11 @@ A turn can hand self-contained sub-tasks to fresh agents and get back only their
 conclusions. Each sub-agent runs in its own session with an empty context, so a
 wide search or a long file survey never enters the conversation that asked for it
 — and its full transcript stays readable afterwards. Several at once run
-concurrently, bounded by `agent.max_parallel_subagents`:
+concurrently, bounded by `agent.max_parallel_subagents`. The list of sub-tasks is
+written by the model and one entry is a whole agent's worth of turns, so the total
+a turn may start — counting the ones its own children start — is capped by
+`agent.max_subagents_per_turn`, and a sub-agent's step budget can only be shorter
+than its parent's, never longer:
 
 ```sh
 rook session ls              # sub-tasks appear under ↳, linked to their parent
