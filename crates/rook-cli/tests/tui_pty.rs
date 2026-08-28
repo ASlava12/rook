@@ -25,8 +25,12 @@ impl Pty {
     fn spawn(program: &std::path::Path, args: &[&str], env: &[(&str, &str)], cols: u16, rows: u16) -> Self {
         let (mut master, mut slave) = (0, 0);
         let mut size = libc::winsize { ws_row: rows, ws_col: cols, ws_xpixel: 0, ws_ypixel: 0 };
+        // A raw pointer rather than `&mut`: the last parameter is `*mut winsize`
+        // on macOS and `*const winsize` on Linux, and a `&mut` passed to the
+        // second is a clippy error under `-D warnings`. `*mut` weakens to
+        // `*const`, so one spelling satisfies both.
         let opened = unsafe {
-            libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), &mut size)
+            libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), &raw mut size)
         };
         assert_eq!(opened, 0, "openpty failed");
 
@@ -64,7 +68,9 @@ impl Pty {
         grid(&self.seen, cols, rows)
     }
 
-    /// The screen once `wanted` is on it, or the last one before giving up.
+    /// The screen once `wanted` is on it. Failing to find it is the failure, so
+    /// this panics rather than handing back a screen for the caller to assert
+    /// the same thing about twice.
     ///
     /// A settling window is a guess about how long a redraw takes, and under a
     /// full test run that guess is wrong: waiting for the thing being asserted
@@ -73,10 +79,28 @@ impl Pty {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         loop {
             let screen = self.screen(cols, rows);
-            if screen.iter().any(|line| line.contains(wanted)) || std::time::Instant::now() >= deadline {
+            if screen.iter().any(|line| line.contains(wanted)) {
                 return screen;
             }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{wanted:?} never appeared. {}\n{}",
+                self.diagnosis(),
+                screen.join("\n")
+            );
         }
+    }
+
+    /// Why the screen looks the way it does, for when it looks like nothing.
+    /// A blank grid alone cannot be told from an app that exited, one that drew
+    /// and was then cleared, or one that never started.
+    fn diagnosis(&mut self) -> String {
+        let alive = match self.child.try_wait() {
+            Ok(None) => "still running".to_string(),
+            Ok(Some(status)) => format!("exited with {status}"),
+            Err(e) => format!("unknown: {e}"),
+        };
+        format!("{} bytes read, child {alive}", self.seen.len())
     }
 
     /// Whether anything arrived, so a closed pty ends the wait instead of
@@ -162,7 +186,26 @@ fn grid(stream: &str, cols: usize, rows: usize) -> Vec<String> {
                 row = parts.next().and_then(|p| p.parse::<usize>().ok()).unwrap_or(1).saturating_sub(1);
                 col = parts.next().and_then(|p| p.parse::<usize>().ok()).unwrap_or(1).saturating_sub(1);
             }
-            'J' => cells = vec![vec![' '; cols]; rows],
+            // Erase-in-display, by mode. Not all of them clear the screen: `0`
+            // — which is what an empty parameter means, and what crossterm
+            // emits most — erases only from the cursor down. Treating every
+            // `J` as `2J` threw away every frame accumulated before it, and
+            // since the whole stream is replayed each time, one of them
+            // anywhere left the screen blank however much had been drawn.
+            'J' => {
+                let (from, to) = match params.as_str() {
+                    "" | "0" => ((row, col), (rows, 0)),
+                    "1" => ((0, 0), (row, col + 1)),
+                    _ => ((0, 0), (rows, 0)),
+                };
+                for (r, line) in cells.iter_mut().enumerate().take(to.0.min(rows)).skip(from.0) {
+                    let start = if r == from.0 { from.1 } else { 0 };
+                    let end = if r == to.0 { to.1.min(cols) } else { cols };
+                    for cell in line.iter_mut().take(end).skip(start) {
+                        *cell = ' ';
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -226,9 +269,7 @@ fn the_footer_shows_the_settings_and_f2_changes_them() {
     // F2 as a VT sequence; crossterm reads both this and SS3, and a pty is not
     // a terminal that will translate one for us.
     pty.send("\u{1b}[12~");
-    let after = pty.screen_showing(100, 30, "readonly/high").join("\n");
-
-    assert!(after.contains("readonly/high"), "F2 cycles approvals:\n{after}");
+    pty.screen_showing(100, 30, "readonly/high");
 }
 
 #[test]
@@ -250,7 +291,6 @@ fn the_memory_tab_shows_what_the_agent_remembers() {
     pty.send("\t\t");
     let screen = pty.screen_showing(100, 30, "Memory").join("\n");
 
-    assert!(screen.contains("Memory"), "the tab must be there:\n{screen}");
     assert!(screen.contains("prefer tabs in Makefiles"), "and the fact:\n{screen}");
     assert!(screen.contains("style"), "with its tags:\n{screen}");
 }
@@ -266,7 +306,6 @@ fn the_tui_chat_answers_the_same_slash_commands_as_the_plain_cli() {
     pty.send("/goal\r");
     let screen = pty.screen_showing(100, 30, "goal set").join("\n");
 
-    assert!(screen.contains("goal set"), "the command must run, not be sent to a model:\n{screen}");
     assert!(screen.contains("ship the release"), "and read back:\n{screen}");
 }
 
@@ -280,7 +319,6 @@ fn an_unknown_slash_command_in_the_tui_says_so() {
     pty.send("/nonsense\r");
     let screen = pty.screen_showing(100, 30, "unknown command").join("\n");
 
-    assert!(screen.contains("unknown command"), "{screen}");
     assert!(!screen.contains("cannot reach"), "it must not have gone to the provider:\n{screen}");
 }
 

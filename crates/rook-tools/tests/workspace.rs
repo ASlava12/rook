@@ -2,7 +2,9 @@
 //! inside the workspace that points out of it reads and writes outside while
 //! every path involved still looks contained.
 
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 
 use rook_tools::{Tool, ToolContext, files};
 
@@ -29,6 +31,7 @@ async fn read(ctx: &ToolContext, path: &str) -> rook_tools::Result<String> {
     files::ReadFile.call(ctx, &serde_json::json!({ "path": path })).await.map(|o| o.content)
 }
 
+#[cfg(unix)]
 async fn write(ctx: &ToolContext, path: &str) -> rook_tools::Result<String> {
     files::WriteFile.call(ctx, &serde_json::json!({ "path": path, "content": "x" })).await.map(|o| o.content)
 }
