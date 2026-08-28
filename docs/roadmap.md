@@ -657,15 +657,21 @@ recorded so the design question survives the session that raised it.
 2. **Consecutive user turns folded into one** — *done*. The agent produces them
    honestly and a chat template on a self-hosted server often will not take
    them; `Request::new` folds them, in the one place every request goes through.
-3. **Verification as a mechanism, not a habit.** The agent that wrote something
-   is the worst judge of it, which is why `delegate` already gives a fresh
-   context. What is missing is a *standard*: a `verify` that hands an artefact
-   and a criterion to an independent context and gets back a verdict with its
-   evidence, not prose. For code the criterion is runnable — it builds, the
-   tests pass, the linter is clean — and the verifier must run it rather than
-   read it and opine. For a claim the criterion is attribution: every statement
-   traced to a source that says it, and the opinion around it dropped. The two
-   share a shape and should share an implementation.
+3. **Verification as a mechanism, not a habit** — *done for what can be run*.
+   `verify` hands a claim to a session that did not make it, with every tool
+   that changes something withheld — the writing tools taken out of the box, and
+   the loop's own six (a skill, memory, `delegate`) neither advertised nor
+   dispatched, because a checker that can start an agent with the writing tools
+   has not been stopped from writing. It must end with `VERDICT: holds`, `fails`
+   or `unproven`; anything else is reported as unchecked rather than passed,
+   since "looks reasonable" is what a model says when it has read something and
+   run nothing.
+
+   It is not isolation — `run_command` can still write, and closing that is the
+   sandbox below. What remains is the other half: a claim whose evidence is a
+   *source* rather than a command. That needs (4), and the criterion is
+   attribution — every statement traced to something that says it, the opinion
+   around it dropped. Same mechanism, different evidence.
 4. **Reaching the web.** `web_search` and `web_fetch`, off unless configured,
    through the policy as external — the deny list and the approval already know
    how to treat something that leaves the machine. This is the one item in

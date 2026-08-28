@@ -2580,3 +2580,82 @@ async fn compacting_asks_for_less_thinking_than_the_turn_that_needed_it() {
         .expect("a summarisation request has to have been made, not merely attempted");
     assert_eq!(summary.effort, Some(rook_llm::Effort::Low));
 }
+
+/// A checker that could edit what it is judging is not checking it. The
+/// instruction not to is one the model weighs against everything else; a tool it
+/// was never handed is not.
+#[tokio::test]
+async fn a_checker_is_given_no_way_to_edit_what_it_is_judging() {
+    let f = fixture();
+    let session = f.rook.start_session("verify").unwrap();
+    std::fs::write(f.workspace.path().join("notes.txt"), "as written\n").unwrap();
+
+    let script = vec![
+        call("verify", serde_json::json!({ "claim": "notes.txt says 'as written'" })),
+        // The child's turn: it reaches for the tool it does not have, then
+        // commits to a verdict.
+        call("write_file", serde_json::json!({ "path": "notes.txt", "content": "fixed\n" })),
+        reply("read it instead\n\nVERDICT: holds"),
+        reply("checked"),
+    ];
+    let provider = ScriptedProvider::new(script);
+    let seen = provider.share();
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), session);
+    agent.allow_everything_not_denied();
+    let outcome = agent.run("prove it").await.unwrap();
+
+    assert_eq!(outcome.delegated.len(), 1, "the check runs in a session of its own");
+    assert_eq!(
+        std::fs::read_to_string(f.workspace.path().join("notes.txt")).unwrap(),
+        "as written\n",
+        "the checker must not have been able to change what it was judging"
+    );
+
+    let offered_to_child: Vec<String> = {
+        let requests = seen.lock().unwrap();
+        let child = requests
+            .iter()
+            .find(|r| r.messages.iter().any(|m| m.content.starts_with("You are checking a claim")))
+            .expect("the checker's own request must be among what the provider was asked");
+        child.tools.iter().map(|t| t.name.clone()).collect()
+    };
+    assert!(
+        !offered_to_child.iter().any(|n| n == "write_file"),
+        "and never offered one: {offered_to_child:?}"
+    );
+    assert!(offered_to_child.iter().any(|n| n == "run_command"), "but must keep what settles a claim");
+    for way_round in ["write_skill", "delegate", "remember", "edit_file"] {
+        assert!(
+            !offered_to_child.iter().any(|n| n == way_round),
+            "{way_round} is another way to change things: {offered_to_child:?}"
+        );
+    }
+}
+
+/// "It looks fine" is what a model says when it has read something and run
+/// nothing. A check that will not commit is reported as unchecked rather than
+/// passed.
+#[tokio::test]
+async fn a_check_that_will_not_commit_is_not_a_pass() {
+    let f = fixture();
+    let session = f.rook.start_session("hedge").unwrap();
+
+    let script = vec![
+        call("verify", serde_json::json!({ "claim": "the build is clean" })),
+        reply("seems reasonable to me"),
+        reply("done"),
+    ];
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
+    let outcome = agent.run("prove it").await.unwrap();
+
+    let result = f
+        .rook
+        .transcript(session, 0, usize::MAX, 4096)
+        .unwrap()
+        .into_iter()
+        .rfind(|e| e.kind == "tool-result")
+        .unwrap()
+        .body;
+    assert!(result.contains("unchecked"), "a hedge must not read as a pass: {result}");
+    assert_eq!(outcome.delegated.len(), 1);
+}

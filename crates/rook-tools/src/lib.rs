@@ -334,6 +334,15 @@ impl ToolBox {
         self.tools.push(tool);
     }
 
+    /// The same box with `dropped` taken out.
+    ///
+    /// The enforceable half of asking an agent not to do something: an
+    /// instruction it may weigh against the rest of its prompt becomes a tool it
+    /// cannot call, because it was never given one.
+    pub fn without(&self, dropped: &[&str]) -> Self {
+        Self { tools: self.tools.iter().filter(|t| !dropped.contains(&t.name())).cloned().collect() }
+    }
+
     pub fn get(&self, name: &str) -> Option<&Arc<dyn Tool>> {
         self.tools.iter().find(|t| t.name() == name)
     }

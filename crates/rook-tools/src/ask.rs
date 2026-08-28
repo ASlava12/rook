@@ -98,13 +98,11 @@ impl Tool for AskUser {
         ToolSpec {
             name: "ask".into(),
             description: format!(
-                "Ask the user when the decision is theirs and guessing wastes real work. All \
-                 independent questions go in one call (1-{MAX_QUESTIONS}, one is a one-entry \
-                 array); questions whose answers depend on each other go in separate calls. \
-                 Options belong in `choices` (up to {MAX_CHOICES}, recommended first), never in \
-                 the question text where the user cannot pick them. Omit `choices` for free text; \
-                 `multi` allows several. Decide low-stakes questions yourself; approving a \
-                 command is not this tool."
+                "Ask the user when the decision is theirs and guessing wastes real work. \
+                 Independent questions go in one call (1-{MAX_QUESTIONS}); ones whose answers \
+                 depend on each other go in separate calls. Options belong in `choices` (up to \
+                 {MAX_CHOICES}, recommended first), never in the question text where the user \
+                 cannot pick them. Decide low-stakes questions yourself."
             ),
             parameters: serde_json::json!({
                 "type": "object",

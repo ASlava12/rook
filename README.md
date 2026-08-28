@@ -149,6 +149,23 @@ Restoring is the one step that writes over something, and what it writes over ma
 be an edit made by hand that no checkpoint holds. So the state on disk is captured
 first, onto the fork it just made; the command prints the rewind that puts it back.
 
+### Checking, rather than believing
+
+A turn can hand a claim to an agent that did not make it:
+
+```
+verify { "claim": "the tests pass after the change", "settles": "cargo test -p rook-store" }
+```
+
+The checker runs in its own session with every tool that changes something
+withheld — not asked not to use them, not given them — and must end with
+`VERDICT: holds`, `fails` or `unproven`. A reply that will not commit is reported
+as unchecked rather than as a pass, because "looks reasonable" is what gets said
+after reading something and running nothing.
+
+It is not a sandbox: `run_command` can still write. It is the difference between
+a rule the model weighs and a tool it does not have.
+
 ### Rook as a tool for something else
 
 ```sh

@@ -130,6 +130,17 @@ impl TurnOutcome {
     }
 }
 
+/// The loop's own tools that change something, and are therefore not offered to
+/// a checker. `delegate` is here because a checker that can start an agent with
+/// the writing tools has not been stopped from writing, only from doing it
+/// itself.
+const CHANGES_THINGS: &[&str] = &[WRITE_SKILL, FIND_SKILL, REMEMBER, FORGET, DELEGATE, VERIFY];
+
+/// The verdict a checker committed to, if it committed to one.
+fn verdict_in(reply: &str) -> Option<&str> {
+    reply.lines().rev().find_map(|line| line.trim().strip_prefix("VERDICT:")).map(str::trim)
+}
+
 /// The head of a sub-task, for a progress line. A task is a whole instruction —
 /// a live one ran to two hundred characters — and repeating it on every step
 /// buries what the step actually was.
@@ -198,6 +209,7 @@ pub const REMEMBER: &str = "remember";
 pub const FORGET: &str = "forget";
 pub const RECALL: &str = "recall";
 pub const DELEGATE: &str = "delegate";
+pub const VERIFY: &str = "verify";
 
 /// How deep delegation may nest. One level of sub-delegation is useful for
 /// splitting a task; beyond that the token cost compounds faster than the work
@@ -252,6 +264,13 @@ pub struct AgentLoop<'a> {
     /// again is charged to the turn that began it rather than being handed a
     /// fresh allowance at each level.
     spawned: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// This loop is checking somebody else's claim, and may not change anything.
+    ///
+    /// Taking the writing tools out of the toolbox is not enough on its own: the
+    /// loop adds six of its own that the toolbox never held, and two of them —
+    /// writing a skill, and delegating to an agent that can write — are ways
+    /// round the very restriction.
+    checking: bool,
 }
 
 impl<'a> AgentLoop<'a> {
@@ -288,6 +307,7 @@ impl<'a> AgentLoop<'a> {
             effort: rook.config.agent.effort(),
             budget,
             spawned: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            checking: false,
         }
     }
 
@@ -495,7 +515,13 @@ impl<'a> AgentLoop<'a> {
     pub fn tool_specs(&self) -> Vec<ToolSpec> {
         let lazy = self.rook.config.agent.lazy_tools;
         let mut specs = if lazy { self.tools.stubs() } else { self.tools.specs() };
-        let mut push = |spec: ToolSpec| specs.push(if lazy { spec.stub() } else { spec });
+        let checking = self.checking;
+        let mut push = |spec: ToolSpec| {
+            if checking && CHANGES_THINGS.contains(&spec.name.as_str()) {
+                return;
+            }
+            specs.push(if lazy { spec.stub() } else { spec })
+        };
         push(ToolSpec {
             name: LOAD_SKILL.into(),
             description: "Load a skill's full instructions into context by name. An unknown \
@@ -530,8 +556,7 @@ impl<'a> AgentLoop<'a> {
                           effort — a build incantation, a platform quirk — not for what this \
                           conversation already says. When no tool does the job, put one in \
                           `files` and have the body call it; a shebang makes it runnable. \
-                          `requires` scopes it to where it holds, and a skill claiming to apply \
-                          everywhere misfires elsewhere. Rewriting your own keeps the old one."
+                          `requires` scopes it to where it holds."
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -543,7 +568,7 @@ impl<'a> AgentLoop<'a> {
                     "files": {
                         "type": "object",
                         "additionalProperties": { "type": "string" },
-                        "description": "Files laid beside the instructions, by relative name: a script the body runs, a template it fills. The loaded skill lists them with their path."
+                        "description": "By relative name: a script the body runs, a template it fills."
                     },
                     "requires": {
                         "type": "object",
@@ -595,6 +620,22 @@ impl<'a> AgentLoop<'a> {
             });
         }
         if self.depth < MAX_DEPTH {
+            push(ToolSpec {
+                name: VERIFY.into(),
+                description: "Have a claim checked by an agent that did not make it and cannot edit anything. Use it before reporting work done."
+                    .into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "claim": {
+                            "type": "string",
+                            "description": "Stated so it can be wrong: `the tests pass`, not `the code is better`."
+                        },
+                        "settles": { "type": "string", "description": "What would decide it — a command, a file." }
+                    },
+                    "required": ["claim"]
+                }),
+            });
             push(ToolSpec {
                 name: DELEGATE.into(),
                 description: "Hand a self-contained sub-task to a fresh agent and get back only its conclusion. Use it when a step would otherwise fill this conversation with detail you do not need to keep — a wide search, a long file survey, an independent verification."
@@ -825,6 +866,19 @@ impl<'a> AgentLoop<'a> {
         self.rook.log(self.session, EventKind::ToolCall, &call.name, &call.arguments.to_string()).ok();
 
         outcome.tools_called.push(call.name.clone());
+
+        // Not advertised to a checker, and refused as well: a name a model
+        // produces without being shown it is still a name it can produce.
+        if self.checking && CHANGES_THINGS.contains(&call.name.as_str()) {
+            let refusal = format!("{}: a check may not change anything", call.name);
+            return (refusal, true);
+        }
+
+        if call.name == VERIFY {
+            let text = self.verify(&call.arguments, outcome, on_progress).await;
+            self.rook.log(self.session, EventKind::ToolResult, VERIFY, &text).ok();
+            return (text, false);
+        }
 
         if call.name == DELEGATE {
             let text = self.delegate(&call.arguments, outcome, on_progress).await;
@@ -1123,6 +1177,120 @@ impl<'a> AgentLoop<'a> {
             }
         }
         report.join("\n\n")
+    }
+
+    /// Check a claim in a context that did not make it.
+    ///
+    /// The author is the worst judge of its own work: it knows what it meant,
+    /// which is exactly the thing under question. So the checking happens in a
+    /// fresh session that is told the claim and nothing about why it should be
+    /// believed.
+    ///
+    /// Two things make this a mechanism rather than an instruction. The checker
+    /// is handed a toolbox with the writing tools taken out — it cannot repair
+    /// what it was asked to judge, and a verifier that fixes things has stopped
+    /// verifying. And it is asked for a verdict in a fixed shape, so "it looks
+    /// fine" is a failure to answer rather than an answer.
+    ///
+    /// It is not isolation: `run_command` can still write, and closing that
+    /// needs the sandbox the roadmap describes. What it is is the difference
+    /// between a rule the model weighs and a tool it does not have.
+    async fn verify(
+        &self,
+        args: &serde_json::Value,
+        outcome: &mut TurnOutcome,
+        on_progress: &mut impl FnMut(Progress<'_>),
+    ) -> String {
+        let claim = args.get("claim").and_then(|c| c.as_str()).unwrap_or("").trim();
+        if claim.is_empty() {
+            return "verify needs a claim to check".into();
+        }
+        let settles = args.get("settles").and_then(|s| s.as_str()).unwrap_or("").trim();
+
+        let ceiling = self.rook.config.agent.max_subagents_per_turn;
+        let claimed = self.spawned.fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |started| (started < ceiling).then_some(started + 1),
+        );
+        if claimed.is_err() {
+            return format!(
+                "this turn has already started {ceiling} sub-agents, which is the limit \
+                 (`[agent] max_subagents_per_turn`)."
+            );
+        }
+
+        let mut instruction = format!("{VERDICT_INSTRUCTIONS}\n\nThe claim:\n{claim}");
+        if !settles.is_empty() {
+            instruction.push_str(&format!("\n\nWhat the author says would settle it:\n{settles}"));
+        }
+
+        let (doing, mut steps) = tokio::sync::mpsc::unbounded_channel::<(usize, String)>();
+        let running = self.run_checker(&instruction, doing);
+        tokio::pin!(running);
+        let checked = loop {
+            tokio::select! {
+                biased;
+                Some((_, tool)) = steps.recv() => on_progress(Progress::Delegating {
+                    task: short(claim),
+                    tool: &tool,
+                }),
+                done = &mut running => break done,
+            }
+        };
+        while let Ok((_, tool)) = steps.try_recv() {
+            on_progress(Progress::Delegating { task: short(claim), tool: &tool });
+        }
+
+        match checked {
+            Ok((id, child)) => {
+                outcome.delegated.push(id.clone());
+                outcome.input_tokens += child.input_tokens;
+                outcome.output_tokens += child.output_tokens;
+                outcome.cached_tokens += child.cached_tokens;
+                match verdict_in(&child.reply) {
+                    Some(_) => format!("checked by {id}:\n{}", child.reply),
+                    // Not treated as passing: a check that would not commit is
+                    // the outcome this exists to make visible.
+                    None => format!(
+                        "checked by {id}, and it did not answer with a verdict, so the claim \
+                         is unchecked:\n{}",
+                        child.reply
+                    ),
+                }
+            }
+            Err(e) => format!("could not check {claim:?}: {e}"),
+        }
+    }
+
+    async fn run_checker(
+        &self,
+        instruction: &str,
+        doing: tokio::sync::mpsc::UnboundedSender<(usize, String)>,
+    ) -> Result<(String, TurnOutcome)> {
+        let session = self.rook.fork_for_subtask(self.session, instruction)?;
+        let mut child = AgentLoop::new(self.rook, self.provider.clone(), session);
+        child.depth = self.depth + 1;
+        child.tools = self.tools.without(&["write_file", "edit_file"]);
+        child.tool_ctx = self.tool_ctx.clone();
+        child.policy = self.policy.clone();
+        child.approver = self.approver.clone();
+        child.hooks = self.hooks.clone();
+        child.servers = self.servers.clone();
+        child.spawned = self.spawned.clone();
+        child.checking = true;
+        // Not lowered the way a delegated errand is: an errand is bounded work
+        // to get through, and a check is the judgement the parent could not make
+        // for itself.
+        child.effort = self.effort;
+
+        let outcome = Box::pin(child.run_with(instruction, |progress| {
+            if let Progress::Delta(Delta::ToolCall(call)) = progress {
+                let _ = doing.send((0, call.name.clone()));
+            }
+        }))
+        .await?;
+        Ok((rook_store::format_session_id(session), outcome))
     }
 
     async fn run_subtask(
@@ -1497,6 +1665,31 @@ impl AgentLoop<'_> {
         }
     }
 }
+
+/// What a checker is told before the claim.
+///
+/// The shape of the answer is part of the instruction because a verdict that can
+/// be hedged is one that will be: "looks reasonable" is what a model says when it
+/// has read something and run nothing.
+const VERDICT_INSTRUCTIONS: &str = "\
+You are checking a claim somebody else made. You did not do the work and you have \
+no stake in it being true.
+
+Do not take the claim's word for anything. Where something can be run — a build, a \
+test, a linter, a command that prints the value in question — run it, and let what \
+it printed be the reason. Where it cannot, read the source and quote the part that \
+decides it. You have no tools for writing files: you are judging this, not fixing \
+it.
+
+End with exactly one of these lines, and nothing after it:
+
+VERDICT: holds
+VERDICT: fails
+VERDICT: unproven
+
+`unproven` is the honest answer when nothing available settles it — say what \
+would. Above that line, give the evidence: the command and its output, or the \
+lines you read. Not a summary of your reasoning.";
 
 const SUMMARY_INSTRUCTIONS: &str = "\
 You are compacting an agent's working transcript so it can keep going with less \
