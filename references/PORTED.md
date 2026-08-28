@@ -31,6 +31,8 @@ Add a row when you implement something after reading a reference. Add it to
 | Asking the user structured questions | hermes `7d6c6ae4` *clarify: schema diet + single questions[] interface (880 → 335 tok/call)* — took the one-questions[]-shape and the rule that options must never be written into the question text, and cut further: no per-question id, and the answer's own text is the "Other" row | source, via `refs advance` | `rook-tools/src/ask.rs`, `AgentLoop::ask_via` |
 | A workspace boundary that a symlink cannot cross | codex `2926014` *make filesystem policy matching URI-native* — their case was encoded and case-variant paths, ours was a symlink out of the workspace that lexical containment could not see | source, via `refs advance` | `ToolContext::resolve`, `through_symlinks`, `sandbox.allow_outside_workspace` |
 | Widening a fact's scope instead of keeping the first | hermes `3b672a68` *delete-path drops every scope of a removed id* — the fix does not apply (identity here is the text, not an id per scope), but its subject exposed the same hazard in ours | source, via `refs advance` | `MemoryBook::learn`, `Scope::within` |
+| Waiting out a provider that said "later" | codex `a73bf25` *decouple HTTP retry backoff from overload integration testing* — theirs refines a retry; here there was none at all, and a 429 ended a turn that had run for minutes | source, via `refs advance` | `rook-llm/src/retry.rs`, `from_spec_with` |
+| A limit that says what to do instead of only what it took | hermes `585723126` *limits line teaches spillover instead of a bare 50KB cap* — the mechanism does not fit a capture that never holds the middle, the lesson does | source, via `refs advance` | `elide_middle` |
 | A sub-agent's budget being its parent's, not its own | codex `4761851` *account subagent token usage toward root goals* — ours already charged the tokens; what it did not bound was the step budget the model writes into the call, or how many sub-agents one turn may start | source, via `refs advance` | `AgentLoop::delegate`, `agent.max_subagents_per_turn` |
 | Auxiliary work billed at the turn's thinking budget | hermes `213ae08e7` *guarded fast summary lane* — they routed summarisation to a cheaper lane; here it was one request that had never been given an effort at all | source, via `refs advance` | `AgentLoop::ask_for_summary` |
 | Keeping what a restore is about to overwrite | cline `89c2efa` *refuse checkpoint workspace restore when HEAD moved past the checkpoint* — they refuse where a store that cannot keep the current state has no better option; ours can keep it, so a rewind became reversible instead of merely safe | source, via `refs advance` | `Rook::rewind`, `Rewind::files_kept` |
@@ -45,6 +47,41 @@ Add a row when you implement something after reading a reference. Add it to
 `cargo xtask refs advance` prints what landed upstream since the pointer was last
 moved; what follows is what was done with it, so a dismissal is a decision rather
 than an omission.
+
+**2026-08-28 (fifteenth pass)** — hermes 40 commits, codex 4, cline, goose and
+opencode one each; acp and openhands unchanged.
+
+- codex `a73bf25` *decouple HTTP retry backoff from overload integration
+  testing* — **ported, and the gap was total.** Their commit refines a retry
+  that exists; here there was none. A 429 or a 529 — the two things a hosted
+  endpoint says most when it is busy — ended the turn, and an autonomous agent
+  is exactly where nobody is watching to ask again. Wrapped around the provider
+  rather than written into each of the three dialects, and only the request is
+  retried: every dialect checks the status before returning the stream, so a
+  failure that reaches the wrapper has emitted nothing to duplicate.
+- hermes `585723126` *limits line teaches spillover instead of a bare 50KB cap*
+  — **ported as the lesson, not the mechanism.** Their fix saves the full output
+  and hands back a path. Ours cannot: `Ends` keeps a head and a tail and
+  discards the middle as it streams, which is what makes a runaway command cost
+  bounded memory. What did apply is that a bare byte count leaves the reader to
+  guess; the elision now says what to do instead.
+- hermes `ae8c97603` *stdout spillover to cache with a read_file recipe* —
+  **not taken.** Spilling to disk is a real feature with a real budget of its
+  own, and it trades away the property the current design was built for. A
+  roadmap entry, not a pass.
+- hermes `c30ac90a9` *rebuild dynamic tool schemas at the compaction boundary so
+  forever-sessions pick up config changes* — **not applicable**: an `AgentLoop`
+  is built per turn and `tool_specs()` runs per request, so there is no schema
+  cached across a session to go stale.
+- codex `dc2ccc6` *make subagents follow the root service tier* — **already
+  held, and deliberately not entirely**: a child inherits its parent's tools,
+  policy, approver, hooks, language servers, step ceiling and sub-agent
+  allowance. Effort is the exception and is set low on purpose.
+- goose `dd8f5ed` *remove unused unstable ACP methods*; cline `ce71fe5` and
+  opencode `1be9fd5` *model list updates*; hermes' image-corrupt retries,
+  skills-guard tuning, cron profile hardening, bot-mode and remote kernels —
+  **not applicable**: multimodal input, a Python skills linter, hosted profiles
+  and remote execution backends are none of them shapes this has.
 
 **2026-08-28 (fourteenth pass)** — all seven advanced: hermes 77 commits, codex
 34, cline 21, opencode 11, openhands 4, acp 2, goose 1.

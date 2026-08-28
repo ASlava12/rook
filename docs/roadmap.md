@@ -708,6 +708,13 @@ standard is how you get a second, wrong one. Revisit when the specification is
 published; until then the entry exists so the design question is recorded rather
 than rediscovered.
 
+**Keeping the middle of a very large output.** `Ends` holds a head and a tail and
+discards what is between them as it streams, which is what makes a runaway
+command cost bounded memory — and it means the middle is gone rather than
+elsewhere. hermes spills the full text to a file and hands back a path to it.
+Worth having, but it is a second budget (disk, this time) and a second place for
+output to accumulate, so it needs the same care as the first.
+
 **Signed release binaries.** `cargo xtask dist` ships unsigned, so Windows
 SmartScreen warns on every download and macOS Gatekeeper needs a right-click to
 open. cline signs with Azure Trusted Signing; both need a certificate this

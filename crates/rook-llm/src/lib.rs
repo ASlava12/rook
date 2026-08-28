@@ -13,6 +13,7 @@
 pub mod anthropic;
 pub mod google;
 pub mod openai;
+pub mod retry;
 pub mod stream;
 pub mod types;
 
@@ -200,7 +201,20 @@ pub fn from_spec(spec: &str, stream_idle: std::time::Duration) -> Result<Box<dyn
 
 /// `context_window` overrides the provider's assumed default, which is guesswork
 /// for anything self-hosted: a local model may serve 8k or a million.
+///
+/// Everything built here is wrapped in [`retry::Retrying`], so a rate limit or an
+/// overloaded endpoint is waited out rather than ending the turn. Wrapped in one
+/// place because every front end goes through here, and a provider built past
+/// this function would quietly be the one that gives up.
 pub fn from_spec_with(
+    spec: &str,
+    stream_idle: std::time::Duration,
+    context_window: Option<usize>,
+) -> Result<Box<dyn Provider>> {
+    Ok(Box::new(retry::Retrying::new(build(spec, stream_idle, context_window)?)))
+}
+
+fn build(
     spec: &str,
     stream_idle: std::time::Duration,
     context_window: Option<usize>,

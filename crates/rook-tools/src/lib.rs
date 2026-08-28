@@ -248,7 +248,18 @@ pub fn elide_middle(text: &str, budget: usize) -> String {
     // Weighted to the tail, which is where a run says how it ended.
     let head = boundary_at_or_before(text, budget / 3);
     let tail = boundary_at_or_after(text, text.len() - (budget - head));
-    format!("{}\n[{} bytes elided from the middle]\n{}", &text[..head], tail - head, &text[tail..])
+    // What was dropped and how to get at it. A bare count tells the reader the
+    // middle is gone and leaves them to guess whether it mattered; the head and
+    // the tail are here because they are usually the answer, and when they are
+    // not, narrowing the command is what works — the whole output was never
+    // held in the first place, so there is nothing to page back to.
+    format!(
+        "{}\n[{} bytes elided from the middle — narrow the command if they matter, \
+         e.g. filter it or ask for fewer lines]\n{}",
+        &text[..head],
+        tail - head,
+        &text[tail..]
+    )
 }
 
 fn boundary_at_or_before(text: &str, mut i: usize) -> usize {
