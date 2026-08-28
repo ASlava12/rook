@@ -677,10 +677,9 @@ impl<'a> AgentLoop<'a> {
                         "context": {
                             "type": "string",
                             "default": "none",
-                            "description": "What the sub-task starts with. `recent` hands it the \
-                                            last few exchanges; anything else is passed to it \
-                                            verbatim, which is where a file it would otherwise \
-                                            have to go and read belongs."
+                            "description": "What it starts with. `recent` is the last few \
+                                            exchanges; anything else is passed verbatim, which is \
+                                            where a file it would otherwise go and read belongs."
                         },
                         "max_steps": { "type": "integer" }
                     }

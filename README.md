@@ -149,6 +149,21 @@ Restoring is the one step that writes over something, and what it writes over ma
 be an edit made by hand that no checkpoint holds. So the state on disk is captured
 first, onto the fork it just made; the command prints the rewind that puts it back.
 
+### Asking what a crate offers
+
+```
+crate_api { "crate": "semver", "entity": "VersionReq" }
+```
+
+A signature recalled is a signature guessed at, and one that compiles is worse
+than one that does not. The answer is already on the machine: cargo unpacks
+every dependency under its registry and `Cargo.lock` says which version this
+project resolved to, so this reads the source rather than the network. Not
+rustdoc JSON, which would be better and is nightly-only.
+
+The scanner is not a parser: it finds declarations and attributes methods to the
+`impl` they sit in. It does not see what a macro generates.
+
 ### Reading a page
 
 Off by default, and off means the tool is never offered rather than the call

@@ -198,6 +198,14 @@ fn why_a_turn_ended_has_one_vocabulary() {
 /// where the six the loop adds are invisible — so it guarded 729 tokens of a
 /// list that costs 1,476, and the two largest entries were the ones it could
 /// not see.
+///
+/// The numbers are a ratchet, set just above what the list costs today so the
+/// next addition trips them. They have been raised once, from 1,700 and 700,
+/// when `verify` and `crate_api` took the list from fourteen tools to sixteen —
+/// and only after four descriptions had been trimmed to pay for them.
+///
+/// `web_fetch` and `web_search` are not in this: they are absent unless `[web]`
+/// is on, and this prices the default.
 #[test]
 fn the_whole_advertised_tool_list_stays_within_a_budget() {
     let dir = tempfile::tempdir().unwrap();
@@ -227,12 +235,16 @@ fn the_whole_advertised_tool_list_stays_within_a_budget() {
 
     let (full, stubs) = (priced(false), priced(true));
     assert!(
-        full < 1_700,
+        full < 1_800,
         "the whole list costs ~{full} tokens on every eager request; trim a description or \
          merge an argument before raising this"
     );
     // The number actually paid, since lazy loading is the default.
-    assert!(stubs < 700, "the stubs cost ~{stubs} tokens on every request");
+    assert!(
+        stubs < 780,
+        "the stubs cost ~{stubs} tokens on every request, which is what is \
+         actually paid: lazy loading is the default"
+    );
     assert!(
         stubs * 2 < full,
         "stubs ({stubs}) must be much cheaper than full schemas ({full}), or lazy loading buys nothing"

@@ -12,6 +12,7 @@
 //!   the model can act on rather than a bare error string.
 
 pub mod ask;
+pub mod crates;
 pub mod exec;
 pub mod files;
 pub mod mcp;
@@ -328,6 +329,7 @@ impl ToolBox {
         tb.register(Arc::new(files::ListDir));
         tb.register(Arc::new(search::Search));
         tb.register(Arc::new(exec::RunCommand));
+        tb.register(Arc::new(crates::CrateApi));
         tb
     }
 

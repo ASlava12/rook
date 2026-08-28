@@ -689,10 +689,16 @@ recorded so the design question survives the session that raised it.
    The tension with local-first stands and is the reason for the default. What
    comes back is somebody else's text arriving in the model's context: not a
    fact, not an instruction, and the input to (3) rather than an answer.
-5. **Asking what a crate offers.** `find_symbol` answers this for the workspace
-   through the language server; what it cannot do is name the API of a crate by
-   name. Doing it locally means rustdoc JSON, which is nightly-only, so this
-   probably lands on (4).
+5. **Asking what a crate offers** — *done, and without the network after all*.
+   The guess that it would need (4) was wrong. Cargo unpacks every dependency
+   under its registry and `Cargo.lock` says which version this project resolved
+   to, so the source is already on the machine: `crate_api` reads it. No rustdoc
+   JSON, which would be the right answer and is nightly-only, and no docs.rs
+   round trip for something already here.
+
+   The scanner is not a parser, the same trade as the HTML one — what is wanted
+   is the signature line. What it does not see is anything a macro generates, and
+   a re-export reads as absent because the item is declared elsewhere.
 6. **Several projects at once** — *done through the daemon*. The blocker was
    never the workspace but the store: one per `ROOK_HOME`, one writer, and bound
    to a workspace that is one per project — so a second project was a second
