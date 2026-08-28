@@ -213,6 +213,13 @@ after reading something and running nothing.
 It is not a sandbox: `run_command` can still write. It is the difference between
 a rule the model weighs and a tool it does not have.
 
+The same tool checks a claim about the world, when `[web]` is on: find where it
+is said, quote it with its address, and keep what a page states apart from what
+its writer argues. And the rule that makes either of them worth anything — a
+verdict from a checker that ran nothing and read nothing is reported as unproven
+however sure it sounded. Reaching for nothing is what a fabricated check looks
+like, and it is what asking a second agent was supposed to get past.
+
 ### More than one project at a time
 
 The store is one per `~/.rook` and takes a single writer; a workspace is one per

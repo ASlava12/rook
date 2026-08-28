@@ -2659,3 +2659,60 @@ async fn a_check_that_will_not_commit_is_not_a_pass() {
     assert!(result.contains("unchecked"), "a hedge must not read as a pass: {result}");
     assert_eq!(outcome.delegated.len(), 1);
 }
+
+/// The point of asking a second agent is to get past the first one's memory. A
+/// verdict reached without reaching for anything is that memory with a label on
+/// it, and it is the shape a fabricated check takes.
+#[tokio::test]
+async fn a_verdict_reached_without_touching_anything_is_not_a_check() {
+    let f = fixture();
+    let session = f.rook.start_session("recall").unwrap();
+
+    let script = vec![
+        call("verify", serde_json::json!({ "claim": "the release shipped on the fourth" })),
+        reply("I recall that it did.\n\nVERDICT: holds"),
+        reply("done"),
+    ];
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
+    let outcome = agent.run("check it").await.unwrap();
+
+    let said = f
+        .rook
+        .transcript(session, 0, usize::MAX, 4096)
+        .unwrap()
+        .into_iter()
+        .rfind(|e| e.kind == "tool-result")
+        .unwrap()
+        .body;
+    assert!(said.contains("unproven"), "a recollection must not read as a pass: {said}");
+    assert!(said.contains("reached for nothing"), "and must say why: {said}");
+    assert_eq!(outcome.delegated.len(), 1);
+}
+
+/// The same verdict from a checker that did reach for something stands.
+#[tokio::test]
+async fn a_verdict_backed_by_a_command_stands() {
+    let f = fixture();
+    let session = f.rook.start_session("ran").unwrap();
+
+    let script = vec![
+        call("verify", serde_json::json!({ "claim": "the directory is readable" })),
+        call("list_dir", serde_json::json!({ "path": "." })),
+        reply("it listed.\n\nVERDICT: holds"),
+        reply("done"),
+    ];
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
+    agent.allow_everything_not_denied();
+    agent.run("check it").await.unwrap();
+
+    let said = f
+        .rook
+        .transcript(session, 0, usize::MAX, 4096)
+        .unwrap()
+        .into_iter()
+        .rfind(|e| e.kind == "tool-result")
+        .unwrap()
+        .body;
+    assert!(!said.contains("reached for nothing"), "{said}");
+    assert!(said.contains("VERDICT: holds"), "{said}");
+}

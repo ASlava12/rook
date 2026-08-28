@@ -668,10 +668,16 @@ recorded so the design question survives the session that raised it.
    run nothing.
 
    It is not isolation — `run_command` can still write, and closing that is the
-   sandbox below. What remains is the other half: a claim whose evidence is a
-   *source* rather than a command. That needs (4), and the criterion is
-   attribution — every statement traced to something that says it, the opinion
-   around it dropped. Same mechanism, different evidence.
+   sandbox below.
+
+   The other half landed with (4): a claim whose evidence is a source rather than
+   a command. The criterion is attribution — find where it is said, quote it with
+   its address, and separate what a page states from what its writer argues,
+   since two sources copying one another are one source. What makes that a
+   mechanism rather than an instruction is the rule beneath it: a verdict from a
+   checker that ran nothing and read nothing is reported as unproven whatever it
+   said. Reaching for nothing is the shape a fabricated check takes, and it is
+   also what asking a second agent was supposed to get past.
 4. **Reaching the web** — *done*. Off unless
    `[web] enabled`, and off means the model is never shown the tool rather than
    the call being refused: a tool it cannot see is one it cannot decide to try.

@@ -1279,6 +1279,18 @@ impl<'a> AgentLoop<'a> {
                 outcome.output_tokens += child.output_tokens;
                 outcome.cached_tokens += child.cached_tokens;
                 match verdict_in(&child.reply) {
+                    // A verdict from a checker that ran nothing and read nothing
+                    // is the model's memory with a label on it, which is exactly
+                    // what asking a second agent was supposed to get past. It is
+                    // reported as unproven whatever it said.
+                    Some(verdict) if verdict != "unproven" && child.tools_called.is_empty() => {
+                        format!(
+                            "checked by {id}, which reached for nothing — no command, no file, \
+                             no page — so `{verdict}` is recollection rather than a check, and \
+                             the claim stands unproven:\n{}",
+                            child.reply
+                        )
+                    }
                     Some(_) => format!("checked by {id}:\n{}", child.reply),
                     // Not treated as passing: a check that would not commit is
                     // the outcome this exists to make visible.
@@ -1715,11 +1727,23 @@ const VERDICT_INSTRUCTIONS: &str = "\
 You are checking a claim somebody else made. You did not do the work and you have \
 no stake in it being true.
 
-Do not take the claim's word for anything. Where something can be run — a build, a \
-test, a linter, a command that prints the value in question — run it, and let what \
-it printed be the reason. Where it cannot, read the source and quote the part that \
-decides it. You have no tools for writing files: you are judging this, not fixing \
-it.
+Do not take the claim's word for anything, and do not answer from memory: a \
+verdict reached without reaching for something is a recollection, and is reported \
+as unproven however sure it sounded.
+
+Where something can be run — a build, a test, a linter, a command that prints the \
+value in question — run it, and let what it printed be the reason. Where it is \
+about this code, read it and quote the lines that decide it. Where it is about \
+the world, find where it is said and quote that, with the address it came from; \
+if the tools for reaching the web are not here, that is a claim you cannot settle \
+and should say so.
+
+Separate what a source states from what it argues. `The figure was 400` is \
+something a page asserts and can be attributed; `the figure was disappointing` is \
+its writer, and belongs in your answer only as theirs. Two sources that copy one \
+another are one source.
+
+You have no tools for writing files: you are judging this, not fixing it.
 
 End with exactly one of these lines, and nothing after it:
 
@@ -1728,8 +1752,9 @@ VERDICT: fails
 VERDICT: unproven
 
 `unproven` is the honest answer when nothing available settles it — say what \
-would. Above that line, give the evidence: the command and its output, or the \
-lines you read. Not a summary of your reasoning.";
+would. Above that line, give the evidence: the command and its output, the lines \
+you read, or the quotation and where it is from. Not a summary of your \
+reasoning.";
 
 const SUMMARY_INSTRUCTIONS: &str = "\
 You are compacting an agent's working transcript so it can keep going with less \
