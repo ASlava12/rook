@@ -153,13 +153,21 @@ async fn elsewhere(
 }
 
 fn spawn_shell(command: &str, cwd: &std::path::Path) -> Result<tokio::process::Child> {
-    let mut cmd = if cfg!(windows) {
-        // `cmd /C` rather than PowerShell: it is always present, and skills that
-        // need PowerShell can invoke it explicitly.
+    #[cfg(windows)]
+    // `cmd /C` rather than PowerShell: it is always present, and skills that
+    // need PowerShell can invoke it explicitly. `raw_arg` rather than `arg`:
+    // `arg` quotes for the C runtime's rules and escapes an embedded `"` as
+    // `\"`, which `cmd.exe` does not read that way — it takes the backslash
+    // literally. A command with a quotation mark in it, which is most of the
+    // ones worth running, arrived at the shell mangled.
+    let mut cmd = {
+        use std::os::windows::process::CommandExt;
         let mut c = tokio::process::Command::new("cmd");
-        c.arg("/C").arg(command);
+        c.as_std_mut().raw_arg(format!("/C {command}"));
         c
-    } else {
+    };
+    #[cfg(not(windows))]
+    let mut cmd = {
         let mut c = tokio::process::Command::new("/bin/sh");
         c.arg("-c").arg(command);
         c

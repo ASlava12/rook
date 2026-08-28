@@ -170,8 +170,15 @@ async fn each_tool_reports_what_it_measured() {
     let found = rook_tools::search::Search.call(&ctx, &serde_json::json!({"pattern": "two"})).await.unwrap();
     assert!(found.meta.contains_key("matches"), "{:?}", found.meta);
 
+    // No spelling of "wait" is in both shells: `cmd.exe` has no `sleep`, and its
+    // `timeout` refuses to run with stdin redirected, which is how commands are
+    // spawned here.
+    let idles = match cfg!(windows) {
+        true => "ping -n 10 127.0.0.1",
+        false => "sleep 5",
+    };
     let ran = rook_tools::exec::RunCommand
-        .call(&ctx, &serde_json::json!({"command": "sleep 5", "timeout_secs": 1}))
+        .call(&ctx, &serde_json::json!({"command": idles, "timeout_secs": 1}))
         .await
         .unwrap();
     assert_eq!(ran.meta["timed_out"], true);

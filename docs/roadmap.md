@@ -668,6 +668,46 @@ a child mid-run, which is what codex's `spawn_agent`/`wait_agent` is for.
 codex #8745 asks for installation too, which means downloading and running a
 binary on the user's behalf.
 
+**Driving physical devices, if the Model Hardware Standard becomes something to
+build against.** Anthropic's [research
+preview](https://www.anthropic.com/news/model-hardware-standard-research-preview)
+describes a shared way for an agent to operate lab and manufacturing hardware:
+devices expose *states* and *procedures* behind a standard driver, reachable
+over MCP, a command line, or a code API.
+
+Most of the plumbing is already here and needs nothing. MHS names MCP as one of
+its three interfaces, and `rook-mcp` speaks it over stdio and streamable HTTP,
+namespaces each server's tools, restarts one that dies and puts every call
+through the approval policy. A device that ships an MCP server is a device this
+can drive today, without a line of new code.
+
+What is not here is the part that matters, and it is not plumbing.
+[ADR-0009](adr/0009-ask-before-acting.md) rests on two things: ask before
+acting, and undo afterwards. `Rook::rewind` restores files from content-addressed
+captures — **a pipette cannot be rewound.** `Risk::External` already says the
+right thing about an MCP tool ("`readOnlyHint` is the claim of the very party
+whose behaviour is in question"), and for a device that claim is about a robot
+arm. So a physical procedure is a risk this codebase has no vocabulary for: not
+`Write`, which is undoable, and not `Execute`, which is bounded by a timeout and
+a workspace. Deciding what it *is* — and what a deny rule for it anchors to,
+since [the shell rules anchor to command position](../references/PORTED.md) —
+is the work, and it is worth doing carefully rather than early.
+
+The skills half is a better fit than it looks. MHS generates reference files
+describing a device's capabilities and its safety limits, which is a `SKILL.md`
+with `requires:` almost exactly: the extension already scopes a skill by OS,
+arch and tool version, and [ADR-0003](adr/0003-agent-skills-format.md) says
+where a new predicate goes. A device predicate would let one skill carry the
+procedure for the instrument in front of it and be invisible everywhere else.
+
+Blocked, and honestly so: there is no public specification, no SDK and no
+repository — the announcement links an application portal and nothing else — and
+preview access is limited to scientific research labs and advanced
+manufacturers, which this is not. Implementing against a description of a
+standard is how you get a second, wrong one. Revisit when the specification is
+published; until then the entry exists so the design question is recorded rather
+than rediscovered.
+
 **Signed release binaries.** `cargo xtask dist` ships unsigned, so Windows
 SmartScreen warns on every download and macOS Gatekeeper needs a right-click to
 open. cline signs with Azure Trusted Signing; both need a certificate this
