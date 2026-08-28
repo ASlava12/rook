@@ -696,14 +696,24 @@ recorded so the design question survives the session that raised it.
    store directly and still meets the lock. Routing it through a running daemon
    is the rest of [ADR-0006](adr/0006-single-writer-store.md), and it is the
    larger half — every command needs a client path as well as a direct one.
-7. **Several agents in one project** — *mechanically done, and not yet safe*.
-   Two connections naming the same workspace share one engine and run
-   concurrently, which is all the machinery needs. What is missing is the part
-   that matters: two agents editing one file is the failure, and a checkpoint
-   records it rather than prevents it. Wanted next is a claim on what each may
-   touch — the checkpoint already knows the paths a call is about to write, so
-   the question is whether another turn is holding one, and refusing is better
-   than merging.
+7. **Several agents in one project** — *done for the simultaneous write*. Two
+   connections naming the same workspace share one engine and run concurrently.
+   A mutating call now claims the paths it is about to write, for as long as the
+   call takes — the checkpoint already resolved them, so it costs nothing to ask
+   — and a second turn reaching for one of them is refused and told which
+   session holds it. Refused rather than queued: the other turn is mid-write,
+   and what this one wants is to be told so it can do something else.
+
+   `edit_file` was already safe on its own: it replaces exact text, and text
+   another turn has changed is not there to replace. `write_file` was the one
+   that overwrote whole.
+
+   What is still open is the slower race — one turn reads a file, another
+   rewrites it, the first writes back what it read. A claim held for the length
+   of a call does not see that, and holding one for the length of a turn would
+   have a turn own a file from its second step to its two-hundredth. The shape
+   that fits is optimistic: record what the file was when it was read, and refuse
+   the write if it is no longer that.
 8. **Secrets the agent can use and cannot leak.** At the concept stage. The
    shape that fits: a secret is named, never valued, in everything the model
    sees — it asks for `deploy_token` and the substitution happens at the edge,

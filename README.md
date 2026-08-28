@@ -179,10 +179,14 @@ ws://127.0.0.1:7717/api/chat?workspace=/path/to/b  # and another, at the same ti
 ```
 
 Each connection gets its own engine, looking at its own project, sharing one
-history, one memory and one search. Two connections naming the same workspace
-also run at once — the machinery allows it, and nothing yet stops them editing
-the same file, which is why that is on the [roadmap](docs/roadmap.md) rather than
-in this list.
+history, one memory and one search.
+
+Two connections naming the same workspace run at once as well. A call that is
+about to write claims those paths for as long as it takes, and a second turn
+reaching for one is refused and told which session is holding it — refused
+rather than queued, because the useful answer to "somebody is writing that" is
+to go and do something else. `edit_file` needed no help: it replaces exact
+text, and text another turn has changed is not there to replace.
 
 `rook run` in a second directory still opens the store directly and still meets
 the lock ([ADR-0006](docs/adr/0006-single-writer-store.md)).

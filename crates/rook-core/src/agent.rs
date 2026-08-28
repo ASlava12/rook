@@ -130,6 +130,10 @@ impl TurnOutcome {
     }
 }
 
+/// What [`AgentLoop::checkpoint_before`] hands back: the claim to hold for the
+/// duration of the call, and whatever the model has to be told.
+type ClaimedResult<'a> = std::result::Result<(Option<crate::service::Writing<'a>>, Option<String>), String>;
+
 /// The loop's own tools that change something, and are therefore not offered to
 /// a checker. `delegate` is here because a checker that can start an agent with
 /// the writing tools has not been stopped from writing, only from doing it
@@ -1008,7 +1012,15 @@ impl<'a> AgentLoop<'a> {
             return (refusal, true);
         }
 
-        let unprotected = self.checkpoint_before(call);
+        // `_writing` is held across the call and dropped when it returns: the
+        // window it protects is the one between the checkpoint and the write.
+        let (_writing, unprotected) = match self.checkpoint_before(call) {
+            Ok(pair) => pair,
+            Err(refusal) => {
+                self.rook.log(self.session, EventKind::ToolResult, &call.name, &refusal).ok();
+                return (refusal, true);
+            }
+        };
         let outcome = match self.tools.call(&self.tool_ctx, &call.name, &call.arguments).await {
             Ok(o) => o,
             Err(e) => rook_tools::ToolOutcome::error(format!("tool error: {e}")),
@@ -1532,26 +1544,36 @@ impl<'a> AgentLoop<'a> {
     /// restores from these, so a file edited without one is edited for good.
     /// That was a line in the log file, where neither the model nor the user was
     /// looking, and both believed the edit was recoverable.
-    fn checkpoint_before(&self, call: &rook_llm::ToolCall) -> Option<String> {
-        let tool = self.tools.get(&call.name)?;
+    fn checkpoint_before(&self, call: &rook_llm::ToolCall) -> ClaimedResult<'_> {
+        // Not a tool of the toolbox — the loop's own, which write through their
+        // own paths and take their own checkpoints.
+        let Some(tool) = self.tools.get(&call.name) else { return Ok((None, None)) };
         let paths: Vec<std::path::PathBuf> = tool
             .touched_paths(&call.arguments)
             .iter()
             .filter_map(|p| self.tool_ctx.resolve(p).ok())
             .collect();
         if paths.is_empty() {
-            return None;
+            return Ok((None, None));
         }
-        let failure = self
+        // The paths a checkpoint is about to capture are exactly the ones
+        // another turn in this project must not be writing, so the claim is
+        // asked for here, where they are already known.
+        let held = self.rook.writing(self.session, &paths).map_err(|e| e.to_string())?;
+
+        let Some(failure) = self
             .rook
             .checkpoint_paths(self.session, &call.name, &paths, &crate::CaptureLimits::for_skill())
-            .err()?;
+            .err()
+        else {
+            return Ok((Some(held), None));
+        };
         let note = format!(
             "no checkpoint was taken first ({failure}), so `rook session rewind` cannot undo this one."
         );
         tracing::warn!("checkpoint before {}: {failure}", call.name);
         self.rook.log(self.session, EventKind::Error, "checkpoint", &note).ok();
-        Some(note)
+        Ok((Some(held), Some(note)))
     }
 }
 

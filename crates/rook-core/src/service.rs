@@ -48,6 +48,29 @@ pub struct Rook {
     /// instead of silently presenting a shorter catalog.
     pub skill_errors: Vec<String>,
     pub plugins: Vec<Plugin>,
+    /// Paths a running turn is part-way through writing, and whose turn.
+    ///
+    /// Several conversations can share one project now, and nothing else stops
+    /// two of them writing the same file at the same moment. `edit_file` refuses
+    /// on its own — it replaces exact text, and text another turn has changed is
+    /// not there to replace — but `write_file` overwrites whole, so the loser of
+    /// that race silently loses its work.
+    writing: std::sync::Mutex<BTreeMap<PathBuf, u128>>,
+}
+
+/// A turn's hold on the paths it is about to write, released when dropped.
+pub struct Writing<'a> {
+    rook: &'a Rook,
+    paths: Vec<PathBuf>,
+}
+
+impl Drop for Writing<'_> {
+    fn drop(&mut self) {
+        let mut held = self.rook.writing.lock().unwrap_or_else(|e| e.into_inner());
+        for path in &self.paths {
+            held.remove(path);
+        }
+    }
 }
 
 impl Rook {
@@ -74,6 +97,7 @@ impl Rook {
             workspace,
             skill_errors,
             plugins,
+            writing: Default::default(),
         })
     }
 
@@ -97,6 +121,7 @@ impl Rook {
             workspace,
             skill_errors: Vec::new(),
             plugins: Vec::new(),
+            writing: Default::default(),
         }
     }
 
@@ -121,6 +146,7 @@ impl Rook {
             workspace,
             skill_errors,
             plugins,
+            writing: Default::default(),
         }
     }
 
@@ -693,6 +719,29 @@ impl Rook {
             files_removed: removed,
             files_kept: kept,
         })
+    }
+
+    /// Claim `paths` for `session` until the returned guard is dropped.
+    ///
+    /// Refuses rather than waits, and refuses rather than merges: the other turn
+    /// is mid-write, and what a turn wants is to be told so it can do something
+    /// else, not to be blocked until it can overwrite the result.
+    pub fn writing(&self, session: u128, paths: &[PathBuf]) -> Result<Writing<'_>> {
+        let mut held = self.writing.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((path, other)) = paths.iter().find_map(|p| held.get(p).map(|s| (p, *s)))
+            && other != session
+        {
+            return Err(CoreError::Other(format!(
+                "{} is being written by session {} right now — wait for it or work on \
+                 something else",
+                path.display(),
+                rook_store::format_session_id(other)
+            )));
+        }
+        for path in paths {
+            held.insert(path.clone(), session);
+        }
+        Ok(Writing { rook: self, paths: paths.to_vec() })
     }
 
     /// Capture `paths` before something modifies them, and record it in the log.
@@ -1339,6 +1388,7 @@ mod tests {
             workspace: dir.to_path_buf(),
             skill_errors: Vec::new(),
             plugins: Vec::new(),
+            writing: Default::default(),
         }
     }
 
