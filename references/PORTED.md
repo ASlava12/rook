@@ -32,6 +32,7 @@ Add a row when you implement something after reading a reference. Add it to
 | A workspace boundary that a symlink cannot cross | codex `2926014` *make filesystem policy matching URI-native* — their case was encoded and case-variant paths, ours was a symlink out of the workspace that lexical containment could not see | source, via `refs advance` | `ToolContext::resolve`, `through_symlinks`, `sandbox.allow_outside_workspace` |
 | Widening a fact's scope instead of keeping the first | hermes `3b672a68` *delete-path drops every scope of a removed id* — the fix does not apply (identity here is the text, not an id per scope), but its subject exposed the same hazard in ours | source, via `refs advance` | `MemoryBook::learn`, `Scope::within` |
 | A sub-agent's budget being its parent's, not its own | codex `4761851` *account subagent token usage toward root goals* — ours already charged the tokens; what it did not bound was the step budget the model writes into the call, or how many sub-agents one turn may start | source, via `refs advance` | `AgentLoop::delegate`, `agent.max_subagents_per_turn` |
+| Auxiliary work billed at the turn's thinking budget | hermes `213ae08e7` *guarded fast summary lane* — they routed summarisation to a cheaper lane; here it was one request that had never been given an effort at all | source, via `refs advance` | `AgentLoop::ask_for_summary` |
 | Keeping what a restore is about to overwrite | cline `89c2efa` *refuse checkpoint workspace restore when HEAD moved past the checkpoint* — they refuse where a store that cannot keep the current state has no better option; ours can keep it, so a rewind became reversible instead of merely safe | source, via `refs advance` | `Rook::rewind`, `Rewind::files_kept` |
 | Reporting a search hit inside a captured file | codex `57e2edc` *encrypt sensitive history and notes tool arguments* — encryption does not fit a store whose point is that it is readable, but the question behind it exposed a search that scanned files and could not report them | source, via `refs advance` | `Rook::captured_as`, `Hit::file` |
 | Summarising only what the model was shown | hermes `1341dfbd` *exclude operational notifications from the tail anchor* — the same mismatch: their notifications, our checkpoint manifests and asides | source, via `refs advance` | `AgentLoop::summarise_span`, `replayed` |
@@ -45,11 +46,11 @@ Add a row when you implement something after reading a reference. Add it to
 moved; what follows is what was done with it, so a dismissal is a decision rather
 than an omission.
 
-**2026-08-28 (fourteenth pass)** — all seven advanced: hermes 68 commits, codex
-33, cline 21, opencode 11, openhands 4, acp 2, goose 1.
+**2026-08-28 (fourteenth pass)** — all seven advanced: hermes 77 commits, codex
+34, cline 21, opencode 11, openhands 4, acp 2, goose 1.
 
-Three ports, and all three are the same shape — a limit that exists but is not
-the one in force at the point that matters.
+Four ports. Three are the same shape — a limit that exists but is not the one in
+force at the point that matters — and the fourth is a cost nobody had priced.
 
 - codex `4761851` *account subagent token usage toward root goals* and `2d929eb`
   *honor turn token budgets in Guardian review rollover* — **ported, twice, and
@@ -77,6 +78,16 @@ the one in force at the point that matters.
   held**, by a different mechanism: the summarising call runs through the same
   provider as the turn, so `stream_idle_timeout_secs` ends a stall, and the
   fallback records a compaction that says where to read the span instead.
+- hermes `213ae08e7` *guarded fast summary lane*, `372c4cdfc` *certify the
+  effective fast route* — **ported as the one line it amounts to here.** They
+  built a route; the idea under it is that condensing a transcript is mechanical
+  work that should not be billed at the turn's thinking budget. A sub-agent here
+  already runs at low effort for that exact reason, and the summarisation call —
+  the other auxiliary request — asked for whatever the provider does by default.
+  Now it asks for low, like the sub-agent.
+- codex `94311d4` *forward history note images to the model* — **not
+  applicable**: nothing here is multimodal, which is a gap in
+  [docs/roadmap.md](../docs/roadmap.md) rather than a defect in this.
 - codex `1932143`, `dc031d4` *propagate executor OS / PowerShell version into
   turn environments* — **not applicable**: one process, one machine; the
   environment a skill is matched against is this one.

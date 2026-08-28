@@ -2530,3 +2530,37 @@ async fn a_rewind_keeps_the_state_it_is_about_to_overwrite() {
         "the hand edit the rewind wrote over has to still be reachable"
     );
 }
+
+/// Summarising is mechanical work, and a sub-agent is already run at low effort
+/// for exactly that reason. The compaction call was the one auxiliary request
+/// that still asked for whatever the provider does by default, so a turn
+/// configured for deep thinking spent it on writing its own summary.
+#[tokio::test]
+async fn compacting_asks_for_less_thinking_than_the_turn_that_needed_it() {
+    let f = fixture();
+    let session = f.rook.start_session("effort").unwrap();
+    // Several messages rather than one: a span of fewer than two entries has
+    // nothing to summarise, and compaction would be counted as attempted
+    // without a summarisation request ever being made.
+    for i in 0..12 {
+        let kind = match i % 2 {
+            0 => rook_store::EventKind::UserMessage,
+            _ => rook_store::EventKind::AssistantMessage,
+        };
+        f.rook.log(session, kind, "turn", &format!("{i} ").repeat(600)).unwrap();
+    }
+
+    let provider = ScriptedProvider::new(vec![reply("## Goal\nsummarised"), reply("done")]);
+    let seen = provider.share();
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), session);
+    agent.set_window_for_test(4_000);
+    let outcome = agent.run("carry on").await.unwrap();
+    assert_eq!(outcome.compactions, 1, "the turn has to compact for this to mean anything");
+
+    let requests = seen.lock().unwrap();
+    let summary = requests
+        .iter()
+        .find(|r| r.messages.first().is_some_and(|m| m.content.starts_with("You are compacting")))
+        .expect("a summarisation request has to have been made, not merely attempted");
+    assert_eq!(summary.effort, Some(rook_llm::Effort::Low));
+}

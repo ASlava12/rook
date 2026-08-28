@@ -1450,7 +1450,11 @@ impl AgentLoop<'_> {
 
 impl AgentLoop<'_> {
     async fn ask_for_summary(&self, material: String) -> Result<String> {
-        let request = Request::new(vec![Message::system(SUMMARY_INSTRUCTIONS), Message::user(material)]);
+        let mut request = Request::new(vec![Message::system(SUMMARY_INSTRUCTIONS), Message::user(material)]);
+        // The same reason a sub-agent runs low: condensing a transcript is
+        // mechanical, and a turn configured to think hard would otherwise spend
+        // that thinking on writing its own summary.
+        request.effort = Some(rook_llm::Effort::Low);
         let mut stream = self.provider.stream(request).await.map_err(|e| CoreError::Other(e.to_string()))?;
         let mut assembler = Assembler::default();
         while let Some(delta) = stream.next().await {
