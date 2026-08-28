@@ -68,3 +68,47 @@ fn a_claim_lasts_the_call_and_not_the_turn() {
         rook.writing(two, &path).expect("and free the moment it is over");
     }
 }
+
+/// A guard releases when the call returns, when it panics on the way out, and
+/// when the turn holding it is aborted. What it cannot release is a call that
+/// never returns at all — `run_command` takes its timeout from the model, so
+/// "for as long as the call takes" is not on its own a bound.
+#[test]
+fn a_claim_nobody_ever_released_stops_being_believed() {
+    let dir = tempfile::tempdir().unwrap();
+    let rook = rook(dir.path());
+    let vanished = rook.start_session("gone").unwrap();
+    let live = rook.start_session("live").unwrap();
+    let path: Vec<PathBuf> = vec![dir.path().join("held.txt")];
+
+    // Leaked on purpose: this is the holder that never comes back.
+    std::mem::forget(rook.writing(vanished, &path).unwrap());
+    assert!(rook.writing(live, &path).is_err(), "held while the holder might still be there");
+    assert_eq!(rook.being_written().len(), 1, "and visible while it is held");
+
+    rook.age_claims_for_test(3_600);
+
+    rook.writing(live, &path).expect("a claim older than any call can be is not believed");
+    assert!(
+        rook.being_written().iter().all(|(_, by)| by.session == live),
+        "and the stale holder is gone from the registry"
+    );
+}
+
+/// A panic inside the call still releases: the guard is dropped while unwinding.
+#[test]
+fn a_call_that_panics_does_not_keep_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let rook = rook(dir.path());
+    let one = rook.start_session("panicking").unwrap();
+    let two = rook.start_session("after").unwrap();
+    let path: Vec<PathBuf> = vec![dir.path().join("mid-write.txt")];
+
+    let fell_over = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _held = rook.writing(one, &path).unwrap();
+        panic!("the tool call blew up");
+    }));
+    assert!(fell_over.is_err(), "the panic has to have happened for this to test anything");
+
+    rook.writing(two, &path).expect("the next turn may have it");
+}

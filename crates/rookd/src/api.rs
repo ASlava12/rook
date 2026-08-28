@@ -34,6 +34,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/skills/{name}", get(skill))
         .route("/api/skills/{name}/history", get(skill_history))
         .route("/api/checkpoints", get(checkpoints))
+        .route("/api/writing", get(writing))
         .route("/api/maintenance", post(maintenance))
         .route(
             "/api/chat",
@@ -399,6 +400,37 @@ fn yes() -> bool {
 
 /// Prune and collect. Defaults to a dry run: a destructive default behind a
 /// single button click is how a UI eats someone's history.
+/// What is being written right now, and by whom.
+///
+/// A lock nobody can look at is one that cannot be debugged when it wedges,
+/// which is the usual complaint about locks. Per project, because that is the
+/// scope a claim has.
+async fn writing(State(s): State<Shared>, Query(q): Query<WorkspaceQuery>) -> ApiResult<Vec<Writer>> {
+    let engine = s.engine_for(q.workspace.as_deref()).await.map_err(rook_core::CoreError::Other)?;
+    let held = engine.read().await.being_written();
+    Ok(Json(
+        held.into_iter()
+            .map(|(path, by)| Writer {
+                path: path.display().to_string(),
+                session: rook_store::format_session_id(by.session),
+                held_for_secs: rook_store::now_unix().saturating_sub(by.since).max(0) as u64,
+            })
+            .collect(),
+    ))
+}
+
+#[derive(serde::Deserialize)]
+struct WorkspaceQuery {
+    workspace: Option<std::path::PathBuf>,
+}
+
+#[derive(serde::Serialize)]
+struct Writer {
+    path: String,
+    session: String,
+    held_for_secs: u64,
+}
+
 async fn maintenance(
     State(s): State<Shared>,
     Json(body): Json<MaintenanceBody>,
@@ -670,6 +702,29 @@ mod tests {
         let f = fixture();
         let (status, _) = get(&f, "/api/sessions/not-a-ulid/changes").await;
         assert!(status.is_client_error(), "answered {status}");
+    }
+
+    /// A lock nobody can look at is one that cannot be debugged when it wedges.
+    #[tokio::test]
+    async fn what_is_being_written_can_be_read() {
+        let f = fixture();
+        let (empty_status, empty) = get(&f, "/api/writing").await;
+        assert_eq!(empty_status, StatusCode::OK);
+        assert_eq!(empty.as_array().unwrap().len(), 0, "nothing is being written yet: {empty}");
+
+        // The guard borrows the engine, so the read is done while it is alive
+        // rather than after — which is also the situation the endpoint exists
+        // for: a claim is only interesting while somebody holds it.
+        let held = {
+            let rook = f.state.rook.read().await;
+            let path = vec![rook.workspace.join("main.rs")];
+            let _held = rook.writing(f.session, &path).unwrap();
+            get(&f, "/api/writing").await.1
+        };
+
+        assert_eq!(held[0]["session"], rook_store::format_session_id(f.session), "{held}");
+        assert!(held[0]["path"].as_str().unwrap().ends_with("main.rs"), "{held}");
+        assert!(held[0]["held_for_secs"].is_number(), "how long it has been held is the useful part");
     }
 
     /// A project this daemon was not started in is served all the same: the

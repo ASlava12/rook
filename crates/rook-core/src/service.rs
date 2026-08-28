@@ -55,8 +55,25 @@ pub struct Rook {
     /// on its own — it replaces exact text, and text another turn has changed is
     /// not there to replace — but `write_file` overwrites whole, so the loser of
     /// that race silently loses its work.
-    writing: std::sync::Mutex<BTreeMap<PathBuf, u128>>,
+    writing: std::sync::Mutex<BTreeMap<PathBuf, Held>>,
 }
+
+/// Who is writing a path, and since when.
+#[derive(Clone, Copy, Debug)]
+pub struct Held {
+    pub session: u128,
+    pub since: i64,
+}
+
+/// How long a claim is believed.
+///
+/// The guard releases on drop, which covers a call that returns, one that
+/// panics while unwinding, and a turn whose task is aborted. What it does not
+/// cover is a call that never returns at all — `run_command` takes its timeout
+/// from the model, so "for as long as the call takes" is not by itself a bound.
+/// Past this the holder is treated as gone, because a file no one can ever write
+/// again is worse than two turns racing for it.
+const HELD_FOR_AT_MOST: i64 = 3_600;
 
 /// A turn's hold on the paths it is about to write, released when dropped.
 pub struct Writing<'a> {
@@ -727,21 +744,50 @@ impl Rook {
     /// is mid-write, and what a turn wants is to be told so it can do something
     /// else, not to be blocked until it can overwrite the result.
     pub fn writing(&self, session: u128, paths: &[PathBuf]) -> Result<Writing<'_>> {
+        let now = rook_store::now_unix();
         let mut held = self.writing.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((path, other)) = paths.iter().find_map(|p| held.get(p).map(|s| (p, *s)))
-            && other != session
+        held.retain(|_, by| now.saturating_sub(by.since) < HELD_FOR_AT_MOST);
+
+        if let Some((path, by)) = paths.iter().find_map(|p| held.get(p).map(|by| (p, *by)))
+            && by.session != session
         {
             return Err(CoreError::Other(format!(
                 "{} is being written by session {} right now — wait for it or work on \
                  something else",
                 path.display(),
-                rook_store::format_session_id(other)
+                rook_store::format_session_id(by.session)
             )));
         }
         for path in paths {
-            held.insert(path.clone(), session);
+            held.insert(path.clone(), Held { session, since: now });
         }
         Ok(Writing { rook: self, paths: paths.to_vec() })
+    }
+
+    /// Move every claim `secs` further into the past.
+    ///
+    /// Public so a test can reach the expiry without sleeping for an hour, which
+    /// is the alternative and is not a test anybody runs.
+    pub fn age_claims_for_test(&self, secs: i64) {
+        let mut held = self.writing.lock().unwrap_or_else(|e| e.into_inner());
+        for by in held.values_mut() {
+            by.since -= secs;
+        }
+    }
+
+    /// What is being written in this project, and by whom.
+    ///
+    /// A registry nobody can read is one that cannot be debugged when it wedges,
+    /// which is the whole complaint about a lock.
+    pub fn being_written(&self) -> Vec<(PathBuf, Held)> {
+        let now = rook_store::now_unix();
+        self.writing
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|(_, by)| now.saturating_sub(by.since) < HELD_FOR_AT_MOST)
+            .map(|(path, by)| (path.clone(), *by))
+            .collect()
     }
 
     /// Capture `paths` before something modifies them, and record it in the log.

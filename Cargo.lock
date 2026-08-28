@@ -2428,6 +2428,7 @@ dependencies = [
  "ignore",
  "libc",
  "regex",
+ "reqwest",
  "rook-llm",
  "rook-mcp",
  "rook-proto",

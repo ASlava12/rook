@@ -188,6 +188,15 @@ rather than queued, because the useful answer to "somebody is writing that" is
 to go and do something else. `edit_file` needed no help: it replaces exact
 text, and text another turn has changed is not there to replace.
 
+The claim is released when the call returns, when it panics on the way out, and
+when the turn holding it is aborted. What none of those cover is a call that
+never returns at all, so a claim also expires; and the registry is readable,
+because a lock nobody can look at cannot be debugged when it wedges:
+
+```sh
+curl 'http://127.0.0.1:7717/api/writing'   # path, session, how long it has been held
+```
+
 `rook run` in a second directory still opens the store directly and still meets
 the lock ([ADR-0006](docs/adr/0006-single-writer-store.md)).
 

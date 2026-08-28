@@ -708,6 +708,13 @@ recorded so the design question survives the session that raised it.
    another turn has changed is not there to replace. `write_file` was the one
    that overwrote whole.
 
+   A claim is released on return, on a panic unwinding out of the call, and when
+   the turn holding it is aborted. None of those covers a call that never returns
+   — `run_command` takes its timeout from the model — so a claim expires as well,
+   and `/api/writing` says what is held and for how long. In release the profile
+   aborts on panic, which skips every destructor; that costs nothing here because
+   the registry is in the process that died.
+
    What is still open is the slower race — one turn reads a file, another
    rewrites it, the first writes back what it read. A claim held for the length
    of a call does not see that, and holding one for the length of a turn would
