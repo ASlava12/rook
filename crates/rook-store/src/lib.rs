@@ -39,10 +39,20 @@ pub use object::{Kind, ObjectId, ObjectMeta};
 pub use schema::{Event, EventKind, EventRecord, FORMAT_VERSION, NewEvent, SessionMeta};
 pub use stats::{KindStats, StoreStats};
 
-/// Generate a fresh session id. ULIDs sort chronologically, which means session
-/// listings come back newest-last for free.
+/// Generate a fresh session id.
+///
+/// Monotonic within the process, which plain ULIDs are not: they order by
+/// millisecond and then by random bits, so two sessions started in the same
+/// millisecond sort in a random order — and that ordering is what decides which
+/// one `--session last` means. The generator keeps the timestamp and increments
+/// the random part instead when the millisecond repeats.
 pub fn new_session_id() -> u128 {
-    ulid::Ulid::generate().0
+    static GENERATOR: std::sync::Mutex<Option<ulid::Generator>> = std::sync::Mutex::new(None);
+    let mut held = GENERATOR.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let generator = held.get_or_insert_with(ulid::Generator::new);
+    // Only after 2^80 ids inside one millisecond, and a fresh random one is
+    // still ordered correctly against every other millisecond.
+    generator.generate().unwrap_or_else(|_| ulid::Ulid::generate()).0
 }
 
 pub fn format_session_id(id: u128) -> String {

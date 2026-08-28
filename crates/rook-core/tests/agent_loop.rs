@@ -879,6 +879,29 @@ fn hook(event: rook_core::hooks::Event, command: &str) -> rook_core::hooks::Hook
     rook_core::hooks::HookConfig { event, command: command.into(), timeout_secs: 10, ..Default::default() }
 }
 
+/// A hook command that prints `json` back, spelled for the shell the platform
+/// runs hooks through. A hook command is shell text, and the two shells do not
+/// agree: `sh -c` strips the double quotes out of a bare argument, and `cmd /C`
+/// keeps the single ones — so one spelling that looks portable is simply wrong
+/// on one of them, silently, by returning a reply that will not parse.
+fn prints(json: &str) -> String {
+    match cfg!(windows) {
+        true => format!("echo {json}"),
+        false => format!("echo '{json}'"),
+    }
+}
+
+/// A hook command that keeps the payload it was handed, so a test can assert on
+/// the payload itself. Deliberately a shell builtin rather than an interpreter:
+/// a stock Windows and a stock FreeBSD have no `python3`.
+fn keeps_its_payload(at: &std::path::Path) -> String {
+    let at = at.display();
+    match cfg!(windows) {
+        true => format!("findstr /R \"^\" > \"{at}\""),
+        false => format!("cat > '{at}'"),
+    }
+}
+
 #[tokio::test]
 async fn a_pre_tool_hook_can_block_a_call_the_policy_would_have_allowed() {
     let f = fixture();
@@ -886,7 +909,7 @@ async fn a_pre_tool_hook_can_block_a_call_the_policy_would_have_allowed() {
         &f,
         vec![rook_core::hooks::HookConfig {
             matches: Some("write_file".into()),
-            ..hook(rook_core::hooks::Event::PreTool, r#"echo '{"decision":"deny","reason":"frozen"}'"#)
+            ..hook(rook_core::hooks::Event::PreTool, &prints(r#"{"decision":"deny","reason":"frozen"}"#))
         }],
     );
     let session = rook.start_session("blocked").unwrap();
@@ -910,7 +933,7 @@ async fn a_hook_cannot_unlock_what_the_deny_list_forbids() {
     let f = fixture();
     let mut config = Config::default();
     config.sandbox.deny = vec!["/rm -rf/".into()];
-    config.hooks = vec![hook(rook_core::hooks::Event::PreTool, r#"echo '{"decision":"allow"}'"#)];
+    config.hooks = vec![hook(rook_core::hooks::Event::PreTool, &prints(r#"{"decision":"allow"}"#))];
     let rook = Rook::from_parts(
         Store::open(f._store_dir.path().join("hook-deny")).unwrap(),
         config,
@@ -980,7 +1003,7 @@ async fn a_prompt_hook_can_refuse_the_turn_and_add_context() {
         &f,
         vec![rook_core::hooks::HookConfig {
             matches: Some("secret".into()),
-            ..hook(rook_core::hooks::Event::Prompt, r#"echo '{"decision":"deny","reason":"not that"}'"#)
+            ..hook(rook_core::hooks::Event::Prompt, &prints(r#"{"decision":"deny","reason":"not that"}"#))
         }],
     );
     let session = rook.start_session("refused").unwrap();
@@ -1012,7 +1035,7 @@ async fn a_hook_matcher_keeps_it_off_calls_it_does_not_care_about() {
         &f,
         vec![rook_core::hooks::HookConfig {
             matches: Some("/^run_command$/".into()),
-            ..hook(rook_core::hooks::Event::PreTool, r#"echo '{"decision":"deny","reason":"no shell"}'"#)
+            ..hook(rook_core::hooks::Event::PreTool, &prints(r#"{"decision":"deny","reason":"no shell"}"#))
         }],
     );
     let session = rook.start_session("matcher").unwrap();
@@ -1804,15 +1827,10 @@ fn the_catalog_names_only_what_the_model_can_act_on() {
 #[tokio::test]
 async fn a_post_tool_hook_is_given_the_facts_the_tool_measured() {
     let f = fixture();
-    // Echo the payload's meta back as context, which is the only way a hook can
-    // show what it was handed.
-    let rook = hooked(
-        &f,
-        vec![hook(
-            rook_core::hooks::Event::PostTool,
-            r#"python3 -c "import json,sys; p=json.load(sys.stdin); print(json.dumps({'context': f\"meta={p['meta']} error={p['is_error']}\"}))""#,
-        )],
-    );
+    // The hook keeps what it was handed rather than summarising it back through
+    // an interpreter, so the assertion is about the payload itself.
+    let handed_to_it = f.workspace.path().join("payload.json");
+    let rook = hooked(&f, vec![hook(rook_core::hooks::Event::PostTool, &keeps_its_payload(&handed_to_it))]);
     let session = rook.start_session("meta").unwrap();
     std::fs::write(f.workspace.path().join("notes.txt"), "one\ntwo\nthree\n").unwrap();
 
@@ -1822,11 +1840,9 @@ async fn a_post_tool_hook_is_given_the_facts_the_tool_measured() {
     ]));
     AgentLoop::new(&rook, provider.clone(), session).run("read the notes").await.unwrap();
 
-    let sent = provider.share();
-    let requests = sent.lock().unwrap();
-    let result = requests.last().unwrap().messages.iter().rev().find(|m| m.role == Role::Tool).unwrap();
-    assert!(result.content.contains("total_lines"), "the hook saw no meta: {}", result.content);
-    assert!(result.content.contains("error=False"), "nor the error flag: {}", result.content);
+    let payload = std::fs::read_to_string(&handed_to_it).expect("the hook must have run at all");
+    assert!(payload.contains("total_lines"), "the hook was given no meta: {payload}");
+    assert!(payload.contains(r#""is_error":false"#), "nor the error flag: {payload}");
 }
 
 #[tokio::test]

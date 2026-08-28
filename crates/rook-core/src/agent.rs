@@ -83,7 +83,11 @@ fn bundled(skill: &rook_skills::Skill) -> String {
         .into_iter()
         .filter(|rel| rel != std::path::Path::new("SKILL.md"))
         .filter(|rel| !rel.starts_with("variants"))
-        .map(|rel| rel.display().to_string())
+        // Forward slashes on every platform, as the manifest already stores
+        // them: the skill's own body refers to these files by relative path,
+        // and advertising `scripts\check.sh` beside a body that says
+        // `scripts/check.sh` leaves the model two spellings to reconcile.
+        .map(|rel| rel.display().to_string().replace('\\', "/"))
         .collect();
     if files.is_empty() {
         return String::new();
