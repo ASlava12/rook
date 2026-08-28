@@ -30,6 +30,10 @@ pub struct Incoming {
     pub id: Option<u64>,
     #[serde(default)]
     pub method: Option<String>,
+    /// A request's arguments. Empty on everything a client reads, and the whole
+    /// point on everything a server does — the same line type serves both ends.
+    #[serde(default)]
+    pub params: Option<serde_json::Value>,
     #[serde(default)]
     pub result: Option<serde_json::Value>,
     #[serde(default)]

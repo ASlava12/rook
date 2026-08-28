@@ -211,8 +211,47 @@ pub struct Request {
 
 impl Request {
     pub fn new(messages: Vec<Message>) -> Self {
-        Self { messages, tools: Vec::new(), max_output_tokens: 4096, temperature: 0.0, effort: None }
+        Self {
+            messages: joined_user_turns(messages),
+            tools: Vec::new(),
+            max_output_tokens: 4096,
+            temperature: 0.0,
+            effort: None,
+        }
     }
+}
+
+/// Fold consecutive user turns into one.
+///
+/// The agent produces them honestly: a compaction summary sits in front of the
+/// first replayed message, and a loaded skill is announced beside the prompt
+/// that caused it. Hosted APIs accept the pair, but a chat template on a
+/// self-hosted server often does not — alternation is baked into the template
+/// rather than checked at the edge, and this is aimed at local models. Two turns
+/// with a blank line between them say the same thing to every one of them.
+///
+/// Tool results are left alone: the dialects have their own rules for those, and
+/// merging a result into a prompt would lose the id it answers.
+fn joined_user_turns(messages: Vec<Message>) -> Vec<Message> {
+    let mut folded: Vec<Message> = Vec::with_capacity(messages.len());
+    for message in messages {
+        match folded.last_mut() {
+            Some(last)
+                if last.role == Role::User
+                    && message.role == Role::User
+                    && last.tool_call_id.is_none()
+                    && message.tool_call_id.is_none() =>
+            {
+                last.content.push_str("\n\n");
+                last.content.push_str(&message.content);
+                // The marker belongs to the end of what is cached, and the end
+                // has just moved.
+                last.cache = message.cache;
+            }
+            _ => folded.push(message),
+        }
+    }
+    folded
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

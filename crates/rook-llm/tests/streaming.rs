@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use rook_llm::openai::{Config, OpenAiCompatible};
-use rook_llm::{Delta, LlmError, Message, Provider, Request, StopReason};
+use rook_llm::{Delta, LlmError, Message, Provider, Request, Role, StopReason};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -259,4 +259,39 @@ fn assembling_a_reply_that_never_ends_stops_rather_than_growing() {
 
     assert!(pushed > 32 << 20, "the cap has to be passed for this to test anything: {pushed} bytes");
     assert!(refusal.contains("provider"), "and the message says whose fault it is: {refusal}");
+}
+
+/// The agent produces consecutive user turns honestly — a compaction summary in
+/// front of the first replayed message, a loaded skill beside the prompt that
+/// asked for it. Hosted APIs take the pair; a chat template on a self-hosted
+/// server often does not, and this is aimed at local models.
+#[test]
+fn consecutive_user_turns_are_folded_into_one() {
+    let request = Request::new(vec![
+        Message::system("rules"),
+        Message::user("a summary of earlier work"),
+        Message::user("and the prompt itself"),
+        Message::assistant("an answer"),
+        Message::user("a follow-up"),
+    ]);
+
+    let roles: Vec<Role> = request.messages.iter().map(|m| m.role).collect();
+    assert_eq!(
+        roles,
+        [Role::System, Role::User, Role::Assistant, Role::User],
+        "two user turns in a row must arrive as one"
+    );
+    assert_eq!(request.messages[1].content, "a summary of earlier work\n\nand the prompt itself");
+}
+
+/// A tool result is a user turn on the wire and is not one here: the dialects
+/// have their own rules for them, and folding one into a prompt loses the id it
+/// answers.
+#[test]
+fn a_tool_result_is_not_folded_into_the_prompt_before_it() {
+    let request =
+        Request::new(vec![Message::user("do the thing"), Message::tool_result("call_1", "it is done")]);
+
+    assert_eq!(request.messages.len(), 2, "{:?}", request.messages);
+    assert_eq!(request.messages[1].tool_call_id.as_deref(), Some("call_1"));
 }

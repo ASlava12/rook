@@ -161,6 +161,14 @@ enum MemoryCmd {
 
 #[derive(Subcommand)]
 enum McpCmd {
+    /// Offer Rook's own tools over stdio, so any MCP client can use them.
+    Serve {
+        /// Allow anything the deny list does not forbid. Without it a client
+        /// reaching a tool that changes the machine is refused, because there
+        /// is nobody at this end to ask.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Connect every configured server and report what it offers.
     Ls,
     /// List one server's tools with their schemas.
@@ -1697,6 +1705,30 @@ fn cmd_mcp(workspace: Option<PathBuf>, cmd: McpCmd, json: bool) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     runtime.block_on(async move {
         let rook = Rook::open(workspace)?;
+        // Before the check below: serving does not need a configured server,
+        // and refusing to start because none is configured would be nonsense.
+        if let McpCmd::Serve { yes } = cmd {
+            let policy = rook_core::agent::policy_for(&rook);
+            if yes {
+                policy.set_mode(rook_tools::policy::Mode::Auto);
+            }
+            let mut tools = rook_tools::ToolBox::standard();
+            rook_core::lsp::register(&mut tools, rook_core::agent::servers_for(&rook));
+            eprintln!(
+                "rook mcp: offering {} tools from {}",
+                tools.names().len(),
+                rook.workspace.display()
+            );
+            return rook_core::mcp_server::serve(rook_core::mcp_server::Offered {
+                tools,
+                ctx: rook_core::agent::tool_context(&rook),
+                policy,
+                approver: std::sync::Arc::new(rook_tools::policy::Unattended),
+            })
+            .await
+            .map_err(Into::into);
+        }
+
         if rook.mcp_servers().is_empty() {
             println!("no servers configured. Add one to {}:\n", rook_core::paths::config_file().display());
             println!("  [[mcp]]\n  name = \"filesystem\"\n  command = \"npx\"\n  args = [\"-y\", \"@modelcontextprotocol/server-filesystem\", \".\"]");
@@ -1705,6 +1737,7 @@ fn cmd_mcp(workspace: Option<PathBuf>, cmd: McpCmd, json: bool) -> Result<()> {
         let session = rook.connect_mcp().await;
 
         match cmd {
+            McpCmd::Serve { .. } => unreachable!("served above"),
             McpCmd::Ls => {
                 if json {
                     let items: Vec<_> = session.servers.iter().map(|(s, tools)| serde_json::json!({

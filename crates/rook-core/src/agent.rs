@@ -56,6 +56,21 @@ pub fn servers_for(rook: &Rook) -> std::sync::Arc<crate::lsp::Servers> {
     crate::lsp::Servers::new(crate::lsp::for_workspace(&rook.config, &rook.workspace), &rook.workspace)
 }
 
+/// What the file and command tools are bounded by, from configuration.
+///
+/// Exposed for the same reason as [`policy_for`]: a turn is not the only thing
+/// that runs a tool. `rook mcp serve` runs them for somebody else's client, and
+/// two places deciding separately what a tool may write to is how one of them
+/// ends up with a boundary the other does not have.
+pub fn tool_context(rook: &Rook) -> ToolContext {
+    let sandbox = &rook.config.sandbox;
+    let mut ctx = ToolContext::new(rook.workspace.clone());
+    ctx.max_output_bytes = sandbox.max_output_bytes;
+    ctx.command_timeout = std::time::Duration::from_secs(sandbox.command_timeout_secs);
+    ctx.allow_outside_workspace = sandbox.allow_outside_workspace;
+    ctx
+}
+
 /// Build the approval policy from configuration.
 ///
 /// Exposed because "allow this for the rest of the run" has to outlive a single
@@ -241,10 +256,7 @@ pub struct AgentLoop<'a> {
 
 impl<'a> AgentLoop<'a> {
     pub fn new(rook: &'a Rook, provider: std::sync::Arc<dyn Provider>, session: u128) -> Self {
-        let mut tool_ctx = ToolContext::new(rook.workspace.clone());
-        tool_ctx.max_output_bytes = rook.config.sandbox.max_output_bytes;
-        tool_ctx.command_timeout = std::time::Duration::from_secs(rook.config.sandbox.command_timeout_secs);
-        tool_ctx.allow_outside_workspace = rook.config.sandbox.allow_outside_workspace;
+        let tool_ctx = tool_context(rook);
 
         // No language servers until a front end hands them over with `equip`.
         // A loop is rebuilt for every turn, so a pool built here is rebuilt with

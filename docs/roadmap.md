@@ -645,6 +645,57 @@ like to something that has to act on it.
   entire delegated prompt on every step, two hundred characters of it, burying
   the step it was reporting.
 
+## Asked for, in order
+
+Seven things, sequenced by how much of the answer is already here. Each is
+recorded so the design question survives the session that raised it.
+
+1. **Rook as an MCP server** — *done*. `rook mcp serve` offers the file tools,
+   the search and the command runner over stdio to anything that speaks the
+   protocol, with the approval policy in front of every call and the unattended
+   approver refusing a write rather than deciding for the user.
+2. **Consecutive user turns folded into one** — *done*. The agent produces them
+   honestly and a chat template on a self-hosted server often will not take
+   them; `Request::new` folds them, in the one place every request goes through.
+3. **Verification as a mechanism, not a habit.** The agent that wrote something
+   is the worst judge of it, which is why `delegate` already gives a fresh
+   context. What is missing is a *standard*: a `verify` that hands an artefact
+   and a criterion to an independent context and gets back a verdict with its
+   evidence, not prose. For code the criterion is runnable — it builds, the
+   tests pass, the linter is clean — and the verifier must run it rather than
+   read it and opine. For a claim the criterion is attribution: every statement
+   traced to a source that says it, and the opinion around it dropped. The two
+   share a shape and should share an implementation.
+4. **Reaching the web.** `web_search` and `web_fetch`, off unless configured,
+   through the policy as external — the deny list and the approval already know
+   how to treat something that leaves the machine. This is the one item in
+   tension with local-first: what it fetches is untrusted text that ends up in
+   context, and its results are the input to (3) rather than an answer on their
+   own.
+5. **Asking what a crate offers.** `find_symbol` answers this for the workspace
+   through the language server; what it cannot do is name the API of a crate by
+   name. Doing it locally means rustdoc JSON, which is nightly-only, so this
+   probably lands on (4).
+6. **Several projects at once.** Blocked on the shape of `Rook`, which bundles
+   the store — one per `ROOK_HOME`, one writer — with the workspace, one per
+   project. The store already records a workspace per session, so the split is
+   the work: workspace becomes a property of a session rather than of the
+   engine, and the daemon serves many. That is also the end state
+   [ADR-0006](adr/0006-single-writer-store.md) named.
+7. **Several agents in one project.** Falls out of (6) mechanically — the daemon
+   already runs concurrent turns — and does not fall out of it safely: two
+   agents editing one file is the failure, and checkpoints record it rather than
+   prevent it. Needs a claim on what each agent may touch, or detection of the
+   overlap before the write.
+8. **Secrets the agent can use and cannot leak.** At the concept stage. The
+   shape that fits: a secret is named, never valued, in everything the model
+   sees — it asks for `deploy_token` and the substitution happens at the edge,
+   in the tool, on its way out. That keeps it out of the transcript, out of
+   compaction, out of what a sub-agent inherits, and out of any provider
+   request. What it needs settled first is where the values live (the store is
+   readable by design, which is the wrong property here) and what stops a tool
+   from being asked to print one.
+
 ## Next
 
 **Keep triaging the reference backlog.** `cargo xtask refs advance` moves a

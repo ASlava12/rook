@@ -1,0 +1,84 @@
+//! Rook offered as an MCP server.
+//!
+//! Driven the way a client drives it — lines of JSON-RPC in, lines out — rather
+//! than by calling the functions underneath, because the shape on the wire is
+//! the whole contract.
+
+use std::io::Write;
+use std::process::{Command, Stdio};
+
+fn talk(workspace: &std::path::Path, home: &std::path::Path, lines: &[&str]) -> Vec<serde_json::Value> {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rook"))
+        .env("ROOK_HOME", home)
+        .args(["--workspace", workspace.to_str().unwrap(), "mcp", "serve"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    {
+        let mut stdin = child.stdin.take().unwrap();
+        for line in lines {
+            writeln!(stdin, "{line}").unwrap();
+        }
+    }
+    let out = child.wait_with_output().unwrap();
+    String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| serde_json::from_str(l).ok()).collect()
+}
+
+fn fixture() -> (tempfile::TempDir, tempfile::TempDir) {
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("note.txt"), "what the disk has\n").unwrap();
+    (workspace, tempfile::tempdir().unwrap())
+}
+
+#[test]
+fn a_client_can_list_the_tools_and_read_a_file_through_them() {
+    let (workspace, home) = fixture();
+    let said = talk(
+        workspace.path(),
+        home.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"note.txt"}}}"#,
+        ],
+    );
+
+    assert_eq!(said.len(), 3, "a notification must not be answered: {said:?}");
+    assert_eq!(said[0]["result"]["serverInfo"]["name"], "rook");
+    let tools: Vec<&str> =
+        said[1]["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+    assert!(tools.contains(&"read_file"), "{tools:?}");
+    assert!(tools.contains(&"run_command"), "{tools:?}");
+
+    let call = &said[2]["result"];
+    assert_eq!(call["isError"], false, "{call}");
+    assert!(
+        call["content"][0]["text"].as_str().unwrap().contains("what the disk has"),
+        "the arguments have to arrive in `params`, which is where a client puts them: {call}"
+    );
+}
+
+/// A client reaching in from outside is not more trusted than the model inside,
+/// and with nobody at this end to ask, the answer is no.
+#[test]
+fn a_write_with_nobody_to_approve_it_is_refused_and_says_why() {
+    let (workspace, home) = fixture();
+    let said = talk(
+        workspace.path(),
+        home.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"write_file","arguments":{"path":"planted.txt","content":"x"}}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"nonsense/method"}"#,
+        ],
+    );
+
+    assert_eq!(said[0]["result"]["isError"], true, "{:?}", said[0]);
+    let why = said[0]["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(why.contains("--yes"), "the refusal has to say what would make it possible: {why}");
+    assert!(!workspace.path().join("planted.txt").exists(), "and nothing may have been written");
+
+    assert_eq!(said[1]["error"]["code"], -32601, "an unknown method is an error, not a result");
+}

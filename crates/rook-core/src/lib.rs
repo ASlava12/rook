@@ -13,6 +13,7 @@ pub mod error;
 pub mod fileset;
 pub mod hooks;
 pub mod lsp;
+pub mod mcp_server;
 pub mod memory;
 pub mod paths;
 pub mod plugins;

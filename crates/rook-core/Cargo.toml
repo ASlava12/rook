@@ -23,7 +23,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 similar = { version = "3.2.0", default-features = false, features = ["text"] }
 thiserror = "2.0.20"
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "process"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "process", "io-std"] }
 toml = "1.1.4"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

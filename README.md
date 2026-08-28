@@ -149,6 +149,19 @@ Restoring is the one step that writes over something, and what it writes over ma
 be an edit made by hand that no checkpoint holds. So the state on disk is captured
 first, onto the fork it just made; the command prints the rewind that puts it back.
 
+### Rook as a tool for something else
+
+```sh
+rook mcp serve          # Rook's own tools over stdio, for any MCP client
+rook mcp serve --yes    # …without asking, for anything the deny list allows
+```
+
+The other direction from `[[mcp]]`: instead of calling somebody else's tools,
+this offers the file tools, the search and the command runner to whatever speaks
+the protocol — an editor, a local model host, another agent. The approval policy
+is in front of every call, and with nobody at this end to ask, a write is refused
+and the refusal says what would make it possible.
+
 All three front ends run turns, stream them, and ask for approvals the same way:
 `rook chat`, `rook tui`, and the web UI at `rookd`. Nothing is reachable from one
 that is not reachable from the others.
