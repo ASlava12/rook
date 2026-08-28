@@ -4,6 +4,15 @@
 //! three interfaces are views over the same [`service::Rook`], which is what
 //! keeps them from drifting into three subtly different products.
 
+/// The shell `run_command` runs a line through.
+///
+/// One place, so the system prompt and the spawner cannot disagree about it —
+/// and they are the two that must not.
+#[cfg(windows)]
+pub const SHELL: &str = "cmd.exe (`cmd /C`)";
+#[cfg(not(windows))]
+pub const SHELL: &str = "/bin/sh";
+
 pub mod agent;
 pub mod catalog;
 pub mod changes;

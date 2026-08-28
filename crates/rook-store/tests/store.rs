@@ -482,3 +482,23 @@ fn the_orphan_sweep_spares_a_file_too_new_to_be_debris() {
     assert_eq!(swept.orphan_files_removed, 1, "one old enough is still collected");
     assert!(!stray.exists());
 }
+
+/// A model with a training cutoff guesses what "now" is, and guesses low. The
+/// arithmetic is Howard Hinnant's and the interesting inputs are the boundaries
+/// it was written to get right.
+#[test]
+fn the_date_is_the_one_the_calendar_says() {
+    let on = |unix: i64| {
+        // The private conversion is reached the way the caller does, through the
+        // clock — so the day is pinned by choosing the second.
+        rook_store::date_of_unix_for_test(unix)
+    };
+
+    assert_eq!(on(0), "1970-01-01", "the epoch");
+    assert_eq!(on(86_399), "1970-01-01", "one second before it rolls over");
+    assert_eq!(on(86_400), "1970-01-02");
+    assert_eq!(on(951_782_400), "2000-02-29", "a leap day in a century that is a leap year");
+    assert_eq!(on(1_709_164_800), "2024-02-29");
+    assert_eq!(on(1_709_251_200), "2024-03-01", "the day after one");
+    assert_eq!(on(4_107_542_400), "2100-03-01", "and a century that is not");
+}

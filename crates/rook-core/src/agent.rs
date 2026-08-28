@@ -370,10 +370,16 @@ impl<'a> AgentLoop<'a> {
         }
         s.push('\n');
         s.push_str(&format!(
-            "## Environment\nos: {} ({} userland)\narch: {}\nworkspace: {}\n",
+            "## Environment\nos: {} ({} userland)\narch: {}\nshell: {}\nworkspace: {}\n",
             env.os,
             env.userland,
             env.arch,
+            // Named for the same reason the userland is: a model that is not
+            // told which shell it has writes the one it saw most in training.
+            // `;` does not chain commands in `cmd.exe`, `$(…)` is not
+            // substitution there, and neither fails loudly — the line runs as
+            // something else. Stable per machine, so it costs no cache.
+            crate::SHELL,
             self.rook.workspace.display()
         ));
         if !env.languages.is_empty() {
@@ -697,6 +703,33 @@ impl<'a> AgentLoop<'a> {
         self.run_with(prompt, |_| {}).await
     }
 
+    /// Everything the model is sent, in order.
+    ///
+    /// One function because it is asked in two places — at the top of a turn and
+    /// again after a compaction — and the two drifted: the second built the
+    /// prefix and the history and stopped, which dropped what belongs beside the
+    /// prompt exactly when context was tightest.
+    ///
+    /// The prompt itself is not appended: it was logged before this, so
+    /// replaying the session already ends with it, and the log is the only
+    /// source of truth for what was said.
+    fn request_messages(&self, prompt: &str) -> Result<Vec<Message>> {
+        let mut messages = vec![cacheable(Message::system(self.system_prompt()))];
+        messages.extend(self.history()?);
+        self.mark_stable_prefix(&mut messages);
+
+        // Beside the newest turn rather than in the system block, which must not
+        // vary: a date is the example that rule names. A model with a training
+        // cutoff otherwise guesses what "now" is, and guesses low.
+        let today = format!("Today is {}.", rook_store::today());
+        let volatile = match self.recalled(prompt) {
+            Some(memory) => format!("{today}\n\n{memory}"),
+            None => today,
+        };
+        messages.insert(messages.len().saturating_sub(1), Message::user(volatile));
+        Ok(messages)
+    }
+
     /// Answer a question about the conversation without joining it.
     ///
     /// One call, no tools, no loop. The exchange is recorded as a note, which
@@ -763,16 +796,7 @@ impl<'a> AgentLoop<'a> {
             self.rook.log(self.session, EventKind::Note, "hook", &context)?;
         }
 
-        // The prompt was just logged, so replaying the session already ends
-        // with it: the log is the only source of truth for what was said.
-        let mut messages = vec![cacheable(Message::system(self.system_prompt()))];
-        messages.extend(self.history()?);
-        self.mark_stable_prefix(&mut messages);
-        if let Some(memory) = self.recalled(prompt) {
-            // Just before the newest turn: memory varies with the prompt, and
-            // anything volatile belongs after everything worth caching.
-            messages.insert(messages.len().saturating_sub(1), Message::user(memory));
-        }
+        let mut messages = self.request_messages(prompt)?;
         let mut outcome = TurnOutcome {
             steps: 0,
             stopped: "end_turn".into(),
@@ -801,9 +825,12 @@ impl<'a> AgentLoop<'a> {
                 let before = measure(&messages);
                 outcome.compactions += 1;
                 self.compact().await;
-                messages = vec![cacheable(Message::system(self.system_prompt()))];
-                messages.extend(self.history()?);
-                self.mark_stable_prefix(&mut messages);
+                // Rebuilt the same way it was built, not a shorter way: this
+                // used to assemble the prefix and the history and stop there,
+                // so what sits beside the prompt — the date, and whatever was
+                // recalled — vanished at the first compaction. It also made the
+                // guard below believe the summary had shrunk something.
+                messages = self.request_messages(prompt)?;
                 worth_compacting = measure(&messages) < before;
             }
 

@@ -409,7 +409,10 @@ async fn a_second_turn_carries_the_first_one_with_it() {
     );
     assert_eq!(request.messages[1].content, "remember my name");
     assert_eq!(request.messages[2].content, "your name is Ada");
-    assert_eq!(request.messages[3].content, "what is my name?");
+    // The date travels beside the newest prompt and folds into it, which is why
+    // the count of turns above is unchanged by it.
+    assert!(request.messages[3].content.ends_with("what is my name?"), "{}", request.messages[3].content);
+    assert!(request.messages[3].content.starts_with("Today is"), "{}", request.messages[3].content);
 }
 
 #[tokio::test]
@@ -628,7 +631,11 @@ async fn a_delegated_task_runs_in_its_own_session_and_returns_only_its_conclusio
 
     // The child started from nothing: its first message is the task, not the parent's prompt.
     let child_request = seen.lock().unwrap()[1].clone();
-    assert_eq!(child_request.messages[1].content, "survey big.txt and report its size");
+    assert!(
+        child_request.messages[1].content.ends_with("survey big.txt and report its size"),
+        "the task is the child's first turn, after the date that travels beside every prompt: {}",
+        child_request.messages[1].content
+    );
     assert!(!child_request.messages.iter().any(|m| m.content.contains("how big is big.txt?")));
 }
 
@@ -2615,7 +2622,7 @@ async fn a_checker_is_given_no_way_to_edit_what_it_is_judging() {
         let requests = seen.lock().unwrap();
         let child = requests
             .iter()
-            .find(|r| r.messages.iter().any(|m| m.content.starts_with("You are checking a claim")))
+            .find(|r| r.messages.iter().any(|m| m.content.contains("You are checking a claim")))
             .expect("the checker's own request must be among what the provider was asked");
         child.tools.iter().map(|t| t.name.clone()).collect()
     };
@@ -2715,4 +2722,36 @@ async fn a_verdict_backed_by_a_command_stands() {
         .body;
     assert!(!said.contains("reached for nothing"), "{said}");
     assert!(said.contains("VERDICT: holds"), "{said}");
+}
+
+/// Two facts a model otherwise supplies from training: which shell it has, and
+/// what day it is. They go in different places on purpose — the shell is the
+/// same every turn and belongs in the cached prefix; the date is not and would
+/// invalidate everything behind it.
+#[tokio::test]
+async fn the_shell_is_in_the_prompt_and_the_date_is_beside_it() {
+    let f = fixture();
+    let session = f.rook.start_session("facts").unwrap();
+    let provider = ScriptedProvider::new(vec![reply("noted")]);
+    let seen = provider.share();
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), session);
+    agent.run("what have I got").await.unwrap();
+
+    let requests = seen.lock().unwrap();
+    let system = &requests[0].messages[0];
+    assert_eq!(system.role, Role::System);
+    assert!(
+        system.content.contains(&format!("shell: {}", rook_core::SHELL)),
+        "the shell is the same every turn, so it belongs in the cached prefix: {}",
+        system.content
+    );
+    assert!(
+        !system.content.contains("Today is"),
+        "and the date is not, because a prefix that varies caches nothing: {}",
+        system.content
+    );
+
+    let beside = requests[0].messages.iter().find(|m| m.content.starts_with("Today is"));
+    let beside = beside.expect("the date has to reach the model somewhere");
+    assert!(beside.content.contains(&rook_store::today()), "{}", beside.content);
 }

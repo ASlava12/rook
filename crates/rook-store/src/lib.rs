@@ -74,6 +74,36 @@ pub fn now_unix_millis() -> i64 {
         .unwrap_or(0)
 }
 
+/// Today, as `YYYY-MM-DD` in UTC.
+///
+/// Arithmetic rather than a date crate: the whole need is one line in a prompt,
+/// and Howard Hinnant's civil-from-days is fifteen lines that have been correct
+/// since 1970 and will be until the type overflows.
+pub fn today() -> String {
+    let (y, m, d) = civil_from_days(now_unix().div_euclid(86_400));
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// The date a given instant falls on, for a test that must not depend on today.
+pub fn date_of_unix_for_test(unix: i64) -> String {
+    let (y, m, d) = civil_from_days(unix.div_euclid(86_400));
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// Days since the epoch to a calendar date, by shifting the year to start in
+/// March so the leap day falls at the end and needs no special case.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (era * 400 + yoe + i64::from(month <= 2), month, day)
+}
+
 pub fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

@@ -31,6 +31,8 @@ Add a row when you implement something after reading a reference. Add it to
 | Asking the user structured questions | hermes `7d6c6ae4` *clarify: schema diet + single questions[] interface (880 → 335 tok/call)* — took the one-questions[]-shape and the rule that options must never be written into the question text, and cut further: no per-question id, and the answer's own text is the "Other" row | source, via `refs advance` | `rook-tools/src/ask.rs`, `AgentLoop::ask_via` |
 | A workspace boundary that a symlink cannot cross | codex `2926014` *make filesystem policy matching URI-native* — their case was encoded and case-variant paths, ours was a symlink out of the workspace that lexical containment could not see | source, via `refs advance` | `ToolContext::resolve`, `through_symlinks`, `sandbox.allow_outside_workspace` |
 | Widening a fact's scope instead of keeping the first | hermes `3b672a68` *delete-path drops every scope of a removed id* — the fix does not apply (identity here is the text, not an id per scope), but its subject exposed the same hazard in ours | source, via `refs advance` | `MemoryBook::learn`, `Scope::within` |
+| Naming the shell the model actually has | codex `5ed294d` *match Windows shell guidance to the executor platform* — the environment block named the OS and not the shell, and `;` chaining sent to `cmd.exe` fails as silently as GNU flags sent to BSD | source, via `refs advance` | `AgentLoop::system_prompt`, `rook_core::SHELL` |
+| Telling the model what day it is | codex `430d26b` *classify clock tools as built-in control tools* — taken as a fact beside the prompt rather than a tool, since a date needs no round trip and must not sit in a prefix that is supposed to cache | source, via `refs advance` | `AgentLoop::request_messages`, `rook_store::today` |
 | Waiting out a provider that said "later" | codex `a73bf25` *decouple HTTP retry backoff from overload integration testing* — theirs refines a retry; here there was none at all, and a 429 ended a turn that had run for minutes | source, via `refs advance` | `rook-llm/src/retry.rs`, `from_spec_with` |
 | A limit that says what to do instead of only what it took | hermes `585723126` *limits line teaches spillover instead of a bare 50KB cap* — the mechanism does not fit a capture that never holds the middle, the lesson does | source, via `refs advance` | `elide_middle` |
 | A sub-agent's budget being its parent's, not its own | codex `4761851` *account subagent token usage toward root goals* — ours already charged the tokens; what it did not bound was the step budget the model writes into the call, or how many sub-agents one turn may start | source, via `refs advance` | `AgentLoop::delegate`, `agent.max_subagents_per_turn` |
@@ -47,6 +49,35 @@ Add a row when you implement something after reading a reference. Add it to
 `cargo xtask refs advance` prints what landed upstream since the pointer was last
 moved; what follows is what was done with it, so a dismissal is a decision rather
 than an omission.
+
+**2026-08-28 (sixteenth pass)** — codex 11 commits, hermes 70, goose 3, cline,
+opencode and openhands one each.
+
+- codex `5ed294d` *match Windows shell guidance to the executor platform* —
+  **ported, and this session had already paid for not having it.** The
+  environment block names the OS, the userland, the arch and the toolchains, and
+  the comment beside it explains that telling a model it is on BSD stops it
+  reaching for GNU `sed -i`. It did not name the shell. `;` does not chain in
+  `cmd.exe` and `$(…)` is not substitution there, and neither fails loudly — the
+  line runs as something else, which is exactly what happened to four tests of
+  ours on Windows this morning.
+- codex `430d26b` *classify clock tools as built-in control tools* — **taken as
+  the fact rather than the tool.** What a clock is for is a model knowing what
+  "now" is instead of guessing from its training, and a fact does not need a
+  round trip. It goes beside the prompt, not in the system block: a date is the
+  example [CLAUDE.md](../CLAUDE.md) names when it says the front of a request
+  must not vary.
+- goose `cfc0538` *parse OpenRouter nested cache_write_tokens* — **not
+  applicable**: cache reads are what the budget and the cost line use, and they
+  are read from the field every dialect puts them in.
+- codex `39507ee` *reject NUL bytes in reviewed terminal input* — **already
+  held, by the platform**: `Command::arg` refuses an interior NUL when it builds
+  the argument, so the spawn fails rather than the shell seeing a truncated line.
+- codex `7625343`, `92f887e` *preserve cached MCP tools during binding capture*;
+  `1cc81ca`, `8faf725` *compression for shared rollout lineages*; cline's hub
+  timeout tests; opencode's model list; openhands' profile stamp — **not
+  applicable**: shared rollouts, hub sessions and profile stamps are shapes this
+  does not have.
 
 **2026-08-28 (fifteenth pass)** — hermes 40 commits, codex 4, cline, goose and
 opencode one each; acp and openhands unchanged.
