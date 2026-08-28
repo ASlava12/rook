@@ -1032,6 +1032,13 @@ fn cmd_store(source: &Source, cmd: StoreCmd, json: bool) -> Result<()> {
                 report.prune.sessions_deleted, report.prune.events_deleted, report.prune.protected
             );
             println!("{tag}collected {} ({} freed)", report.gc.collected, fmt::bytes(report.gc.bytes_freed));
+            if report.history_dropped > 0 {
+                println!(
+                    "{tag}dropped {} history entr{} past `[storage.retention] max_history_entries`",
+                    report.history_dropped,
+                    if report.history_dropped == 1 { "y" } else { "ies" }
+                );
+            }
             for (kind, samples) in &report.dictionaries_trained {
                 println!("trained {kind} dictionary from {samples} objects");
             }
@@ -1050,9 +1057,10 @@ fn cmd_store(source: &Source, cmd: StoreCmd, json: bool) -> Result<()> {
                         fmt::bytes(policy.max_total_bytes.unwrap_or(0))
                     );
                     println!(
-                        "  {} session(s) remain, {protected} protected; the rest is checkpoints, \
-                         skill versions and memory, which retention does not delete",
-                        left.len()
+                        "  {} session(s) remain, {protected} protected; the rest is held by refs \
+                         — the newest {} entries of each history, which retention keeps",
+                        left.len(),
+                        policy.max_history_entries.map(|n| n.to_string()).unwrap_or("all".into())
                     );
                 }
             }

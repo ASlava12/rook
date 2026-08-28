@@ -209,6 +209,7 @@ fn prune_drops_old_sessions_but_never_protected_ones() {
         max_session_age_days: Some(90),
         max_sessions: None,
         max_total_bytes: None,
+        max_history_entries: None,
         protect_tags: vec!["keep".into()],
     };
     let report = s.prune(&policy, false).unwrap();
@@ -358,6 +359,7 @@ fn budget(bytes: Option<u64>) -> rook_store::RetentionPolicy {
         max_session_age_days: None,
         max_sessions: None,
         max_total_bytes: bytes,
+        max_history_entries: None,
         protect_tags: vec!["keep".into()],
     }
 }

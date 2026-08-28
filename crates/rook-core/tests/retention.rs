@@ -129,3 +129,46 @@ fn a_cap_held_by_a_ref_is_not_paid_for_with_the_sessions() {
         "and the newest session is still there"
     );
 }
+
+/// Three histories here are appended to by the agent rather than by a person —
+/// a capture per skill write, an entry per memory change, a snapshot per
+/// checkpoint — and each entry is a ref. A ref is a root to the collector, so
+/// until something dropped them every one of those objects was immortal, and
+/// the byte cap could not be met at any price.
+#[test]
+fn an_appended_history_keeps_its_newest_entries_and_drops_the_rest() {
+    let (mut f, _) = fixture(1, None);
+    f.rook.config.storage.retention.max_history_entries = Some(3);
+
+    let written = 7;
+    for i in 0..written {
+        let id = f.rook.store.put(Kind::Snapshot, format!("state {i}").as_bytes()).unwrap();
+        f.rook.store.set_ref(&format!("skill/tidy/h/{i:015}-{}", id.short()), &id).unwrap();
+        f.rook.store.set_ref(&format!("memory/h/{i:015}-{}", id.short()), &id).unwrap();
+        f.rook.store.set_ref(&format!("checkpoint/nightly/{i:015}-{}", id.short()), &id).unwrap();
+    }
+    // Not a history: one ref per distinct version, and one current state.
+    let head = f.rook.store.put(Kind::Memory, b"the book itself").unwrap();
+    f.rook.store.set_ref("memory/head", &head).unwrap();
+    f.rook.store.set_ref("skill/tidy/v/1.0.0", &head).unwrap();
+
+    let rook = &f.rook;
+    let report = rook.maintenance(false).unwrap();
+
+    assert_eq!(report.history_dropped, 3 * (written - 3), "four of each seven had to go");
+    for family in ["skill/tidy/h/", "memory/h/", "checkpoint/nightly/"] {
+        let left = rook.store.list_refs(family).unwrap();
+        assert_eq!(left.len(), 3, "{family} kept {} entries against a limit of 3", left.len());
+        let stamps: Vec<&str> = left
+            .iter()
+            .map(|(name, _)| name.rsplit('/').next().unwrap().split('-').next().unwrap())
+            .collect();
+        assert_eq!(
+            stamps,
+            ["000000000000004", "000000000000005", "000000000000006"],
+            "the newest three are what survive in {family}"
+        );
+    }
+    assert!(rook.store.get_ref("memory/head").unwrap().is_some(), "the current state is not a history");
+    assert!(rook.store.get_ref("skill/tidy/v/1.0.0").unwrap().is_some(), "nor is a version pointer");
+}

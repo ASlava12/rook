@@ -110,6 +110,7 @@ the bug the survey kept finding:
 max_session_age_days = 180
 max_sessions         = 2000
 max_total_bytes      = 4294967296   # 4 GiB
+max_history_entries  = 50
 protect_tags         = ["keep", "pinned"]
 ```
 
@@ -126,9 +127,20 @@ whole cycle, and `rookd` runs it on a configurable interval.
 redb reuses freed pages rather than returning them, so `index.redb` never shrinks
 and a cap on its size could never be met.
 
-Retention only deletes sessions. Checkpoints, skill versions and memory are kept
-until you delete them, so a store can sit above its byte budget legitimately —
-`store maintain` reports how far over it is and how many sessions were left.
+Three things here are appended to rather than replaced: a capture per skill
+write under `skill/<name>/h/`, an entry per memory change under `memory/h/`, and
+a snapshot per `rook checkpoint` under `checkpoint/<name>/`. Each entry is a ref,
+and a ref is a root — so until `max_history_entries` existed, every object they
+named was immortal and the byte cap could not be met at any price. Retention now
+keeps the newest entries of each and drops the rest; `None` keeps them all, which
+is what the store did before.
+
+What it still does not touch is `skill/<name>/v/<version>`, which is one ref per
+distinct version rather than one per write, and `memory/head`, which is the
+current state. A store can therefore still sit above its byte budget
+legitimately — `store maintain` reports how far over it is, and stops deleting
+sessions once a round frees nothing, because at that point the history is what
+is holding it and more sessions will not help.
 
 Every step has a dry run, and `--dry-run` is how you find out what a policy would do
 before it does it.

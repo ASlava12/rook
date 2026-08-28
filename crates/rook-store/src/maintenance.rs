@@ -76,6 +76,14 @@ pub struct RetentionPolicy {
     pub max_session_age_days: Option<u32>,
     pub max_sessions: Option<usize>,
     pub max_total_bytes: Option<u64>,
+    /// How many entries each appended-to history keeps: versions of one skill,
+    /// states of the memory book, snapshots under one checkpoint name.
+    ///
+    /// Every one of them is a ref, every ref is a root to [`Store::gc`], and
+    /// nothing removed one — so an agent that wrote a skill a thousand times had
+    /// a thousand immortal captures, and the byte cap below could not be met at
+    /// any price. `None` keeps them all, which is what the store did before.
+    pub max_history_entries: Option<usize>,
     /// Never pruned automatically, at any age.
     pub protect_tags: Vec<String>,
 }
@@ -88,6 +96,10 @@ impl Default for RetentionPolicy {
             max_session_age_days: Some(180),
             max_sessions: Some(2000),
             max_total_bytes: Some(4 << 30), // 4 GiB
+            // Generous: reading back the last fifty versions of a skill is more
+            // history than anyone asks for, and content addressing means the
+            // unchanged parts of them cost nothing.
+            max_history_entries: Some(50),
             protect_tags: vec!["keep".into(), "pinned".into()],
         }
     }

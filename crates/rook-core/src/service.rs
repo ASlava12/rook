@@ -934,6 +934,12 @@ impl Rook {
     /// been met until that has run.
     pub fn maintenance(&self, dry_run: bool) -> Result<MaintenanceReport> {
         let policy = &self.config.storage.retention;
+        // Before the collection, so the objects the dropped refs were holding
+        // are collectable in the same pass rather than the next one.
+        let history_dropped = match policy.max_history_entries {
+            Some(keep) => self.trim_histories(keep, dry_run)?,
+            None => 0,
+        };
         let mut prune = self.store.prune(policy, dry_run)?;
         let grace = self.config.storage.gc_grace_secs;
         let mut gc = self.store.gc(&GcOptions {
@@ -996,8 +1002,53 @@ impl Rook {
                 self.config.storage.dictionary_bytes,
             )?
         };
-        Ok(MaintenanceReport { prune, gc, dictionaries_trained: trained, over_budget_by })
+        Ok(MaintenanceReport { prune, gc, dictionaries_trained: trained, over_budget_by, history_dropped })
     }
+
+    /// Drop all but the newest `keep` entries of every history the agent appends
+    /// to on its own.
+    ///
+    /// Three of them exist and they share a shape — `skill/<name>/h/<stamp>`,
+    /// `memory/h/<stamp>`, `checkpoint/<name>/<stamp>` — so one rule covers all
+    /// three. What it must not touch is `skill/<name>/v/<version>`, which is one
+    /// ref per distinct version rather than an entry per write, and
+    /// `memory/head`, which is the current state.
+    ///
+    /// The stamp is zero-padded, so the order `list_refs` returns is the order
+    /// they were written and the newest are the tail.
+    fn trim_histories(&self, keep: usize, dry_run: bool) -> Result<u64> {
+        let mut by_group: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (name, _) in self.store.list_refs("")? {
+            if let Some(group) = appended_history(&name) {
+                by_group.entry(group.to_string()).or_default().push(name.clone());
+            }
+        }
+
+        let mut dropped = 0;
+        for (_, mut entries) in by_group {
+            if entries.len() <= keep {
+                continue;
+            }
+            entries.sort();
+            let stale = entries.len() - keep;
+            for name in entries.into_iter().take(stale) {
+                dropped += 1;
+                if !dry_run {
+                    self.store.delete_ref(&name)?;
+                }
+            }
+        }
+        Ok(dropped)
+    }
+}
+
+/// The history a ref belongs to, or `None` when it is not one.
+fn appended_history(name: &str) -> Option<&str> {
+    let (group, _stamp) = name.rsplit_once('/')?;
+    let appended = group.starts_with("checkpoint/")
+        || (group.starts_with("skill/") && group.ends_with("/h"))
+        || group == "memory/h";
+    appended.then_some(group)
 }
 
 /// A store that is still over its cap after this many rounds is being kept over
@@ -1157,6 +1208,11 @@ pub struct MaintenanceReport {
     pub dictionaries_trained: Vec<(String, usize)>,
     /// Stored bytes still above the cap once everything prunable is gone.
     pub over_budget_by: u64,
+    /// History refs dropped past `max_history_entries`. Reported because each
+    /// one was keeping an object alive against collection, and a store that
+    /// suddenly has room should say why.
+    #[serde(default)]
+    pub history_dropped: u64,
 }
 
 /// A skill as the agent supplies it, before it is a file.
