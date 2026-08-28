@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 
@@ -23,6 +23,49 @@ use crate::AppState;
 
 pub async fn upgrade(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> Response {
     ws.on_upgrade(move |socket| serve(socket, state))
+}
+
+/// Refuses the upgrade before anything else looks at the request.
+///
+/// A layer rather than a check inside the handler: the handler cannot run until
+/// `WebSocketUpgrade` has extracted, so a decision made there is made after the
+/// framework has already answered a malformed upgrade — and a rule about who
+/// may connect belongs in front of the connecting, not inside it.
+pub async fn only_from_this_daemon(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if !from_this_daemon(request.headers()) {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            "this websocket only accepts connections from the daemon's own page",
+        )
+            .into_response();
+    }
+    next.run(request).await
+}
+
+/// Whether the upgrade came from the page this daemon serves.
+///
+/// A websocket is outside the same-origin policy and is not preflighted, so any
+/// page the user has open can connect to a daemon on loopback — and what this
+/// one reaches is a turn: tools, the workspace, the transcript, and a setting
+/// that widens what runs without asking. The other endpoints are covered by
+/// their JSON content type forcing a preflight that no CORS header answers;
+/// this one has nothing equivalent, so it checks for itself.
+///
+/// A request with no `Origin` is not a browser — curl, an editor, the tests —
+/// and is left alone; a browser always sends one.
+fn from_this_daemon(headers: &axum::http::HeaderMap) -> bool {
+    let Some(origin) = headers.get(axum::http::header::ORIGIN) else {
+        return true;
+    };
+    let (Ok(origin), Some(Ok(host))) =
+        (origin.to_str(), headers.get(axum::http::header::HOST).map(|h| h.to_str()))
+    else {
+        return false;
+    };
+    origin.strip_prefix("http://").or_else(|| origin.strip_prefix("https://")) == Some(host)
 }
 
 async fn serve(socket: WebSocket, state: Arc<AppState>) {

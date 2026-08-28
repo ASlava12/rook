@@ -165,16 +165,31 @@ impl Hooks {
     }
 }
 
+/// A hook's command is a line for a shell, and the two shells do not agree on
+/// how to get one there.
+///
+/// On Windows `arg` is wrong: Rust quotes an argument for the C runtime's rules,
+/// escaping an embedded `"` as `\"`, and `cmd.exe` parses neither — it takes the
+/// backslash literally. A hook whose command contains a quotation mark, which is
+/// most of the useful ones, arrived mangled. `raw_arg` hands the line over
+/// untouched, which is what `cmd /C` wants.
+#[cfg(windows)]
+fn shell(command: &str) -> tokio::process::Command {
+    use std::os::windows::process::CommandExt;
+    let mut c = tokio::process::Command::new("cmd");
+    c.as_std_mut().raw_arg(format!("/C {command}"));
+    c
+}
+
+#[cfg(not(windows))]
+fn shell(command: &str) -> tokio::process::Command {
+    let mut c = tokio::process::Command::new("/bin/sh");
+    c.arg("-c").arg(command);
+    c
+}
+
 async fn invoke(config: &HookConfig, payload: &serde_json::Value) -> std::io::Result<HookReply> {
-    let mut command = if cfg!(windows) {
-        let mut c = tokio::process::Command::new("cmd");
-        c.arg("/C").arg(&config.command);
-        c
-    } else {
-        let mut c = tokio::process::Command::new("/bin/sh");
-        c.arg("-c").arg(&config.command);
-        c
-    };
+    let mut command = shell(&config.command);
     let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

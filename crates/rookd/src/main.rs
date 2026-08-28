@@ -39,6 +39,18 @@ pub struct AppState {
     /// request that spawned it.
     pub rook: Arc<RwLock<Rook>>,
     pub started: std::time::Instant,
+    /// Read once at startup rather than through the lock on every request: none
+    /// of it changes while the process runs, and `/api/health` must be able to
+    /// answer while a turn holds the store — a liveness check that waits reports
+    /// a working daemon as a dead one.
+    pub about: About,
+}
+
+pub struct About {
+    pub store_root: String,
+    pub workspace: String,
+    pub os: String,
+    pub arch: String,
 }
 
 #[tokio::main]
@@ -59,7 +71,14 @@ async fn main() -> Result<()> {
         );
     }
 
-    let state = Arc::new(AppState { rook: Arc::new(RwLock::new(rook)), started: std::time::Instant::now() });
+    let about = About {
+        store_root: rook.store.root().display().to_string(),
+        workspace: rook.workspace.display().to_string(),
+        os: rook.env().os.clone(),
+        arch: rook.env().arch.clone(),
+    };
+    let state =
+        Arc::new(AppState { rook: Arc::new(RwLock::new(rook)), started: std::time::Instant::now(), about });
     let app = api::router(state.clone()).merge(web::router());
 
     let maintenance = tokio::spawn(maintain(state.clone(), config.storage.maintenance_interval_hours));
@@ -84,13 +103,25 @@ async fn main() -> Result<()> {
 /// Prune, collect and enforce the size budget on a schedule, because a daemon
 /// left running is exactly where an unbounded store grows unnoticed.
 ///
-/// Takes the write lock for as long as it runs, so a turn started meanwhile
-/// waits. That is the single-writer store showing through, and it is why this
-/// is hourly at its most frequent rather than continuous.
+/// It needs the store to itself, which is the single-writer store showing
+/// through, and it is why this is hourly at its most frequent rather than
+/// continuous. It asks rather than waits: this lock is fair, so a writer that
+/// queues behind a turn puts every reader behind it too — and a turn holds its
+/// read guard for as long as the turn runs, which is minutes. Waiting for the
+/// lock would make the whole daemon, `/api/health` included, unanswerable for
+/// that long. Postponing the work by a minute costs nothing by comparison.
 async fn maintain(state: Arc<AppState>, every_hours: u32) {
     let period = Duration::from_secs(u64::from(every_hours.max(1)) * 3600);
+    const WHEN_BUSY: Duration = Duration::from_secs(60);
+    let mut waiting = period;
     loop {
-        match state.rook.write().await.maintenance(false) {
+        tokio::time::sleep(waiting).await;
+        let Ok(rook) = state.rook.try_write() else {
+            tracing::debug!("maintenance postponed: a turn is holding the store");
+            waiting = WHEN_BUSY;
+            continue;
+        };
+        match rook.maintenance(false) {
             Ok(report) => tracing::info!(
                 sessions = report.prune.sessions_deleted,
                 collected = report.gc.collected,
@@ -100,7 +131,7 @@ async fn maintain(state: Arc<AppState>, every_hours: u32) {
             ),
             Err(e) => tracing::warn!("maintenance failed: {e}"),
         }
-        tokio::time::sleep(period).await;
+        waiting = period;
     }
 }
 

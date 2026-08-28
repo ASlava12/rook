@@ -35,7 +35,10 @@ pub fn router(state: Shared) -> Router {
         .route("/api/skills/{name}/history", get(skill_history))
         .route("/api/checkpoints", get(checkpoints))
         .route("/api/maintenance", post(maintenance))
-        .route("/api/chat", get(crate::chat::upgrade))
+        .route(
+            "/api/chat",
+            get(crate::chat::upgrade).layer(axum::middleware::from_fn(crate::chat::only_from_this_daemon)),
+        )
         .route("/api/search", get(search))
         .with_state(state)
 }
@@ -82,16 +85,21 @@ impl From<CoreError> for Fail {
 
 type ApiResult<T> = std::result::Result<Json<T>, Fail>;
 
+/// Deliberately does not wait for the store.
+///
+/// A liveness check that blocks behind a running turn reports the one thing it
+/// exists to rule out — a daemon that has stopped answering — for a daemon that
+/// is working perfectly. What it can say without the lock is enough to tell a
+/// client it reached the right process at a version it understands.
 async fn health(State(s): State<Shared>) -> ApiResult<Health> {
-    let rook = s.rook.read().await;
     Ok(Json(Health {
         ok: true,
         version: rook_core::AGENT_VERSION.to_string(),
         api_version: API_VERSION,
-        store_root: rook.store.root().display().to_string(),
-        workspace: rook.workspace.display().to_string(),
-        os: rook.env().os.clone(),
-        arch: rook.env().arch.clone(),
+        store_root: s.about.store_root.clone(),
+        workspace: s.about.workspace.clone(),
+        os: s.about.os.clone(),
+        arch: s.about.arch.clone(),
         uptime_secs: s.started.elapsed().as_secs(),
     }))
 }
@@ -432,9 +440,16 @@ mod tests {
         let session = rook.start_session("api test").unwrap();
         rook.log(session, rook_store::EventKind::UserMessage, "prompt", "find the leak").unwrap();
 
+        let about = crate::About {
+            store_root: rook.store.root().display().to_string(),
+            workspace: rook.workspace.display().to_string(),
+            os: rook.env().os.clone(),
+            arch: rook.env().arch.clone(),
+        };
         let state = Arc::new(AppState {
             rook: Arc::new(tokio::sync::RwLock::new(rook)),
             started: std::time::Instant::now(),
+            about,
         });
         Fixture { _home: home, _workspace: workspace, router: router(state.clone()), state, session }
     }
@@ -481,6 +496,21 @@ mod tests {
         assert_eq!(body["ok"], true);
         assert_eq!(body["api_version"], rook_proto::API_VERSION);
         assert!(body["store_root"].is_string(), "a client needs to know which store it reached");
+    }
+
+    /// A turn holds its read guard for as long as it runs and maintenance wants
+    /// the write lock, so if liveness went through either one it would report a
+    /// working daemon as a dead one for minutes at a time.
+    #[tokio::test]
+    async fn health_answers_while_the_store_is_held() {
+        let f = fixture();
+        let held = f.state.rook.write().await;
+
+        let (status, body) = get(&f, "/api/health").await;
+
+        assert_eq!(status, StatusCode::OK, "liveness must not wait for the store");
+        assert!(!body["store_root"].as_str().unwrap().is_empty(), "and still say which store: {body}");
+        drop(held);
     }
 
     #[tokio::test]
@@ -639,6 +669,42 @@ mod tests {
         let f = fixture();
         let (status, _) = get(&f, "/api/sessions/not-a-ulid/changes").await;
         assert!(status.is_client_error(), "answered {status}");
+    }
+
+    /// A websocket is not covered by the same-origin policy and is not
+    /// preflighted, so without this any page the user has open could open one
+    /// to a daemon on loopback — and this socket runs turns.
+    fn upgrade_request(origin: Option<&str>) -> Request<Body> {
+        let mut request = Request::builder()
+            .uri("/api/chat")
+            .header("host", "127.0.0.1:7717")
+            .header("connection", "Upgrade")
+            .header("upgrade", "websocket")
+            .header("sec-websocket-version", "13")
+            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==");
+        if let Some(origin) = origin {
+            request = request.header("origin", origin);
+        }
+        request.body(Body::empty()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_chat_socket_refuses_an_upgrade_from_another_page() {
+        let f = fixture();
+        let refused = f.router.clone().oneshot(upgrade_request(Some("http://evil.example"))).await.unwrap();
+        assert_eq!(refused.status(), StatusCode::FORBIDDEN, "a cross-origin upgrade must not connect");
+
+        // Past the gate is as far as this harness goes: `oneshot` hands the
+        // router a request with no connection under it, so the upgrade itself
+        // answers "426 Upgrade Required". What matters here is which requests
+        // the gate turns away, and 426 is not that.
+        let own = f.router.clone().oneshot(upgrade_request(Some("http://127.0.0.1:7717"))).await.unwrap();
+        assert_eq!(own.status(), StatusCode::UPGRADE_REQUIRED, "the daemon's own page gets through");
+
+        // curl, an editor, these tests: not a browser, and a browser is what the
+        // origin check exists for.
+        let headless = f.router.clone().oneshot(upgrade_request(None)).await.unwrap();
+        assert_eq!(headless.status(), StatusCode::UPGRADE_REQUIRED, "a client with no origin gets through");
     }
 
     #[tokio::test]

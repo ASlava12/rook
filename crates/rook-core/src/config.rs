@@ -312,10 +312,20 @@ impl Config {
     pub fn save(&self) -> std::io::Result<()> {
         let path = crate::paths::config_file();
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            crate::paths::private_dir(parent)?;
         }
         let text = toml::to_string_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        std::fs::write(path, text)
+        std::fs::write(&path, text)?;
+        // An MCP server's headers and environment live in here, and that is
+        // where its API key goes — the field says so. Model keys are read from
+        // the environment and never written, but this file is not therefore
+        // free of secrets.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(())
     }
 }

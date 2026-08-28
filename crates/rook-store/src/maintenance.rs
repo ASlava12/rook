@@ -6,8 +6,9 @@
 //! store therefore ships with the brakes attached rather than as a later fix.
 
 use std::collections::HashSet;
+use std::path::Path;
 
-use redb::{ReadableDatabase, ReadableTable};
+use redb::ReadableTable;
 use serde::{Deserialize, Serialize};
 
 use crate::Store;
@@ -27,6 +28,13 @@ pub struct GcOptions<'a> {
     /// Objects to treat as reachable regardless of the index, e.g. the working
     /// set of a session currently in flight.
     pub extra_roots: Vec<ObjectId>,
+    /// How a container object names the objects it keeps alive.
+    ///
+    /// `None` means no object here has children — true of a bare store and of
+    /// nothing else. A caller that leaves it out of a `..Default::default()` for
+    /// a store that does hold manifests collects every file a checkpoint or a
+    /// skill version refers to, because the manifest is reachable and its
+    /// contents are not reachable through anything else.
     pub expand: Option<Expander<'a>>,
     /// Report what would be collected without deleting anything.
     pub dry_run: bool,
@@ -106,15 +114,27 @@ impl Store {
         let mut reachable: HashSet<[u8; 32]> = HashSet::new();
         let mut worklist: Vec<ObjectId> = opts.extra_roots.clone();
 
+        // One write transaction across the mark and the sweep, and that is the
+        // whole reason it is a write transaction: with the roots read in one and
+        // the deletion done in another, an event appended in between named an
+        // object this had already decided was unreachable, and deleted it out
+        // from under a reference. An append has to wait for this, so it cannot
+        // land in the middle any more. Reads inside the mark see the same
+        // committed snapshot, because nothing is written until the end.
+        let txn = self.db.begin_write()?;
+
         {
-            let txn = self.db.begin_read()?;
-            for entry in txn.open_table(schema::REFS)?.iter()? {
+            let refs = txn.open_table(schema::REFS)?;
+            for entry in refs.iter()? {
                 let (_, v) = entry?;
                 if let Some(id) = ObjectId::from_hex(&hex::encode(v.value())) {
                     worklist.push(id);
                 }
             }
-            for entry in txn.open_table(schema::EVENTS)?.iter()? {
+        }
+        {
+            let events = txn.open_table(schema::EVENTS)?;
+            for entry in events.iter()? {
                 let (_, v) = entry?;
                 let rec: schema::EventRecord = postcard::from_bytes(v.value())?;
                 worklist.push(rec.body);
@@ -141,7 +161,6 @@ impl Store {
         let now = crate::now_unix();
         let mut doomed: Vec<(ObjectId, ObjectMeta)> = Vec::new();
         {
-            let txn = self.db.begin_read()?;
             let objects = txn.open_table(schema::OBJECTS)?;
             for entry in objects.iter()? {
                 let (k, v) = entry?;
@@ -168,18 +187,24 @@ impl Store {
         }
 
         if !opts.dry_run && !doomed.is_empty() {
-            let txn = self.db.begin_write()?;
-            {
-                let mut objects = txn.open_table(schema::OBJECTS)?;
-                let mut blobs = txn.open_table(schema::BLOBS)?;
-                for (id, meta) in &doomed {
-                    objects.remove(id.as_bytes())?;
-                    if !meta.external {
-                        blobs.remove(id.as_bytes())?;
-                    }
+            let mut objects = txn.open_table(schema::OBJECTS)?;
+            let mut blobs = txn.open_table(schema::BLOBS)?;
+            for (id, meta) in &doomed {
+                objects.remove(id.as_bytes())?;
+                if !meta.external {
+                    blobs.remove(id.as_bytes())?;
                 }
             }
-            txn.commit()?;
+        }
+        match opts.dry_run {
+            // Dropping a write transaction abandons it, which is what a dry run
+            // wants: it took one only so that what it reports is what a real run
+            // would have found.
+            true => drop(txn),
+            false => txn.commit()?,
+        }
+
+        if !opts.dry_run {
             for (id, meta) in &doomed {
                 if meta.external {
                     let _ = std::fs::remove_file(self.object_path(id));
@@ -187,11 +212,28 @@ impl Store {
             }
         }
 
-        report.orphan_files_removed = self.sweep_orphan_files(opts.dry_run)?;
+        report.orphan_files_removed = self.sweep_orphan_files(opts.dry_run, opts.min_age_secs)?;
         Ok(report)
     }
 
-    fn sweep_orphan_files(&self, dry_run: bool) -> Result<u64> {
+    /// Files under `objects/` that the index does not know about.
+    ///
+    /// `min_age_secs` matters more here than in the mark: a payload is written
+    /// to disk *before* the transaction that records it commits, and the staging
+    /// file exists for the moment between the write and the rename. Judged by
+    /// the index alone, both look like debris — so a concurrent `put` would have
+    /// its payload deleted and its index entry left pointing at nothing, or its
+    /// rename would fail outright. Only what has sat there long enough to be
+    /// from a crash is swept.
+    fn sweep_orphan_files(&self, dry_run: bool, min_age_secs: i64) -> Result<u64> {
+        let recent = |path: &Path| {
+            let Ok(age) = std::fs::metadata(path).and_then(|m| m.modified()).map(|t| t.elapsed()) else {
+                // No mtime is no evidence of debris.
+                return true;
+            };
+            age.map(|d| d.as_secs() < min_age_secs.max(0) as u64).unwrap_or(true)
+        };
+
         let objects_dir = self.root.join("objects");
         let mut removed = 0;
         let mut stack = vec![objects_dir];
@@ -205,7 +247,7 @@ impl Store {
                 }
                 let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
                 let Some(id) = ObjectId::from_hex(name) else { continue };
-                if self.has(&id)? {
+                if self.has(&id)? || recent(&path) {
                     continue;
                 }
                 removed += 1;
@@ -216,7 +258,7 @@ impl Store {
         }
         // Also clear the staging directory; anything left there is from a crash.
         if !dry_run && let Ok(entries) = std::fs::read_dir(self.root.join("tmp")) {
-            for entry in entries.flatten() {
+            for entry in entries.flatten().filter(|e| !recent(&e.path())) {
                 let _ = std::fs::remove_file(entry.path());
             }
         }

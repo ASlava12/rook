@@ -67,12 +67,54 @@ pub fn matching<'a>(offered: &'a [Offered], query: &str) -> Vec<&'a Offered> {
 /// that does the work — `SKILL.md` alone is instructions for tools that are
 /// not there.
 pub fn install(skill: &Offered, into: &Path) -> Result<PathBuf> {
+    // The name comes from a `SKILL.md` in somebody else's repository and becomes
+    // a directory here. `parse` already refuses one that cannot be a directory,
+    // and this is the check that guards the `remove_dir_all` below: the parser
+    // is one caller away, and what is about to be deleted recursively deserves
+    // to be proven inside the skills directory rather than assumed.
+    if !rook_skills::usable_name(&skill.name) {
+        return Err(CoreError::Other(format!(
+            "{:?} from {} cannot be a skill name — it would install outside the skills directory",
+            skill.name, skill.source
+        )));
+    }
     let target = into.join(&skill.name);
     if target.exists() {
         std::fs::remove_dir_all(&target).map_err(|e| CoreError::Io { path: target.clone(), source: e })?;
     }
-    copy_tree(&skill.dir, &target)?;
+    copy_tree(&skill.dir, &target, &mut Budget::new())?;
     Ok(target)
+}
+
+/// What one install may copy.
+///
+/// A source is a repository someone else controls, and `git clone` brings all of
+/// it. Without this the size of the skills directory is decided there — the same
+/// reason `CaptureLimits` exists for a checkpoint.
+struct Budget {
+    files: usize,
+    bytes: u64,
+}
+
+impl Budget {
+    const MOST_FILES: usize = 2_000;
+    const MOST_BYTES: u64 = 64 << 20;
+
+    fn new() -> Self {
+        Self { files: 0, bytes: 0 }
+    }
+
+    fn charge(&mut self, path: &Path, len: u64) -> Result<()> {
+        self.files += 1;
+        self.bytes += len;
+        match self.files > Self::MOST_FILES || self.bytes > Self::MOST_BYTES {
+            true => Err(CoreError::CaptureTooBig {
+                what: format!("{} files / {} bytes at {}", self.files, self.bytes, path.display()),
+                limit: format!("a skill may bring {} files and {} bytes", Self::MOST_FILES, Self::MOST_BYTES),
+            }),
+            false => Ok(()),
+        }
+    }
 }
 
 fn fetch(source: &str, refresh: bool) -> Result<PathBuf> {
@@ -80,7 +122,10 @@ fn fetch(source: &str, refresh: bool) -> Result<PathBuf> {
     if local.is_dir() {
         return Ok(local.to_path_buf());
     }
-    if !source.starts_with("http://") && !source.starts_with("https://") && !source.contains('@') {
+    let repository =
+        (source.starts_with("http://") || source.starts_with("https://") || source.contains('@'))
+            && !source.starts_with('-');
+    if !repository {
         return Err(CoreError::Other(format!("{source:?} is neither a directory nor a repository")));
     }
 
@@ -95,7 +140,9 @@ fn fetch(source: &str, refresh: bool) -> Result<PathBuf> {
     if let Some(parent) = into.parent() {
         std::fs::create_dir_all(parent).map_err(|e| CoreError::Io { path: parent.into(), source: e })?;
     }
-    git(&["clone", "--depth", "1", source, &into.display().to_string()], None)?;
+    // `--` because `source` is configuration: a value beginning with `-` would
+    // otherwise reach git in the position where it reads options.
+    git(&["clone", "--depth", "1", "--", source, &into.display().to_string()], None)?;
     Ok(into)
 }
 
@@ -146,18 +193,25 @@ fn read_skills(root: &Path, source: &str) -> Vec<Offered> {
     found
 }
 
-fn copy_tree(from: &Path, to: &Path) -> Result<()> {
+fn copy_tree(from: &Path, to: &Path, budget: &mut Budget) -> Result<()> {
     std::fs::create_dir_all(to).map_err(|e| CoreError::Io { path: to.into(), source: e })?;
     for entry in std::fs::read_dir(from).map_err(|e| CoreError::Io { path: from.into(), source: e })? {
         let entry = entry.map_err(|e| CoreError::Io { path: from.into(), source: e })?;
-        let target = to.join(entry.file_name());
-        match entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            true => copy_tree(&entry.path(), &target)?,
-            false => {
-                std::fs::copy(entry.path(), &target)
-                    .map_err(|e| CoreError::Io { path: target.clone(), source: e })?;
-            }
+        let Ok(kind) = entry.file_type() else { continue };
+        // Skipped, not followed: `read_dir` reports a symlink as itself while
+        // `fs::copy` reads through it, so a link in the source repository would
+        // copy whatever it points at on this machine into the skills directory.
+        if kind.is_symlink() {
+            continue;
         }
+        let target = to.join(entry.file_name());
+        if kind.is_dir() {
+            copy_tree(&entry.path(), &target, budget)?;
+            continue;
+        }
+        budget.charge(&entry.path(), entry.metadata().map(|m| m.len()).unwrap_or(0))?;
+        std::fs::copy(entry.path(), &target)
+            .map_err(|e| CoreError::Io { path: target.clone(), source: e })?;
     }
     Ok(())
 }

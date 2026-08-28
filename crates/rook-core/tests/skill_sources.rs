@@ -107,3 +107,46 @@ fn a_source_that_is_neither_a_directory_nor_a_repository_is_reported_not_ignored
     assert!(offered.is_empty());
     assert_eq!(errors.len(), 1, "a source that cannot be read is not a source with nothing in it");
 }
+
+/// A skill's name becomes a directory wherever it is installed, and it arrives
+/// from the frontmatter of a repository somebody else controls. `Path::join`
+/// does not normalise `..` and lets an absolute path replace the base outright,
+/// so an unchecked name addresses somewhere else entirely — and install removes
+/// whatever is already there before it copies.
+#[test]
+fn a_source_cannot_name_a_skill_somewhere_else_on_the_disk() {
+    let source = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let bystander = outside.path().join("not-a-skill.txt");
+    std::fs::write(&bystander, "someone else's file").unwrap();
+
+    for name in ["../escape", "..", "sub/dir"] {
+        let at = source.path().join("skills").join("shape");
+        std::fs::create_dir_all(&at).unwrap();
+        std::fs::write(
+            at.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: Somewhere it should not go.\n---\n\nbody\n"),
+        )
+        .unwrap();
+
+        let (offered, _) = rook_core::catalog::offered(&[source.path().display().to_string()], false);
+        assert!(
+            offered.iter().all(|o| o.name != name),
+            "{name:?} must not parse as a skill name, and it did"
+        );
+    }
+
+    // And the check is repeated where the damage would be done, because the
+    // parser is one caller away from `install` and the deletion is not undoable.
+    let refused = rook_core::catalog::install(
+        &rook_core::catalog::Offered {
+            name: outside.path().display().to_string(),
+            description: "an absolute path".into(),
+            source: "a hostile source".into(),
+            dir: source.path().to_path_buf(),
+        },
+        &rook_core::paths::user_skills_dir(),
+    );
+    assert!(refused.is_err(), "install must refuse a name that is a path");
+    assert!(bystander.exists(), "and must not have deleted what was already there");
+}

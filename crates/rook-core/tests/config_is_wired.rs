@@ -238,3 +238,20 @@ fn the_whole_advertised_tool_list_stays_within_a_budget() {
         "stubs ({stubs}) must be much cheaper than full schemas ({full}), or lazy loading buys nothing"
     );
 }
+
+/// Everything the agent has ever read, run or been told to remember collects
+/// under this directory, and `config.toml` is where an MCP server's API key
+/// goes. On a shared machine the default mode hands all of it to every other
+/// account.
+#[cfg(unix)]
+#[test]
+fn the_agent_state_directory_is_not_readable_by_other_accounts() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let dir = home.path().join("state");
+
+    rook_core::paths::private_dir(&dir).unwrap();
+
+    let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o700, "the state directory must be the owner's alone, not {mode:o}");
+}

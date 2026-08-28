@@ -453,3 +453,30 @@ fn gc_leaves_alone_what_was_only_just_written() {
     let swept = s.gc(&rook_store::GcOptions { min_age_secs: 0, ..Default::default() }).unwrap();
     assert_eq!(swept.collected, 1, "once the window has passed it is ordinary garbage");
 }
+
+/// A payload is written to disk *before* the transaction that records it
+/// commits, and the staging file exists for the moment between the write and the
+/// rename. To an index scan both look exactly like debris from a crash — so a
+/// sweep that judges by the index alone deletes the payload of a `put` running
+/// beside it and leaves its index entry pointing at nothing.
+#[test]
+fn the_orphan_sweep_spares_a_file_too_new_to_be_debris() {
+    let (dir, s) = tmp_store();
+    let name = "ab".repeat(32);
+    let holding = dir.path().join("objects").join("ab").join("ab");
+    std::fs::create_dir_all(&holding).unwrap();
+    let stray = holding.join(&name);
+    std::fs::write(&stray, b"a payload whose transaction has not committed yet").unwrap();
+
+    let grace = 600;
+    let age = std::fs::metadata(&stray).unwrap().modified().unwrap().elapsed().unwrap().as_secs();
+    assert!(age < grace, "the file has to be inside the grace for this to test anything: {age}s");
+
+    let spared = s.gc(&rook_store::GcOptions { min_age_secs: grace as i64, ..Default::default() }).unwrap();
+    assert_eq!(spared.orphan_files_removed, 0, "a file this new is a concurrent write, not debris");
+    assert!(stray.exists(), "and it is still there");
+
+    let swept = s.gc(&rook_store::GcOptions { min_age_secs: 0, ..Default::default() }).unwrap();
+    assert_eq!(swept.orphan_files_removed, 1, "one old enough is still collected");
+    assert!(!stray.exists());
+}

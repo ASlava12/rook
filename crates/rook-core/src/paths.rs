@@ -90,7 +90,33 @@ pub fn builtin_skills_dir() -> Option<PathBuf> {
 
 pub fn ensure_dirs() -> std::io::Result<()> {
     for d in [home(), store_dir(), user_skills_dir(), logs_dir()] {
-        std::fs::create_dir_all(d)?;
+        private_dir(&d)?;
     }
     Ok(())
+}
+
+/// Create a directory readable only by its owner.
+///
+/// What accumulates under here is every transcript the agent has ever written —
+/// the files it read, the commands it ran, what it was told to remember — and,
+/// in `config.toml`, whatever header or environment variable an MCP server needs
+/// to authenticate. On a machine with more than one account the default mode
+/// hands all of that to every other one.
+///
+/// Applied on creation only: a directory that already exists keeps the mode its
+/// owner chose, because changing it under them is not this function's business.
+#[cfg(unix)]
+pub fn private_dir(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    if path.is_dir() {
+        return Ok(());
+    }
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(path)
+}
+
+/// As above. Windows inherits the parent's ACL, which for a directory under the
+/// user's profile is already the user's.
+#[cfg(not(unix))]
+pub fn private_dir(path: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(path)
 }

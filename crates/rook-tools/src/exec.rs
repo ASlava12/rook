@@ -41,9 +41,13 @@ impl Tool for RunCommand {
             Some(rel) => ctx.resolve(rel)?,
             None => ctx.workspace.clone(),
         };
+        // A zero is the model asking for no time at all: it kills the command
+        // before it starts and reports a timeout of zero seconds, which reads as
+        // a broken tool rather than as the argument it was.
         let timeout = args
             .get("timeout_secs")
             .and_then(|v| v.as_u64())
+            .filter(|secs| *secs > 0)
             .map(std::time::Duration::from_secs)
             .unwrap_or(ctx.command_timeout);
 

@@ -250,6 +250,18 @@ pub fn split_frontmatter<'a>(text: &'a str, path: &Path) -> Result<(&'a str, &'a
     Err(SkillError::NoFrontmatter { path: path.to_path_buf() })
 }
 
+/// Whether a name may be used as the skill's directory.
+///
+/// The name becomes a path component wherever a skill is installed or written,
+/// and it arrives from places that are not this machine: the frontmatter of a
+/// repository someone else controls, and tool arguments a model wrote. `..` or
+/// an absolute path in one of them addresses somewhere else entirely, and
+/// `Path::join` neither normalises the first nor resists the second.
+pub fn usable_name(name: &str) -> bool {
+    let name = name.trim();
+    !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 pub fn parse(text: &str, path: &Path) -> Result<(SkillManifest, String)> {
     let (front, body) = split_frontmatter(text, path)?;
     let manifest: SkillManifest = serde_yaml_ng::from_str(front)
@@ -257,6 +269,19 @@ pub fn parse(text: &str, path: &Path) -> Result<(SkillManifest, String)> {
 
     if manifest.name.trim().is_empty() {
         return Err(SkillError::MissingField { path: path.to_path_buf(), field: "name" });
+    }
+    // Refused at the door rather than at each place that builds a path from it:
+    // a name that cannot be a directory is not a skill this can install, and
+    // every later check is one somebody can forget to write.
+    if !usable_name(&manifest.name) {
+        return Err(SkillError::BadFrontmatter {
+            path: path.to_path_buf(),
+            reason: format!(
+                "{:?} cannot be a skill name — it becomes a directory, so letters, digits, \
+                 hyphens and underscores only",
+                manifest.name
+            ),
+        });
     }
     if manifest.description.trim().is_empty() {
         return Err(SkillError::MissingField { path: path.to_path_buf(), field: "description" });

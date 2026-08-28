@@ -239,3 +239,24 @@ async fn a_stream_that_never_sends_a_separator_is_cut_off_rather_than_buffered_f
         started.elapsed()
     );
 }
+
+/// The frame cap bounds one SSE event and says nothing about how many arrive.
+/// A provider that never ends the stream is held only by the request timeout,
+/// which bounds the time and not the memory.
+#[test]
+fn assembling_a_reply_that_never_ends_stops_rather_than_growing() {
+    let mut assembler = rook_llm::Assembler::default();
+    let megabyte = "x".repeat(1 << 20);
+
+    let mut pushed = 0usize;
+    let refusal = loop {
+        pushed += megabyte.len();
+        if let Err(e) = assembler.push(rook_llm::Delta::Text(megabyte.clone())) {
+            break e.to_string();
+        }
+        assert!(pushed <= 64 << 20, "no cap was reached after {pushed} bytes");
+    };
+
+    assert!(pushed > 32 << 20, "the cap has to be passed for this to test anything: {pushed} bytes");
+    assert!(refusal.contains("provider"), "and the message says whose fault it is: {refusal}");
+}

@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin};
 use tokio::sync::{Mutex, oneshot};
 
@@ -17,12 +17,46 @@ use crate::{McpError, Result, ServerConfig};
 
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Incoming>>>>;
 
+/// The same cap the HTTP transport puts on one event, for the same reason:
+/// `lines()` grows a single line until the machine runs out of memory, and how
+/// long a line a server sends is decided by the server. Not a trust boundary —
+/// a stdio server is a subprocess with the user's own privileges and needs no
+/// trick to do harm — but a broken one should cost its own connection rather
+/// than the agent's memory.
+const MAX_LINE_BYTES: u64 = 8 << 20;
+
 pub(crate) struct Stdio {
     name: String,
     stdin: Mutex<ChildStdin>,
     pending: Pending,
     next_id: AtomicU64,
     child: Mutex<Child>,
+}
+
+#[derive(PartialEq, Eq)]
+enum Line {
+    Read,
+    Ended,
+}
+
+/// One line into `line`, or [`Line::Ended`] when the stream closed or a line
+/// passed [`MAX_LINE_BYTES`].
+///
+/// A line over the cap ends the connection rather than being resynchronised
+/// past: a server that sends one is broken, the waiters are released by the
+/// same path that handles a closed pipe, and [`crate::Server::restart`] is what
+/// brings a broken server back.
+async fn read_bounded<R>(reader: &mut R, line: &mut Vec<u8>) -> Line
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    line.clear();
+    match reader.take(MAX_LINE_BYTES).read_until(b'\n', line).await {
+        Ok(0) => Line::Ended,
+        Ok(_) if line.last() != Some(&b'\n') => Line::Ended,
+        Ok(_) => Line::Read,
+        Err(_) => Line::Ended,
+    }
 }
 
 impl Stdio {
@@ -49,9 +83,10 @@ impl Stdio {
         // presents as a hang with no output anywhere.
         let name = config.name.clone();
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                tracing::debug!(server = %name, "{line}");
+            let mut reader = BufReader::new(stderr);
+            let mut line = Vec::new();
+            while read_bounded(&mut reader, &mut line).await == Line::Read {
+                tracing::debug!(server = %name, "{}", String::from_utf8_lossy(&line).trim_end());
             }
         });
 
@@ -59,10 +94,11 @@ impl Stdio {
         let reader_pending = pending.clone();
         let name = config.name.clone();
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                let Ok(message) = serde_json::from_str::<Incoming>(&line) else {
-                    tracing::debug!(server = %name, "unparsable line: {line}");
+            let mut reader = BufReader::new(stdout);
+            let mut line = Vec::new();
+            while read_bounded(&mut reader, &mut line).await == Line::Read {
+                let Ok(message) = serde_json::from_slice::<Incoming>(&line) else {
+                    tracing::debug!(server = %name, "unparsable line: {}", String::from_utf8_lossy(&line));
                     continue;
                 };
                 match message.id {

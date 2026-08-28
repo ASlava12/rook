@@ -646,7 +646,7 @@ impl<'a> AgentLoop<'a> {
         while let Some(delta) = stream.next().await {
             let delta = delta.map_err(|e| CoreError::Other(e.to_string()))?;
             on_delta(&delta);
-            assembler.push(delta);
+            assembler.push(delta).map_err(|e| CoreError::Other(e.to_string()))?;
         }
 
         let response = assembler.finish();
@@ -753,7 +753,7 @@ impl<'a> AgentLoop<'a> {
             while let Some(delta) = stream.next().await {
                 let delta = delta.map_err(|e| CoreError::Other(e.to_string()))?;
                 on_progress(Progress::Delta(&delta));
-                assembler.push(delta);
+                assembler.push(delta).map_err(|e| CoreError::Other(e.to_string()))?;
             }
             if !assembler.reasoning().is_empty() {
                 self.rook.log(self.session, EventKind::Reasoning, "", assembler.reasoning()).ok();
@@ -1066,6 +1066,12 @@ impl<'a> AgentLoop<'a> {
         let mut stream = running;
         loop {
             tokio::select! {
+                // Biased so a step already waiting is reported before the branch
+                // that can end the loop is even polled. Unbiased, `select!`
+                // chooses at random among ready branches, and on the last round
+                // both are: the children have finished and their last tool names
+                // are still in the channel.
+                biased;
                 Some((i, tool)) = steps.recv() => {
                     on_progress(Progress::Delegating { task: short(&tasks[i]), tool: &tool });
                 }
@@ -1078,6 +1084,12 @@ impl<'a> AgentLoop<'a> {
                     None => break,
                 },
             }
+        }
+        // Bias orders the two branches; it does not stop the last child sending
+        // between the final poll and the break. Every sender is dropped by now,
+        // so this drains what is left and cannot block.
+        while let Ok((i, tool)) = steps.try_recv() {
+            on_progress(Progress::Delegating { task: short(&tasks[i]), tool: &tool });
         }
 
         let mut report = Vec::with_capacity(total);
@@ -1462,7 +1474,9 @@ impl AgentLoop<'_> {
         let mut stream = self.provider.stream(request).await.map_err(|e| CoreError::Other(e.to_string()))?;
         let mut assembler = Assembler::default();
         while let Some(delta) = stream.next().await {
-            assembler.push(delta.map_err(|e| CoreError::Other(e.to_string()))?);
+            assembler
+                .push(delta.map_err(|e| CoreError::Other(e.to_string()))?)
+                .map_err(|e| CoreError::Other(e.to_string()))?;
         }
         let summary = assembler.finish().message.content;
         match summary.trim().is_empty() {

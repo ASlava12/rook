@@ -100,3 +100,32 @@ fn a_dry_run_deletes_nothing_and_still_reports_the_overage() {
         assert!(f.rook.store.get_session(*id).unwrap().is_some());
     }
 }
+
+/// A ref keeps its object reachable and nothing here removes refs, so bytes held
+/// by one are bytes no amount of deleting sessions can free. Rounds that freed
+/// nothing used to keep going anyway, and the history was what paid for a cap
+/// that could not be reached.
+#[test]
+fn a_cap_held_by_a_ref_is_not_paid_for_with_the_sessions() {
+    let (f, ids) = fixture(4, Some(1));
+    // Every session's body pinned by a ref, so deleting the session releases
+    // nothing at all — which is the case the loop could not tell from progress.
+    for (i, id) in ids.iter().enumerate() {
+        for event in f.rook.store.events(*id, 0, usize::MAX).unwrap() {
+            f.rook.store.set_ref(&format!("checkpoint/pinned-{i}"), &event.record.body).unwrap();
+        }
+    }
+
+    let report = f.rook.maintenance(false).unwrap();
+
+    assert!(report.over_budget_by > 0, "the cap has to stay unreachable for this to test anything");
+    assert!(
+        report.prune.sessions_deleted <= 1,
+        "one round freed nothing, so the rest of the history must not have been spent: {} deleted",
+        report.prune.sessions_deleted
+    );
+    assert!(
+        f.rook.store.get_session(*ids.last().unwrap()).unwrap().is_some(),
+        "and the newest session is still there"
+    );
+}

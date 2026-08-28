@@ -237,9 +237,9 @@ impl Rook {
     /// system is not the agent's to overwrite.
     pub fn write_skill(&self, skill: &AuthoredSkill) -> Result<PathBuf> {
         let name = skill.name.trim();
-        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        if !rook_skills::usable_name(name) {
             return Err(CoreError::Other(format!(
-                "{name:?} is not a usable skill name — lower-case letters, digits and hyphens only"
+                "{name:?} is not a usable skill name — letters, digits, hyphens and underscores only"
             )));
         }
         if let Ok(existing) = self.skills().resolve(name, self.env())
@@ -339,6 +339,11 @@ impl Rook {
     }
 
     pub fn new_skill(&self, name: &str, description: &str) -> Result<PathBuf> {
+        if !rook_skills::usable_name(name) {
+            return Err(CoreError::Other(format!(
+                "{name:?} is not a usable skill name — letters, digits, hyphens and underscores only"
+            )));
+        }
         let dir = paths::user_skills_dir().join(name);
         if dir.exists() {
             return Err(CoreError::Other(format!("{} already exists", dir.display())));
@@ -967,6 +972,19 @@ impl Rook {
                 gc.collected += round.collected;
                 gc.bytes_freed += round.bytes_freed;
                 over_budget_by = self.content_bytes()?.saturating_sub(cap);
+                // Deleting the oldest sessions and freeing nothing means what
+                // holds the cap is not sessions — a ref pins its objects, and
+                // nothing here removes refs. Continuing would spend the rest of
+                // the history on a cap it cannot reach, so it stops and says so
+                // through `over_budget_by` instead.
+                if round.bytes_freed == 0 {
+                    tracing::warn!(
+                        over_budget_by,
+                        "still over the size cap after deleting the oldest sessions freed \
+                         nothing; what is left is held by refs, which retention does not cover"
+                    );
+                    break;
+                }
             }
         }
 
