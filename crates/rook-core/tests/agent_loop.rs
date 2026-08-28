@@ -2755,3 +2755,39 @@ async fn the_shell_is_in_the_prompt_and_the_date_is_beside_it() {
     let beside = beside.expect("the date has to reach the model somewhere");
     assert!(beside.content.contains(&rook_store::today()), "{}", beside.content);
 }
+
+/// The estimate counts message text and not the tool schemas, which are the
+/// larger part of a small request. The provider counted what it actually
+/// received, so anchoring on that shrinks the error to one turn's worth — and
+/// the error is in the direction that ends a turn with a limit nobody saw
+/// coming.
+#[tokio::test]
+async fn the_context_size_follows_what_the_provider_reported() {
+    let f = fixture();
+    let session = f.rook.start_session("anchored").unwrap();
+
+    // Far more than the messages weigh, which is what a real provider reports:
+    // it counted the schemas too.
+    let heavy = |content: &str| Response {
+        message: Message::assistant(content),
+        stop_reason: StopReason::ToolUse,
+        usage: Usage { input_tokens: 3_000, output_tokens: 10, ..Default::default() },
+        model: "scripted".into(),
+    };
+    let mut first = heavy("");
+    first.message.tool_calls =
+        vec![ToolCall { id: "call_1".into(), name: "list_dir".into(), arguments: serde_json::json!({}) }];
+
+    let mut agent =
+        AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(vec![first, reply("done")])), session);
+    agent.allow_everything_not_denied();
+    agent.set_window_for_test(4_000);
+    let outcome = agent.run("go").await.unwrap();
+
+    assert_eq!(
+        outcome.compactions, 1,
+        "3,000 reported against a 4,000 window is over the threshold, and the estimate of these \
+         few short messages is not — so a turn that never compacted would mean the report was \
+         ignored"
+    );
+}

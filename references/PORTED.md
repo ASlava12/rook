@@ -31,6 +31,7 @@ Add a row when you implement something after reading a reference. Add it to
 | Asking the user structured questions | hermes `7d6c6ae4` *clarify: schema diet + single questions[] interface (880 → 335 tok/call)* — took the one-questions[]-shape and the rule that options must never be written into the question text, and cut further: no per-question id, and the answer's own text is the "Other" row | source, via `refs advance` | `rook-tools/src/ask.rs`, `AgentLoop::ask_via` |
 | A workspace boundary that a symlink cannot cross | codex `2926014` *make filesystem policy matching URI-native* — their case was encoded and case-variant paths, ours was a symlink out of the workspace that lexical containment could not see | source, via `refs advance` | `ToolContext::resolve`, `through_symlinks`, `sandbox.allow_outside_workspace` |
 | Widening a fact's scope instead of keeping the first | hermes `3b672a68` *delete-path drops every scope of a removed id* — the fix does not apply (identity here is the text, not an id per scope), but its subject exposed the same hazard in ours | source, via `refs advance` | `MemoryBook::learn`, `Scope::within` |
+| Measuring context by what the provider counted | hermes `d3a1c4651` *context size anchors on provider-reported usage* — ours estimated the messages and not the tool schemas, so the budget was short by the size of the tool list on every request | source, via `refs advance` | `measured`, `AgentLoop::run_with` |
 | Naming the shell the model actually has | codex `5ed294d` *match Windows shell guidance to the executor platform* — the environment block named the OS and not the shell, and `;` chaining sent to `cmd.exe` fails as silently as GNU flags sent to BSD | source, via `refs advance` | `AgentLoop::system_prompt`, `rook_core::SHELL` |
 | Telling the model what day it is | codex `430d26b` *classify clock tools as built-in control tools* — taken as a fact beside the prompt rather than a tool, since a date needs no round trip and must not sit in a prefix that is supposed to cache | source, via `refs advance` | `AgentLoop::request_messages`, `rook_store::today` |
 | Waiting out a provider that said "later" | codex `a73bf25` *decouple HTTP retry backoff from overload integration testing* — theirs refines a retry; here there was none at all, and a 429 ended a turn that had run for minutes | source, via `refs advance` | `rook-llm/src/retry.rs`, `from_spec_with` |
@@ -67,6 +68,30 @@ opencode and openhands one each.
   round trip. It goes beside the prompt, not in the system block: a date is the
   example [CLAUDE.md](../CLAUDE.md) names when it says the front of a request
   must not vary.
+- hermes `d3a1c4651` *context size anchors on provider-reported usage —
+  estimation shrinks to the last turn* — **ported, and it was covering an
+  under-count.** The estimate here is `len / 4` over the messages and does not
+  count the tool schemas, which are ~750 tokens of every request by default. Both
+  the compaction threshold and the overflow check turned on that number, so the
+  budget was optimistic by the size of the tool list. The provider counted what
+  it actually received; anchoring on it leaves only what has been appended since
+  to estimate. Taken only when the report is at least what the text plainly
+  weighs — several local servers report a constant, and under-counting is the
+  direction that ends a turn with a limit error.
+- hermes `c7761573f`, `93f4dc756`, `c6a426e9a` *prune positionally unanswered
+  tool_calls before the send* — **already held**: `close_open_call` answers a
+  call the log never answered, and a result with no call ahead of it is dropped
+  rather than sent. Both directions, and for the same reason they give.
+- hermes `b855f86bc` *413 recovery measures bytes, not token estimates* — **not
+  applicable yet**: nothing here recovers from a 413, it refuses before sending
+  with `ContextOverflow`, and the anchor above is what makes that refusal
+  accurate.
+- hermes `95cf7dc9e` *session temp root off tmpfs* — **not applicable**: the
+  staging directory is under `ROOK_HOME`, not `/tmp`, and is swept by age.
+- hermes `72874b067` *skill_manage operations[]*, `baa344dee`, `7b5e1911f`,
+  `a9e72f1b5` schema diets, the desktop, gateway, install and profile commits —
+  **not applicable**: batched skill operations are a shape this does not have,
+  and the diets are the exercise this repository already runs as a test.
 - goose `cfc0538` *parse OpenRouter nested cache_write_tokens* — **not
   applicable**: cache reads are what the budget and the cost line use, and they
   are read from the field every dialect puts them in.

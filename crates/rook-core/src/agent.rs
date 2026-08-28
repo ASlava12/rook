@@ -814,6 +814,9 @@ impl<'a> AgentLoop<'a> {
         };
 
         let mut worth_compacting = true;
+        // What the provider last said the request cost, and how many messages
+        // that covered. See `measured`.
+        let mut anchor: Option<(usize, usize)> = None;
         while outcome.steps < self.max_steps {
             outcome.steps += 1;
 
@@ -821,8 +824,8 @@ impl<'a> AgentLoop<'a> {
             // summarise leaves the context where it was, so the next step would
             // ask again, and the step after that — spending a summarisation
             // call each time to stay exactly as full as it already is.
-            if worth_compacting && self.budget.needs_compaction(measure(&messages)) {
-                let before = measure(&messages);
+            if worth_compacting && self.budget.needs_compaction(measured(&messages, anchor)) {
+                let before = measured(&messages, anchor);
                 outcome.compactions += 1;
                 self.compact().await;
                 // Rebuilt the same way it was built, not a shorter way: this
@@ -831,14 +834,16 @@ impl<'a> AgentLoop<'a> {
                 // recalled — vanished at the first compaction. It also made the
                 // guard below believe the summary had shrunk something.
                 messages = self.request_messages(prompt)?;
-                worth_compacting = measure(&messages) < before;
+                // The anchor counted messages that are no longer there.
+                anchor = None;
+                worth_compacting = measured(&messages, anchor) < before;
             }
 
             // Compaction summarises history; it cannot make one message smaller.
             // A pasted build log larger than the window would otherwise be sent
             // whole and come back as a provider error about a limit the user
             // never saw.
-            let used = measure(&messages);
+            let used = measured(&messages, anchor);
             if used > self.budget.usable() {
                 return Err(CoreError::Llm(rook_llm::LlmError::ContextOverflow {
                     used,
@@ -846,6 +851,7 @@ impl<'a> AgentLoop<'a> {
                 }));
             }
 
+            let sent = messages.len();
             let mut request = Request::new(messages.clone());
             request.tools = self.tool_specs();
             request.effort = Some(self.effort);
@@ -861,6 +867,15 @@ impl<'a> AgentLoop<'a> {
                 self.rook.log(self.session, EventKind::Reasoning, "", assembler.reasoning()).ok();
             }
             let response = assembler.finish();
+
+            // Only when it is at least what the text plainly weighs. A provider
+            // reporting less than that is not counting what this needs counted —
+            // several local servers report a constant — and under-counting is
+            // the direction that ends a turn with a limit error.
+            let reported = response.usage.input_tokens as usize;
+            if reported >= measure(&messages[..sent.min(messages.len())]) {
+                anchor = Some((sent, reported));
+            }
 
             outcome.input_tokens += response.usage.input_tokens;
             outcome.output_tokens += response.usage.output_tokens;
@@ -1859,6 +1874,24 @@ fn requested_tasks(args: &serde_json::Value) -> Vec<String> {
 fn cacheable(message: Message) -> Message {
     const MINIMUM_TOKENS: usize = 1024;
     if estimate_tokens(&message.content) >= MINIMUM_TOKENS { message.cacheable() } else { message }
+}
+
+/// What the request costs, anchored on what the provider last said it cost.
+///
+/// Estimation is `len / 4` and it is wrong in the direction that hurts: it counts
+/// the messages and not the tool schemas, which are ~750 tokens of every request
+/// by default and more when they are sent in full. Both the compaction threshold
+/// and the overflow check turn on this number, so under-counting means a request
+/// that comes back as a limit error the user never saw coming.
+///
+/// The provider counted what it received exactly. Everything up to that point
+/// therefore needs no estimating, and the error shrinks to whatever has been
+/// appended since.
+fn measured(messages: &[Message], anchor: Option<(usize, usize)>) -> usize {
+    match anchor {
+        Some((counted, reported)) if counted <= messages.len() => reported + measure(&messages[counted..]),
+        _ => measure(messages),
+    }
 }
 
 fn measure(messages: &[Message]) -> usize {
