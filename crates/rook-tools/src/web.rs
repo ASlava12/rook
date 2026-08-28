@@ -25,7 +25,7 @@ use crate::{Result, Tool, ToolContext, ToolError, ToolOutcome, arg_str};
 const MOST_BYTES: usize = 4 << 20;
 
 pub struct Fetch {
-    client: reqwest::Client,
+    pub(crate) client: reqwest::Client,
 }
 
 impl Fetch {
@@ -191,4 +191,193 @@ fn collapse(text: &str) -> String {
         out.push('\n');
     }
     out.trim().to_string()
+}
+
+/// Which engine answers a search.
+///
+/// Two, because they answer "who sees the query" differently and neither answer
+/// is right for everybody. SearxNG is usually the user's own instance, so the
+/// query does not leave the machine; Brave is the one people actually have a key
+/// for. Their result shapes differ, which is the only reason this is an enum
+/// rather than a url.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Engine {
+    /// A SearxNG instance, by base url.
+    Searx(String),
+    /// Brave's API, with the key from `BRAVE_API_KEY`.
+    Brave(String),
+}
+
+impl Engine {
+    /// `None` when no engine is configured, or when the one named needs a key
+    /// that is not set — which is a reason to say nothing rather than to offer a
+    /// tool that fails on its first call.
+    pub fn named(name: &str, searx_url: &str) -> Option<Self> {
+        match name.trim() {
+            "searxng" | "searx" => Some(Self::Searx(searx_url.trim_end_matches('/').to_string())),
+            "brave" => std::env::var("BRAVE_API_KEY").ok().filter(|k| !k.trim().is_empty()).map(Self::Brave),
+            _ => None,
+        }
+    }
+
+    fn endpoint(&self) -> &str {
+        match self {
+            Self::Searx(base) => base,
+            Self::Brave(_) => "https://api.search.brave.com",
+        }
+    }
+}
+
+/// How many results one search may bring back. More than a handful is a page to
+/// read rather than a list to choose from.
+const MOST_RESULTS: usize = 10;
+
+pub struct Search {
+    client: reqwest::Client,
+    engine: Engine,
+}
+
+impl Search {
+    pub fn new(engine: Engine, timeout: std::time::Duration) -> Result<Self> {
+        Ok(Self { client: Fetch::new(timeout)?.client, engine })
+    }
+}
+
+#[async_trait]
+impl Tool for Search {
+    fn name(&self) -> &str {
+        "web_search"
+    }
+
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "web_search".into(),
+            description: "Search the web for pages to read. Returns titles, addresses and the \
+                          engine's own summaries — read a page with `web_fetch` before relying \
+                          on what a summary says."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" },
+                    "limit": { "type": "integer", "description": "up to 10" }
+                },
+                "required": ["query"]
+            }),
+        }
+    }
+
+    /// The engine's address, not the query: what leaves the machine is a request
+    /// to that host, and a rule allowing a local instance should not also allow
+    /// a hosted one.
+    fn risk(&self, _args: &serde_json::Value) -> Risk {
+        Risk::Network(self.engine.endpoint().to_string())
+    }
+
+    async fn call(&self, ctx: &ToolContext, args: &serde_json::Value) -> Result<ToolOutcome> {
+        let query = arg_str(args, self.name(), "query")?;
+        let limit = args
+            .get("limit")
+            .and_then(|n| n.as_u64())
+            .map(|n| (n as usize).clamp(1, MOST_RESULTS))
+            .unwrap_or(5);
+
+        let q = escaped(&query);
+        let request = match &self.engine {
+            Engine::Searx(base) => self.client.get(format!("{base}/search?q={q}&format=json")),
+            Engine::Brave(key) => self
+                .client
+                .get(format!("https://api.search.brave.com/res/v1/web/search?q={q}"))
+                .header("X-Subscription-Token", key)
+                .header("Accept", "application/json"),
+        };
+
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(e) => {
+                return Ok(ToolOutcome::error(format!("could not reach {}: {e}", self.engine.endpoint())));
+            }
+        };
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Ok(ToolOutcome::error(format!(
+                "{} answered {status}: {}",
+                self.engine.endpoint(),
+                crate::elide_middle(&body, 400)
+            )));
+        }
+
+        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body) else {
+            return Ok(ToolOutcome::error(format!("{} did not answer with JSON", self.engine.endpoint())));
+        };
+        let found = results(&self.engine, &parsed, limit);
+        if found.is_empty() {
+            return Ok(ToolOutcome::ok(format!("nothing found for {query:?}")));
+        }
+
+        let listed = found.join("\n\n");
+        let full = listed.len();
+        let (listed, truncated) = match full > ctx.max_output_bytes {
+            true => (crate::elide_middle(&listed, ctx.max_output_bytes), true),
+            false => (listed, false),
+        };
+        Ok(ToolOutcome {
+            content: listed,
+            is_error: false,
+            truncated,
+            full_bytes: full,
+            meta: Default::default(),
+        }
+        .with("results", found.len()))
+    }
+}
+
+/// A query, safe to paste into a url.
+///
+/// Written out rather than pulled in: percent-encoding a query string needs one
+/// rule — anything that is not unreserved becomes `%XX` — and the crate that
+/// does it properly is a dependency for ten lines.
+fn escaped(query: &str) -> String {
+    let mut out = String::with_capacity(query.len() + 8);
+    for byte in query.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(*byte as char),
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
+}
+
+/// One entry per result, as `title\nurl\nsummary`.
+///
+/// The two engines disagree about where the fields live and what the summary is
+/// called, and about nothing else.
+fn results(engine: &Engine, body: &serde_json::Value, limit: usize) -> Vec<String> {
+    let (list, summary) = match engine {
+        Engine::Searx(_) => (body.get("results"), "content"),
+        Engine::Brave(_) => (body.pointer("/web/results"), "description"),
+    };
+    let text = |v: &serde_json::Value, key: &str| {
+        v.get(key).and_then(|f| f.as_str()).unwrap_or("").trim().to_string()
+    };
+    list.and_then(|l| l.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter(|item| !text(item, "url").is_empty())
+                .take(limit)
+                .map(|item| {
+                    // The engine's summary, marked as the engine's: it is a
+                    // paraphrase by a third party of a page nobody has read yet.
+                    format!(
+                        "{}\n{}\n  {}",
+                        text(item, "title"),
+                        text(item, "url"),
+                        readable(&text(item, summary))
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }

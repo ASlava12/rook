@@ -173,11 +173,23 @@ pub struct WebConfig {
     pub enabled: bool,
     /// How long one page has to arrive.
     pub timeout_secs: u64,
+    /// Which search engine answers `web_search`: `searxng`, `brave`, or empty
+    /// for none. Empty is the default because the two have different answers to
+    /// "who sees the query" and neither should be picked for somebody.
+    pub search: String,
+    /// The SearxNG instance to ask. Its own, usually — the reason to prefer it
+    /// is that the query does not leave the machine.
+    pub search_url: String,
 }
 
 impl Default for WebConfig {
     fn default() -> Self {
-        Self { enabled: false, timeout_secs: 30 }
+        Self {
+            enabled: false,
+            timeout_secs: 30,
+            search: String::new(),
+            search_url: "http://127.0.0.1:8888".into(),
+        }
     }
 }
 

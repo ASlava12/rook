@@ -297,6 +297,15 @@ impl<'a> AgentLoop<'a> {
                 Ok(fetch) => tools.register(std::sync::Arc::new(fetch)),
                 Err(e) => tracing::warn!("web is enabled but unusable: {e}"),
             }
+            // Only when an engine is named and usable. Offering a search that
+            // fails on its first call teaches the model to stop asking, which is
+            // worse than never having offered it.
+            let engine = rook_tools::web::Engine::named(&rook.config.web.search, &rook.config.web.search_url);
+            if let Some(engine) = engine
+                && let Ok(search) = rook_tools::web::Search::new(engine, patience)
+            {
+                tools.register(std::sync::Arc::new(search));
+            }
         }
 
         let (hooks, bad_hooks) = Hooks::compile(&rook.config.hooks);

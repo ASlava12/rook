@@ -264,7 +264,7 @@ fn nothing_reaches_the_network_until_the_web_is_turned_on() {
     let offered = |enabled: bool| {
         let dir = tempfile::tempdir().unwrap();
         let config = rook_core::Config {
-            web: rook_core::config::WebConfig { enabled, timeout_secs: 5 },
+            web: rook_core::config::WebConfig { enabled, ..Default::default() },
             ..Default::default()
         };
         let rook = rook_core::Rook::from_parts(

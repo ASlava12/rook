@@ -101,3 +101,80 @@ fn the_risk_a_fetch_reports_is_the_address() {
     let elsewhere = fetch.risk(&serde_json::json!({ "url": "https://elsewhere.example/x" }));
     assert_eq!(policy.decide(&elsewhere), rook_tools::policy::Decision::Ask, "and only that host");
 }
+
+async fn searx(body: &'static str) -> String {
+    serve("200 OK", "application/json", body).await
+}
+
+#[tokio::test]
+async fn a_search_lists_what_the_engine_returned_with_its_summaries_marked_as_such() {
+    let base = searx(
+        r#"{"results":[
+             {"title":"Serde","url":"https://serde.rs","content":"A <b>framework</b> for serializing"},
+             {"title":"Docs","url":"https://docs.rs/serde","content":"API documentation"},
+             {"title":"No address","content":"dropped, because there is nothing to read"}
+           ]}"#,
+    )
+    .await;
+    let base = base.trim_end_matches("/page").to_string();
+
+    let search =
+        rook_tools::web::Search::new(rook_tools::web::Engine::Searx(base), std::time::Duration::from_secs(5))
+            .unwrap();
+    let out = search.call(&ctx(), &serde_json::json!({ "query": "serde json" })).await.unwrap();
+
+    assert!(!out.is_error, "{}", out.content);
+    assert_eq!(out.meta["results"], 2, "a result with no address is not one: {}", out.content);
+    assert!(out.content.contains("https://serde.rs"), "{}", out.content);
+    assert!(
+        out.content.contains("A framework for serializing"),
+        "the engine's own summary comes through, markup and all removed: {}",
+        out.content
+    );
+}
+
+/// A rule that allows a local instance must not also allow a hosted one: what
+/// leaves the machine is a request to a host, and which host is the question.
+#[test]
+fn the_risk_a_search_reports_is_the_engine_not_the_query() {
+    let local = rook_tools::web::Search::new(
+        rook_tools::web::Engine::Searx("http://127.0.0.1:8888".into()),
+        std::time::Duration::from_secs(5),
+    )
+    .unwrap();
+    let hosted = rook_tools::web::Search::new(
+        rook_tools::web::Engine::Brave("a-key".into()),
+        std::time::Duration::from_secs(5),
+    )
+    .unwrap();
+    let asking = serde_json::json!({ "query": "anything at all" });
+
+    let (policy, _) = rook_tools::policy::Policy::compile(
+        rook_tools::policy::Mode::Ask,
+        &["http://127.0.0.1:8888".into()],
+        &[],
+        &[],
+    );
+
+    assert_eq!(policy.decide(&local.risk(&asking)), rook_tools::policy::Decision::Allow);
+    assert_eq!(
+        policy.decide(&hosted.risk(&asking)),
+        rook_tools::policy::Decision::Ask,
+        "allowing your own search engine must not allow somebody else's"
+    );
+}
+
+/// Naming an engine whose key is not set is a reason to offer nothing: a tool
+/// that fails on its first call teaches the model to stop asking.
+#[test]
+fn an_engine_that_cannot_work_is_not_offered() {
+    unsafe { std::env::remove_var("BRAVE_API_KEY") };
+    assert!(rook_tools::web::Engine::named("brave", "").is_none());
+    assert!(rook_tools::web::Engine::named("", "http://x").is_none());
+    assert!(rook_tools::web::Engine::named("nonsense", "http://x").is_none());
+    assert_eq!(
+        rook_tools::web::Engine::named("searxng", "http://127.0.0.1:8888/"),
+        Some(rook_tools::web::Engine::Searx("http://127.0.0.1:8888".into())),
+        "a trailing slash must not become a double one"
+    );
+}

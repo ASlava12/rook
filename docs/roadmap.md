@@ -672,7 +672,7 @@ recorded so the design question survives the session that raised it.
    *source* rather than a command. That needs (4), and the criterion is
    attribution — every statement traced to something that says it, the opinion
    around it dropped. Same mechanism, different evidence.
-4. **Reaching the web** — *`web_fetch` done, `web_search` next*. Off unless
+4. **Reaching the web** — *done*. Off unless
    `[web] enabled`, and off means the model is never shown the tool rather than
    the call being refused: a tool it cannot see is one it cannot decide to try.
    It reports `Risk::Network`, whose subject is the address, so an allow rule can
@@ -680,10 +680,11 @@ recorded so the design question survives the session that raised it.
    stripper — what a model needs off a page is the writing, and a real parser
    costs more than the rest of this binary.
 
-   Search is the half left. The provider question is the whole of it: SearxNG is
-   the local-first answer and self-hostable, Brave is the one people actually
-   have a key for, and their result shapes differ — so it is two dialects behind
-   one tool, the same way the model providers are.
+   Search landed with both engines and no default: SearxNG for the case where
+   the query does not leave the machine, Brave for the case where somebody has a
+   key. Its risk is the engine's address, so allowing a local instance does not
+   allow a hosted one, and an engine named without its key is offered as nothing
+   rather than as a tool that fails once and teaches the model to stop asking.
 
    The tension with local-first stands and is the reason for the default. What
    comes back is somebody else's text arriving in the model's context: not a

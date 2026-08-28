@@ -165,6 +165,22 @@ style dropped. What comes back is somebody else's writing on its way into the
 model's context — not a fact and not an instruction, which is why the answer
 always says where it came from.
 
+`web_search` needs an engine named as well, and there is no default because the
+two differ on who sees the query:
+
+```toml
+[web]
+enabled    = true
+search     = "searxng"                  # your own instance: the query stays here
+search_url = "http://127.0.0.1:8888"
+# search   = "brave"                    # or hosted, with BRAVE_API_KEY in the environment
+```
+
+Its risk is the engine's address rather than the query, so allowing your own
+instance does not also allow somebody else's. An engine named without the key it
+needs is offered as nothing at all — a tool that fails on its first call teaches
+the model to stop asking.
+
 ### Checking, rather than believing
 
 A turn can hand a claim to an agent that did not make it:
