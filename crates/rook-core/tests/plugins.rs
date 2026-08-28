@@ -27,7 +27,11 @@ fn skill(dir: &Path, name: &str) {
 #[test]
 fn a_plugin_brings_its_skills_and_its_servers() {
     let workspace = tempfile::tempdir().unwrap();
-    let dir = workspace.path().join(".rook/plugins/rust-pack");
+    // Component by component, because this path is later compared as a string
+    // against one the discovery built by walking the disk. A single
+    // `join(".rook/plugins/rust-pack")` keeps the forward slashes on Windows,
+    // where the filesystem accepts them and `to_str` reports them back.
+    let dir = workspace.path().join(".rook").join("plugins").join("rust-pack");
     write(
         &dir.join(".claude-plugin/plugin.json"),
         r#"{"name":"rust-pack","version":"1.2.0",
