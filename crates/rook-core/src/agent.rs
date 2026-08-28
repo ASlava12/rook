@@ -287,7 +287,17 @@ impl<'a> AgentLoop<'a> {
         // `equip` set afterwards was never what answered. A workspace with no
         // Rust in it was offered rust-analyzer for exactly this reason.
         let servers = crate::lsp::Servers::new(Vec::new(), &rook.workspace);
-        let tools = ToolBox::standard();
+        let mut tools = ToolBox::standard();
+        // Registered rather than gated at the call: a tool the agent is never
+        // shown is one it cannot decide to try, and off is the default because
+        // this agent's point is that it runs here.
+        if rook.config.web.enabled {
+            let patience = std::time::Duration::from_secs(rook.config.web.timeout_secs);
+            match rook_tools::web::Fetch::new(patience) {
+                Ok(fetch) => tools.register(std::sync::Arc::new(fetch)),
+                Err(e) => tracing::warn!("web is enabled but unusable: {e}"),
+            }
+        }
 
         let (hooks, bad_hooks) = Hooks::compile(&rook.config.hooks);
         for error in bad_hooks {

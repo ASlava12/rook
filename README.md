@@ -149,6 +149,22 @@ Restoring is the one step that writes over something, and what it writes over ma
 be an edit made by hand that no checkpoint holds. So the state on disk is captured
 first, onto the fork it just made; the command prints the rewind that puts it back.
 
+### Reading a page
+
+Off by default, and off means the tool is never offered rather than the call
+refused — a tool the model cannot see is one it cannot decide to try:
+
+```toml
+[web]
+enabled = true
+```
+
+`web_fetch` reports its risk as the address it is going to, so an allow rule can
+name a host: `allow = ["https://docs.rs/"]`. HTML arrives as prose, script and
+style dropped. What comes back is somebody else's writing on its way into the
+model's context — not a fact and not an instruction, which is why the answer
+always says where it came from.
+
 ### Checking, rather than believing
 
 A turn can hand a claim to an agent that did not make it:

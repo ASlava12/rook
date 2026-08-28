@@ -672,12 +672,22 @@ recorded so the design question survives the session that raised it.
    *source* rather than a command. That needs (4), and the criterion is
    attribution — every statement traced to something that says it, the opinion
    around it dropped. Same mechanism, different evidence.
-4. **Reaching the web.** `web_search` and `web_fetch`, off unless configured,
-   through the policy as external — the deny list and the approval already know
-   how to treat something that leaves the machine. This is the one item in
-   tension with local-first: what it fetches is untrusted text that ends up in
-   context, and its results are the input to (3) rather than an answer on their
-   own.
+4. **Reaching the web** — *`web_fetch` done, `web_search` next*. Off unless
+   `[web] enabled`, and off means the model is never shown the tool rather than
+   the call being refused: a tool it cannot see is one it cannot decide to try.
+   It reports `Risk::Network`, whose subject is the address, so an allow rule can
+   name a host and mean it. HTML comes back as prose through a deliberately crude
+   stripper — what a model needs off a page is the writing, and a real parser
+   costs more than the rest of this binary.
+
+   Search is the half left. The provider question is the whole of it: SearxNG is
+   the local-first answer and self-hostable, Brave is the one people actually
+   have a key for, and their result shapes differ — so it is two dialects behind
+   one tool, the same way the model providers are.
+
+   The tension with local-first stands and is the reason for the default. What
+   comes back is somebody else's text arriving in the model's context: not a
+   fact, not an instruction, and the input to (3) rather than an answer.
 5. **Asking what a crate offers.** `find_symbol` answers this for the workspace
    through the language server; what it cannot do is name the API of a crate by
    name. Doing it locally means rustdoc JSON, which is nightly-only, so this

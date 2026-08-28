@@ -18,6 +18,7 @@ pub mod mcp;
 pub mod pending;
 pub mod policy;
 pub mod search;
+pub mod web;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

@@ -255,3 +255,46 @@ fn the_agent_state_directory_is_not_readable_by_other_accounts() {
     let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o700, "the state directory must be the owner's alone, not {mode:o}");
 }
+
+/// The one tool that leaves the machine, and the point of this agent is that it
+/// runs here. Off means the model is never shown it, not that the call is
+/// refused: a tool it cannot see is one it cannot decide to try.
+#[test]
+fn nothing_reaches_the_network_until_the_web_is_turned_on() {
+    let offered = |enabled: bool| {
+        let dir = tempfile::tempdir().unwrap();
+        let config = rook_core::Config {
+            web: rook_core::config::WebConfig { enabled, timeout_secs: 5 },
+            ..Default::default()
+        };
+        let rook = rook_core::Rook::from_parts(
+            rook_store::Store::open(dir.path()).unwrap(),
+            config,
+            rook_skills::Environment::bare("linux", "x86_64", "0.1.0"),
+            rook_skills::SkillIndex::default(),
+            dir.path().to_path_buf(),
+        );
+        let session = rook.start_session("web").unwrap();
+        let agent = rook_core::agent::AgentLoop::new(&rook, std::sync::Arc::new(Nothing), session);
+        agent.tool_specs().into_iter().map(|s| s.name).collect::<Vec<_>>()
+    };
+
+    assert!(!offered(false).iter().any(|n| n == "web_fetch"), "off is the default and means absent");
+    assert!(offered(true).iter().any(|n| n == "web_fetch"), "and on means offered");
+}
+
+/// A provider that is never asked anything.
+struct Nothing;
+
+#[async_trait::async_trait]
+impl rook_llm::Provider for Nothing {
+    fn id(&self) -> &str {
+        "none/none"
+    }
+    fn context_window(&self) -> usize {
+        8192
+    }
+    async fn complete(&self, _: rook_llm::Request) -> rook_llm::Result<rook_llm::Response> {
+        Err(rook_llm::LlmError::Other("not asked".into()))
+    }
+}

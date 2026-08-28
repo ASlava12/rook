@@ -25,6 +25,7 @@ pub struct Config {
     pub sandbox: SandboxConfig,
     pub telemetry: TelemetryConfig,
     pub memory: MemoryConfig,
+    pub web: WebConfig,
     /// Language servers, as `[[lsp]]` tables. When empty, known servers found
     /// on `PATH` are used.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -56,6 +57,7 @@ impl Default for Config {
             sandbox: SandboxConfig::default(),
             telemetry: TelemetryConfig::default(),
             memory: MemoryConfig::default(),
+            web: WebConfig::default(),
             server: Default::default(),
             lsp: Vec::new(),
             mcp: Vec::new(),
@@ -157,6 +159,26 @@ pub struct ServerConfig {
     /// Bound to loopback by default. An agent's transcript is the most sensitive
     /// thing on a developer's machine; it does not get exposed by accident.
     pub allow_remote: bool,
+}
+
+/// Reaching the network.
+///
+/// Off by default and meant to stay off for anyone who does not want it: the
+/// point of this agent is that it runs here, and a page it fetches is somebody
+/// else's text arriving in the model's context.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WebConfig {
+    /// Offer `web_fetch` at all. Nothing reaches the network while this is off.
+    pub enabled: bool,
+    /// How long one page has to arrive.
+    pub timeout_secs: u64,
+}
+
+impl Default for WebConfig {
+    fn default() -> Self {
+        Self { enabled: false, timeout_secs: 30 }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
