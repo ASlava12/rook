@@ -454,7 +454,12 @@ impl Tool for ListDir {
             }
             let rel = entry.path().strip_prefix(&root).unwrap_or(entry.path());
             let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-            entries.push(format!("{}{}", rel.display(), if is_dir { "/" } else { "" }));
+            // Forward slashes, as the manifests store them and as a directory is
+            // already marked here. Native separators made the listing disagree
+            // with itself on Windows — `src/` on one line and `src\main.rs` on
+            // the next — and left the model two spellings for one path.
+            let rel = rel.display().to_string().replace('\\', "/");
+            entries.push(format!("{rel}{}", if is_dir { "/" } else { "" }));
         }
         entries.sort();
         let truncated = total > entries.len();
