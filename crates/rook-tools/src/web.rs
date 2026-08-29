@@ -37,9 +37,11 @@ impl Fetch {
         let client = reqwest::Client::builder()
             .timeout(timeout)
             .connect_timeout(std::time::Duration::from_secs(10))
-            // Not followed silently: a redirect is how a url that was approved
-            // becomes a request to somewhere else.
-            .redirect(reqwest::redirect::Policy::limited(3))
+            // Followed by hand below instead, and only while they stay on the
+            // host that was approved. The client's own policy can stop, but
+            // stopping surfaces as an ordinary send failure with nothing in it
+            // about where the redirect pointed — which is the useful half.
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent(concat!("rook/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|e| ToolError::Invalid {
@@ -82,9 +84,34 @@ impl Tool for Fetch {
             return Ok(ToolOutcome::error(format!("{url:?} is not an http or https address")));
         }
 
-        let response = match self.client.get(&url).send().await {
-            Ok(response) => response,
-            Err(e) => return Ok(ToolOutcome::error(format!("could not fetch {url}: {e}"))),
+        // Redirects are followed here rather than by the client, and only while
+        // they stay on the host that was approved. The approval named an
+        // address; a redirect elsewhere is how that approval becomes a request
+        // somewhere nobody agreed to. `http` to `https` and a missing trailing
+        // slash both stay put, so this costs nothing ordinary.
+        const MOST_HOPS: usize = 4;
+        let mut at = url.clone();
+        let mut landed = None;
+        for _ in 0..MOST_HOPS {
+            let hop = match self.client.get(&at).send().await {
+                Ok(hop) => hop,
+                Err(e) => return Ok(ToolOutcome::error(format!("could not fetch {at}: {e}"))),
+            };
+            let Some(to) = redirected_to(&hop) else {
+                landed = Some(hop);
+                break;
+            };
+            let to = absolute(&at, &to);
+            if host_of(&to) != host_of(&at) {
+                return Ok(ToolOutcome::error(format!(
+                    "{at} redirects to {to}, which is a different host — fetch that address if it \
+                     is the one you want"
+                )));
+            }
+            at = to;
+        }
+        let Some(response) = landed else {
+            return Ok(ToolOutcome::error(format!("{url} redirects more than {MOST_HOPS} times")));
         };
         let status = response.status();
         let kind = response.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok());
@@ -113,7 +140,7 @@ impl Tool for Fetch {
         };
 
         Ok(ToolOutcome {
-            content: format!("{status} {url}\n\n{text}"),
+            content: format!("{status} {at}\n\n{text}"),
             is_error: !status.is_success(),
             truncated,
             full_bytes: full,
@@ -122,6 +149,34 @@ impl Tool for Fetch {
         .with("status", status.as_u16())
         .with("content_type", kind))
     }
+}
+
+/// Where a response points, when it points somewhere.
+fn redirected_to(response: &reqwest::Response) -> Option<String> {
+    response.status().is_redirection().then(|| {
+        response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string()
+    })
+}
+
+/// A `Location` may be relative, and a relative one cannot leave the host.
+fn absolute(from: &str, location: &str) -> String {
+    if location.starts_with("http://") || location.starts_with("https://") {
+        return location.to_string();
+    }
+    let root = from.split('/').take(3).collect::<Vec<_>>().join("/");
+    match location.starts_with('/') {
+        true => format!("{root}{location}"),
+        false => format!("{root}/{location}"),
+    }
+}
+
+fn host_of(url: &str) -> &str {
+    url.split('/').nth(2).unwrap_or_default()
 }
 
 /// HTML with the markup taken out.

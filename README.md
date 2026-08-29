@@ -175,7 +175,10 @@ enabled = true
 ```
 
 `web_fetch` reports its risk as the address it is going to, so an allow rule can
-name a host: `allow = ["https://docs.rs/"]`. HTML arrives as prose, script and
+name a host: `allow = ["https://docs.rs/"]`. A redirect that stays on that host
+is followed and one that leaves it is reported instead — an approval named an
+address, and following it elsewhere would spend that approval somewhere nobody
+agreed to. HTML arrives as prose, script and
 style dropped. What comes back is somebody else's writing on its way into the
 model's context — not a fact and not an instruction, which is why the answer
 always says where it came from.

@@ -102,6 +102,49 @@ fn the_risk_a_fetch_reports_is_the_address() {
     assert_eq!(policy.decide(&elsewhere), rook_tools::policy::Decision::Ask, "and only that host");
 }
 
+/// The approval named an address. A redirect to another host is how that
+/// approval turns into a request somewhere nobody agreed to.
+#[tokio::test]
+async fn a_redirect_off_the_approved_host_is_reported_rather_than_followed() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let mut scratch = [0u8; 4096];
+            let _ = socket.read(&mut scratch).await;
+            let head = String::from_utf8_lossy(&scratch).to_string();
+            // `/here` stays on this host; `/away` does not.
+            let response = if head.contains("GET /away") {
+                "HTTP/1.1 302 Found\r\nLocation: http://elsewhere.example/taken\r\nContent-Length: 0\r\n\r\n"
+                    .to_string()
+            } else if head.contains("GET /here") {
+                format!("HTTP/1.1 302 Found\r\nLocation: http://{addr}/landed\r\nContent-Length: 0\r\n\r\n")
+            } else {
+                let body = "the page it landed on";
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )
+            };
+            let _ = socket.write_all(response.as_bytes()).await;
+        }
+    });
+
+    let stayed = fetch(&format!("http://{addr}/here")).await;
+    assert!(!stayed.is_error, "a redirect within the host is ordinary and is followed: {}", stayed.content);
+    assert!(stayed.content.contains("the page it landed on"), "{}", stayed.content);
+
+    let left = fetch(&format!("http://{addr}/away")).await;
+    assert!(left.is_error, "{}", left.content);
+    assert!(
+        left.content.contains("elsewhere.example"),
+        "and it says where it wanted to go, so the model can ask for that address: {}",
+        left.content
+    );
+}
+
 async fn searx(body: &'static str) -> String {
     serve("200 OK", "application/json", body).await
 }

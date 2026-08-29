@@ -751,6 +751,17 @@ mod tests {
         let again = f.state.engine_for(Some(elsewhere.path())).await.unwrap();
         assert!(std::sync::Arc::ptr_eq(&engine, &again), "built once and kept, not rebuilt per prompt");
 
+        // Naming the daemon's own project is not naming another one: a second
+        // engine for the same directory is a second registry of who is writing
+        // what, and two agents blind to each other's claims are what the claims
+        // exist to prevent.
+        let own = f.state.rook.read().await.workspace.clone();
+        let named = f.state.engine_for(Some(&own)).await.unwrap();
+        assert!(
+            std::sync::Arc::ptr_eq(&named, &f.state.rook),
+            "naming the daemon's own workspace must reach the daemon's own engine"
+        );
+
         let missing = f.state.engine_for(Some(std::path::Path::new("/no/such/project"))).await;
         assert!(missing.is_err(), "a path that is not a directory is refused rather than created");
     }

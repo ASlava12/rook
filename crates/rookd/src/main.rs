@@ -69,6 +69,13 @@ impl AppState {
         if !here.is_dir() {
             return Err(format!("{} is not a directory", here.display()));
         }
+        // Naming the daemon's own project has to reach the daemon's own engine.
+        // A second one for the same directory is a second registry of who is
+        // writing what, and two agents that cannot see each other's claims are
+        // exactly what the claims exist to prevent.
+        if self.rook.read().await.workspace.canonicalize().is_ok_and(|own| own == here) {
+            return Ok(self.rook.clone());
+        }
         if let Some(known) = self.elsewhere.read().await.get(&here) {
             return Ok(known.clone());
         }
