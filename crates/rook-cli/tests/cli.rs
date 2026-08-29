@@ -353,6 +353,53 @@ fn a_read_routes_through_the_daemon_and_answers_the_same() {
     assert!(err.contains(&daemon.address), "and must say where the lock is: {err}");
 }
 
+/// A transcript and a search are what somebody wants while the daemon is up, and
+/// both needed the store stopped to get. Routed, they must answer what the store
+/// answers — and the search must carry its filters, or a narrowed question comes
+/// back widened with nothing saying so.
+#[test]
+fn a_transcript_and_a_search_read_the_same_through_the_daemon() {
+    let rook = Rook::new();
+    // The turn fails for want of a model and leaves the session behind, which is
+    // all this needs: something with a transcript to read.
+    // Two of them, because one session makes a filtered search and an unfiltered
+    // one the same answer, and a test that cannot tell them apart proves nothing
+    // about the filter.
+    let _ = rook.run(&["run", "alpha worth finding"]);
+    let _ = rook.run(&["run", "beta worth finding"]);
+    let sessions = rook.json(&["session", "ls", "--all"]);
+    assert_eq!(sessions.as_array().unwrap().len(), 2, "both failed runs leave a session");
+    let alpha = sessions
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["title"].as_str().is_some_and(|t| t.starts_with("alpha")))
+        .expect("the alpha session");
+    let id = alpha["id"].as_str().unwrap().to_string();
+
+    let direct_search = rook.json(&["search", "worth finding"]);
+    let direct_show = rook.json(&["session", "show", &id]);
+    assert!(!direct_show.as_array().unwrap().is_empty(), "there is a transcript to compare");
+
+    let daemon = Daemon::start(&rook);
+
+    assert_eq!(rook.json(&["search", "worth finding"]), direct_search, "routed search must match");
+    assert_eq!(rook.json(&["session", "show", &id]), direct_show, "and so must the transcript");
+
+    let narrowed = rook.run(&["--json", "search", "worth finding", "--session", &id]);
+    assert!(narrowed.status.success(), "{}", String::from_utf8_lossy(&narrowed.stderr));
+    let note = String::from_utf8_lossy(&narrowed.stderr);
+    assert!(note.contains(&daemon.address), "it has to have gone over the API: {note}");
+    let hits = serde_json::from_slice::<serde_json::Value>(&narrowed.stdout).unwrap();
+    let text = hits.to_string();
+    assert!(text.contains("alpha"), "the session it was narrowed to is in the answer: {text}");
+    assert!(
+        !text.contains("beta"),
+        "and the other is not — a filter dropped on the way to the daemon widens the answer \
+         with nothing saying so: {text}"
+    );
+}
+
 #[test]
 fn the_store_is_readable_again_once_the_daemon_stops() {
     let rook = Rook::new();

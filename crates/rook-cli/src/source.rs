@@ -7,7 +7,8 @@
 use anyhow::{Context, Result, bail};
 use serde::de::DeserializeOwned;
 
-use rook_core::{Rook, SessionSummary, paths};
+use rook_core::search::Found;
+use rook_core::{Rook, SessionSummary, TranscriptEntry, paths};
 use rook_proto::Page;
 use rook_skills::SkillCard;
 use rook_store::StoreStats;
@@ -68,6 +69,58 @@ impl Source {
             Self::Daemon(d) => Ok(d.get::<Page<SkillCard>>("/api/skills")?.items),
         }
     }
+
+    /// Resolve `last`, a prefix, or a whole id, wherever the sessions come from.
+    pub fn session_named(&self, spec: &str, workspace: &std::path::Path) -> Result<u128> {
+        Ok(rook_core::session_named(spec, workspace, &self.sessions()?)?)
+    }
+
+    pub fn search(&self, query: &str, options: &rook_core::search::Search) -> Result<Found> {
+        match self {
+            Self::Local(rook) => Ok(rook.search(query, options)?),
+            Self::Daemon(d) => {
+                let mut path = format!("/api/search?q={}&limit={}", escaped(query), options.limit);
+                if let Some(session) = options.session {
+                    path.push_str(&format!("&session={}", rook_store::format_session_id(session)));
+                }
+                if options.conversation_only {
+                    path.push_str("&conversation=true");
+                }
+                d.get(&path)
+            }
+        }
+    }
+
+    pub fn transcript(
+        &self,
+        session: u128,
+        from: u64,
+        limit: usize,
+        max_body: usize,
+    ) -> Result<Vec<TranscriptEntry>> {
+        match self {
+            Self::Local(rook) => Ok(rook.transcript(session, from, limit, max_body)?),
+            Self::Daemon(d) => Ok(d
+                .get::<Page<TranscriptEntry>>(&format!(
+                    "/api/sessions/{}/transcript?from={from}&limit={limit}&max_body={max_body}",
+                    rook_store::format_session_id(session)
+                ))?
+                .items),
+        }
+    }
+}
+
+/// A query safe to paste into a url. Written out for the same reason as the one
+/// in `rook-tools`: one rule, and the crate that does it properly is a
+/// dependency for ten lines.
+fn escaped(query: &str) -> String {
+    query
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+            other => format!("%{other:02X}"),
+        })
+        .collect()
 }
 
 fn is_locked(e: &rook_core::CoreError) -> bool {

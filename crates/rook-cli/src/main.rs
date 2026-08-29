@@ -366,9 +366,14 @@ fn main() -> Result<()> {
         Some(Command::Mcp(c)) => cmd_mcp(cli.workspace, c, cli.json),
         Some(Command::Memory(c)) => cmd_memory(&Rook::open(cli.workspace)?, c, cli.json),
         Some(Command::Lsp(c)) => cmd_lsp(cli.workspace, c, cli.json),
-        Some(Command::Search { query, session, conversation, limit }) => {
-            cmd_search(&Rook::open(cli.workspace)?, &query.join(" "), session, conversation, limit, cli.json)
-        }
+        Some(Command::Search { query, session, conversation, limit }) => cmd_search(
+            &Source::open(cli.workspace)?,
+            &query.join(" "),
+            session,
+            conversation,
+            limit,
+            cli.json,
+        ),
     }
 }
 
@@ -1140,32 +1145,39 @@ fn parse_kind(s: &str) -> Result<Kind> {
     })
 }
 
+fn show_transcript(entries: &[rook_core::TranscriptEntry], json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(entries)?);
+        return Ok(());
+    }
+    for e in entries {
+        println!(
+            "── #{:<4} {:<12} {:<20} {} → {} {}",
+            e.seq,
+            e.kind,
+            e.label.chars().take(20).collect::<String>(),
+            fmt::bytes(e.bytes),
+            fmt::bytes(e.stored_bytes),
+            if e.truncated { "(elided)" } else { "" }
+        );
+        println!("{}\n", e.body);
+    }
+    Ok(())
+}
+
 fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, json: bool) -> Result<()> {
+    // Both read, and both are what somebody wants while the daemon is up.
     if let SessionCmd::Ls { all } = cmd {
         return show_sessions(&source.sessions()?, workspace, all, json);
     }
+    if let SessionCmd::Show { id, from, limit, max_body } = &cmd {
+        let session = source.session_named(id, workspace)?;
+        let entries = source.transcript(session, *from, *limit, *max_body)?;
+        return show_transcript(&entries, json);
+    }
     let rook = source.local()?;
     match cmd {
-        SessionCmd::Ls { .. } => unreachable!("routed above"),
-        SessionCmd::Show { id, from, limit, max_body } => {
-            let entries = rook.transcript(rook.session_named(&id)?, from, limit, max_body)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&entries)?);
-                return Ok(());
-            }
-            for e in entries {
-                println!(
-                    "── #{:<4} {:<12} {:<20} {} → {} {}",
-                    e.seq,
-                    e.kind,
-                    e.label.chars().take(20).collect::<String>(),
-                    fmt::bytes(e.bytes),
-                    fmt::bytes(e.stored_bytes),
-                    if e.truncated { "(elided)" } else { "" }
-                );
-                println!("{}\n", e.body);
-            }
-        }
+        SessionCmd::Ls { .. } | SessionCmd::Show { .. } => unreachable!("routed above"),
         SessionCmd::Context { id, window } => {
             // A constant here reported a percentage of a window the agent does
             // not have: a session at 55% of a 6k model reads as 1% of 128k.
@@ -1508,7 +1520,7 @@ fn cmd_skills(source: &Source, cmd: SkillCmd, json: bool) -> Result<()> {
 }
 
 fn cmd_search(
-    rook: &Rook,
+    source: &Source,
     query: &str,
     session: Option<String>,
     conversation: bool,
@@ -1521,7 +1533,7 @@ fn cmd_search(
         conversation_only: conversation,
         ..Default::default()
     };
-    let found = rook.search(query, &options)?;
+    let found = source.search(query, &options)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&found)?);
         return Ok(());

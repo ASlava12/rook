@@ -367,6 +367,13 @@ struct SearchQuery {
     q: String,
     #[serde(default = "default_limit")]
     limit: usize,
+    /// The same two filters the command line has. Without them a client routing
+    /// a narrowed search through here would get a wider answer and no sign that
+    /// its narrowing was dropped.
+    #[serde(default)]
+    session: Option<String>,
+    #[serde(default)]
+    conversation: bool,
 }
 
 async fn search(
@@ -374,7 +381,18 @@ async fn search(
     Query(query): Query<SearchQuery>,
 ) -> ApiResult<rook_core::search::Found> {
     let rook = s.rook.read().await;
-    let options = rook_core::search::Search { limit: query.limit.min(200), ..Default::default() };
+    let session = match query.session.as_deref() {
+        Some(spec) => Some(rook_store::parse_session_id(spec).ok_or_else(|| {
+            Fail(StatusCode::BAD_REQUEST, ApiError::new("bad_request", "not a session id"))
+        })?),
+        None => None,
+    };
+    let options = rook_core::search::Search {
+        limit: query.limit.min(200),
+        session,
+        conversation_only: query.conversation,
+        ..Default::default()
+    };
     Ok(Json(rook.search(&query.q, &options)?))
 }
 
