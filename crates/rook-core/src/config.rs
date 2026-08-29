@@ -230,6 +230,10 @@ pub struct SandboxConfig {
     /// the store's own pruning never sees them; `store maintain` removes the
     /// oldest past this.
     pub max_output_files: usize,
+    /// How many commands may be left running at once. Each is a process nobody
+    /// is waiting on, so the cap is what stops a turn from filling the machine
+    /// with servers.
+    pub max_background_jobs: usize,
     pub command_timeout_secs: u64,
     /// Lets file tools read and write outside the workspace, including through
     /// a symlink that leads out of it. Off by default: a workspace that cannot
@@ -327,6 +331,7 @@ impl Default for SandboxConfig {
             max_output_bytes: 256 * 1024,
             max_spill_bytes: 64 * 1024 * 1024,
             max_output_files: 100,
+            max_background_jobs: 4,
             command_timeout_secs: 120,
             allow_outside_workspace: false,
         }

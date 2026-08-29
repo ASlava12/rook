@@ -215,6 +215,7 @@ async fn turn(
             Shared {
                 servers: rook_core::agent::servers_for(&rook.config, &rook.workspace),
                 mcp: Arc::new(rook.connect_mcp().await),
+                jobs: rook_core::agent::jobs_for(&rook.config),
             }
         })
         .await;
@@ -224,7 +225,7 @@ async fn turn(
     agent.effort = connection.settings.effort();
     agent.approver = connection.approver;
     agent.ask_via(connection.asker);
-    rook_core::agent::equip(&mut agent, shared.servers.clone(), &shared.mcp);
+    rook_core::agent::equip(&mut agent, shared.servers.clone(), &shared.mcp, shared.jobs.clone());
 
     let emit = outbound.clone();
     let result = agent
@@ -277,6 +278,7 @@ fn report(outbound: &mpsc::UnboundedSender<ChatEvent>, message: String) {
 struct Shared {
     servers: Arc<rook_core::lsp::Servers>,
     mcp: Arc<rook_core::McpSession>,
+    jobs: Arc<rook_tools::jobs::Jobs>,
 }
 
 /// What the browser may change for the rest of the connection.

@@ -42,12 +42,29 @@ pub fn equip(
     agent: &mut AgentLoop<'_>,
     servers: std::sync::Arc<crate::lsp::Servers>,
     mcp: &crate::McpSession,
+    jobs: std::sync::Arc<rook_tools::jobs::Jobs>,
 ) {
     agent.servers = servers.clone();
     crate::lsp::register(&mut agent.tools, servers);
     for (server, tools) in &mcp.servers {
         agent.tools.register_server(server.clone(), tools.clone());
     }
+    // Registered only where there is a registry behind it, the way `ask` is
+    // registered only where somebody can answer.
+    agent.tools.register(std::sync::Arc::new(rook_tools::jobs::JobTool));
+    agent.tool_ctx.jobs = Some(jobs);
+}
+
+/// Build the registry of commands left running.
+///
+/// Exposed for the same reason as [`policy_for`]: it belongs to the front end,
+/// and one built per turn would kill everything in it between one turn and the
+/// next — which is every background command there is.
+pub fn jobs_for(config: &Config) -> std::sync::Arc<rook_tools::jobs::Jobs> {
+    std::sync::Arc::new(rook_tools::jobs::Jobs::new(
+        config.sandbox.max_background_jobs,
+        config.sandbox.max_output_bytes,
+    ))
 }
 
 /// Build the language-server pool from configuration.

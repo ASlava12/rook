@@ -15,6 +15,7 @@ pub mod ask;
 pub mod crates;
 pub mod exec;
 pub mod files;
+pub mod jobs;
 pub mod mcp;
 pub mod pending;
 pub mod policy;
@@ -128,6 +129,9 @@ pub struct ToolContext {
     pub files: Option<Arc<dyn Files>>,
     /// Set by a front end that has a terminal of its own to run in.
     pub terminals: Option<Arc<dyn Terminals>>,
+    /// Commands left running. Built once by the front end, because a registry
+    /// built per turn would kill everything in it between one turn and the next.
+    pub jobs: Option<Arc<jobs::Jobs>>,
     /// Where the whole of a runaway command's output is kept. `None` discards
     /// the middle, which is what happened before there was anywhere to put it.
     pub spill_dir: Option<PathBuf>,
@@ -144,6 +148,7 @@ impl std::fmt::Debug for ToolContext {
             .field("allow_outside_workspace", &self.allow_outside_workspace)
             .field("spill_dir", &self.spill_dir)
             .field("max_spill_bytes", &self.max_spill_bytes)
+            .field("jobs", &self.jobs.is_some())
             .field("files", &self.files.is_some())
             .field("terminals", &self.terminals.is_some())
             .finish()
@@ -187,6 +192,7 @@ impl ToolContext {
             allow_outside_workspace: false,
             files: None,
             terminals: None,
+            jobs: None,
             spill_dir: None,
             max_spill_bytes: 0,
         }
@@ -281,7 +287,7 @@ fn boundary_at_or_before(text: &str, mut i: usize) -> usize {
     i
 }
 
-fn boundary_at_or_after(text: &str, mut i: usize) -> usize {
+pub(crate) fn boundary_at_or_after(text: &str, mut i: usize) -> usize {
     while i < text.len() && !text.is_char_boundary(i) {
         i += 1;
     }

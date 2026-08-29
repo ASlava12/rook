@@ -702,6 +702,7 @@ fn cmd_run(
             &mut agent,
             rook_core::agent::servers_for(&rook.config, &rook.workspace),
             &mcp,
+            rook_core::agent::jobs_for(&rook.config),
         );
         for (name, error) in &mcp.failures {
             eprintln!("mcp {name}: {error}");

@@ -244,6 +244,7 @@ impl App {
                 policy: rook_core::agent::policy_for(&rook.config),
                 effort: std::cell::Cell::new(rook.config.agent.effort()),
                 servers: rook_core::agent::servers_for(&rook.config, &rook.workspace),
+                jobs: rook_core::agent::jobs_for(&rook.config),
                 // Connected once: every turn would otherwise spawn each server,
                 // wait out its handshake and kill it again.
                 mcp,
@@ -538,6 +539,7 @@ impl App {
         let effort = self.shared.effort.get();
         let servers = self.shared.servers.clone();
         let mcp = self.shared.mcp.clone();
+        let jobs = self.shared.jobs.clone();
         let session = self.chat.session;
         let yes = self.shared.yes;
 
@@ -586,7 +588,7 @@ impl App {
                 agent.approver = approver;
                 agent.ask_via(asker);
             }
-            rook_core::agent::equip(&mut agent, servers, &mcp);
+            rook_core::agent::equip(&mut agent, servers, &mcp, jobs);
 
             let emit = to_loop.clone();
             let result = agent

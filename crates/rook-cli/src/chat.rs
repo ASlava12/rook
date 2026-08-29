@@ -76,6 +76,7 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
         // Likewise the language servers: a pool dropped per turn restarts
         // rust-analyzer, and it indexes the workspace every time it starts.
         servers: rook_core::agent::servers_for(&rook.config, &rook.workspace),
+        jobs: rook_core::agent::jobs_for(&rook.config),
         effort: std::cell::Cell::new(rook.config.agent.effort()),
         yes,
     };
@@ -158,6 +159,9 @@ pub struct Session {
     pub mcp: std::sync::Arc<rook_core::McpSession>,
     pub policy: std::sync::Arc<rook_tools::policy::Policy>,
     pub servers: std::sync::Arc<rook_core::lsp::Servers>,
+    /// Commands left running, for the same reason: a registry per turn would
+    /// kill them between one turn and the next.
+    pub jobs: std::sync::Arc<rook_tools::jobs::Jobs>,
     /// The policy holds the mode; effort has nowhere else to live and is worth
     /// changing per task, so it sits beside it for the whole session.
     pub effort: std::cell::Cell<rook_llm::Effort>,
@@ -181,7 +185,7 @@ async fn turn(
         agent.policy = shared.policy.clone();
         agent.approver = std::sync::Arc::new(crate::approve::Terminal);
     }
-    rook_core::agent::equip(&mut agent, shared.servers.clone(), &shared.mcp);
+    rook_core::agent::equip(&mut agent, shared.servers.clone(), &shared.mcp, shared.jobs.clone());
     agent.effort = shared.effort.get();
 
     let mut out = std::io::stdout();

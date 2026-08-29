@@ -757,6 +757,16 @@ recorded so the design question survives the session that raised it.
    readable by design, which is the wrong property here) and what stops a tool
    from being asked to print one.
 
+- **Commands that keep running** — `run_command` waits, caps and kills at a
+  timeout, so a dev server or a watcher could only be run by not running it.
+  `background: true` answers at once with an id and the `job` tool reads or stops
+  it. The registry is the front end's, like the language-server pool, and takes
+  its processes with it when it goes. Bounded three ways: how many run at once,
+  how much each keeps, and how many finished ones are held for their output.
+  Adding it put the advertised tool list fifteen tokens over
+  `the_whole_advertised_tool_list_stays_within_a_budget`, which was the guard
+  doing its job; two descriptions were trimmed rather than the number raised.
+  5 tests.
 - **Seeing what an approval is for** — a write asked about by path is a write
   approved blind, which is most of the value of asking gone. `Tool::preview`
   gives the diff a write or an edit would make, built by applying the very edits

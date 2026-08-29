@@ -140,7 +140,12 @@ fn equipping_a_loop_gives_it_both_halves() {
         }],
         dir.path(),
     );
-    rook_core::agent::equip(&mut agent, servers, &rook_core::McpSession::default());
+    rook_core::agent::equip(
+        &mut agent,
+        servers,
+        &rook_core::McpSession::default(),
+        rook_core::agent::jobs_for(&rook.config),
+    );
 
     let after: Vec<String> = agent.tools.specs().into_iter().map(|t| t.name).collect();
     assert!(after.len() > before, "the language-server tools are the ones being counted: {after:?}");

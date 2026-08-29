@@ -27,7 +27,11 @@ impl Tool for RunCommand {
                 "properties": {
                     "command": { "type": "string" },
                     "cwd": { "type": "string", "description": "Working directory, relative to the workspace." },
-                    "timeout_secs": { "type": "integer" }
+                    "timeout_secs": { "type": "integer" },
+                    "background": {
+                        "type": "boolean",
+                        "description": "Leave it running and answer at once with a job id."
+                    }
                 },
                 "required": ["command"]
             }),
@@ -50,6 +54,15 @@ impl Tool for RunCommand {
             .filter(|secs| *secs > 0)
             .map(std::time::Duration::from_secs)
             .unwrap_or(ctx.command_timeout);
+
+        if args.get("background").and_then(|b| b.as_bool()).unwrap_or(false) {
+            let Some(jobs) = &ctx.jobs else {
+                let why = "this front end does not keep background commands — give it a                            `timeout_secs` long enough instead";
+                return Ok(ToolOutcome::error(why.to_string()));
+            };
+            let id = jobs.start(&command, &cwd)?;
+            return Ok(ToolOutcome::ok(format!("started {id}; `job` reads what it prints")).with("job", id));
+        }
 
         if let Some(terminals) = &ctx.terminals {
             return elsewhere(terminals.as_ref(), &command, &cwd, ctx, timeout).await;
@@ -242,7 +255,7 @@ async fn elsewhere(
     .with("exit_code", i64::from(ran.exit_code)))
 }
 
-fn spawn_shell(command: &str, cwd: &std::path::Path) -> Result<tokio::process::Child> {
+pub(crate) fn spawn_shell(command: &str, cwd: &std::path::Path) -> Result<tokio::process::Child> {
     #[cfg(windows)]
     // `cmd /C` rather than PowerShell: it is always present, and skills that
     // need PowerShell can invoke it explicitly. `raw_arg` rather than `arg`:
@@ -276,12 +289,6 @@ fn spawn_shell(command: &str, cwd: &std::path::Path) -> Result<tokio::process::C
     cmd.spawn().map_err(|e| ToolError::Io { path: cwd.to_path_buf(), source: e })
 }
 
-/// SIGKILL to the whole group. Windows has no equivalent that is not a job
-/// object, so there `kill_on_drop` takes the shell and its children are left —
-/// the timeout still reports what happened rather than claiming otherwise.
-/// The same sentence wherever a command ran out of time: what it had printed is
-/// the part worth reading, and a model told only that it timed out retries the
-/// same command against the same limit.
 /// What to say about the kept copy, and where it is — or nothing, once the file
 /// has been removed.
 ///
@@ -301,6 +308,9 @@ fn settle(
     Some((spill.note(), spill.path.display().to_string()))
 }
 
+/// The same sentence wherever a command ran out of time: what it had printed is
+/// the part worth reading, and a model told only that it timed out retries the
+/// same command against the same limit.
 fn timed_out(limit: std::time::Duration, killed: bool, printed: &str) -> String {
     format!(
         "command timed out after {}s{} — pass a larger `timeout_secs` if it needs longer. \
@@ -321,7 +331,10 @@ fn joined(out: &Ends, err: &Ends) -> String {
     combined
 }
 
-fn kill_group(pid: Option<u32>) -> bool {
+/// SIGKILL to the whole group. Windows has no equivalent that is not a job
+/// object, so there `kill_on_drop` takes the shell and its children are left —
+/// the timeout still reports what happened rather than claiming otherwise.
+pub(crate) fn kill_group(pid: Option<u32>) -> bool {
     match pid {
         #[cfg(unix)]
         Some(pid) => unsafe { libc::kill(-(pid as i32), libc::SIGKILL) == 0 },

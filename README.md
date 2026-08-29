@@ -149,6 +149,26 @@ Restoring is the one step that writes over something, and what it writes over ma
 be an edit made by hand that no checkpoint holds. So the state on disk is captured
 first, onto the fork it just made; the command prints the rewind that puts it back.
 
+### Something that keeps running
+
+`run_command` waits, caps the output and kills at the timeout, which is right for
+a build and wrong for a server. `background: true` starts it and answers at once
+with an id; `job` reads what it has printed since, and stops it:
+
+```
+run_command  { "command": "npm run dev", "background": true }   → job001
+job          { "id": "job001" }                                 → what it printed
+job          { "id": "job001", "stop": true }
+```
+
+The registry belongs to the front end rather than to a turn — one built per turn
+would kill everything in it between one turn and the next — and it takes the
+processes with it when it goes, because a dev server that outlived the agent that
+started it is one nobody knows to stop. `[sandbox] max_background_jobs` caps how
+many run at once and the refusal names which to stop; each keeps the last
+`max_output_bytes` it printed, since a server's interesting line is its most
+recent.
+
 ### Asking what a crate offers
 
 ```

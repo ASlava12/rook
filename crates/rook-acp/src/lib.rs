@@ -67,6 +67,7 @@ where
         Arc::new(Settings { policy: policy.clone(), effort: RwLock::new(rook.config.agent.effort()) });
     let servers = rook_core::agent::servers_for(&rook.config, &rook.workspace);
     let mcp = Arc::new(rook.connect_mcp().await);
+    let jobs = rook_core::agent::jobs_for(&rook.config);
     // Filled in by `initialize`, and read when a turn starts: the client may
     // serve its unsaved buffers, and the protocol forbids asking if it cannot.
     let client_files: Arc<Mutex<ClientFiles>> = Default::default();
@@ -112,7 +113,12 @@ where
                     handle: tokio::spawn(prompt(
                         rook.clone(),
                         peer.clone(),
-                        Shared { policy: policy.clone(), servers: servers.clone(), mcp: mcp.clone() },
+                        Shared {
+                            policy: policy.clone(),
+                            servers: servers.clone(),
+                            mcp: mcp.clone(),
+                            jobs: jobs.clone(),
+                        },
                         TurnSetup { client: *client_files.lock().await, effort },
                         id,
                         params,
@@ -279,6 +285,7 @@ struct Shared {
     policy: Arc<rook_tools::policy::Policy>,
     servers: Arc<rook_core::lsp::Servers>,
     mcp: Arc<rook_core::McpSession>,
+    jobs: Arc<rook_tools::jobs::Jobs>,
 }
 
 async fn prompt(
@@ -319,7 +326,7 @@ async fn prompt(
 
     let mut agent = AgentLoop::new(&rook, provider.into(), session);
     agent.policy = shared.policy.clone();
-    rook_core::agent::equip(&mut agent, shared.servers.clone(), &shared.mcp);
+    rook_core::agent::equip(&mut agent, shared.servers.clone(), &shared.mcp, shared.jobs.clone());
     let editor = Arc::new(EditorApprover {
         peer: peer.clone(),
         session: request.session_id.clone(),
