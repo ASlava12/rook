@@ -13,6 +13,14 @@ use std::io::Read;
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::process::{Child, Command, Stdio};
 
+/// How long a wait may take before it is a failure rather than a slow machine.
+///
+/// Not a performance claim: every wait here ends the moment the thing it is
+/// waiting for arrives, so this only decides how long a genuinely stuck app
+/// hangs the suite. It was twenty seconds, and a FreeBSD VM running nine of
+/// these at once starved one of them past that while it was still drawing.
+const PATIENCE: std::time::Duration = std::time::Duration::from_secs(60);
+
 struct Pty {
     master: std::fs::File,
     child: Child,
@@ -57,9 +65,9 @@ impl Pty {
     /// a store, probing the machine for what skills apply — lands in that gap.
     fn screen(&mut self, cols: usize, rows: usize) -> Vec<String> {
         let painted = |seen: &str| grid(seen, cols, rows).iter().filter(|line| !line.is_empty()).count();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let deadline = std::time::Instant::now() + PATIENCE;
         while painted(&self.seen) <= 3 && std::time::Instant::now() < deadline {
-            assert!(self.read_more(200), "the app drew nothing at all");
+            assert!(self.read_more(200), "the pty closed before the app drew a frame");
         }
         // A redraw emits only the cells that changed, so keep accumulating for a
         // moment rather than stopping at the first frame that looks complete.
@@ -76,7 +84,7 @@ impl Pty {
     /// full test run that guess is wrong: waiting for the thing being asserted
     /// is the same lesson as waiting for a frame rather than for a byte.
     fn screen_showing(&mut self, cols: usize, rows: usize, wanted: &str) -> Vec<String> {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let deadline = std::time::Instant::now() + PATIENCE;
         loop {
             let screen = self.screen(cols, rows);
             if screen.iter().any(|line| line.contains(wanted)) {
@@ -103,8 +111,9 @@ impl Pty {
         format!("{} bytes read, child {alive}", self.seen.len())
     }
 
-    /// Whether anything arrived, so a closed pty ends the wait instead of
-    /// spinning it out to the deadline.
+    /// Whether the pty is still open, so a child that exited ends the wait
+    /// instead of spinning it out to the deadline. Silence is not closure: a
+    /// slow machine has not drawn *yet*.
     fn read_more(&mut self, timeout_ms: i32) -> bool {
         let mut chunk = [0u8; 8192];
         if !readable(&self.master, timeout_ms) {

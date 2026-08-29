@@ -152,7 +152,9 @@ alternate screen writes before anything is drawn, so work the app does between
 the two lands in the gap and a byte-triggered capture reads a blank screen. And
 after a keypress, wait for the content being asserted rather than for a settling
 window — a window is a guess about redraw latency, and under a full `cargo xtask
-ci` that guess is wrong often enough to look like a product failure.
+ci` that guess is wrong often enough to look like a product failure. The deadline
+on those waits is not a performance claim either: nine of these run at once and
+the FreeBSD runner is a VM, so it is only how long a stuck app hangs the suite.
 
 ## Storage changes
 
