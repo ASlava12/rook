@@ -377,14 +377,23 @@ fn a_transcript_and_a_search_read_the_same_through_the_daemon() {
         .expect("the alpha session");
     let id = alpha["id"].as_str().unwrap().to_string();
 
+    // Everything seeded before anything is measured: a search reports how many
+    // objects it scanned, and a fact written between the two readings is one
+    // more object.
+    rook.ok(&["memory", "add", "the daemon was up", "--tag", "note"]);
     let direct_search = rook.json(&["search", "worth finding"]);
     let direct_show = rook.json(&["session", "show", &id]);
+    let direct_diff = rook.json(&["session", "diff", &id]);
+    let direct_memory = rook.json(&["memory", "ls"]);
     assert!(!direct_show.as_array().unwrap().is_empty(), "there is a transcript to compare");
+    assert!(!direct_memory.as_array().unwrap().is_empty(), "and a fact to compare");
 
     let daemon = Daemon::start(&rook);
 
     assert_eq!(rook.json(&["search", "worth finding"]), direct_search, "routed search must match");
     assert_eq!(rook.json(&["session", "show", &id]), direct_show, "and so must the transcript");
+    assert_eq!(rook.json(&["session", "diff", &id]), direct_diff, "and the diff");
+    assert_eq!(rook.json(&["memory", "ls"]), direct_memory, "and what it remembers");
 
     let narrowed = rook.run(&["--json", "search", "worth finding", "--session", &id]);
     assert!(narrowed.status.success(), "{}", String::from_utf8_lossy(&narrowed.stderr));

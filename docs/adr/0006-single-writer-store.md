@@ -19,6 +19,15 @@ The index allows one writer at a time. Stop the daemon, or read through its
 API at http://127.0.0.1:7717 instead.
 ```
 
+## What routes so far
+
+`store stat`, `session ls`, `session show`, `session diff`, `skills ls`, `search`
+and `memory ls` go over the API when the store is held. What is left is
+`store ls`, `store cat`, `session context` and the skill detail — each needs
+either an endpoint it does not have or a printer that works from the API's shape
+rather than the store's types, which is the work below and not a different
+decision.
+
 ## Why not fix it now
 
 The fix is for the CLI to detect a running daemon and route through its HTTP API,

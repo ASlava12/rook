@@ -263,13 +263,19 @@ struct MemoryQuery {
     /// Rank against this instead of listing, the way a turn would recall.
     #[serde(default)]
     q: Option<String>,
+    #[serde(default)]
+    workspace: Option<std::path::PathBuf>,
 }
 
 async fn memory(
     State(s): State<Shared>,
     Query(query): Query<MemoryQuery>,
 ) -> ApiResult<Page<rook_core::Fact>> {
-    let rook = s.rook.read().await;
+    // Scoped to the project asked about rather than to the daemon's own. A fact
+    // is remembered against a workspace, so answering from the wrong one is not
+    // a smaller answer but a different question.
+    let engine = s.engine_for(query.workspace.as_deref()).await.map_err(CoreError::Other)?;
+    let rook = engine.read().await;
     let book = rook.memory()?;
     let workspace = rook.workspace.display().to_string();
     let facts: Vec<rook_core::Fact> = match &query.q {

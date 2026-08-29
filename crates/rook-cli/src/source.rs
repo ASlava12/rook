@@ -91,6 +91,29 @@ impl Source {
         }
     }
 
+    pub fn changes(&self, session: u128, with_diff: bool) -> Result<rook_core::changes::Changes> {
+        match self {
+            Self::Local(rook) => Ok(rook.changes(session, with_diff)?),
+            Self::Daemon(d) => d.get(&format!(
+                "/api/sessions/{}/changes?diff={with_diff}",
+                rook_store::format_session_id(session)
+            )),
+        }
+    }
+
+    /// Every fact the agent holds, unscoped.
+    ///
+    /// Scoping is left to the caller so that both paths do it with the same
+    /// code: a listing that narrowed differently depending on where it read from
+    /// would be a difference the user can see, which is the one thing routing is
+    /// not allowed to be.
+    pub fn memory(&self) -> Result<Vec<rook_core::Fact>> {
+        match self {
+            Self::Local(rook) => Ok(rook.memory()?.facts.clone()),
+            Self::Daemon(d) => Ok(d.get::<Page<rook_core::Fact>>("/api/memory?all=true")?.items),
+        }
+    }
+
     pub fn transcript(
         &self,
         session: u128,

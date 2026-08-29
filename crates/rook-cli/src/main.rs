@@ -364,7 +364,10 @@ fn main() -> Result<()> {
         Some(Command::Skills(c)) => cmd_skills(&Source::open(cli.workspace)?, c, cli.json),
         Some(Command::Checkpoint(c)) => cmd_checkpoint(&Rook::open(cli.workspace)?, c, cli.json),
         Some(Command::Mcp(c)) => cmd_mcp(cli.workspace, c, cli.json),
-        Some(Command::Memory(c)) => cmd_memory(&Rook::open(cli.workspace)?, c, cli.json),
+        Some(Command::Memory(c)) => {
+            let here = workspace_of(&cli.workspace);
+            cmd_memory(&Source::open(cli.workspace)?, c, &here, cli.json)
+        }
         Some(Command::Lsp(c)) => cmd_lsp(cli.workspace, c, cli.json),
         Some(Command::Search { query, session, conversation, limit }) => cmd_search(
             &Source::open(cli.workspace)?,
@@ -1145,6 +1148,69 @@ fn parse_kind(s: &str) -> Result<Kind> {
     })
 }
 
+fn show_memory(facts: &[&rook_core::Fact], held: &[rook_core::Fact], all: bool, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(&facts)?);
+        return Ok(());
+    }
+    let rows: Vec<Vec<String>> = facts
+        .iter()
+        .map(|f| {
+            vec![
+                f.id.clone(),
+                if f.pinned { "pin".into() } else { String::new() },
+                f.scope.label().rsplit('/').next().unwrap_or("global").to_string(),
+                f.tags.join(","),
+                f.text.chars().take(70).collect(),
+            ]
+        })
+        .collect();
+    print!("{}", fmt::table(&["id", "", "scope", "tags", "fact"], &rows));
+    if !all && facts.len() < held.len() {
+        println!("\n{} more scoped to other workspaces (--all)", held.len() - facts.len());
+    }
+    // Pinning wins over relevance and not over the budget, so past this point
+    // pinning one more fact costs another one its place. Read from the
+    // configuration rather than from an engine, which a routed listing has not
+    // opened.
+    let budget = rook_core::Config::load()?.memory.context_budget_tokens;
+    let pinned: usize = facts.iter().filter(|f| f.pinned).map(|f| f.tokens()).sum();
+    if pinned > budget {
+        println!(
+            "\npinned facts come to ~{pinned} tokens against a recall budget of {budget} \
+             — some of them will not reach the model"
+        );
+    }
+    Ok(())
+}
+
+fn show_changes(changes: &rook_core::changes::Changes, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(&changes)?);
+        return Ok(());
+    }
+    if changes.touched() == 0 {
+        println!("this session changed nothing on disk");
+        return Ok(());
+    }
+    for file in changes.files.iter().filter(|f| f.change != rook_core::changes::Change::Unchanged) {
+        println!("{} {}  +{} -{}", file.change.sigil(), file.path, file.lines_added, file.lines_removed);
+        if let Some(diff) = &file.diff {
+            for line in diff.lines() {
+                let colour = match line.chars().next() {
+                    Some('+') => "\x1b[32m",
+                    Some('-') => "\x1b[31m",
+                    Some('@') => "\x1b[36m",
+                    _ => "",
+                };
+                println!("  {colour}{line}\x1b[0m");
+            }
+        }
+    }
+    println!("\n{}", changes.summary());
+    Ok(())
+}
+
 fn show_transcript(entries: &[rook_core::TranscriptEntry], json: bool) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(entries)?);
@@ -1175,9 +1241,15 @@ fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, json: bool) -
         let entries = source.transcript(session, *from, *limit, *max_body)?;
         return show_transcript(&entries, json);
     }
+    if let SessionCmd::Diff { id, stat } = &cmd {
+        let session = source.session_named(id, workspace)?;
+        return show_changes(&source.changes(session, !stat)?, json);
+    }
     let rook = source.local()?;
     match cmd {
-        SessionCmd::Ls { .. } | SessionCmd::Show { .. } => unreachable!("routed above"),
+        SessionCmd::Ls { .. } | SessionCmd::Show { .. } | SessionCmd::Diff { .. } => {
+            unreachable!("routed above")
+        }
         SessionCmd::Context { id, window } => {
             // A constant here reported a percentage of a window the agent does
             // not have: a session at 55% of a 6k model reads as 1% of 128k.
@@ -1218,38 +1290,6 @@ fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, json: bool) -
                 })
                 .collect();
             print!("{}", fmt::table(&["kind", "events", "bytes", "tokens", ""], &rows));
-        }
-        SessionCmd::Diff { id, stat } => {
-            let changes = rook.changes(rook.session_named(&id)?, !stat)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&changes)?);
-                return Ok(());
-            }
-            if changes.touched() == 0 {
-                println!("this session changed nothing on disk");
-                return Ok(());
-            }
-            for file in changes.files.iter().filter(|f| f.change != rook_core::changes::Change::Unchanged) {
-                println!(
-                    "{} {}  +{} -{}",
-                    file.change.sigil(),
-                    file.path,
-                    file.lines_added,
-                    file.lines_removed
-                );
-                if let Some(diff) = &file.diff {
-                    for line in diff.lines() {
-                        let colour = match line.chars().next() {
-                            Some('+') => "\x1b[32m",
-                            Some('-') => "\x1b[31m",
-                            Some('@') => "\x1b[36m",
-                            _ => "",
-                        };
-                        println!("  {colour}{line}\x1b[0m");
-                    }
-                }
-            }
-            println!("\n{}", changes.summary());
         }
         SessionCmd::Goal { id, goal } => {
             let session = rook.session_named(&id)?;
@@ -1605,45 +1645,20 @@ fn cmd_lsp(workspace: Option<PathBuf>, cmd: LspCmd, json: bool) -> Result<()> {
     })
 }
 
-fn cmd_memory(rook: &Rook, cmd: MemoryCmd, json: bool) -> Result<()> {
-    let workspace = rook.workspace.display().to_string();
+fn cmd_memory(source: &Source, cmd: MemoryCmd, workspace: &Path, json: bool) -> Result<()> {
+    let workspace = workspace.display().to_string();
+    if let MemoryCmd::Ls { all } = cmd {
+        let held = source.memory()?;
+        let facts: Vec<_> = if all {
+            held.iter().collect()
+        } else {
+            held.iter().filter(|f| f.scope.applies_in(&workspace)).collect()
+        };
+        return show_memory(&facts, &held, all, json);
+    }
+    let rook = source.local()?;
     match cmd {
-        MemoryCmd::Ls { all } => {
-            let book = rook.memory()?;
-            let facts: Vec<_> =
-                if all { book.facts.iter().collect() } else { book.in_scope(&workspace).collect() };
-            if json {
-                println!("{}", serde_json::to_string_pretty(&facts)?);
-                return Ok(());
-            }
-            let rows: Vec<Vec<String>> = facts
-                .iter()
-                .map(|f| {
-                    vec![
-                        f.id.clone(),
-                        if f.pinned { "pin".into() } else { String::new() },
-                        f.scope.label().rsplit('/').next().unwrap_or("global").to_string(),
-                        f.tags.join(","),
-                        f.text.chars().take(70).collect(),
-                    ]
-                })
-                .collect();
-            print!("{}", fmt::table(&["id", "", "scope", "tags", "fact"], &rows));
-            if !all && facts.len() < book.facts.len() {
-                println!("\n{} more scoped to other workspaces (--all)", book.facts.len() - facts.len());
-            }
-            // Pinning wins over relevance and not over the budget, so past this
-            // point pinning one more fact costs another one its place.
-            let budget = rook.config.memory.context_budget_tokens;
-            let pinned: usize = facts.iter().filter(|f| f.pinned).map(|f| f.tokens()).sum();
-            if pinned > budget {
-                println!(
-                    "\npinned facts come to ~{pinned} tokens against a recall budget of {budget} \
-                     — some of them will not reach the model"
-                );
-            }
-        }
-
+        MemoryCmd::Ls { .. } => unreachable!("routed above"),
         MemoryCmd::Search { query } => {
             let book = rook.memory()?;
             let hits = rook_core::memory::search(book.in_scope(&workspace), &query.join(" "));
