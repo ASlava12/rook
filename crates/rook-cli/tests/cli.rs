@@ -385,6 +385,7 @@ fn a_transcript_and_a_search_read_the_same_through_the_daemon() {
     let direct_show = rook.json(&["session", "show", &id]);
     let direct_diff = rook.json(&["session", "diff", &id]);
     let direct_memory = rook.json(&["memory", "ls"]);
+    let direct_context = rook.json(&["session", "context", &id]);
     assert!(!direct_show.as_array().unwrap().is_empty(), "there is a transcript to compare");
     assert!(!direct_memory.as_array().unwrap().is_empty(), "and a fact to compare");
 
@@ -394,6 +395,7 @@ fn a_transcript_and_a_search_read_the_same_through_the_daemon() {
     assert_eq!(rook.json(&["session", "show", &id]), direct_show, "and so must the transcript");
     assert_eq!(rook.json(&["session", "diff", &id]), direct_diff, "and the diff");
     assert_eq!(rook.json(&["memory", "ls"]), direct_memory, "and what it remembers");
+    assert_eq!(rook.json(&["session", "context", &id]), direct_context, "and what it costs");
 
     let narrowed = rook.run(&["--json", "search", "worth finding", "--session", &id]);
     assert!(narrowed.status.success(), "{}", String::from_utf8_lossy(&narrowed.stderr));

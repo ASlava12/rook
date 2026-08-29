@@ -283,8 +283,7 @@ pub async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command
         },
 
         "context" => {
-            let window = rest.parse().unwrap_or(128_000);
-            let usage = rook.context_usage(*session, window)?;
+            let usage = rook.context_usage(*session, rest.parse().ok())?;
             let pct = usage.live_tokens as f64 / usage.usable.max(1) as f64 * 100.0;
             say!("~{} of {} usable tokens ({pct:.0}%)", usage.live_tokens, usage.usable);
             if usage.needs_compaction {

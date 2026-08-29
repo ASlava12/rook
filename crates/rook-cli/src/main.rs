@@ -1184,6 +1184,42 @@ fn show_memory(facts: &[&rook_core::Fact], held: &[rook_core::Fact], all: bool, 
     Ok(())
 }
 
+fn show_context(usage: &rook_core::ContextUsage, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(&usage)?);
+        return Ok(());
+    }
+    let pct = usage.live_tokens as f64 / usage.usable.max(1) as f64 * 100.0;
+    println!("window       {:>9}  (usable {}, compacts at {})", usage.window, usage.usable, usage.compact_at);
+    println!(
+        "in context   {:>9}  {:.0}% of usable {}",
+        usage.live_tokens,
+        pct,
+        if usage.needs_compaction { "— over the compaction threshold" } else { "" }
+    );
+    println!("ever logged  {:>9}  ({} compactions so far)", usage.logged_tokens, usage.compactions);
+    if usage.replay_from > 0 {
+        println!("replay from  {:>9}  everything before it is the last summary", usage.replay_from);
+    }
+    println!();
+    let max = usage.by_kind.iter().map(|(_, u)| u.tokens).max().unwrap_or(0) as u64;
+    let rows: Vec<Vec<String>> = usage
+        .by_kind
+        .iter()
+        .map(|(kind, u)| {
+            vec![
+                kind.clone(),
+                u.events.to_string(),
+                fmt::bytes(u.bytes),
+                format!("~{}", u.tokens),
+                fmt::bar(u.tokens as u64, max, 20),
+            ]
+        })
+        .collect();
+    print!("{}", fmt::table(&["kind", "events", "bytes", "tokens", ""], &rows));
+    Ok(())
+}
+
 fn show_changes(changes: &rook_core::changes::Changes, json: bool) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(&changes)?);
@@ -1245,52 +1281,16 @@ fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, json: bool) -
         let session = source.session_named(id, workspace)?;
         return show_changes(&source.changes(session, !stat)?, json);
     }
+    if let SessionCmd::Context { id, window } = &cmd {
+        let session = source.session_named(id, workspace)?;
+        return show_context(&source.context_usage(session, *window, workspace)?, json);
+    }
     let rook = source.local()?;
     match cmd {
-        SessionCmd::Ls { .. } | SessionCmd::Show { .. } | SessionCmd::Diff { .. } => {
-            unreachable!("routed above")
-        }
-        SessionCmd::Context { id, window } => {
-            // A constant here reported a percentage of a window the agent does
-            // not have: a session at 55% of a 6k model reads as 1% of 128k.
-            let window = window.unwrap_or_else(|| configured_window(rook));
-            let usage = rook.context_usage(rook.session_named(&id)?, window)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&usage)?);
-                return Ok(());
-            }
-            let pct = usage.live_tokens as f64 / usage.usable.max(1) as f64 * 100.0;
-            println!(
-                "window       {:>9}  (usable {}, compacts at {})",
-                usage.window, usage.usable, usage.compact_at
-            );
-            println!(
-                "in context   {:>9}  {:.0}% of usable {}",
-                usage.live_tokens,
-                pct,
-                if usage.needs_compaction { "— over the compaction threshold" } else { "" }
-            );
-            println!("ever logged  {:>9}  ({} compactions so far)", usage.logged_tokens, usage.compactions);
-            if usage.replay_from > 0 {
-                println!("replay from  {:>9}  everything before it is the last summary", usage.replay_from);
-            }
-            println!();
-            let max = usage.by_kind.iter().map(|(_, u)| u.tokens).max().unwrap_or(0) as u64;
-            let rows: Vec<Vec<String>> = usage
-                .by_kind
-                .iter()
-                .map(|(kind, u)| {
-                    vec![
-                        kind.clone(),
-                        u.events.to_string(),
-                        fmt::bytes(u.bytes),
-                        format!("~{}", u.tokens),
-                        fmt::bar(u.tokens as u64, max, 20),
-                    ]
-                })
-                .collect();
-            print!("{}", fmt::table(&["kind", "events", "bytes", "tokens", ""], &rows));
-        }
+        SessionCmd::Ls { .. }
+        | SessionCmd::Show { .. }
+        | SessionCmd::Diff { .. }
+        | SessionCmd::Context { .. } => unreachable!("routed above"),
         SessionCmd::Goal { id, goal } => {
             let session = rook.session_named(&id)?;
             if goal.is_empty() {
@@ -1744,14 +1744,6 @@ fn cmd_memory(source: &Source, cmd: MemoryCmd, workspace: &Path, json: bool) -> 
 
 /// What the agent would budget against: the override if there is one, else what
 /// the provider says its model holds.
-fn configured_window(rook: &Rook) -> usize {
-    rook.config.agent.context_window.unwrap_or_else(|| {
-        rook_llm::from_spec_with(&rook.config.agent.model, rook.config.agent.stream_idle(), None)
-            .map(|p| p.context_window())
-            .unwrap_or(128_000)
-    })
-}
-
 fn cmd_mcp(workspace: Option<PathBuf>, cmd: McpCmd, json: bool) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     runtime.block_on(async move {

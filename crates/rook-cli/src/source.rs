@@ -91,6 +91,30 @@ impl Source {
         }
     }
 
+    /// What a session costs in context. The workspace travels with the request:
+    /// the window is decided by the model that project configured.
+    pub fn context_usage(
+        &self,
+        session: u128,
+        window: Option<usize>,
+        workspace: &std::path::Path,
+    ) -> Result<rook_core::ContextUsage> {
+        match self {
+            Self::Local(rook) => Ok(rook.context_usage(session, window)?),
+            Self::Daemon(d) => {
+                let mut path = format!(
+                    "/api/sessions/{}/context?workspace={}",
+                    rook_store::format_session_id(session),
+                    escaped(&workspace.display().to_string())
+                );
+                if let Some(window) = window {
+                    path.push_str(&format!("&window={window}"));
+                }
+                d.get(&path)
+            }
+        }
+    }
+
     pub fn changes(&self, session: u128, with_diff: bool) -> Result<rook_core::changes::Changes> {
         match self {
             Self::Local(rook) => Ok(rook.changes(session, with_diff)?),

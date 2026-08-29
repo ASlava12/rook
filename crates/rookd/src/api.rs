@@ -27,6 +27,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/sessions", get(sessions))
         .route("/api/sessions/{id}/transcript", get(transcript))
         .route("/api/sessions/{id}/changes", get(changes))
+        .route("/api/sessions/{id}/context", get(context))
         .route("/api/sessions/{id}/goal", post(set_goal))
         .route("/api/sessions/{id}/rewind", post(rewind))
         .route("/api/memory", get(memory).post(forget))
@@ -241,6 +242,28 @@ struct DiffQuery {
 
 /// What a session did to the workspace, from its own checkpoints. The diffs are
 /// opt-in: a session that rewrote a large file is a large answer.
+async fn context(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+    Query(q): Query<ContextQuery>,
+) -> ApiResult<rook_core::ContextUsage> {
+    // Scoped like `/api/memory`: what fraction of the window a session fills
+    // depends on the model that project configured, and this daemon serves
+    // several projects.
+    let engine = s.engine_for(q.workspace.as_deref()).await.map_err(CoreError::Other)?;
+    let rook = engine.read().await;
+    Ok(Json(rook.context_usage(session_id(&id)?, q.window)?))
+}
+
+#[derive(serde::Deserialize)]
+struct ContextQuery {
+    /// Ask how the session would sit in a different model.
+    #[serde(default)]
+    window: Option<usize>,
+    #[serde(default)]
+    workspace: Option<std::path::PathBuf>,
+}
+
 async fn changes(
     State(s): State<Shared>,
     Path(id): Path<String>,
@@ -720,6 +743,26 @@ mod tests {
             let (status, _) = post(&f, path, body).await;
             assert!(status.is_client_error(), "{path} answered {status}");
         }
+    }
+
+    /// The denominator is the project's, not a constant: a session at 55% of a
+    /// 6k model reads as 1% of 128k, and this daemon serves several projects.
+    #[tokio::test]
+    async fn what_a_session_costs_is_measured_against_the_window_asked_for() {
+        let f = fixture();
+        let id = rook_store::format_session_id(f.session);
+
+        let (status, own) = get(&f, &format!("/api/sessions/{id}/context")).await;
+        assert_eq!(status, StatusCode::OK, "{own}");
+        let configured = f.state.rook.read().await.context_window();
+        assert_eq!(own["window"], configured, "the project's own window when none is named: {own}");
+
+        let (_, narrow) = get(&f, &format!("/api/sessions/{id}/context?window=6000")).await;
+        assert_eq!(narrow["window"], 6000, "{narrow}");
+        assert!(
+            narrow["usable"].as_u64().unwrap() < own["usable"].as_u64().unwrap(),
+            "a smaller window leaves less room: {narrow}"
+        );
     }
 
     #[tokio::test]

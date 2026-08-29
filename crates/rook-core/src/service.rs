@@ -613,11 +613,29 @@ impl Rook {
         Ok(out)
     }
 
+    /// How much context a turn in this project actually has.
+    ///
+    /// Configured, else what the provider says about the configured model, else
+    /// a guess. Here rather than in a front end because everything that reports
+    /// a percentage has to agree about the denominator: the chat REPL guessed
+    /// 128k while the same command in the CLI asked the provider, so the same
+    /// session read as two different fractions depending on where it was asked.
+    pub fn context_window(&self) -> usize {
+        self.config.agent.context_window.unwrap_or_else(|| {
+            rook_llm::from_spec_with(&self.config.agent.model, self.config.agent.stream_idle(), None)
+                .map(|p| p.context_window())
+                .unwrap_or(128_000)
+        })
+    }
+
     /// What a session is costing in context, broken down by what is in it.
     ///
     /// Answers the question every agent gets asked and few can: why is this
-    /// conversation nearly full, and of what.
-    pub fn context_usage(&self, session: u128, window: usize) -> Result<ContextUsage> {
+    /// conversation nearly full, and of what. `window` overrides what this
+    /// project's configuration says, for asking how the same session would sit
+    /// in a different model.
+    pub fn context_usage(&self, session: u128, window: Option<usize>) -> Result<ContextUsage> {
+        let window = window.unwrap_or_else(|| self.context_window());
         let budget = crate::context::ContextBudget::new(window, self.config.agent.compact_at);
         let mut by_kind: BTreeMap<String, KindUsage> = BTreeMap::new();
         let mut compactions = 0;

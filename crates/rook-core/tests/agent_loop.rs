@@ -377,7 +377,7 @@ async fn context_usage_separates_what_is_live_from_what_is_merely_stored() {
     agent.allow_everything_not_denied();
     agent.run("shrink it").await.unwrap();
 
-    let usage = f.rook.context_usage(session, 128_000).unwrap();
+    let usage = f.rook.context_usage(session, Some(128_000)).unwrap();
     assert!(usage.by_kind.iter().any(|(k, _)| k == "checkpoint"));
     assert!(
         usage.live_tokens < usage.logged_tokens,
@@ -847,14 +847,14 @@ async fn a_failed_summary_does_not_wedge_the_turn() {
 async fn context_usage_counts_only_what_survives_compaction() {
     let f = fixture();
     let session = long_session(&f, 40);
-    let before = f.rook.context_usage(session, 128_000).unwrap();
+    let before = f.rook.context_usage(session, Some(128_000)).unwrap();
 
     let provider = ScriptedProvider::new(vec![reply("## Done\nshort"), reply("ok")]);
     let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), session);
     agent.set_window_for_test(4_000);
     agent.run("go").await.unwrap();
 
-    let after = f.rook.context_usage(session, 128_000).unwrap();
+    let after = f.rook.context_usage(session, Some(128_000)).unwrap();
     assert!(
         after.live_tokens < before.live_tokens / 2,
         "compaction should cut what a turn carries: {} -> {}",
@@ -2024,14 +2024,14 @@ async fn what_context_reports_is_what_a_turn_actually_carries() {
     f.rook.log(session, rook_store::EventKind::UserMessage, "prompt", "the question").unwrap();
     f.rook.log(session, rook_store::EventKind::AssistantMessage, "m", "the answer").unwrap();
 
-    let before = f.rook.context_usage(session, 100_000).unwrap().live_tokens;
+    let before = f.rook.context_usage(session, Some(100_000)).unwrap().live_tokens;
 
     // Bookkeeping the model never sees: an aside, a failed load, a manifest.
     f.rook.log(session, rook_store::EventKind::Note, "aside", &"noise ".repeat(500)).unwrap();
     f.rook.log(session, rook_store::EventKind::Error, "load_skill", &"more ".repeat(500)).unwrap();
     f.rook.log(session, rook_store::EventKind::Checkpoint, "before", &"manifest ".repeat(500)).unwrap();
 
-    let after = f.rook.context_usage(session, 100_000).unwrap();
+    let after = f.rook.context_usage(session, Some(100_000)).unwrap();
 
     assert_eq!(after.live_tokens, before, "none of that reaches a turn, so none of it is its cost");
     assert!(after.logged_tokens > after.live_tokens, "but it is still what the store holds");
@@ -2046,7 +2046,7 @@ async fn the_reported_cost_matches_the_request_that_gets_built() {
 
     let provider = Arc::new(ScriptedProvider::new(vec![reply("ok")]));
     let mut agent = AgentLoop::new(&f.rook, provider.clone(), session);
-    let reported = f.rook.context_usage(session, 100_000).unwrap().live_tokens;
+    let reported = f.rook.context_usage(session, Some(100_000)).unwrap().live_tokens;
     agent.run("go").await.unwrap();
 
     let sent = provider.share();
