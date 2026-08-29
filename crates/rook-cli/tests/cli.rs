@@ -673,3 +673,32 @@ fn asking_a_language_server_where_none_applies_says_why() {
     assert!(said.contains("no language server applies here"), "{said}");
     assert!(said.contains("handles a file in"), "and what would have made one apply: {said}");
 }
+
+/// Everything `[web]` can be set to, and what doctor says about it. A setting
+/// that is on but unusable is the one worth catching before a turn finds out.
+#[test]
+fn doctor_says_what_the_web_configuration_will_actually_do() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let doctor = |config: &str| {
+        std::fs::write(home.path().join("config.toml"), config).unwrap();
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_rook"))
+            .env("ROOK_HOME", home.path())
+            .env_remove("BRAVE_API_KEY")
+            .args(["--workspace", workspace.path().to_str().unwrap(), "doctor"])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).to_string();
+        text.split("web:").nth(1).unwrap_or_default().split("\n\n").next().unwrap_or_default().to_string()
+    };
+
+    assert!(doctor("").contains("off"), "the default is off and should say so");
+    assert!(doctor("[web]\nenabled = true\n").contains("no search engine"));
+    assert!(
+        doctor("[web]\nenabled = true\nsearch = \"brave\"\n").contains("BRAVE_API_KEY"),
+        "named but unusable is the case worth catching before a turn does"
+    );
+    let searx = doctor("[web]\nenabled = true\nsearch = \"searxng\"\n");
+    assert!(searx.contains("web_search"), "{searx}");
+    assert!(searx.contains("searxng"), "{searx}");
+}

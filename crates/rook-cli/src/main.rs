@@ -455,6 +455,26 @@ fn cmd_doctor(rook: &Rook, json: bool) -> Result<()> {
         }
     }
 
+    println!();
+    println!("web:");
+    match rook.config.web.enabled {
+        false => println!("  off — `[web] enabled = true` offers `web_fetch`"),
+        true => {
+            println!("  ✓ web_fetch");
+            let engine = rook_tools::web::Engine::named(&rook.config.web.search, &rook.config.web.search_url);
+            match (rook.config.web.search.trim(), engine) {
+                ("", _) => println!("  · no search engine — set `[web] search` to searxng or brave"),
+                (named, None) => {
+                    println!("  ✗ {named}: named but unusable — brave needs BRAVE_API_KEY in the environment")
+                }
+                // Reachability is not asked here: a search engine that is down
+                // this second is a different failure from one misconfigured, and
+                // doctor should not stall on a network round trip.
+                (named, Some(_)) => println!("  ✓ web_search via {named}"),
+            }
+        }
+    }
+
     let (_, unusable) = rook_tools::policy::Policy::compile(
         rook.config.sandbox.mode,
         &rook.config.sandbox.allow,
