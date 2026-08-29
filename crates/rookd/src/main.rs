@@ -44,13 +44,15 @@ pub struct AppState {
     /// two together made a second project a second process — and the second
     /// process the one that could not open the store. Kept apart here: several
     /// projects run at once against one history, one memory and one search.
-    pub elsewhere: RwLock<std::collections::HashMap<std::path::PathBuf, Arc<RwLock<Rook>>>>,
+    pub elsewhere: RwLock<std::collections::HashMap<std::path::PathBuf, Project>>,
     pub started: std::time::Instant,
     /// Read once at startup rather than through the lock on every request: none
     /// of it changes while the process runs, and `/api/health` must be able to
     /// answer while a turn holds the store — a liveness check that waits reports
     /// a working daemon as a dead one.
     pub about: About,
+    /// The ceiling on `elsewhere`, from `[server] max_projects`.
+    pub max_projects: usize,
 }
 
 impl AppState {
@@ -76,13 +78,32 @@ impl AppState {
         if self.rook.read().await.workspace.canonicalize().is_ok_and(|own| own == here) {
             return Ok(self.rook.clone());
         }
-        if let Some(known) = self.elsewhere.read().await.get(&here) {
-            return Ok(known.clone());
+        let mut kept = self.elsewhere.write().await;
+        if let Some(known) = kept.get_mut(&here) {
+            known.last_used = std::time::Instant::now();
+            return Ok(known.engine.clone());
         }
+
         let built = Arc::new(RwLock::new(self.rook.read().await.for_workspace(here.clone())));
-        self.elsewhere.write().await.insert(here, built.clone());
+        kept.insert(here, Project { engine: built.clone(), last_used: std::time::Instant::now() });
+        // How many projects there are is decided by whoever connects. Dropping
+        // the one nobody has asked for in longest costs a rediscovery of its
+        // skills; a connection still holding it keeps working either way.
+        while kept.len() > self.max_projects {
+            let Some(stale) = kept.iter().min_by_key(|(_, p)| p.last_used).map(|(path, _)| path.clone())
+            else {
+                break;
+            };
+            kept.remove(&stale);
+        }
         Ok(built)
     }
+}
+
+/// An engine the daemon is keeping, and when it was last wanted.
+pub struct Project {
+    pub engine: Arc<RwLock<Rook>>,
+    last_used: std::time::Instant,
 }
 
 pub struct About {
@@ -119,6 +140,7 @@ async fn main() -> Result<()> {
     let state = Arc::new(AppState {
         rook: Arc::new(RwLock::new(rook)),
         elsewhere: RwLock::new(std::collections::HashMap::new()),
+        max_projects: config.server.max_projects.max(1),
         started: std::time::Instant::now(),
         about,
     });

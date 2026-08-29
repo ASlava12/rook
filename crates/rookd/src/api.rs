@@ -481,6 +481,7 @@ mod tests {
         let state = Arc::new(AppState {
             rook: Arc::new(tokio::sync::RwLock::new(rook)),
             elsewhere: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+            max_projects: 3,
             started: std::time::Instant::now(),
             about,
         });
@@ -702,6 +703,30 @@ mod tests {
         let f = fixture();
         let (status, _) = get(&f, "/api/sessions/not-a-ulid/changes").await;
         assert!(status.is_client_error(), "answered {status}");
+    }
+
+    /// How many projects a daemon is asked for is decided by whoever connects,
+    /// which makes it a limit rather than a preference — and an engine holds a
+    /// skill index and a plugin list.
+    #[tokio::test]
+    async fn the_engines_kept_for_projects_are_bounded() {
+        let f = fixture();
+        let dirs: Vec<tempfile::TempDir> = (0..5).map(|_| tempfile::tempdir().unwrap()).collect();
+
+        for dir in &dirs {
+            f.state.engine_for(Some(dir.path())).await.unwrap();
+        }
+        assert_eq!(f.state.elsewhere.read().await.len(), 3, "the cap is `[server] max_projects`");
+
+        // The one asked for most recently is the one that survives.
+        let newest = dirs.last().unwrap().path().canonicalize().unwrap();
+        assert!(f.state.elsewhere.read().await.contains_key(&newest), "and the least wanted goes first");
+        let oldest = dirs[0].path().canonicalize().unwrap();
+        assert!(!f.state.elsewhere.read().await.contains_key(&oldest));
+
+        // Dropped is not broken: naming it again builds it again.
+        let again = f.state.engine_for(Some(dirs[0].path())).await.unwrap();
+        assert_eq!(again.read().await.workspace, oldest);
     }
 
     /// A lock nobody can look at is one that cannot be debugged when it wedges.

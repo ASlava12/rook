@@ -236,7 +236,10 @@ ws://127.0.0.1:7717/api/chat?workspace=/path/to/b  # and another, at the same ti
 ```
 
 Each connection gets its own engine, looking at its own project, sharing one
-history, one memory and one search.
+history, one memory and one search. How many are kept is
+`[server] max_projects`, because how many a daemon is asked for is decided by
+whoever connects; past it the least recently wanted is dropped and rebuilt when
+it is next named.
 
 Two connections naming the same workspace run at once as well. A call that is
 about to write claims those paths for as long as it takes, and a second turn

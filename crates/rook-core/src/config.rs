@@ -156,6 +156,15 @@ pub struct StorageConfig {
 pub struct ServerConfig {
     pub bind: String,
     pub port: u16,
+    /// How many projects the daemon keeps an engine for.
+    ///
+    /// One is built the first time a connection names a workspace and kept, so
+    /// that skills and plugins are discovered once rather than per prompt. The
+    /// number of projects is decided by whoever connects, which is what makes
+    /// this a limit rather than a preference. Past it the least recently used is
+    /// dropped; a connection still holding one keeps it, and the next to name
+    /// that project builds it again.
+    pub max_projects: usize,
     /// Bound to loopback by default. An agent's transcript is the most sensitive
     /// thing on a developer's machine; it does not get exposed by accident.
     pub allow_remote: bool,
@@ -260,7 +269,7 @@ impl Default for StorageConfig {
 
 impl Default for ServerConfig {
     fn default() -> Self {
-        Self { bind: "127.0.0.1".into(), port: 7717, allow_remote: false }
+        Self { bind: "127.0.0.1".into(), port: 7717, max_projects: 16, allow_remote: false }
     }
 }
 
