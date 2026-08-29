@@ -31,6 +31,7 @@ Add a row when you implement something after reading a reference. Add it to
 | Asking the user structured questions | hermes `7d6c6ae4` *clarify: schema diet + single questions[] interface (880 → 335 tok/call)* — took the one-questions[]-shape and the rule that options must never be written into the question text, and cut further: no per-question id, and the answer's own text is the "Other" row | source, via `refs advance` | `rook-tools/src/ask.rs`, `AgentLoop::ask_via` |
 | A workspace boundary that a symlink cannot cross | codex `2926014` *make filesystem policy matching URI-native* — their case was encoded and case-variant paths, ours was a symlink out of the workspace that lexical containment could not see | source, via `refs advance` | `ToolContext::resolve`, `through_symlinks`, `sandbox.allow_outside_workspace` |
 | Widening a fact's scope instead of keeping the first | hermes `3b672a68` *delete-path drops every scope of a removed id* — the fix does not apply (identity here is the text, not an id per scope), but its subject exposed the same hazard in ours | source, via `refs advance` | `MemoryBook::learn`, `Scope::within` |
+| Editing a record without undoing what landed beside it | codex `0b45b17` *preserve permissions when updating session metadata* — naming a session read it, changed the title and wrote it back, putting the turn's own event counters back to the stale read | source, via `refs advance` | `Store::update_session`, `Rook::name_session_from` |
 | Reading a reply whose text arrives as parts | hermes `23bae43cf` *normalize list-shaped streaming content deltas* — one field typed as a string made the frame unparseable, and an unparseable frame is skipped, so the text vanished without a word | source, via `refs advance` | `rook-llm/src/openai.rs`, `Text` |
 | A layering that fails the build instead of describing itself | goose `a9060fd` *stop enumerating crates in AGENTS.md* — the opposite conclusion: the list here is a rule, so what it needed was enforcement, not deletion. It found the table already drifted | source, via `refs advance` | `crates/rook-core/tests/layering.rs` |
 | Measuring context by what the provider counted | hermes `d3a1c4651` *context size anchors on provider-reported usage* — ours estimated the messages and not the tool schemas, so the budget was short by the size of the tool list on every request | source, via `refs advance` | `measured`, `AgentLoop::run_with` |
@@ -64,6 +65,22 @@ goose 3, acp, opencode and openhands two each.
   rather than by edge, and it immediately showed the table in `CLAUDE.md` had
   drifted: `rook-lsp`, `rook-mcp` and `rook-acp` were absent from it entirely,
   and `rook-tools` had gained two dependencies since it was written.
+- codex `0b45b17` *preserve permissions when updating session metadata* —
+  **ported, and it was the same shape here.** Naming a session read its record,
+  set the title and wrote the record back, in two transactions. `append_event`
+  edits the same record — the sequence number, the event count, the token totals
+  — inside one, so anything it landed between the read and the write was put back
+  to what the reader saw. Naming happens at the top of a turn, beside the events
+  the turn is already writing. `Store::update_session` does the read and the
+  write together, and is now the only way an existing record is edited.
+- codex `c2abf86` *run executor hooks for interrupted turns*, `f9cdc90`
+  *preserve context baselines across nested agent forks*, `f742dab` *per-tool
+  MCP output limits* — **not taken**: a hook here is per tool call and per
+  prompt rather than per turn, a forked sub-agent starts with an empty context by
+  design, and one output cap covers every tool because the cost being bounded is
+  the context, which does not care which tool filled it.
+- codex: Guardian primitives, plugin catalogues, Seatbelt policy names, app-server
+  notifications and release packaging — **not applicable**.
 - hermes `23bae43cf` *normalize list-shaped streaming content deltas* —
   **ported, and the failure it prevents is a silent one.** The dialect says
   `content` is a string; several servers that implement it send a list of parts

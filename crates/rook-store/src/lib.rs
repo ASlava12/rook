@@ -418,6 +418,36 @@ impl Store {
         Ok(())
     }
 
+    /// Change a session's record in place.
+    ///
+    /// The read and the write are one transaction, which reading it, changing a
+    /// field and calling `create_session` is not: an event appended between the
+    /// two is an event whose counters the write puts back. Everything that
+    /// edits an existing record goes through here; `create_session` is for one
+    /// that did not exist.
+    pub fn update_session<F: FnOnce(&mut SessionMeta)>(&self, id: u128, change: F) -> Result<bool> {
+        let txn = self.db.begin_write()?;
+        let found = {
+            let mut sessions = txn.open_table(schema::SESSIONS)?;
+            let key = schema::session_key(id);
+            let found = match sessions.get(key.as_slice())? {
+                Some(raw) => Some(postcard::from_bytes::<SessionMeta>(raw.value())?),
+                None => None,
+            };
+            match found {
+                Some(mut meta) => {
+                    change(&mut meta);
+                    let encoded = postcard::to_stdvec(&meta)?;
+                    sessions.insert(key.as_slice(), encoded.as_slice())?;
+                    true
+                }
+                None => false,
+            }
+        };
+        txn.commit()?;
+        Ok(found)
+    }
+
     pub fn get_session(&self, id: u128) -> Result<Option<SessionMeta>> {
         let txn = self.db.begin_read()?;
         let sessions = txn.open_table(schema::SESSIONS)?;

@@ -471,11 +471,7 @@ impl Rook {
     /// prompt instead. Twenty sessions called `chat` is a list you have to open
     /// one at a time.
     pub fn name_session_from(&self, session: u128, prompt: &str) -> Result<()> {
-        let Some(mut meta) = self.store.get_session(session)? else { return Ok(()) };
-        if !meta.title.trim().is_empty() {
-            return Ok(());
-        }
-        meta.title = prompt
+        let title: String = prompt
             .lines()
             .map(str::trim)
             .find(|l| !l.is_empty())
@@ -483,7 +479,11 @@ impl Rook {
             .chars()
             .take(72)
             .collect();
-        self.store.create_session(&meta)?;
+        self.store.update_session(session, |meta| {
+            if meta.title.trim().is_empty() {
+                meta.title = title;
+            }
+        })?;
         Ok(())
     }
 

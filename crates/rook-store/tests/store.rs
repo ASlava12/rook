@@ -524,3 +524,32 @@ fn history_keys_do_not_tie_when_the_clock_does() {
     let distinct: std::collections::BTreeSet<&String> = keys.iter().collect();
     assert_eq!(distinct.len(), keys.len(), "and no two may be the same name");
 }
+
+/// Reading a record, changing a field and writing it back is two transactions,
+/// and an event appended between them is an event whose counters the write puts
+/// back. The turn that named a session was doing exactly that.
+#[test]
+fn changing_one_field_does_not_undo_what_landed_meanwhile() {
+    let (_d, s) = tmp_store();
+    let id = rook_store::new_session_id();
+    s.create_session(&SessionMeta::new(id, "", "/tmp", rook_store::now_unix())).unwrap();
+
+    // The stale read a caller would have taken before changing a field.
+    let stale = s.get_session(id).unwrap().unwrap();
+    for i in 0..4 {
+        s.append_event(id, NewEvent::new(EventKind::UserMessage, Kind::Message, format!("{i}").as_bytes()))
+            .unwrap();
+    }
+    let busy = s.get_session(id).unwrap().unwrap();
+    assert_eq!(busy.event_count, 4, "the events have to have landed for this to test anything");
+    assert!(busy.event_count > stale.event_count);
+
+    s.update_session(id, |meta| meta.title = "named later".into()).unwrap();
+
+    let after = s.get_session(id).unwrap().unwrap();
+    assert_eq!(after.title, "named later", "the change is applied");
+    assert_eq!(after.event_count, 4, "and nothing else is rolled back to what the reader saw");
+    assert_eq!(after.next_seq, busy.next_seq);
+
+    assert!(!s.update_session(rook_store::new_session_id(), |_| {}).unwrap(), "a session that is not there");
+}

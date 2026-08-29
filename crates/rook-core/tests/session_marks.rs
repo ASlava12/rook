@@ -196,3 +196,32 @@ fn a_session_is_named_by_what_was_first_asked_of_it() {
     rook.name_session_from(named, "a prompt").unwrap();
     assert_eq!(rook.store.get_session(named).unwrap().unwrap().title, "a name the user chose");
 }
+
+/// Naming a session happens at the top of a turn, beside the events the turn is
+/// already writing. Reading the record, setting the title and writing it back
+/// put the counters back to what the read saw.
+#[test]
+fn naming_a_session_keeps_what_the_turn_has_already_logged() {
+    let dir = tempfile::tempdir().unwrap();
+    let rook = rook(dir.path());
+    let session = rook.start_session("").unwrap();
+
+    for i in 0..3 {
+        rook.log(session, EventKind::UserMessage, "turn", &format!("said {i}")).unwrap();
+    }
+    let before = rook.store.get_session(session).unwrap().unwrap().event_count;
+    assert_eq!(before, 3, "the events have to be there for this to test anything");
+
+    rook.name_session_from(session, "call it this").unwrap();
+
+    let after = rook.store.get_session(session).unwrap().unwrap();
+    assert_eq!(after.title, "call it this");
+    assert_eq!(after.event_count, before, "and the log is not rolled back by the naming");
+
+    rook.name_session_from(session, "or this").unwrap();
+    assert_eq!(
+        rook.store.get_session(session).unwrap().unwrap().title,
+        "call it this",
+        "a session that has a name keeps it"
+    );
+}
