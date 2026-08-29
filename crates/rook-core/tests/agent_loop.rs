@@ -2835,3 +2835,34 @@ async fn a_turn_may_not_overwrite_what_another_turn_looked_at_last() {
     );
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "mine\n", "which is the file it left");
 }
+
+/// A verdict from a checker that called nothing is reported as unproven. Reaching
+/// for a tool it was never given and being refused must not count as calling
+/// something, or the rule is one `write_skill` away from being satisfied by a
+/// recollection.
+#[tokio::test]
+async fn a_refused_reach_is_not_a_check_either() {
+    let f = fixture();
+    let session = f.rook.start_session("refused").unwrap();
+
+    let script = vec![
+        call("verify", serde_json::json!({ "claim": "the release shipped" })),
+        call("write_skill", serde_json::json!({ "name": "notes", "description": "x", "body": "y" })),
+        reply("I still think it did.\n\nVERDICT: holds"),
+        reply("done"),
+    ];
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
+    agent.allow_everything_not_denied();
+    agent.run("check it").await.unwrap();
+
+    let said = f
+        .rook
+        .transcript(session, 0, usize::MAX, 4096)
+        .unwrap()
+        .into_iter()
+        .rfind(|e| e.kind == "tool-result")
+        .unwrap()
+        .body;
+    assert!(said.contains("unproven"), "a refused reach is not evidence: {said}");
+    assert!(said.contains("reached for nothing"), "{said}");
+}

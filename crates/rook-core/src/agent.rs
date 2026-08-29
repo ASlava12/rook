@@ -929,14 +929,17 @@ impl<'a> AgentLoop<'a> {
     ) -> (String, bool) {
         self.rook.log(self.session, EventKind::ToolCall, &call.name, &call.arguments.to_string()).ok();
 
-        outcome.tools_called.push(call.name.clone());
-
-        // Not advertised to a checker, and refused as well: a name a model
-        // produces without being shown it is still a name it can produce.
+        // Refused before it is recorded, and the order is the point: a verdict
+        // from a checker that called nothing is reported as unproven, and a
+        // reach for a tool it was never given is not a call it made. Counting it
+        // would let a check reach for `write_skill`, be refused, and have its
+        // recollection stand as evidence.
         if self.checking && CHANGES_THINGS.contains(&call.name.as_str()) {
             let refusal = format!("{}: a check may not change anything", call.name);
             return (refusal, true);
         }
+
+        outcome.tools_called.push(call.name.clone());
 
         if call.name == VERIFY {
             let text = self.verify(&call.arguments, outcome, on_progress).await;
