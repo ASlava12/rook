@@ -36,6 +36,7 @@ Ctrl-C stops the turn in flight. Ctrl-D leaves.";
 
 pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: bool) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let asked_for_a_workspace = workspace.is_some();
     let rook = Rook::open(workspace)?;
     let provider = rook_llm::from_spec_with(
         &rook.config.agent.model,
@@ -47,6 +48,15 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
     let mut session = match resume {
         Some(id) => rook.session_named(&id)?,
         None => rook.start_session("")?,
+    };
+    // `-C` is the user deciding; without it, the session decides.
+    let elsewhere = if asked_for_a_workspace { None } else { rook.following(session)? };
+    let rook = match elsewhere {
+        Some(theirs) => {
+            println!("continuing in {}, where this session belongs", theirs.workspace.display());
+            theirs
+        }
+        None => rook,
     };
 
     let mcp = runtime.block_on(rook.connect_mcp());

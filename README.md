@@ -133,6 +133,11 @@ A file the agent wrote back identically shows as unchanged, and its own
 intermediate states are not counted — the baseline is what was there before it
 started, not what it wrote last.
 
+A session is bound to the project it started in, so resuming one by id from
+somewhere else continues it there rather than here — its transcript names that
+project's files and its checkpoints restore into it. `-C` overrides, because that
+is the user deciding.
+
 ### Undoing a turn
 
 The loop checkpoints every file a tool is about to modify, so a rewind puts the

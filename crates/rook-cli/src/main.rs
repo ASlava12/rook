@@ -679,6 +679,7 @@ fn cmd_run(
     // The exit code is decided inside and taken here, after the store has been
     // dropped: exiting from within would skip closing it cleanly.
     let unfinished = runtime.block_on(async move {
+        let asked_for_a_workspace = workspace.is_some();
         let rook = Rook::open(workspace)?;
         let provider = rook_llm::from_spec_with(
             &rook.config.agent.model,
@@ -690,6 +691,15 @@ fn cmd_run(
         let session = match session {
             Some(s) => rook.session_named(&s)?,
             None => rook.start_session("")?,
+        };
+        // `-C` is the user deciding; without it, the session decides.
+        let elsewhere = if asked_for_a_workspace { None } else { rook.following(session)? };
+        let rook = match elsewhere {
+            Some(theirs) => {
+                eprintln!("continuing in {}, where this session belongs", theirs.workspace.display());
+                theirs
+            }
+            None => rook,
         };
         let mut agent = rook_core::agent::AgentLoop::new(&rook, provider.into(), session);
         // `run` is scripted more often than watched, so it refuses what it cannot

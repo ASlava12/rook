@@ -84,6 +84,19 @@ impl Rook {
         format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
     }
 
+    /// Run from a directory rather than with `--workspace`, which is the only
+    /// way to exercise what happens when the user names none.
+    fn from(&self, dir: &std::path::Path, args: &[&str]) -> String {
+        let out = Command::new(env!("CARGO_BIN_EXE_rook"))
+            .env("ROOK_HOME", self.home.path())
+            .env("ROOK_LOG", "error")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
+    }
+
     fn write_config(&self, toml: &str) {
         std::fs::create_dir_all(self.home.path()).unwrap();
         std::fs::write(self.home.path().join("config.toml"), toml).unwrap();
@@ -477,6 +490,29 @@ fn doctor_carries_the_advice_rather_than_only_the_failure() {
     let model = out.split("model:").nth(1).unwrap();
     assert!(model.contains("cannot reach"), "{model}");
     assert!(model.contains("Start the server"), "doctor exists to say what to do: {model}");
+}
+
+/// A session is bound to a project: its transcript names that project's files,
+/// its checkpoints restore into it, and its memory is scoped to it. Resuming one
+/// from somewhere else read the old conversation and edited the new directory.
+#[test]
+fn a_session_resumed_from_elsewhere_goes_on_where_it_belongs() {
+    let rook = Rook::new();
+    let _ = rook.run(&["run", "started here"]);
+    let id = rook.json(&["session", "ls", "--all"])[0]["id"].as_str().unwrap().to_string();
+    let elsewhere = tempfile::tempdir().unwrap();
+
+    let out = rook.from(elsewhere.path(), &["run", "--session", &id, "and now?"]);
+
+    assert!(out.contains("where this session belongs"), "{out}");
+    assert!(out.contains(&rook.workspace.path().display().to_string()), "and names it: {out}");
+
+    // `-C` is the user deciding, and is left alone.
+    let named = rook.from(
+        elsewhere.path(),
+        &["--workspace", elsewhere.path().to_str().unwrap(), "run", "--session", &id, "and now?"],
+    );
+    assert!(!named.contains("where this session belongs"), "{named}");
 }
 
 #[test]

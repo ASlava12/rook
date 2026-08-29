@@ -37,6 +37,7 @@ Add a row when you implement something after reading a reference. Add it to
 | Measuring context by what the provider counted | hermes `d3a1c4651` *context size anchors on provider-reported usage* — ours estimated the messages and not the tool schemas, so the budget was short by the size of the tool list on every request | source, via `refs advance` | `measured`, `AgentLoop::run_with` |
 | Naming the shell the model actually has | codex `5ed294d` *match Windows shell guidance to the executor platform* — the environment block named the OS and not the shell, and `;` chaining sent to `cmd.exe` fails as silently as GNU flags sent to BSD | source, via `refs advance` | `AgentLoop::system_prompt`, `rook_core::SHELL` |
 | Telling the model what day it is | codex `430d26b` *classify clock tools as built-in control tools* — taken as a fact beside the prompt rather than a tool, since a date needs no round trip and must not sit in a prefix that is supposed to cache | source, via `refs advance` | `AgentLoop::request_messages`, `rook_store::today` |
+| Resuming a session where it belongs | codex `f5636bb` *restore thread cwd from owned settings snapshots* — ours took whatever directory the command was run from, so the conversation was one project's and the edits another's | source, via `refs advance` | `Rook::following`, `rook run --session`, `rook chat --resume` |
 | A rollback whose undo point is real | hermes `1315e65a5`, `154fd10af` *failed rollback keeps the skill and the snapshots* / *name the preserved snapshot path* — ours captured first and discarded the result, then claimed undoability either way | source, via `refs advance` | `Rook::rollback_skill`, `Rollback::undo` |
 | The effort the user asked for reaching the wire | hermes `b954547e7` *hand-rolled effort map inverted the ladder* — theirs was inverted, ours was absent: the OpenAI dialect sent no `reasoning_effort` at all | source, via `refs advance` | `rook-llm/src/openai.rs`, `crates/rook-llm/tests/openai.rs` |
 | Waiting out a provider that said "later" | codex `a73bf25` *decouple HTTP retry backoff from overload integration testing* — theirs refines a retry; here there was none at all, and a 429 ended a turn that had run for minutes | source, via `refs advance` | `rook-llm/src/retry.rs`, `from_spec_with` |
@@ -55,6 +56,25 @@ Add a row when you implement something after reading a reference. Add it to
 `cargo xtask refs advance` prints what landed upstream since the pointer was last
 moved; what follows is what was done with it, so a dismissal is a decision rather
 than an omission.
+
+**2026-08-30 (twentieth pass)** — codex 4 commits, acp 1.
+
+- codex `f5636bb` *restore thread cwd from owned settings snapshots* —
+  **ported, and it was the same hole.** Resuming a session by id used whatever
+  directory the command was run from, so the transcript named one project's files
+  while the turn read and edited another's, and nothing said so. A session is
+  bound to a project — its checkpoints restore into it, its memory is scoped to
+  it — so `Rook::following` moves the engine to where the session belongs unless
+  `-C` says otherwise, which is the user deciding. Their second half, a setting
+  falling outside the replay window after compaction, does not apply: the
+  workspace is on the session record, not in the log.
+- codex `4210c08` *preserve turn lineage across goal continuations* — dismissed;
+  a goal here is one line of text on the session, and there are no automatic
+  continuations to attribute.
+- codex `aaa7ed0` *harden diagnostic report uploads*, `b8c8637` grammar in a
+  prompt — dismissed; nothing is uploaded from here, by design.
+- acp `9c211e2` *update registry agents* — a list of agents that speak the
+  protocol, not a schema change.
 
 **2026-08-29 (nineteenth pass)** — hermes 3 commits.
 

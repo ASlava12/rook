@@ -533,6 +533,28 @@ impl Rook {
             .collect()
     }
 
+    /// The engine looking at the project this session belongs to, when that is
+    /// not the one this engine is looking at.
+    ///
+    /// A session is bound to a project: its transcript names that project's
+    /// files, its checkpoints restore into it, and its memory is scoped to it.
+    /// Resuming one from another directory read the old conversation and edited
+    /// the new directory, and said nothing about either.
+    ///
+    /// `None` when it is the same project, or when the recorded one is no longer
+    /// a directory — a project that has been moved is not a reason to refuse to
+    /// go on in this one.
+    pub fn following(&self, session: u128) -> Result<Option<Self>> {
+        let Some(meta) = self.store.get_session(session)? else { return Ok(None) };
+        let theirs = PathBuf::from(&meta.workspace);
+        // Through symlinks, because the same directory arrives spelled two ways:
+        // `--workspace` keeps what was typed and an omitted one is the resolved
+        // current directory, which on macOS is `/private/var` for `/var`.
+        let same = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+        let moved = same(&theirs) != same(&self.workspace) && theirs.is_dir();
+        Ok(moved.then(|| self.for_workspace(theirs)))
+    }
+
     pub fn start_session(&self, title: &str) -> Result<u128> {
         let id = rook_store::new_session_id();
         let mut meta =
