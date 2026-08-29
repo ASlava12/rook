@@ -322,7 +322,8 @@ fn what_the_user_is_told_after_answering_is_not_a_rust_name() {
 async fn an_unattended_refusal_tells_the_model_to_stop_before_it_tells_the_user_anything() {
     use rook_tools::policy::{Approver, Unattended};
 
-    let Approval::Deny(why) = Unattended.ask("write_file", &Risk::Write(vec!["a.py".into()])).await else {
+    let Approval::Deny(why) = Unattended.ask("write_file", &Risk::Write(vec!["a.py".into()]), None).await
+    else {
         panic!("nothing can approve anything here")
     };
 

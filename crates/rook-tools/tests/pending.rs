@@ -39,9 +39,9 @@ async fn every_answer_reaches_its_question_while_others_are_still_arriving() {
     let asking: Vec<_> = (0..IN_FLIGHT)
         .map(|i| {
             let approver = approver.clone();
-            tokio::spawn(
-                async move { approver.ask(&format!("tool{i}"), &Risk::Execute(format!("do {i}"))).await },
-            )
+            tokio::spawn(async move {
+                approver.ask(&format!("tool{i}"), &Risk::Execute(format!("do {i}")), None).await
+            })
         })
         .collect();
 
@@ -55,7 +55,7 @@ async fn every_answer_reaches_its_question_while_others_are_still_arriving() {
 async fn a_question_nobody_answers_gives_up_and_says_how_long_it_waited() {
     let (approver, _requests) = approver(Duration::from_millis(50));
 
-    let decided = approver.ask("run_command", &Risk::Execute("rm -rf /tmp/x".into())).await;
+    let decided = approver.ask("run_command", &Risk::Execute("rm -rf /tmp/x".into()), None).await;
     let Approval::Deny(why) = decided else { panic!("silence is not consent") };
     assert!(why.contains("no answer within"), "{why}");
 }
@@ -66,7 +66,7 @@ async fn a_front_end_that_is_not_there_is_refused_at_once_rather_than_waited_out
     drop(requests);
 
     let started = std::time::Instant::now();
-    let decided = approver.ask("run_command", &Risk::Execute("ls".into())).await;
+    let decided = approver.ask("run_command", &Risk::Execute("ls".into()), None).await;
     assert!(matches!(decided, Approval::Deny(_)), "nothing can answer, so nothing will");
     assert!(started.elapsed() < Duration::from_secs(1), "and it did not wait the hour out");
 }

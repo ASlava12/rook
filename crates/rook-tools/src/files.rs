@@ -266,6 +266,12 @@ impl Tool for WriteFile {
         .with("created", !existed))
     }
 
+    async fn preview(&self, ctx: &ToolContext, args: &serde_json::Value) -> Option<String> {
+        let path = ctx.resolve(&arg_str(args, self.name(), "path").ok()?).ok()?;
+        let before = ctx.read_text(&path).await.unwrap_or_default();
+        Some(diff(&path, &before, args.get("content")?.as_str()?))
+    }
+
     fn touched_paths(&self, args: &serde_json::Value) -> Vec<String> {
         path_arg(args)
     }
@@ -360,9 +366,36 @@ impl Tool for EditFile {
         .with("occurrences", replaced as u64))
     }
 
+    async fn preview(&self, ctx: &ToolContext, args: &serde_json::Value) -> Option<String> {
+        let path = ctx.resolve(&arg_str(args, self.name(), "path").ok()?).ok()?;
+        let before = ctx.read_text(&path).await.ok()?;
+        // The same edits the call would make, against a copy nothing writes: an
+        // approval shown anything else is an approval of something else.
+        let mut after = before.clone();
+        for edit in parse_edits(args).ok()? {
+            after = apply(&after, &edit).ok()?.0;
+        }
+        Some(diff(&path, &before, &after))
+    }
+
     fn touched_paths(&self, args: &serde_json::Value) -> Vec<String> {
         path_arg(args)
     }
+}
+
+/// The change as a person reads one. Bounded, because a rewritten file is a diff
+/// the size of the file twice over, and this is a question in a terminal.
+fn diff(path: &std::path::Path, before: &str, after: &str) -> String {
+    const MOST: usize = 8 * 1024;
+    if before == after {
+        return format!("{} would be written unchanged", path.display());
+    }
+    let text = similar::TextDiff::from_lines(before, after)
+        .unified_diff()
+        .context_radius(3)
+        .header(&path.display().to_string(), "after")
+        .to_string();
+    crate::elide_middle(&text, MOST)
 }
 
 /// Accepts a bare `{old, new}` alongside `edits`, so a model that learnt the

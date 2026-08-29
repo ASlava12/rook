@@ -123,7 +123,11 @@ async fn call_tool(
     // not more trusted than the model inside, and the policy is the only thing
     // that ever decided this.
     let risk = tool.risk(&args);
-    if let Some(refusal) = refused(offered, &name, risk).await {
+    let preview = match offered.policy.decide(&risk) {
+        Decision::Ask => tool.preview(&offered.ctx, &args).await,
+        _ => None,
+    };
+    if let Some(refusal) = refused(offered, &name, risk, preview.as_deref()).await {
         return Ok(as_result(&refusal, true));
     }
 
@@ -134,11 +138,11 @@ async fn call_tool(
 }
 
 /// Why the call may not happen, or `None` when it may.
-async fn refused(offered: &Offered, name: &str, risk: Risk) -> Option<String> {
+async fn refused(offered: &Offered, name: &str, risk: Risk, preview: Option<&str>) -> Option<String> {
     match offered.policy.decide(&risk) {
         Decision::Allow => None,
         Decision::Deny(why) => Some(format!("refused: {why}")),
-        Decision::Ask => match offered.approver.ask(name, &risk).await {
+        Decision::Ask => match offered.approver.ask(name, &risk, preview).await {
             Approval::Once => None,
             Approval::ForRun => {
                 offered.policy.grant_for_run(&risk.subject());

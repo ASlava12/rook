@@ -316,7 +316,10 @@ impl Approval {
 
 #[async_trait]
 pub trait Approver: Send + Sync {
-    async fn ask(&self, tool: &str, risk: &Risk) -> Approval;
+    /// `preview` is what the call would change, when the tool can say. Passed
+    /// beside the risk rather than folded into it: the risk is what a rule
+    /// matches on, and a diff is not that.
+    async fn ask(&self, tool: &str, risk: &Risk, preview: Option<&str>) -> Approval;
 }
 
 /// The approver used when nothing can prompt — a script, a cron run, the daemon.
@@ -328,7 +331,7 @@ pub struct Unattended;
 
 #[async_trait]
 impl Approver for Unattended {
-    async fn ask(&self, _tool: &str, risk: &Risk) -> Approval {
+    async fn ask(&self, _tool: &str, risk: &Risk, _preview: Option<&str>) -> Approval {
         // Addressed to the model first, because the model is what reads it. The
         // remedies are all things only the person can do, and a refusal that
         // offers nothing actionable is one an agent works around: asked to edit
@@ -350,6 +353,8 @@ pub struct ApprovalRequest {
     pub id: String,
     pub tool: String,
     pub action: String,
+    /// What the call would change, when the tool can say.
+    pub preview: Option<String>,
 }
 
 /// An approver that hands the question to whatever is driving the UI and waits
@@ -371,8 +376,13 @@ impl ChannelApprover {
 
 #[async_trait]
 impl Approver for ChannelApprover {
-    async fn ask(&self, tool: &str, risk: &Risk) -> Approval {
-        let request = |id| ApprovalRequest { id, tool: tool.to_string(), action: risk.describe() };
+    async fn ask(&self, tool: &str, risk: &Risk, preview: Option<&str>) -> Approval {
+        let request = |id| ApprovalRequest {
+            id,
+            tool: tool.to_string(),
+            action: risk.describe(),
+            preview: preview.map(str::to_string),
+        };
         match self.0.ask(request).await {
             Ok(approval) => approval,
             Err(unanswered) => Approval::Deny(unanswered.to_string()),

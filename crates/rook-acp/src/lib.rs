@@ -474,10 +474,22 @@ struct EditorApprover {
 
 #[async_trait]
 impl Approver for EditorApprover {
-    async fn ask(&self, tool: &str, risk: &Risk) -> Approval {
+    async fn ask(&self, tool: &str, risk: &Risk, preview: Option<&str>) -> Approval {
+        // As a text block rather than the schema's `diff`, which wants the whole
+        // of both texts so the editor can render its own view. What is on offer
+        // here is one already rendered, and the same string every front end
+        // shows.
+        let content: Vec<serde_json::Value> = preview
+            .map(|text| serde_json::json!([{ "type": "content", "content": { "type": "text", "text": text } }]))
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
         let params = serde_json::json!({
             "sessionId": self.session,
-            "toolCall": { "toolCallId": format!("approval_{tool}"), "title": risk.describe() },
+            "toolCall": {
+                "toolCallId": format!("approval_{tool}"),
+                "title": risk.describe(),
+                "content": content,
+            },
             "options": [
                 { "optionId": "once",   "name": "Allow once",    "kind": "allow_once" },
                 { "optionId": "always", "name": "Always allow",  "kind": "allow_always" },

@@ -27,6 +27,30 @@ impl File {
     }
 }
 
+/// Approving a write shown only a path is approving something you cannot see,
+/// which is most of the value of being asked.
+#[tokio::test]
+async fn what_an_edit_would_change_can_be_seen_before_it_is_approved() {
+    let f = File::with("let a = 1;\nlet b = 2;\n");
+    let args = serde_json::json!({"path": "f.rs", "edits": [{"old": "let b = 2;", "new": "let b = 3;"}]});
+
+    let preview = EditFile.preview(&f.ctx, &args).await.expect("an edit can say what it would change");
+
+    assert!(preview.contains("-let b = 2;"), "the line that goes: {preview}");
+    assert!(preview.contains("+let b = 3;"), "and the one that arrives: {preview}");
+    assert_eq!(f.contents(), "let a = 1;\nlet b = 2;\n", "and nothing is written to say it");
+}
+
+/// The preview is the edits themselves, applied to a copy — anything else is an
+/// approval of something other than what happens.
+#[tokio::test]
+async fn a_preview_of_edits_that_cannot_apply_promises_nothing() {
+    let f = File::with("let a = 1;\n");
+    let args = serde_json::json!({"path": "f.rs", "edits": [{"old": "not there", "new": "x"}]});
+
+    assert!(EditFile.preview(&f.ctx, &args).await.is_none(), "there is no change to show");
+}
+
 #[tokio::test]
 async fn edits_apply_in_order_each_seeing_the_last() {
     let f = File::with("let a = 1;\nlet b = 2;\n");

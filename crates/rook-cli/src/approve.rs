@@ -10,9 +10,12 @@ pub struct Terminal;
 
 #[async_trait]
 impl Approver for Terminal {
-    async fn ask(&self, tool: &str, risk: &Risk) -> Approval {
-        let question =
-            format!("\n  {tool} wants to {}\n  [y]es once · [a]lways this run · [n]o: ", risk.describe());
+    async fn ask(&self, tool: &str, risk: &Risk, preview: Option<&str>) -> Approval {
+        let shown = preview.map(|p| format!("\n{}\n", indented(p))).unwrap_or_default();
+        let question = format!(
+            "\n  {tool} wants to {}\n{shown}  [y]es once · [a]lways this run · [n]o: ",
+            risk.describe()
+        );
         // stdin is blocking, and blocking it on the runtime's worker would stall
         // every other task in the turn.
         tokio::task::spawn_blocking(move || {
@@ -44,6 +47,12 @@ impl rook_tools::ask::Asker for Terminal {
             .await
             .unwrap_or_else(|_| questions.iter().map(unanswered).collect())
     }
+}
+
+/// Under the question rather than at the left margin, so the diff reads as part
+/// of it and not as output the command produced.
+fn indented(text: &str) -> String {
+    text.lines().map(|l| format!("    {l}\n")).collect()
 }
 
 fn unanswered(q: &Question) -> Answer {

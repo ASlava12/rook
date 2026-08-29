@@ -32,6 +32,27 @@ impl Workspace {
     }
 }
 
+/// A new file has nothing to diff against, and an overwrite has everything.
+#[tokio::test]
+async fn what_a_write_would_change_can_be_seen_before_it_is_approved() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ToolContext::new(dir.path().to_path_buf());
+    std::fs::write(dir.path().join("there.txt"), "old\n").unwrap();
+
+    let fresh = files::WriteFile
+        .preview(&ctx, &serde_json::json!({"path": "new.txt", "content": "hello\n"}))
+        .await
+        .expect("a file that does not exist yet is still a change");
+    assert!(fresh.contains("+hello"), "{fresh}");
+
+    let over = files::WriteFile
+        .preview(&ctx, &serde_json::json!({"path": "there.txt", "content": "new\n"}))
+        .await
+        .unwrap();
+    assert!(over.contains("-old") && over.contains("+new"), "{over}");
+    assert_eq!(std::fs::read_to_string(dir.path().join("there.txt")).unwrap(), "old\n", "nothing written");
+}
+
 #[tokio::test]
 async fn a_file_comes_back_with_line_numbers() {
     let w = Workspace::new();

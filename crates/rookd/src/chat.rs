@@ -350,6 +350,7 @@ fn approver(
                 id: request.id,
                 tool: request.tool,
                 action: request.action,
+                preview: request.preview,
             });
             if sent.is_err() {
                 break;

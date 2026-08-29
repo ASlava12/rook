@@ -184,6 +184,9 @@ pub enum ChatEvent {
         id: String,
         tool: String,
         action: String,
+        /// What the call would change, when the tool can say.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preview: Option<String>,
     },
     /// The turn is blocked until a [`ClientMessage::Answers`] with this id.
     Ask {

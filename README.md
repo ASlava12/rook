@@ -382,6 +382,12 @@ select in the browser, and a session config option over ACP — all the same
 policy. `rook --yes` skips the prompts for one run. Unattended runs with no `--yes`
 refuse rather than improvise, and say what would have made it possible.
 
+A prompt shows what it is asking about: a write or an edit comes with the diff it
+would make, built by applying the very edits the call would apply to a copy
+nothing writes. Indented under the terminal prompt, coloured in the TUI panel, in
+the browser's dialog, and as content on the ACP permission request — an approval
+that names only a path is one given blind.
+
 A question put to a person is bounded by `[agent] answer_timeout_secs` (ten
 minutes). A closed tab or an abandoned terminal would otherwise hold the turn —
 and the store's single write lock with it — for as long as the process lives.

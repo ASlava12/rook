@@ -329,6 +329,15 @@ pub trait Tool: Send + Sync {
         false
     }
 
+    /// What the call would change, for whoever is asked to approve it.
+    ///
+    /// A person shown only a path is approving something they cannot see, which
+    /// is most of the value of asking. `None` where there is nothing to show —
+    /// a command's effect is the command, and it is already in the question.
+    async fn preview(&self, _ctx: &ToolContext, _args: &serde_json::Value) -> Option<String> {
+        None
+    }
+
     /// What this call would do to the machine, for the approval policy.
     fn risk(&self, args: &serde_json::Value) -> policy::Risk {
         match self.touched_paths(args) {

@@ -751,20 +751,31 @@ impl App {
         );
 
         if let Some(request) = &self.chat.pending {
-            f.render_widget(
-                Paragraph::new(vec![
-                    Line::from(Span::styled(
-                        format!("{} wants to {}", request.tool, request.action),
-                        Style::default().fg(Color::Yellow),
-                    )),
-                    Line::from(Span::styled(
-                        "[y]es once · [a]lways this run · [n]o",
-                        Style::default().fg(Color::DarkGray),
-                    )),
-                ])
-                .block(bordered(" approval ")),
-                ask,
-            );
+            let mut lines = vec![Line::from(Span::styled(
+                format!("{} wants to {}", request.tool, request.action),
+                Style::default().fg(Color::Yellow),
+            ))];
+            // Coloured the way a diff is read, because that is what it usually
+            // is; the panel is small, so what does not fit scrolls off the top
+            // rather than pushing the question off the bottom.
+            let room = ask.height.saturating_sub(3) as usize;
+            if let Some(preview) = &request.preview {
+                let shown: Vec<&str> = preview.lines().collect();
+                let from = shown.len().saturating_sub(room);
+                lines.extend(shown[from..].iter().map(|line| {
+                    let colour = match line.as_bytes().first() {
+                        Some(b'+') => Color::Green,
+                        Some(b'-') => Color::Red,
+                        _ => Color::DarkGray,
+                    };
+                    Line::from(Span::styled((*line).to_string(), Style::default().fg(colour)))
+                }));
+            }
+            lines.push(Line::from(Span::styled(
+                "[y]es once · [a]lways this run · [n]o",
+                Style::default().fg(Color::DarkGray),
+            )));
+            f.render_widget(Paragraph::new(lines).block(bordered(" approval ")), ask);
         } else if let Some(asking) = &self.chat.asking {
             f.render_widget(Paragraph::new(asking.panel()).block(bordered(&asking.title())), ask);
         }

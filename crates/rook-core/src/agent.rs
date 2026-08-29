@@ -1035,7 +1035,7 @@ impl<'a> AgentLoop<'a> {
 
             let target = crate::paths::user_skills_dir().join(name);
             let risk = rook_tools::policy::Risk::Write(vec![target.display().to_string()]);
-            if let Some(refusal) = self.gate_risk(FIND_SKILL, &call.arguments, risk).await {
+            if let Some(refusal) = self.gate_risk(FIND_SKILL, &call.arguments, risk, None).await {
                 self.rook.log(self.session, EventKind::Error, FIND_SKILL, &refusal).ok();
                 return (refusal, true);
             }
@@ -1070,7 +1070,10 @@ impl<'a> AgentLoop<'a> {
                 writing.extend(files.keys().map(|rel| target.join(rel).display().to_string()));
             }
             let risk = rook_tools::policy::Risk::Write(writing);
-            if let Some(refusal) = self.gate_risk(WRITE_SKILL, &call.arguments, risk).await {
+            // The body is the whole of what it would write, so the body is the
+            // preview: there is nothing on disk to diff it against.
+            let body = call.arguments.get("body").and_then(|b| b.as_str());
+            if let Some(refusal) = self.gate_risk(WRITE_SKILL, &call.arguments, risk, body).await {
                 self.rook.log(self.session, EventKind::Error, WRITE_SKILL, &refusal).ok();
                 return (refusal, true);
             }
@@ -1604,8 +1607,15 @@ impl<'a> AgentLoop<'a> {
     /// is to ask. Returns the refusal to hand back to the model, or `None` when
     /// the call may proceed.
     async fn gate(&self, call: &rook_llm::ToolCall) -> Option<String> {
-        let risk = self.tools.get(&call.name)?.risk(&call.arguments);
-        self.gate_risk(&call.name, &call.arguments, risk).await
+        let tool = self.tools.get(&call.name)?;
+        let risk = tool.risk(&call.arguments);
+        // Only when someone is going to be asked: building a diff of a file the
+        // policy already allows is work nobody reads.
+        let preview = match self.policy.decide(&risk) {
+            Decision::Ask => tool.preview(&self.tool_ctx, &call.arguments).await,
+            _ => None,
+        };
+        self.gate_risk(&call.name, &call.arguments, risk, preview.as_deref()).await
     }
 
     /// The same decision for something the toolbox does not own. A pseudo-tool
@@ -1616,6 +1626,7 @@ impl<'a> AgentLoop<'a> {
         name: &str,
         arguments: &serde_json::Value,
         risk: rook_tools::policy::Risk,
+        preview: Option<&str>,
     ) -> Option<String> {
         // The policy runs first so a hook cannot unlock what the deny list
         // forbids; everything else, a hook may override.
@@ -1635,7 +1646,7 @@ impl<'a> AgentLoop<'a> {
         match decision {
             Decision::Allow => None,
             Decision::Deny(why) => Some(format!("refused: {why}")),
-            Decision::Ask => match self.approver.ask(name, &risk).await {
+            Decision::Ask => match self.approver.ask(name, &risk, preview).await {
                 rook_tools::policy::Approval::Once => None,
                 rook_tools::policy::Approval::ForRun => {
                     self.policy.grant_for_run(&risk.subject());

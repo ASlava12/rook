@@ -43,6 +43,17 @@ stop, not improvise.
 command, the deny list would be decorative — and the one moment a user is most
 likely to click through a prompt is the moment they should not.
 
+**A question shows what it is asking about.** An approval that names only a path
+is an approval of something the person cannot see, and the one moment they are
+most likely to click through is the moment they should not. A tool that can say
+what it would change says it — a diff for a write or an edit, the body for a
+skill being authored — and the same string reaches the terminal, the TUI, the
+browser and the editor, because a question that is answerable in one front end
+and blind in another is the same defect as a capability reachable from one.
+
+It is built only when someone is actually going to be asked: a diff of a call the
+policy already allows is work nobody reads.
+
 **No approver means refuse.** An unattended run — a script, a cron job, the
 daemon — gets an approver that always declines, with a message naming `--yes` and
 the config key. Silently allowing would put the least-supervised runs at the
