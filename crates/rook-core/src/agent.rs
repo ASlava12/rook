@@ -1085,6 +1085,16 @@ impl<'a> AgentLoop<'a> {
             Ok(o) => o,
             Err(e) => rook_tools::ToolOutcome::error(format!("tool error: {e}")),
         };
+        if !outcome.is_error
+            && let Some(tool) = self.tools.get(&call.name)
+        {
+            let seen: Vec<std::path::PathBuf> = tool
+                .observed_paths(&call.arguments)
+                .iter()
+                .filter_map(|p| self.tool_ctx.resolve(p).ok())
+                .collect();
+            self.rook.touched(self.session, &seen);
+        }
         let mut text = match self.after_tool(call, &outcome).await {
             Some(extra) => format!("{}\n\n{extra}", outcome.content),
             None => outcome.content,
@@ -1628,10 +1638,17 @@ impl<'a> AgentLoop<'a> {
         if paths.is_empty() {
             return Ok((None, None));
         }
+        if tool.overwrites()
+            && let Some(unseen) = self.rook.overwriting_unseen(self.session, &paths)
+        {
+            return Err(unseen);
+        }
         // The paths a checkpoint is about to capture are exactly the ones
         // another turn in this project must not be writing, so the claim is
         // asked for here, where they are already known.
         let held = self.rook.writing(self.session, &paths).map_err(|e| e.to_string())?;
+        // Writing it makes this turn the one that has seen it.
+        self.rook.touched(self.session, &paths);
 
         let Some(failure) = self
             .rook

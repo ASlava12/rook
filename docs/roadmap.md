@@ -738,12 +738,14 @@ recorded so the design question survives the session that raised it.
    aborts on panic, which skips every destructor; that costs nothing here because
    the registry is in the process that died.
 
-   What is still open is the slower race — one turn reads a file, another
-   rewrites it, the first writes back what it read. A claim held for the length
-   of a call does not see that, and holding one for the length of a turn would
-   have a turn own a file from its second step to its two-hundredth. The shape
-   that fits is optimistic: record what the file was when it was read, and refuse
-   the write if it is no longer that.
+   The slower race is closed too, and by a smaller thing than the hashes that
+   were sketched here. What matters is not what a file contained but who looked
+   at it last: an overwrite by a turn that is not the last to have seen a file is
+   a turn writing over something it never read. So a read records the reader, a
+   write records the writer, and `write_file` — the only tool that replaces a
+   file whole — is refused when somebody else looked last, with `edit_file`
+   offered instead. A session working alone is always the last to have looked, so
+   it never meets the rule, which is what keeps a rule from being switched off.
 8. **Secrets the agent can use and cannot leak.** At the concept stage. The
    shape that fits: a secret is named, never valued, in everything the model
    sees — it asks for `deploy_token` and the substitution happens at the edge,

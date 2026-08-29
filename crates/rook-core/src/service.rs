@@ -56,6 +56,14 @@ pub struct Rook {
     /// not there to replace — but `write_file` overwrites whole, so the loser of
     /// that race silently loses its work.
     writing: std::sync::Mutex<BTreeMap<PathBuf, Held>>,
+    /// Who last read or wrote each file.
+    ///
+    /// The claim above stops two turns writing at the same instant. It says
+    /// nothing about the slower race: one turn reads a file, another rewrites
+    /// it, and the first writes back what it read. This is what tells them
+    /// apart — an overwrite by somebody who is not the last to have looked is a
+    /// turn writing over something it never saw.
+    touched: std::sync::Mutex<BTreeMap<PathBuf, Held>>,
 }
 
 /// Who is writing a path, and since when.
@@ -115,6 +123,7 @@ impl Rook {
             skill_errors,
             plugins,
             writing: Default::default(),
+            touched: Default::default(),
         })
     }
 
@@ -139,6 +148,7 @@ impl Rook {
             skill_errors: Vec::new(),
             plugins: Vec::new(),
             writing: Default::default(),
+            touched: Default::default(),
         }
     }
 
@@ -164,6 +174,7 @@ impl Rook {
             skill_errors,
             plugins,
             writing: Default::default(),
+            touched: Default::default(),
         }
     }
 
@@ -769,6 +780,39 @@ impl Rook {
         for by in held.values_mut() {
             by.since -= secs;
         }
+    }
+
+    /// Record that `session` has seen these files as they are now.
+    pub fn touched(&self, session: u128, paths: &[PathBuf]) {
+        let now = rook_store::now_unix();
+        let mut seen = self.touched.lock().unwrap_or_else(|e| e.into_inner());
+        seen.retain(|_, by| now.saturating_sub(by.since) < HELD_FOR_AT_MOST);
+        for path in paths {
+            seen.insert(path.clone(), Held { session, since: now });
+        }
+    }
+
+    /// The path `session` would be overwriting without having looked at it since
+    /// somebody else did, if there is one.
+    ///
+    /// Only a whole-file overwrite asks this. An edit names the text it replaces
+    /// and fails on its own when that text has changed; there is nothing for an
+    /// overwrite to fail against.
+    pub fn overwriting_unseen(&self, session: u128, paths: &[PathBuf]) -> Option<String> {
+        let now = rook_store::now_unix();
+        let seen = self.touched.lock().unwrap_or_else(|e| e.into_inner());
+        paths.iter().find_map(|path| {
+            let by = seen.get(path)?;
+            let stale = by.session != session && now.saturating_sub(by.since) < HELD_FOR_AT_MOST;
+            stale.then(|| {
+                format!(
+                    "{} was last touched by session {}, not by this one — read it before \
+                     overwriting it, or change the part you mean with `edit_file`",
+                    path.display(),
+                    rook_store::format_session_id(by.session)
+                )
+            })
+        })
     }
 
     /// What is being written in this project, and by whom.
@@ -1430,6 +1474,7 @@ mod tests {
             skill_errors: Vec::new(),
             plugins: Vec::new(),
             writing: Default::default(),
+            touched: Default::default(),
         }
     }
 

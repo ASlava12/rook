@@ -112,3 +112,51 @@ fn a_call_that_panics_does_not_keep_the_file() {
 
     rook.writing(two, &path).expect("the next turn may have it");
 }
+
+/// The claim stops two turns writing at the same instant. The slower race is the
+/// one it cannot see: one turn reads a file, another rewrites it, and the first
+/// writes back what it read.
+#[test]
+fn overwriting_a_file_somebody_else_touched_is_refused_until_it_is_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let rook = rook(dir.path());
+    let mine = rook.start_session("mine").unwrap();
+    let theirs = rook.start_session("theirs").unwrap();
+    let file = vec![dir.path().join("main.rs")];
+
+    assert!(
+        rook.overwriting_unseen(mine, &file).is_none(),
+        "a file nobody has touched is not somebody else's"
+    );
+
+    rook.touched(theirs, &file);
+    let refused = rook.overwriting_unseen(mine, &file).expect("somebody else looked at it last");
+    assert!(refused.contains("main.rs"), "{refused}");
+    assert!(
+        refused.contains(&rook_store::format_session_id(theirs)),
+        "the refusal names who, or there is nothing to do about it: {refused}"
+    );
+    assert!(refused.contains("edit_file"), "and what to do instead: {refused}");
+
+    rook.touched(mine, &file);
+    assert!(
+        rook.overwriting_unseen(mine, &file).is_none(),
+        "reading it is what makes overwriting it safe again"
+    );
+}
+
+/// One session on its own must never meet this: it is always the last to have
+/// looked, and a rule that fires on the ordinary case is a rule that gets
+/// switched off.
+#[test]
+fn a_lone_session_is_never_refused_its_own_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let rook = rook(dir.path());
+    let only = rook.start_session("alone").unwrap();
+    let file = vec![dir.path().join("notes.txt")];
+
+    for _ in 0..3 {
+        assert!(rook.overwriting_unseen(only, &file).is_none());
+        rook.touched(only, &file);
+    }
+}

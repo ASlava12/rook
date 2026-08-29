@@ -102,6 +102,10 @@ impl Tool for ReadFile {
         .with("total_lines", total_lines as u64)
         .with("returned_lines", page.shown as u64))
     }
+
+    fn observed_paths(&self, args: &serde_json::Value) -> Vec<String> {
+        path_arg(args)
+    }
 }
 
 /// The lines a read asked for, and what the file has around them.
@@ -264,6 +268,10 @@ impl Tool for WriteFile {
 
     fn touched_paths(&self, args: &serde_json::Value) -> Vec<String> {
         path_arg(args)
+    }
+
+    fn overwrites(&self) -> bool {
+        true
     }
 }
 

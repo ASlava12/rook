@@ -2791,3 +2791,47 @@ async fn the_context_size_follows_what_the_provider_reported() {
          ignored"
     );
 }
+
+/// End to end, through the loop that has to notice: a read makes this turn the
+/// one that has seen the file, and an overwrite by a turn that has not is
+/// refused with what to do instead.
+#[tokio::test]
+async fn a_turn_may_not_overwrite_what_another_turn_looked_at_last() {
+    let f = fixture();
+    let target = f.workspace.path().join("shared.txt");
+    std::fs::write(&target, "as it was\n").unwrap();
+
+    let theirs = f.rook.start_session("theirs").unwrap();
+    // As the loop will see it: paths are resolved through symlinks before they
+    // reach the registry, and on macOS `/var` is one.
+    f.rook.touched(theirs, &[target.canonicalize().unwrap()]);
+
+    let mine = f.rook.start_session("mine").unwrap();
+    let script = vec![
+        call("write_file", serde_json::json!({ "path": "shared.txt", "content": "mine\n" })),
+        call("read_file", serde_json::json!({ "path": "shared.txt" })),
+        call("write_file", serde_json::json!({ "path": "shared.txt", "content": "mine\n" })),
+        reply("done"),
+    ];
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), mine);
+    agent.allow_everything_not_denied();
+    agent.run("rewrite it").await.unwrap();
+
+    let results: Vec<String> = f
+        .rook
+        .transcript(mine, 0, usize::MAX, 4096)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == "tool-result")
+        .map(|e| e.body)
+        .collect();
+
+    assert!(results[0].contains("edit_file"), "the blind overwrite is refused: {}", results[0]);
+    assert!(!results[0].contains("overwrote"), "and does not happen: {}", results[0]);
+    assert!(
+        results[2].contains("overwrote"),
+        "after reading it, the same write goes through: {}",
+        results[2]
+    );
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "mine\n", "which is the file it left");
+}

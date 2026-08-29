@@ -306,6 +306,20 @@ pub trait Tool: Send + Sync {
         Vec::new()
     }
 
+    /// Paths this call reads, so a caller can tell that this session has seen
+    /// what is there. Empty for anything that does not read a named file.
+    fn observed_paths(&self, _args: &serde_json::Value) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Whether this replaces a file wholesale rather than changing part of it.
+    ///
+    /// An edit names the text it is replacing and fails on its own when somebody
+    /// else has changed that text. An overwrite has nothing to fail against.
+    fn overwrites(&self) -> bool {
+        false
+    }
+
     /// What this call would do to the machine, for the approval policy.
     fn risk(&self, args: &serde_json::Value) -> policy::Risk {
         match self.touched_paths(args) {

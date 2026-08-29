@@ -245,6 +245,12 @@ rather than queued, because the useful answer to "somebody is writing that" is
 to go and do something else. `edit_file` needed no help: it replaces exact
 text, and text another turn has changed is not there to replace.
 
+The slower race is the other one: a turn reads a file, another rewrites it, and
+the first writes back what it read. A read records who looked, and `write_file` —
+the only tool that replaces a file whole — is refused when somebody else looked
+last, with `edit_file` offered instead. Working alone you are always the last to
+have looked, so you never meet it.
+
 The claim is released when the call returns, when it panics on the way out, and
 when the turn holding it is aborted. What none of those cover is a call that
 never returns at all, so a claim also expires; and the registry is readable,
