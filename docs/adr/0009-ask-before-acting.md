@@ -51,8 +51,9 @@ skill being authored — and the same string reaches the terminal, the TUI, the
 browser and the editor, because a question that is answerable in one front end
 and blind in another is the same defect as a capability reachable from one.
 
-It is built only when someone is actually going to be asked: a diff of a call the
-policy already allows is work nobody reads.
+It is built at the moment of asking rather than earlier — a `pre_tool` hook may
+turn an allowed call into one somebody is asked about, and a diff of a call
+nobody is asked about is work nobody reads.
 
 **No approver means refuse.** An unattended run — a script, a cron job, the
 daemon — gets an approver that always declines, with a message naming `--yes` and

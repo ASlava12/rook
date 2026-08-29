@@ -763,7 +763,8 @@ recorded so the design question survives the session that raised it.
   the call would apply to a copy nothing writes, and shown in all four front
   ends: indented under the terminal prompt, coloured in the TUI panel, in the
   browser's dialog, and as a content block on the ACP permission request. Built
-  only when someone is going to be asked. 4 tests.
+  at the moment of asking, since a hook can turn an allowed call into an asked
+  one. 4 tests.
 - **Standing instructions from `AGENTS.md`** — the convention codex, opencode
   and others already read, and this agent read none of them: a project's
   conventions had to be repeated every turn or hidden in a skill, which is

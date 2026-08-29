@@ -393,7 +393,7 @@ fn diff(path: &std::path::Path, before: &str, after: &str) -> String {
     let text = similar::TextDiff::from_lines(before, after)
         .unified_diff()
         .context_radius(3)
-        .header(&path.display().to_string(), "after")
+        .header("before", "after")
         .to_string();
     crate::elide_middle(&text, MOST)
 }
