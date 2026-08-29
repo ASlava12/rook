@@ -100,3 +100,23 @@ fn a_turn_says_what_it_changed_about_what_it_believes() {
     assert!(note.contains("remembered: deploys happen on fridays"), "{note}");
     assert!(note.contains("forgot: deploys happen on tuesdays"), "{note}");
 }
+
+/// The history is read back in the order its keys sort, so writes faster than
+/// the clock have to keep their order all the same.
+#[test]
+fn a_history_written_faster_than_the_clock_still_comes_back_in_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let rook = rook(dir.path());
+
+    let notes: Vec<String> = (0..12).map(|i| format!("change {i:02}")).collect();
+    for (i, note) in notes.iter().enumerate() {
+        rook.remember(Fact::new(format!("fact {i}"), Scope::Global), Some(note.clone())).unwrap();
+    }
+
+    let history = rook.memory_history().unwrap();
+    assert_eq!(history.len(), notes.len(), "every change is a version of its own");
+
+    let read_back: Vec<&str> = history.iter().rev().filter_map(|v| v.note.as_deref()).collect();
+    let expected: Vec<&str> = notes.iter().map(String::as_str).collect();
+    assert_eq!(read_back, expected, "oldest to newest, in the order they were written");
+}

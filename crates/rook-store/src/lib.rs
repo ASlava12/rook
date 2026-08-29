@@ -47,12 +47,30 @@ pub use stats::{KindStats, StoreStats};
 /// one `--session last` means. The generator keeps the timestamp and increments
 /// the random part instead when the millisecond repeats.
 pub fn new_session_id() -> u128 {
+    monotonic().0
+}
+
+/// A name for one entry of an appended-to history, ordered by when it was made.
+///
+/// Those refs are read back in the order their names sort, and the name used to
+/// be a millisecond stamp with the object's hash after it. Two changes in the
+/// same millisecond — which two tool calls in a row are — then tied, and the tie
+/// resolved by the hash, which is to say arbitrarily: `memory history` reported
+/// the older change first. A monotonic ULID cannot tie.
+///
+/// Sorts after the old format for as long as both are in a store, which is the
+/// right way round: `0000017…` is smaller than `01…` and is also older.
+pub fn history_key() -> String {
+    monotonic().to_string()
+}
+
+fn monotonic() -> ulid::Ulid {
     static GENERATOR: std::sync::Mutex<Option<ulid::Generator>> = std::sync::Mutex::new(None);
     let mut held = GENERATOR.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let generator = held.get_or_insert_with(ulid::Generator::new);
     // Only after 2^80 ids inside one millisecond, and a fresh random one is
     // still ordered correctly against every other millisecond.
-    generator.generate().unwrap_or_else(|_| ulid::Ulid::generate()).0
+    generator.generate().unwrap_or_else(|_| ulid::Ulid::generate())
 }
 
 pub fn format_session_id(id: u128) -> String {
@@ -61,17 +79,6 @@ pub fn format_session_id(id: u128) -> String {
 
 pub fn parse_session_id(s: &str) -> Option<u128> {
     ulid::Ulid::from_string(s).ok().map(|u| u.0)
-}
-
-/// Millisecond clock, for ordering things that can happen more than once a
-/// second. Second granularity is not enough for a history key: two captures in
-/// the same second are ordinary, and ordering them by a colliding timestamp
-/// makes "the previous version" a coin flip.
-pub fn now_unix_millis() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
 }
 
 /// Today, as `YYYY-MM-DD` in UTC.

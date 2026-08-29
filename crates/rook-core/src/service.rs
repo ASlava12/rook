@@ -229,8 +229,7 @@ impl Rook {
         // The object id is part of the history key, not just the timestamp: two
         // captures within the same second are distinct versions, while capturing
         // unchanged content twice is genuinely the same entry and should collapse.
-        self.store
-            .set_ref(&format!("skill/{name}/h/{:015}-{}", rook_store::now_unix_millis(), id.short()), &id)?;
+        self.store.set_ref(&format!("skill/{name}/h/{}", rook_store::history_key()), &id)?;
         Ok((set, id))
     }
 
@@ -434,10 +433,7 @@ impl Rook {
         let root = root.unwrap_or(&self.workspace);
         let (set, id) =
             FileSet::capture(&self.store, "checkpoint", name, "", root, &CaptureLimits::default(), None)?;
-        self.store.set_ref(
-            &format!("checkpoint/{name}/{:015}-{}", rook_store::now_unix_millis(), id.short()),
-            &id,
-        )?;
+        self.store.set_ref(&format!("checkpoint/{name}/{}", rook_store::history_key()), &id)?;
         Ok((set, id))
     }
 
@@ -1031,8 +1027,7 @@ impl Rook {
         book.updated_at = rook_store::now_unix();
         let id = book.store(&self.store)?;
         self.store.set_ref(MEMORY_HEAD, &id)?;
-        self.store
-            .set_ref(&format!("{MEMORY_LOG}{:015}-{}", rook_store::now_unix_millis(), id.short()), &id)?;
+        self.store.set_ref(&format!("{MEMORY_LOG}{}", rook_store::history_key()), &id)?;
         Ok(id)
     }
 

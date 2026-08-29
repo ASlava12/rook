@@ -502,3 +502,25 @@ fn the_date_is_the_one_the_calendar_says() {
     assert_eq!(on(1_709_251_200), "2024-03-01", "the day after one");
     assert_eq!(on(4_107_542_400), "2100-03-01", "and a century that is not");
 }
+
+/// History refs are read back in the order their names sort. The name used to be
+/// a millisecond stamp with the object's hash after it, so two entries written
+/// inside one millisecond tied — and the tie resolved by the hash, which is to
+/// say by nothing.
+#[test]
+fn history_keys_do_not_tie_when_the_clock_does() {
+    let keys: Vec<String> = (0..500).map(|_| rook_store::history_key()).collect();
+
+    // The precondition, stated exactly: a ULID's first ten characters are its
+    // millisecond, so keys sharing them are keys the old scheme would have
+    // collided on.
+    let same_millisecond = keys.windows(2).filter(|pair| pair[0][..10] == pair[1][..10]).count();
+    assert!(same_millisecond > 0, "the keys have to outrun the clock or this proves nothing");
+
+    let mut sorted = keys.clone();
+    sorted.sort();
+    assert_eq!(sorted, keys, "written in order, so they must sort in order");
+
+    let distinct: std::collections::BTreeSet<&String> = keys.iter().collect();
+    assert_eq!(distinct.len(), keys.len(), "and no two may be the same name");
+}
