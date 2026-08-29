@@ -194,10 +194,27 @@ fn readable(html: &str) -> String {
         out.push_str(&rest[..open]);
         rest = &rest[open..];
 
+        // A `<` only opens a tag when a name, a closer or a declaration follows.
+        // Anywhere else it is the character itself — `if a < b` is prose, and
+        // swallowing to the next `>` eats the sentence it was in.
+        let opens_a_tag = rest
+            .as_bytes()
+            .get(1)
+            .is_some_and(|c| c.is_ascii_alphabetic() || matches!(c, b'/' | b'!' | b'?'));
+        if !opens_a_tag {
+            out.push('<');
+            rest = &rest[1..];
+            continue;
+        }
+
+        // Compared as bytes. A tag name is ASCII, and slicing the text by those
+        // indices instead panics the moment a `<` is followed by anything
+        // multibyte — which is a page with `a < b` in its prose and a word of
+        // Japanese after it.
+        let after = rest.as_bytes();
         let dropped = ["script", "style"].into_iter().find(|tag| {
-            rest.len() > tag.len() + 1
-                && rest[1..=tag.len()].eq_ignore_ascii_case(tag)
-                && !rest[tag.len() + 1..].starts_with(|c: char| c.is_ascii_alphanumeric())
+            after.get(1..=tag.len()).is_some_and(|name| name.eq_ignore_ascii_case(tag.as_bytes()))
+                && !after.get(tag.len() + 1).is_some_and(u8::is_ascii_alphanumeric)
         });
         if let Some(tag) = dropped {
             match find_close(rest, tag) {

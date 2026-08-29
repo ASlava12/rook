@@ -221,3 +221,33 @@ fn an_engine_that_cannot_work_is_not_offered() {
         "a trailing slash must not become a double one"
     );
 }
+
+/// A page is arbitrary text. Deciding whether a `<` opens a `<script>` by
+/// slicing the six bytes after it splits a character the moment those bytes are
+/// not ASCII — and a page with `a < b` in its prose and a word of Japanese after
+/// it is an ordinary page, not a malformed one. In release the profile aborts on
+/// panic, so this took the process with it.
+#[tokio::test]
+async fn a_page_that_puts_a_bare_angle_bracket_before_multibyte_text_is_read() {
+    let url = serve(
+        "200 OK",
+        "text/html",
+        // Two shapes a real page has and a naive stripper does not survive: a
+        // bracket that opens nothing, and a malformed tag whose name runs
+        // straight into multibyte text.
+        "<p>if a < aa\u{65e5}\u{672c}\u{8a9e} then b</p><a\u{65e5}\u{672c}\u{8a9e}>\
+         <p>and \u{4eca}\u{65e5}</p>",
+    )
+    .await;
+
+    let out = fetch(&url).await;
+
+    assert!(!out.is_error, "{}", out.content);
+    assert!(
+        out.content.contains("a < aa\u{65e5}\u{672c}\u{8a9e} then b"),
+        "a bracket that opens no tag is the character itself, and the sentence around it \
+         survives: {}",
+        out.content
+    );
+    assert!(out.content.contains("\u{4eca}\u{65e5}"), "{}", out.content);
+}
