@@ -56,6 +56,22 @@ Add a row when you implement something after reading a reference. Add it to
 moved; what follows is what was done with it, so a dismissal is a decision rather
 than an omission.
 
+**2026-08-29 (nineteenth pass)** — hermes 3 commits.
+
+- hermes `835a913ff` *arm the failure cooldown when codex compaction fails* —
+  **dismissed, and it took reading ours to be sure.** Their failed compaction
+  frees nothing, so the next turn tries again and pays for another call; the
+  cooldown is what stops that. Here a summary that cannot be produced still
+  records a position — the span is dropped from the request either way and the
+  events are still in the log, so the note says where to read them. Context is
+  freed, and there is nothing to retry.
+  `a_compaction_whose_summary_failed_still_moves_the_session_on` is that claim.
+  The `Err` paths that remain cost no model call, and adding a wait to them would
+  be a configuration field guarding nothing.
+- hermes `0ffad55e0`, `4209d371a` — validating `/model` against a vendor's
+  recommendation endpoint. `rook models` asks the endpoint what it serves, which
+  is the same question without a vendor in it.
+
 **2026-08-29 (eighteenth pass)** — hermes 46 commits, cline 1.
 
 - hermes `1315e65a5` *a failed rollback restore keeps the skill and the
