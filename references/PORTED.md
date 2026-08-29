@@ -31,6 +31,7 @@ Add a row when you implement something after reading a reference. Add it to
 | Asking the user structured questions | hermes `7d6c6ae4` *clarify: schema diet + single questions[] interface (880 → 335 tok/call)* — took the one-questions[]-shape and the rule that options must never be written into the question text, and cut further: no per-question id, and the answer's own text is the "Other" row | source, via `refs advance` | `rook-tools/src/ask.rs`, `AgentLoop::ask_via` |
 | A workspace boundary that a symlink cannot cross | codex `2926014` *make filesystem policy matching URI-native* — their case was encoded and case-variant paths, ours was a symlink out of the workspace that lexical containment could not see | source, via `refs advance` | `ToolContext::resolve`, `through_symlinks`, `sandbox.allow_outside_workspace` |
 | Widening a fact's scope instead of keeping the first | hermes `3b672a68` *delete-path drops every scope of a removed id* — the fix does not apply (identity here is the text, not an id per scope), but its subject exposed the same hazard in ours | source, via `refs advance` | `MemoryBook::learn`, `Scope::within` |
+| A layering that fails the build instead of describing itself | goose `a9060fd` *stop enumerating crates in AGENTS.md* — the opposite conclusion: the list here is a rule, so what it needed was enforcement, not deletion. It found the table already drifted | source, via `refs advance` | `crates/rook-core/tests/layering.rs` |
 | Measuring context by what the provider counted | hermes `d3a1c4651` *context size anchors on provider-reported usage* — ours estimated the messages and not the tool schemas, so the budget was short by the size of the tool list on every request | source, via `refs advance` | `measured`, `AgentLoop::run_with` |
 | Naming the shell the model actually has | codex `5ed294d` *match Windows shell guidance to the executor platform* — the environment block named the OS and not the shell, and `;` chaining sent to `cmd.exe` fails as silently as GNU flags sent to BSD | source, via `refs advance` | `AgentLoop::system_prompt`, `rook_core::SHELL` |
 | Telling the model what day it is | codex `430d26b` *classify clock tools as built-in control tools* — taken as a fact beside the prompt rather than a tool, since a date needs no round trip and must not sit in a prefix that is supposed to cache | source, via `refs advance` | `AgentLoop::request_messages`, `rook_store::today` |
@@ -50,6 +51,25 @@ Add a row when you implement something after reading a reference. Add it to
 `cargo xtask refs advance` prints what landed upstream since the pointer was last
 moved; what follows is what was done with it, so a dismissal is a decision rather
 than an omission.
+
+**2026-08-29 (seventeenth pass)** — codex 31 commits, cline 5, goose 3, acp,
+opencode and openhands two each. hermes moved 934 and is triaged separately.
+
+- goose `a9060fd` *stop enumerating crates in AGENTS.md Structure* — **taken as
+  the opposite conclusion, and it found a drift.** They deleted a list from their
+  agent-facing document because it goes stale. The list here is a *rule* — which
+  crate may depend on which — so deleting it loses the rule; what was missing was
+  anything holding it. `crates/rook-core/tests/layering.rs` does now, by rank
+  rather than by edge, and it immediately showed the table in `CLAUDE.md` had
+  drifted: `rook-lsp`, `rook-mcp` and `rook-acp` were absent from it entirely,
+  and `rook-tools` had gained two dependencies since it was written.
+- cline `cea134b` *prevent hook spawn failures from crashing the core process* —
+  **already held**: a hook that cannot be spawned is caught where it is invoked,
+  and for `pre_tool` it becomes a denial rather than a crash or a silent pass,
+  which is the direction that matters.
+- codex, acp, opencode, openhands — registry docs, model catalogues, Linux ARM64
+  artifacts, telemetry flags and console animations: **not applicable**, product
+  surfaces and release plumbing this does not have.
 
 **2026-08-28 (sixteenth pass)** — codex 11 commits, hermes 70, goose 3, cline,
 opencode and openhands one each.

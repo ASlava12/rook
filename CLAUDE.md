@@ -32,14 +32,18 @@ ROOK_HOME=/tmp/rook-scratch cargo run -p rook-cli -- store stat
 Dependencies run one way. Do not add an edge that reverses them.
 
 ```
-rook-store   ──►  (nothing internal)
-rook-skills  ──►  (nothing internal)
-rook-llm     ──►  (nothing internal)
-rook-tools   ──►  rook-llm
-rook-core    ──►  store, skills, llm, tools, proto
-rookd        ──►  core, store, skills, proto
-rook-cli     ──►  core, store, skills, llm, proto
+rook-store  rook-skills  rook-llm  rook-lsp  rook-proto   ──►  (nothing internal)
+rook-mcp                                                 ──►  llm
+rook-tools                                               ──►  llm, mcp, proto
+rook-core                                                ──►  everything below it
+rookd  rook-acp                                          ──►  core and below
+rook-cli                                                 ──►  acp, core and below
 ```
+
+`crates/rook-core/tests/layering.rs` holds this, so an edge that reverses it
+fails the build rather than being noticed later. It is ranks rather than a list
+of edges: adding an ordinary dependency needs no edit there, and adding a crate
+needs one line.
 
 `rook-store` must not learn what a skill or a checkpoint is. When GC needs to know
 that a manifest keeps files alive, the caller passes an expander.
