@@ -132,6 +132,24 @@ impl Jobs {
         running.get(id).map(|r| r.seen_as(id))
     }
 
+    /// The job once it has finished, or as it stands when the wait runs out.
+    ///
+    /// Polled rather than signalled: a signal has to be armed before the thing
+    /// it waits for happens, and a job that finished before this was called
+    /// would then be waited on forever. This is what lets several commands run
+    /// at once — the alternative is the model asking again and again, and every
+    /// ask is a whole turn.
+    pub async fn wait(&self, id: &str, patience: std::time::Duration) -> Option<Job> {
+        let deadline = std::time::Instant::now() + patience;
+        loop {
+            let job = self.get(id)?;
+            if job.exit_code.is_some() || std::time::Instant::now() >= deadline {
+                return Some(job);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
     /// Ask one to stop and keep what it printed: the output is why anyone asked.
     ///
     /// True means there is such a job, not that it has already died — the kill
@@ -231,7 +249,8 @@ impl crate::Tool for JobTool {
                 "type": "object",
                 "properties": {
                     "id": { "type": "string" },
-                    "stop": { "type": "boolean", "description": "Kill it; what it printed is kept." }
+                    "stop": { "type": "boolean", "description": "Kill it; what it printed is kept." },
+                    "wait_secs": { "type": "integer", "description": "Answer when it ends, or after this." }
                 }
             }),
         }
@@ -251,7 +270,18 @@ impl crate::Tool for JobTool {
         if args.get("stop").and_then(|s| s.as_bool()).unwrap_or(false) && !jobs.stop(id) {
             return Ok(crate::ToolOutcome::error(format!("{id} is not running")));
         }
-        match jobs.get(id) {
+        // No longer than a command in the foreground would have been given: the
+        // same wait, whichever way it was started.
+        let patience = args
+            .get("wait_secs")
+            .and_then(|w| w.as_u64())
+            .map(std::time::Duration::from_secs)
+            .map(|asked| asked.min(ctx.command_timeout));
+        let job = match patience {
+            Some(patience) => jobs.wait(id, patience).await,
+            None => jobs.get(id),
+        };
+        match job {
             Some(job) => Ok(crate::ToolOutcome::ok(format!("{}\n{}", describe(&job), job.output))
                 .with("running", job.exit_code.is_none())),
             None => Ok(crate::ToolOutcome::error(format!("no background command {id}"))),

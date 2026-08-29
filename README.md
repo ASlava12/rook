@@ -163,8 +163,15 @@ with an id; `job` reads what it has printed since, and stops it:
 ```
 run_command  { "command": "npm run dev", "background": true }   → job001
 job          { "id": "job001" }                                 → what it printed
+job          { "id": "job001", "wait_secs": 60 }                → …when it ends
 job          { "id": "job001", "stop": true }
 ```
+
+`wait_secs` is what makes several commands one wait rather than many: three test
+suites started together and then waited on cost four tool calls, where asking
+again and again costs a whole turn each time. It is capped at the timeout a
+command in the foreground would have been given — the same wait, whichever way it
+was started.
 
 `/jobs` in the chat and the TUI shows the same list without spending a turn on
 it, and `rook mcp` offers the same pair, since a stdio session lasts as long as

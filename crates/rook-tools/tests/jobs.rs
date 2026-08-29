@@ -141,6 +141,55 @@ async fn finished_background_commands_do_not_pile_up() {
     assert_eq!(newest, "job007", "and it is the oldest that go: {held:?}");
 }
 
+/// The point of the wait: three commands run at once and the turn spends four
+/// tool calls, not one per check. Polling costs a whole model round trip each
+/// time.
+#[tokio::test]
+async fn several_commands_run_at_once_and_the_turn_waits_for_them() {
+    let (dir, ctx) = ctx(4);
+
+    let mut ids = Vec::new();
+    for name in ["a", "b", "c"] {
+        let command = format!("sleep 0.3; echo done > {}/{name}", dir.path().display());
+        let out = RunCommand
+            .call(&ctx, &serde_json::json!({"command": command, "background": true}))
+            .await
+            .unwrap();
+        ids.push(out.meta.get("job").and_then(|j| j.as_str()).unwrap().to_string());
+    }
+
+    let started = std::time::Instant::now();
+    for id in &ids {
+        let out = JobTool.call(&ctx, &serde_json::json!({"id": id, "wait_secs": 20})).await.unwrap();
+        assert_eq!(out.meta.get("running"), Some(&serde_json::json!(false)), "{}", out.content);
+    }
+
+    assert!(started.elapsed() < std::time::Duration::from_secs(1), "they ran together, not one by one");
+    for name in ["a", "b", "c"] {
+        assert!(dir.path().join(name).exists(), "{name} never finished");
+    }
+}
+
+/// A wait that outlives what it is waiting for would hold the turn as surely as
+/// a command with no timeout.
+#[tokio::test]
+async fn a_wait_gives_up_and_says_it_is_still_running() {
+    let (_d, mut ctx) = ctx(4);
+    ctx.command_timeout = std::time::Duration::from_secs(1);
+
+    let started =
+        RunCommand.call(&ctx, &serde_json::json!({"command": "sleep 30", "background": true})).await.unwrap();
+    let id = started.meta.get("job").and_then(|j| j.as_str()).unwrap().to_string();
+
+    let waited = std::time::Instant::now();
+    // Asked for far longer than a command in the foreground would have been
+    // given, which is the cap it is held to.
+    let out = JobTool.call(&ctx, &serde_json::json!({"id": id, "wait_secs": 600})).await.unwrap();
+
+    assert!(waited.elapsed() < std::time::Duration::from_secs(5), "it waited {:?}", waited.elapsed());
+    assert_eq!(out.meta.get("running"), Some(&serde_json::json!(true)), "{}", out.content);
+}
+
 /// A front end with nowhere to keep one says so rather than running it in the
 /// foreground and appearing to hang.
 #[tokio::test]
