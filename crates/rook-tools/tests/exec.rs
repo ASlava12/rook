@@ -236,6 +236,34 @@ async fn an_output_that_fits_is_not_also_written_to_a_file() {
 
     assert!(!out.truncated, "nothing was left out");
     assert!(!out.meta.contains_key("output_file"), "so nothing is named: {:?}", out.meta);
+    // And nothing is left behind: a copy of every `echo` ever run is the
+    // accumulator the cap exists to prevent.
+    assert_eq!(std::fs::read_dir(kept.path()).unwrap().count(), 0, "and no file remains");
+}
+
+/// The command that ran until the timeout is the one whose output is most worth
+/// having, and the ends of it are the least of it.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_timed_out_command_still_says_where_the_whole_of_its_output_is() {
+    let (_d, mut ctx) = ctx();
+    let kept = tempfile::tempdir().unwrap();
+    ctx.max_output_bytes = 1024;
+    ctx.spill_dir = Some(kept.path().to_path_buf());
+    ctx.max_spill_bytes = 8 << 20;
+
+    let out = run(
+        &ctx,
+        serde_json::json!({
+            "command": "yes padding | head -c 100000; echo NEEDLE; sleep 30",
+            "timeout_secs": 3
+        }),
+    )
+    .await;
+
+    assert_eq!(out.meta.get("timed_out"), Some(&serde_json::json!(true)), "{}", out.content);
+    let path = out.meta.get("output_file").and_then(|p| p.as_str()).expect("it names the file");
+    assert!(std::fs::read_to_string(path).unwrap().contains("NEEDLE"), "which holds what it printed");
 }
 
 /// stdout was drained to EOF before stderr was read at all. A command that

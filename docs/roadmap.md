@@ -778,7 +778,9 @@ recorded so the design question survives the session that raised it.
   to read something it has. Bounded twice over, because the answer to a memory
   budget cannot be an unbounded disk one: `[sandbox] max_spill_bytes` caps each
   file and says when it stopped, and `store maintain` keeps the newest
-  `[sandbox] max_output_files`. 4 tests.
+  `[sandbox] max_output_files`. A timed-out command names it too — that is the
+  run whose output is most worth having and the ends of it are the least of it.
+  6 tests.
 
 ## Next
 

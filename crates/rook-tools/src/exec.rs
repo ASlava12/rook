@@ -99,9 +99,20 @@ impl Tool for RunCommand {
             // The whole group, not the shell: `sh -c` may fork rather than
             // exec, and killing the shell alone leaves the real work running.
             let killed = kill_group(group);
-            return Ok(
-                ToolOutcome::error(timed_out(timeout, killed, &joined(&out, &err))).with("timed_out", true)
-            );
+            // A command that ran until the timeout is the one whose output is
+            // most worth having, and the ends of it are the least of it.
+            let printed = joined(&out, &err);
+            let kept = settle(spill, out.seen + err.seen > printed.len());
+            let outcome = ToolOutcome::error(format!(
+                "{}{}",
+                timed_out(timeout, killed, &printed),
+                kept.as_ref().map(|(note, _)| note.as_str()).unwrap_or("")
+            ))
+            .with("timed_out", true);
+            return Ok(match kept {
+                Some((_, path)) => outcome.with("output_file", path),
+                None => outcome,
+            });
         }
         let status = child.wait().await;
 
@@ -113,13 +124,7 @@ impl Tool for RunCommand {
             combined = crate::elide_middle(&combined, ctx.max_output_bytes);
         }
 
-        // Only when something was actually left out: naming a file that holds
-        // exactly what is already on screen is a path the model may go and read
-        // for nothing.
-        let kept = spill.filter(|_| truncated).map(|s| {
-            let s = s.lock().unwrap_or_else(|e| e.into_inner());
-            (s.note(), s.path.display().to_string())
-        });
+        let kept = settle(spill, truncated);
 
         let outcome = ToolOutcome {
             content: format!(
@@ -178,7 +183,12 @@ impl Spill {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let path = dir.join(format!("{stamp:039}.log"));
+        // The clock alone is not unique: two delegated sub-agents starting
+        // together get the same reading on a coarse one, and `File::create`
+        // truncates — so the second would silently take the first's file.
+        static NTH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let nth = NTH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = dir.join(format!("{stamp:039}-{nth:06}.log"));
         let file = std::fs::File::create(&path).ok()?;
         Some(Self { file, path, written: 0, cap, dropped: 0 })
     }
@@ -272,6 +282,25 @@ fn spawn_shell(command: &str, cwd: &std::path::Path) -> Result<tokio::process::C
 /// The same sentence wherever a command ran out of time: what it had printed is
 /// the part worth reading, and a model told only that it timed out retries the
 /// same command against the same limit.
+/// What to say about the kept copy, and where it is — or nothing, once the file
+/// has been removed.
+///
+/// Only when something was actually left out. Naming a file that holds exactly
+/// what is already on screen sends the model to read something it has, and a
+/// copy of every `echo` ever run is the accumulator the cap exists to prevent.
+fn settle(
+    spill: Option<std::sync::Arc<std::sync::Mutex<Spill>>>,
+    anything_lost: bool,
+) -> Option<(String, String)> {
+    let spill = spill?;
+    let spill = spill.lock().unwrap_or_else(|e| e.into_inner());
+    if !anything_lost {
+        let _ = std::fs::remove_file(&spill.path);
+        return None;
+    }
+    Some((spill.note(), spill.path.display().to_string()))
+}
+
 fn timed_out(limit: std::time::Duration, killed: bool, printed: &str) -> String {
     format!(
         "command timed out after {}s{} — pass a larger `timeout_secs` if it needs longer. \
