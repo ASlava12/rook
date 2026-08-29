@@ -52,6 +52,10 @@ fn a_client_can_list_the_tools_and_read_a_file_through_them() {
         said[1]["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(tools.contains(&"read_file"), "{tools:?}");
     assert!(tools.contains(&"run_command"), "{tools:?}");
+    // Served for as long as stdin is open, so a command left running is one this
+    // can keep — and a tool offered here and not there is the asymmetry the
+    // three front ends exist to avoid.
+    assert!(tools.contains(&"job"), "{tools:?}");
 
     let call = &said[2]["result"];
     assert_eq!(call["isError"], false, "{call}");

@@ -162,7 +162,8 @@ job          { "id": "job001", "stop": true }
 ```
 
 `/jobs` in the chat and the TUI shows the same list without spending a turn on
-it. The registry belongs to the front end rather than to a turn — one built per turn
+it, and `rook mcp` offers the same pair, since a stdio session lasts as long as
+the client keeps it open. The registry belongs to the front end rather than to a turn — one built per turn
 would kill everything in it between one turn and the next — and it takes the
 processes with it when it goes, because a dev server that outlived the agent that
 started it is one nobody knows to stop. `[sandbox] max_background_jobs` caps how

@@ -1793,10 +1793,15 @@ fn cmd_mcp(workspace: Option<PathBuf>, cmd: McpCmd, json: bool) -> Result<()> {
             }
             let mut tools = rook_tools::ToolBox::standard();
             rook_core::lsp::register(&mut tools, rook_core::agent::servers_for(&config, &here));
+            // Served for as long as stdin is open, which is a session like any
+            // other, so a command left running is one this can keep.
+            tools.register(std::sync::Arc::new(rook_tools::jobs::JobTool));
+            let mut ctx = rook_core::agent::tool_context(&config, &here, &rook_core::paths::output_dir());
+            ctx.jobs = Some(rook_core::agent::jobs_for(&config));
             eprintln!("rook mcp: offering {} tools from {}", tools.names().len(), here.display());
             return rook_core::mcp_server::serve(rook_core::mcp_server::Offered {
                 tools,
-                ctx: rook_core::agent::tool_context(&config, &here, &rook_core::paths::output_dir()),
+                ctx,
                 policy,
                 approver: std::sync::Arc::new(rook_tools::policy::Unattended),
             })
