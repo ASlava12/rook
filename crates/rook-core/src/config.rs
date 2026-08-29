@@ -221,6 +221,15 @@ pub struct SandboxConfig {
     /// Cap on a single command's captured output, before it is stored and
     /// summarised rather than pasted into context.
     pub max_output_bytes: usize,
+    /// Ceiling on one kept copy of a command's whole output. The ends of a
+    /// runaway output are what the model is shown; this is where the middle
+    /// goes, so a line that is neither first nor last is somewhere rather than
+    /// gone. Zero keeps none.
+    pub max_spill_bytes: u64,
+    /// How many of those copies to keep. They are files rather than objects, so
+    /// the store's own pruning never sees them; `store maintain` removes the
+    /// oldest past this.
+    pub max_output_files: usize,
     pub command_timeout_secs: u64,
     /// Lets file tools read and write outside the workspace, including through
     /// a symlink that leads out of it. Off by default: a workspace that cannot
@@ -316,6 +325,8 @@ impl Default for SandboxConfig {
             .map(String::from)
             .collect(),
             max_output_bytes: 256 * 1024,
+            max_spill_bytes: 64 * 1024 * 1024,
+            max_output_files: 100,
             command_timeout_secs: 120,
             allow_outside_workspace: false,
         }

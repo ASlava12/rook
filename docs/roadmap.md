@@ -767,6 +767,19 @@ recorded so the design question survives the session that raised it.
   any caller whose limit exceeded its data — nothing had one until now, and in
   release that is an abort. 3 tests.
 
+- **The middle of a very large output** — `Ends` holds a head and a tail and
+  discards what is between them as it streams, which is what makes a runaway
+  command cost bounded memory and what made the four hundredth line of two
+  thousand unreachable. The whole of it now goes to a file under `$ROOK_HOME`
+  as it arrives — one file for both streams, in the order a terminal would have
+  shown them — and the reply names it, so the model reaches the middle with the
+  shell it already has rather than with a new tool. Only when something was
+  actually left out: naming a file that holds what is already on screen sends it
+  to read something it has. Bounded twice over, because the answer to a memory
+  budget cannot be an unbounded disk one: `[sandbox] max_spill_bytes` caps each
+  file and says when it stopped, and `store maintain` keeps the newest
+  `[sandbox] max_output_files`. 4 tests.
+
 ## Next
 
 **Keep triaging the reference backlog.** `cargo xtask refs advance` moves a
@@ -829,13 +842,6 @@ manufacturers, which this is not. Implementing against a description of a
 standard is how you get a second, wrong one. Revisit when the specification is
 published; until then the entry exists so the design question is recorded rather
 than rediscovered.
-
-**Keeping the middle of a very large output.** `Ends` holds a head and a tail and
-discards what is between them as it streams, which is what makes a runaway
-command cost bounded memory — and it means the middle is gone rather than
-elsewhere. hermes spills the full text to a file and hands back a path to it.
-Worth having, but it is a second budget (disk, this time) and a second place for
-output to accumulate, so it needs the same care as the first.
 
 **Signed release binaries.** `cargo xtask dist` ships unsigned, so Windows
 SmartScreen warns on every download and macOS Gatekeeper needs a right-click to

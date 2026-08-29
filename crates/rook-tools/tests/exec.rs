@@ -164,6 +164,80 @@ async fn a_runaway_command_costs_bounded_memory_and_still_shows_both_ends() {
     assert!(out.full_bytes > 8_000_000, "what was produced is still reported");
 }
 
+/// The ends are what the model is shown, and they are also all it had: a line
+/// that is neither first nor last was discarded as it streamed.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_middle_of_a_runaway_output_is_kept_where_the_shell_can_reach_it() {
+    let (_d, mut ctx) = ctx();
+    let kept = tempfile::tempdir().unwrap();
+    ctx.max_output_bytes = 2048;
+    ctx.spill_dir = Some(kept.path().to_path_buf());
+    ctx.max_spill_bytes = 8 << 20;
+
+    let out = run(
+        &ctx,
+        serde_json::json!({
+            "command": "echo FIRST; yes padding | head -c 200000; echo NEEDLE_IN_THE_MIDDLE;                         yes padding | head -c 200000; echo LAST",
+            "timeout_secs": 120
+        }),
+    )
+    .await;
+
+    assert!(out.truncated, "the output has to exceed the cap or there is no middle to lose");
+    assert!(
+        !out.content.contains("NEEDLE_IN_THE_MIDDLE"),
+        "and the middle is not in the reply: {}",
+        out.content
+    );
+
+    let path = out.meta.get("output_file").and_then(|p| p.as_str()).expect("the reply names the file");
+    assert!(out.content.contains(path), "and says so where the model will read it: {}", out.content);
+    let whole = std::fs::read_to_string(path).unwrap();
+    assert!(whole.contains("NEEDLE_IN_THE_MIDDLE"), "the middle is there");
+    assert!(whole.contains("FIRST") && whole.contains("LAST"), "and so are the ends");
+}
+
+/// A command that prints without end must not fill the disk instead of memory.
+#[cfg(unix)]
+#[tokio::test]
+async fn what_is_kept_of_a_runaway_output_is_itself_bounded() {
+    let (_d, mut ctx) = ctx();
+    let kept = tempfile::tempdir().unwrap();
+    ctx.max_output_bytes = 1024;
+    ctx.spill_dir = Some(kept.path().to_path_buf());
+    ctx.max_spill_bytes = 64 * 1024;
+
+    let out =
+        run(&ctx, serde_json::json!({"command": "yes padding | head -c 4000000", "timeout_secs": 120})).await;
+
+    assert!(
+        out.full_bytes >= 4_000_000,
+        "the command printed {} bytes, far more than the cap",
+        out.full_bytes
+    );
+    let path = out.meta.get("output_file").and_then(|p| p.as_str()).unwrap();
+    let size = std::fs::metadata(path).unwrap().len();
+    assert!(size <= 64 * 1024, "the kept copy must stop at the cap, and it is {size} bytes");
+    assert!(out.content.contains("max_spill_bytes"), "and must say it stopped: {}", out.content);
+}
+
+/// Naming a file that holds exactly what is already on screen sends the model
+/// off to read something it has.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_output_that_fits_is_not_also_written_to_a_file() {
+    let (_d, mut ctx) = ctx();
+    let kept = tempfile::tempdir().unwrap();
+    ctx.spill_dir = Some(kept.path().to_path_buf());
+    ctx.max_spill_bytes = 8 << 20;
+
+    let out = run(&ctx, serde_json::json!({"command": "echo small"})).await;
+
+    assert!(!out.truncated, "nothing was left out");
+    assert!(!out.meta.contains_key("output_file"), "so nothing is named: {:?}", out.meta);
+}
+
 /// stdout was drained to EOF before stderr was read at all. A command that
 /// fills the stderr pipe buffer — a build with warnings does it easily — blocks
 /// writing to it, so it never finishes writing stdout, so the drain never ends.

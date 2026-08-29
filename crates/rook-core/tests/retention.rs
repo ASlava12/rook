@@ -36,6 +36,7 @@ fn fixture(count: usize, cap: Option<u64>) -> (Fixture, Vec<u128>) {
     // every object is seconds old and the point is the byte budget.
     config.storage.gc_grace_secs = 0;
     config.storage.retention.protect_tags = vec!["keep".into()];
+    config.sandbox.max_output_files = 3;
     config.storage.train_dictionaries_after = usize::MAX;
 
     let env = Environment::bare("linux", "x86_64", "0.1.0");
@@ -55,6 +56,33 @@ fn distinct_body(seed: usize) -> String {
             char::from(b'a' + (state % 26) as u8)
         })
         .collect()
+}
+
+/// Kept copies of command output are files rather than objects, so nothing the
+/// store prunes ever sees them.
+#[test]
+fn kept_command_output_is_trimmed_to_the_newest_and_the_rest_go() {
+    let (f, _) = fixture(1, None);
+    std::fs::create_dir_all(&f.rook.output_dir).unwrap();
+    for i in 0..10u32 {
+        std::fs::write(f.rook.output_dir.join(format!("{i:039}.log")), "output").unwrap();
+    }
+    let keep = f.rook.config.sandbox.max_output_files;
+    assert!(10 > keep, "there have to be more files than the cap, and the cap is {keep}");
+
+    let dry = f.rook.maintenance(true).unwrap();
+    assert_eq!(dry.outputs_dropped, (10 - keep) as u64, "a dry run counts them");
+    assert_eq!(std::fs::read_dir(&f.rook.output_dir).unwrap().count(), 10, "and removes none");
+
+    let report = f.rook.maintenance(false).unwrap();
+    assert_eq!(report.outputs_dropped, (10 - keep) as u64);
+    let left: Vec<String> = std::fs::read_dir(&f.rook.output_dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(left.len(), keep, "{left:?}");
+    assert!(left.iter().all(|n| n.starts_with(&"0".repeat(35))), "the newest are what stayed: {left:?}");
 }
 
 #[test]

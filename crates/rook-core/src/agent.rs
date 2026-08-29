@@ -69,12 +69,16 @@ pub fn servers_for(config: &Config, workspace: &Path) -> std::sync::Arc<crate::l
 /// Configuration and a directory rather than the engine, because that is all it
 /// ever read — and `mcp serve` has the first two without opening the store,
 /// which is what lets it run beside a daemon that is holding it.
-pub fn tool_context(config: &Config, workspace: &Path) -> ToolContext {
+pub fn tool_context(config: &Config, workspace: &Path, output_dir: &Path) -> ToolContext {
     let sandbox = &config.sandbox;
     let mut ctx = ToolContext::new(workspace.to_path_buf());
     ctx.max_output_bytes = sandbox.max_output_bytes;
     ctx.command_timeout = std::time::Duration::from_secs(sandbox.command_timeout_secs);
     ctx.allow_outside_workspace = sandbox.allow_outside_workspace;
+    // Outside the workspace on purpose: it is the agent's record of a command,
+    // not a file of the project's, and a checkpoint should not capture it.
+    ctx.spill_dir = Some(output_dir.to_path_buf());
+    ctx.max_spill_bytes = sandbox.max_spill_bytes;
     ctx
 }
 
@@ -286,7 +290,7 @@ pub struct AgentLoop<'a> {
 
 impl<'a> AgentLoop<'a> {
     pub fn new(rook: &'a Rook, provider: std::sync::Arc<dyn Provider>, session: u128) -> Self {
-        let tool_ctx = tool_context(&rook.config, &rook.workspace);
+        let tool_ctx = tool_context(&rook.config, &rook.workspace, &rook.output_dir);
 
         // No language servers until a front end hands them over with `equip`.
         // A loop is rebuilt for every turn, so a pool built here is rebuilt with

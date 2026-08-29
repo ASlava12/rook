@@ -44,6 +44,15 @@ pub fn user_skills_dir() -> PathBuf {
     home().join("skills")
 }
 
+/// Where the whole of a runaway command's output is kept.
+///
+/// Under the home rather than in the workspace: it is the agent's record of what
+/// a command printed, not a file the project has, and putting it in the
+/// workspace would put it in every checkpoint and every `git status`.
+pub fn output_dir() -> PathBuf {
+    home().join("output")
+}
+
 pub fn user_plugins_dir() -> PathBuf {
     home().join("plugins")
 }

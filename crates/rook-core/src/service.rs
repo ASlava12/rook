@@ -56,6 +56,14 @@ pub struct Rook {
     /// not there to replace — but `write_file` overwrites whole, so the loser of
     /// that race silently loses its work.
     writing: std::sync::Mutex<BTreeMap<PathBuf, Held>>,
+    /// Where the whole of a runaway command's output is kept.
+    ///
+    /// A field rather than [`paths::output_dir`] because `from_parts` exists so
+    /// a caller can point at a scratch store without touching process-wide
+    /// state, and `maintenance` *deletes* from this directory: reading it from
+    /// the environment would let a test with no `ROOK_HOME` sweep the files of
+    /// whoever ran it.
+    pub output_dir: PathBuf,
     /// Who last read or wrote each file.
     ///
     /// The claim above stops two turns writing at the same instant. It says
@@ -122,6 +130,7 @@ impl Rook {
             workspace,
             skill_errors,
             plugins,
+            output_dir: paths::output_dir(),
             writing: Default::default(),
             touched: Default::default(),
         })
@@ -140,6 +149,7 @@ impl Rook {
         skills: SkillIndex,
         workspace: PathBuf,
     ) -> Self {
+        let root = store.root().to_path_buf();
         Self {
             store: Arc::new(store),
             config,
@@ -148,6 +158,9 @@ impl Rook {
             workspace,
             skill_errors: Vec::new(),
             plugins: Vec::new(),
+            // Beside the scratch store rather than in the user's home, for the
+            // reason the field carries.
+            output_dir: root.join("output"),
             writing: Default::default(),
             touched: Default::default(),
         }
@@ -174,6 +187,7 @@ impl Rook {
             workspace,
             skill_errors,
             plugins,
+            output_dir: self.output_dir.clone(),
             writing: Default::default(),
             touched: Default::default(),
         }
@@ -1138,6 +1152,10 @@ impl Rook {
             Some(keep) => self.trim_histories(keep, dry_run)?,
             None => 0,
         };
+        // Kept copies of command output are files rather than objects, so the
+        // store's own pruning never sees them — and a directory nothing empties
+        // is the unbounded accumulator this codebase does not allow.
+        let outputs_dropped = trim_outputs(&self.output_dir, self.config.sandbox.max_output_files, dry_run);
         let mut prune = self.store.prune(policy, dry_run)?;
         let grace = self.config.storage.gc_grace_secs;
         let mut gc = self.store.gc(&GcOptions {
@@ -1200,7 +1218,14 @@ impl Rook {
                 self.config.storage.dictionary_bytes,
             )?
         };
-        Ok(MaintenanceReport { prune, gc, dictionaries_trained: trained, over_budget_by, history_dropped })
+        Ok(MaintenanceReport {
+            prune,
+            gc,
+            dictionaries_trained: trained,
+            over_budget_by,
+            history_dropped,
+            outputs_dropped,
+        })
     }
 
     /// Drop all but the newest `keep` entries of every history the agent appends
@@ -1414,6 +1439,31 @@ pub struct MaintenanceReport {
     /// suddenly has room should say why.
     #[serde(default)]
     pub history_dropped: u64,
+    /// Kept copies of command output removed past `[sandbox] max_output_files`.
+    #[serde(default)]
+    pub outputs_dropped: u64,
+}
+
+/// Keep the newest `keep` files under the output directory and delete the rest.
+///
+/// Newest by name: the name is the nanosecond it was opened, zero-padded, so
+/// sorting the names sorts them by age without asking the filesystem for times
+/// it may not have.
+fn trim_outputs(dir: &Path, keep: usize, dry_run: bool) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+    let mut names: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+    if names.len() <= keep {
+        return 0;
+    }
+    names.sort();
+    let stale = names.len() - keep;
+    let mut dropped = 0;
+    for path in names.into_iter().take(stale) {
+        if dry_run || std::fs::remove_file(&path).is_ok() {
+            dropped += 1;
+        }
+    }
+    dropped
 }
 
 /// A skill as the agent supplies it, before it is a file.
@@ -1512,6 +1562,7 @@ mod tests {
             workspace: dir.to_path_buf(),
             skill_errors: Vec::new(),
             plugins: Vec::new(),
+            output_dir: dir.join("output"),
             writing: Default::default(),
             touched: Default::default(),
         }

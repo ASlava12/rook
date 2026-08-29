@@ -1109,6 +1109,12 @@ fn cmd_store(source: &Source, cmd: StoreCmd, json: bool) -> Result<()> {
                     if report.history_dropped == 1 { "y" } else { "ies" }
                 );
             }
+            if report.outputs_dropped > 0 {
+                println!(
+                    "{tag}removed {} kept command output(s) past `[sandbox] max_output_files`",
+                    report.outputs_dropped
+                );
+            }
             for (kind, samples) in &report.dictionaries_trained {
                 println!("trained {kind} dictionary from {samples} objects");
             }
@@ -1789,7 +1795,7 @@ fn cmd_mcp(workspace: Option<PathBuf>, cmd: McpCmd, json: bool) -> Result<()> {
             eprintln!("rook mcp: offering {} tools from {}", tools.names().len(), here.display());
             return rook_core::mcp_server::serve(rook_core::mcp_server::Offered {
                 tools,
-                ctx: rook_core::agent::tool_context(&config, &here),
+                ctx: rook_core::agent::tool_context(&config, &here, &rook_core::paths::output_dir()),
                 policy,
                 approver: std::sync::Arc::new(rook_tools::policy::Unattended),
             })

@@ -64,8 +64,15 @@ impl Tool for RunCommand {
         // both the first error and the last line survive it. Outside the future
         // that fills them, so a timeout still has what was printed before it.
         let keep = ctx.max_output_bytes;
-        let mut out = Ends::new(keep);
-        let mut err = Ends::new(keep);
+        // One file for both streams. Opened before the command runs, because
+        // whether the middle matters is only known once it is gone.
+        let spill = ctx
+            .spill_dir
+            .as_deref()
+            .and_then(|dir| Spill::open(dir, ctx.max_spill_bytes))
+            .map(|s| std::sync::Arc::new(std::sync::Mutex::new(s)));
+        let mut out = Ends::new(keep, spill.clone());
+        let mut err = Ends::new(keep, spill.clone());
         let overran = {
             // Together, not one after the other: a pipe holds about 64 KiB, and
             // a command that fills stderr while stdout is being drained blocks
@@ -106,14 +113,29 @@ impl Tool for RunCommand {
             combined = crate::elide_middle(&combined, ctx.max_output_bytes);
         }
 
-        Ok(ToolOutcome {
-            content: format!("exit {code}\n{combined}"),
+        // Only when something was actually left out: naming a file that holds
+        // exactly what is already on screen is a path the model may go and read
+        // for nothing.
+        let kept = spill.filter(|_| truncated).map(|s| {
+            let s = s.lock().unwrap_or_else(|e| e.into_inner());
+            (s.note(), s.path.display().to_string())
+        });
+
+        let outcome = ToolOutcome {
+            content: format!(
+                "exit {code}\n{combined}{}",
+                kept.as_ref().map(|(n, _)| n.as_str()).unwrap_or("")
+            ),
             is_error: code != 0,
             truncated,
             full_bytes: full,
             meta: Default::default(),
         }
-        .with("exit_code", code))
+        .with("exit_code", code);
+        Ok(match kept {
+            Some((_, path)) => outcome.with("output_file", path),
+            None => outcome,
+        })
     }
 
     fn risk(&self, args: &serde_json::Value) -> crate::policy::Risk {
@@ -124,6 +146,64 @@ impl Tool for RunCommand {
 impl RunCommand {
     fn command_of(args: &serde_json::Value) -> String {
         args.get("command").and_then(|c| c.as_str()).unwrap_or_default().to_string()
+    }
+}
+
+/// Everything a command printed, kept on disk because the ends alone discard the
+/// middle as they stream.
+///
+/// The head holds the first error and the tail holds why it failed, which is why
+/// they are what the model is shown; but a run whose interesting line is the
+/// four hundredth of two thousand has it nowhere. This is where it is, and the
+/// model reaches it with the shell it already has.
+struct Spill {
+    file: std::fs::File,
+    path: std::path::PathBuf,
+    written: u64,
+    cap: u64,
+    /// Bytes the cap kept out. A spill that silently stops is a file that reads
+    /// as a complete record of a command that printed less than it did.
+    dropped: u64,
+}
+
+impl Spill {
+    /// `None` when there is nowhere to put it, which is not an error: the ends
+    /// are still what the model is shown either way.
+    fn open(dir: &std::path::Path, cap: u64) -> Option<Self> {
+        if cap == 0 {
+            return None;
+        }
+        std::fs::create_dir_all(dir).ok()?;
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let path = dir.join(format!("{stamp:039}.log"));
+        let file = std::fs::File::create(&path).ok()?;
+        Some(Self { file, path, written: 0, cap, dropped: 0 })
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        use std::io::Write;
+        let room = self.cap.saturating_sub(self.written) as usize;
+        if room == 0 {
+            self.dropped += bytes.len() as u64;
+            return;
+        }
+        let taking = room.min(bytes.len());
+        if self.file.write_all(&bytes[..taking]).is_ok() {
+            self.written += taking as u64;
+        }
+        self.dropped += (bytes.len() - taking) as u64;
+    }
+
+    /// What to tell the model, once the command has finished.
+    fn note(&self) -> String {
+        let past = match self.dropped {
+            0 => String::new(),
+            n => format!(", {n} bytes past `[sandbox] max_spill_bytes` not kept"),
+        };
+        format!("\n[whole output: {} ({} bytes{past})]", self.path.display(), self.written)
     }
 }
 
@@ -233,11 +313,14 @@ struct Ends {
     tail: std::collections::VecDeque<u8>,
     seen: usize,
     cap: usize,
+    /// Shared with the other stream, so the file holds both in the order they
+    /// arrived — which is the order a terminal would have shown them.
+    spill: Option<std::sync::Arc<std::sync::Mutex<Spill>>>,
 }
 
 impl Ends {
-    fn new(cap: usize) -> Self {
-        Self { head: Vec::new(), tail: Default::default(), seen: 0, cap }
+    fn new(cap: usize, spill: Option<std::sync::Arc<std::sync::Mutex<Spill>>>) -> Self {
+        Self { head: Vec::new(), tail: Default::default(), seen: 0, cap, spill }
     }
 
     async fn drain(&mut self, reader: &mut (impl tokio::io::AsyncRead + Unpin)) {
@@ -245,6 +328,9 @@ impl Ends {
         while let Ok(n) = reader.read(&mut chunk).await {
             if n == 0 {
                 break;
+            }
+            if let Some(spill) = &self.spill {
+                spill.lock().unwrap_or_else(|e| e.into_inner()).write(&chunk[..n]);
             }
             self.seen += n;
             for &byte in &chunk[..n] {
