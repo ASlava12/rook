@@ -47,6 +47,22 @@ async fn a_background_command_answers_at_once_and_keeps_printing() {
     let stopped = JobTool.call(&ctx, &serde_json::json!({"id": id, "stop": true})).await.unwrap();
     assert!(!stopped.is_error, "{}", stopped.content);
     assert!(stopped.content.contains("ready"), "what it printed survives being stopped: {}", stopped.content);
+    assert!(until(&ctx, &id, "exit ").await.contains("ready"), "and it really stops");
+}
+
+/// The signal has to be kept rather than delivered to whoever happens to be
+/// listening: a job stopped in the same breath as it was started has a task that
+/// is not waiting yet.
+#[tokio::test]
+async fn a_background_command_stopped_at_once_still_stops() {
+    let (_d, ctx) = ctx(4);
+
+    let started =
+        RunCommand.call(&ctx, &serde_json::json!({"command": "sleep 30", "background": true})).await.unwrap();
+    let id = started.meta.get("job").and_then(|j| j.as_str()).unwrap().to_string();
+    JobTool.call(&ctx, &serde_json::json!({"id": id, "stop": true})).await.unwrap();
+
+    until(&ctx, &id, "exit ").await;
 }
 
 /// Each one is a process nobody is waiting on, so what stops a turn filling the
@@ -87,9 +103,20 @@ async fn the_registry_going_away_takes_the_processes_with_it() {
     ctx.jobs = None;
     assert!(JobTool.call(&ctx, &serde_json::json!({"id": id})).await.unwrap().is_error, "and it is gone");
 
-    std::fs::remove_file(&marker).unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    assert!(!marker.exists(), "the process kept running after the registry was dropped");
+    // Until it stops recreating the marker, rather than once: how long the kill
+    // takes to land is scheduling, and a fixed wait is a guess about it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let _ = std::fs::remove_file(&marker);
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        if !marker.exists() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the process kept running after the registry was dropped"
+        );
+    }
 }
 
 /// A turn that starts a thousand short commands would otherwise keep all

@@ -331,6 +331,18 @@ fn joined(out: &Ends, err: &Ends) -> String {
     combined
 }
 
+/// Stop a child, and everything it started where the platform can say so.
+///
+/// The only place that difference is spelled out: a caller says "stop this" and
+/// gets an answer, rather than each one branching on the platform.
+pub(crate) async fn kill_tree(child: &mut tokio::process::Child) -> bool {
+    #[cfg(unix)]
+    if kill_group(child.id()) {
+        return true;
+    }
+    child.kill().await.is_ok()
+}
+
 /// SIGKILL to the whole group. Windows has no equivalent that is not a job
 /// object, so there `kill_on_drop` takes the shell and its children are left —
 /// the timeout still reports what happened rather than claiming otherwise.

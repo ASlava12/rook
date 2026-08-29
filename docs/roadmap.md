@@ -766,7 +766,7 @@ recorded so the design question survives the session that raised it.
   Adding it put the advertised tool list fifteen tokens over
   `the_whole_advertised_tool_list_stays_within_a_budget`, which was the guard
   doing its job; two descriptions were trimmed rather than the number raised.
-  5 tests.
+  `/jobs` shows the same list without spending a turn on it. 6 tests.
 - **Seeing what an approval is for** — a write asked about by path is a write
   approved blind, which is most of the value of asking gone. `Tool::preview`
   gives the diff a write or an edit would make, built by applying the very edits

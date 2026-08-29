@@ -26,6 +26,7 @@ const HELP: &str = "  /context [window]   what this conversation costs, and of w
   /diff               what this session has changed on disk
   /btw <question>     ask about this conversation without joining it
   /mcp                connected tool servers
+  /jobs [id]          commands left running, or what one has printed
   /undo               rewind past the last exchange, files included
   /rewind <seq>       rewind to a specific point in the transcript
   /new [title]        start a fresh session
@@ -284,6 +285,23 @@ pub async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command
         "effort" => match rook_llm::Effort::parse(rest) {
             Some(effort) => shared.effort.set(effort),
             None => say!("no effort {rest:?} — low, medium, high, xhigh or max"),
+        },
+
+        "jobs" if rest.is_empty() => {
+            let running = shared.jobs.list();
+            if running.is_empty() {
+                say!("nothing running in the background");
+            }
+            for job in running {
+                match job.exit_code {
+                    Some(code) => say!("{} [exit {code}] {}", job.id, job.command),
+                    None => say!("{} [running] {}", job.id, job.command),
+                }
+            }
+        }
+        "jobs" => match shared.jobs.get(rest) {
+            Some(job) => say!("{} {}\n{}", job.id, job.command, job.output),
+            None => say!("no background command {rest}"),
         },
 
         "context" => {

@@ -30,6 +30,11 @@ pub struct Job {
 struct Running {
     command: String,
     started_at: i64,
+    /// Woken to stop it. The child lives in the task that reads it, so this is
+    /// how anyone else reaches it — and it works where a process group is not a
+    /// thing that can be signalled.
+    stop: Arc<tokio::sync::Notify>,
+    /// The same thing without waiting, for `Drop`, which cannot.
     group: Option<u32>,
     text: Arc<Mutex<String>>,
     exit: Arc<Mutex<Option<i32>>>,
@@ -87,24 +92,32 @@ impl Jobs {
         let id = format!("job{:03}", self.started.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1);
         let text = Arc::new(Mutex::new(String::new()));
         let exit = Arc::new(Mutex::new(None));
+        let stop = Arc::new(tokio::sync::Notify::new());
         let group = child.id();
 
-        let (into, finished, cap) = (text.clone(), exit.clone(), self.max_output_bytes);
+        let (into, code, cap, stopped) = (text.clone(), exit.clone(), self.max_output_bytes, stop.clone());
         tokio::spawn(async move {
             let mut out = child.stdout.take();
             let mut err = child.stderr.take();
             // Both together, for the reason `run_command` reads them together: a
             // command that fills the stderr pipe while stdout is drained blocks
             // on the write and never finishes either.
-            let (a, b) = (drain(&mut out, &into, cap), drain(&mut err, &into, cap));
-            tokio::join!(a, b);
-            let code = child.wait().await.ok().and_then(|s| s.code()).unwrap_or(-1);
-            *finished.lock().unwrap_or_else(|e| e.into_inner()) = Some(code);
+            let reading = async {
+                tokio::join!(drain(&mut out, &into, cap), drain(&mut err, &into, cap));
+            };
+            tokio::select! {
+                _ = reading => {}
+                _ = stopped.notified() => {
+                    crate::exec::kill_tree(&mut child).await;
+                }
+            }
+            let status = child.wait().await.ok().and_then(|s| s.code()).unwrap_or(-1);
+            *code.lock().unwrap_or_else(|e| e.into_inner()) = Some(status);
         });
 
         running.insert(
             id.clone(),
-            Running { command: command.to_string(), started_at: now(), group, text, exit },
+            Running { command: command.to_string(), started_at: now(), stop, group, text, exit },
         );
         Ok(id)
     }
@@ -119,11 +132,19 @@ impl Jobs {
         running.get(id).map(|r| r.seen_as(id))
     }
 
-    /// Kill one and keep what it printed: the output is why anyone asked.
+    /// Ask one to stop and keep what it printed: the output is why anyone asked.
+    ///
+    /// True means there is such a job, not that it has already died — the kill
+    /// happens in the task that owns the child, and `job` reports the exit code
+    /// once it has one.
     pub fn stop(&self, id: &str) -> bool {
         let running = self.running.lock().unwrap_or_else(|e| e.into_inner());
         let Some(job) = running.get(id) else { return false };
-        crate::exec::kill_group(job.group)
+        // `notify_one` rather than `notify_waiters`: the latter wakes whoever is
+        // already waiting and is otherwise lost, so stopping a job in the same
+        // breath as starting it would do nothing at all.
+        job.stop.notify_one();
+        true
     }
 }
 
@@ -149,7 +170,13 @@ impl Running {
 impl Drop for Jobs {
     fn drop(&mut self) {
         for job in self.running.lock().unwrap_or_else(|e| e.into_inner()).values() {
+            // Both, and the signal is the fallback rather than the plan: dropping
+            // this usually means the process is on its way out, and the task that
+            // would answer the signal may never be scheduled again. Killing the
+            // group needs nobody's cooperation; where there is no group to kill,
+            // the signal is all there is.
             crate::exec::kill_group(job.group);
+            job.stop.notify_one();
         }
     }
 }

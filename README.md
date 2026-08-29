@@ -161,7 +161,8 @@ job          { "id": "job001" }                                 → what it prin
 job          { "id": "job001", "stop": true }
 ```
 
-The registry belongs to the front end rather than to a turn — one built per turn
+`/jobs` in the chat and the TUI shows the same list without spending a turn on
+it. The registry belongs to the front end rather than to a turn — one built per turn
 would kill everything in it between one turn and the next — and it takes the
 processes with it when it goes, because a dev server that outlived the agent that
 started it is one nobody knows to stop. `[sandbox] max_background_jobs` caps how

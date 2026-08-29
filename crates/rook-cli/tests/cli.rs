@@ -482,8 +482,9 @@ fn doctor_carries_the_advice_rather_than_only_the_failure() {
 #[test]
 fn every_slash_command_answers_on_an_empty_session() {
     let rook = Rook::new();
-    let out = rook
-        .chat("/help\n/context\n/session\n/skills\n/memory\n/search nothing\n/diff\n/mcp\n/goal\n/quit\n");
+    let out = rook.chat(
+        "/help\n/context\n/session\n/skills\n/memory\n/search nothing\n/diff\n/mcp\n/goal\n/jobs\n/quit\n",
+    );
 
     // Each line is what that command says when there is nothing to report,
     // which is the state every new session starts in.
@@ -496,6 +497,7 @@ fn every_slash_command_answers_on_an_empty_session() {
         "nothing changed on disk yet",
         "no tool servers connected",
         "no goal set",
+        "nothing running in the background",
     ] {
         assert!(out.contains(expected), "no sign of {expected:?} in:\n{out}");
     }
