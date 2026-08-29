@@ -82,3 +82,49 @@ fn a_write_with_nobody_to_approve_it_is_refused_and_says_why() {
 
     assert_eq!(said[1]["error"]["code"], -32601, "an unknown method is an error, not a result");
 }
+
+/// The client and the server are both here, so they can be pointed at each
+/// other. Nothing else checks both halves of the wire at once — a hand-written
+/// exchange only ever proves the side it was written against.
+///
+/// It also pins the thing that made this fail the first time it was tried:
+/// serving must not open the store, or it cannot run beside anything that
+/// already has — which is the arrangement somebody wants when they run the web
+/// UI and point an editor at the tools.
+#[test]
+fn the_client_and_the_server_understand_each_other() {
+    let workspace = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("note.txt"), "loopback works\n").unwrap();
+    std::fs::write(
+        home.path().join("config.toml"),
+        format!(
+            "[[mcp]]\nname = \"self\"\ncommand = {:?}\nargs = [\"--workspace\", {:?}, \"mcp\", \"serve\"]\n",
+            env!("CARGO_BIN_EXE_rook"),
+            workspace.path().to_str().unwrap()
+        ),
+    )
+    .unwrap();
+
+    let rook = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_rook"))
+            .env("ROOK_HOME", home.path())
+            .args(["--workspace", workspace.path().to_str().unwrap()])
+            .args(args)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+
+    // The client opens the store; the server it spawns must not need it.
+    let listed = rook(&["mcp", "ls"]);
+    assert!(listed.contains("self"), "the server has to have answered its handshake: {listed}");
+    assert!(listed.contains("2025-06-18"), "{listed}");
+
+    let tools = rook(&["mcp", "tools", "self"]);
+    assert!(tools.contains("read_file"), "{tools}");
+    assert!(tools.contains("run_command"), "{tools}");
+
+    let read = rook(&["mcp", "call", "self", "read_file", r#"{"path":"note.txt"}"#]);
+    assert!(read.contains("loopback works"), "a call has to round-trip through both halves: {read}");
+}

@@ -212,7 +212,10 @@ async fn turn(
 
     let shared = shared
         .get_or_init(|| async {
-            Shared { servers: rook_core::agent::servers_for(&rook), mcp: Arc::new(rook.connect_mcp().await) }
+            Shared {
+                servers: rook_core::agent::servers_for(&rook.config, &rook.workspace),
+                mcp: Arc::new(rook.connect_mcp().await),
+            }
         })
         .await;
 
@@ -285,7 +288,7 @@ struct Settings {
 impl Settings {
     fn new(rook: &rook_core::Rook) -> Self {
         Self {
-            policy: rook_core::agent::policy_for(rook),
+            policy: rook_core::agent::policy_for(&rook.config),
             effort: std::sync::RwLock::new(rook.config.agent.effort()),
         }
     }

@@ -241,9 +241,9 @@ impl App {
             approver: Arc::new(ChannelApprover::new(requests, patience)),
             asker: Arc::new(ChannelAsker::new(questions, patience)),
             shared: crate::chat::Session {
-                policy: rook_core::agent::policy_for(&rook),
+                policy: rook_core::agent::policy_for(&rook.config),
                 effort: std::cell::Cell::new(rook.config.agent.effort()),
-                servers: rook_core::agent::servers_for(&rook),
+                servers: rook_core::agent::servers_for(&rook.config, &rook.workspace),
                 // Connected once: every turn would otherwise spawn each server,
                 // wait out its handshake and kill it again.
                 mcp,

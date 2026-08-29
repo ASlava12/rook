@@ -62,10 +62,10 @@ where
 
     // Built once for the connection: an editor sends many prompts, and
     // reconnecting MCP or restarting a language server for each is wasted time.
-    let policy = rook_core::agent::policy_for(&rook);
+    let policy = rook_core::agent::policy_for(&rook.config);
     let settings =
         Arc::new(Settings { policy: policy.clone(), effort: RwLock::new(rook.config.agent.effort()) });
-    let servers = rook_core::agent::servers_for(&rook);
+    let servers = rook_core::agent::servers_for(&rook.config, &rook.workspace);
     let mcp = Arc::new(rook.connect_mcp().await);
     // Filled in by `initialize`, and read when a turn starts: the client may
     // serve its unsaved buffers, and the protocol forbids asking if it cannot.

@@ -24,6 +24,9 @@ use rook_tools::{ToolBox, ToolContext};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use std::path::Path;
+
+use crate::config::Config;
 use crate::context::{ContextBudget, estimate_tokens};
 use crate::error::{CoreError, Result};
 use crate::hooks::{self, Hooks};
@@ -52,8 +55,8 @@ pub fn equip(
 /// Exposed for the same reason as [`policy_for`], and more urgently: a pool
 /// dropped at the end of a turn takes its running servers with it, and
 /// rust-analyzer spends seconds indexing the workspace every time it starts.
-pub fn servers_for(rook: &Rook) -> std::sync::Arc<crate::lsp::Servers> {
-    crate::lsp::Servers::new(crate::lsp::for_workspace(&rook.config, &rook.workspace), &rook.workspace)
+pub fn servers_for(config: &Config, workspace: &Path) -> std::sync::Arc<crate::lsp::Servers> {
+    crate::lsp::Servers::new(crate::lsp::for_workspace(config, workspace), workspace)
 }
 
 /// What the file and command tools are bounded by, from configuration.
@@ -62,9 +65,13 @@ pub fn servers_for(rook: &Rook) -> std::sync::Arc<crate::lsp::Servers> {
 /// that runs a tool. `rook mcp serve` runs them for somebody else's client, and
 /// two places deciding separately what a tool may write to is how one of them
 /// ends up with a boundary the other does not have.
-pub fn tool_context(rook: &Rook) -> ToolContext {
-    let sandbox = &rook.config.sandbox;
-    let mut ctx = ToolContext::new(rook.workspace.clone());
+///
+/// Configuration and a directory rather than the engine, because that is all it
+/// ever read — and `mcp serve` has the first two without opening the store,
+/// which is what lets it run beside a daemon that is holding it.
+pub fn tool_context(config: &Config, workspace: &Path) -> ToolContext {
+    let sandbox = &config.sandbox;
+    let mut ctx = ToolContext::new(workspace.to_path_buf());
     ctx.max_output_bytes = sandbox.max_output_bytes;
     ctx.command_timeout = std::time::Duration::from_secs(sandbox.command_timeout_secs);
     ctx.allow_outside_workspace = sandbox.allow_outside_workspace;
@@ -76,8 +83,8 @@ pub fn tool_context(rook: &Rook) -> ToolContext {
 /// Exposed because "allow this for the rest of the run" has to outlive a single
 /// turn: an interactive front end builds one policy for the session and hands it
 /// to every loop, or the user is asked again the moment they said not to be.
-pub fn policy_for(rook: &Rook) -> std::sync::Arc<Policy> {
-    let sandbox = &rook.config.sandbox;
+pub fn policy_for(config: &Config) -> std::sync::Arc<Policy> {
+    let sandbox = &config.sandbox;
     let (policy, unusable) = Policy::compile(sandbox.mode, &sandbox.allow, &sandbox.ask, &sandbox.deny);
     for error in unusable {
         tracing::warn!("ignoring unusable sandbox rule: {error}");
@@ -279,7 +286,7 @@ pub struct AgentLoop<'a> {
 
 impl<'a> AgentLoop<'a> {
     pub fn new(rook: &'a Rook, provider: std::sync::Arc<dyn Provider>, session: u128) -> Self {
-        let tool_ctx = tool_context(rook);
+        let tool_ctx = tool_context(&rook.config, &rook.workspace);
 
         // No language servers until a front end hands them over with `equip`.
         // A loop is rebuilt for every turn, so a pool built here is rebuilt with
@@ -320,7 +327,7 @@ impl<'a> AgentLoop<'a> {
             tools,
             tool_ctx,
             session,
-            policy: policy_for(rook),
+            policy: policy_for(&rook.config),
             hooks: std::sync::Arc::new(hooks),
             servers,
             session_context: std::sync::Mutex::new(None),

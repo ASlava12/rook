@@ -279,6 +279,9 @@ the protocol — an editor, a local model host, another agent. The approval poli
 is in front of every call, and with nobody at this end to ask, a write is refused
 and the refusal says what would make it possible.
 
+It does not open the store, so it runs beside `rookd` — which is the arrangement
+you want if the web UI is up and an editor should reach the same tools.
+
 All three front ends run turns, stream them, and ask for approvals the same way:
 `rook chat`, `rook tui`, and the web UI at `rookd`. Nothing is reachable from one
 that is not reachable from the others.

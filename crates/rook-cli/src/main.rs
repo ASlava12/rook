@@ -666,7 +666,11 @@ fn cmd_run(
             agent.allow_everything_not_denied();
         }
         let mcp = rook.connect_mcp().await;
-        rook_core::agent::equip(&mut agent, rook_core::agent::servers_for(&rook), &mcp);
+        rook_core::agent::equip(
+            &mut agent,
+            rook_core::agent::servers_for(&rook.config, &rook.workspace),
+            &mcp,
+        );
         for (name, error) in &mcp.failures {
             eprintln!("mcp {name}: {error}");
         }
@@ -1724,30 +1728,35 @@ fn configured_window(rook: &Rook) -> usize {
 fn cmd_mcp(workspace: Option<PathBuf>, cmd: McpCmd, json: bool) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     runtime.block_on(async move {
-        let rook = Rook::open(workspace)?;
-        // Before the check below: serving does not need a configured server,
-        // and refusing to start because none is configured would be nonsense.
+        // Before the store is opened, and before the check that a server is
+        // configured. Serving needs neither: the tools it offers read files and
+        // run commands, so all it wants is the configuration and a directory —
+        // and opening the store would stop it running beside a daemon holding
+        // it, which is exactly when somebody wants both.
         if let McpCmd::Serve { yes } = cmd {
-            let policy = rook_core::agent::policy_for(&rook);
+            let config = rook_core::Config::load()?;
+            let here = workspace
+                .clone()
+                .or_else(|| std::env::current_dir().ok())
+                .unwrap_or_else(|| PathBuf::from("."));
+            let policy = rook_core::agent::policy_for(&config);
             if yes {
                 policy.set_mode(rook_tools::policy::Mode::Auto);
             }
             let mut tools = rook_tools::ToolBox::standard();
-            rook_core::lsp::register(&mut tools, rook_core::agent::servers_for(&rook));
-            eprintln!(
-                "rook mcp: offering {} tools from {}",
-                tools.names().len(),
-                rook.workspace.display()
-            );
+            rook_core::lsp::register(&mut tools, rook_core::agent::servers_for(&config, &here));
+            eprintln!("rook mcp: offering {} tools from {}", tools.names().len(), here.display());
             return rook_core::mcp_server::serve(rook_core::mcp_server::Offered {
                 tools,
-                ctx: rook_core::agent::tool_context(&rook),
+                ctx: rook_core::agent::tool_context(&config, &here),
                 policy,
                 approver: std::sync::Arc::new(rook_tools::policy::Unattended),
             })
             .await
             .map_err(Into::into);
         }
+
+        let rook = Rook::open(workspace)?;
 
         if rook.mcp_servers().is_empty() {
             println!("no servers configured. Add one to {}:\n", rook_core::paths::config_file().display());

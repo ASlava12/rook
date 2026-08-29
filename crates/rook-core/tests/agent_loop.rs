@@ -1302,7 +1302,7 @@ async fn a_delegated_child_shares_the_parent_language_servers() {
     let session = f.rook.start_session("share").unwrap();
     let parent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(vec![])), session);
 
-    let pool = rook_core::agent::servers_for(&f.rook);
+    let pool = rook_core::agent::servers_for(&f.rook.config, &f.rook.workspace);
     let mut owner = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(vec![])), session);
     owner.servers = pool.clone();
 

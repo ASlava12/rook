@@ -72,10 +72,10 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
     // and not the single turn it was granted in.
     let shared = Session {
         mcp: std::sync::Arc::new(mcp),
-        policy: rook_core::agent::policy_for(&rook),
+        policy: rook_core::agent::policy_for(&rook.config),
         // Likewise the language servers: a pool dropped per turn restarts
         // rust-analyzer, and it indexes the workspace every time it starts.
-        servers: rook_core::agent::servers_for(&rook),
+        servers: rook_core::agent::servers_for(&rook.config, &rook.workspace),
         effort: std::cell::Cell::new(rook.config.agent.effort()),
         yes,
     };
