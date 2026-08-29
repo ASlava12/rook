@@ -1518,6 +1518,7 @@ impl<'a> AgentLoop<'a> {
 
     /// Shrink the context window this loop budgets against, so a test can reach
     /// compaction without a hundred thousand tokens of fixture.
+    #[doc(hidden)]
     pub fn set_window_for_test(&mut self, window: usize) {
         self.budget = ContextBudget::new(window, self.rook.config.agent.compact_at);
     }
@@ -1675,6 +1676,7 @@ impl<'a> AgentLoop<'a> {
 impl AgentLoop<'_> {
     /// Public so a test can drive it: the alternative is filling a context
     /// window to make it happen, which measures the budget rather than this.
+    #[doc(hidden)]
     pub async fn compact_now(&self) {
         self.compact().await
     }

@@ -112,6 +112,14 @@ send and nothing checked, so such a prompt went to the provider whole.
 `every_error_variant_is_constructed_somewhere` fail the build for the next one.
 Either wire it up or delete it.
 
+Those two count every `.rs` file, so a function only a test reaches passes them —
+used by something is not the same as used, and library API offered to nobody is
+the thing being guarded against.
+`a_public_function_no_production_code_calls_says_it_is_a_test_seam` asks the same
+question of `src/` alone. A genuine seam — one that exists because the
+alternative is filling a context window or sleeping for an hour — says so with
+`#[doc(hidden)]`, and that is the whole exemption.
+
 **A config field nothing reads is a lie, not a stub.** Four shipped that way —
 `sandbox.allow`, `allow_outside_workspace`, `lazy_skills`, and
 `storage.maintenance_interval_hours`, which `docs/storage.md` described as

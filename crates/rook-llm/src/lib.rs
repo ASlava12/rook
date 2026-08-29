@@ -195,10 +195,6 @@ pub fn split_spec(spec: &str) -> (&str, &str) {
 
 /// Endpoints and keys come from environment variables, so neither the store nor
 /// the config file ever holds a credential.
-pub fn from_spec(spec: &str, stream_idle: std::time::Duration) -> Result<Box<dyn Provider>> {
-    from_spec_with(spec, stream_idle, None)
-}
-
 /// `context_window` overrides the provider's assumed default, which is guesswork
 /// for anything self-hosted: a local model may serve 8k or a million.
 ///

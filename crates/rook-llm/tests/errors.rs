@@ -70,7 +70,9 @@ fn a_hosted_endpoint_is_told_to_check_the_network_and_the_key() {
 #[test]
 fn an_empty_api_key_is_reported_as_unset_rather_than_sent() {
     unsafe { std::env::set_var("ANTHROPIC_API_KEY", "  ") };
-    let Err(err) = rook_llm::from_spec("anthropic/claude-opus-5", std::time::Duration::from_secs(1)) else {
+    let Err(err) =
+        rook_llm::from_spec_with("anthropic/claude-opus-5", std::time::Duration::from_secs(1), None)
+    else {
         panic!("a blank key must not build a provider")
     };
     let err = err.to_string();
@@ -156,7 +158,8 @@ async fn a_base_url_that_serves_nothing_is_not_reported_as_a_missing_model() {
 
 #[test]
 fn an_unknown_provider_names_the_ones_that_exist() {
-    let Err(err) = rook_llm::from_spec("googl/gemini-2.5-pro", std::time::Duration::from_secs(1)) else {
+    let Err(err) = rook_llm::from_spec_with("googl/gemini-2.5-pro", std::time::Duration::from_secs(1), None)
+    else {
         panic!("a typo must not resolve")
     };
     let said = err.to_string();
@@ -173,7 +176,7 @@ fn every_listed_provider_is_one_the_code_actually_dispatches() {
         let spec = format!("{name}/some-model");
         // A missing key or endpoint is the environment's business, not the
         // question being asked here.
-        let built = rook_llm::from_spec(&spec, std::time::Duration::from_secs(1));
+        let built = rook_llm::from_spec_with(&spec, std::time::Duration::from_secs(1), None);
         assert!(!matches!(built, Err(LlmError::UnknownProvider { .. })), "{name} is listed and not handled");
     }
 }

@@ -92,6 +92,7 @@ pub fn today() -> String {
 }
 
 /// The date a given instant falls on, for a test that must not depend on today.
+#[doc(hidden)]
 pub fn date_of_unix_for_test(unix: i64) -> String {
     let (y, m, d) = civil_from_days(unix.div_euclid(86_400));
     format!("{y:04}-{m:02}-{d:02}")

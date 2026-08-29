@@ -132,6 +132,7 @@ impl Rook {
     /// For tests and for embedding Rook in another program. `open` is the normal
     /// path; this exists so a caller can point at a scratch store and a fixed
     /// environment without mutating process-wide state.
+    #[doc(hidden)]
     pub fn from_parts(
         store: Store,
         config: Config,
@@ -775,6 +776,7 @@ impl Rook {
     ///
     /// Public so a test can reach the expiry without sleeping for an hour, which
     /// is the alternative and is not a test anybody runs.
+    #[doc(hidden)]
     pub fn age_claims_for_test(&self, secs: i64) {
         let mut held = self.writing.lock().unwrap_or_else(|e| e.into_inner());
         for by in held.values_mut() {

@@ -95,11 +95,13 @@ impl Environment {
         }
     }
 
+    #[doc(hidden)]
     pub fn with_language(mut self, key: &str, version: &str) -> Self {
         self.languages.insert(key.to_string(), version.to_string());
         self
     }
 
+    #[doc(hidden)]
     pub fn with_tool(mut self, key: &str, version: &str) -> Self {
         self.tools.insert(key.to_string(), version.to_string());
         self

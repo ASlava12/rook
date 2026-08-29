@@ -89,7 +89,7 @@ async fn an_unreachable_endpoint_reports_transport_rather_than_hanging() {
 
 #[tokio::test]
 async fn the_configured_context_window_overrides_the_provider_default() {
-    let default = rook_llm::from_spec("ollama/x", Duration::from_secs(1)).unwrap();
+    let default = rook_llm::from_spec_with("ollama/x", Duration::from_secs(1), None).unwrap();
     let overridden = rook_llm::from_spec_with("ollama/x", Duration::from_secs(1), Some(262_144)).unwrap();
     assert_ne!(default.context_window(), 262_144);
     assert_eq!(overridden.context_window(), 262_144);
