@@ -398,6 +398,21 @@ impl<'a> AgentLoop<'a> {
             s.push_str(&format!("tools: {}\n", tools.join(", ")));
         }
 
+        for standing in crate::instructions::applying_in(
+            &self.rook.workspace,
+            self.rook.config.agent.max_instructions_bytes,
+        ) {
+            s.push_str(&format!("\n## {}\n{}\n", standing.from.display(), standing.text.trim_end()));
+            // Said rather than silently cut: instructions that stop mid-sentence
+            // read as instructions that end there.
+            if standing.elided > 0 {
+                s.push_str(&format!(
+                    "[{} more bytes not shown — past `[agent] max_instructions_bytes`]\n",
+                    standing.elided
+                ));
+            }
+        }
+
         if let Ok(extra) = self.session_context.lock()
             && let Some(text) = extra.as_deref().filter(|t| !t.trim().is_empty())
         {

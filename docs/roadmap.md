@@ -757,6 +757,16 @@ recorded so the design question survives the session that raised it.
    readable by design, which is the wrong property here) and what stops a tool
    from being asked to print one.
 
+- **Standing instructions from `AGENTS.md`** — the convention codex, opencode
+  and others already read, and this agent read none of them: a project's
+  conventions had to be repeated every turn or hidden in a skill, which is
+  loaded on demand and so is not standing instruction. `$ROOK_HOME/AGENTS.md`
+  then the workspace's, most general first, each bounded by
+  `[agent] max_instructions_bytes` and each saying when it was cut. Writing it
+  found `floor_char_boundary` indexing one byte past the end of its input for
+  any caller whose limit exceeded its data — nothing had one until now, and in
+  release that is an abort. 3 tests.
+
 ## Next
 
 **Keep triaging the reference backlog.** `cargo xtask refs advance` moves a

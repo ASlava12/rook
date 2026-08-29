@@ -21,6 +21,7 @@ pub mod context;
 pub mod error;
 pub mod fileset;
 pub mod hooks;
+pub mod instructions;
 pub mod lsp;
 pub mod mcp_server;
 pub mod memory;

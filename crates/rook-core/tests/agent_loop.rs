@@ -1314,6 +1314,44 @@ async fn a_delegated_child_shares_the_parent_language_servers() {
     );
 }
 
+/// The convention every reference agent already reads, and this one read none.
+#[tokio::test]
+async fn a_projects_own_instructions_reach_the_model_under_both_names() {
+    let f = fixture();
+    std::fs::write(rook_core::paths::home().join("AGENTS.md"), "Prefer tabs everywhere.\n").unwrap();
+    std::fs::write(f.workspace.path().join("AGENTS.md"), "This project uses spaces.\n").unwrap();
+
+    let session = f.rook.start_session("instructed").unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![reply("ok")]));
+    let prompt = AgentLoop::new(&f.rook, provider, session).system_prompt();
+
+    assert!(prompt.contains("Prefer tabs everywhere"), "the user's own instructions: {prompt}");
+    assert!(prompt.contains("This project uses spaces"), "and the project's: {prompt}");
+    let general = prompt.find("Prefer tabs").unwrap();
+    let specific = prompt.find("This project uses").unwrap();
+    assert!(general < specific, "most general first, so the project has the last word: {prompt}");
+
+    std::fs::remove_file(rook_core::paths::home().join("AGENTS.md")).unwrap();
+}
+
+/// A file in a repository is written by whoever sends the pull request, and it
+/// is paid for on every single request.
+#[tokio::test]
+async fn instructions_a_repository_committed_cannot_spend_the_context_window() {
+    let mut f = fixture();
+    f.rook.config.agent.max_instructions_bytes = 64;
+    let huge = format!("{}\nthe part past the limit\n", "x".repeat(4096));
+    std::fs::write(f.workspace.path().join("AGENTS.md"), &huge).unwrap();
+    assert!(huge.len() > f.rook.config.agent.max_instructions_bytes, "the file has to exceed the limit");
+
+    let session = f.rook.start_session("bounded").unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![reply("ok")]));
+    let prompt = AgentLoop::new(&f.rook, provider, session).system_prompt();
+
+    assert!(!prompt.contains("the part past the limit"), "what was cut must not be there: {prompt}");
+    assert!(prompt.contains("max_instructions_bytes"), "and the cut must be named: {prompt}");
+}
+
 #[tokio::test]
 async fn the_system_prompt_does_not_vary_with_the_prompt() {
     let f = fixture();

@@ -424,6 +424,27 @@ fn cmd_doctor(rook: &Rook, json: bool) -> Result<()> {
     }
 
     println!();
+    println!("standing instructions:");
+    // Named, because the difference between a file the agent reads and one it
+    // does not is invisible until something it says is ignored.
+    let standing =
+        rook_core::instructions::applying_in(&rook.workspace, rook.config.agent.max_instructions_bytes);
+    if standing.is_empty() {
+        println!(
+            "  (none — an {} here or in {} applies to every turn)",
+            rook_core::instructions::FILENAME,
+            rook_core::paths::home().display()
+        );
+    }
+    for one in &standing {
+        let cut = match one.elided {
+            0 => String::new(),
+            n => format!(", {n} bytes past `[agent] max_instructions_bytes` not read"),
+        };
+        println!("  {} ({} bytes{cut})", one.from.display(), one.text.len());
+    }
+
+    println!();
     println!("model:");
     match probe_provider(rook) {
         Ok(note) => println!("  {note}"),

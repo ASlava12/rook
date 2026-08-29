@@ -64,8 +64,14 @@ pub fn window_bytes(data: &[u8], max_bytes: usize) -> (Vec<u8>, bool) {
     (out, true)
 }
 
-fn floor_char_boundary(data: &[u8], mut i: usize) -> usize {
-    i = i.min(data.len());
+pub(crate) fn floor_char_boundary(data: &[u8], mut i: usize) -> usize {
+    // The end of the slice is a boundary and has no byte to look at. `i` was
+    // always short of it here — `window_bytes` returns early when the data fits
+    // — until a caller passed a limit larger than its input and this indexed
+    // one past the end.
+    if i >= data.len() {
+        return data.len();
+    }
     while i > 0 && (data[i] & 0xC0) == 0x80 {
         i -= 1;
     }
@@ -99,4 +105,20 @@ pub fn reaches_the_model(kind: rook_store::EventKind) -> bool {
 /// entry carries.
 pub fn kind_reaches_the_model(kind: &str) -> bool {
     matches!(kind, "user" | "assistant" | "tool-call" | "tool-result" | "skill")
+}
+
+#[cfg(test)]
+mod tests {
+    /// `window_bytes` returns early when its input fits, so nothing ever asked
+    /// this for a boundary at or past the end — until a caller with a limit
+    /// larger than its input did, and it indexed one byte off the slice.
+    #[test]
+    fn the_end_of_the_input_is_a_boundary_and_has_no_byte_to_look_at() {
+        let text = "héllo".as_bytes();
+        assert_eq!(super::floor_char_boundary(text, text.len()), text.len());
+        assert_eq!(super::floor_char_boundary(text, 4096), text.len());
+        // And it still walks back off a continuation byte inside the string:
+        // `é` occupies bytes 1 and 2.
+        assert_eq!(super::floor_char_boundary(text, 2), 1);
+    }
 }

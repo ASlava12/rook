@@ -117,6 +117,11 @@ pub struct AgentConfig {
     /// terminal would otherwise hold the turn, and the store's write lock with
     /// it, for as long as the process lives.
     pub answer_timeout_secs: u64,
+    /// Ceiling on how much of an `AGENTS.md` reaches the model, per file. It is
+    /// paid for on every request and is written by whoever sends the pull
+    /// request, so a repository cannot spend the context window by committing a
+    /// large one.
+    pub max_instructions_bytes: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -250,6 +255,7 @@ impl Default for AgentConfig {
             max_skill_cards: 50,
             stream_idle_timeout_secs: 90,
             answer_timeout_secs: 600,
+            max_instructions_bytes: 32 * 1024,
         }
     }
 }

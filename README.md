@@ -535,6 +535,23 @@ variants:                        # swaps only the body
 missing Docker 27, instead of leaving you to guess. See
 [docs/skills.md](docs/skills.md).
 
+### Standing instructions
+
+A skill is loaded when it is wanted. What holds for every turn goes in an
+`AGENTS.md` — the file codex, opencode and others already read — either in the
+workspace or in `$ROOK_HOME` for what applies everywhere:
+
+```
+~/.rook/AGENTS.md      # yours, wherever you work
+<workspace>/AGENTS.md  # this project's, and it has the last word
+```
+
+Both are read whole into the system prompt, most general first, capped at
+`[agent] max_instructions_bytes` each — it is paid for on every request and the
+project's copy is written by whoever sends the pull request. A cut is stated in
+the prompt rather than made silently, since instructions that stop mid-sentence
+read as instructions that end there. `rook doctor` lists what it found.
+
 ## Layout
 
 ```
