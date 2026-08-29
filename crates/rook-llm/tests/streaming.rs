@@ -295,3 +295,31 @@ fn a_tool_result_is_not_folded_into_the_prompt_before_it() {
     assert_eq!(request.messages.len(), 2, "{:?}", request.messages);
     assert_eq!(request.messages[1].tool_call_id.as_deref(), Some("call_1"));
 }
+
+/// The dialect says `content` is a string. Several servers that implement it
+/// send a list of parts instead, and a field typed as a string makes the whole
+/// frame fail to parse — which is skipped, so the reply arrives empty with
+/// nothing anywhere saying why. This is aimed at self-hosted servers, where that
+/// is the likeliest shape to meet.
+#[tokio::test]
+async fn a_content_delta_shaped_as_a_list_is_read_the_same_as_a_string() {
+    let url = serve(
+        vec![
+            "data: {\"choices\":[{\"delta\":{\"content\":[{\"type\":\"text\",\"text\":\"in \"},{\"type\":\"text\",\"text\":\"parts\"}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\" and a string\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ],
+        Duration::from_millis(2),
+        false,
+    )
+    .await;
+
+    let mut stream = provider(url, Duration::from_secs(5)).stream(request()).await.unwrap();
+    let mut text = String::new();
+    while let Some(delta) = stream.next().await {
+        if let Delta::Text(t) = delta.unwrap() {
+            text.push_str(&t);
+        }
+    }
+    assert_eq!(text, "in parts and a string", "both shapes are the same text");
+}

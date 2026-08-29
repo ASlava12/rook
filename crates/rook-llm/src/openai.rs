@@ -110,7 +110,7 @@ impl Provider for OpenAiCompatible {
         Ok(Response {
             message: Message {
                 role: Role::Assistant,
-                content: choice.message.content.unwrap_or_default(),
+                content: choice.message.content.map(Text::into_string).unwrap_or_default(),
                 tool_calls,
                 tool_call_id: None,
                 cache: false,
@@ -226,10 +226,10 @@ impl Provider for OpenAiCompatible {
                             };
                         }
                         for choice in parsed.choices {
-                            if let Some(text) = choice.delta.content.filter(|t| !t.is_empty()) {
+                            if let Some(text) = choice.delta.content.map(Text::into_string).filter(|t| !t.is_empty()) {
                                 yield Delta::Text(text);
                             }
-                            if let Some(text) = choice.delta.reasoning_content.filter(|t| !t.is_empty()) {
+                            if let Some(text) = choice.delta.reasoning_content.map(Text::into_string).filter(|t| !t.is_empty()) {
                                 yield Delta::Reasoning(text);
                             }
                             for call in choice.delta.tool_calls.unwrap_or_default() {
@@ -426,7 +426,7 @@ struct WireChoice {
 #[derive(Deserialize)]
 struct WireRespMessage {
     #[serde(default)]
-    content: Option<String>,
+    content: Option<Text>,
     #[serde(default)]
     tool_calls: Option<Vec<WireRespToolCall>>,
 }
@@ -465,12 +465,41 @@ struct WireChunkChoice {
 #[derive(Default, Deserialize)]
 struct WireDelta {
     #[serde(default)]
-    content: Option<String>,
+    content: Option<Text>,
     /// Non-standard but widely emitted by reasoning models.
     #[serde(default, alias = "reasoning")]
-    reasoning_content: Option<String>,
+    reasoning_content: Option<Text>,
     #[serde(default)]
     tool_calls: Option<Vec<WireDeltaToolCall>>,
+}
+
+/// The text of a message, however the server spells it.
+///
+/// The dialect as written says a string. Several servers that implement it send
+/// a list of parts instead — the Responses shape leaking into chat-completions —
+/// and one field typed as a string makes the whole frame fail to parse. A frame
+/// that fails to parse is skipped, so the reply arrives empty with nothing
+/// anywhere saying why.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Text {
+    One(String),
+    Parts(Vec<Part>),
+}
+
+#[derive(Deserialize)]
+struct Part {
+    #[serde(default)]
+    text: String,
+}
+
+impl Text {
+    fn into_string(self) -> String {
+        match self {
+            Self::One(text) => text,
+            Self::Parts(parts) => parts.into_iter().map(|p| p.text).collect(),
+        }
+    }
 }
 
 #[derive(Deserialize)]

@@ -31,6 +31,7 @@ Add a row when you implement something after reading a reference. Add it to
 | Asking the user structured questions | hermes `7d6c6ae4` *clarify: schema diet + single questions[] interface (880 → 335 tok/call)* — took the one-questions[]-shape and the rule that options must never be written into the question text, and cut further: no per-question id, and the answer's own text is the "Other" row | source, via `refs advance` | `rook-tools/src/ask.rs`, `AgentLoop::ask_via` |
 | A workspace boundary that a symlink cannot cross | codex `2926014` *make filesystem policy matching URI-native* — their case was encoded and case-variant paths, ours was a symlink out of the workspace that lexical containment could not see | source, via `refs advance` | `ToolContext::resolve`, `through_symlinks`, `sandbox.allow_outside_workspace` |
 | Widening a fact's scope instead of keeping the first | hermes `3b672a68` *delete-path drops every scope of a removed id* — the fix does not apply (identity here is the text, not an id per scope), but its subject exposed the same hazard in ours | source, via `refs advance` | `MemoryBook::learn`, `Scope::within` |
+| Reading a reply whose text arrives as parts | hermes `23bae43cf` *normalize list-shaped streaming content deltas* — one field typed as a string made the frame unparseable, and an unparseable frame is skipped, so the text vanished without a word | source, via `refs advance` | `rook-llm/src/openai.rs`, `Text` |
 | A layering that fails the build instead of describing itself | goose `a9060fd` *stop enumerating crates in AGENTS.md* — the opposite conclusion: the list here is a rule, so what it needed was enforcement, not deletion. It found the table already drifted | source, via `refs advance` | `crates/rook-core/tests/layering.rs` |
 | Measuring context by what the provider counted | hermes `d3a1c4651` *context size anchors on provider-reported usage* — ours estimated the messages and not the tool schemas, so the budget was short by the size of the tool list on every request | source, via `refs advance` | `measured`, `AgentLoop::run_with` |
 | Naming the shell the model actually has | codex `5ed294d` *match Windows shell guidance to the executor platform* — the environment block named the OS and not the shell, and `;` chaining sent to `cmd.exe` fails as silently as GNU flags sent to BSD | source, via `refs advance` | `AgentLoop::system_prompt`, `rook_core::SHELL` |
@@ -52,8 +53,8 @@ Add a row when you implement something after reading a reference. Add it to
 moved; what follows is what was done with it, so a dismissal is a decision rather
 than an omission.
 
-**2026-08-29 (seventeenth pass)** — codex 31 commits, cline 5, goose 3, acp,
-opencode and openhands two each. hermes moved 934 and is triaged separately.
+**2026-08-29 (seventeenth pass)** — hermes 934 commits, codex 31, cline 5,
+goose 3, acp, opencode and openhands two each.
 
 - goose `a9060fd` *stop enumerating crates in AGENTS.md Structure* — **taken as
   the opposite conclusion, and it found a drift.** They deleted a list from their
@@ -63,6 +64,27 @@ opencode and openhands two each. hermes moved 934 and is triaged separately.
   rather than by edge, and it immediately showed the table in `CLAUDE.md` had
   drifted: `rook-lsp`, `rook-mcp` and `rook-acp` were absent from it entirely,
   and `rook-tools` had gained two dependencies since it was written.
+- hermes `23bae43cf` *normalize list-shaped streaming content deltas* —
+  **ported, and the failure it prevents is a silent one.** The dialect says
+  `content` is a string; several servers that implement it send a list of parts
+  instead. A field typed as a string made the whole frame fail to parse, and a
+  frame that fails to parse is skipped — so the reply arrived empty with nothing
+  anywhere saying why. This is aimed at self-hosted servers, which is where that
+  shape is likeliest.
+- hermes `0dd0f6e64` *clamp authorization gate lock timeout to prevent
+  OverflowError on macOS* — **not applicable, and checked rather than assumed**:
+  `tokio::time::timeout(Duration::from_secs(u64::MAX), …)` saturates and returns
+  normally here. Theirs is asyncio's arithmetic, not a shape this has.
+- hermes `bf8b28f27` *route browser snapshot storage through the symlink-safe
+  writer* — **already held**: every path a tool touches goes through
+  `ToolContext::resolve`, which follows symlinks before deciding, and there is no
+  second writer that bypasses it.
+- hermes: 145 desktop fixes, 56 gateway, 28 JS formatting, and the rest across
+  kanban, cron, auth, update and their OpenViking memory provider — **not
+  applicable**. Triaged by subject, which is the honest way to handle a branch
+  landing of this size; what was read closely is the thirty-odd under `agent`,
+  `tools`, `skills`, `memory`, `compression` and `context`, and most of those had
+  already been triaged in earlier passes because the merge replays them.
 - cline `cea134b` *prevent hook spawn failures from crashing the core process* —
   **already held**: a hook that cannot be spawned is caught where it is invoked,
   and for `pre_tool` it becomes a denial rather than a crash or a silent pass,
