@@ -122,27 +122,13 @@ fn default_limit() -> usize {
     100
 }
 
-async fn objects(State(s): State<Shared>, Query(q): Query<ListQuery>) -> ApiResult<Page<serde_json::Value>> {
+async fn objects(
+    State(s): State<Shared>,
+    Query(q): Query<ListQuery>,
+) -> ApiResult<Page<rook_store::ObjectRow>> {
     let rook = s.rook.read().await;
     let kind = q.kind.as_deref().and_then(parse_kind);
-    let items = rook
-        .store
-        .list_objects(kind, q.limit.min(1000))
-        .map_err(CoreError::from)?
-        .into_iter()
-        .map(|(id, m)| {
-            serde_json::json!({
-                "id": id.to_hex(),
-                "short": id.short(),
-                "kind": rook_store::Kind::from_u8(m.kind).as_str(),
-                "size_raw": m.size_raw,
-                "size_stored": m.size_stored,
-                "external": m.external,
-                "created_at": m.created_at,
-            })
-        })
-        .collect();
-    Ok(Json(Page::new(items)))
+    Ok(Json(Page::new(rook.store.object_rows(kind, q.limit.min(1000)).map_err(CoreError::from)?)))
 }
 
 fn parse_kind(s: &str) -> Option<rook_store::Kind> {
@@ -187,16 +173,9 @@ struct PrefixQuery {
     prefix: String,
 }
 
-async fn refs(State(s): State<Shared>, Query(q): Query<PrefixQuery>) -> ApiResult<Page<serde_json::Value>> {
+async fn refs(State(s): State<Shared>, Query(q): Query<PrefixQuery>) -> ApiResult<Page<rook_store::RefRow>> {
     let rook = s.rook.read().await;
-    let items = rook
-        .store
-        .list_refs(&q.prefix)
-        .map_err(CoreError::from)?
-        .into_iter()
-        .map(|(name, id)| serde_json::json!({ "ref": name, "object": id.to_hex(), "short": id.short() }))
-        .collect();
-    Ok(Json(Page::new(items)))
+    Ok(Json(Page::new(rook.store.ref_rows(&q.prefix).map_err(CoreError::from)?)))
 }
 
 /// Sessions with their goals folded in. The goal lives in the `kv` table rather
@@ -363,23 +342,31 @@ async fn rewind(
     Ok(Json(rook.rewind(session_id(&id)?, body.to_seq, body.restore_files)?))
 }
 
-async fn skills(State(s): State<Shared>) -> ApiResult<Page<rook_skills::SkillCard>> {
-    let rook = s.rook.read().await;
+async fn skills(
+    State(s): State<Shared>,
+    Query(q): Query<WorkspaceQuery>,
+) -> ApiResult<Page<rook_skills::SkillCard>> {
+    let engine = s.engine_for(q.workspace.as_deref()).await.map_err(CoreError::Other)?;
+    let rook = engine.read().await;
     Ok(Json(Page::new(rook.catalog())))
 }
 
-async fn skill(State(s): State<Shared>, Path(name): Path<String>) -> ApiResult<serde_json::Value> {
-    let rook = s.rook.read().await;
-    let resolved = rook.skills().resolve(&name, rook.env()).map_err(CoreError::from)?;
-    Ok(Json(serde_json::json!({
-        "name": resolved.skill.manifest.name,
-        "version": resolved.skill.version().to_string(),
-        "source": resolved.skill.source.label(),
-        "dir": resolved.skill.dir,
-        "variant": resolved.variant.as_ref().map(|v| v.body.display().to_string()),
-        "rejected": resolved.rejected,
-        "body": resolved.body,
-    })))
+/// Which project is being asked about. A skill can come from the project as
+/// well as from the user, so the daemon's own is not an answer for another's.
+#[derive(Deserialize)]
+struct WorkspaceQuery {
+    #[serde(default)]
+    workspace: Option<std::path::PathBuf>,
+}
+
+async fn skill(
+    State(s): State<Shared>,
+    Path(name): Path<String>,
+    Query(q): Query<WorkspaceQuery>,
+) -> ApiResult<rook_skills::SkillDetail> {
+    let engine = s.engine_for(q.workspace.as_deref()).await.map_err(CoreError::Other)?;
+    let rook = engine.read().await;
+    Ok(Json(rook.skills().resolve(&name, rook.env()).map_err(CoreError::from)?.detail()))
 }
 
 async fn skill_history(
@@ -464,11 +451,6 @@ async fn writing(State(s): State<Shared>, Query(q): Query<WorkspaceQuery>) -> Ap
             })
             .collect(),
     ))
-}
-
-#[derive(serde::Deserialize)]
-struct WorkspaceQuery {
-    workspace: Option<std::path::PathBuf>,
 }
 
 #[derive(serde::Serialize)]

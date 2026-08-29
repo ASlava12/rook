@@ -358,8 +358,9 @@ fn a_read_routes_through_the_daemon_and_answers_the_same() {
 /// answers — and the search must carry its filters, or a narrowed question comes
 /// back widened with nothing saying so.
 #[test]
-fn a_transcript_and_a_search_read_the_same_through_the_daemon() {
+fn every_read_answers_the_same_through_the_daemon_as_it_does_direct() {
     let rook = Rook::new();
+    rook.skill("greet", "---\nname: greet\nversion: 1.0.0\ndescription: say hello\n---\n\nHello.");
     // The turn fails for want of a model and leaves the session behind, which is
     // all this needs: something with a transcript to read.
     // Two of them, because one session makes a filtered search and an unfiltered
@@ -386,6 +387,11 @@ fn a_transcript_and_a_search_read_the_same_through_the_daemon() {
     let direct_diff = rook.json(&["session", "diff", &id]);
     let direct_memory = rook.json(&["memory", "ls"]);
     let direct_context = rook.json(&["session", "context", &id]);
+    let direct_objects = rook.json(&["store", "ls"]);
+    let direct_refs = rook.json(&["store", "refs"]);
+    let direct_skill = rook.json(&["skills", "show", "greet"]);
+    let object = direct_objects[0]["short"].as_str().expect("a listing of objects names one").to_string();
+    let direct_cat = rook.ok(&["store", "cat", &object]);
     assert!(!direct_show.as_array().unwrap().is_empty(), "there is a transcript to compare");
     assert!(!direct_memory.as_array().unwrap().is_empty(), "and a fact to compare");
 
@@ -396,6 +402,14 @@ fn a_transcript_and_a_search_read_the_same_through_the_daemon() {
     assert_eq!(rook.json(&["session", "diff", &id]), direct_diff, "and the diff");
     assert_eq!(rook.json(&["memory", "ls"]), direct_memory, "and what it remembers");
     assert_eq!(rook.json(&["session", "context", &id]), direct_context, "and what it costs");
+    assert_eq!(rook.json(&["store", "ls"]), direct_objects, "and the objects behind all of it");
+    assert_eq!(rook.json(&["store", "refs"]), direct_refs, "and what names them");
+    assert_eq!(rook.json(&["skills", "show", "greet"]), direct_skill, "and a skill's body");
+    assert_eq!(
+        rook.ok(&["store", "cat", &object]),
+        direct_cat,
+        "and one object's bytes, which is what the other listings point at"
+    );
 
     let narrowed = rook.run(&["--json", "search", "worth finding", "--session", &id]);
     assert!(narrowed.status.success(), "{}", String::from_utf8_lossy(&narrowed.stderr));

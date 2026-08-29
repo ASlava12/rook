@@ -21,11 +21,15 @@ API at http://127.0.0.1:7717 instead.
 
 ## What routes so far
 
-`store stat`, `session ls`, `session show`, `session diff`, `session context`,
-`skills ls`, `search` and `memory ls` go over the API when the store is held.
-What is left is `store ls`, `store cat` and the skill detail, each of which needs
-a printer that works from the API's shape rather than the store's types — the
-work below, not a different decision.
+Every read the CLI has goes over the API when the store is held: `store stat`,
+`store ls`, `store cat`, `store refs`, `session ls`, `session show`,
+`session diff`, `session context`, `skills ls`, `skills show`, `search` and
+`memory ls`. Writes and maintenance still refuse, which is the decision above
+rather than a gap.
+
+One of them is not identical routed. `store cat` over the API gets a windowed,
+text-decoded payload, because the endpoint that serves it also serves a browser
+and must not be the thing that takes it down; it says so when it happens.
 
 ## Why not fix it now
 

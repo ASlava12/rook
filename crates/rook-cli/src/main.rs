@@ -361,7 +361,10 @@ fn main() -> Result<()> {
             let here = workspace_of(&cli.workspace);
             cmd_session(&Source::open(cli.workspace)?, c, &here, cli.json)
         }
-        Some(Command::Skills(c)) => cmd_skills(&Source::open(cli.workspace)?, c, cli.json),
+        Some(Command::Skills(c)) => {
+            let here = workspace_of(&cli.workspace);
+            cmd_skills(&Source::open(cli.workspace)?, c, &here, cli.json)
+        }
         Some(Command::Checkpoint(c)) => cmd_checkpoint(&Rook::open(cli.workspace)?, c, cli.json),
         Some(Command::Mcp(c)) => cmd_mcp(cli.workspace, c, cli.json),
         Some(Command::Memory(c)) => {
@@ -964,64 +967,70 @@ fn show_sessions(sessions: &[SessionSummary], workspace: &Path, all: bool, json:
     Ok(())
 }
 
+/// How much of one object `store cat` asks the API for. Generous, and finite:
+/// the store holds tool output that ran away.
+const CAT_BYTES: usize = 4 << 20;
+
+fn show_objects(objects: &[rook_store::ObjectRow], json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(&objects)?);
+        return Ok(());
+    }
+    let rows: Vec<Vec<String>> = objects
+        .iter()
+        .map(|o| {
+            vec![
+                o.short.clone(),
+                o.kind.clone(),
+                fmt::bytes(o.size_raw),
+                fmt::bytes(o.size_stored),
+                if o.external { "file".into() } else { "inline".into() },
+                fmt::timestamp(o.created_at),
+            ]
+        })
+        .collect();
+    print!("{}", fmt::table(&["id", "kind", "logical", "stored", "where", "created"], &rows));
+    Ok(())
+}
+
+fn show_refs(refs: &[rook_store::RefRow], json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(&refs)?);
+        return Ok(());
+    }
+    let rows: Vec<Vec<String>> = refs.iter().map(|r| vec![r.name.clone(), r.short.clone()]).collect();
+    print!("{}", fmt::table(&["ref", "object"], &rows));
+    Ok(())
+}
+
 fn cmd_store(source: &Source, cmd: StoreCmd, json: bool) -> Result<()> {
     // Routed before the store is opened, because the daemon may be holding it.
     if let StoreCmd::Stat = cmd {
         return show_stats(&source.stats()?, json);
     }
+    if let StoreCmd::Ls { kind, limit } = &cmd {
+        let want = kind.as_deref().map(parse_kind).transpose()?;
+        return show_objects(&source.objects(want, *limit)?, json);
+    }
+    if let StoreCmd::Refs { prefix } = &cmd {
+        return show_refs(&source.refs(prefix.as_deref().unwrap_or(""))?, json);
+    }
+    if let StoreCmd::Cat { id } = &cmd {
+        let (bytes, elided) = source.object(id, CAT_BYTES)?;
+        std::io::Write::write_all(&mut std::io::stdout(), &bytes)?;
+        // The one place a routed read is not the local one: the API windows the
+        // payload and decodes it as text, so a large object comes back with its
+        // middle marked as elided and a binary one comes back mangled.
+        if elided {
+            eprintln!("\n[the daemon holds the store; it sent the ends of this object, not all of it]");
+        }
+        return Ok(());
+    }
     let rook = source.local()?;
     match cmd {
         StoreCmd::Stat => unreachable!("routed above"),
-        StoreCmd::Ls { kind, limit } => {
-            let want = kind.as_deref().map(parse_kind).transpose()?;
-            let objects = rook.store.list_objects(want, limit)?;
-            if json {
-                let items: Vec<_> = objects
-                    .iter()
-                    .map(|(id, m)| {
-                        serde_json::json!({
-                            "id": id.to_hex(), "kind": Kind::from_u8(m.kind).as_str(),
-                            "raw": m.size_raw, "stored": m.size_stored, "created_at": m.created_at,
-                        })
-                    })
-                    .collect();
-                println!("{}", serde_json::to_string_pretty(&items)?);
-                return Ok(());
-            }
-            let rows: Vec<Vec<String>> = objects
-                .iter()
-                .map(|(id, m)| {
-                    vec![
-                        id.short(),
-                        Kind::from_u8(m.kind).as_str().to_string(),
-                        fmt::bytes(m.size_raw),
-                        fmt::bytes(m.size_stored),
-                        if m.external { "file".into() } else { "inline".into() },
-                        fmt::timestamp(m.created_at),
-                    ]
-                })
-                .collect();
-            print!("{}", fmt::table(&["id", "kind", "logical", "stored", "where", "created"], &rows));
-        }
-        StoreCmd::Cat { id } => {
-            let object = rook
-                .store
-                .resolve_prefix(&id)?
-                .with_context(|| format!("no object matches {id:?} (or the prefix is ambiguous)"))?;
-            let data = rook.store.get(&object)?;
-            use std::io::Write;
-            std::io::stdout().write_all(&data)?;
-        }
-        StoreCmd::Refs { prefix } => {
-            let refs = rook.store.list_refs(prefix.as_deref().unwrap_or(""))?;
-            if json {
-                let items: Vec<_> =
-                    refs.iter().map(|(n, id)| serde_json::json!({"ref": n, "object": id.to_hex()})).collect();
-                println!("{}", serde_json::to_string_pretty(&items)?);
-                return Ok(());
-            }
-            let rows: Vec<Vec<String>> = refs.iter().map(|(n, id)| vec![n.clone(), id.short()]).collect();
-            print!("{}", fmt::table(&["ref", "object"], &rows));
+        StoreCmd::Ls { .. } | StoreCmd::Cat { .. } | StoreCmd::Refs { .. } => {
+            unreachable!("routed above")
         }
         StoreCmd::Gc { dry_run } => {
             let report = rook.store.gc(&rook_store::GcOptions {
@@ -1376,41 +1385,30 @@ fn show_skills(catalog: &[SkillCard], all: bool, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_skills(source: &Source, cmd: SkillCmd, json: bool) -> Result<()> {
+fn show_skill(skill: &rook_skills::SkillDetail, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(skill)?);
+        return Ok(());
+    }
+    println!("# {} {} ({})", skill.name, skill.version, skill.source);
+    if let Some(variant) = &skill.variant {
+        println!("variant: {} — selected for this environment", variant.display());
+    }
+    println!("dir: {}\n", skill.dir.display());
+    println!("{}", skill.body);
+    Ok(())
+}
+
+fn cmd_skills(source: &Source, cmd: SkillCmd, workspace: &Path, json: bool) -> Result<()> {
     if let SkillCmd::Ls { all } = cmd {
-        return show_skills(&source.catalog()?, all, json);
+        return show_skills(&source.catalog(workspace)?, all, json);
+    }
+    if let SkillCmd::Show { name } = &cmd {
+        return show_skill(&source.skill(name, workspace)?, json);
     }
     let rook = source.local()?;
     match cmd {
-        SkillCmd::Ls { .. } => unreachable!("routed above"),
-        SkillCmd::Show { name } => {
-            let resolved = rook.skills().resolve(&name, rook.env())?;
-            if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "name": resolved.skill.manifest.name,
-                        "version": resolved.skill.version().to_string(),
-                        "source": resolved.skill.source.label(),
-                        "dir": resolved.skill.dir,
-                        "variant": resolved.variant.as_ref().map(|v| v.body.clone()),
-                        "body": resolved.body,
-                    }))?
-                );
-                return Ok(());
-            }
-            println!(
-                "# {} {} ({})",
-                resolved.skill.manifest.name,
-                resolved.skill.version(),
-                resolved.skill.source.label()
-            );
-            if let Some(v) = &resolved.variant {
-                println!("variant: {} — selected for this environment", v.body.display());
-            }
-            println!("dir: {}\n", resolved.skill.dir.display());
-            println!("{}", resolved.body);
-        }
+        SkillCmd::Ls { .. } | SkillCmd::Show { .. } => unreachable!("routed above"),
         SkillCmd::Why { name } => {
             let skills = rook.skills();
             let versions = skills.versions_of(&name);

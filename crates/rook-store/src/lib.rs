@@ -119,6 +119,27 @@ pub fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
+/// One object as a listing shows it.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ObjectRow {
+    pub id: String,
+    pub short: String,
+    pub kind: String,
+    pub size_raw: u64,
+    pub size_stored: u64,
+    pub external: bool,
+    pub created_at: i64,
+}
+
+/// One name pointing at an object.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RefRow {
+    #[serde(rename = "ref")]
+    pub name: String,
+    pub object: String,
+    pub short: String,
+}
+
 /// A handle to the on-disk store. Cheap to clone by `Arc`, safe to share across
 /// threads; redb serializes writers internally.
 pub struct Store {
@@ -337,6 +358,36 @@ impl Store {
             found = ObjectId::from_hex(&hex_full);
         }
         Ok(found)
+    }
+
+    /// The same listing, in the shape every front end shows it in.
+    ///
+    /// The CLI, the API and the browser all answer this question, and each had
+    /// built its own JSON for it — `raw` in one and `size_raw` in the next, for
+    /// the same number. One row type, so the answer does not depend on who was
+    /// asked.
+    pub fn object_rows(&self, kind: Option<Kind>, limit: usize) -> Result<Vec<ObjectRow>> {
+        Ok(self
+            .list_objects(kind, limit)?
+            .into_iter()
+            .map(|(id, m)| ObjectRow {
+                short: id.short(),
+                id: id.to_hex(),
+                kind: Kind::from_u8(m.kind).as_str().to_string(),
+                size_raw: m.size_raw,
+                size_stored: m.size_stored,
+                external: m.external,
+                created_at: m.created_at,
+            })
+            .collect())
+    }
+
+    pub fn ref_rows(&self, prefix: &str) -> Result<Vec<RefRow>> {
+        Ok(self
+            .list_refs(prefix)?
+            .into_iter()
+            .map(|(name, id)| RefRow { name, short: id.short(), object: id.to_hex() })
+            .collect())
     }
 
     pub fn list_objects(&self, kind: Option<Kind>, limit: usize) -> Result<Vec<(ObjectId, ObjectMeta)>> {

@@ -10,8 +10,8 @@ use serde::de::DeserializeOwned;
 use rook_core::search::Found;
 use rook_core::{Rook, SessionSummary, TranscriptEntry, paths};
 use rook_proto::Page;
-use rook_skills::SkillCard;
-use rook_store::StoreStats;
+use rook_skills::{SkillCard, SkillDetail};
+use rook_store::{ObjectRow, RefRow, StoreStats};
 
 pub enum Source {
     Local(Box<Rook>),
@@ -56,6 +56,45 @@ impl Source {
         }
     }
 
+    pub fn objects(&self, kind: Option<rook_store::Kind>, limit: usize) -> Result<Vec<ObjectRow>> {
+        match self {
+            Self::Local(rook) => Ok(rook.store.object_rows(kind, limit)?),
+            Self::Daemon(d) => {
+                let kind = kind.map(|k| format!("&kind={}", k.as_str())).unwrap_or_default();
+                Ok(d.get::<Page<ObjectRow>>(&format!("/api/store/objects?limit={limit}{kind}"))?.items)
+            }
+        }
+    }
+
+    pub fn refs(&self, prefix: &str) -> Result<Vec<RefRow>> {
+        match self {
+            Self::Local(rook) => Ok(rook.store.ref_rows(prefix)?),
+            Self::Daemon(d) => {
+                Ok(d.get::<Page<RefRow>>(&format!("/api/store/refs?prefix={}", escaped(prefix)))?.items)
+            }
+        }
+    }
+
+    /// One object's bytes. `max_bytes` is what the caller can take: the daemon
+    /// windows a large payload rather than sending all of it, and says so.
+    pub fn object(&self, id: &str, max_bytes: usize) -> Result<(Vec<u8>, bool)> {
+        match self {
+            Self::Local(rook) => {
+                let object = rook
+                    .store
+                    .resolve_prefix(id)?
+                    .with_context(|| format!("no object matches {id:?} (or the prefix is ambiguous)"))?;
+                Ok((rook.store.get(&object)?, false))
+            }
+            Self::Daemon(d) => {
+                let got: serde_json::Value =
+                    d.get(&format!("/api/store/objects/{}?max_bytes={max_bytes}", escaped(id)))?;
+                let body = got["body"].as_str().unwrap_or_default().as_bytes().to_vec();
+                Ok((body, got["truncated"].as_bool().unwrap_or(false)))
+            }
+        }
+    }
+
     pub fn sessions(&self) -> Result<Vec<SessionSummary>> {
         match self {
             Self::Local(rook) => Ok(rook.session_summaries()?),
@@ -63,10 +102,19 @@ impl Source {
         }
     }
 
-    pub fn catalog(&self) -> Result<Vec<SkillCard>> {
+    pub fn catalog(&self, workspace: &std::path::Path) -> Result<Vec<SkillCard>> {
         match self {
             Self::Local(rook) => Ok(rook.catalog()),
-            Self::Daemon(d) => Ok(d.get::<Page<SkillCard>>("/api/skills")?.items),
+            Self::Daemon(d) => {
+                Ok(d.get::<Page<SkillCard>>(&format!("/api/skills?workspace={}", here(workspace)))?.items)
+            }
+        }
+    }
+
+    pub fn skill(&self, name: &str, workspace: &std::path::Path) -> Result<SkillDetail> {
+        match self {
+            Self::Local(rook) => Ok(rook.skills().resolve(name, rook.env())?.detail()),
+            Self::Daemon(d) => d.get(&format!("/api/skills/{}?workspace={}", escaped(name), here(workspace))),
         }
     }
 
@@ -105,7 +153,7 @@ impl Source {
                 let mut path = format!(
                     "/api/sessions/{}/context?workspace={}",
                     rook_store::format_session_id(session),
-                    escaped(&workspace.display().to_string())
+                    here(workspace)
                 );
                 if let Some(window) = window {
                     path.push_str(&format!("&window={window}"));
@@ -155,6 +203,11 @@ impl Source {
                 .items),
         }
     }
+}
+
+/// The project being asked about, as a query value.
+fn here(workspace: &std::path::Path) -> String {
+    escaped(&workspace.display().to_string())
 }
 
 /// A query safe to paste into a url. Written out for the same reason as the one

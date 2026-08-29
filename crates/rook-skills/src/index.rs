@@ -162,6 +162,37 @@ pub struct Resolved {
     pub rejected: Vec<(String, Vec<String>)>,
 }
 
+impl Resolved {
+    /// One resolved skill as a caller outside this crate sees it. `Skill` holds
+    /// a parsed manifest and a directory handle, neither of which survives a
+    /// wire; the CLI and the API each flattened it by hand and disagreed about
+    /// what a variant was — a path in one, a string in the other.
+    pub fn detail(&self) -> SkillDetail {
+        SkillDetail {
+            name: self.skill.manifest.name.clone(),
+            version: self.skill.version().to_string(),
+            source: self.skill.source.label().to_string(),
+            dir: self.skill.dir.clone(),
+            variant: self.variant.as_ref().map(|v| v.body.clone()),
+            rejected: self.rejected.clone(),
+            body: self.body.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct SkillDetail {
+    pub name: String,
+    pub version: String,
+    pub source: String,
+    pub dir: std::path::PathBuf,
+    /// The body chosen for this environment, when a variant was.
+    pub variant: Option<std::path::PathBuf>,
+    /// Versions that were rejected, and why. Empty when the newest applied.
+    pub rejected: Vec<(String, Vec<String>)>,
+    pub body: String,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct SkillIndex {
     skills: Vec<Skill>,
