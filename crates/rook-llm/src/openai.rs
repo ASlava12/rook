@@ -304,6 +304,7 @@ impl OpenAiCompatible {
             temperature: request.temperature,
             stream,
             stream_options: stream.then_some(StreamOptions { include_usage: true }),
+            reasoning_effort: request.effort.and_then(|e| reasoning_effort(&self.model, e)),
         };
 
         let mut req = self
@@ -338,6 +339,32 @@ struct WireRequest<'a> {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream_options: Option<StreamOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<&'a str>,
+}
+
+/// The rung this dialect understands, or `None` for a model that has no
+/// reasoning to spend.
+///
+/// Sent only to families documented to accept it. A strict OpenAI-compatible
+/// server rejects an unknown field outright rather than ignoring it, and most
+/// of what speaks this dialect is not OpenAI — so the default is to say
+/// nothing, which is also what the field did before it was mapped at all.
+fn reasoning_effort(model: &str, effort: crate::Effort) -> Option<&'static str> {
+    let reasons = model.starts_with("gpt-5")
+        || model.starts_with("o1")
+        || model.starts_with("o3")
+        || model.starts_with("o4");
+    if !reasons {
+        return None;
+    }
+    Some(match effort {
+        // Four rungs against five: the two above `high` are the same request
+        // here, and pretending otherwise would be a value the API rejects.
+        crate::Effort::Low => "low",
+        crate::Effort::Medium => "medium",
+        crate::Effort::High | crate::Effort::XHigh | crate::Effort::Max => "high",
+    })
 }
 
 /// Without this, a streamed response carries no token counts at all, and the

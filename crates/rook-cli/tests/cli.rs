@@ -191,8 +191,22 @@ fn a_skill_written_by_a_person_can_be_versioned_and_rolled_back() {
     assert_eq!(versions.len(), 2, "{history}");
 
     let first = versions.iter().find(|v| v["note"] == "first").unwrap()["object"].as_str().unwrap();
-    rook.ok(&["skills", "rollback", "notes", first]);
+    let rolled = rook.ok(&["skills", "rollback", "notes", first]);
     assert!(rook.ok(&["skills", "show", "notes"]).contains("First version"));
+
+    // The undo it offers has to be one: a rollback that says it is undoable and
+    // names nothing is the claim without the capture behind it.
+    let undo = rolled
+        .lines()
+        .find_map(|l| l.strip_prefix("undo with `rook skills rollback notes "))
+        .and_then(|l| l.strip_suffix("`"))
+        .unwrap_or_else(|| panic!("no undo point named in: {rolled}"))
+        .to_string();
+    rook.ok(&["skills", "rollback", "notes", &undo]);
+    assert!(
+        rook.ok(&["skills", "show", "notes"]).contains("Second version"),
+        "the undo point must hold what was on disk before the rollback"
+    );
 }
 
 #[test]

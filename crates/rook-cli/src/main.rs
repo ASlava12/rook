@@ -1545,7 +1545,10 @@ fn cmd_skills(source: &Source, cmd: SkillCmd, workspace: &Path, json: bool) -> R
             let id = resolve_object(rook, &object)?;
             let result = rook.rollback_skill(&name, &id)?;
             println!("restored {} file(s) for {name} from {}", result.restored, id.short());
-            println!("the previous state was captured first, so this is undoable");
+            match &result.undo {
+                Some(undo) => println!("undo with `rook skills rollback {name} {}`", undo.short()),
+                None => println!("{name} was not on disk, so there was nothing to capture first"),
+            }
             if !result.left_behind.is_empty() {
                 println!("\nnot in that capture, left on disk in {}:", result.dir.display());
                 for f in &result.left_behind {

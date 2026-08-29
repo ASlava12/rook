@@ -283,13 +283,29 @@ impl Rook {
             )));
         }
         // Capture the current state first, so a rollback is itself undoable.
-        let _ = self.capture_skill(name, Some("automatic capture before rollback".into()));
-        let dest = self
-            .skills()
-            .resolve(name, self.env())
-            .map(|r| r.skill.dir.clone())
-            .unwrap_or_else(|_| paths::user_skills_dir().join(name));
-        let restored = set.restore(&self.store, &dest)?;
+        // A skill that no longer resolves has nothing on disk to lose and is
+        // being recreated from a capture, so there is nothing to take first —
+        // but when there is, a failed capture means the rollback would be the
+        // one nobody can get back from, and it does not happen.
+        let resolved = self.skills().resolve(name, self.env()).ok();
+        let undo = match &resolved {
+            Some(_) => Some(self.capture_skill(name, Some("automatic capture before rollback".into()))?.1),
+            None => None,
+        };
+        let dest = resolved.map(|r| r.skill.dir).unwrap_or_else(|| paths::user_skills_dir().join(name));
+        // Writing files stops where it fails, so the directory is then part one
+        // version and part the other. Naming the capture that holds what was
+        // there is the difference between that and losing it.
+        let restored = set.restore(&self.store, &dest).map_err(|e| match &undo {
+            Some(id) => CoreError::Other(format!(
+                "{e} — {} is now part {} and part what was there before; restore it \
+                 with `rook skills rollback {name} {}`",
+                dest.display(),
+                object.short(),
+                id.short()
+            )),
+            None => e,
+        })?;
 
         // Restoring writes files back; it does not delete. Anything on disk that
         // the capture never knew about survives, and saying so is the difference
@@ -305,7 +321,7 @@ impl Rook {
             }
         }
         left_behind.sort();
-        Ok(Rollback { restored, left_behind, dir: dest })
+        Ok(Rollback { restored, left_behind, dir: dest, undo })
     }
 
     /// Scaffold a new skill on disk and capture v0.1.0 of it.
@@ -1246,6 +1262,9 @@ pub struct Rollback {
     /// alone; delete them by hand if the rollback should be exact.
     pub left_behind: Vec<String>,
     pub dir: PathBuf,
+    /// The capture taken of what was there first. `None` when the skill was not
+    /// on disk to begin with, which is the only case a rollback is not undoable.
+    pub undo: Option<ObjectId>,
 }
 
 fn walk_files(root: &Path) -> Vec<PathBuf> {

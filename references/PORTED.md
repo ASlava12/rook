@@ -37,6 +37,8 @@ Add a row when you implement something after reading a reference. Add it to
 | Measuring context by what the provider counted | hermes `d3a1c4651` *context size anchors on provider-reported usage* — ours estimated the messages and not the tool schemas, so the budget was short by the size of the tool list on every request | source, via `refs advance` | `measured`, `AgentLoop::run_with` |
 | Naming the shell the model actually has | codex `5ed294d` *match Windows shell guidance to the executor platform* — the environment block named the OS and not the shell, and `;` chaining sent to `cmd.exe` fails as silently as GNU flags sent to BSD | source, via `refs advance` | `AgentLoop::system_prompt`, `rook_core::SHELL` |
 | Telling the model what day it is | codex `430d26b` *classify clock tools as built-in control tools* — taken as a fact beside the prompt rather than a tool, since a date needs no round trip and must not sit in a prefix that is supposed to cache | source, via `refs advance` | `AgentLoop::request_messages`, `rook_store::today` |
+| A rollback whose undo point is real | hermes `1315e65a5`, `154fd10af` *failed rollback keeps the skill and the snapshots* / *name the preserved snapshot path* — ours captured first and discarded the result, then claimed undoability either way | source, via `refs advance` | `Rook::rollback_skill`, `Rollback::undo` |
+| The effort the user asked for reaching the wire | hermes `b954547e7` *hand-rolled effort map inverted the ladder* — theirs was inverted, ours was absent: the OpenAI dialect sent no `reasoning_effort` at all | source, via `refs advance` | `rook-llm/src/openai.rs`, `crates/rook-llm/tests/openai.rs` |
 | Waiting out a provider that said "later" | codex `a73bf25` *decouple HTTP retry backoff from overload integration testing* — theirs refines a retry; here there was none at all, and a 429 ended a turn that had run for minutes | source, via `refs advance` | `rook-llm/src/retry.rs`, `from_spec_with` |
 | A limit that says what to do instead of only what it took | hermes `585723126` *limits line teaches spillover instead of a bare 50KB cap* — the mechanism does not fit a capture that never holds the middle, the lesson does | source, via `refs advance` | `elide_middle` |
 | A sub-agent's budget being its parent's, not its own | codex `4761851` *account subagent token usage toward root goals* — ours already charged the tokens; what it did not bound was the step budget the model writes into the call, or how many sub-agents one turn may start | source, via `refs advance` | `AgentLoop::delegate`, `agent.max_subagents_per_turn` |
@@ -53,6 +55,45 @@ Add a row when you implement something after reading a reference. Add it to
 `cargo xtask refs advance` prints what landed upstream since the pointer was last
 moved; what follows is what was done with it, so a dismissal is a decision rather
 than an omission.
+
+**2026-08-29 (eighteenth pass)** — hermes 46 commits, cline 1.
+
+- hermes `1315e65a5` *a failed rollback restore keeps the skill and the
+  snapshots* and `154fd10af` *name the preserved snapshot path in the ROLLBACK
+  FAILED payload* — **taken, and the same claim here was unbacked.**
+  `Rook::rollback_skill` took a capture of the current state first and threw the
+  result away with `let _ =`, then printed "the previous state was captured
+  first, so this is undoable" whether or not it had been. The capture now decides
+  the message: a skill that is on disk must be captured or the rollback does not
+  happen, one that is not says plainly that there was nothing to take, and the
+  CLI prints the command that undoes it rather than the claim that something
+  would. A restore that fails part way now names that capture in the error, which
+  is the half of their fix about the payload.
+- hermes `b954547e7` *route effort through canonical clamp_effort — hand-rolled
+  map inverted the ladder* — **their bug is not here; looking for it found a
+  worse one.** The Google ladder is monotone and Anthropic passes the rung
+  through. The OpenAI dialect sent nothing at all: `--effort`, `/effort`, the ACP
+  session setting and `[agent] effort` all reached the request and were dropped
+  on the way to the wire. `reasoning_effort` goes out now, to the families
+  documented to take it and to no others — most of what speaks this dialect is
+  not OpenAI, and a strict server rejects an unknown field rather than ignoring
+  it, which is hermes' own `31f0336da`.
+- hermes `11b98a142` *two-line conversation clock* — already here as of
+  `856fb43`, and taken the same way: beside the newest message rather than in the
+  system prompt, so the cached prefix does not change every turn.
+- hermes `c87058983` *tolerate malformed ports in the Ollama URL heuristic*,
+  `31f0336da` *omit Ollama-only `think=false` on strict OpenAI-compat endpoints*
+  — dismissed as written: there is no Ollama-specific request shaping here. The
+  second one's rule is what the effort mapping above follows.
+- hermes `b6bd681e8` *nested subtasks via optional parent field* — dismissed;
+  [ADR-0010](../docs/adr/0010-no-todo-tool.md) declines the todo tool on the
+  strength of goose's own A/B, and nesting it is more of what was declined.
+- The remaining thirty-eight are provider plugins for endpoints Rook does not
+  ship (Nebius, Ramp Router, TokenPlan), Slack gateway routing and busy modes,
+  prompt text for their own identity, and contributor mappings.
+- cline `48d6385` *thread task id into hook runner creation so execution
+  telemetry fires* — dismissed; hooks here are matched and run per event with the
+  session already in the payload, and there is no telemetry to correlate.
 
 **2026-08-29 (seventeenth pass)** — hermes 934 commits, codex 31, cline 5,
 goose 3, acp, opencode and openhands two each.
