@@ -578,8 +578,8 @@ lose people's trust:
   that model says is scripted. Whether the agent behaves well when the answers
   are not is untested.
 - **The CLI writes to the store directly**, so a command that changes it cannot
-  run while `rookd` holds the lock. Reads route over the daemon's API instead and
-  print the same thing; writes say where the lock is
+  run while `rookd` holds the lock. Every read routes over the daemon's API
+  instead and prints the same thing; writes say where the lock is
   ([ADR-0006](docs/adr/0006-single-writer-store.md)).
 - **No structured plan state.** The agent is asked for a plan in prose and told
   not to keep a checklist — deliberately, on the strength of someone else's
