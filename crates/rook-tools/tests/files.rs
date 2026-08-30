@@ -56,6 +56,12 @@ async fn a_deletion_names_the_file_it_would_take_and_takes_only_that() {
     assert!(!out.is_error, "{}", out.content);
     assert!(!dir.path().join("gone.rs").exists());
 
+    // An empty file has nothing to diff, and "would be written unchanged" is the
+    // opposite of what is about to happen to it.
+    std::fs::write(dir.path().join("empty.rs"), "").unwrap();
+    let empty = files::DeleteFile.preview(&ctx, &serde_json::json!({"path": "empty.rs"})).await.unwrap();
+    assert!(empty.contains("would be deleted"), "{empty}");
+
     let refused = files::DeleteFile.call(&ctx, &serde_json::json!({"path": "src"})).await.unwrap();
     assert!(refused.is_error, "a directory is not one file: {}", refused.content);
     assert!(dir.path().join("src").is_dir());

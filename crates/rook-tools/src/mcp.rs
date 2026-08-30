@@ -11,14 +11,44 @@ use rook_mcp::{Server, ToolDescriptor};
 
 use crate::{Result, Tool, ToolBox, ToolContext, ToolOutcome};
 
-/// Models constrain tool names to `[a-zA-Z0-9_-]`, so servers are namespaced
-/// with a double underscore rather than a dot.
+/// Models constrain tool names to `[a-zA-Z0-9_-]` and to 64 characters, so
+/// servers are namespaced with a double underscore rather than a dot.
+///
+/// A package-style server name — `npm:@modelcontextprotocol/server-everything`
+/// — sanitises to something long enough that the pair does not fit, and a name
+/// that does not fit is not one tool refused: the provider rejects the whole
+/// request, so every turn fails while the tool list contains it. The server half
+/// gives way, since the tool half is what tells two of them apart, and what is
+/// cut is replaced by a digest of the whole name so two long servers do not
+/// become one.
 pub fn namespaced(server: &str, tool: &str) -> String {
-    format!("{}__{}", sanitize(server), sanitize(tool))
+    const MOST: usize = 64;
+    let (server, tool) = (sanitize(server), sanitize(tool));
+    let room = MOST.saturating_sub(tool.len() + 2);
+    if server.len() <= room {
+        return format!("{server}__{tool}");
+    }
+    // Enough of the name to stay recognisable, and enough digest to stay
+    // distinct. A tool name so long that neither fits is the server's own
+    // problem, and truncating the tool would make two of them the same.
+    let digest = format!("{:04x}", crc16(&server));
+    let keep = room.saturating_sub(digest.len());
+    format!("{}{digest}__{tool}", &server[..keep.min(server.len())])
 }
 
 fn sanitize(s: &str) -> String {
     s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect()
+}
+
+/// Four hex characters of difference, which is all this needs: it separates the
+/// handful of servers one agent talks to, not the world's.
+fn crc16(text: &str) -> u16 {
+    text.bytes().fold(0xffffu16, |crc, byte| {
+        (0..8).fold(crc ^ u16::from(byte), |crc, _| match crc & 1 {
+            1 => (crc >> 1) ^ 0xa001,
+            _ => crc >> 1,
+        })
+    })
 }
 
 pub struct McpTool {
@@ -100,5 +130,39 @@ impl ToolBox {
         for descriptor in tools {
             self.register(Arc::new(McpTool::new(server.clone(), descriptor)));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::namespaced;
+
+    /// A name over sixty-four characters is not one tool refused: the provider
+    /// rejects the request, so every turn fails while the list contains it.
+    #[test]
+    fn a_package_style_server_name_still_fits_what_a_model_accepts() {
+        let long = "npm:@modelcontextprotocol/server-sequential.thinking";
+        let name = namespaced(long, "sequentialthinking");
+
+        assert!(name.len() <= 64, "{} characters: {name}", name.len());
+        assert!(name.ends_with("__sequentialthinking"), "the tool half is what tells two apart: {name}");
+        assert!(name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'), "{name}");
+    }
+
+    /// Cutting the server half to make room would make two long ones the same,
+    /// and a call meant for one would go to the other.
+    #[test]
+    fn two_long_server_names_do_not_become_one() {
+        let tool = "search";
+        let a = namespaced("npm:@modelcontextprotocol/server-everything-alpha", tool);
+        let b = namespaced("npm:@modelcontextprotocol/server-everything-beta", tool);
+
+        assert_ne!(a, b, "{a}");
+        assert_eq!(a, namespaced("npm:@modelcontextprotocol/server-everything-alpha", tool), "and stable");
+    }
+
+    #[test]
+    fn a_short_name_is_left_alone() {
+        assert_eq!(namespaced("docs", "search"), "docs__search");
     }
 }

@@ -341,7 +341,13 @@ impl Tool for DeleteFile {
     async fn preview(&self, ctx: &ToolContext, args: &serde_json::Value) -> Option<String> {
         let path = ctx.resolve(&arg_str(args, self.name(), "path").ok()?).ok()?;
         let before = ctx.read_text(&path).await.ok()?;
-        Some(diff(&path, &before, ""))
+        // Not `diff` alone: with nothing on either side it says the file "would
+        // be written unchanged", which is the opposite of what is about to
+        // happen, in the one place a person is deciding whether to let it.
+        Some(match before.is_empty() {
+            true => format!("{} would be deleted (it is empty)", path.display()),
+            false => diff(&path, &before, ""),
+        })
     }
 
     fn touched_paths(&self, args: &serde_json::Value) -> Vec<String> {

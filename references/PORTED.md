@@ -38,6 +38,7 @@ Add a row when you implement something after reading a reference. Add it to
 | Naming the shell the model actually has | codex `5ed294d` *match Windows shell guidance to the executor platform* — the environment block named the OS and not the shell, and `;` chaining sent to `cmd.exe` fails as silently as GNU flags sent to BSD | source, via `refs advance` | `AgentLoop::system_prompt`, `rook_core::SHELL` |
 | Telling the model what day it is | codex `430d26b` *classify clock tools as built-in control tools* — taken as a fact beside the prompt rather than a tool, since a date needs no round trip and must not sit in a prefix that is supposed to cache | source, via `refs advance` | `AgentLoop::request_messages`, `rook_store::today` |
 | Resuming a session where it belongs | codex `f5636bb` *restore thread cwd from owned settings snapshots* — ours took whatever directory the command was run from, so the conversation was one project's and the edits another's | source, via `refs advance` | `Rook::following`, `rook run --session`, `rook chat --resume` |
+| A tool name a model will accept | codex `94cbbdd` *support package-style MCP server names* — theirs widens what a server may be called; ours already took such a name and sanitised it, but a namespaced name over sixty-four characters makes the provider reject every request | source, via `refs advance` | `mcp::namespaced` |
 | A rollback whose undo point is real | hermes `1315e65a5`, `154fd10af` *failed rollback keeps the skill and the snapshots* / *name the preserved snapshot path* — ours captured first and discarded the result, then claimed undoability either way | source, via `refs advance` | `Rook::rollback_skill`, `Rollback::undo` |
 | The effort the user asked for reaching the wire | hermes `b954547e7` *hand-rolled effort map inverted the ladder* — theirs was inverted, ours was absent: the OpenAI dialect sent no `reasoning_effort` at all | source, via `refs advance` | `rook-llm/src/openai.rs`, `crates/rook-llm/tests/openai.rs` |
 | Waiting out a provider that said "later" | codex `a73bf25` *decouple HTTP retry backoff from overload integration testing* — theirs refines a retry; here there was none at all, and a 429 ended a turn that had run for minutes | source, via `refs advance` | `rook-llm/src/retry.rs`, `from_spec_with` |
@@ -56,6 +57,35 @@ Add a row when you implement something after reading a reference. Add it to
 `cargo xtask refs advance` prints what landed upstream since the pointer was last
 moved; what follows is what was done with it, so a dismissal is a decision rather
 than an omission.
+
+**2026-08-30 (twenty-second pass)** — codex 4, hermes 26, openhands 2, acp 1.
+One taken, and it was their new feature meeting our old bug.
+
+- codex `94cbbdd` *support package-style MCP server names* — **their feature is
+  our bug.** They widened what a server may be called to
+  `npm:@modelcontextprotocol/server-sequential.thinking`; here such a name was
+  already accepted and already sanitised into the tool namespace, but nothing
+  capped the length. Models take sixty-four characters, and a name past it is not
+  one tool refused — the provider rejects the whole request, so every turn fails
+  for as long as the tool list carries it. The server half now gives way, since
+  the tool half is what tells two apart, and what is cut is replaced by a digest
+  of the whole name so two long servers do not become one.
+- codex `cefa060` *approve the first Node REPL execution without a Guardian
+  wait* — dismissed; there is no persistent REPL here, and an approval that
+  skipped the gate on a first call is what [ADR-0009](../docs/adr/0009-ask-before-acting.md)
+  refuses.
+- codex `88f7765`, `da23e13`, openhands' two and acp's one — test working
+  directories, JediTerm rendering, a clipped menu, a CI heading, and a registry
+  list.
+- hermes' twenty-six are almost all one thing: negotiating *native* compaction
+  with a provider, and carrying that capability across model switches, resumes
+  and proxies. Rook compacts itself, so there is nothing to negotiate. Two of
+  them are worth naming because they confirm ports already made:
+  `be9270378` *keep tool-schema tokens in the unanchored fallback estimate* is
+  the defect `measured` was written for, and `4f2254350` *exactly one auxiliary
+  request per attempt* is what `worth_compacting` already enforces. And
+  `ef71f2cad` *deny by default on unattended platforms* is what `Unattended` has
+  always done.
 
 **2026-08-30 (twenty-first pass)** — hermes 124 commits, codex 4, opencode 2,
 acp 1. Nothing taken, and two of the dismissals took reading our own code to be
