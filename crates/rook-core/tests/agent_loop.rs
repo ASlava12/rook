@@ -1506,6 +1506,26 @@ async fn two_tool_calls_sharing_an_id_do_not_make_an_unsendable_request() {
     assert!(said.contains("same call id"), "the model has to be told which call was dropped: {said}");
 }
 
+/// A model can end a turn with nothing in it, and every front end renders that
+/// as a hang: the prompt, then no answer and no error.
+#[tokio::test]
+async fn a_turn_that_said_nothing_says_that_rather_than_nothing() {
+    let f = fixture();
+    let session = f.rook.start_session("silent").unwrap();
+
+    let outcome = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(vec![reply("")])), session)
+        .run("say something")
+        .await
+        .unwrap();
+
+    assert!(outcome.reply.contains("without saying anything"), "{:?}", outcome.reply);
+    assert!(outcome.reply.contains(&outcome.stopped), "and why it ended: {:?}", outcome.reply);
+
+    // The transcript records what the model said, and it said nothing.
+    let entries = f.rook.transcript(session, 0, 100, 4096).unwrap();
+    assert!(entries.iter().all(|e| e.kind != "assistant"), "{entries:?}");
+}
+
 #[tokio::test]
 async fn the_system_prompt_does_not_vary_with_the_prompt() {
     let f = fixture();

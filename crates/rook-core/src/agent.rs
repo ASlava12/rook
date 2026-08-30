@@ -1028,6 +1028,16 @@ impl<'a> AgentLoop<'a> {
                 let said = self.interjections.take();
                 if said.is_empty() {
                     outcome.stopped = response.stop_reason.as_str().into();
+                    // A turn that said nothing at any step ends in silence every
+                    // front end renders as a hang. Set here rather than logged:
+                    // the transcript records what the model said, and it said
+                    // nothing.
+                    if outcome.reply.is_empty() {
+                        outcome.reply = format!(
+                            "(the model ended the turn without saying anything — {})",
+                            outcome.stopped
+                        );
+                    }
                     self.finish(&outcome).await;
                     return Ok(outcome);
                 }

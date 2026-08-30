@@ -67,8 +67,10 @@ const SCENARIOS: &[Scenario] = &[
         check: |turn, _| {
             expect(turn.tools.iter().any(|t| t == "verify"), "the tool has to be the one used", turn)?;
             let settled = turn.reply.to_lowercase();
+            // Words that mean this claim in particular. A bare "not" would be
+            // satisfied by "it does not fail", which is the opposite answer.
             expect(
-                settled.contains("fails") || settled.contains("not") || settled.contains("subtract"),
+                ["fails", "subtract", "minus", "a - b"].iter().any(|w| settled.contains(w)),
                 "the claim is false and the file says so",
                 turn,
             )
@@ -132,7 +134,12 @@ pub fn smoke(model: Option<String>) -> Result<()> {
         }
 
         let outcome = run(&rook, home.path(), workspace.path(), scenario.prompt);
-        let verdict = outcome.and_then(|turn| (scenario.check)(&turn, workspace.path()));
+        let verdict = outcome.and_then(|turn| {
+            // Before what it said: a model that flailed to the step limit and
+            // happened to mention the right word has not done the task.
+            expect(turn.stopped != "max_steps", "it ran out of steps rather than finishing", &turn)?;
+            (scenario.check)(&turn, workspace.path())
+        });
         match verdict {
             Ok(()) => println!("{:<34} ok", scenario.name),
             Err(e) => {

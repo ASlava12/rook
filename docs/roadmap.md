@@ -774,11 +774,13 @@ recorded so the design question survives the session that raised it.
   rejects — so the model's mistake used to come back as an opaque provider error
   after the work had been done twice; the repeat is dropped from the message that
   asked as well as from the answers, and the result says which call went and why.
+  A turn the model ended without saying anything reports that instead of nothing,
+  since silence with no error is what every front end renders as a hang.
   And a verdict is read however the model dressed the line — bold, a bullet, a
   different case — because a check that ran the build and read the code is not
   "unchecked" for having written `**VERDICT: holds**`; a fourth word still is
   not a verdict, since reporting a hedge as one is what asking for three exists
-  to prevent. 6 tests.
+  to prevent. 7 tests.
 - **A refactor that lands whole or not at all** — `edit_file` took one file, so
   renaming a symbol across five was five calls and a failure on the third left
   two already changed. `files` takes them together: every file is worked out
