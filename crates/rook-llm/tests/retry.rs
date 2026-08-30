@@ -34,8 +34,11 @@ async fn flaky(refusals: Vec<&'static str>) -> (String, Arc<AtomicUsize>) {
                         "finish_reason":"stop"}],"model":"m"}"#,
                 ),
             };
+            // This answers one request per connection and then drops it, and a
+            // client not told so is entitled to reuse the socket and find it
+            // gone — which a retry does by definition.
             let response = format!(
-                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
                 body.len()
             );
             let _ = socket.write_all(response.as_bytes()).await;

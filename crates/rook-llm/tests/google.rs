@@ -21,7 +21,7 @@ async fn serve(body: &'static str) -> (String, tokio::sync::oneshot::Receiver<St
         let read = socket.read(&mut scratch).await.unwrap_or(0);
         let _ = tx.send(String::from_utf8_lossy(&scratch[..read]).into_owned());
         let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         );
         let _ = socket.write_all(response.as_bytes()).await;

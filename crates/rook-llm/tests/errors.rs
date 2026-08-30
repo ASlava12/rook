@@ -100,7 +100,7 @@ async fn serve(routes: &'static [(&'static str, &'static str, &'static str)]) ->
                 .map(|(_, status, body)| (*status, *body))
                 .unwrap_or(("404 Not Found", "{}"));
             let response = format!(
-                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
                 body.len()
             );
             let _ = socket.write_all(response.as_bytes()).await;

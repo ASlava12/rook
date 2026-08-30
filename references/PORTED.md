@@ -57,6 +57,42 @@ Add a row when you implement something after reading a reference. Add it to
 moved; what follows is what was done with it, so a dismissal is a decision rather
 than an omission.
 
+**2026-08-30 (twenty-first pass)** — hermes 124 commits, codex 4, opencode 2,
+acp 1. Nothing taken, and two of the dismissals took reading our own code to be
+sure of.
+
+- hermes `6b290b81d` *reduce false positives in exfil_curl/exfil_wget patterns*
+  and `21e52c1fd`, its sibling — **the lesson is already the rule here.** Theirs
+  is a threat scanner matching env-var names anywhere in a command, so
+  `$TRILLIUM_ETAPI_URL` tripped a rule meant for `$API_KEY`; the fix anchors the
+  match. Rook has no such scanner and does not claim one — the deny list is
+  pattern matching over what a call would do, and `COMMAND` already anchors every
+  shipped rule at command position for exactly this reason, so `grep -r mkfs
+  docs/` is not refused for saying the word.
+- hermes `7e95b67ad` *revision pinning, canonicalization, case-fold guards* and
+  `86dda3cd3` *fetch explicitly linked same-directory siblings on install* —
+  dismissed after checking ours for the same family. `write_skill` takes file
+  names from the model, and `safe_relative` refuses anything that is not a
+  sequence of normal components, so `../` cannot write outside the skill's
+  directory. `catalog::install` proves the name can be a directory before the
+  `remove_dir_all` it guards, and `copy_tree` skips symlinks rather than
+  following them, since `read_dir` reports a link as itself while `fs::copy`
+  reads through it.
+- hermes `514707ff3` *system prompt always rebuilds at the commit boundary* —
+  already true and for a different reason: an `AgentLoop` is built per turn and
+  `system_prompt()` is called each time, so an edited `AGENTS.md` reaches the
+  next turn. Compaction rebuilds the whole request rather than the tail, which is
+  the same defect they were fixing.
+- codex `0a12b855a` *preserve Guardian authorization across history compaction* —
+  does not apply: an approval granted for the run lives on the `Policy`, which
+  compaction does not touch, and nothing here keys authorization off the
+  model-visible conversation.
+- The remaining hundred and twenty-odd are their own surfaces: Telegram and
+  Discord menus, cron schedule grammar, a real-profile browser, desktop MCP
+  OAuth, a skills hub, per-provider `request_overrides`, and todo snapshots —
+  which [ADR-0010](../docs/adr/0010-no-todo-tool.md) declines. codex's other
+  three are Vim motions in their composer; opencode's two and acp's one are docs.
+
 **2026-08-30 (twentieth pass)** — codex 4 commits, acp 1.
 
 - codex `f5636bb` *restore thread cwd from owned settings snapshots* —
