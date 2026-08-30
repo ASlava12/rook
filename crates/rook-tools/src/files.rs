@@ -372,8 +372,23 @@ impl Tool for EditFile {
         }
 
         let names: Vec<String> = edited.iter().map(|(p, _)| p.display().to_string()).collect();
-        for (path, text) in &edited {
-            ctx.write_text(path, text).await?;
+        for (i, (path, text)) in edited.iter().enumerate() {
+            // Everything that can be decided was decided above, so a failure
+            // here is the filesystem refusing — and by then the files before it
+            // are written. Saying which is the difference between a half-done
+            // refactor somebody can finish and one they have to find.
+            ctx.write_text(path, text).await.map_err(|e| match i {
+                0 => e,
+                done => ToolError::Invalid {
+                    tool: "edit_file".into(),
+                    message: format!(
+                        "{e} — {} of {} were already written: {}",
+                        done,
+                        edited.len(),
+                        names[..done].join(", ")
+                    ),
+                },
+            })?;
         }
         Ok(ToolOutcome::ok(format!("{edits} edit(s), {replaced} replacement(s) in {}", names.join(", ")))
             .with("occurrences", replaced as u64))
@@ -423,10 +438,23 @@ fn parse_targets(args: &serde_json::Value) -> Result<Vec<Target>> {
                 .into(),
         )
     })?;
-    files
+    let targets: Vec<Target> = files
         .iter()
         .map(|f| Ok(Target { path: arg_str(f, "edit_file", "path")?, edits: parse_edits(f)? }))
-        .collect()
+        .collect::<Result<_>>()?;
+
+    // Each entry is read from disk on its own, so two for the same file would
+    // both start from the original and the second write would quietly undo the
+    // first.
+    let mut seen = std::collections::BTreeSet::new();
+    if let Some(twice) = targets.iter().find(|t| !seen.insert(&t.path)) {
+        return Err(invalid(format!(
+            "{} appears twice in `files` — put all of its edits in one entry, in the order they \
+             should apply",
+            twice.path
+        )));
+    }
+    Ok(targets)
 }
 
 /// The change as a person reads one. Bounded, because a rewritten file is a diff

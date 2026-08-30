@@ -95,6 +95,31 @@ async fn a_refactor_across_several_files_lands_whole_or_not_at_all() {
     assert_eq!(out.meta.get("occurrences"), Some(&serde_json::json!(2)), "{:?}", out.meta);
 }
 
+/// Each entry reads the file on its own, so two for the same file would both
+/// start from the original and the second write would undo the first.
+#[tokio::test]
+async fn one_file_named_twice_is_refused_rather_than_written_twice() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.rs"), "one two\n").unwrap();
+    let ctx = ToolContext::new(dir.path().to_path_buf());
+
+    let refused = EditFile
+        .call(
+            &ctx,
+            &serde_json::json!({"files": [
+                {"path": "a.rs", "edits": [{"old": "one", "new": "1"}]},
+                {"path": "a.rs", "edits": [{"old": "two", "new": "2"}]}
+            ]}),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(refused.contains("appears twice"), "{refused}");
+    assert!(refused.contains("one entry"), "and says what to do instead: {refused}");
+    assert_eq!(std::fs::read_to_string(dir.path().join("a.rs")).unwrap(), "one two\n");
+}
+
 /// Both files are captured before either is written, and both are shown before
 /// either is approved.
 #[test]
