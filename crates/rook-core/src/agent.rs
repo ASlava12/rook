@@ -999,9 +999,22 @@ impl<'a> AgentLoop<'a> {
             }
 
             if response.stop_reason != StopReason::ToolUse || response.message.tool_calls.is_empty() {
-                outcome.stopped = response.stop_reason.as_str().into();
-                self.finish(&outcome).await;
-                return Ok(outcome);
+                // Said while this was answering, and the answer is now in front
+                // of it: the turn is not over, whatever the model thinks. Left
+                // in the queue it would reach the next prompt instead, folded
+                // into it, which is not where the person put it.
+                let said = self.interjections.take();
+                if said.is_empty() {
+                    outcome.stopped = response.stop_reason.as_str().into();
+                    self.finish(&outcome).await;
+                    return Ok(outcome);
+                }
+                messages.push(response.message.clone());
+                for text in said {
+                    self.rook.log(self.session, EventKind::UserMessage, "while running", &text).ok();
+                    messages.push(Message::user(&text));
+                }
+                continue;
             }
 
             messages.push(response.message.clone());

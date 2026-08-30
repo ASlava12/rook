@@ -1392,6 +1392,37 @@ async fn something_said_while_a_turn_runs_reaches_the_next_step() {
     assert!(said.take().is_empty(), "and be delivered once, not at every step");
 }
 
+/// Said while the model was writing its last answer, it would sit in the queue
+/// until the next prompt and be folded into it — which is not where it was put.
+#[tokio::test]
+async fn something_said_as_a_turn_ends_keeps_the_turn_going() {
+    let f = fixture();
+    let session = f.rook.start_session("steered late").unwrap();
+    let provider = ScriptedProvider::new(vec![reply("all done"), reply("right, changed course")]);
+    let seen = provider.share();
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), session);
+    let said = agent.interjections.clone();
+
+    let saying = said.clone();
+    let mut once = true;
+    let outcome = agent
+        .run_with("look around", |progress| {
+            if let rook_core::agent::Progress::Delta(_) = progress
+                && std::mem::take(&mut once)
+            {
+                saying.say("wait — the other directory");
+            }
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.steps, 2, "the turn went on rather than ending on the model's word");
+    assert_eq!(outcome.reply, "right, changed course");
+    let second = &seen.lock().unwrap()[1].messages;
+    assert!(second.last().unwrap().content.contains("the other directory"), "{second:?}");
+    assert!(said.take().is_empty(), "and nothing is left for the next prompt to inherit");
+}
+
 #[tokio::test]
 async fn the_system_prompt_does_not_vary_with_the_prompt() {
     let f = fixture();

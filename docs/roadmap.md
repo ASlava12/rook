@@ -764,7 +764,10 @@ recorded so the design question survives the session that raised it.
   step, which is the one place a user message may go: between an assistant's tool
   call and its result, no dialect accepts one. The TUI and the browser, being the
   front ends that can take input while a turn runs; the plain REPL is blocked on
-  its own readline and says so by not offering it. 1 test.
+  its own readline and says so by not offering it. And said while the model is
+  writing its last answer, the turn goes on rather than ending on the model's
+  word — otherwise it would sit in the queue until the next prompt and be folded
+  into it, which is not where the person put it. 2 tests.
 - **Commands that keep running** — `run_command` waits, caps and kills at a
   timeout, so a dev server or a watcher could only be run by not running it.
   `background: true` answers at once with an id and the `job` tool reads or stops
