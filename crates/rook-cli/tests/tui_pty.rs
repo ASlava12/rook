@@ -221,6 +221,22 @@ fn grid(stream: &str, cols: usize, rows: usize) -> Vec<String> {
     cells.into_iter().map(|r| r.into_iter().collect::<String>().trim_end().to_string()).collect()
 }
 
+/// One at a time.
+///
+/// These look independent — each has its own home and workspace — but each also
+/// starts a whole `rook` from cold: opening a store, discovering skills and
+/// plugins, and building a provider, all before the first byte reaches the
+/// terminal. Nine of those at once on the FreeBSD runner, which is a VM, starved
+/// one past a minute of having drawn nothing at all, twice, on two different
+/// tests. Serially each gets the machine and finishes in seconds.
+///
+/// The guard is taken for the whole test, so it is released when the `Pty` that
+/// holds it is dropped — which is also when the child is killed.
+fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+    static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    GATE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn tui(home: &std::path::Path, workspace: &std::path::Path) -> Pty {
     Pty::spawn(
         std::path::Path::new(env!("CARGO_BIN_EXE_rook")),
@@ -233,6 +249,7 @@ fn tui(home: &std::path::Path, workspace: &std::path::Path) -> Pty {
 
 #[test]
 fn the_tui_starts_and_draws_its_tabs() {
+    let _one = one_at_a_time();
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let mut pty = tui(home.path(), workspace.path());
@@ -250,6 +267,7 @@ fn the_tui_starts_and_draws_its_tabs() {
 
 #[test]
 fn the_browsing_tabs_render_without_a_model() {
+    let _one = one_at_a_time();
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let mut pty = tui(home.path(), workspace.path());
@@ -268,6 +286,7 @@ fn the_browsing_tabs_render_without_a_model() {
 
 #[test]
 fn the_footer_shows_the_settings_and_f2_changes_them() {
+    let _one = one_at_a_time();
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let mut pty = tui(home.path(), workspace.path());
@@ -283,6 +302,7 @@ fn the_footer_shows_the_settings_and_f2_changes_them() {
 
 #[test]
 fn the_memory_tab_shows_what_the_agent_remembers() {
+    let _one = one_at_a_time();
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
 
@@ -306,6 +326,7 @@ fn the_memory_tab_shows_what_the_agent_remembers() {
 
 #[test]
 fn the_tui_chat_answers_the_same_slash_commands_as_the_plain_cli() {
+    let _one = one_at_a_time();
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let mut pty = tui(home.path(), workspace.path());
@@ -320,6 +341,7 @@ fn the_tui_chat_answers_the_same_slash_commands_as_the_plain_cli() {
 
 #[test]
 fn an_unknown_slash_command_in_the_tui_says_so() {
+    let _one = one_at_a_time();
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let mut pty = tui(home.path(), workspace.path());
@@ -335,6 +357,7 @@ fn an_unknown_slash_command_in_the_tui_says_so() {
 /// without a stray separator where the total will go.
 #[test]
 fn the_footer_shows_no_running_total_before_there_is_one() {
+    let _one = one_at_a_time();
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let mut pty = tui(home.path(), workspace.path());
@@ -367,6 +390,7 @@ fn a_model_that_never_answers(home: &std::path::Path) {
 /// killed, taking the browsing state and any approval granted for the run.
 #[test]
 fn ctrl_c_stops_a_running_turn_rather_than_the_whole_ui() {
+    let _one = one_at_a_time();
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     a_model_that_never_answers(home.path());
@@ -387,6 +411,7 @@ fn ctrl_c_stops_a_running_turn_rather_than_the_whole_ui() {
 /// another project's session read as one of this project's.
 #[test]
 fn the_sessions_tab_names_the_workspace_only_when_it_is_another_one() {
+    let _one = one_at_a_time();
     let home = tempfile::tempdir().unwrap();
     // Named rather than random, because the pane is a third of the screen and a
     // temporary directory's name does not fit in it.
