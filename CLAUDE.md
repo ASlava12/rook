@@ -64,6 +64,14 @@ non-obvious choice was made — usually a failure mode being avoided.
 **Tests are named as claims.** `a_capture_refuses_to_run_away_instead_of_thrashing`,
 not `test_capture_2`. Assertion messages print the actual values.
 
+**A timing constant in a test is not what the test claims.** Three CI failures
+in a row were one: a deadline chosen to keep the suite quick, met on a laptop and
+missed on a loaded runner. A wait that exists only to tell "failed" from "hung"
+should be generous, and the test that is *about* a timeout sets its own — as
+`a_hung_server_times_out_rather_than_blocking_the_agent` does. When raising it
+twice has not helped, the number was never the problem: `tui_pty` needed
+`one_at_a_time()`, not a third guess.
+
 **A test for a bound asserts that the bound was reached.** Three passed here
 while proving nothing: a scrollback test whose 5,000 short lines never came near
 the megabyte it was capping, a step-limit test whose config never reached the
@@ -152,13 +160,10 @@ alternate screen writes before anything is drawn, so work the app does between
 the two lands in the gap and a byte-triggered capture reads a blank screen. And
 after a keypress, wait for the content being asserted rather than for a settling
 window — a window is a guess about redraw latency, and under a full `cargo xtask
-ci` that guess is wrong often enough to look like a product failure. The deadline
-on those waits is not a performance claim either: it is only how long a stuck app
-hangs the suite. Raising it was the wrong answer twice — these tests look
-independent, and each also starts a whole `rook` from cold before its first byte
-reaches the terminal, so nine at once on the FreeBSD VM starved one past a minute
-of having drawn nothing. They take `one_at_a_time()`; add to that rather than to
-the deadline.
+ci` that guess is wrong often enough to look like a product failure. These tests
+take `one_at_a_time()`: each starts a whole `rook` from cold before its first
+byte reaches the terminal, and nine at once on the FreeBSD VM starved one past a
+minute of having drawn nothing. Add to that rather than to the deadline.
 
 ## Storage changes
 

@@ -7,8 +7,13 @@ fn mock(mode: &str) -> ServerConfig {
         name: format!("mock-{mode}"),
         command: env!("CARGO_BIN_EXE_mcp-mock").to_string(),
         args: vec![mode.to_string()],
-        startup_timeout_secs: 5,
-        call_timeout_secs: 5,
+        // Shorter than the shipped defaults so a wedged mock does not hang the
+        // suite, and not so short that spawning a process counts as one. At five
+        // seconds a restart on a loaded runner timed out, and a timeout is not a
+        // transport failure — so the test read a slow machine as the cap it was
+        // there to check.
+        startup_timeout_secs: 30,
+        call_timeout_secs: 30,
         ..Default::default()
     }
 }
@@ -99,7 +104,9 @@ async fn a_hung_server_times_out_rather_than_blocking_the_agent() {
 #[tokio::test]
 async fn a_server_that_dies_mid_call_fails_the_call_instead_of_hanging() {
     let server = Server::connect(&mock("crash")).await.unwrap();
-    let err = tokio::time::timeout(Duration::from_secs(5), server.call_tool("echo", &serde_json::json!({})))
+    // Only long enough to tell "failed" from "hung": the call's own timeout is
+    // thirty seconds, so anything under that and over a loaded spawn will do.
+    let err = tokio::time::timeout(Duration::from_secs(20), server.call_tool("echo", &serde_json::json!({})))
         .await
         .expect("a dead server must not leave the call pending")
         .unwrap_err();
