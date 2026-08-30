@@ -1423,6 +1423,36 @@ async fn something_said_as_a_turn_ends_keeps_the_turn_going() {
     assert!(said.take().is_empty(), "and nothing is left for the next prompt to inherit");
 }
 
+/// A call cut off at the output limit arrives with arguments that will not
+/// parse. Nobody should be asked to approve running the empty string, and the
+/// model should be told what it actually got wrong.
+#[tokio::test]
+async fn a_tool_call_whose_arguments_did_not_parse_says_that_and_asks_nobody() {
+    let f = fixture();
+    let session = f.rook.start_session("truncated").unwrap();
+    let mut truncated = call("run_command", serde_json::json!({}));
+    truncated.message.tool_calls[0].arguments = serde_json::Value::Null;
+
+    let provider = ScriptedProvider::new(vec![truncated, reply("sorry, again")]);
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), session);
+    // Refuses everything and says so, so an approval that was asked for would
+    // show up as that refusal instead.
+    agent.approver = Arc::new(rook_tools::policy::Unattended);
+
+    agent.run("do something").await.unwrap();
+
+    let said: String = f
+        .rook
+        .transcript(session, 0, 100, 4096)
+        .unwrap()
+        .iter()
+        .map(|e| e.body.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(said.contains("not valid JSON"), "the model has to be told what it got wrong: {said}");
+    assert!(!said.contains("needs someone to approve"), "and nobody is asked to approve it: {said}");
+}
+
 #[tokio::test]
 async fn the_system_prompt_does_not_vary_with_the_prompt() {
     let f = fixture();

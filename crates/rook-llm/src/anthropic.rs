@@ -268,7 +268,7 @@ impl Provider for Anthropic {
                 yield Delta::ToolCall(ToolCall {
                     id,
                     name,
-                    arguments: serde_json::from_str(&arguments).unwrap_or(serde_json::Value::Null),
+                    arguments: crate::parse_arguments(&arguments),
                 });
             }
             yield Delta::Done {

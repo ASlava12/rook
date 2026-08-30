@@ -408,6 +408,9 @@ impl ToolBox {
         let tool = self
             .get(name)
             .ok_or_else(|| ToolError::Unknown { name: name.to_string(), nearest: self.nearest(name) })?;
+        if let Some(unusable) = unusable_arguments(name, args) {
+            return Err(unusable);
+        }
         tool.call(ctx, args).await
     }
 
@@ -454,6 +457,22 @@ fn edits(a: &str, b: &str) -> usize {
 /// pages happened to hold no zero byte. Read and searched a line at a time, this
 /// is what bounds the memory either costs.
 pub(crate) const MAX_LINE: u64 = 1 << 20;
+
+/// Why the call cannot be made at all, before anyone is asked to approve it.
+///
+/// `Null` is what a dialect hands back for arguments it could not parse — a call
+/// cut off at the output limit produces it every time. Without this the tool
+/// reports the argument that is missing as a result, so a model told `path` is
+/// missing sends the same truncated call again; and the policy is asked to weigh
+/// a command that is the empty string.
+pub fn unusable_arguments(tool: &str, args: &serde_json::Value) -> Option<ToolError> {
+    args.is_null().then(|| ToolError::Invalid {
+        tool: tool.to_string(),
+        message: "the arguments were not valid JSON — send the call again, as one complete \
+                  JSON object"
+            .into(),
+    })
+}
 
 pub(crate) fn arg_str(args: &serde_json::Value, tool: &str, key: &str) -> Result<String> {
     args.get(key).and_then(|v| v.as_str()).map(str::to_string).ok_or_else(|| ToolError::Invalid {

@@ -333,3 +333,22 @@ async fn an_unattended_refusal_tells_the_model_to_stop_before_it_tells_the_user_
     let user = why.find("For the user").unwrap();
     assert!(stop < user, "what the reader can do comes before what it cannot: {why}");
 }
+
+/// A call cut off at the output limit arrives as arguments that will not parse,
+/// and the dialects hand that back as `Null`. Reported as the missing argument
+/// it causes, a model sends the same truncated call again.
+#[tokio::test]
+async fn arguments_that_are_not_json_say_so_rather_than_naming_what_is_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = rook_tools::ToolContext::new(dir.path().to_path_buf());
+    let tools = rook_tools::ToolBox::standard();
+
+    let refused = tools.call(&ctx, "read_file", &serde_json::Value::Null).await.unwrap_err().to_string();
+
+    assert!(refused.contains("not valid JSON"), "{refused}");
+    assert!(refused.contains("send the call again"), "and what to do about it: {refused}");
+
+    // No arguments at all is a different thing and still reads as one.
+    let missing = tools.call(&ctx, "read_file", &serde_json::json!({})).await.unwrap_err().to_string();
+    assert!(missing.contains("path"), "{missing}");
+}

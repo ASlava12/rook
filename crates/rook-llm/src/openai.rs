@@ -95,9 +95,7 @@ impl Provider for OpenAiCompatible {
             .map(|c| ToolCall {
                 id: c.id,
                 name: c.function.name,
-                // Arguments arrive as a JSON string; a model that emits invalid
-                // JSON here is common enough that it must not be fatal.
-                arguments: serde_json::from_str(&c.function.arguments).unwrap_or(serde_json::Value::Null),
+                arguments: crate::parse_arguments(&c.function.arguments),
             })
             .collect();
 

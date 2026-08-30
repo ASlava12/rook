@@ -174,6 +174,22 @@ pub enum Effort {
     Max,
 }
 
+/// Tool arguments as they arrive on the wire: a JSON string in two of the three
+/// dialects.
+///
+/// Nothing here is fatal, because a model emitting invalid JSON is common — a
+/// call cut off at the output limit produces it every time. But the three cases
+/// are not the same, and collapsing them made the second read as the third: no
+/// arguments is an empty object, and something that will not parse is `Null`, so
+/// whoever dispatches can say which mistake was made instead of complaining
+/// about the argument that is missing as a result.
+pub fn parse_arguments(raw: &str) -> serde_json::Value {
+    if raw.trim().is_empty() {
+        return serde_json::json!({});
+    }
+    serde_json::from_str(raw).unwrap_or(serde_json::Value::Null)
+}
+
 impl Effort {
     pub fn as_str(self) -> &'static str {
         match self {

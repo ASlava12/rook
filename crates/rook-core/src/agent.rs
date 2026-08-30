@@ -1049,6 +1049,15 @@ impl<'a> AgentLoop<'a> {
             return (refusal, true);
         }
 
+        // Before the gate, not after: a call whose arguments did not parse has
+        // no risk worth weighing, and asking somebody to approve running the
+        // empty string is a question with no answer.
+        if let Some(unusable) = rook_tools::unusable_arguments(&call.name, &call.arguments) {
+            let refusal = unusable.to_string();
+            self.rook.log(self.session, EventKind::Error, &call.name, &refusal).ok();
+            return (refusal, true);
+        }
+
         outcome.tools_called.push(call.name.clone());
 
         if call.name == VERIFY {

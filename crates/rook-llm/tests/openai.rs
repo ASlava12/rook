@@ -79,6 +79,18 @@ async fn the_effort_the_user_asked_for_reaches_a_model_that_has_one() {
     assert_eq!(body["reasoning_effort"], "high", "{body}");
 }
 
+/// Three cases arrive as one string, and collapsing them makes a truncated call
+/// read as a call that forgot an argument.
+#[test]
+fn arguments_that_are_absent_are_not_arguments_that_are_broken() {
+    use rook_llm::parse_arguments;
+
+    assert_eq!(parse_arguments("{\"path\":\"a.rs\"}")["path"], "a.rs");
+    assert_eq!(parse_arguments(""), serde_json::json!({}), "a call with no arguments has none");
+    assert_eq!(parse_arguments("   "), serde_json::json!({}));
+    assert!(parse_arguments("{\"path\":\"a.r").is_null(), "cut off at the output limit");
+}
+
 /// Most of what speaks this dialect is not OpenAI, and a strict server rejects
 /// an unknown field rather than ignoring it.
 #[tokio::test]
