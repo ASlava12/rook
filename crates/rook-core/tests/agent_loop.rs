@@ -1352,6 +1352,46 @@ async fn instructions_a_repository_committed_cannot_spend_the_context_window() {
     assert!(prompt.contains("max_instructions_bytes"), "and the cut must be named: {prompt}");
 }
 
+/// A turn is not a wall: somebody watching one go the wrong way could only stop
+/// it and start again, losing everything it had done to say one sentence.
+#[tokio::test]
+async fn something_said_while_a_turn_runs_reaches_the_next_step() {
+    let f = fixture();
+    let session = f.rook.start_session("steered").unwrap();
+    let provider = ScriptedProvider::new(vec![
+        call("list_dir", serde_json::json!({ "path": "." })),
+        reply("understood"),
+    ]);
+    let seen = provider.share();
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), session);
+    let said = agent.interjections.clone();
+
+    // Said during the turn, which is the whole case: before it starts it would
+    // simply be part of the prompt, and consecutive user turns are folded into
+    // one anyway.
+    let saying = said.clone();
+    agent
+        .run_with("look around", |progress| {
+            if let rook_core::agent::Progress::ToolDone { .. } = progress {
+                saying.say("actually, look at src/ instead");
+            }
+        })
+        .await
+        .unwrap();
+
+    let second = &seen.lock().unwrap()[1].messages;
+    let roles: Vec<_> = second.iter().map(|m| (m.role, m.content.contains("src/ instead"))).collect();
+    assert!(roles.iter().any(|(_, said)| *said), "it has to reach the model: {roles:?}");
+    // Between an assistant's tool call and its result, no dialect accepts a user
+    // message — so it goes after the result and before the next request.
+    let at = second.iter().position(|m| m.content.contains("src/ instead")).unwrap();
+    assert_eq!(second[at].role, rook_llm::Role::User, "{roles:?}");
+    assert_eq!(second[at - 1].role, rook_llm::Role::Tool, "it must follow the tool result: {roles:?}");
+    assert_eq!(at, second.len() - 1, "and be the last thing said: {roles:?}");
+
+    assert!(said.take().is_empty(), "and be delivered once, not at every step");
+}
+
 #[tokio::test]
 async fn the_system_prompt_does_not_vary_with_the_prompt() {
     let f = fixture();

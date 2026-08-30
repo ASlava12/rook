@@ -88,6 +88,7 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
         // rust-analyzer, and it indexes the workspace every time it starts.
         servers: rook_core::agent::servers_for(&rook.config, &rook.workspace),
         jobs: rook_core::agent::jobs_for(&rook.config),
+        interjections: Default::default(),
         effort: std::cell::Cell::new(rook.config.agent.effort()),
         yes,
     };
@@ -170,6 +171,9 @@ pub struct Session {
     pub mcp: std::sync::Arc<rook_core::McpSession>,
     pub policy: std::sync::Arc<rook_tools::policy::Policy>,
     pub servers: std::sync::Arc<rook_core::lsp::Servers>,
+    /// What the user says while a turn runs, for the front ends that can take
+    /// it. Kept here because a loop is built per turn and this outlives one.
+    pub interjections: std::sync::Arc<rook_core::agent::Interjections>,
     /// Commands left running, for the same reason: a registry per turn would
     /// kill them between one turn and the next.
     pub jobs: std::sync::Arc<rook_tools::jobs::Jobs>,

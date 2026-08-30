@@ -141,10 +141,14 @@ async fn serve(socket: WebSocket, engine: Arc<tokio::sync::RwLock<rook_core::Roo
                 }
             }
             ClientMessage::Prompt { session, text } => {
+                // Typed while a turn runs, it goes to the turn: the browser had
+                // to wait or cancel, and cancelling loses everything the turn
+                // had done to say one sentence to it.
                 if running.as_ref().is_some_and(|h| !h.is_finished()) {
-                    let _ = outbound.send(ChatEvent::Error {
-                        message: "a turn is already running on this connection".into(),
-                    });
+                    if let Some(shared) = shared.get() {
+                        shared.interjections.say(&text);
+                    }
+                    let _ = outbound.send(ChatEvent::Interjected { text });
                     continue;
                 }
                 running = Some(tokio::spawn(turn(
@@ -216,6 +220,7 @@ async fn turn(
                 servers: rook_core::agent::servers_for(&rook.config, &rook.workspace),
                 mcp: Arc::new(rook.connect_mcp().await),
                 jobs: rook_core::agent::jobs_for(&rook.config),
+                interjections: Default::default(),
             }
         })
         .await;
@@ -225,6 +230,7 @@ async fn turn(
     agent.effort = connection.settings.effort();
     agent.approver = connection.approver;
     agent.ask_via(connection.asker);
+    agent.interjections = shared.interjections.clone();
     rook_core::agent::equip(&mut agent, shared.servers.clone(), &shared.mcp, shared.jobs.clone());
 
     let emit = outbound.clone();
@@ -279,6 +285,7 @@ struct Shared {
     servers: Arc<rook_core::lsp::Servers>,
     mcp: Arc<rook_core::McpSession>,
     jobs: Arc<rook_tools::jobs::Jobs>,
+    interjections: Arc<rook_core::agent::Interjections>,
 }
 
 /// What the browser may change for the rest of the connection.

@@ -180,6 +180,11 @@ pub enum ChatEvent {
         cached_tokens: u32,
     },
     /// The turn is blocked until an [`ClientMessage::Approval`] with this id.
+    /// Something the user said while a turn was running, echoed back so the page
+    /// can show it landed rather than leaving the box looking ignored.
+    Interjected {
+        text: String,
+    },
     Approval {
         id: String,
         tool: String,

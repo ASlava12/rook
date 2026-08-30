@@ -101,6 +101,11 @@ answer never enters the context the agent carries forward, though it is still in
 the transcript. Ctrl-C stops the turn in flight without leaving; whatever it
 already did stays in the log.
 
+Typing while a turn runs steers it rather than waiting for it: what you send
+reaches the model at its next step, so a turn heading the wrong way can be
+corrected without throwing away what it has already done. In the TUI and in the
+browser, which are the two front ends that can take input while one is running.
+
 ### Reading what the agent remembers
 
 ```sh

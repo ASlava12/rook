@@ -199,6 +199,7 @@ function connect() {
     else if (e.type === 'forgot') say('stat', `\nforgot: ${e.text}\n`);
     else if (e.type === 'error') { say('err', `\n${e.message}\n`); done(); }
     else if (e.type === 'cancelled') { say('stat', '\n[stopped]\n\n'); done(); }
+    else if (e.type === 'interjected') say('you', `\n› ${e.text}\n(the turn will see this at its next step)\n`);
     else if (e.type === 'approval') askApproval(e);
     else if (e.type === 'ask') askUser(e);
     else if (e.type === 'done') {
@@ -215,7 +216,7 @@ function connect() {
 function done() {
   state.chat.busy = false;
   const button = document.querySelector('#send');
-  if (button) { button.disabled = false; button.textContent = 'Send'; }
+  if (button) { button.textContent = 'Send'; }
 }
 
 function askApproval(request) {
@@ -300,16 +301,19 @@ async function renderChat() {
   const form = el('form', { class: 'ask', onsubmit: (event) => {
     event.preventDefault();
     const text = input.value.trim();
-    if (!text || state.chat.busy) return;
-    say('stat', `› ${text}\n`);
+    if (!text) return;
     connect();
     const deliver = () => socket.send(JSON.stringify({
       type: 'prompt', session: state.chat.session, text,
     }));
     if (socket.readyState === 1) deliver(); else socket.addEventListener('open', deliver, { once: true });
     input.value = '';
+    // While a turn runs this is something to say to it, and the server echoes
+    // it back as `interjected` — so the transcript is written there, once, and
+    // the working state is left alone.
+    if (state.chat.busy) return;
+    say('stat', `› ${text}\n`);
     state.chat.busy = true;
-    send.disabled = true;
     send.textContent = '…';
   } }, input, send);
 

@@ -245,6 +245,7 @@ impl App {
                 effort: std::cell::Cell::new(rook.config.agent.effort()),
                 servers: rook_core::agent::servers_for(&rook.config, &rook.workspace),
                 jobs: rook_core::agent::jobs_for(&rook.config),
+                interjections: Default::default(),
                 // Connected once: every turn would otherwise spawn each server,
                 // wait out its handshake and kill it again.
                 mcp,
@@ -516,7 +517,17 @@ impl App {
 
     fn send(&mut self) {
         let prompt = std::mem::take(&mut self.chat.input).trim().to_string();
-        if prompt.is_empty() || self.chat.busy {
+        if prompt.is_empty() {
+            return;
+        }
+        // Typed while a turn runs, it goes to the turn. It used to be dropped
+        // where it was taken, so watching one go the wrong way left nothing to
+        // do but stop it and start again.
+        if self.chat.busy {
+            self.shared.interjections.say(&prompt);
+            self.chat.push("you", &format!("› {prompt}"));
+            self.chat.push("stat", "  (the turn will see this at its next step)");
+            self.chat.scroll = 0;
             return;
         }
         // `/btw` is a turn without tools, so it goes down the normal path; every
@@ -540,6 +551,7 @@ impl App {
         let servers = self.shared.servers.clone();
         let mcp = self.shared.mcp.clone();
         let jobs = self.shared.jobs.clone();
+        let interjections = self.shared.interjections.clone();
         let session = self.chat.session;
         let yes = self.shared.yes;
 
@@ -588,6 +600,7 @@ impl App {
                 agent.approver = approver;
                 agent.ask_via(asker);
             }
+            agent.interjections = interjections;
             rook_core::agent::equip(&mut agent, servers, &mcp, jobs);
 
             let emit = to_loop.clone();

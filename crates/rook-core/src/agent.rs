@@ -99,6 +99,28 @@ pub fn tool_context(config: &Config, workspace: &Path, output_dir: &Path) -> Too
     ctx
 }
 
+/// What the user said while a turn was running.
+///
+/// A turn is not a wall: somebody watching one go the wrong way should be able
+/// to say so without killing it and starting over. What they type is carried
+/// here and given to the model at the next step, which is the one place it can
+/// go — between an assistant's tool call and its result, no dialect accepts a
+/// user message.
+#[derive(Default)]
+pub struct Interjections(std::sync::Mutex<Vec<String>>);
+
+impl Interjections {
+    pub fn say(&self, text: &str) {
+        if !text.trim().is_empty() {
+            self.0.lock().unwrap_or_else(|e| e.into_inner()).push(text.trim().to_string());
+        }
+    }
+
+    pub fn take(&self) -> Vec<String> {
+        std::mem::take(&mut *self.0.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+}
+
 /// What to show whoever is asked to approve a call.
 ///
 /// A variant rather than a string because building it costs a file read and a
@@ -308,6 +330,10 @@ pub struct AgentLoop<'a> {
     /// Consulted whenever the policy says to ask. Refuses by default, so an
     /// unattended run cannot silently do something nobody reviewed.
     pub approver: std::sync::Arc<dyn Approver>,
+    /// What the user said while the turn was running, if a front end can take
+    /// it. Shared rather than owned because a loop is built per turn and this
+    /// has to outlive one.
+    pub interjections: std::sync::Arc<Interjections>,
     pub depth: u32,
     pub max_steps: u32,
     pub effort: rook_llm::Effort,
@@ -373,6 +399,7 @@ impl<'a> AgentLoop<'a> {
             servers,
             session_context: std::sync::Mutex::new(None),
             approver: std::sync::Arc::new(Unattended),
+            interjections: Default::default(),
             depth: 0,
             max_steps: rook.config.agent.max_steps,
             effort: rook.config.agent.effort(),
@@ -882,6 +909,14 @@ impl<'a> AgentLoop<'a> {
         let mut anchor: Option<(usize, usize)> = None;
         while outcome.steps < self.max_steps {
             outcome.steps += 1;
+
+            // Before the request rather than after the tool results: this is the
+            // one place a user message may go, and it is what makes a turn
+            // steerable instead of only stoppable.
+            for said in self.interjections.take() {
+                self.rook.log(self.session, EventKind::UserMessage, "while running", &said).ok();
+                messages.push(Message::user(&said));
+            }
 
             // Once per turn that it achieves something. A span too small to
             // summarise leaves the context where it was, so the next step would

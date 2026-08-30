@@ -757,6 +757,14 @@ recorded so the design question survives the session that raised it.
    readable by design, which is the wrong property here) and what stops a tool
    from being asked to print one.
 
+- **Steering a turn instead of stopping it** — what you typed while a turn ran
+  was taken from the input box and dropped on the floor, so watching one head the
+  wrong way left nothing to do but kill it and start again, losing everything it
+  had done in order to say one sentence. It now reaches the model at the next
+  step, which is the one place a user message may go: between an assistant's tool
+  call and its result, no dialect accepts one. The TUI and the browser, being the
+  front ends that can take input while a turn runs; the plain REPL is blocked on
+  its own readline and says so by not offering it. 1 test.
 - **Commands that keep running** — `run_command` waits, caps and kills at a
   timeout, so a dev server or a watcher could only be run by not running it.
   `background: true` answers at once with an id and the `job` tool reads or stops
