@@ -14,6 +14,7 @@ cargo test --workspace
 cargo xtask compaction     # re-measure the storage claims in README/docs
 cargo xtask dist           # release build; also prints the binary sizes README quotes
 cargo xtask targets        # supported target matrix
+cargo xtask smoke --model ollama/qwen3:8b   # real turns against a real model
 ```
 
 `cargo xtask clean` reclaims `target/` — incremental state and cross-target

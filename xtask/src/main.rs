@@ -1,8 +1,9 @@
 //! Repo automation: `cargo xtask <task>`.
-//!
 //! Kept as a Rust binary rather than a Makefile or a shell script so it behaves
 //! the same on Windows as it does on the BSDs — which is the whole point of a
 //! four-platform target list.
+
+mod smoke;
 
 use std::process::{Command, ExitCode};
 
@@ -104,6 +105,12 @@ enum Task {
         /// Remove everything, not just the parts that regenerate cheaply.
         #[arg(long)]
         all: bool,
+    },
+    /// Run a few real turns against a real model, and check what came back.
+    Smoke {
+        /// `provider/model`, else `ROOK_SMOKE_MODEL`, else the configured one.
+        #[arg(long)]
+        model: Option<String>,
     },
     /// Work with the upstream agent sources in `references/`.
     Refs {
@@ -254,6 +261,7 @@ fn run() -> Result<()> {
         }
         Task::Compaction => cargo(&["run", "--release", "-p", "rook-store", "--example", "compaction"]),
         Task::Clean { all } => clean(all),
+        Task::Smoke { model } => smoke::smoke(model),
         Task::Refs { action } => refs(action),
     }
 }

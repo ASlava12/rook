@@ -675,6 +675,7 @@ cargo xtask targets        # the supported target matrix
 cargo xtask compaction     # measure the storage claims above
 cargo xtask clean          # report what target/ costs and reclaim it
 cargo xtask refs status    # how far the reference pointers have drifted
+cargo xtask smoke --model … # four real turns against a real model
 cargo test --workspace
 ```
 

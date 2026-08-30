@@ -853,10 +853,13 @@ pointer and prints what landed; the log in
 commit, so a dismissal is a decision. Every pass so far is dated there, and more
 of them found a defect here than found something worth porting.
 
-**A live-model smoke test in CI.** An Ollama service container running a small
-model, so a turn is exercised against something with judgement. The wire itself
-no longer needs it: `crates/rook-core/tests/over_http.rs` runs whole turns
-against a server that speaks the OpenAI dialect and checks what it was sent.
+**A live-model smoke test in CI.** `cargo xtask smoke --model …` is the test —
+four turns against a real endpoint, checking that the agent read the file rather
+than answering from memory, that its edit landed and moved nothing else, that it
+used what a command printed, and that `verify` refused to settle a false claim.
+What is left is the container: an Ollama service running a small model, so CI can
+call it without a key. Until then it is a command a person runs, which is honest
+— a job that passes because no model could be pulled is worse than no job.
 
 ## After that
 
