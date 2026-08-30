@@ -51,6 +51,61 @@ async fn a_preview_of_edits_that_cannot_apply_promises_nothing() {
     assert!(EditFile.preview(&f.ctx, &args).await.is_none(), "there is no change to show");
 }
 
+/// A rename across five files was five calls, and a failure on the third left
+/// two of them changed — the rule this already kept within one file, dropped at
+/// the file boundary.
+#[tokio::test]
+async fn a_refactor_across_several_files_lands_whole_or_not_at_all() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["a.rs", "b.rs"] {
+        std::fs::write(dir.path().join(name), "use old_name;\n").unwrap();
+    }
+    let ctx = ToolContext::new(dir.path().to_path_buf());
+    let read = |name: &str| std::fs::read_to_string(dir.path().join(name)).unwrap();
+
+    let out = EditFile
+        .call(
+            &ctx,
+            &serde_json::json!({"files": [
+                {"path": "a.rs", "edits": [{"old": "old_name", "new": "new_name"}]},
+                {"path": "b.rs", "edits": [{"old": "not there", "new": "x"}]}
+            ]}),
+        )
+        .await
+        .unwrap();
+
+    assert!(out.is_error, "{}", out.content);
+    assert!(out.content.contains("any other file"), "and says so: {}", out.content);
+    assert_eq!(read("a.rs"), "use old_name;\n", "the file before the failure must be untouched");
+
+    let out = EditFile
+        .call(
+            &ctx,
+            &serde_json::json!({"files": [
+                {"path": "a.rs", "edits": [{"old": "old_name", "new": "new_name"}]},
+                {"path": "b.rs", "edits": [{"old": "old_name", "new": "new_name"}]}
+            ]}),
+        )
+        .await
+        .unwrap();
+
+    assert!(!out.is_error, "{}", out.content);
+    assert_eq!(read("a.rs"), "use new_name;\n");
+    assert_eq!(read("b.rs"), "use new_name;\n");
+    assert_eq!(out.meta.get("occurrences"), Some(&serde_json::json!(2)), "{:?}", out.meta);
+}
+
+/// Both files are captured before either is written, and both are shown before
+/// either is approved.
+#[test]
+fn a_refactor_names_every_file_it_would_touch() {
+    let args = serde_json::json!({"files": [
+        {"path": "a.rs", "edits": [{"old": "x", "new": "y"}]},
+        {"path": "b.rs", "edits": [{"old": "x", "new": "y"}]}
+    ]});
+    assert_eq!(EditFile.touched_paths(&args), vec!["a.rs".to_string(), "b.rs".to_string()]);
+}
+
 #[tokio::test]
 async fn edits_apply_in_order_each_seeing_the_last() {
     let f = File::with("let a = 1;\nlet b = 2;\n");

@@ -239,8 +239,12 @@ fn the_whole_advertised_tool_list_stays_within_a_budget() {
     };
 
     let (full, stubs) = (priced(false), priced(true));
+    // Raised once, from 1,800: `edit_file` grew a `files` array so a refactor
+    // across several files is one call that either lands whole or writes
+    // nothing, and the shape has to appear twice because `$ref` is not read the
+    // same way by all three dialects. Two descriptions were trimmed first.
     assert!(
-        full < 1_800,
+        full < 1_900,
         "the whole list costs ~{full} tokens on every eager request; trim a description or \
          merge an argument before raising this"
     );

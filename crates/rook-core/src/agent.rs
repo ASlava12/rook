@@ -673,8 +673,7 @@ impl<'a> AgentLoop<'a> {
             description: "Write down a repeatable procedure, with the tools it needs beside it, \
                           so a later session does not work it out again. For what took real \
                           effort — a build incantation, a platform quirk — not for what this \
-                          conversation already says. When no tool does the job, put one in \
-                          `files` and have the body call it; a shebang makes it runnable. \
+                          conversation already says. A script the body runs goes in `files`, and \
                           `requires` scopes it to where it holds."
                 .into(),
             parameters: json!({

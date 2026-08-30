@@ -29,8 +29,9 @@ what unblocks the most.
   separates what a fresh turn would carry from what is merely stored.
 - **Tools** — paged `read_file`, `write_file`, batched and unambiguous `edit_file`,
   `list_dir`, regex `search`, `run_command` with timeout, output cap and deny
-  list. Every edit to one file goes in one call, applied in order against the
-  text as it then stands; a batch that cannot finish writes nothing. Every cap
+  list. Every edit to one file goes in one call and a refactor across several in
+  one `files`, applied in order against the text as it then stands; a batch that
+  cannot finish writes nothing, in any of the files it names. Every cap
   is enforced while output is read rather than after, both ends of a long output
   survive it — a compiler's first error is at the head and the reason for a
   failure is not the consequences at the tail — and a timeout kills the whole
@@ -757,6 +758,15 @@ recorded so the design question survives the session that raised it.
    readable by design, which is the wrong property here) and what stops a tool
    from being asked to print one.
 
+- **A refactor that lands whole or not at all** — `edit_file` took one file, so
+  renaming a symbol across five was five calls and a failure on the third left
+  two already changed. `files` takes them together: every file is worked out
+  before any is written, which is the rule the tool already kept within one file,
+  dropped at the file boundary. The approval shows every diff and the checkpoint
+  captures every path, because both ask the tool what it would touch. The
+  advertised list went past its budget and two descriptions were trimmed before
+  the number was raised, with what bought the increase recorded beside it.
+  2 tests.
 - **Steering a turn instead of stopping it** — what you typed while a turn ran
   was taken from the input box and dropped on the floor, so watching one head the
   wrong way left nothing to do but kill it and start again, losing everything it

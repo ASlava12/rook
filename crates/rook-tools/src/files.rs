@@ -281,6 +281,23 @@ impl Tool for WriteFile {
     }
 }
 
+/// Written out once because the schema names it twice, and a shape that drifted
+/// between the two would be a tool documenting something it does not accept.
+fn edit_list() -> serde_json::Value {
+    json!({
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "old": { "type": "string" },
+                "new": { "type": "string" },
+                "replace_all": { "type": "boolean" }
+            },
+            "required": ["old", "new"]
+        }
+    })
+}
+
 pub struct EditFile;
 
 #[derive(serde::Deserialize)]
@@ -300,87 +317,116 @@ impl Tool for EditFile {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "edit_file".into(),
-            description: "Replace exact strings in a file. Every edit to one file goes in one \
-                          call: they apply in order, and either all land or none do. Each `old` \
-                          is matched literally, indentation included, and must match exactly once \
-                          against the text as it then stands — add surrounding context to \
-                          disambiguate, or set `replace_all`."
+            description: "Replace exact strings in files. Every edit to one file goes in one \
+                          call, and a refactor across several in one `files`: they apply in order \
+                          and either all land or none do. Each `old` is matched literally, \
+                          indentation included, and must match exactly once against the text as \
+                          it then stands — add context to disambiguate, or set `replace_all`."
                 .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" },
-                    "edits": {
+                    "edits": edit_list(),
+                    "files": {
                         "type": "array",
-                        "minItems": 1,
                         "items": {
                             "type": "object",
-                            "properties": {
-                                "old": { "type": "string" },
-                                "new": { "type": "string" },
-                                "replace_all": { "type": "boolean" }
-                            },
-                            "required": ["old", "new"]
+                            "properties": { "path": { "type": "string" }, "edits": edit_list() }
                         }
                     }
-                },
-                "required": ["path", "edits"]
+                }
             }),
         }
     }
 
     async fn call(&self, ctx: &ToolContext, args: &serde_json::Value) -> Result<ToolOutcome> {
-        let path = ctx.resolve(&arg_str(args, self.name(), "path")?)?;
-        let edits = parse_edits(args)?;
-
-        let original = ctx.read_text(&path).await?;
-
-        // Applied to a copy: a later edit that cannot be placed must not leave
-        // the earlier ones on disk.
-        let mut text = original;
-        let mut replaced = 0usize;
-        for (i, edit) in edits.iter().enumerate() {
-            match apply(&text, edit) {
-                Ok((updated, count)) => {
-                    text = updated;
-                    replaced += count;
-                }
-                Err(reason) => {
-                    return Ok(ToolOutcome::error(format!(
-                        "edit {} of {} did not apply to {}: {reason}. Nothing was written.",
-                        i + 1,
-                        edits.len(),
-                        path.display()
-                    ))
-                    .with("failed_edit", i as u64 + 1));
+        let mut edited = Vec::new();
+        let (mut replaced, mut edits) = (0usize, 0usize);
+        // Every file worked out before any is written: a refactor that fails on
+        // the third must not leave the first two changed, which is the rule this
+        // already kept within one file.
+        for target in parse_targets(args)? {
+            let path = ctx.resolve(&target.path)?;
+            let mut text = ctx.read_text(&path).await?;
+            for (i, edit) in target.edits.iter().enumerate() {
+                match apply(&text, edit) {
+                    Ok((updated, count)) => {
+                        text = updated;
+                        replaced += count;
+                    }
+                    Err(reason) => {
+                        return Ok(ToolOutcome::error(format!(
+                            "edit {} of {} did not apply to {}: {reason}. Nothing was written, \
+                             here or in any other file.",
+                            i + 1,
+                            target.edits.len(),
+                            path.display()
+                        ))
+                        .with("failed_edit", i as u64 + 1));
+                    }
                 }
             }
+            edits += target.edits.len();
+            edited.push((path, text));
         }
 
-        ctx.write_text(&path, &text).await?;
-        Ok(ToolOutcome::ok(format!(
-            "{} edit(s), {replaced} replacement(s) in {}",
-            edits.len(),
-            path.display()
-        ))
-        .with("occurrences", replaced as u64))
+        let names: Vec<String> = edited.iter().map(|(p, _)| p.display().to_string()).collect();
+        for (path, text) in &edited {
+            ctx.write_text(path, text).await?;
+        }
+        Ok(ToolOutcome::ok(format!("{edits} edit(s), {replaced} replacement(s) in {}", names.join(", ")))
+            .with("occurrences", replaced as u64))
     }
 
     async fn preview(&self, ctx: &ToolContext, args: &serde_json::Value) -> Option<String> {
-        let path = ctx.resolve(&arg_str(args, self.name(), "path").ok()?).ok()?;
-        let before = ctx.read_text(&path).await.ok()?;
-        // The same edits the call would make, against a copy nothing writes: an
-        // approval shown anything else is an approval of something else.
-        let mut after = before.clone();
-        for edit in parse_edits(args).ok()? {
-            after = apply(&after, &edit).ok()?.0;
+        let mut shown = Vec::new();
+        for target in parse_targets(args).ok()? {
+            let path = ctx.resolve(&target.path).ok()?;
+            let before = ctx.read_text(&path).await.ok()?;
+            // The same edits the call would make, against a copy nothing writes:
+            // an approval shown anything else is an approval of something else.
+            let mut after = before.clone();
+            for edit in &target.edits {
+                after = apply(&after, edit).ok()?.0;
+            }
+            shown.push(diff(&path, &before, &after));
         }
-        Some(diff(&path, &before, &after))
+        Some(shown.join("\n"))
     }
 
     fn touched_paths(&self, args: &serde_json::Value) -> Vec<String> {
-        path_arg(args)
+        match parse_targets(args) {
+            Ok(targets) => targets.into_iter().map(|t| t.path).collect(),
+            Err(_) => path_arg(args),
+        }
     }
+}
+
+/// One file and what to do to it.
+struct Target {
+    path: String,
+    edits: Vec<Edit>,
+}
+
+/// Accepts `files` for several and `path` with `edits` for one, so a refactor
+/// and a one-line fix are the same tool.
+fn parse_targets(args: &serde_json::Value) -> Result<Vec<Target>> {
+    let invalid = |message: String| ToolError::Invalid { tool: "edit_file".into(), message };
+    let Some(files) = args.get("files") else {
+        return Ok(vec![Target { path: arg_str(args, "edit_file", "path")?, edits: parse_edits(args)? }]);
+    };
+    let files = files.as_array().filter(|f| !f.is_empty()).ok_or_else(|| {
+        invalid(
+            "`files` must be a non-empty array of {path, edits} — for one file, pass `path` \
+                 and `edits` instead"
+                .into(),
+        )
+    })?;
+    files
+        .iter()
+        .map(|f| Ok(Target { path: arg_str(f, "edit_file", "path")?, edits: parse_edits(f)? }))
+        .collect()
 }
 
 /// The change as a person reads one. Bounded, because a rewritten file is a diff
