@@ -758,13 +758,15 @@ recorded so the design question survives the session that raised it.
    readable by design, which is the wrong property here) and what stops a tool
    from being asked to print one.
 
-- **Telling a model what it actually got wrong** — a tool call cut off at the
-  output limit arrives with arguments that will not parse, which two of the three
-  dialects turned into `Null`. The tool then reported the argument that was
-  missing as a result, so a model told `path` is missing sent the same truncated
-  call again — and for `run_command` somebody was asked to approve running the
-  empty string. Empty arguments and broken ones are now different things, and the
-  broken one is refused before the gate with what to do about it. 3 tests.
+- **Surviving a model's own mistakes** — the closest thing to a live model this
+  has: what happens when the answer is malformed rather than scripted-perfect.
+  Arguments that will not parse are told apart from arguments that are absent,
+  and refused before anyone is asked to approve running the empty string. Two
+  calls given one id are replayed as two results carrying it, which every dialect
+  rejects — so the model's mistake used to come back as an opaque provider error
+  after the work had been done twice; the repeat is dropped from the message that
+  asked as well as from the answers, and the result says which call went and why.
+  4 tests.
 - **A refactor that lands whole or not at all** — `edit_file` took one file, so
   renaming a symbol across five was five calls and a failure on the third left
   two already changed. `files` takes them together: every file is worked out

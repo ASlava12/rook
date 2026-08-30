@@ -1016,10 +1016,31 @@ impl<'a> AgentLoop<'a> {
                 continue;
             }
 
-            messages.push(response.message.clone());
-            for call in &response.message.tool_calls {
-                let (result, failed) = self.dispatch(call, &mut outcome, &mut on_progress).await;
+            // Two calls given one id would be replayed as two results carrying
+            // it, which every dialect rejects — so the model's mistake would
+            // come back as an opaque error from the provider, after the work had
+            // been done twice.
+            let mut asked = response.message.clone();
+            let mut dropped: Vec<(String, String)> = Vec::new();
+            let mut seen = std::collections::BTreeSet::new();
+            asked.tool_calls.retain(|call| {
+                let first = seen.insert(call.id.clone());
+                if !first {
+                    dropped.push((call.id.clone(), call.name.clone()));
+                }
+                first
+            });
+            messages.push(asked.clone());
+
+            for call in &asked.tool_calls {
+                let (mut result, failed) = self.dispatch(call, &mut outcome, &mut on_progress).await;
                 on_progress(Progress::ToolDone { name: &call.name, failed });
+                for (_, name) in dropped.iter().filter(|(id, _)| *id == call.id) {
+                    result.push_str(&format!(
+                        "\n\n[`{name}` came with this same call id and was not made — one id per \
+                         call, and it can be asked for again]"
+                    ));
+                }
                 messages.push(Message::tool_result(&call.id, result));
             }
         }

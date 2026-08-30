@@ -1453,6 +1453,33 @@ async fn a_tool_call_whose_arguments_did_not_parse_says_that_and_asks_nobody() {
     assert!(!said.contains("needs someone to approve"), "and nobody is asked to approve it: {said}");
 }
 
+/// Two results carrying one id is a request every dialect rejects, so the
+/// model's mistake would come back as an opaque error from the provider after
+/// the work had already been done.
+#[tokio::test]
+async fn two_tool_calls_sharing_an_id_do_not_make_an_unsendable_request() {
+    let f = fixture();
+    let session = f.rook.start_session("duplicate ids").unwrap();
+    let mut both = call("list_dir", serde_json::json!({ "path": "." }));
+    let first = both.message.tool_calls[0].clone();
+    both.message.tool_calls.push(rook_llm::ToolCall { id: first.id.clone(), ..first });
+
+    let provider = ScriptedProvider::new(vec![both, reply("noted")]);
+    let seen = provider.share();
+    AgentLoop::new(&f.rook, Arc::new(provider), session).run("look").await.unwrap();
+
+    let second = &seen.lock().unwrap()[1].messages;
+    let ids: Vec<&Option<String>> =
+        second.iter().filter(|m| m.role == rook_llm::Role::Tool).map(|m| &m.tool_call_id).collect();
+    let unique: std::collections::BTreeSet<_> = ids.iter().collect();
+    assert_eq!(ids.len(), unique.len(), "one result per id, or the next request is unsendable: {ids:?}");
+
+    let calls = second.iter().filter(|m| m.role == rook_llm::Role::Assistant).flat_map(|m| &m.tool_calls);
+    assert_eq!(calls.count(), 1, "and the message that asked must not carry the duplicate either");
+    let said: String = second.iter().map(|m| m.content.clone()).collect();
+    assert!(said.contains("same call id"), "the model has to be told which call was dropped: {said}");
+}
+
 #[tokio::test]
 async fn the_system_prompt_does_not_vary_with_the_prompt() {
     let f = fixture();
