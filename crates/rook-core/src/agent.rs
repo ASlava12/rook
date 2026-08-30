@@ -693,11 +693,11 @@ impl<'a> AgentLoop<'a> {
         });
         push(ToolSpec {
             name: WRITE_SKILL.into(),
-            description: "Write down a repeatable procedure, with the tools it needs beside it, \
-                          so a later session does not work it out again. For what took real \
-                          effort — a build incantation, a platform quirk — not for what this \
-                          conversation already says. A script the body runs goes in `files`, and \
-                          `requires` scopes it to where it holds."
+            description: "Write down a repeatable procedure so a later session does not work it \
+                          out again. For what took real effort — a build incantation, a platform \
+                          quirk — not for what this conversation already says. A script the body \
+                          runs goes in `files`, with the tools it needs; `requires` scopes it to \
+                          where it holds."
                 .into(),
             parameters: json!({
                 "type": "object",

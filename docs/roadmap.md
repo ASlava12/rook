@@ -758,6 +758,14 @@ recorded so the design question survives the session that raised it.
    readable by design, which is the wrong property here) and what stops a tool
    from being asked to print one.
 
+- **Deleting a file inside undo** — the loop checkpoints what a tool says it
+  will touch, and `run_command` says nothing, so `rm` was the one change to a
+  file that no rewind could reverse. Every other thing a command does leaves the
+  content somewhere; a deletion leaves nothing. `delete_file` takes one file,
+  shows what would go before it goes, and is captured like any other write.
+  Adding it put the stubs — the number actually paid, since lazy loading is the
+  default — two tokens over, and `write_skill`'s first sentence was the one worth
+  shortening. 2 tests.
 - **Surviving a model's own mistakes** — the closest thing to a live model this
   has: what happens when the answer is malformed rather than scripted-perfect.
   Arguments that will not parse are told apart from arguments that are absent,

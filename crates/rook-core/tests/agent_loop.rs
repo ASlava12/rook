@@ -318,6 +318,32 @@ async fn a_mutating_tool_is_checkpointed_and_a_rewind_undoes_it() {
     assert_eq!(original.len(), entries.len());
 }
 
+/// The point of having a tool for it: `rm` through the shell declares no path,
+/// so nothing is captured and the file is simply gone.
+#[tokio::test]
+async fn a_rewind_brings_back_a_file_the_agent_deleted() {
+    let f = fixture();
+    let target = f.workspace.path().join("dead.rs");
+    std::fs::write(&target, "fn old() {}\n").unwrap();
+    let session = f.rook.start_session("delete").unwrap();
+
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("delete_file", serde_json::json!({ "path": "dead.rs" })),
+        reply("gone"),
+    ]));
+    let mut agent = AgentLoop::new(&f.rook, provider, session);
+    agent.allow_everything_not_denied();
+    agent.run("drop dead.rs").await.unwrap();
+    assert!(!target.exists(), "it has to have been deleted for this to be about anything");
+
+    let entries = f.rook.transcript(session, 0, 100, 4096).unwrap();
+    let checkpoint = entries.iter().find(|e| e.kind == "checkpoint").expect("a deletion checkpoints");
+    let report = f.rook.rewind(session, checkpoint.seq, true).unwrap();
+
+    assert_eq!(report.files_restored, 1);
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "fn old() {}\n");
+}
+
 #[tokio::test]
 async fn a_rewind_deletes_a_file_the_agent_created() {
     let f = fixture();

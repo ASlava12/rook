@@ -298,6 +298,64 @@ fn edit_list() -> serde_json::Value {
     })
 }
 
+/// Deleting is the one change to a file that `run_command` cannot undo.
+///
+/// Everything else the shell does to a file leaves the content somewhere — a
+/// move, an overwrite by a build. A `rm` leaves nothing, and the loop only
+/// checkpoints what a tool says it will touch, so a deletion through the shell
+/// is outside `rook session rewind` entirely. Through here it is inside it.
+pub struct DeleteFile;
+
+#[async_trait]
+impl Tool for DeleteFile {
+    fn name(&self) -> &str {
+        "delete_file"
+    }
+
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "delete_file".into(),
+            description: "Delete one file. Use this rather than `rm`, which no rewind can undo.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": { "path": { "type": "string" } },
+                "required": ["path"]
+            }),
+        }
+    }
+
+    async fn call(&self, ctx: &ToolContext, args: &serde_json::Value) -> Result<ToolOutcome> {
+        let path = ctx.resolve(&arg_str(args, self.name(), "path")?)?;
+        if path.is_dir() {
+            return Ok(ToolOutcome::error(format!(
+                "{} is a directory — this deletes one file, so name the files or use \
+                 `run_command` and accept that a rewind will not bring them back",
+                path.display()
+            )));
+        }
+        let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        std::fs::remove_file(&path).map_err(|e| ToolError::Io { path: path.clone(), source: e })?;
+        Ok(ToolOutcome::ok(format!("deleted {} ({bytes} bytes)", path.display())).with("bytes", bytes))
+    }
+
+    async fn preview(&self, ctx: &ToolContext, args: &serde_json::Value) -> Option<String> {
+        let path = ctx.resolve(&arg_str(args, self.name(), "path").ok()?).ok()?;
+        let before = ctx.read_text(&path).await.ok()?;
+        Some(diff(&path, &before, ""))
+    }
+
+    fn touched_paths(&self, args: &serde_json::Value) -> Vec<String> {
+        path_arg(args)
+    }
+
+    /// The whole file goes, so the slower race applies: deleting something
+    /// another turn has looked at since this one did is the same mistake as
+    /// overwriting it.
+    fn overwrites(&self) -> bool {
+        true
+    }
+}
+
 pub struct EditFile;
 
 #[derive(serde::Deserialize)]

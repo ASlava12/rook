@@ -146,7 +146,10 @@ is the user deciding.
 ### Undoing a turn
 
 The loop checkpoints every file a tool is about to modify, so a rewind puts the
-workspace back as well as the conversation — and forks rather than truncates, so
+workspace back as well as the conversation. `delete_file` exists for that reason:
+`rm` through the shell declares no path, so nothing is captured and no rewind
+brings it back — every other change a command makes leaves the content somewhere,
+and a deletion leaves nothing — and forks rather than truncates, so
 the turns you rewound past stay readable in the parent session.
 
 ```sh
@@ -658,6 +661,11 @@ lose people's trust:
 - **Permissions are pattern matching, not a sandbox.** They raise the floor;
   `curl … | sh` is one obfuscation away from any rule. Not a jail. The workspace
   boundary binds the file tools, not commands the agent runs.
+- **Undo covers what a tool declared, not what a command did.** A checkpoint
+  holds the paths a tool said it would touch; a `run_command` says none, so what
+  a shell command changes is outside `rook session rewind`. `delete_file` closes
+  the case that cannot be recovered any other way — everything else a command
+  writes leaves its content somewhere.
 
 ## Development
 

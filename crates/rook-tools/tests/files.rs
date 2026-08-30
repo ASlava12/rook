@@ -32,6 +32,35 @@ impl Workspace {
     }
 }
 
+/// `rm` through the shell is outside every checkpoint, so the one change to a
+/// file that cannot be undone was the one with no tool behind it.
+#[tokio::test]
+async fn a_deletion_names_the_file_it_would_take_and_takes_only_that() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ToolContext::new(dir.path().to_path_buf());
+    std::fs::write(dir.path().join("gone.rs"), "fn old() {}\n").unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+
+    let shown = files::DeleteFile
+        .preview(&ctx, &serde_json::json!({"path": "gone.rs"}))
+        .await
+        .expect("what would go is shown before it goes");
+    assert!(shown.contains("-fn old"), "{shown}");
+    assert!(dir.path().join("gone.rs").exists(), "and showing it does not do it");
+
+    // The checkpoint is taken from what the tool says it touches, so this is
+    // what makes the deletion undoable at all.
+    assert_eq!(files::DeleteFile.touched_paths(&serde_json::json!({"path": "gone.rs"})), ["gone.rs"]);
+
+    let out = files::DeleteFile.call(&ctx, &serde_json::json!({"path": "gone.rs"})).await.unwrap();
+    assert!(!out.is_error, "{}", out.content);
+    assert!(!dir.path().join("gone.rs").exists());
+
+    let refused = files::DeleteFile.call(&ctx, &serde_json::json!({"path": "src"})).await.unwrap();
+    assert!(refused.is_error, "a directory is not one file: {}", refused.content);
+    assert!(dir.path().join("src").is_dir());
+}
+
 /// A new file has nothing to diff against, and an overwrite has everything.
 #[tokio::test]
 async fn what_a_write_would_change_can_be_seen_before_it_is_approved() {
