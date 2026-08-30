@@ -211,8 +211,31 @@ type ClaimedResult<'a> = std::result::Result<(Option<crate::service::Writing<'a>
 const CHANGES_THINGS: &[&str] = &[WRITE_SKILL, FIND_SKILL, REMEMBER, FORGET, DELEGATE, VERIFY];
 
 /// The verdict a checker committed to, if it committed to one.
-fn verdict_in(reply: &str) -> Option<&str> {
-    reply.lines().rev().find_map(|line| line.trim().strip_prefix("VERDICT:")).map(str::trim)
+/// The verdict a checker ended with, if it ended with one of the three.
+///
+/// Tolerant of how a model dresses the line — bold, a bullet, a different case,
+/// a full stop — because the whole mechanism turns on finding it, and a check
+/// that ran the build and read the code is not "unchecked" for having written
+/// `**VERDICT: holds**`.
+///
+/// Not tolerant of a fourth word. `VERDICT: probably` is a hedge, and reporting
+/// a hedge as a verdict is what asking for one of three exists to prevent.
+fn verdict_in(reply: &str) -> Option<&'static str> {
+    const DRESSING: [char; 6] = ['*', '_', '#', '-', '>', '`'];
+    reply.lines().rev().find_map(|line| {
+        let line = line.trim().trim_start_matches(|c: char| DRESSING.contains(&c) || c == ' ');
+        let (head, rest) = line.split_at_checked("VERDICT:".len())?;
+        if !head.eq_ignore_ascii_case("VERDICT:") {
+            return None;
+        }
+        let word = rest
+            .trim_start_matches(|c: char| DRESSING.contains(&c) || c == ' ')
+            .split_whitespace()
+            .next()?
+            .trim_matches(|c: char| !c.is_ascii_alphabetic())
+            .to_ascii_lowercase();
+        ["holds", "fails", "unproven"].into_iter().find(|known| *known == word)
+    })
 }
 
 /// The head of a sub-task, for a progress line. A task is a whole instruction —
@@ -2071,4 +2094,28 @@ fn measured(messages: &[Message], anchor: Option<(usize, usize)>) -> usize {
 
 fn measure(messages: &[Message]) -> usize {
     messages.iter().map(|m| estimate_tokens(&m.content) + 4).sum()
+}
+
+#[cfg(test)]
+mod verdict_tests {
+    use super::verdict_in;
+
+    /// The whole mechanism turns on finding this line, and a check that ran the
+    /// build is not "unchecked" for having written it in bold.
+    #[test]
+    fn a_verdict_is_read_however_the_model_dressed_it() {
+        assert_eq!(verdict_in("evidence\n\nVERDICT: holds"), Some("holds"));
+        assert_eq!(verdict_in("**VERDICT: fails**"), Some("fails"));
+        assert_eq!(verdict_in("- verdict: Unproven."), Some("unproven"));
+        assert_eq!(verdict_in("> `VERDICT:` holds"), Some("holds"));
+        assert_eq!(verdict_in("VERDICT: holds\nVERDICT: fails"), Some("fails"), "the last one is the one");
+    }
+
+    /// Asking for one of three is what stops a hedge being reported as a check.
+    #[test]
+    fn anything_but_the_three_words_is_not_a_verdict() {
+        assert_eq!(verdict_in("VERDICT: probably holds"), None);
+        assert_eq!(verdict_in("I would say it holds"), None);
+        assert_eq!(verdict_in("VERDICT:"), None);
+    }
 }
