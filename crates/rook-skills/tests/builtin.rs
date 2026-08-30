@@ -29,7 +29,7 @@ fn every_shipped_skill_parses() {
     let (index, errors) = builtin();
 
     assert!(errors.is_empty(), "{errors:?}");
-    assert!(index.catalog(&env("linux")).len() >= 3, "the shipped skills went missing");
+    assert!(index.catalog(&env("linux")).len() >= 4, "the shipped skills went missing");
 }
 
 #[test]

@@ -595,7 +595,9 @@ Both are read whole into the system prompt, most general first, capped at
 `[agent] max_instructions_bytes` each — it is paid for on every request and the
 project's copy is written by whoever sends the pull request. A cut is stated in
 the prompt rather than made silently, since instructions that stop mid-sentence
-read as instructions that end there. `rook doctor` lists what it found.
+read as instructions that end there. `rook doctor` lists what it found. The shipped `project-instructions` skill says
+what belongs in one and what does not — a long one is worse than none, since it
+crowds out the conversation on every request.
 
 ## Layout
 
