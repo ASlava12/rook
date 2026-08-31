@@ -109,6 +109,23 @@ pub fn tool_context(config: &Config, workspace: &Path, output_dir: &Path) -> Too
 #[derive(Default)]
 pub struct Interjections(std::sync::Mutex<Vec<String>>);
 
+/// Hand what the user said to every sub-task, and keep it for whoever is
+/// waiting on them.
+///
+/// Said to the conversation while its work is out with the children: it reaches
+/// each of them at their next step, and the parent still sees it afterwards —
+/// otherwise the one place it lands is the sub-tasks, and the turn that started
+/// them never learns anybody spoke. `carried` is what to give back, so a message
+/// is broadcast once rather than at every poll.
+fn relay(from: &Interjections, to: &[std::sync::Arc<Interjections>], carried: &mut Vec<String>) {
+    for text in from.take() {
+        for child in to {
+            child.say(&text);
+        }
+        carried.push(text);
+    }
+}
+
 impl Interjections {
     pub fn say(&self, text: &str) {
         if !text.trim().is_empty() {
@@ -1368,6 +1385,8 @@ impl<'a> AgentLoop<'a> {
             self.rook.config.agent.max_parallel_subagents.max(1),
         ));
         let total = tasks.len();
+        // One queue each, filled from the parent's while they run.
+        let relayed: Vec<std::sync::Arc<Interjections>> = (0..total).map(|_| Default::default()).collect();
         let (doing, mut steps) = tokio::sync::mpsc::unbounded_channel::<(usize, String)>();
         let running: futures_util::stream::FuturesUnordered<_> = tasks
             .iter()
@@ -1376,9 +1395,10 @@ impl<'a> AgentLoop<'a> {
                 let limit = limit.clone();
                 let inherited = inherited.clone();
                 let doing = doing.clone();
+                let said = relayed[i].clone();
                 async move {
                     let _permit = limit.acquire().await;
-                    (i, self.run_subtask(task, inherited.as_deref(), max_steps, doing, i).await)
+                    (i, self.run_subtask(task, inherited.as_deref(), max_steps, doing, i, said).await)
                 }
             })
             .collect();
@@ -1392,6 +1412,8 @@ impl<'a> AgentLoop<'a> {
         let mut results: Vec<Option<_>> = (0..total).map(|_| None).collect();
         let mut done = 0;
         let mut stream = running;
+        let mut carried: Vec<String> = Vec::new();
+        let mut carrying = tokio::time::interval(std::time::Duration::from_millis(200));
         loop {
             tokio::select! {
                 // Biased so a step already waiting is reported before the branch
@@ -1403,6 +1425,12 @@ impl<'a> AgentLoop<'a> {
                 Some((i, tool)) = steps.recv() => {
                     on_progress(Progress::Delegating { task: short(&tasks[i]), tool: &tool });
                 }
+                // Said to the conversation while its work is out with the
+                // children. It reaches each of them at their next step, and is
+                // kept for the parent too — otherwise the one place it lands is
+                // the sub-tasks, and the turn that started them never learns
+                // anybody spoke.
+                _ = carrying.tick() => relay(&self.interjections, &relayed, &mut carried),
                 landed = stream.next() => match landed {
                     Some((i, result)) => {
                         done += 1;
@@ -1418,6 +1446,9 @@ impl<'a> AgentLoop<'a> {
         // so this drains what is left and cannot block.
         while let Ok((i, tool)) = steps.try_recv() {
             on_progress(Progress::Delegating { task: short(&tasks[i]), tool: &tool });
+        }
+        for text in carried {
+            self.interjections.say(&text);
         }
 
         let mut report = Vec::with_capacity(total);
@@ -1552,6 +1583,9 @@ impl<'a> AgentLoop<'a> {
         child.hooks = self.hooks.clone();
         child.servers = self.servers.clone();
         child.spawned = self.spawned.clone();
+        // No relay of what the user says mid-turn, unlike a sub-task: a checker
+        // is asked to be the one party with no stake in the answer, and a remark
+        // from the person whose work is being checked is a stake.
         child.checking = true;
         // Not lowered the way a delegated errand is: an errand is bounded work
         // to get through, and a check is the judgement the parent could not make
@@ -1574,6 +1608,7 @@ impl<'a> AgentLoop<'a> {
         max_steps: Option<u32>,
         doing: tokio::sync::mpsc::UnboundedSender<(usize, String)>,
         index: usize,
+        said: std::sync::Arc<Interjections>,
     ) -> Result<(String, TurnOutcome)> {
         let session = self.rook.fork_for_subtask(self.session, task)?;
         if let Some(context) = inherited {
@@ -1592,6 +1627,10 @@ impl<'a> AgentLoop<'a> {
         child.hooks = self.hooks.clone();
         child.servers = self.servers.clone();
         child.spawned = self.spawned.clone();
+        // Its own queue, not the parent's: what the user says while several of
+        // these run has to reach all of them, and taking from one queue would
+        // give it to whichever child stepped first.
+        child.interjections = said;
         // A sub-task is a bounded errand, and lower effort means fewer and more
         // consolidated tool calls rather than a worse answer.
         child.effort = rook_llm::Effort::Low;
@@ -2127,5 +2166,33 @@ mod verdict_tests {
         assert_eq!(verdict_in("VERDICT: probably holds"), None);
         assert_eq!(verdict_in("I would say it holds"), None);
         assert_eq!(verdict_in("VERDICT:"), None);
+    }
+}
+
+#[cfg(test)]
+mod relay_tests {
+    use super::{Interjections, relay};
+    use std::sync::Arc;
+
+    /// One queue each, because taking from one shared queue would give the
+    /// message to whichever child stepped first and to none of the others.
+    #[test]
+    fn what_is_said_mid_delegation_reaches_every_child_and_is_kept_for_the_parent() {
+        let parent = Interjections::default();
+        let children: Vec<Arc<Interjections>> = (0..3).map(|_| Default::default()).collect();
+        let mut carried = Vec::new();
+
+        parent.say("use serde, not a hand-rolled parser");
+        relay(&parent, &children, &mut carried);
+
+        for child in &children {
+            assert_eq!(child.take(), ["use serde, not a hand-rolled parser"]);
+        }
+        assert_eq!(carried, ["use serde, not a hand-rolled parser"], "and the parent still hears it");
+
+        // Polled many times a second: a message must go out once.
+        relay(&parent, &children, &mut carried);
+        assert!(children[0].take().is_empty());
+        assert_eq!(carried.len(), 1);
     }
 }

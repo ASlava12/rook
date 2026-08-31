@@ -2,6 +2,15 @@ use std::path::PathBuf;
 
 use rook_lsp::{LspError, Server, ServerConfig};
 
+/// One at a time, for the reason `rook-mcp`'s client tests are: each starts a
+/// subprocess and waits for its handshake, and nine cold starts at once on a
+/// loaded machine time out together — which reads as a broken client and is a
+/// scheduler.
+async fn one_at_a_time() -> tokio::sync::MutexGuard<'static, ()> {
+    static GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    GATE.lock().await
+}
+
 fn mock() -> ServerConfig {
     ServerConfig {
         language: "mock".into(),
@@ -37,6 +46,7 @@ impl Workspace {
 
 #[tokio::test]
 async fn the_handshake_completes_over_content_length_framing() {
+    let _one = one_at_a_time().await;
     let workspace = Workspace::new();
     let server = Server::start(&mock(), workspace.dir.path()).await.unwrap();
     assert_eq!(server.language(), "mock");
@@ -45,6 +55,7 @@ async fn the_handshake_completes_over_content_length_framing() {
 
 #[tokio::test]
 async fn diagnostics_arrive_after_a_file_is_opened() {
+    let _one = one_at_a_time().await;
     let workspace = Workspace::new();
     let server = Server::start(&mock(), workspace.dir.path()).await.unwrap();
     server.sync(&workspace.file(), "rust").await.unwrap();
@@ -58,6 +69,7 @@ async fn diagnostics_arrive_after_a_file_is_opened() {
 
 #[tokio::test]
 async fn a_definition_answered_as_a_single_object_is_understood() {
+    let _one = one_at_a_time().await;
     let workspace = Workspace::new();
     let server = Server::start(&mock(), workspace.dir.path()).await.unwrap();
     server.sync(&workspace.file(), "rust").await.unwrap();
@@ -74,6 +86,7 @@ async fn a_definition_answered_as_a_single_object_is_understood() {
 
 #[tokio::test]
 async fn references_come_back_as_a_list() {
+    let _one = one_at_a_time().await;
     let workspace = Workspace::new();
     let server = Server::start(&mock(), workspace.dir.path()).await.unwrap();
     server.sync(&workspace.file(), "rust").await.unwrap();
@@ -88,6 +101,7 @@ async fn references_come_back_as_a_list() {
 
 #[tokio::test]
 async fn workspace_symbols_carry_a_readable_kind() {
+    let _one = one_at_a_time().await;
     let workspace = Workspace::new();
     let server = Server::start(&mock(), workspace.dir.path()).await.unwrap();
     let found = server.symbols("parse").await.unwrap();
@@ -100,6 +114,7 @@ async fn workspace_symbols_carry_a_readable_kind() {
 
 #[tokio::test]
 async fn a_missing_language_server_names_the_command() {
+    let _one = one_at_a_time().await;
     let workspace = Workspace::new();
     let config = ServerConfig { command: "no-such-language-server".into(), ..mock() };
     let Err(err) = Server::start(&config, workspace.dir.path()).await else {
@@ -111,6 +126,7 @@ async fn a_missing_language_server_names_the_command() {
 
 #[tokio::test]
 async fn extensions_decide_which_server_handles_a_file() {
+    let _one = one_at_a_time().await;
     let config = mock();
     assert!(config.handles(std::path::Path::new("src/lib.rs")));
     assert!(config.handles(std::path::Path::new("SRC/LIB.RS")), "extensions are case-insensitive");
@@ -129,6 +145,7 @@ fn a_symbol_is_located_by_name_on_a_word_boundary() {
 
 #[tokio::test]
 async fn an_edited_file_is_re_analysed_rather_than_answered_from_the_old_version() {
+    let _one = one_at_a_time().await;
     let workspace = Workspace::new();
     let server = Server::start(&mock(), workspace.dir.path()).await.unwrap();
     server.sync(&workspace.file(), "rust").await.unwrap();
@@ -154,6 +171,7 @@ async fn an_edited_file_is_re_analysed_rather_than_answered_from_the_old_version
 
 #[tokio::test]
 async fn syncing_an_unchanged_file_costs_nothing() {
+    let _one = one_at_a_time().await;
     let workspace = Workspace::new();
     let server = Server::start(&mock(), workspace.dir.path()).await.unwrap();
     server.sync(&workspace.file(), "rust").await.unwrap();

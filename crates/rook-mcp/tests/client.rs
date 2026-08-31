@@ -2,6 +2,20 @@ use std::time::Duration;
 
 use rook_mcp::{McpError, Server, ServerConfig};
 
+/// One at a time.
+///
+/// Each of these starts a subprocess and waits for its handshake. Thirteen at
+/// once is thirteen cold starts competing, and on a loaded machine every one of
+/// them timed out together — which reads as a broken client and is a scheduler.
+/// The same answer as `tui_pty`, for the same reason.
+///
+/// Async, because the tests are: a `std` guard held across an await would make
+/// the future non-`Send`.
+async fn one_at_a_time() -> tokio::sync::MutexGuard<'static, ()> {
+    static GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    GATE.lock().await
+}
+
 fn mock(mode: &str) -> ServerConfig {
     ServerConfig {
         name: format!("mock-{mode}"),
@@ -20,6 +34,7 @@ fn mock(mode: &str) -> ServerConfig {
 
 #[tokio::test]
 async fn handshake_reports_what_the_server_is() {
+    let _one = one_at_a_time().await;
     let server = Server::connect(&mock("ok")).await.unwrap();
     assert_eq!(server.info().server.name, "mock");
     assert_eq!(server.info().server.version, "1.2.3");
@@ -29,6 +44,7 @@ async fn handshake_reports_what_the_server_is() {
 
 #[tokio::test]
 async fn tools_are_listed_with_their_schemas_intact() {
+    let _one = one_at_a_time().await;
     let server = Server::connect(&mock("ok")).await.unwrap();
     let tools = server.list_tools().await.unwrap();
     assert_eq!(tools.len(), 2);
@@ -47,6 +63,7 @@ async fn tools_are_listed_with_their_schemas_intact() {
 
 #[tokio::test]
 async fn a_tool_call_round_trips() {
+    let _one = one_at_a_time().await;
     let server = Server::connect(&mock("ok")).await.unwrap();
     let result = server.call_tool("echo", &serde_json::json!({ "text": "hello" })).await.unwrap();
     assert!(!result.is_error);
@@ -56,6 +73,7 @@ async fn a_tool_call_round_trips() {
 
 #[tokio::test]
 async fn binary_content_is_described_rather_than_inlined() {
+    let _one = one_at_a_time().await;
     let server = Server::connect(&mock("ok")).await.unwrap();
     let result = server.call_tool("picture", &serde_json::json!({})).await.unwrap();
     assert_eq!(result.to_text(), "[image/png image, 4 bytes base64]");
@@ -64,6 +82,7 @@ async fn binary_content_is_described_rather_than_inlined() {
 
 #[tokio::test]
 async fn concurrent_calls_get_their_own_answers() {
+    let _one = one_at_a_time().await;
     let server = Server::connect(&mock("ok")).await.unwrap();
     let args: Vec<_> = (0..12).map(|i| serde_json::json!({ "text": format!("m{i}") })).collect();
     let calls = args.iter().map(|a| server.call_tool("echo", a));
@@ -75,6 +94,7 @@ async fn concurrent_calls_get_their_own_answers() {
 
 #[tokio::test]
 async fn notifications_and_junk_lines_do_not_disturb_a_call() {
+    let _one = one_at_a_time().await;
     let server = Server::connect(&mock("noise")).await.unwrap();
     let result = server.call_tool("echo", &serde_json::json!({ "text": "x" })).await.unwrap();
     assert_eq!(result.to_text(), "echo: x");
@@ -83,6 +103,7 @@ async fn notifications_and_junk_lines_do_not_disturb_a_call() {
 
 #[tokio::test]
 async fn a_server_error_names_the_method_and_the_code() {
+    let _one = one_at_a_time().await;
     let server = Server::connect(&mock("error")).await.unwrap();
     let err = server.call_tool("nope", &serde_json::json!({})).await.unwrap_err();
     let message = err.to_string();
@@ -93,6 +114,7 @@ async fn a_server_error_names_the_method_and_the_code() {
 
 #[tokio::test]
 async fn a_hung_server_times_out_rather_than_blocking_the_agent() {
+    let _one = one_at_a_time().await;
     let mut config = mock("slow");
     config.call_timeout_secs = 1;
     let server = Server::connect(&config).await.unwrap();
@@ -103,6 +125,7 @@ async fn a_hung_server_times_out_rather_than_blocking_the_agent() {
 
 #[tokio::test]
 async fn a_server_that_dies_mid_call_fails_the_call_instead_of_hanging() {
+    let _one = one_at_a_time().await;
     let server = Server::connect(&mock("crash")).await.unwrap();
     // Only long enough to tell "failed" from "hung": the call's own timeout is
     // thirty seconds, so anything under that and over a loaded spawn will do.
@@ -115,6 +138,7 @@ async fn a_server_that_dies_mid_call_fails_the_call_instead_of_hanging() {
 
 #[tokio::test]
 async fn a_missing_command_fails_with_the_command_in_the_message() {
+    let _one = one_at_a_time().await;
     let config = ServerConfig {
         name: "ghost".into(),
         command: "definitely-not-installed-anywhere".into(),
@@ -130,6 +154,7 @@ async fn a_missing_command_fails_with_the_command_in_the_message() {
 #[cfg(unix)]
 #[tokio::test]
 async fn dropping_a_server_takes_its_child_process_with_it() {
+    let _one = one_at_a_time().await;
     // `kill -0` rather than a libc dependency for one call in one test.
     let alive = |pid: u32| {
         std::process::Command::new("kill").args(["-0", &pid.to_string()]).status().is_ok_and(|s| s.success())
@@ -155,6 +180,7 @@ async fn dropping_a_server_takes_its_child_process_with_it() {
 /// and one retry per call, a few per run.
 #[tokio::test]
 async fn a_server_that_dies_once_is_restarted_and_the_call_answered() {
+    let _one = one_at_a_time().await;
     // Held, or the directory goes with the temporary and the mock has nowhere
     // to record having died.
     let dir = tempfile::tempdir().unwrap();
@@ -174,6 +200,7 @@ async fn a_server_that_dies_once_is_restarted_and_the_call_answered() {
 /// A server dying on every call must not be respawned on every call.
 #[tokio::test]
 async fn restarts_are_capped_and_the_last_error_is_the_real_one() {
+    let _one = one_at_a_time().await;
     let server = Server::connect(&mock("crash")).await.unwrap();
 
     for _ in 0..6 {

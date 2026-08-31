@@ -166,6 +166,13 @@ take `one_at_a_time()`: each starts a whole `rook` from cold before its first
 byte reaches the terminal, and nine at once on the FreeBSD VM starved one past a
 minute of having drawn nothing. Add to that rather than to the deadline.
 
+**A test that starts a subprocess and waits for it takes `one_at_a_time()`.**
+`tui_pty`, `rook-mcp`'s client and `rook-lsp`'s client all do. Thirteen mocks
+spawned at once on a loaded machine timed out *together*, on the handshake, which
+reads as a broken client and is a scheduler — the tell is that every test in the
+file failed identically. Serially each gets the machine and the file still
+finishes in seconds.
+
 ## Storage changes
 
 - Bump `FORMAT_VERSION` in `crates/rook-store/src/schema.rs` for any change older

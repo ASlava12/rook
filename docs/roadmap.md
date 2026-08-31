@@ -797,7 +797,9 @@ recorded so the design question survives the session that raised it.
   step, which is the one place a user message may go: between an assistant's tool
   call and its result, no dialect accepts one. The TUI and the browser, being the
   front ends that can take input while a turn runs; the plain REPL is blocked on
-  its own readline and says so by not offering it. And said while the model is
+  its own readline and says so by not offering it. A remark typed while a
+  delegation is out reaches every running sub-task rather than waiting for all of
+  them to land. And said while the model is
   writing its last answer, the turn goes on rather than ending on the model's
   word — otherwise it would sit in the queue until the next prompt and be folded
   into it, which is not where the person put it. 2 tests.
@@ -865,9 +867,14 @@ call it without a key. Until then it is a command a person runs, which is honest
 
 ## After that
 
-**Talking to a sub-agent while it runs.** Each one now reports when it lands, so
-a delegation is no longer silence — but the parent still cannot send anything to
-a child mid-run, which is what codex's `spawn_agent`/`wait_agent` is for.
+**Talking to a sub-agent while it runs.** What the *user* says now reaches them:
+a remark typed while a delegation is out is handed to every running sub-task at
+its next step, and kept for the parent, which used to have to wait for all of
+them to land before hearing it. A checker is deliberately left out — it is asked
+to be the one party with no stake in the answer, and a remark from the person
+whose work is being checked is a stake. What is still missing is the parent
+sending something of its own, which is what codex's `spawn_agent`/`wait_agent`
+is for; it cannot, because it is blocked on the children it would be talking to.
 
 **Auto-installing language servers.** Detection is done; the other half of
 codex #8745 asks for installation too, which means downloading and running a
