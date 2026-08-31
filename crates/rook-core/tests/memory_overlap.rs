@@ -69,3 +69,15 @@ fn the_budget_still_bounds_what_recall_returns() {
     assert!(cost <= 100, "recall spent {cost} of a 100-token budget");
     assert!(!chosen.is_empty());
 }
+
+/// `len()` is bytes, so a single Cyrillic letter counted as a term while a
+/// single Latin one did not — a difference nothing wanted and nothing named.
+#[test]
+fn a_one_character_term_is_dropped_whatever_alphabet_it_is_in() {
+    let terms = rook_core::memory::terms_of("a я 文 ok да");
+
+    assert!(!terms.contains("a"), "{terms:?}");
+    assert!(!terms.contains("я"), "{terms:?}");
+    assert!(!terms.contains("文"), "{terms:?}");
+    assert!(terms.contains("ok") && terms.contains("да"), "and two still count: {terms:?}");
+}

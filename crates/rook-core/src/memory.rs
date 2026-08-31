@@ -305,7 +305,10 @@ pub fn terms_of(text: &str) -> BTreeSet<String> {
     ];
     text.split(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
         .map(|w| w.trim_matches('-').to_lowercase())
-        .filter(|w| w.len() > 1 && !NOISE.contains(&w.as_str()))
+        // Characters, not bytes: `len()` here kept any single non-ASCII letter
+        // while dropping every single ASCII one, which is a difference nothing
+        // wanted.
+        .filter(|w| w.chars().nth(1).is_some() && !NOISE.contains(&w.as_str()))
         .collect()
 }
 
@@ -353,10 +356,13 @@ pub const SAME_FACT: f32 = 0.95;
 /// erring high costs the mention entirely.
 pub const WORTH_MENTIONING: f32 = 0.55;
 
-/// Shared terms as a fraction of the terms either one uses.
+/// Shared terms as a fraction of the terms the two use between them.
 ///
-/// Jaccard over the same terms the ranking matches on, so a fact judged similar
-/// here is one that would have matched the same queries.
+/// Dice rather than Jaccard — twice the overlap over the sum, not the overlap
+/// over the union — which is what the thresholds below were measured against:
+/// "prefer tabs" and "prefer tabs in Makefiles" score 0.80 here and would score
+/// 0.67 the other way. Over the same terms the ranking matches on, so a fact
+/// judged similar here is one that would have matched the same queries.
 pub fn overlap(a: &str, b: &str) -> f32 {
     let (a, b) = (terms_of(a), terms_of(b));
     if a.is_empty() || b.is_empty() {
