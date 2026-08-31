@@ -660,6 +660,13 @@ lose people's trust:
   run while `rookd` holds the lock. Every read routes over the daemon's API
   instead and prints the same thing; writes say where the lock is
   ([ADR-0006](docs/adr/0006-single-writer-store.md)).
+- **Reasoning is not carried across a tool call.** A model that thought before
+  calling a tool gets its own thinking back as nothing: `Reasoning` is logged for
+  a person to read and is not replayed, and the assistant message pushed back
+  into the turn carries content and tool calls only. Requests are accepted — this
+  costs continuity, not correctness — but the model re-derives its plan each
+  step. Closing it is a wire detail per dialect, and `cargo xtask smoke` against a
+  real model is what should settle the shape before it is written.
 - **No structured plan state.** The agent is asked for a plan in prose and told
   not to keep a checklist — deliberately, on the strength of someone else's
   benchmark ([ADR-0010](docs/adr/0010-no-todo-tool.md)). There is nothing for a

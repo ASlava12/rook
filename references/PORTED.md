@@ -61,6 +61,28 @@ Add a row when you implement something after reading a reference. Add it to
 moved; what follows is what was done with it, so a dismissal is a decision rather
 than an omission.
 
+**2026-08-31 (twenty-fifth pass)** — codex 12, goose 5, openhands 4, opencode 3,
+acp 1. Nothing taken; one gap found and recorded rather than guessed at.
+
+- goose `7d97fe1` *preserve thinking and redacted-thinking blocks across turns* —
+  **a real gap here, and not one to close blind.** `EventKind::Reasoning` is
+  logged and `context::reaches_the_model` excludes it, and within a turn the
+  assistant message pushed back carries content and tool calls and no thinking at
+  all. So a model that reasoned before calling a tool re-derives that reasoning
+  on the next step. It is not an error — Anthropic is the default provider and
+  requests plainly go through — so what is lost is continuity, not the request.
+  Closing it means an opaque thinking block with its signature on `Message`,
+  filled and echoed by one dialect, and a wire detail implemented against
+  documentation rather than a live model is how every request breaks at once.
+  `cargo xtask smoke` is what would settle it. Written down in the roadmap so it
+  is a decision rather than an omission.
+- codex's Guardian cluster — nine commits on preserving a review's evidence and
+  the user's answers across compaction. Not applicable: a check here runs in a
+  fresh session that is told the claim and nothing else, so the parent compacting
+  cannot reach it.
+- The rest are a native voice build recipe, a desktop proxy, a settings nav, an
+  a11y shortcut alignment, deepseek stats and a registry listing.
+
 **2026-08-31 (openclaw, first read)** — added at the user's request and read for
 the first time. Nothing ported yet; one thing recorded.
 
