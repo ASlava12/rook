@@ -198,9 +198,27 @@ fn on_disk(path: &Path) -> OnDisk {
 }
 
 /// A change with nothing to say about its contents.
+/// Relative to the workspace, however the two paths spell it.
+///
+/// That is how the user asked and how they will act on the answer — and
+/// `strip_prefix` alone did not get there on Windows, where the same directory
+/// arrives as `C:\x` from one side and `\\?\C:\x` from the other, spelled with
+/// either separator. Forward slashes out, as `list_dir` already prints them.
+fn relative_to(path: &Path, roots: &[PathBuf]) -> String {
+    let plain = |p: &Path| {
+        let text = p.display().to_string().replace('\\', "/");
+        text.trim_start_matches("//?/").trim_end_matches('/').to_string()
+    };
+    let shown = plain(path);
+    roots
+        .iter()
+        .find_map(|root| shown.strip_prefix(&plain(root))?.strip_prefix('/'))
+        .unwrap_or(&shown)
+        .to_string()
+}
+
 fn named(path: &Path, roots: &[PathBuf], change: Change) -> FileChange {
-    let relative = roots.iter().find_map(|root| path.strip_prefix(root).ok()).unwrap_or(path);
-    FileChange { path: relative.display().to_string(), change, lines_added: 0, lines_removed: 0, diff: None }
+    FileChange { path: relative_to(path, roots), change, lines_added: 0, lines_removed: 0, diff: None }
 }
 
 /// Text small enough to diff. Absent content reads as empty, so an added or
@@ -211,4 +229,29 @@ fn readable(content: Option<&[u8]>) -> Option<String> {
         return None;
     }
     Some(String::from_utf8_lossy(bytes).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::relative_to;
+    use std::path::{Path, PathBuf};
+
+    /// Both sides are absolute and neither controls how the other is spelled: a
+    /// capture records the root it was handed, and the workspace is whatever the
+    /// engine was opened with. On Windows one of them is a verbatim path.
+    #[test]
+    fn a_path_is_named_relatively_however_the_two_sides_spell_it() {
+        let roots = |root: &str| vec![PathBuf::from(root)];
+
+        assert_eq!(relative_to(Path::new("/w/src/a.rs"), &roots("/w")), "src/a.rs");
+        assert_eq!(relative_to(Path::new("/w/src/a.rs"), &roots("/w/")), "src/a.rs");
+        assert_eq!(
+            relative_to(Path::new(r"\\?\C:\w\src\a.rs"), &roots(r"C:\w")),
+            "src/a.rs",
+            "verbatim on one side only"
+        );
+        assert_eq!(relative_to(Path::new("//?/C:/w/src/a.rs"), &roots(r"\\?\C:\w")), "src/a.rs");
+        // Nothing matched: the whole path beats a relative name that is wrong.
+        assert_eq!(relative_to(Path::new("/elsewhere/a.rs"), &roots("/w")), "/elsewhere/a.rs");
+    }
 }
