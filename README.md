@@ -569,7 +569,11 @@ A skill is a directory with a `SKILL.md` — the
 [Agent Skills](https://www.webfuse.com/agent-skills-cheat-sheet) format, so skills
 written for other agents work unchanged. A directory under `~/.rook/plugins` with
 a `plugin.json` is an Agent Plugin, and brings its `skills/` and its `mcpServers`
-together; see [docs/skills.md](docs/skills.md). Rook adds two optional blocks:
+together; see [docs/skills.md](docs/skills.md). One vendored into a workspace
+under `.rook/plugins` brings only its skills: a repository is not the person
+running the agent, and an `mcpServers` entry is a command that would be spawned
+at session start. The ones you want go under `[[mcp]]` in your own config, and
+the skipped ones are named on start so you know which. Rook adds two optional blocks:
 
 ```yaml
 ---

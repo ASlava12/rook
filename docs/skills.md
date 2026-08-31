@@ -297,3 +297,11 @@ A plugin's servers are namespaced by its name, so two plugins shipping a `docs`
 server do not collide in the tool names the model sees, and each runs in its own
 directory. A skill from a plugin ranks above a built-in one and below the user's
 and the project's: something vendored into a workspace is there on purpose.
+
+Only a plugin under `~/.rook/plugins` brings its servers. One vendored into a
+workspace brings its skills and not its `mcpServers`: a skill is text the model
+may or may not load, and a server is a command spawned at session start — before
+a prompt, before an approval, before anyone has typed anything. Cloning a
+repository would otherwise run whatever it chose to declare. The ones you want go
+under `[[mcp]]` in your own `config.toml`, and each skipped one is named on
+start.

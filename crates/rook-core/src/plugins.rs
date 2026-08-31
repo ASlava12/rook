@@ -32,11 +32,29 @@ impl Plugin {
 pub fn discover(workspace: &Path) -> (Vec<Plugin>, Vec<String>) {
     let mut found = Vec::new();
     let mut errors = Vec::new();
-    for root in [paths::user_plugins_dir(), paths::project_plugins_dir(workspace)] {
+    for (root, mine) in [(paths::user_plugins_dir(), true), (paths::project_plugins_dir(workspace), false)] {
         let Ok(entries) = std::fs::read_dir(&root) else { continue };
         for entry in entries.flatten().filter(|e| e.path().is_dir()) {
             match load(&entry.path()) {
-                Ok(Some(plugin)) => found.push(plugin),
+                Ok(Some(mut plugin)) => {
+                    // A plugin under `~/.rook/plugins` was put there by the
+                    // person running this. One vendored into a workspace came
+                    // with the repository, and its `mcpServers` are commands
+                    // this would spawn at session start — before a prompt,
+                    // before an approval, before the user has typed anything.
+                    // Its skills are text and are loaded; its servers are not.
+                    if !mine && !plugin.mcp.is_empty() {
+                        errors.push(format!(
+                            "plugin {:?} in this workspace declares {} MCP server(s), which are \
+                             not started: a repository is not the person running the agent. Add \
+                             the ones you want under `[[mcp]]` in config.toml.",
+                            plugin.name,
+                            plugin.mcp.len()
+                        ));
+                        plugin.mcp.clear();
+                    }
+                    found.push(plugin);
+                }
                 Ok(None) => {}
                 Err(e) => errors.push(e),
             }
