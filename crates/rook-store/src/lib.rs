@@ -546,7 +546,7 @@ impl Store {
 
         {
             let record = EventRecord {
-                ts: now_unix(),
+                ts: event.ts.unwrap_or_else(now_unix),
                 kind: event.kind,
                 body: body_id,
                 label: event.label.to_string(),

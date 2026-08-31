@@ -204,6 +204,8 @@ pub struct EventRecord {
 #[derive(Clone, Debug)]
 pub struct NewEvent<'a> {
     pub kind: EventKind,
+    /// When it happened, if not now.
+    pub ts: Option<i64>,
     /// Tool name, skill id or model name, depending on `kind`.
     pub label: &'a str,
     pub body_kind: crate::object::Kind,
@@ -214,7 +216,7 @@ pub struct NewEvent<'a> {
 
 impl<'a> NewEvent<'a> {
     pub fn new(kind: EventKind, body_kind: crate::object::Kind, body: &'a [u8]) -> Self {
-        Self { kind, label: "", body_kind, body, tokens_in: 0, tokens_out: 0 }
+        Self { kind, ts: None, label: "", body_kind, body, tokens_in: 0, tokens_out: 0 }
     }
 
     pub fn label(mut self, label: &'a str) -> Self {
@@ -225,6 +227,17 @@ impl<'a> NewEvent<'a> {
     pub fn usage(mut self, tokens_in: u32, tokens_out: u32) -> Self {
         self.tokens_in = tokens_in;
         self.tokens_out = tokens_out;
+        self
+    }
+
+    /// Write it as though it happened then.
+    ///
+    /// A seam, and the alternative is waiting: what reads an event's time is
+    /// the history replay deciding whether a pause was long enough to mention,
+    /// and the shortest one it mentions is an hour.
+    #[doc(hidden)]
+    pub fn at(mut self, ts: i64) -> Self {
+        self.ts = Some(ts);
         self
     }
 }

@@ -40,6 +40,7 @@ Add a row when you implement something after reading a reference. Add it to
 | Resuming a session where it belongs | codex `f5636bb` *restore thread cwd from owned settings snapshots* — ours took whatever directory the command was run from, so the conversation was one project's and the edits another's | source, via `refs advance` | `Rook::following`, `rook run --session`, `rook chat --resume` |
 | A tool name a model will accept | codex `94cbbdd` *support package-style MCP server names* — theirs widens what a server may be called; ours already took such a name and sanitised it, but a namespaced name over sixty-four characters makes the provider reject every request | source, via `refs advance` | `mcp::namespaced` |
 | A sub-task that did not finish, said as such | hermes' five delegation commits — theirs reported a failed child as completed; ours reported an unfinished one in the same shape as a finished one | source, via `refs advance` | `AgentLoop::delegate`, `finished` |
+| Knowing a conversation was paused, not continuous | openclaw's per-message timestamps — theirs stamps every line, ours marks a gap of an hour or more, which is the part that changes an answer | source, via `refs advance` | `AgentLoop::history`, `gap_before` |
 | Choosing how long a cached prefix lives | goose `fb15d4e` *configurable Anthropic prompt-cache TTL* — ours wrote the five-minute default, so a pause longer than that paid to reprocess the whole prefix | source, via `refs advance` | `[agent] prompt_cache_ttl`, `CacheTtl` |
 | A rollback whose undo point is real | hermes `1315e65a5`, `154fd10af` *failed rollback keeps the skill and the snapshots* / *name the preserved snapshot path* — ours captured first and discarded the result, then claimed undoability either way | source, via `refs advance` | `Rook::rollback_skill`, `Rollback::undo` |
 | The effort the user asked for reaching the wire | hermes `b954547e7` *hand-rolled effort map inverted the ladder* — theirs was inverted, ours was absent: the OpenAI dialect sent no `reasoning_effort` at all | source, via `refs advance` | `rook-llm/src/openai.rs`, `crates/rook-llm/tests/openai.rs` |
@@ -72,6 +73,12 @@ the first time. Nothing ported yet; one thing recorded.
   tools and becomes one about where a request is going, and only `fetch` and the
   MCP client go anywhere. Still at the concept stage, which is where the user
   asked for it to stay.
+- openclaw *date and time* — **taken, in a smaller shape.** They stamp every
+  inbound message with a local timestamp and an elapsed-time suffix. Here the
+  replayed history read as continuous however long the gaps, so a session picked
+  up a week later looked like one paused for a moment. A gap of an hour or more
+  is now marked where it happened; stamping every line would pay tokens on every
+  request to answer a question nobody asks except across a gap.
 - The rest of their release is transports and surfaces of their own — Discord and
   Slack logins, a browser-extension CDP relay, Buzz rooms, ClickClack menus, a
   macOS app, a Control UI. The architecture it is all hung from is one gateway

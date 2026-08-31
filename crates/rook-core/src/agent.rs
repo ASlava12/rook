@@ -318,6 +318,33 @@ pub enum Progress<'a> {
 /// pair half-written. Every provider refuses a request where an assistant asked
 /// for a tool and nothing replied, so without this the session could never be
 /// resumed — and saying what happened is more use to the model than a blank.
+/// How long a pause was, when it was long enough to matter.
+///
+/// An hour is the shortest gap worth a line: below it a conversation reads as
+/// one sitting, and above it the answer to "have you already done that" starts
+/// to depend on when.
+fn gap_before(last: i64, now: i64) -> Option<String> {
+    const HOUR: i64 = 3600;
+    let seconds = now.saturating_sub(last);
+    if last == 0 || seconds < HOUR {
+        return None;
+    }
+    Some(match seconds / HOUR {
+        hours @ ..24 => format!("{hours} hour{}", plural(hours)),
+        hours => {
+            let days = hours / 24;
+            format!("{days} day{}", plural(days))
+        }
+    })
+}
+
+fn plural(n: i64) -> &'static str {
+    match n {
+        1 => "",
+        _ => "s",
+    }
+}
+
 fn close_open_call(messages: &mut Vec<Message>, open: &mut Option<String>) {
     if let Some(id) = open.take() {
         messages.push(Message::tool_result(id, "no result was recorded: the turn did not finish"));
@@ -615,12 +642,24 @@ impl<'a> AgentLoop<'a> {
             )));
         }
         let mut open_call: Option<String> = None;
+        // A replayed conversation reads as continuous however long the gaps
+        // were, so a session picked up a week later looks like one paused for a
+        // moment — and "did you already run the tests?" has a different answer
+        // depending on which it was. Marked rather than stamped per message: a
+        // timestamp on every line costs tokens on every request to answer a
+        // question nobody asks except across a gap.
+        let mut last_at = 0i64;
 
         for event in events {
             let body = match self.rook.store.get(&event.record.body) {
                 Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
                 Err(_) => continue,
             };
+            if let Some(gap) = gap_before(last_at, event.record.ts) {
+                messages.push(Message::user(format!("[{gap} later]")));
+            }
+            last_at = event.record.ts;
+
             match event.record.kind {
                 EventKind::UserMessage => {
                     close_open_call(&mut messages, &mut open_call);
@@ -2214,5 +2253,26 @@ mod relay_tests {
         relay(&parent, &children, &mut carried);
         assert!(children[0].take().is_empty());
         assert_eq!(carried.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod gap_tests {
+    use super::gap_before;
+
+    /// A conversation replayed without them reads as one sitting, and "have you
+    /// already run the tests?" has a different answer if the last exchange was
+    /// last week.
+    #[test]
+    fn only_a_pause_long_enough_to_change_an_answer_is_marked() {
+        const HOUR: i64 = 3600;
+        assert_eq!(gap_before(0, 10 * HOUR), None, "nothing precedes the first event");
+        assert_eq!(gap_before(100, 100 + HOUR - 1), None, "a conversation is one sitting");
+        assert_eq!(gap_before(100, 100 + HOUR).as_deref(), Some("1 hour"));
+        assert_eq!(gap_before(100, 100 + 5 * HOUR).as_deref(), Some("5 hours"));
+        assert_eq!(gap_before(100, 100 + 24 * HOUR).as_deref(), Some("1 day"));
+        assert_eq!(gap_before(100, 100 + 90 * HOUR).as_deref(), Some("3 days"));
+        // A clock that went backwards is not a gap.
+        assert_eq!(gap_before(10 * HOUR, HOUR), None);
     }
 }

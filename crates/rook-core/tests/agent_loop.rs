@@ -1554,6 +1554,37 @@ async fn a_turn_that_said_nothing_says_that_rather_than_nothing() {
     assert!(entries.iter().all(|e| e.kind != "assistant"), "{entries:?}");
 }
 
+/// A session resumed a week later replayed as though it had paused for a
+/// moment, and what the agent should do next often depends on which it was.
+#[tokio::test]
+async fn a_conversation_picked_up_days_later_says_so() {
+    let f = fixture();
+    let session = f.rook.start_session("resumed").unwrap();
+    f.rook.log(session, rook_store::EventKind::UserMessage, "", "did you run the tests?").unwrap();
+
+    // The store stamps an event as it is written, so an old exchange is written
+    // as one: the record carries the time, and the replay reads it back.
+    f.rook
+        .store
+        .append_event(
+            session,
+            rook_store::NewEvent::new(
+                rook_store::EventKind::AssistantMessage,
+                rook_store::Kind::Message,
+                b"yes, all green",
+            )
+            .at(rook_store::now_unix() + 3 * 24 * 3600),
+        )
+        .unwrap();
+
+    let provider = ScriptedProvider::new(vec![reply("that was a while ago")]);
+    let seen = provider.share();
+    AgentLoop::new(&f.rook, Arc::new(provider), session).run("and now?").await.unwrap();
+
+    let carried: String = seen.lock().unwrap()[0].messages.iter().map(|m| m.content.clone()).collect();
+    assert!(carried.contains("3 days later"), "{carried}");
+}
+
 #[tokio::test]
 async fn the_system_prompt_does_not_vary_with_the_prompt() {
     let f = fixture();

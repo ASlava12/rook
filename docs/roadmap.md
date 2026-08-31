@@ -837,6 +837,13 @@ recorded so the design question survives the session that raised it.
   browser's dialog, and as a content block on the ACP permission request. Built
   at the moment of asking, since a hook can turn an allowed call into an asked
   one. 4 tests.
+- **A pause the conversation can see** — a session resumed a week later replayed
+  as though it had paused for a moment, and what to do next often depends on
+  which it was: "have you already run the tests" has a different answer across a
+  week. A gap of an hour or more is marked where it happened. Marked rather than
+  stamped per message, which is what OpenClaw does and what a hundred-message
+  session cannot afford — a timestamp on every line pays tokens on every request
+  to answer a question nobody asks except across a gap. 2 tests.
 - **Standing instructions from `AGENTS.md`** — the convention codex, opencode
   and others already read, and this agent read none of them: a project's
   conventions had to be repeated every turn or hidden in a skill, which is
