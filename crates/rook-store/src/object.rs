@@ -11,6 +11,22 @@ impl ObjectId {
         Self(*blake3::hash(data).as_bytes())
     }
 
+    /// The id these bytes would be stored under, without holding them.
+    ///
+    /// Content addressing is the store's job, and a caller that wants to know
+    /// whether a file on disk is the one it captured should not have to read the
+    /// file to find out.
+    pub fn of_reader(mut source: impl std::io::Read) -> std::io::Result<Self> {
+        let mut hasher = blake3::Hasher::new();
+        let mut chunk = vec![0u8; 64 * 1024];
+        loop {
+            match source.read(&mut chunk)? {
+                0 => return Ok(Self(*hasher.finalize().as_bytes())),
+                n => hasher.update(&chunk[..n]),
+            };
+        }
+    }
+
     pub fn to_hex(self) -> String {
         hex::encode(self.0)
     }

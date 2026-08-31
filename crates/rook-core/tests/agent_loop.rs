@@ -1782,6 +1782,45 @@ async fn a_deleted_file_shows_as_removed() {
     assert_eq!(changes.files[0].change, rook_core::changes::Change::Removed);
 }
 
+/// The size cap was applied to bytes already in memory, which is not a cap: the
+/// file had to be read whole in order to decide it would not be diffed.
+#[tokio::test]
+async fn a_file_too_large_to_diff_still_says_whether_it_changed() {
+    let f = fixture();
+    let target = f.workspace.path().join("big.bin");
+    // Past the 256 KiB the diff gives up at, and poorly compressible so it is a
+    // real read either way.
+    let bulk: String = (0..300_000).map(|i| char::from(b'a' + (i % 26) as u8)).collect();
+    std::fs::write(&target, &bulk).unwrap();
+    let session = f.rook.start_session("bulk").unwrap();
+
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("write_file", serde_json::json!({ "path": "big.bin", "content": bulk.clone() })),
+        reply("left it alone"),
+    ]));
+    let mut agent = AgentLoop::new(&f.rook, provider, session);
+    agent.allow_everything_not_denied();
+    agent.run("rewrite it with what it already says").await.unwrap();
+
+    // Written with the same content: hashing says so, and nothing else could
+    // without holding both halves at once.
+    let same = f.rook.changes(session, true).unwrap();
+    assert_eq!(same.files[0].change, rook_core::changes::Change::Unchanged, "{:?}", same.files[0]);
+    assert!(same.files[0].diff.is_none(), "and nothing that large is rendered");
+
+    std::fs::write(
+        &target,
+        format!(
+            "{bulk}and one more line
+"
+        ),
+    )
+    .unwrap();
+    let moved = f.rook.changes(session, true).unwrap();
+    assert_eq!(moved.files[0].change, rook_core::changes::Change::Modified, "{:?}", moved.files[0]);
+    assert_eq!(moved.files[0].path, "big.bin", "and it is still named");
+}
+
 #[tokio::test]
 async fn the_earliest_checkpoint_is_the_baseline_not_the_latest() {
     let f = fixture();

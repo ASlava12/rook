@@ -100,12 +100,22 @@ impl Rook {
         ];
         let mut files = Vec::new();
         for (path, original) in before {
-            let now = std::fs::read(&path).ok();
             let was = match original {
                 Some(id) => Some(self.store.get(&id)?),
                 None => None,
             };
-            files.push(compare(&path, &roots, was.as_deref(), now.as_deref(), with_diff));
+            files.push(match on_disk(&path) {
+                OnDisk::Text(now) => compare(&path, &roots, was.as_deref(), Some(&now), with_diff),
+                OnDisk::Gone => compare(&path, &roots, was.as_deref(), None, with_diff),
+                // Too large to hold, let alone to diff. Whether it changed is
+                // still answerable: the id a capture is stored under is the hash
+                // of its content, so hashing the file says which without either
+                // of them being in memory at once.
+                OnDisk::Large(id) => {
+                    let same = original.is_some_and(|was| was == id);
+                    named(&path, &roots, if same { Change::Unchanged } else { Change::Modified })
+                }
+            });
         }
         files.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(Changes { files })
@@ -158,6 +168,39 @@ fn compare(
         file.diff = Some(diff.unified_diff().context_radius(3).header("before", "after").to_string());
     }
     file
+}
+
+enum OnDisk {
+    Gone,
+    Text(Vec<u8>),
+    /// Past what is worth holding: its content hash, which is what a capture is
+    /// stored under.
+    Large(ObjectId),
+}
+
+/// Read a file only as far as it is worth reading.
+///
+/// The cap used to be applied after the bytes were all in memory, which is not a
+/// cap: a session that wrote a two-gigabyte file made `session diff` read two
+/// gigabytes in order to decide it would not diff them. Its length answers that
+/// first, and for one too large to hold, its hash answers whether it changed —
+/// which is the id a capture is stored under, so the two are comparable without
+/// either being in memory.
+fn on_disk(path: &Path) -> OnDisk {
+    let Ok(meta) = std::fs::metadata(path) else { return OnDisk::Gone };
+    if meta.len() as usize <= MAX_DIFF_BYTES {
+        return std::fs::read(path).map(OnDisk::Text).unwrap_or(OnDisk::Gone);
+    }
+    match std::fs::File::open(path).and_then(ObjectId::of_reader) {
+        Ok(id) => OnDisk::Large(id),
+        Err(_) => OnDisk::Gone,
+    }
+}
+
+/// A change with nothing to say about its contents.
+fn named(path: &Path, roots: &[PathBuf], change: Change) -> FileChange {
+    let relative = roots.iter().find_map(|root| path.strip_prefix(root).ok()).unwrap_or(path);
+    FileChange { path: relative.display().to_string(), change, lines_added: 0, lines_removed: 0, diff: None }
 }
 
 /// Text small enough to diff. Absent content reads as empty, so an added or

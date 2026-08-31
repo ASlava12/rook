@@ -21,7 +21,9 @@ what unblocks the most.
   exercised against a live model in CI.
 - **Session diffs** — what a session changed on disk, from its own checkpoints:
   no repository, no staging, and files that were never versioned. Text diffs
-  with counts, binary reported without one. 4 tests.
+  with counts, binary reported without one, and a file past what is worth
+  rendering answered by its hash — which is the id its capture is stored under,
+  so whether it changed is decided without either copy being in memory. 5 tests.
 - **Rewind and fork** — `rook session rewind` restores workspace files as well as
   the conversation, deleting files the turn created, and forks rather than
   truncating so the rewound-past turns stay readable.
