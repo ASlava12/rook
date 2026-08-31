@@ -82,7 +82,8 @@ what unblocks the most.
   the turn, so servers are not restarted between turns. 10 tests against a mock server, plus a
   real check-edit-check turn against clangd.
 - **Hooks** — five events with matchers, able to allow / ask / deny a tool call
-  and to add context the model sees. A failing `pre_tool` hook blocks; no hook
+  and to add context the model sees, bounded because that context is carried for
+  the rest of the session. A failing `pre_tool` hook blocks; no hook
   overrides the deny list. 7 tests.
 - **ACP server** — `rook acp` speaks v1 over stdio: initialize, session
   new/load/list/prompt/cancel, streamed `session/update`, approvals through

@@ -935,6 +935,34 @@ fn keeps_its_payload(at: &std::path::Path) -> String {
     }
 }
 
+/// A hook's stdout becomes context the model carries for the rest of the
+/// session, and it was read whole: `cat` on the wrong file spent the window.
+///
+/// Asked of the hooks directly rather than through a turn, because the cap is
+/// generous enough that a fixture's small window would refuse the request
+/// before the assertion was reached — which is its own answer, and not this one.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_hook_that_will_not_stop_talking_is_cut_off() {
+    let (hooks, bad) = rook_core::hooks::Hooks::compile(&[hook(
+        rook_core::hooks::Event::SessionStart,
+        // Far past what a reply may be, and cheap to produce. `head` closes the
+        // pipe, so `yes` is stopped by its own reader rather than by ours.
+        "yes chatter | head -c 4000000",
+    )]);
+    assert!(bad.is_empty(), "{bad:?}");
+
+    let ran = std::time::Instant::now();
+    let outcome = hooks.run(rook_core::hooks::Event::SessionStart, "", &serde_json::json!({})).await;
+    let said = outcome.context().expect("the hook did run");
+
+    assert!(said.starts_with("chatter"), "and what it said is kept: {}", &said[..40.min(said.len())]);
+    assert!(said.len() <= 64 * 1024, "up to the cap and no further: {} bytes", said.len());
+    // Reading only the first bytes would leave the writer blocked on a full pipe
+    // and every hook would end at its timeout instead.
+    assert!(ran.elapsed() < std::time::Duration::from_secs(5), "it took {:?}", ran.elapsed());
+}
+
 #[tokio::test]
 async fn a_pre_tool_hook_can_block_a_call_the_policy_would_have_allowed() {
     let f = fixture();

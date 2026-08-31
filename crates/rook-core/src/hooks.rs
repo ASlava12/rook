@@ -188,6 +188,11 @@ fn shell(command: &str) -> tokio::process::Command {
     c
 }
 
+/// What a hook may say. Its stdout becomes context the model carries, so a
+/// chatty one would spend the window on its own output; the timeout bounds how
+/// long it talks and this bounds how much.
+const MOST_REPLY_BYTES: usize = 64 * 1024;
+
 async fn invoke(config: &HookConfig, payload: &serde_json::Value) -> std::io::Result<HookReply> {
     let mut command = shell(&config.command);
     let mut child = command
@@ -202,21 +207,27 @@ async fn invoke(config: &HookConfig, payload: &serde_json::Value) -> std::io::Re
         let _ = stdin.shutdown().await;
     }
 
-    let output = tokio::time::timeout(Duration::from_secs(config.timeout_secs), child.wait_with_output())
-        .await
-        .map_err(|_| {
+    let (mut out, mut err) = (child.stdout.take(), child.stderr.take());
+    let finished = async {
+        // Both together, for the reason `run_command` reads them together: a
+        // hook that fills the stderr pipe while stdout is drained blocks on the
+        // write and never finishes either.
+        let (stdout, stderr) = tokio::join!(bounded(&mut out), bounded(&mut err));
+        (child.wait().await, stdout, stderr)
+    };
+    let (status, stdout, stderr) =
+        tokio::time::timeout(Duration::from_secs(config.timeout_secs), finished).await.map_err(|_| {
             std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 format!("no answer within {}s", config.timeout_secs),
             )
-        })??;
+        })?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let status = status?;
+    if !status.success() {
         return Err(std::io::Error::other(format!(
             "exit {}: {}",
-            output.status.code().unwrap_or(-1),
+            status.code().unwrap_or(-1),
             if stderr.is_empty() { stdout } else { stderr }
         )));
     }
@@ -224,4 +235,23 @@ async fn invoke(config: &HookConfig, payload: &serde_json::Value) -> std::io::Re
     // JSON when it is JSON, otherwise whatever was printed is the context.
     Ok(serde_json::from_str(&stdout)
         .unwrap_or(HookReply { context: (!stdout.is_empty()).then_some(stdout), ..Default::default() }))
+}
+
+/// Read to the end, keep the beginning.
+///
+/// Not `take`: stopping the read leaves the writer blocked on a full pipe, so a
+/// hook that printed more than the cap would never exit and every one of them
+/// would end at its timeout. The pipe is drained; only the memory is bounded.
+async fn bounded(stream: &mut Option<impl tokio::io::AsyncRead + Unpin>) -> String {
+    use tokio::io::AsyncReadExt;
+    let Some(stream) = stream else { return String::new() };
+    let (mut kept, mut chunk) = (Vec::new(), vec![0u8; 16 * 1024]);
+    while let Ok(n) = stream.read(&mut chunk).await {
+        if n == 0 {
+            break;
+        }
+        let room = MOST_REPLY_BYTES.saturating_sub(kept.len());
+        kept.extend_from_slice(&chunk[..n.min(room)]);
+    }
+    String::from_utf8_lossy(&kept).trim().to_string()
 }
