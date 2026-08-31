@@ -149,14 +149,20 @@ fn fetch(source: &str, refresh: bool) -> Result<PathBuf> {
 /// One directory per source, named after it rather than hashed: a cache you
 /// cannot read is one you cannot clear with any confidence.
 fn cache_name(source: &str) -> String {
-    source
+    let name: String = source
         .trim_end_matches('/')
         .trim_end_matches(".git")
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '.' { c } else { '-' })
-        .collect::<String>()
-        .trim_matches('-')
-        .to_string()
+        .collect();
+    // Dots are kept because they are half of what makes a host readable, and
+    // trimmed at the ends because a name of nothing but them is `..` — a
+    // directory built from configuration that points outside the cache. No
+    // separator survives the mapping, so this is the only way out.
+    match name.trim_matches(['-', '.']) {
+        "" => "source".into(),
+        trimmed => trimmed.to_string(),
+    }
 }
 
 fn git(args: &[&str], cwd: Option<&Path>) -> Result<()> {
@@ -214,4 +220,21 @@ fn copy_tree(from: &Path, to: &Path, budget: &mut Budget) -> Result<()> {
             .map_err(|e| CoreError::Io { path: target.clone(), source: e })?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cache_name;
+
+    /// The name becomes a directory under the cache, and it is built from
+    /// configuration. No separator survives the mapping, so the only way out was
+    /// a name of nothing but dots.
+    #[test]
+    fn a_cache_name_is_always_one_directory_inside_the_cache() {
+        assert_eq!(cache_name("https://github.com/rook/skills.git"), "https---github.com-rook-skills");
+        assert_eq!(cache_name("git@github.com:rook/skills"), "git-github.com-rook-skills");
+        assert_eq!(cache_name("..@"), "source", "not the cache's parent");
+        assert_eq!(cache_name("https://..."), "https", "and never only dots");
+        assert!(!cache_name("https://../../x").contains('/'), "and never a path of its own");
+    }
 }

@@ -60,10 +60,11 @@ is only a `SKILL.md`, which is most of them, adds nothing to the reply.
 
 ## What ships with Rook
 
-Four skills come in the box, under `skills/` in the source tree:
+Five skills come in the box, under `skills/` in the source tree:
 
 | skill | what it is for |
 |---|---|
+| `decision-matrix` | Working a fork out loud: options, weighted criteria, and whether the winner survives moving the weights |
 | `in-place-edit` | Editing files from the shell across GNU, BSD and Windows userlands |
 | `project-instructions` | Writing a project's `AGENTS.md`, and keeping it worth its cost |
 | `rust-release` | Cutting a release of a Rust workspace |

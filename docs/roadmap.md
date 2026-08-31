@@ -844,6 +844,17 @@ recorded so the design question survives the session that raised it.
   chose to declare. Its skills still load, because a skill is text; its servers
   do not, and each one is named on start with the line that would enable it. 2
   tests.
+- **Deciding out loud** — the shipped `decision-matrix` skill, for a fork that is
+  not obvious: the options, the requirements that eliminate one before it is
+  scored, five to eight independent criteria weighted to 1.0, a scale whose
+  middle is defined, and the check that matters most — move each weight by a
+  fifth and see whether the winner moves, because a leader that does not survive
+  that is resting on the weights and not on evidence. It ends at `ask`, where the
+  person picks one or writes something else, and an answer that is not on the
+  list is the most useful thing it can produce: it means the fork was framed
+  wrongly. A skill rather than a tool for the reason
+  [ADR-0010](adr/0010-no-todo-tool.md) gives about planning — this is a
+  discipline, and a discipline needs no schema on every request.
 - **A pause the conversation can see** — a session resumed a week later replayed
   as though it had paused for a moment, and what to do next often depends on
   which it was: "have you already run the tests" has a different answer across a
