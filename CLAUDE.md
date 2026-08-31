@@ -55,6 +55,16 @@ that a manifest keeps files alive, the caller passes an expander.
 context — has a limit in `Config` and a test that it is enforced. A new unbounded
 accumulator is a bug, not a follow-up.
 
+**A limit is applied while the bytes arrive, not after.** `bytes.len() > MAX`
+reads as a cap and is not one: by the time it is false the memory is already
+spent, which is the whole thing it was there to prevent. Three shipped that way —
+a command's output, a file `session diff` was deciding not to render, and a page
+`web_fetch` had already downloaded. Read in chunks and stop, or ask the cheap
+question first: a file's length before its contents, and a hash rather than a
+comparison when it is too large to hold. Draining still matters where a writer is
+on the other end — `hooks` deadlocked when it stopped reading a full pipe — so
+bound the memory and read to the end.
+
 **Errors say what to do.** `CaptureTooBig` names the limit that was hit.
 `StoreError::Locked` says which process is probably holding it and what to do
 instead. `NoCompatibleVersion` lists every mismatch, not the first.

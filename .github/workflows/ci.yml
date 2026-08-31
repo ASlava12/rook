@@ -44,6 +44,10 @@ jobs:
         with:
           release: '14.2'
           usesh: true
+          # Nothing follows this step, so copying the VM's workspace back is
+          # `target/` — two and a half gigabytes over ssh that nobody reads, and
+          # the one part of this job that has failed on its own.
+          copyback: false
           prepare: pkg install -y rust
           run: |
             cargo test --workspace
