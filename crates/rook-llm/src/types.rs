@@ -223,6 +223,37 @@ pub struct Request {
     /// Providers that have no notion of effort ignore it.
     #[serde(default)]
     pub effort: Option<Effort>,
+    /// How long the cached prefix should be kept, where the provider offers a
+    /// choice. Ignored by the ones that do not.
+    #[serde(default)]
+    pub cache_ttl: CacheTtl,
+}
+
+/// How long a cached prompt prefix is kept.
+///
+/// The trade is which side of a pause you pay on. A write costs more for the
+/// longer one and a hit costs a tenth either way, so an hour is the better deal
+/// exactly when a conversation outlives five minutes — which a person thinking
+/// does and a scripted `rook run` does not, since its one turn never reads the
+/// cache it wrote.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CacheTtl {
+    #[default]
+    #[serde(rename = "5m")]
+    FiveMinutes,
+    #[serde(rename = "1h")]
+    OneHour,
+}
+
+impl CacheTtl {
+    pub fn parse(text: &str) -> Option<Self> {
+        Some(match text.trim().to_lowercase().as_str() {
+            "5m" => CacheTtl::FiveMinutes,
+            "1h" => CacheTtl::OneHour,
+            _ => return None,
+        })
+    }
 }
 
 impl Request {
@@ -233,6 +264,7 @@ impl Request {
             max_output_tokens: 4096,
             temperature: 0.0,
             effort: None,
+            cache_ttl: CacheTtl::default(),
         }
     }
 }

@@ -39,6 +39,8 @@ Add a row when you implement something after reading a reference. Add it to
 | Telling the model what day it is | codex `430d26b` *classify clock tools as built-in control tools* — taken as a fact beside the prompt rather than a tool, since a date needs no round trip and must not sit in a prefix that is supposed to cache | source, via `refs advance` | `AgentLoop::request_messages`, `rook_store::today` |
 | Resuming a session where it belongs | codex `f5636bb` *restore thread cwd from owned settings snapshots* — ours took whatever directory the command was run from, so the conversation was one project's and the edits another's | source, via `refs advance` | `Rook::following`, `rook run --session`, `rook chat --resume` |
 | A tool name a model will accept | codex `94cbbdd` *support package-style MCP server names* — theirs widens what a server may be called; ours already took such a name and sanitised it, but a namespaced name over sixty-four characters makes the provider reject every request | source, via `refs advance` | `mcp::namespaced` |
+| A sub-task that did not finish, said as such | hermes' five delegation commits — theirs reported a failed child as completed; ours reported an unfinished one in the same shape as a finished one | source, via `refs advance` | `AgentLoop::delegate`, `finished` |
+| Choosing how long a cached prefix lives | goose `fb15d4e` *configurable Anthropic prompt-cache TTL* — ours wrote the five-minute default, so a pause longer than that paid to reprocess the whole prefix | source, via `refs advance` | `[agent] prompt_cache_ttl`, `CacheTtl` |
 | A rollback whose undo point is real | hermes `1315e65a5`, `154fd10af` *failed rollback keeps the skill and the snapshots* / *name the preserved snapshot path* — ours captured first and discarded the result, then claimed undoability either way | source, via `refs advance` | `Rook::rollback_skill`, `Rollback::undo` |
 | The effort the user asked for reaching the wire | hermes `b954547e7` *hand-rolled effort map inverted the ladder* — theirs was inverted, ours was absent: the OpenAI dialect sent no `reasoning_effort` at all | source, via `refs advance` | `rook-llm/src/openai.rs`, `crates/rook-llm/tests/openai.rs` |
 | Waiting out a provider that said "later" | codex `a73bf25` *decouple HTTP retry backoff from overload integration testing* — theirs refines a retry; here there was none at all, and a 429 ended a turn that had run for minutes | source, via `refs advance` | `rook-llm/src/retry.rs`, `from_spec_with` |
@@ -57,6 +59,34 @@ Add a row when you implement something after reading a reference. Add it to
 `cargo xtask refs advance` prints what landed upstream since the pointer was last
 moved; what follows is what was done with it, so a dismissal is a decision rather
 than an omission.
+
+**2026-08-31 (twenty-fourth pass)** — hermes 42, codex 3, goose 2, opencode 1.
+Two taken. hermes' remaining thirty-odd are their own: group-chat transports
+across gateways, Telegram polling, dashboard auth cookies, and a long run of
+native-compaction leases and backoff rows, which Rook has no equivalent of
+because it compacts itself.
+
+- goose `fb15d4e` *configurable Anthropic prompt-cache TTL (5m/1h)* — **taken.**
+  The cached prefix was written with the unnamed five-minute default, so a person
+  who thought for six minutes paid to reprocess the whole of it. `[agent]
+  prompt_cache_ttl` chooses, and the reasoning is why it is a choice rather than
+  a new default: the hour costs more to write and pays off only when the
+  conversation outlives five minutes, which a conversation does and a scripted
+  `rook run` — one turn, never reading the cache it wrote — does not.
+- hermes `1b6ea1a2c`, `ec02d5179`, `5ce8f7155`, `5a134383f`, `b4d517438` — five
+  commits on one theme: *a sub-agent that failed was reported to the parent as
+  completed*. Here the failure itself is reported as one, but a child that ran
+  out of steps read exactly like a child that finished: the stop reason was in
+  the line and nothing else distinguished it, and a parent skimming five uniform
+  blocks reads them uniformly. It now says it did not finish, and why, with what
+  it managed still following — that is usually most of the work.
+- codex `a9519cbc` *make the update_plan tool opt-in* — nothing to take, and
+  worth recording: their checklist tool is now off by default, which is the
+  direction [ADR-0010](../docs/adr/0010-no-todo-tool.md) went further in on the
+  strength of goose's own A/B.
+- codex `b7cd519c` *mark history ingestion requests in turn metadata* — already
+  separate here: what a turn puts beside the newest message is never logged, so
+  the replay that rebuilds history cannot mistake it for something said.
 
 **2026-08-31 (twenty-third pass)** — acp 2, openhands 1, all documentation: a
 registry listing twice over, and a save button disabled when an edit is reverted.

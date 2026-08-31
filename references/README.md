@@ -20,6 +20,7 @@ cargo xtask refs init codex    # or just one
 | `cline/` | [cline/cline](https://github.com/cline/cline) | Apache-2.0 | Context-window management and diff-editing reliability. |
 | `hermes/` | [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) | MIT | Memory, skills and local-model handling. |
 | `openhands/` | [OpenHands/OpenHands](https://github.com/OpenHands/OpenHands) | MIT | Autonomous task execution and sandboxing. |
+| `openclaw/` | [openclaw/openclaw](https://github.com/openclaw/openclaw) | MIT | A persistent assistant reached through the channels people already use: one gateway, many transports, and a policy layer between them. |
 
 `agent0ai/agent-zero` is deliberately absent: its repository declares no license,
 so there is nothing here that says reading it is fine.

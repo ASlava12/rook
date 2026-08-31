@@ -70,6 +70,26 @@ fn provider(url: String) -> Anthropic {
 
 const DONE: &str = r#"{"id":"msg_1","model":"claude-opus-5","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":9,"output_tokens":2}}"#;
 
+/// The hour is the better deal exactly when a conversation outlives five
+/// minutes, and it is not the default because a scripted single turn never
+/// reads the cache it wrote.
+#[tokio::test]
+async fn a_longer_cache_lifetime_is_asked_for_only_when_it_is_asked_for() {
+    let cached = |ttl| async move {
+        let (url, seen) = serve("200 OK", "application/json", DONE).await;
+        let mut request = Request::new(vec![Message::system("be terse").cacheable(), Message::user("hello")]);
+        request.cache_ttl = ttl;
+        provider(url).complete(request).await.unwrap();
+        seen.lock().unwrap().clone().unwrap()["system"][0]["cache_control"].clone()
+    };
+
+    assert_eq!(cached(rook_llm::CacheTtl::FiveMinutes).await["type"], "ephemeral");
+    // The default is unnamed on the wire: a model that does not offer the choice
+    // rejects the request over an unknown field.
+    assert!(cached(rook_llm::CacheTtl::FiveMinutes).await.get("ttl").is_none());
+    assert_eq!(cached(rook_llm::CacheTtl::OneHour).await["ttl"], "1h");
+}
+
 #[tokio::test]
 async fn the_system_prompt_is_lifted_out_of_the_message_list() {
     let (url, seen) = serve("200 OK", "application/json", DONE).await;

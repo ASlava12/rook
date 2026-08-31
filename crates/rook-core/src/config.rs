@@ -122,6 +122,13 @@ pub struct AgentConfig {
     /// request, so a repository cannot spend the context window by committing a
     /// large one.
     pub max_instructions_bytes: usize,
+    /// How long a provider that offers the choice should keep the cached prompt
+    /// prefix: `5m` or `1h`. A longer write costs more and a hit costs a tenth
+    /// either way, so the hour pays off exactly when a conversation outlives
+    /// five minutes — a person thinking between turns. A scripted `rook run`
+    /// never reads the cache its one turn wrote, which is why this is not the
+    /// default.
+    pub prompt_cache_ttl: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -273,6 +280,7 @@ impl Default for AgentConfig {
             stream_idle_timeout_secs: 90,
             answer_timeout_secs: 600,
             max_instructions_bytes: 32 * 1024,
+            prompt_cache_ttl: "5m".into(),
         }
     }
 }
@@ -355,6 +363,10 @@ impl AgentConfig {
     /// reason to stop working.
     pub fn effort(&self) -> rook_llm::Effort {
         rook_llm::Effort::parse(&self.effort).unwrap_or_default()
+    }
+
+    pub fn cache_ttl(&self) -> rook_llm::CacheTtl {
+        rook_llm::CacheTtl::parse(&self.prompt_cache_ttl).unwrap_or_default()
     }
 
     pub fn answer_timeout(&self) -> std::time::Duration {

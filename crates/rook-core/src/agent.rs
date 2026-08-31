@@ -139,6 +139,15 @@ impl Interjections {
     }
 }
 
+/// Whether a turn ended because it was done.
+///
+/// `max_steps` and `max_tokens` are a turn that stopped, not one that finished,
+/// and the difference is the whole of what a parent needs to know about a
+/// sub-task it did not watch.
+fn finished(stopped: &str) -> bool {
+    matches!(stopped, "end_turn" | "stop")
+}
+
 /// What to show whoever is asked to approve a call.
 ///
 /// A variant rather than a string because building it costs a file read and a
@@ -993,6 +1002,7 @@ impl<'a> AgentLoop<'a> {
             let mut request = Request::new(messages.clone());
             request.tools = self.tool_specs();
             request.effort = Some(self.effort);
+            request.cache_ttl = self.rook.config.agent.cache_ttl();
             let mut stream =
                 self.provider.stream(request).await.map_err(|e| CoreError::Other(e.to_string()))?;
             let mut assembler = Assembler::default();
@@ -1462,10 +1472,19 @@ impl<'a> AgentLoop<'a> {
                     // Or the turn reports the children's input against only its
                     // own cache, and the ratio a person reads is wrong.
                     outcome.cached_tokens += child.cached_tokens;
-                    report.push(format!(
-                        "### {task}\nsub-agent {id}, {} steps ({}):\n{}",
-                        child.steps, child.stopped, child.reply
-                    ));
+                    // A child that ran out of steps, or was cut off mid-answer,
+                    // reported the same way as one that finished: the stop
+                    // reason was in the line, and five uniform blocks are read
+                    // uniformly. What it managed still follows, because it is
+                    // usually most of the work.
+                    let how = match finished(&child.stopped) {
+                        true => format!("sub-agent {id}, {} steps ({}):", child.steps, child.stopped),
+                        false => format!(
+                            "sub-agent {id} did not finish — {} after {} steps. What it had done:",
+                            child.stopped, child.steps
+                        ),
+                    };
+                    report.push(format!("### {task}\n{how}\n{}", child.reply));
                 }
                 Err(e) => report.push(format!("### {task}\nfailed: {e}")),
             }

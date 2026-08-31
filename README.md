@@ -384,6 +384,7 @@ The `provider/model` in `config.toml` picks the wire dialect:
 [agent]
 model  = "anthropic/claude-opus-5"  # ANTHROPIC_API_KEY
 effort = "high"                     # low | medium | high | xhigh | max
+prompt_cache_ttl = "5m"             # 5m | 1h — see below
 # model = "ollama/qwen3-coder:30b"  # a local endpoint, no key
 # model = "openai/gpt-5.5"          # OPENAI_API_KEY
 # model = "google/gemini-2.5-pro"   # GEMINI_API_KEY, or GOOGLE_API_KEY
@@ -392,6 +393,12 @@ effort = "high"                     # low | medium | high | xhigh | max
 Three dialects are spoken natively — Anthropic's Messages API, Google's
 `generateContent` and OpenAI's chat completions — and the last of those covers
 `lmstudio`, `ollama`, vLLM, llama.cpp and anything else that answers it.
+
+`prompt_cache_ttl` is which side of a pause you pay on. A cache write costs more
+for the hour and a hit costs a tenth either way, so `1h` pays off exactly when a
+conversation outlives five minutes — a person thinking between turns. It is not
+the default because a scripted `rook run` never reads the cache its one turn
+wrote, and would simply pay more for it.
 
 Keys come from the environment, never from the config file or the store.
 `rook models` asks the endpoint what it serves. Effort applies where the provider

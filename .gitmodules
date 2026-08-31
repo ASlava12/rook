@@ -40,3 +40,9 @@
 	branch = main
 	shallow = true
 	update = none
+[submodule "references/openclaw"]
+	path = references/openclaw
+	url = https://github.com/openclaw/openclaw.git
+	branch = main
+	shallow = true
+	update = none

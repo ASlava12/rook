@@ -350,12 +350,12 @@ fn wire_request(model: &str, request: &Request, stream: bool) -> serde_json::Val
             }
             Role::User => messages.push(serde_json::json!({
                 "role": "user",
-                "content": [text_block(&message.content, message.cache)],
+                "content": [text_block(&message.content, message.cache, request.cache_ttl)],
             })),
             Role::Assistant => {
                 let mut blocks = Vec::new();
                 if !message.content.trim().is_empty() {
-                    blocks.push(text_block(&message.content, false));
+                    blocks.push(text_block(&message.content, false, request.cache_ttl));
                 }
                 for call in &message.tool_calls {
                     blocks.push(serde_json::json!({
@@ -369,7 +369,7 @@ fn wire_request(model: &str, request: &Request, stream: bool) -> serde_json::Val
                 if message.cache
                     && let Some(last) = blocks.last_mut()
                 {
-                    last["cache_control"] = ephemeral();
+                    last["cache_control"] = ephemeral(request.cache_ttl);
                 }
                 // An assistant turn with nothing in it is rejected.
                 if !blocks.is_empty() {
@@ -388,7 +388,7 @@ fn wire_request(model: &str, request: &Request, stream: bool) -> serde_json::Val
     if !system.is_empty() {
         // As an array so the breakpoint can sit on it; tools render before
         // system, so one marker here caches both.
-        body["system"] = serde_json::json!([text_block(&system, cache_system)]);
+        body["system"] = serde_json::json!([text_block(&system, cache_system, request.cache_ttl)]);
     }
     if takes_adaptive_thinking(model) {
         // `display` defaults to omitted on these models, which streams empty
@@ -415,16 +415,21 @@ fn wire_request(model: &str, request: &Request, stream: bool) -> serde_json::Val
     body
 }
 
-fn text_block(text: &str, cache: bool) -> serde_json::Value {
+fn text_block(text: &str, cache: bool, ttl: crate::CacheTtl) -> serde_json::Value {
     let mut block = serde_json::json!({ "type": "text", "text": text });
     if cache {
-        block["cache_control"] = ephemeral();
+        block["cache_control"] = ephemeral(ttl);
     }
     block
 }
 
-fn ephemeral() -> serde_json::Value {
-    serde_json::json!({ "type": "ephemeral" })
+/// The five-minute default is unnamed on the wire, so only the hour is sent —
+/// an unknown field is a rejected request on a model that does not offer it.
+fn ephemeral(ttl: crate::CacheTtl) -> serde_json::Value {
+    match ttl {
+        crate::CacheTtl::FiveMinutes => serde_json::json!({ "type": "ephemeral" }),
+        crate::CacheTtl::OneHour => serde_json::json!({ "type": "ephemeral", "ttl": "1h" }),
+    }
 }
 
 #[derive(Deserialize)]

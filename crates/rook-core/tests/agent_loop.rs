@@ -2368,6 +2368,31 @@ async fn a_delegation_reports_each_sub_task_as_it_lands() {
     assert_eq!(named, ["check a", "check b", "check c"], "each names its own task");
 }
 
+/// A child that ran out of steps read exactly like one that finished: the stop
+/// reason was in the line, and a parent skimming five uniform blocks reads them
+/// uniformly — and then answers as though the work were done.
+#[tokio::test]
+async fn a_sub_task_that_did_not_finish_is_not_reported_like_one_that_did() {
+    let f = fixture();
+    let session = f.rook.start_session("unfinished").unwrap();
+    let script = vec![
+        call("delegate", serde_json::json!({ "tasks": ["look around"], "max_steps": 1 })),
+        // The child's one step asks for a tool, so it stops at its limit rather
+        // than at an answer.
+        call("list_dir", serde_json::json!({ "path": "." })),
+        reply("so much for that"),
+    ];
+
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
+    agent.allow_everything_not_denied();
+    agent.run("delegate one thing").await.unwrap();
+
+    let transcript = f.rook.transcript(session, 0, 200, 8000).unwrap();
+    let report = transcript.iter().rev().find(|e| e.label == "delegate").unwrap();
+    assert!(report.body.contains("did not finish"), "{}", report.body);
+    assert!(report.body.contains("max_steps"), "and why: {}", report.body);
+}
+
 #[tokio::test]
 async fn the_report_keeps_the_order_the_tasks_were_asked_in() {
     let f = fixture();
