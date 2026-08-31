@@ -58,3 +58,34 @@ async fn a_file_far_larger_than_memory_would_hold_is_still_searched_line_by_line
     let found = find(dir.path(), serde_json::json!({ "pattern": "the needle" })).await;
     assert!(found.contains("huge.log:200001"), "found at its real line number: {found}");
 }
+
+/// Searching one file printed `:12:text`: the path stripped of itself is empty,
+/// and a hit that names nothing is a hit nobody can open.
+#[tokio::test]
+async fn searching_a_single_file_still_says_which_file() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("one.rs"), "fn needle() {}\n").unwrap();
+
+    let found = find(dir.path(), serde_json::json!({ "pattern": "needle", "path": "one.rs" })).await;
+
+    assert!(found.contains("one.rs:1:"), "{found}");
+}
+
+/// The hits were capped and the looking was not: the walk has no idea whether
+/// it is in a workspace or a home directory until it is in one.
+#[tokio::test]
+async fn a_walk_that_will_not_end_is_given_up_on_and_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    for i in 0..12 {
+        std::fs::write(dir.path().join(format!("f{i}.txt")), "nothing here\n").unwrap();
+    }
+    let mut ctx = ToolContext::new(dir.path().to_path_buf());
+    ctx.max_files_searched = 5;
+
+    let found = Search.call(&ctx, &serde_json::json!({ "pattern": "needle" })).await.unwrap();
+
+    assert!(found.content.contains("stopped after 5 files"), "{}", found.content);
+    assert!(found.content.contains("narrow"), "and says what to do about it: {}", found.content);
+    assert!(found.truncated, "and the outcome says it was cut: {found:?}");
+    assert_eq!(found.meta.get("files_scanned"), Some(&serde_json::json!(5)));
+}

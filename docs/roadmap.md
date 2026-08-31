@@ -31,7 +31,9 @@ what unblocks the most.
   `list_dir`, regex `search`, `run_command` with timeout, output cap and deny
   list. Every edit to one file goes in one call and a refactor across several in
   one `files`, applied in order against the text as it then stands; a batch that
-  cannot finish writes nothing, in any of the files it names. Every cap
+  cannot finish writes nothing, in any of the files it names. `search` caps the
+  looking as well as the hits — `[sandbox] max_files_searched` — because a walk
+  cannot tell a workspace from a home directory until it is in one. Every cap
   is enforced while output is read rather than after, both ends of a long output
   survive it — a compiler's first error is at the head and the reason for a
   failure is not the consequences at the tail — and a timeout kills the whole

@@ -137,6 +137,10 @@ pub struct ToolContext {
     pub spill_dir: Option<PathBuf>,
     /// Ceiling on one such file. Zero keeps none.
     pub max_spill_bytes: u64,
+    /// Files `search` may look at before giving up. The hits are capped by the
+    /// call; this caps the looking, which is what turns a walk of somebody's
+    /// home directory into a hang.
+    pub max_files_searched: usize,
 }
 
 impl std::fmt::Debug for ToolContext {
@@ -148,6 +152,7 @@ impl std::fmt::Debug for ToolContext {
             .field("allow_outside_workspace", &self.allow_outside_workspace)
             .field("spill_dir", &self.spill_dir)
             .field("max_spill_bytes", &self.max_spill_bytes)
+            .field("max_files_searched", &self.max_files_searched)
             .field("jobs", &self.jobs.is_some())
             .field("files", &self.files.is_some())
             .field("terminals", &self.terminals.is_some())
@@ -195,6 +200,7 @@ impl ToolContext {
             jobs: None,
             spill_dir: None,
             max_spill_bytes: 0,
+            max_files_searched: 20_000,
         }
     }
 

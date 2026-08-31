@@ -234,6 +234,10 @@ pub struct SandboxConfig {
     /// is waiting on, so the cap is what stops a turn from filling the machine
     /// with servers.
     pub max_background_jobs: usize,
+    /// Files `search` may look at before giving up. Its hits are capped by the
+    /// call; without this the looking is not, and a walk has no way to know
+    /// whether it is in a workspace or a home directory until it is in one.
+    pub max_files_searched: usize,
     pub command_timeout_secs: u64,
     /// Lets file tools read and write outside the workspace, including through
     /// a symlink that leads out of it. Off by default: a workspace that cannot
@@ -332,6 +336,7 @@ impl Default for SandboxConfig {
             max_spill_bytes: 64 * 1024 * 1024,
             max_output_files: 100,
             max_background_jobs: 4,
+            max_files_searched: 20_000,
             command_timeout_secs: 120,
             allow_outside_workspace: false,
         }

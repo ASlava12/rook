@@ -41,6 +41,7 @@ impl Tool for Search {
         let root = ctx.resolve(args.get("path").and_then(|v| v.as_str()).unwrap_or("."))?;
         let glob = args.get("glob").and_then(|v| v.as_str()).map(str::to_string);
         let limit = arg_usize(args, "limit", 200);
+        let most_files = ctx.max_files_searched;
 
         let re = regex::Regex::new(&pattern).map_err(|e| ToolError::Invalid {
             tool: self.name().to_string(),
@@ -52,6 +53,7 @@ impl Tool for Search {
             let mut hits = Vec::new();
             let mut total = 0usize;
             let mut files_scanned = 0usize;
+            let mut gave_up = false;
             // Not following links is the default; stated because it is the
             // workspace boundary, and a default is not a decision. `require_git`
             // is not the default: without it a `.gitignore` is silently ignored
@@ -67,6 +69,14 @@ impl Tool for Search {
                     && !path.to_string_lossy().contains(g.as_str())
                 {
                     continue;
+                }
+                // A scan with no end is a hang, and the walk has no idea how
+                // large what it is walking is: a monorepo, a `node_modules` no
+                // `.gitignore` covers, a home directory named as the path. The
+                // hits are capped already; this caps the looking.
+                if files_scanned >= most_files {
+                    gave_up = true;
+                    break;
                 }
                 let Ok(file) = std::fs::File::open(path) else { continue };
                 let mut reader = std::io::BufReader::new(file);
@@ -102,28 +112,40 @@ impl Tool for Search {
                     }
                     total += 1;
                     if hits.len() < limit {
-                        let rel = path.strip_prefix(&root).unwrap_or(path);
+                        // Empty when the path *is* the root, which is what
+                        // searching one file gives — and `:12:text` names
+                        // nothing.
+                        let rel = match path.strip_prefix(&root) {
+                            Ok(rel) if rel.as_os_str().is_empty() => path,
+                            Ok(rel) => rel,
+                            Err(_) => path,
+                        };
                         let shown: String = text.chars().take(400).collect();
                         hits.push(format!("{}:{}:{}", rel.display(), n, shown));
                     }
                 }
             }
-            (hits, total, files_scanned)
+            (hits, total, files_scanned, gave_up)
         })
         .await
         .map_err(|e| ToolError::Invalid { tool: "search".into(), message: e.to_string() })?;
 
-        let (hits, total, files_scanned) = result;
-        let truncated = total > hits.len();
+        let (hits, total, files_scanned, gave_up) = result;
+        let truncated = total > hits.len() || gave_up;
         let mut body = if hits.is_empty() {
             format!("no matches for {pattern:?} in {files_scanned} files")
         } else {
             hits.join("\n")
         };
-        if truncated {
+        if total > hits.len() {
             body.push_str(&format!(
                 "\n[{} more matches; narrow the pattern or raise limit]",
                 total - hits.len()
+            ));
+        }
+        if gave_up {
+            body.push_str(&format!(
+                "\n[stopped after {most_files} files; narrow `path` or `glob` to search the rest]"
             ));
         }
         Ok(ToolOutcome { content: body, is_error: false, truncated, full_bytes: 0, meta: Default::default() }

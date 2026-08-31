@@ -96,6 +96,7 @@ pub fn tool_context(config: &Config, workspace: &Path, output_dir: &Path) -> Too
     // not a file of the project's, and a checkpoint should not capture it.
     ctx.spill_dir = Some(output_dir.to_path_buf());
     ctx.max_spill_bytes = sandbox.max_spill_bytes;
+    ctx.max_files_searched = sandbox.max_files_searched;
     ctx
 }
 
