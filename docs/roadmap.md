@@ -763,6 +763,14 @@ recorded so the design question survives the session that raised it.
    readable by design, which is the wrong property here) and what stops a tool
    from being asked to print one.
 
+   OpenClaw has shipped the second half of that and it is worth copying: a
+   secret is bound to the exact destination hosts it may be substituted into,
+   and an unbound one **fails closed** rather than going out in plaintext. That
+   turns "what stops a tool from printing it" from a question about tools into
+   one about destinations, which is a much smaller surface — `fetch` and the MCP
+   client are the only two here that leave the machine, and `run_command` would
+   simply never be given a value to print.
+
 - **Deleting a file inside undo** — the loop checkpoints what a tool says it
   will touch, and `run_command` says nothing, so `rm` was the one change to a
   file that no rewind could reverse. Every other thing a command does leaves the

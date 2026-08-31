@@ -103,8 +103,11 @@ pub fn reaches_the_model(kind: rook_store::EventKind) -> bool {
 
 /// The same question asked of a kind's printed name, which is what a transcript
 /// entry carries.
+///
+/// Through the enum rather than a second list of names: the doc above says one
+/// answer, and two lists that must agree are two answers waiting to differ.
 pub fn kind_reaches_the_model(kind: &str) -> bool {
-    matches!(kind, "user" | "assistant" | "tool-call" | "tool-result" | "skill")
+    rook_store::EventKind::named(kind).is_some_and(reaches_the_model)
 }
 
 #[cfg(test)]
@@ -120,5 +123,20 @@ mod tests {
         // And it still walks back off a continuation byte inside the string:
         // `é` occupies bytes 1 and 2.
         assert_eq!(super::floor_char_boundary(text, 2), 1);
+    }
+
+    /// The two used to be two lists of the same answer, and the module's own
+    /// doc says there should be one.
+    #[test]
+    fn a_kind_answers_the_same_by_name_as_by_variant() {
+        for kind in rook_store::EventKind::ALL {
+            assert_eq!(
+                super::kind_reaches_the_model(kind.as_str()),
+                super::reaches_the_model(kind),
+                "{} answers differently by name",
+                kind.as_str()
+            );
+        }
+        assert!(!super::kind_reaches_the_model("not-a-kind"));
     }
 }

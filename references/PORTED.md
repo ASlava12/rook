@@ -60,6 +60,24 @@ Add a row when you implement something after reading a reference. Add it to
 moved; what follows is what was done with it, so a dismissal is a decision rather
 than an omission.
 
+**2026-08-31 (openclaw, first read)** — added at the user's request and read for
+the first time. Nothing ported yet; one thing recorded.
+
+- openclaw *secret egress host binding* — a secret is bound to the exact HTTPS
+  hosts it may be substituted into, and an unbound one fails closed rather than
+  going out in plaintext. [The roadmap's secrets entry](../docs/roadmap.md) had
+  the first half of this shape already — named, never valued, substituted at the
+  edge — and was open about not knowing what stops a tool from being asked to
+  print one. Binding to destinations answers it: the question stops being about
+  tools and becomes one about where a request is going, and only `fetch` and the
+  MCP client go anywhere. Still at the concept stage, which is where the user
+  asked for it to stay.
+- The rest of their release is transports and surfaces of their own — Discord and
+  Slack logins, a browser-extension CDP relay, Buzz rooms, ClickClack menus, a
+  macOS app, a Control UI. The architecture it is all hung from is one gateway
+  with untrusted execution behind it, which is a different shape from a local
+  agent with a single-writer store.
+
 **2026-08-31 (twenty-fourth pass)** — hermes 42, codex 3, goose 2, opencode 1.
 Two taken. hermes' remaining thirty-odd are their own: group-chat transports
 across gateways, Telegram polling, dashboard auth cookies, and a long run of

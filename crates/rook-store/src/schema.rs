@@ -159,6 +159,28 @@ impl EventKind {
             EventKind::Note => "note",
         }
     }
+
+    /// The kind that prints as `name`, if any.
+    ///
+    /// A transcript entry carries the printed name and not the variant, so a
+    /// caller that has to ask the same question of both would otherwise keep two
+    /// lists in step by hand.
+    pub fn named(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.as_str() == name)
+    }
+
+    pub const ALL: [EventKind; 10] = [
+        EventKind::UserMessage,
+        EventKind::AssistantMessage,
+        EventKind::Reasoning,
+        EventKind::ToolCall,
+        EventKind::ToolResult,
+        EventKind::SkillLoaded,
+        EventKind::Checkpoint,
+        EventKind::Compaction,
+        EventKind::Error,
+        EventKind::Note,
+    ];
 }
 
 /// One entry in a session's append-only log.
