@@ -257,3 +257,35 @@ async fn a_page_that_puts_a_bare_angle_bracket_before_multibyte_text_is_read() {
     );
     assert!(out.content.contains("\u{4eca}\u{65e5}"), "{}", out.content);
 }
+
+/// The cap was applied to a body already in memory, which is not a cap: a
+/// server answering with far more than a page is not stopped by a check that
+/// runs after it has all arrived.
+#[tokio::test]
+async fn a_page_far_larger_than_a_page_is_stopped_while_it_arrives() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let Ok((mut socket, _)) = listener.accept().await else { return };
+        let mut scratch = [0u8; 4096];
+        let _ = socket.read(&mut scratch).await;
+        // Chunked, and never ending: a `Content-Length` would let the client
+        // refuse on the header alone, which is not what is being tested.
+        let head = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n";
+        if socket.write_all(head.as_bytes()).await.is_err() {
+            return;
+        }
+        let chunk = format!("{:x}\r\n{}\r\n", 64 * 1024, "x".repeat(64 * 1024));
+        while socket.write_all(chunk.as_bytes()).await.is_ok() {}
+    });
+
+    let url = format!("http://{addr}/endless");
+    let ctx = ToolContext::new(std::env::temp_dir());
+    let fetch = Fetch::new(std::time::Duration::from_secs(20)).unwrap();
+    let out = fetch.call(&ctx, &serde_json::json!({ "url": url })).await.unwrap();
+
+    assert!(out.is_error, "{}", out.content);
+    assert!(out.content.contains("may bring back"), "and says which limit: {}", out.content);
+}

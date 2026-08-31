@@ -28,6 +28,28 @@ pub struct Fetch {
     pub(crate) client: reqwest::Client,
 }
 
+/// Read a page while it arrives, and stop at the cap.
+///
+/// The cap used to be applied to a body already in memory, which is not a cap: a
+/// server answering with ten gigabytes is not stopped by a check that runs after
+/// they arrive. What is on the other end is somebody else's, and the size it
+/// claims — or does not claim — is theirs too.
+async fn bounded_body(mut response: reqwest::Response, most: usize) -> std::result::Result<Vec<u8>, String> {
+    let mut body = Vec::new();
+    loop {
+        match response.chunk().await {
+            Ok(None) => return Ok(body),
+            Ok(Some(chunk)) => {
+                body.extend_from_slice(&chunk);
+                if body.len() > most {
+                    return Err(format!("returned more than the {most} bytes a page may bring back"));
+                }
+            }
+            Err(e) => return Err(format!("answered but did not finish: {e}")),
+        }
+    }
+}
+
 impl Fetch {
     pub fn new(timeout: std::time::Duration) -> Result<Self> {
         // The same provider the model client installs, for the same reason: the
@@ -117,16 +139,10 @@ impl Tool for Fetch {
         let kind = response.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok());
         let kind = kind.unwrap_or("").split(';').next().unwrap_or("").trim().to_string();
 
-        let body = match response.bytes().await {
+        let body = match bounded_body(response, MOST_BYTES).await {
             Ok(bytes) => bytes,
-            Err(e) => return Ok(ToolOutcome::error(format!("{url} answered but did not finish: {e}"))),
+            Err(why) => return Ok(ToolOutcome::error(format!("{url} {why}"))),
         };
-        if body.len() > MOST_BYTES {
-            return Ok(ToolOutcome::error(format!(
-                "{url} returned {} bytes, past the {MOST_BYTES} a page may bring back",
-                body.len()
-            )));
-        }
 
         let text = String::from_utf8_lossy(&body);
         let text = match kind.contains("html") {

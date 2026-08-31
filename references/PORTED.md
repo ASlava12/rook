@@ -69,9 +69,11 @@ acp 1. Nothing taken; one gap found and recorded rather than guessed at.
   logged and `context::reaches_the_model` excludes it, and within a turn the
   assistant message pushed back carries content and tool calls and no thinking at
   all. So a model that reasoned before calling a tool re-derives that reasoning
-  on the next step. It is not an error — Anthropic is the default provider and
-  requests plainly go through — so what is lost is continuity, not the request.
-  Closing it means an opaque thinking block with its signature on `Message`,
+  on the next step. Whether that is merely a loss of continuity or a refused
+  request is unknown, and this project of all things should not guess: nothing
+  here has run against a live model, which is the first item in the README's own
+  list of what is not done. Closing it means an opaque thinking block with its
+  signature on `Message`,
   filled and echoed by one dialect, and a wire detail implemented against
   documentation rather than a live model is how every request breaks at once.
   `cargo xtask smoke` is what would settle it. Written down in the roadmap so it
