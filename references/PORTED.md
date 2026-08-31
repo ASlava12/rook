@@ -58,6 +58,12 @@ Add a row when you implement something after reading a reference. Add it to
 moved; what follows is what was done with it, so a dismissal is a decision rather
 than an omission.
 
+**2026-08-31 (twenty-third pass)** — acp 2, openhands 1, all documentation: a
+registry listing twice over, and a save button disabled when an edit is reverted.
+Nothing to take. The pass was worth making anyway, because looking at what the
+research notes claim about Rook found three claims that had gone stale — ACP, MCP
+and Agent Plugins were still listed there as *planned*.
+
 **2026-08-30 (twenty-second pass)** — codex 4, hermes 26, openhands 2, acp 1.
 One taken, and it was their new feature meeting our old bug.
 

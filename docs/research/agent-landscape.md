@@ -118,9 +118,12 @@ Desktop has no persistent context/token usage indicator"*, and
 context usage (similar to `/context`)"* (143 reactions).
 
 → **In Rook.** No hard file-size refusal: `read_file` pages by line offset and
-tells the model how to get the rest. `run_command` caps captured output and keeps
-the *tail*, where exit messages live. Compaction is checked *before* each request
-via [`ContextBudget`](../../crates/rook-core/src/context.rs) rather than after a
+tells the model how to get the rest. `run_command` caps captured output while it
+is read and keeps *both ends* — a compiler's first error is at the head and the
+reason for a failure is not the consequences at the tail — with the whole of it
+written to a file the reply names, so the middle is somewhere rather than gone.
+Compaction is checked *before* each request via
+[`ContextBudget`](../../crates/rook-core/src/context.rs) rather than after a
 rejection, and elision is always visible to the model. The full payload is in the
 store either way, addressable by sequence number.
 
@@ -167,9 +170,16 @@ hard to read: a user's Obsidian vault, "10000s of files", deleted with no
 recovery. 166 reactions.
 
 → **In Rook.** Commands run through a deny list that is refused even with
-interactive approval; `edit_file` rejects an ambiguous match instead of guessing;
-checkpoints exist so there is something to go back to; and every tool result is
-in the store, so "what did it actually do" is answerable after the fact.
+interactive approval; `edit_file` rejects an ambiguous match instead of guessing,
+and a refactor across several files writes nothing unless every one of them
+applies; `delete_file` exists so that the one change a shell cannot undo is
+captured first; an approval shows the diff it is asking about rather than only a
+path; and every tool result is in the store, so "what did it actually do" is
+answerable after the fact.
+
+The limit is worth stating: a checkpoint holds what a *tool* said it would touch,
+and `run_command` says nothing, so what a shell command changes is outside
+`rook session rewind`.
 
 ## 8. Interoperability has settled, and it is worth adopting
 
@@ -183,12 +193,16 @@ portable capability. goose has an open issue to
   AI Foundation. **Rook reads this format today**, so skills written for other
   agents work unchanged.
 - **ACP** — JSON-RPC 2.0 over stdio, from Zed, v1 stable, adopted by JetBrains,
-  Google and GitHub. *Planned, not implemented.*
-- **MCP** — for consuming third-party tools. *Planned.*
+  Google and GitHub. `rook acp` speaks it, so no plugin is needed per editor.
+- **MCP** — both directions: `rook-mcp` consumes third-party tools over stdio and
+  streamable HTTP, and `rook mcp` offers Rook's own to anything that speaks it.
 - **Agent Plugins 1.0** — `plugin.json` packaging that defers to Agent Skills for
-  the skill format. *Planned.*
+  the skill format. Discovered from the workspace and from `$ROOK_HOME`, bringing
+  a plugin's skills and its MCP servers with it.
 
-Inventing a fourth format here would be a mistake, and the roadmap says so.
+Inventing a fourth format here would be a mistake, and the roadmap says so. All
+four are now spoken rather than planned; what is left is in
+[roadmap.md](../roadmap.md).
 
 ## Sources
 
