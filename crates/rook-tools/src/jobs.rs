@@ -17,7 +17,7 @@ use tokio::io::AsyncReadExt;
 use crate::{Result, ToolError};
 
 /// What one background command has printed and whether it is still going.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct Job {
     pub id: String,
     pub command: String,

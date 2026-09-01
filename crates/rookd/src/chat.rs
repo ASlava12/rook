@@ -219,15 +219,7 @@ async fn turn(
         Err(e) => return report(&outbound, e.to_string()),
     };
 
-    let shared = shared
-        .get_or_init(|| async {
-            Shared {
-                servers: rook_core::agent::servers_for(&rook.config, &rook.workspace),
-                mcp: Arc::new(rook.connect_mcp().await),
-                jobs: rook_core::agent::jobs_for(&rook.config),
-            }
-        })
-        .await;
+    let shared = shared.get_or_init(|| Shared::for_project(&rook)).await;
 
     let mut agent = AgentLoop::new(&rook, provider.into(), session);
     agent.policy = connection.settings.policy.clone();
@@ -296,6 +288,16 @@ pub struct Shared {
     servers: Arc<rook_core::lsp::Servers>,
     mcp: Arc<rook_core::McpSession>,
     pub jobs: Arc<rook_tools::jobs::Jobs>,
+}
+
+impl Shared {
+    pub async fn for_project(rook: &rook_core::Rook) -> Self {
+        Self {
+            servers: rook_core::agent::servers_for(&rook.config, &rook.workspace),
+            mcp: Arc::new(rook.connect_mcp().await),
+            jobs: rook_core::agent::jobs_for(&rook.config),
+        }
+    }
 }
 
 /// What the browser may change for the rest of the connection.

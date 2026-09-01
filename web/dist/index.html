@@ -94,6 +94,7 @@ form.ask button[disabled]{opacity:.5;cursor:default}
   <button data-tab="search">Search</button>
   <button data-tab="memory">Memory</button>
   <button data-tab="skills">Skills</button>
+  <button data-tab="jobs">Jobs</button>
   <button data-tab="store">Store</button>
 </nav>
 <main id="view"></main>
@@ -155,7 +156,7 @@ async function boot() {
 function render() {
   const v = $('#view'); v.replaceChildren(el('p', {class:'empty'}, 'loading…'));
   ({ chat: renderChat, sessions: renderSessions, search: renderSearch, memory: renderMemory,
-     skills: renderSkills, store: renderStore })[state.tab]().catch(e => {
+     skills: renderSkills, jobs: renderJobs, store: renderStore })[state.tab]().catch(e => {
     v.replaceChildren(el('div', {class:'card'},
       el('h2', {}, 'error'),
       el('p', {}, e.error || String(e)),
@@ -512,6 +513,41 @@ async function renderSkills() {
   }
   $('#view').replaceChildren(el('div', {class:'grid'},
     el('div', {class:'card'}, el('h2', {}, `skills (${items.length})`), list), right));
+}
+
+// Commands the agent left running. The CLI and the TUI have had `/jobs` since
+// they had jobs; a browser could start a dev server and then not see it.
+async function renderJobs() {
+  const { items } = await api('/api/jobs');
+  if (state.job && !items.some(j => j.id === state.job)) state.job = null;
+
+  const state_of = (j) => j.exit_code === null || j.exit_code === undefined
+    ? `running ${Math.max(0, Math.round(Date.now()/1000) - j.started_at)}s`
+    : `exit ${j.exit_code}`;
+
+  const stop = async (id) => {
+    try { await api(`/api/jobs/${id}/stop`, {}); render(); } catch (e) { alert(e.error || e); }
+  };
+
+  const list = el('ul', {class:'list'}, items.map(j => el('li', {
+      'aria-current': String(j.id === state.job),
+      onclick: () => { state.job = j.id; render(); }
+    },
+    el('div', {class:'name'}, `${j.id} · ${state_of(j)}`),
+    el('div', {class:'sub'}, j.command))));
+
+  const right = el('div', {class:'card'}, el('h2', {}, 'output'));
+  if (state.job) {
+    const full = await api(`/api/jobs/${state.job}`);
+    right.append(el('div', {class:'row'},
+      el('span', {class:'sub'}, `${full.id} · ${state_of(full)}`),
+      full.exit_code === null ? el('button', { onclick: () => stop(full.id) }, 'Stop') : null));
+    right.append(el('pre', {style:'white-space:pre-wrap;font-size:.82rem;max-height:28rem;overflow:auto'},
+      full.output || '(nothing printed yet)'));
+  }
+  $('#view').replaceChildren(el('div', {class:'grid'},
+    el('div', {class:'card'}, el('h2', {}, `jobs (${items.length})`),
+      items.length ? list : el('p', {class:'empty'}, 'nothing running in the background')), right));
 }
 
 // Deletion is not undoable, so the dry run is offered first and reported in the

@@ -9,14 +9,19 @@ use std::path::PathBuf;
 use rook_tools::{Tool, ToolContext, files};
 
 struct Dirs {
+    /// Kept so the fixture outlives the test that made it.
+    _root: tempfile::TempDir,
     workspace: PathBuf,
     outside: PathBuf,
 }
 
-fn dirs(name: &str) -> Dirs {
-    let root = std::env::temp_dir().join(format!("rook-workspace-{name}"));
-    let _ = std::fs::remove_dir_all(&root);
-    let dirs = Dirs { workspace: root.join("ws"), outside: root.join("out") };
+/// A fresh pair of directories. These sat at a fixed path under the system
+/// temp directory and were cleared on the way in, so two runs of this binary at
+/// once deleted each other's fixtures — which reads as three symlink guards
+/// failing and is nothing of the kind.
+fn dirs() -> Dirs {
+    let root = tempfile::tempdir().unwrap();
+    let dirs = Dirs { workspace: root.path().join("ws"), outside: root.path().join("out"), _root: root };
     std::fs::create_dir_all(&dirs.workspace).unwrap();
     std::fs::create_dir_all(&dirs.outside).unwrap();
     dirs
@@ -39,7 +44,7 @@ async fn write(ctx: &ToolContext, path: &str) -> rook_tools::Result<String> {
 #[cfg(unix)]
 #[tokio::test]
 async fn a_symlink_out_of_the_workspace_does_not_read_through_it() {
-    let d = dirs("read");
+    let d = dirs();
     std::fs::write(d.outside.join("secret.txt"), "the private key").unwrap();
     link(&d.outside.join("secret.txt"), &d.workspace.join("innocent.txt"));
 
@@ -54,7 +59,7 @@ async fn a_symlink_out_of_the_workspace_does_not_read_through_it() {
 #[cfg(unix)]
 #[tokio::test]
 async fn a_symlinked_directory_does_not_plant_files_outside_the_workspace() {
-    let d = dirs("write");
+    let d = dirs();
     link(&d.outside, &d.workspace.join("door"));
 
     let ctx = ToolContext::new(d.workspace.clone());
@@ -65,7 +70,7 @@ async fn a_symlinked_directory_does_not_plant_files_outside_the_workspace() {
 #[cfg(unix)]
 #[tokio::test]
 async fn a_symlink_that_stays_inside_the_workspace_still_works() {
-    let d = dirs("inside");
+    let d = dirs();
     std::fs::create_dir_all(d.workspace.join("real")).unwrap();
     std::fs::write(d.workspace.join("real/notes.txt"), "kept").unwrap();
     link(&d.workspace.join("real"), &d.workspace.join("shortcut"));
@@ -79,7 +84,7 @@ async fn a_symlink_that_stays_inside_the_workspace_still_works() {
 #[cfg(unix)]
 #[tokio::test]
 async fn widening_the_sandbox_deliberately_opens_the_door_again() {
-    let d = dirs("allowed");
+    let d = dirs();
     std::fs::write(d.outside.join("secret.txt"), "the private key").unwrap();
     link(&d.outside.join("secret.txt"), &d.workspace.join("innocent.txt"));
 
@@ -93,7 +98,7 @@ async fn widening_the_sandbox_deliberately_opens_the_door_again() {
 async fn a_workspace_reached_through_a_symlink_contains_its_own_files() {
     // macOS gives `/tmp` as a symlink to `/private/tmp`, so a workspace spelled
     // one way and a file resolved the other must still match.
-    let d = dirs("spelling");
+    let d = dirs();
     std::fs::write(d.workspace.join("here.txt"), "inside").unwrap();
 
     let ctx = ToolContext::new(d.workspace.clone());
@@ -105,7 +110,7 @@ async fn a_workspace_reached_through_a_symlink_contains_its_own_files() {
 
 #[tokio::test]
 async fn plain_parent_traversal_is_still_refused() {
-    let d = dirs("traversal");
+    let d = dirs();
     std::fs::write(d.outside.join("secret.txt"), "the private key").unwrap();
 
     let ctx = ToolContext::new(d.workspace.clone());

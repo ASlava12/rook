@@ -41,6 +41,9 @@ pub fn router(state: Shared) -> Router {
             "/api/chat",
             get(crate::chat::upgrade).layer(axum::middleware::from_fn(crate::chat::only_from_this_daemon)),
         )
+        .route("/api/jobs", get(jobs))
+        .route("/api/jobs/{id}", get(job))
+        .route("/api/jobs/{id}/stop", post(stop_job))
         .route("/api/search", get(search))
         .with_state(state)
 }
@@ -392,6 +395,68 @@ struct SearchQuery {
     conversation: bool,
 }
 
+/// A job without what it printed. The list is polled, and four jobs are four
+/// capped outputs; the one being read asks for itself.
+#[derive(serde::Serialize)]
+struct JobLine {
+    id: String,
+    command: String,
+    started_at: i64,
+    exit_code: Option<i32>,
+}
+
+#[derive(Deserialize)]
+struct Which {
+    workspace: Option<std::path::PathBuf>,
+}
+
+/// The commands a project has left running, or nothing if it has run no turn:
+/// the registry is built with the rest of its equipment when the first one is
+/// served, and asking is not a reason to build it.
+async fn running_in(s: &Shared, which: &Which) -> Result<Option<Arc<rook_tools::jobs::Jobs>>, Fail> {
+    let engine = s.engine_for(which.workspace.as_deref()).await.map_err(CoreError::Other)?;
+    let equipment = s.equipment_for(&engine).await;
+    let running = equipment.get().map(|shared| shared.jobs.clone());
+    Ok(running)
+}
+
+fn no_such_job(id: &str) -> Fail {
+    Fail(StatusCode::NOT_FOUND, ApiError::new("not_found", format!("no background command {id}")))
+}
+
+async fn jobs(State(s): State<Shared>, Query(which): Query<Which>) -> ApiResult<Page<JobLine>> {
+    let Some(jobs) = running_in(&s, &which).await? else { return Ok(Json(Page::new(Vec::new()))) };
+    let listed = jobs
+        .list()
+        .into_iter()
+        .map(|j| JobLine { id: j.id, command: j.command, started_at: j.started_at, exit_code: j.exit_code })
+        .collect();
+    Ok(Json(Page::new(listed)))
+}
+
+async fn job(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+    Query(which): Query<Which>,
+) -> ApiResult<rook_tools::jobs::Job> {
+    let found = running_in(&s, &which).await?.and_then(|jobs| jobs.get(&id));
+    found.map(Json).ok_or_else(|| no_such_job(&id))
+}
+
+/// Answers with the job as it stands, not as it will be: the kill happens in
+/// the task that owns the child, so the exit code arrives on a later read.
+async fn stop_job(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+    Query(which): Query<Which>,
+) -> ApiResult<rook_tools::jobs::Job> {
+    let Some(jobs) = running_in(&s, &which).await? else { return Err(no_such_job(&id)) };
+    if !jobs.stop(&id) {
+        return Err(no_such_job(&id));
+    }
+    jobs.get(&id).map(Json).ok_or_else(|| no_such_job(&id))
+}
+
 async fn search(
     State(s): State<Shared>,
     Query(query): Query<SearchQuery>,
@@ -516,6 +581,43 @@ mod tests {
             about,
         });
         Fixture { _home: home, _workspace: workspace, router: router(state.clone()), state, session }
+    }
+
+    /// The CLI and the TUI have had `/jobs` since they had jobs. A browser
+    /// could start a dev server through the agent and then have no way to see
+    /// it, let alone stop it.
+    #[tokio::test]
+    async fn a_browser_can_see_and_stop_what_the_agent_left_running() {
+        let f = fixture();
+        let (status, body) = get(&f, "/api/jobs").await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a project that has run no turn has no jobs, which is not an error"
+        );
+        assert_eq!(body["items"].as_array().unwrap().len(), 0);
+
+        let equipment = f.state.equipment_for(&f.state.rook).await;
+        let workspace = {
+            let rook = f.state.rook.read().await;
+            equipment.get_or_init(|| crate::chat::Shared::for_project(&rook)).await;
+            rook.workspace.clone()
+        };
+        let jobs = equipment.get().unwrap().jobs.clone();
+        let id = jobs.start("echo dev-server-up; sleep 30", &workspace).unwrap();
+
+        let (status, body) = get(&f, "/api/jobs").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["items"][0]["id"], id);
+        assert_eq!(body["items"][0]["exit_code"], serde_json::Value::Null, "it is still running");
+        assert!(body["items"][0].get("output").is_none(), "the list does not carry what four jobs printed");
+
+        let (status, body) = post(&f, &format!("/api/jobs/{id}/stop"), serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let (status, body) = get(&f, "/api/jobs/nosuch").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(body["error"].as_str().unwrap().contains("nosuch"), "{body}");
     }
 
     /// The language-server pool, the MCP session and the commands left running

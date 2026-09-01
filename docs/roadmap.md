@@ -187,6 +187,13 @@ what unblocks the most.
   `rook memory`. Both the TUI and the browser now have a Memory view over a new
   `/api/memory`, and the browser can forget a fact: one nobody can remove is one
   that quietly steers everything. 4 tests, including the tab drawn on a pty.
+- **Background commands visible outside the terminal** — the chat REPL and the
+  TUI have had `/jobs` since there were jobs; a browser could start a dev server
+  through the agent and then neither see it nor stop it. A Jobs tab over a new
+  `/api/jobs` lists them, reads one's output and stops it. The registry moved
+  with it: it was built per websocket, so reloading the page killed every
+  command the agent had left running, and re-indexed every language server on
+  the way. It belongs to the project now.
 - **What a session was for and what it did, in every view** — the goal and the
   files it changed were reachable only through `/goal` and `/diff` in the chat.
   The session browser in both the TUI and the web now leads with them, which is

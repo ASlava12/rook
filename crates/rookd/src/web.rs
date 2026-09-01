@@ -87,4 +87,30 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "a client-side route must still load the app");
         assert!(body.contains("<title>"));
     }
+
+    /// The page is one hand-written file with no build step, so a tab wired to
+    /// a renderer that does not exist is a blank screen and nothing else
+    /// notices. The two lists are twelve hundred lines apart.
+    #[test]
+    fn every_tab_the_page_offers_has_something_to_draw_it() {
+        let page = Assets::get("index.html").expect("the UI is embedded");
+        let page = std::str::from_utf8(&page.data).expect("the page is text");
+
+        let tabs: Vec<&str> =
+            page.split("data-tab=\"").skip(1).filter_map(|rest| rest.split('"').next()).collect();
+        assert!(tabs.len() >= 6, "found {} tabs, so the markup moved and this checks nothing", tabs.len());
+
+        for tab in tabs {
+            let named = format!("{tab}: render");
+            let at = page.find(&named).unwrap_or_else(|| panic!("nothing draws the {tab} tab"));
+            let renderer: String = page[at + named.len() - "render".len()..]
+                .chars()
+                .take_while(char::is_ascii_alphanumeric)
+                .collect();
+            assert!(
+                page.contains(&format!("function {renderer}(")),
+                "the {tab} tab is drawn by {renderer}, which is not defined"
+            );
+        }
+    }
 }
