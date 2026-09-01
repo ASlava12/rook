@@ -53,6 +53,24 @@ async fn the_handshake_completes_over_content_length_framing() {
     server.shutdown().await;
 }
 
+/// The caller used to read the file a second time for itself, so a file that
+/// changed between the two left the server holding one document while every
+/// position was computed against another.
+#[tokio::test]
+async fn the_text_a_sync_hands_back_is_the_text_the_server_was_given() {
+    let _one = one_at_a_time().await;
+    let workspace = Workspace::new();
+    let server = Server::start(&mock(), workspace.dir.path()).await.unwrap();
+
+    let sent = server.sync(&workspace.file(), "rust").await.unwrap();
+    assert_eq!(sent, std::fs::read_to_string(workspace.file()).unwrap());
+
+    // Unchanged on disk: the second sync is a no-op for the server and still
+    // answers with what it holds.
+    assert_eq!(server.sync(&workspace.file(), "rust").await.unwrap(), sent);
+    server.shutdown().await;
+}
+
 #[tokio::test]
 async fn diagnostics_arrive_after_a_file_is_opened() {
     let _one = one_at_a_time().await;

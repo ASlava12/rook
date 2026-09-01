@@ -337,8 +337,13 @@ impl Daemon {
             .stderr(std::process::Stdio::null())
             .spawn()
             .unwrap();
+        // Generous, because it only tells a failed start from a slow one:
+        // `rookd` opens a store, discovers skills and plugins and binds a port
+        // before it writes anything, and four seconds of that was a claim about
+        // speed rather than a deadline. It returns the moment the file appears.
         let address_file = rook.home.path().join("rookd.addr");
-        for _ in 0..80 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
             if let Ok(address) = std::fs::read_to_string(&address_file) {
                 std::thread::sleep(std::time::Duration::from_millis(150));
                 return Self { child, address: address.trim().to_string() };

@@ -201,10 +201,10 @@ impl Servers {
     async fn prepare(&self, path: &Path) -> rook_lsp::Result<Opened> {
         let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let (server, language_id) = self.for_path(&path).await?;
-        server.sync(&path, &language_id).await?;
-        let text = tokio::fs::read_to_string(&path)
-            .await
-            .map_err(|e| rook_lsp::LspError::Io { path: path.clone(), source: e })?;
+        // The very text the server was given: reading it again would be a second
+        // answer, and a file that changed in between would leave every position
+        // computed here pointing somewhere else in the server's document.
+        let text = server.sync(&path, &language_id).await?;
         Ok(Opened { server, text, path })
     }
 }

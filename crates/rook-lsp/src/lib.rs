@@ -216,7 +216,12 @@ impl Server {
     /// The agent's normal loop is edit, then check — so a server still holding
     /// the version it saw at open time reports diagnostics for code that no
     /// longer exists, which is worse than reporting none.
-    pub async fn sync(&self, path: &Path, language_id: &str) -> Result<()> {
+    /// Tell the server what this file says now, and hand back the same text.
+    ///
+    /// The text is returned rather than read again by the caller: a second read
+    /// is a second answer, and a file that changed between them would leave the
+    /// server holding one document while positions are computed against another.
+    pub async fn sync(&self, path: &Path, language_id: &str) -> Result<String> {
         let text = tokio::fs::read_to_string(path)
             .await
             .map_err(|e| LspError::Io { path: path.to_path_buf(), source: e })?;
@@ -224,7 +229,7 @@ impl Server {
 
         let mut opened = self.opened.lock().await;
         let (method, params) = match opened.get_mut(path) {
-            Some(document) if document.text == text => return Ok(()),
+            Some(document) if document.text == text => return Ok(text),
             Some(document) => {
                 document.version += 1;
                 document.text = text.clone();
@@ -232,7 +237,7 @@ impl Server {
                     "textDocument/didChange",
                     serde_json::json!({
                         "textDocument": { "uri": uri, "version": document.version },
-                        "contentChanges": [{ "text": text }],
+                        "contentChanges": [{ "text": text.clone() }],
                     }),
                 )
             }
@@ -245,7 +250,7 @@ impl Server {
                             "uri": uri,
                             "languageId": language_id,
                             "version": 1,
-                            "text": text,
+                            "text": text.clone(),
                         }
                     }),
                 )
@@ -257,7 +262,8 @@ impl Server {
         // it cached would let `diagnostics` return it before the new analysis
         // has arrived.
         self.diagnostics.lock().await.remove(&protocol::to_uri(path));
-        self.notify(method, params).await
+        self.notify(method, params).await?;
+        Ok(text)
     }
 
     /// Diagnostics for a file, after giving the server time to produce them.
