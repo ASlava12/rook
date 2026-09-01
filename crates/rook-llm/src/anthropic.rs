@@ -127,10 +127,13 @@ impl Provider for Anthropic {
             .await
             .map_err(|e| LlmError::unreachable(&self.config.base_url, e))?;
         let status = response.status();
-        let text = response.text().await.map_err(|e| LlmError::unreachable(&self.config.base_url, e))?;
         if !status.is_success() {
-            return Err(LlmError::Status { status: status.as_u16(), body: truncate(&text, 500) });
+            return Err(LlmError::Status {
+                status: status.as_u16(),
+                body: crate::quoted_text(response).await,
+            });
         }
+        let text = crate::whole_text(response, &self.config.base_url).await?;
         let listing: Listing = serde_json::from_str(&text)
             .map_err(|e| LlmError::Decode(format!("{e}: {}", truncate(&text, 300))))?;
         Ok(listing
@@ -143,10 +146,13 @@ impl Provider for Anthropic {
     async fn complete(&self, request: Request) -> Result<Response> {
         let response = self.send(&request, false).await?;
         let status = response.status();
-        let text = response.text().await.map_err(|e| LlmError::unreachable(&self.config.base_url, e))?;
         if !status.is_success() {
-            return Err(LlmError::Status { status: status.as_u16(), body: truncate(&text, 2000) });
+            return Err(LlmError::Status {
+                status: status.as_u16(),
+                body: crate::quoted_text(response).await,
+            });
         }
+        let text = crate::whole_text(response, &self.config.base_url).await?;
 
         let wire: WireResponse = serde_json::from_str(&text)
             .map_err(|e| LlmError::Decode(format!("{e}: {}", truncate(&text, 500))))?;
@@ -180,8 +186,10 @@ impl Provider for Anthropic {
         let response = self.send(&request, true).await?;
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(LlmError::Status { status: status.as_u16(), body: truncate(&body, 2000) });
+            return Err(LlmError::Status {
+                status: status.as_u16(),
+                body: crate::quoted_text(response).await,
+            });
         }
 
         let idle = self.config.stream_idle_timeout;

@@ -93,6 +93,10 @@ pub struct AgentConfig {
     /// Ask for a brief plan before multi-step work. One line in the system
     /// prompt, not a checklist tool — see ADR-0010.
     pub plan_first: bool,
+    /// Send tool definitions with the request. Off for an endpoint that refuses
+    /// one carrying them — llama.cpp's server, some gateways — where the tools
+    /// go in the prompt instead and the model's answer is read back.
+    pub native_tools: bool,
     /// Overrides the provider's assumed context length, which is guesswork for
     /// anything self-hosted: a local model may serve 8k or a million.
     pub context_window: Option<usize>,
@@ -273,6 +277,7 @@ impl Default for AgentConfig {
             lazy_tools: true,
             effort: "high".into(),
             plan_first: true,
+            native_tools: true,
             context_window: None,
             max_parallel_subagents: 4,
             max_subagents_per_turn: 16,

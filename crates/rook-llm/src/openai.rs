@@ -74,10 +74,10 @@ impl Provider for OpenAiCompatible {
     async fn complete(&self, request: Request) -> Result<Response> {
         let resp = self.send(&request, false).await?;
         let status = resp.status();
-        let text = resp.text().await.map_err(|e| LlmError::unreachable(&self.config.base_url, e))?;
         if !status.is_success() {
-            return Err(self.refused(status, &text).await);
+            return Err(self.refused(status, &crate::quoted_text(resp).await).await);
         }
+        let text = crate::whole_text(resp, &self.config.base_url).await?;
 
         let wire: WireResponse = serde_json::from_str(&text)
             .map_err(|e| LlmError::Decode(format!("{e}: {}", truncate(&text, 500))))?;
@@ -150,10 +150,13 @@ impl Provider for OpenAiCompatible {
             .map_err(|e| LlmError::unreachable(&self.config.base_url, e))?;
 
         let status = response.status();
-        let text = response.text().await.map_err(|e| LlmError::unreachable(&self.config.base_url, e))?;
         if !status.is_success() {
-            return Err(LlmError::Status { status: status.as_u16(), body: truncate(&text, 500) });
+            return Err(LlmError::Status {
+                status: status.as_u16(),
+                body: crate::quoted_text(response).await,
+            });
         }
+        let text = crate::whole_text(response, &self.config.base_url).await?;
         let listing: Listing = serde_json::from_str(&text)
             .map_err(|e| LlmError::Decode(format!("{e}: {}", truncate(&text, 300))))?;
         Ok(listing
@@ -167,8 +170,7 @@ impl Provider for OpenAiCompatible {
         let resp = self.send(&request, true).await?;
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(self.refused(status, &body).await);
+            return Err(self.refused(status, &crate::quoted_text(resp).await).await);
         }
 
         let idle = self.config.stream_idle_timeout;

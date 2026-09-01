@@ -508,6 +508,14 @@ impl<'a> AgentLoop<'a> {
     /// Everything here renders at the front of the request, so anything that
     /// varies per turn invalidates the cached prefix behind it. Recalled memory
     /// used to live here and now travels next to the prompt instead.
+    /// Whether this turn sends its tools with the request or describes them in
+    /// the prompt. Both the provider and the user get a say: the provider knows
+    /// its dialect, and only the user knows what the endpoint behind a
+    /// `base_url` will accept.
+    fn native_tools(&self) -> bool {
+        self.rook.config.agent.native_tools && self.provider.supports_tools()
+    }
+
     pub fn system_prompt(&self) -> String {
         let env = self.rook.env();
         let mut s = String::new();
@@ -585,6 +593,9 @@ impl<'a> AgentLoop<'a> {
                      what it does have, so describe what you need.\n"
                 ));
             }
+        }
+        if !self.native_tools() {
+            s.push_str(&rook_llm::prompted::describe(&self.tool_specs()));
         }
         s
     }
@@ -1043,7 +1054,9 @@ impl<'a> AgentLoop<'a> {
 
             let sent = messages.len();
             let mut request = Request::new(messages.clone());
-            request.tools = self.tool_specs();
+            if self.native_tools() {
+                request.tools = self.tool_specs();
+            }
             request.effort = Some(self.effort);
             request.cache_ttl = self.rook.config.agent.cache_ttl();
             let mut stream =
@@ -1057,7 +1070,10 @@ impl<'a> AgentLoop<'a> {
             if !assembler.reasoning().is_empty() {
                 self.rook.log(self.session, EventKind::Reasoning, "", assembler.reasoning()).ok();
             }
-            let response = assembler.finish();
+            let mut response = assembler.finish();
+            if !self.native_tools() {
+                rook_llm::prompted::adopt(&mut response);
+            }
 
             // Only when it is at least what the text plainly weighs. A provider
             // reporting less than that is not counting what this needs counted —

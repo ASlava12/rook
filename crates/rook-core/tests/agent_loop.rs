@@ -2100,6 +2100,43 @@ fn turning_off_lazy_skills_puts_the_bodies_in_the_prompt() {
     assert!(lazy.contains("greeting: How to greet"), "lazily it is a card");
 }
 
+/// Some OpenAI-compatible endpoints refuse a request carrying `tools` at all,
+/// and the model behind one can still use them if they are in the prompt. The
+/// loop above the provider must not be able to tell which happened.
+#[tokio::test]
+async fn tools_an_endpoint_cannot_be_sent_are_put_in_the_prompt_and_read_back() {
+    let f = fixture();
+    let mut config = Config::default();
+    config.agent.native_tools = false;
+    let rook = with_config(&f, "no-native-tools", config);
+    let session = rook.start_session("s").unwrap();
+
+    std::fs::write(rook.workspace.join("answer.txt"), "forty-two").unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        reply(
+            "Let me look.\n```json\n\
+             {\"tool\": \"read_file\", \"arguments\": {\"path\": \"answer.txt\"}}\n```",
+        ),
+        reply("it says forty-two"),
+    ]));
+    let seen = provider.share();
+
+    let outcome = AgentLoop::new(&rook, provider, session).run("what is in answer.txt?").await.unwrap();
+
+    assert_eq!(outcome.tools_called, ["read_file"], "the written call was run as a call");
+    assert_eq!(outcome.reply, "it says forty-two");
+
+    let turns = seen.lock().unwrap().clone();
+    assert!(turns[0].tools.is_empty(), "nothing may be sent to an endpoint that refuses it");
+    let system = &turns[0].messages[0].content;
+    assert!(system.contains("read_file"), "so the tools are described instead: {system}");
+    assert!(system.contains("\"tool\""), "with the shape of a call: {system}");
+    assert!(
+        turns[1].messages.iter().any(|m| m.content.contains("forty-two")),
+        "and the result came back as a tool result"
+    );
+}
+
 #[test]
 fn turning_off_lazy_tools_restores_the_argument_descriptions() {
     let f = fixture();

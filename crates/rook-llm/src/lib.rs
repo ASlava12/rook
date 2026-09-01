@@ -13,6 +13,7 @@
 pub mod anthropic;
 pub mod google;
 pub mod openai;
+pub mod prompted;
 pub mod retry;
 pub mod stream;
 pub mod types;
@@ -99,8 +100,57 @@ fn required_key(names: &[&str]) -> Result<String> {
     })
 }
 
-/// A prefix of `text`, cut on a character boundary. Provider bodies reach the
-/// user in error messages, and a body can be a megabyte of HTML.
+/// What one reply may amount to, streamed or assembled in one piece.
+///
+/// A frame cap bounds a single SSE event and says nothing about how many of
+/// them arrive; a provider that answers without stopping is held only by the
+/// request timeout, which bounds the time and not the memory. Generous enough
+/// that no real reply meets it — the largest context window in service is
+/// smaller than this — so reaching it means the provider is broken.
+pub(crate) const MOST_REPLY_BYTES: usize = 32 << 20;
+
+/// How much of a failing endpoint's body is worth repeating back.
+const MOST_QUOTED_BYTES: usize = 2000;
+
+/// The whole body, refused as it arrives rather than measured once it is here.
+///
+/// `base_url` is configuration and the body is whatever is on the other end of
+/// it, so "read it all and then look at the length" is a cap that has already
+/// been paid by the time it is checked.
+pub(crate) async fn whole_text(mut response: reqwest::Response, url: &str) -> Result<String> {
+    let mut body = Vec::new();
+    loop {
+        match response.chunk().await {
+            Ok(None) => return Ok(String::from_utf8_lossy(&body).into_owned()),
+            Ok(Some(chunk)) => {
+                body.extend_from_slice(&chunk);
+                if body.len() > MOST_REPLY_BYTES {
+                    return Err(LlmError::Decode(format!(
+                        "{url} sent more than the {MOST_REPLY_BYTES} bytes one reply may be, and \
+                         was still sending"
+                    )));
+                }
+            }
+            Err(e) => return Err(LlmError::unreachable(url, e)),
+        }
+    }
+}
+
+/// As much of a failed request's body as goes in the message, and no more: an
+/// endpoint that answers a 500 with a megabyte of HTML should not cost a
+/// megabyte to say so.
+pub(crate) async fn quoted_text(mut response: reqwest::Response) -> String {
+    let mut body = Vec::new();
+    while body.len() <= MOST_QUOTED_BYTES {
+        match response.chunk().await {
+            Ok(Some(chunk)) => body.extend_from_slice(&chunk),
+            _ => break,
+        }
+    }
+    truncate(&String::from_utf8_lossy(&body), MOST_QUOTED_BYTES)
+}
+
+/// A prefix of `text`, cut on a character boundary.
 pub(crate) fn truncate(text: &str, max: usize) -> String {
     if text.len() <= max {
         return text.to_string();

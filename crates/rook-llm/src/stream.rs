@@ -22,15 +22,6 @@ pub type ResponseStream = Pin<Box<dyn Stream<Item = Result<Delta>> + Send>>;
 /// Reassembles a [`ResponseStream`] into the same [`Response`] a non-streaming
 /// call would have produced, so a caller that does not care about deltas does
 /// not have to handle them.
-/// What one reply may assemble to.
-///
-/// The frame cap bounds a single SSE event and says nothing about how many of
-/// them arrive; a provider that streams without stopping is held only by the
-/// request timeout, which bounds the time and not the memory. Generous enough
-/// that no real reply meets it — the largest context window in service is
-/// smaller than this — so reaching it means the provider is broken.
-const MOST_ASSEMBLED_BYTES: usize = 32 << 20;
-
 #[derive(Default)]
 pub struct Assembler {
     text: String,
@@ -47,11 +38,11 @@ impl Assembler {
             Delta::ToolCall(c) => self.tool_calls.push(c),
             Delta::Done { stop_reason, usage, model } => self.finished = Some((stop_reason, usage, model)),
         }
-        let assembled = self.text.len() + self.reasoning.len();
-        match assembled > MOST_ASSEMBLED_BYTES {
+        let most = crate::MOST_REPLY_BYTES;
+        match self.text.len() + self.reasoning.len() > most {
             true => Err(crate::LlmError::Decode(format!(
-                "the reply passed {MOST_ASSEMBLED_BYTES} bytes and is still arriving — the \
-                 provider is not ending the stream"
+                "the reply passed {most} bytes and is still arriving — the provider is not \
+                 ending the stream"
             ))),
             false => Ok(()),
         }
