@@ -968,3 +968,22 @@ the command rules here anchor to command position already. codex's Guardian
 retention, per-account app approvals and turn analytics are their hosted
 product. openhands' cron editing and cloud settings, acp and opencode's registry
 docs.
+
+## Twentieth pass — openclaw
+
+Acted on: `fix(agents): resolve Windows bare commands through PATHEXT`. Windows
+is a tested target here, and `std::process::Command` searches `PATH` for
+`foo.exe` and nothing else — it does not consult `PATHEXT`, which is a shell's
+job. npm, uv and bun all install their runners as `.cmd`, so every MCP server
+configured the way its README writes it — `npx -y @modelcontextprotocol/…` —
+was "program not found" on Windows while working everywhere else. Three
+spawners had it: `rook-mcp`, `rook-lsp` and the version probe behind a skill's
+`requires`, which quietly reported a skill as inapplicable. The lookup is
+ordinary code rather than a `#[cfg(windows)]` block, so all of it is reachable
+from a test on any machine — the first shape of it was `cfg`-gated, and
+deleting the lookup entirely did not fail a single test here.
+
+Dismissed: `fix(ios): omit deep-link URLs from logs` — the Google key goes in a
+header here and not the `?key=` the docs lead with, with a comment saying why.
+The rest of the two hundred are their gateway, their plugin registry, their
+desktop and their messaging bridges.

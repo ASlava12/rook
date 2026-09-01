@@ -134,9 +134,45 @@ pub struct Server {
     child: Mutex<Child>,
 }
 
+/// The program to start, looked up the way a shell would.
+///
+/// Windows searches `PATH` for `foo.exe` and consults `PATHEXT` only in a
+/// shell, so a program installed as `npx.cmd` — which is how npm, uv and bun
+/// install theirs — is "program not found" there while working everywhere
+/// else. Everything a README tells someone to configure goes through this.
+///
+/// Copied rather than shared: `rook-mcp`, `rook-lsp` and `rook-skills` each
+/// start a program somebody named in configuration, and the three sit on one
+/// layer with nothing beneath them to hold it.
+fn program(command: &str) -> std::path::PathBuf {
+    match cfg!(windows) {
+        true => resolved(
+            command,
+            &std::env::var_os("PATH").unwrap_or_default(),
+            &std::env::var("PATHEXT").unwrap_or_else(|_| ".EXE;.CMD;.BAT;.COM".into()),
+        ),
+        false => std::path::PathBuf::from(command),
+    }
+}
+
+/// What Windows would start, given its two variables.
+///
+/// Apart from [`program`] so that all of it is reachable from a test: which
+/// machine the test runs on is not what decides whether this is right.
+fn resolved(command: &str, path: &std::ffi::OsStr, exts: &str) -> std::path::PathBuf {
+    let named = std::path::Path::new(command);
+    if named.extension().is_some() || named.parent() != Some(std::path::Path::new("")) {
+        return named.to_path_buf();
+    }
+    let exts: Vec<&str> = exts.split(';').filter(|e| !e.is_empty()).collect();
+    std::env::split_paths(path)
+        .find_map(|dir| exts.iter().map(|ext| dir.join(format!("{command}{ext}"))).find(|c| c.is_file()))
+        .unwrap_or_else(|| named.to_path_buf())
+}
+
 impl Server {
     pub async fn start(config: &ServerConfig, root: &Path) -> Result<Self> {
-        let mut child = tokio::process::Command::new(&config.command)
+        let mut child = tokio::process::Command::new(program(&config.command))
             .args(&config.args)
             .current_dir(root)
             .stdin(Stdio::piped())

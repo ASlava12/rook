@@ -16,8 +16,10 @@ fn mock() -> ServerConfig {
         language: "mock".into(),
         command: env!("CARGO_BIN_EXE_lsp-mock").to_string(),
         extensions: vec!["rs".into()],
-        startup_timeout_secs: 10,
-        request_timeout_secs: 5,
+        // The shipped waits, not shorter ones to keep the suite quick. None of
+        // these tests is about a timeout: the wait only tells "failed" from
+        // "hung", and at ten and five seconds five of them failed together on a
+        // loaded machine — which reads as a broken client and is a scheduler.
         diagnostics_wait_ms: 2_000,
         ..Default::default()
     }

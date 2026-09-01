@@ -88,9 +88,45 @@ where
     }
 }
 
+/// The program to start, looked up the way a shell would.
+///
+/// Windows searches `PATH` for `foo.exe` and consults `PATHEXT` only in a
+/// shell, so a program installed as `npx.cmd` — which is how npm, uv and bun
+/// install theirs — is "program not found" there while working everywhere
+/// else. Everything a README tells someone to configure goes through this.
+///
+/// Copied rather than shared: `rook-mcp`, `rook-lsp` and `rook-skills` each
+/// start a program somebody named in configuration, and the three sit on one
+/// layer with nothing beneath them to hold it.
+fn program(command: &str) -> std::path::PathBuf {
+    match cfg!(windows) {
+        true => resolved(
+            command,
+            &std::env::var_os("PATH").unwrap_or_default(),
+            &std::env::var("PATHEXT").unwrap_or_else(|_| ".EXE;.CMD;.BAT;.COM".into()),
+        ),
+        false => std::path::PathBuf::from(command),
+    }
+}
+
+/// What Windows would start, given its two variables.
+///
+/// Apart from [`program`] so that all of it is reachable from a test: which
+/// machine the test runs on is not what decides whether this is right.
+fn resolved(command: &str, path: &std::ffi::OsStr, exts: &str) -> std::path::PathBuf {
+    let named = std::path::Path::new(command);
+    if named.extension().is_some() || named.parent() != Some(std::path::Path::new("")) {
+        return named.to_path_buf();
+    }
+    let exts: Vec<&str> = exts.split(';').filter(|e| !e.is_empty()).collect();
+    std::env::split_paths(path)
+        .find_map(|dir| exts.iter().map(|ext| dir.join(format!("{command}{ext}"))).find(|c| c.is_file()))
+        .unwrap_or_else(|| named.to_path_buf())
+}
+
 impl Stdio {
     pub(crate) fn spawn(config: &ServerConfig) -> Result<Self> {
-        let mut command = tokio::process::Command::new(&config.command);
+        let mut command = tokio::process::Command::new(program(&config.command));
         command
             .args(&config.args)
             .envs(&config.env)
@@ -224,5 +260,40 @@ impl Transport for Stdio {
 
     async fn shutdown(&self) {
         let _ = self.child.lock().await.kill().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolved;
+
+    fn windows(command: &str, path: &std::path::Path) -> std::path::PathBuf {
+        resolved(command, &std::env::join_paths([path]).unwrap(), ".EXE;.CMD;.BAT")
+    }
+
+    /// Every MCP README configures a server as `npx …`, and npm installs npx as
+    /// `npx.cmd`. `Command::new("npx")` looks for `npx.exe`, finds nothing, and
+    /// reports a server that is installed as one that is not.
+    #[test]
+    fn a_program_installed_under_an_extension_is_found_by_its_bare_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("npx.CMD"), "@echo off").unwrap();
+
+        assert_eq!(windows("npx", dir.path()), dir.path().join("npx.CMD"));
+        assert_eq!(
+            resolved("npx", &std::env::join_paths([dir.path()]).unwrap(), ".EXE"),
+            std::path::PathBuf::from("npx"),
+            "and only through an extension PATHEXT names"
+        );
+    }
+
+    /// A name that is nowhere must come back as it went in: the failure that
+    /// follows should say what was asked for, not a path nothing is at.
+    #[test]
+    fn a_name_that_needs_no_looking_up_is_passed_through_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        for command in ["/usr/local/bin/server", "./server", "server.exe", "rook-no-such-program"] {
+            assert_eq!(windows(command, dir.path()), std::path::PathBuf::from(command), "{command}");
+        }
     }
 }
