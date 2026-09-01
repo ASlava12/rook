@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use tokio::sync::RwLock;
+use tokio::sync::{OnceCell, RwLock};
 
 use rook_core::Rook;
 
@@ -45,6 +45,8 @@ pub struct AppState {
     /// process the one that could not open the store. Kept apart here: several
     /// projects run at once against one history, one memory and one search.
     pub elsewhere: RwLock<std::collections::HashMap<std::path::PathBuf, Project>>,
+    /// Per project, and outliving every connection to it: see [`chat::Shared`].
+    equipment: RwLock<std::collections::HashMap<std::path::PathBuf, Arc<OnceCell<chat::Shared>>>>,
     pub started: std::time::Instant,
     /// Read once at startup rather than through the lock on every request: none
     /// of it changes while the process runs, and `/api/health` must be able to
@@ -95,8 +97,26 @@ impl AppState {
                 break;
             };
             kept.remove(&stale);
+            // The project is gone, so its servers and its background commands
+            // go with it: keeping them alive would be keeping processes for a
+            // workspace nothing can reach any more.
+            self.equipment.write().await.remove(&stale);
         }
         Ok(built)
+    }
+
+    /// The shared equipment for whatever project `engine` is, made on first ask.
+    ///
+    /// Keyed by workspace rather than held on the connection: two browser tabs
+    /// on one project are one set of language servers, one MCP session and one
+    /// list of background commands, and closing a tab is not the end of any of
+    /// them.
+    pub async fn equipment_for(&self, engine: &Arc<RwLock<Rook>>) -> Arc<OnceCell<chat::Shared>> {
+        let workspace = engine.read().await.workspace.clone();
+        if let Some(kept) = self.equipment.read().await.get(&workspace) {
+            return kept.clone();
+        }
+        self.equipment.write().await.entry(workspace).or_default().clone()
     }
 }
 
@@ -140,6 +160,7 @@ async fn main() -> Result<()> {
     let state = Arc::new(AppState {
         rook: Arc::new(RwLock::new(rook)),
         elsewhere: RwLock::new(std::collections::HashMap::new()),
+        equipment: RwLock::new(std::collections::HashMap::new()),
         max_projects: config.server.max_projects.max(1),
         started: std::time::Instant::now(),
         about,

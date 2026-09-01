@@ -868,6 +868,13 @@ server that dies takes its tools out for the rest of the run, and every later
 call returns the transport error. That is honest but poor, and it is a piece of
 work rather than a line, so it is named here rather than half-done.
 
+Wrong within the hour, and the correction matters more than the paragraph: the
+reconnect landed seven minutes after this was written, in the same pass.
+`request_with` restarts a server whose transport failed and retries the call
+once, bounded by `MOST_RESTARTS`, and leaves alone anything the server itself
+answered — an rpc error is a working server. The paragraph stood for four days
+saying the opposite, which is the one thing a log of decisions must not do.
+
 Dismissed: `fix(sessions): don't let the empty-session sweep delete an archived
 transcript` — there is no such sweep here; retention deletes by age, size and
 tag. `fix(gemini): embed images in Gemini 3.x functionResponse.parts` — a tool

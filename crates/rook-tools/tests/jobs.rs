@@ -203,3 +203,34 @@ async fn a_front_end_that_keeps_none_refuses_rather_than_blocking() {
     assert!(out.is_error, "{}", out.content);
     assert!(out.content.contains("timeout_secs"), "and says what to do instead: {}", out.content);
 }
+
+/// A job that outruns its cap used to keep only the tail, so a background
+/// `cargo test` lost the first error — the one line anybody wants — and kept
+/// the summary that says a test failed. `run_command` keeps both ends; this
+/// does too, and over a run that never ends rather than one that has finished.
+#[tokio::test]
+async fn a_job_that_prints_more_than_it_may_keep_still_has_its_first_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut ctx = ToolContext::new(dir.path().to_path_buf());
+    let cap = 4 * 1024;
+    ctx.jobs = Some(Arc::new(Jobs::new(1, cap)));
+
+    let last = 20_000;
+    RunCommand
+        .call(&ctx, &serde_json::json!({ "command": format!("seq 1 {last}"), "background": true }))
+        .await
+        .unwrap();
+
+    let answer = JobTool.call(&ctx, &serde_json::json!({ "id": "job001", "wait_secs": 20 })).await.unwrap();
+    // The first line is what the job is, not what it printed, and it quotes the
+    // command — so an assertion made against the whole answer would find the
+    // numbers in the command rather than in the output.
+    let (state, printed) =
+        answer.content.split_once('\n').expect("a job answers with its state and its output");
+    assert!(state.contains("exit 0"), "{state}");
+
+    assert!(printed.contains("elided"), "nothing was elided, so the cap was never reached: {printed}");
+    assert!(printed.starts_with("1\n2\n3\n"), "the head is gone: {}", &printed[..60.min(printed.len())]);
+    assert!(printed.trim_end().ends_with(&last.to_string()), "the tail is gone");
+    assert!(printed.len() < cap * 2, "kept {} bytes against a cap of {cap}", printed.len());
+}

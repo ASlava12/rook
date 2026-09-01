@@ -2,8 +2,8 @@
 //!
 //! `run_command` waits, caps and kills at a timeout, which is right for a build
 //! and wrong for a server: a watch process or a dev server has no end, so the
-//! only way to run one was not to. Here it is started, its output accumulates in
-//! the same bounded ends, and the turn carries on.
+//! only way to run one was not to. Here it is started, its output accumulates
+//! between the same bounded ends, and the turn carries on.
 //!
 //! Owned by the front end rather than by a turn, for the reason the language
 //! server pool is: a new `AgentLoop` is built per turn, and a registry built
@@ -36,7 +36,7 @@ struct Running {
     stop: Arc<tokio::sync::Notify>,
     /// The same thing without waiting, for `Drop`, which cannot.
     group: Option<u32>,
-    text: Arc<Mutex<String>>,
+    printed: Arc<Mutex<Printed>>,
     exit: Arc<Mutex<Option<i32>>>,
 }
 
@@ -90,12 +90,12 @@ impl Jobs {
 
         let mut child = crate::exec::spawn_shell(command, cwd)?;
         let id = format!("job{:03}", self.started.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1);
-        let text = Arc::new(Mutex::new(String::new()));
+        let printed = Arc::new(Mutex::new(Printed::default()));
         let exit = Arc::new(Mutex::new(None));
         let stop = Arc::new(tokio::sync::Notify::new());
         let group = child.id();
 
-        let (into, code, cap, stopped) = (text.clone(), exit.clone(), self.max_output_bytes, stop.clone());
+        let (into, code, cap, stopped) = (printed.clone(), exit.clone(), self.max_output_bytes, stop.clone());
         tokio::spawn(async move {
             let mut out = child.stdout.take();
             let mut err = child.stderr.take();
@@ -117,7 +117,7 @@ impl Jobs {
 
         running.insert(
             id.clone(),
-            Running { command: command.to_string(), started_at: now(), stop, group, text, exit },
+            Running { command: command.to_string(), started_at: now(), stop, group, printed, exit },
         );
         Ok(id)
     }
@@ -176,7 +176,7 @@ impl Running {
             id: id.to_string(),
             command: self.command.clone(),
             started_at: self.started_at,
-            output: self.text.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            output: self.printed.lock().unwrap_or_else(|e| e.into_inner()).seen(),
             exit_code: *self.exit.lock().unwrap_or_else(|e| e.into_inner()),
         }
     }
@@ -199,11 +199,47 @@ impl Drop for Jobs {
     }
 }
 
-/// Appends until the cap, then drops the head rather than the tail: a server's
-/// interesting line is the one it printed most recently.
+/// Both ends of what a job has printed, for the reason `run_command` keeps
+/// both: a build's first error is at the head, and a server's interesting line
+/// is the one it printed most recently. Unlike `run_command` this arrives over
+/// hours, so the head is kept as it goes and the tail slides.
+#[derive(Default)]
+struct Printed {
+    head: String,
+    tail: String,
+    elided: usize,
+}
+
+impl Printed {
+    fn push(&mut self, text: &str, cap: usize) {
+        let head_room = cap / 3;
+        match head_room.checked_sub(self.head.len()) {
+            Some(room) => {
+                let take = crate::boundary_at_or_after(text, room.min(text.len()));
+                self.head.push_str(&text[..take]);
+                self.tail.push_str(&text[take..]);
+            }
+            None => self.tail.push_str(text),
+        }
+        let tail_room = cap.saturating_sub(self.head.len());
+        if self.tail.len() > tail_room {
+            let from = crate::boundary_at_or_after(&self.tail, self.tail.len() - tail_room);
+            self.elided += from;
+            self.tail.drain(..from);
+        }
+    }
+
+    fn seen(&self) -> String {
+        match self.elided {
+            0 => format!("{}{}", self.head, self.tail),
+            gone => format!("{}\n… {gone} bytes elided …\n{}", self.head, self.tail),
+        }
+    }
+}
+
 async fn drain(
     stream: &mut Option<impl tokio::io::AsyncRead + Unpin>,
-    into: &Arc<Mutex<String>>,
+    into: &Arc<Mutex<Printed>>,
     cap: usize,
 ) {
     let Some(stream) = stream else { return };
@@ -212,12 +248,7 @@ async fn drain(
         if n == 0 {
             return;
         }
-        let mut held = into.lock().unwrap_or_else(|e| e.into_inner());
-        held.push_str(&String::from_utf8_lossy(&chunk[..n]));
-        if held.len() > cap {
-            let from = crate::boundary_at_or_after(&held, held.len() - cap);
-            *held = held[from..].to_string();
-        }
+        into.lock().unwrap_or_else(|e| e.into_inner()).push(&String::from_utf8_lossy(&chunk[..n]), cap);
     }
 }
 

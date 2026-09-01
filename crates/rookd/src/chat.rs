@@ -38,7 +38,8 @@ pub async fn upgrade(
         Ok(engine) => engine,
         Err(why) => return (axum::http::StatusCode::BAD_REQUEST, why).into_response(),
     };
-    ws.on_upgrade(move |socket| serve(socket, engine))
+    let equipment = state.equipment_for(&engine).await;
+    ws.on_upgrade(move |socket| serve(socket, engine, equipment))
 }
 
 /// Refuses the upgrade before anything else looks at the request.
@@ -84,7 +85,11 @@ fn from_this_daemon(headers: &axum::http::HeaderMap) -> bool {
     origin.strip_prefix("http://").or_else(|| origin.strip_prefix("https://")) == Some(host)
 }
 
-async fn serve(socket: WebSocket, engine: Arc<tokio::sync::RwLock<rook_core::Rook>>) {
+async fn serve(
+    socket: WebSocket,
+    engine: Arc<tokio::sync::RwLock<rook_core::Rook>>,
+    shared: Arc<tokio::sync::OnceCell<Shared>>,
+) {
     let (mut sink, mut stream) = socket.split();
     let (outbound, mut queued) = mpsc::unbounded_channel::<ChatEvent>();
 
@@ -102,10 +107,10 @@ async fn serve(socket: WebSocket, engine: Arc<tokio::sync::RwLock<rook_core::Roo
     let patience = engine.read().await.config.agent.answer_timeout();
     let (approver, relay) = approver(outbound.clone(), patience);
     let (asker, ask_relay) = asker(outbound.clone(), patience);
-    // Per connection, not per prompt: connecting MCP servers and starting
-    // language servers is expensive, and an approval granted for the run has to
-    // survive the turn it was granted in.
-    let shared: Arc<tokio::sync::OnceCell<Shared>> = Arc::new(tokio::sync::OnceCell::new());
+    // What this browser has typed mid-turn, which is per connection — unlike
+    // the servers and the background commands in `shared`, which belong to the
+    // project and outlive any one socket.
+    let interjections: Arc<rook_core::agent::Interjections> = Default::default();
     // Settings are cheap and wanted before the first prompt, so they are not in
     // the cell with the expensive things.
     let settings = Arc::new(Settings::new(&*engine.read().await));
@@ -145,9 +150,7 @@ async fn serve(socket: WebSocket, engine: Arc<tokio::sync::RwLock<rook_core::Roo
                 // to wait or cancel, and cancelling loses everything the turn
                 // had done to say one sentence to it.
                 if running.as_ref().is_some_and(|h| !h.is_finished()) {
-                    if let Some(shared) = shared.get() {
-                        shared.interjections.say(&text);
-                    }
+                    interjections.say(&text);
                     let _ = outbound.send(ChatEvent::Interjected { text });
                     continue;
                 }
@@ -157,6 +160,7 @@ async fn serve(socket: WebSocket, engine: Arc<tokio::sync::RwLock<rook_core::Roo
                         approver: approver.clone(),
                         asker: asker.clone(),
                         settings: settings.clone(),
+                        interjections: interjections.clone(),
                     },
                     shared.clone(),
                     outbound.clone(),
@@ -183,6 +187,7 @@ struct Connection {
     approver: Arc<ChannelApprover>,
     asker: Arc<ChannelAsker>,
     settings: Arc<Settings>,
+    interjections: Arc<rook_core::agent::Interjections>,
 }
 
 async fn turn(
@@ -220,7 +225,6 @@ async fn turn(
                 servers: rook_core::agent::servers_for(&rook.config, &rook.workspace),
                 mcp: Arc::new(rook.connect_mcp().await),
                 jobs: rook_core::agent::jobs_for(&rook.config),
-                interjections: Default::default(),
             }
         })
         .await;
@@ -230,7 +234,7 @@ async fn turn(
     agent.effort = connection.settings.effort();
     agent.approver = connection.approver;
     agent.ask_via(connection.asker);
-    agent.interjections = shared.interjections.clone();
+    agent.interjections = connection.interjections.clone();
     rook_core::agent::equip(&mut agent, shared.servers.clone(), &shared.mcp, shared.jobs.clone());
 
     let emit = outbound.clone();
@@ -281,11 +285,17 @@ fn report(outbound: &mpsc::UnboundedSender<ChatEvent>, message: String) {
 }
 
 /// What a connection keeps between turns.
-struct Shared {
+/// What a turn needs and nobody wants rebuilt: the language-server pool, the
+/// MCP session and the commands left running.
+///
+/// Per project rather than per connection, because for a daemon the front end
+/// is the daemon. Rebuilt on every socket, a browser reload re-indexed every
+/// language server, respawned every MCP server, and killed every background
+/// command the agent had started.
+pub struct Shared {
     servers: Arc<rook_core::lsp::Servers>,
     mcp: Arc<rook_core::McpSession>,
-    jobs: Arc<rook_tools::jobs::Jobs>,
-    interjections: Arc<rook_core::agent::Interjections>,
+    pub jobs: Arc<rook_tools::jobs::Jobs>,
 }
 
 /// What the browser may change for the rest of the connection.

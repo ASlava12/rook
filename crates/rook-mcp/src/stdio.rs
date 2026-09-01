@@ -1,6 +1,6 @@
 //! The stdio transport: a subprocess speaking newline-delimited JSON-RPC.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::process::Stdio as ProcessStdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -18,23 +18,21 @@ use crate::{McpError, Result, ServerConfig};
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Incoming>>>>;
 
 /// The tail of the server's stderr, kept so a failure can say what the server
-/// said about it. Bounded twice — lines and bytes — because a server that dies
-/// in a loop writes as much as it likes on the way down.
+/// said about it. Bounded in lines and in each line, because a server dying in
+/// a loop writes as much as it likes on the way down.
 #[derive(Clone, Default)]
-struct LastWords(Arc<std::sync::Mutex<std::collections::VecDeque<String>>>);
+struct LastWords(Arc<std::sync::Mutex<VecDeque<String>>>);
 
 const MOST_LAST_WORDS: usize = 5;
-const MOST_LAST_WORD_BYTES: usize = 400;
+const MOST_LAST_WORD_CHARS: usize = 400;
 
 impl LastWords {
     fn heard(&self, line: &str) {
-        let line = line.trim();
+        let line: String = line.trim().chars().take(MOST_LAST_WORD_CHARS).collect();
         if line.is_empty() {
             return;
         }
         let Ok(mut kept) = self.0.lock() else { return };
-        let mut line = line.to_string();
-        line.truncate(floor_char_boundary(&line, MOST_LAST_WORD_BYTES));
         kept.push_back(line);
         while kept.len() > MOST_LAST_WORDS {
             kept.pop_front();
@@ -42,14 +40,8 @@ impl LastWords {
     }
 
     fn said(&self) -> String {
-        self.0.lock().map(|kept| kept.iter().cloned().collect::<Vec<_>>().join(" / ")).unwrap_or_default()
-    }
-}
-
-fn floor_char_boundary(text: &str, at: usize) -> usize {
-    match at >= text.len() {
-        true => text.len(),
-        false => (0..=at).rev().find(|&i| text.is_char_boundary(i)).unwrap_or(0),
+        let Ok(kept) = self.0.lock() else { return String::new() };
+        kept.iter().cloned().collect::<Vec<_>>().join(" / ")
     }
 }
 

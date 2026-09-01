@@ -510,11 +510,29 @@ mod tests {
         let state = Arc::new(AppState {
             rook: Arc::new(tokio::sync::RwLock::new(rook)),
             elsewhere: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+            equipment: tokio::sync::RwLock::new(std::collections::HashMap::new()),
             max_projects: 3,
             started: std::time::Instant::now(),
             about,
         });
         Fixture { _home: home, _workspace: workspace, router: router(state.clone()), state, session }
+    }
+
+    /// The language-server pool, the MCP session and the commands left running
+    /// were built per websocket, so reloading the page re-indexed every server,
+    /// respawned every MCP server, and killed every background command the
+    /// agent had started.
+    #[tokio::test]
+    async fn reconnecting_to_a_project_does_not_rebuild_what_it_is_running() {
+        let f = fixture();
+        let first = f.state.equipment_for(&f.state.rook).await;
+        let again = f.state.equipment_for(&f.state.rook).await;
+        assert!(Arc::ptr_eq(&first, &again), "a second connection to one project must reuse them");
+
+        let elsewhere = tempfile::tempdir().unwrap();
+        let other = f.state.engine_for(Some(elsewhere.path())).await.unwrap();
+        let theirs = f.state.equipment_for(&other).await;
+        assert!(!Arc::ptr_eq(&first, &theirs), "another project has its own servers and its own jobs");
     }
 
     async fn post(f: &Fixture, path: &str, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
