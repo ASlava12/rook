@@ -187,6 +187,15 @@ what unblocks the most.
   `rook memory`. Both the TUI and the browser now have a Memory view over a new
   `/api/memory`, and the browser can forget a fact: one nobody can remove is one
   that quietly steers everything. 4 tests, including the tab drawn on a pty.
+- **Tools for an endpoint that cannot carry them** — llama.cpp's server and a
+  few gateways refuse a request with `tools` in it at all, and
+  `Provider::supports_tools` said the agent fell back to describing them in the
+  prompt. Nothing read it and there was no such fallback: it survived the
+  dead-API tests only because `Retrying` forwards it. Now `[agent]
+  native_tools = false` puts the tools in the system block and reads a written
+  call back out of the reply — parsed as JSON wherever it sits, because a
+  scanner for `"tool":` finds one in the tool list and in the model explaining
+  itself. Nothing above the provider can tell which kind of endpoint answered.
 - **Background commands visible outside the terminal** — the chat REPL and the
   TUI have had `/jobs` since there were jobs; a browser could start a dev server
   through the agent and then neither see it nor stop it. A Jobs tab over a new

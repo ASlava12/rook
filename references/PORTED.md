@@ -941,3 +941,30 @@ kept, bounded in lines and in bytes, and appear in `Closed` and `Timeout`. The
 part worth having is the ordering: two tasks drain the two pipes, and the one
 draining stdout is what releases the waiters, so without waiting for its sibling
 whether the error carries the explanation is up to the scheduler.
+
+## Nineteenth pass — goose, codex, openhands, acp, opencode
+
+Acted on, from goose's `fix(dictation): bound provider response bodies` and
+`fix(desktop): reject oversized recipe files before reading`: both are the rule
+this repository already wrote down after three instances, and the provider
+client had nine more. Every dialect read a body with `response.text()` and then
+called `truncate` on it — the cap paid before it was checked, with `truncate`'s
+own doc comment saying "a body can be a megabyte of HTML". `base_url` is
+configuration, so how much arrives is decided by whatever is on the other end.
+`whole_text` refuses past the size one reply may be, `quoted_text` reads only
+what an error message will carry, and the streaming cap became the same
+constant as the non-streaming one, because it is the same question.
+
+Found while reading goose's `fix(security): anchor execute shell extraction`,
+which is about parsing a tool call out of prose: `Provider::supports_tools`
+says the agent "falls back to prompt-encoded tool calls", and nothing reads it,
+no provider overrides it, and there is no such fallback. It survives the
+dead-API tests only because `Retrying` forwards it. That is the next piece of
+work rather than a line here.
+
+Dismissed: goose's `isolate Telegram voice temp files`, `isolate audio recorder
+generations` and `fuse command scanner signals` — no dictation, no recorder, and
+the command rules here anchor to command position already. codex's Guardian
+retention, per-account app approvals and turn analytics are their hosted
+product. openhands' cron editing and cloud settings, acp and opencode's registry
+docs.
