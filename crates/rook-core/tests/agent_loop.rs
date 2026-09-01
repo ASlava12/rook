@@ -1404,6 +1404,16 @@ async fn instructions_a_repository_committed_cannot_spend_the_context_window() {
 
     assert!(!prompt.contains("the part past the limit"), "what was cut must not be there: {prompt}");
     assert!(prompt.contains("max_instructions_bytes"), "and the cut must be named: {prompt}");
+    // Counted from the file's length: past the cap the rest is never read.
+    let past = huge.len() - f.rook.config.agent.max_instructions_bytes;
+    assert!(prompt.contains(&format!("{past} more bytes")), "and counted from the whole: {prompt}");
+
+    // A byte that is not text is not a reason to follow nothing and say nothing
+    // about why.
+    std::fs::write(f.workspace.path().join("AGENTS.md"), b"tabs, not \xff spaces\n").unwrap();
+    let prompt =
+        AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(vec![reply("ok")])), session).system_prompt();
+    assert!(prompt.contains("tabs, not"), "{prompt}");
 }
 
 /// A turn is not a wall: somebody watching one go the wrong way could only stop
