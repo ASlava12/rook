@@ -90,9 +90,13 @@ impl Transport for Http {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let body = Request { jsonrpc: "2.0", id, method, params };
 
-        let response = tokio::time::timeout(timeout, self.post(&body))
-            .await
-            .map_err(|_| McpError::Timeout { server: self.name.clone(), method: method.into(), timeout })??;
+        let response =
+            tokio::time::timeout(timeout, self.post(&body)).await.map_err(|_| McpError::Timeout {
+                server: self.name.clone(),
+                method: method.into(),
+                timeout,
+                said: String::new(),
+            })??;
 
         let status = response.status();
         let event_stream = response
@@ -152,9 +156,14 @@ async fn read_event_stream(
     loop {
         let chunk = match tokio::time::timeout(timeout, bytes.next()).await {
             Err(_) => {
-                return Err(McpError::Timeout { server: server.into(), method: method.into(), timeout });
+                return Err(McpError::Timeout {
+                    server: server.into(),
+                    method: method.into(),
+                    timeout,
+                    said: String::new(),
+                });
             }
-            Ok(None) => return Err(McpError::Closed { server: server.into() }),
+            Ok(None) => return Err(McpError::Closed { server: server.into(), said: String::new() }),
             Ok(Some(chunk)) => {
                 chunk.map_err(|e| McpError::Transport { server: server.into(), message: e.to_string() })?
             }

@@ -875,3 +875,62 @@ result is text throughout Rook, so there is no image to embed. The remaining
 sixty are gateway liveness and launchd restarts, desktop STT and cloud auth,
 cron booking, WeCom streaming, kanban connections, plugin handlers for their own
 platform adapters, YAML provider-key coercion, and contributor mappings.
+
+## Eighteenth pass — cline, goose, opencode, openhands, acp
+
+Acted on: cline's `Clarify model-facing message when user rejects a tool call`.
+Three front ends each wrote the literal `"the user declined"`, which reaches the
+model as `refused: the user declined` — indistinguishable from a fault, and a
+fault is something a model routes around. Theirs appends "NOT a tool or system
+failure. Clarify with user before proceeding."; Rook now has one
+`Approval::declined()` saying nothing failed, that no other tool or sub-agent
+will be allowed the same thing, and to ask the person what they would rather —
+the wording the unattended refusal already uses, with somebody present to ask.
+
+Acted on, from goose's `fix(security): restrict extension tool dispatch`: their
+hole was a fallback that split `server__tool` and dispatched by prefix when the
+lookup missed, so a tool the server implements but never advertised — one
+filtered out of the list — could still be called. Rook cannot do this: it builds
+one `McpTool` per advertised descriptor and dispatches by exact registry lookup,
+and `Registry::without` removes the tool rather than hiding it. But looking for
+the equivalent found a real one next door. A read-only checker drops
+`write_file` and `edit_file` by name, and `delete_file` was added to the toolbox
+months after that line was written, so a checker could delete the work it was
+judging. The list is now `CHANGES_FILES` beside `CHANGES_THINGS`, and a test
+pins the set a checker is left with so the next tool cannot arrive unweighed.
+
+Dismissed: `fix(gdk): preserve tool-call indices in streaming responses` — the
+OpenAI dialect here already assembles by `call.index`. `fix(core): propagate
+parent aborts to delegated subagents` — sub-tasks are futures awaited inside the
+parent's, so dropping the parent drops them, and their processes die with
+`kill_on_drop`; cline had to plumb what structured concurrency gives here. The
+rest of the twenty-nine are desktop marketplace panes, locale bugs, auth
+refresh, dependency bumps, registry docs and cloud UI.
+
+Also acted on, from hermes: `fix(compression): take reasoning_content when the
+summarizer leaves content empty`. Rook read only the text channel, so a
+reasoning model that fitted the whole summary into one thought and left
+`content` empty was treated as a summariser that produced nothing — and the span
+it had just summarised was replaced by the note saying it could not be. And
+`fix(agent): cap compaction threshold floor at 85% of the context window`, whose
+underlying point is that the fraction is config: `ContextBudget::new` now clamps
+it, because a threshold at the top of the window is tripped by a turn that then
+has nowhere to put the tool results it is about to receive.
+
+Dismissed from those two: hermes' `surface silent turn stalls with a bounded
+turn-liveness watchdog` — every dialect here already has `stream_idle_timeout`,
+which is the same watchdog one layer down. openclaw's `keep plugin surfaces
+reachable over bracketed IPv6 hosts` — the daemon writes `http://{addr}` from a
+`SocketAddr`, whose `Display` brackets v6 already; theirs joined host and port as
+strings. `retain grep matches with byte-form paths` — search here is lossy from
+end to end and drops nothing for being unrepresentable.
+
+Also acted on, from openclaw's `fix(memory): preserve vector worker stderr`: a
+stdio MCP server that fails explains itself on stderr and nowhere else — the
+protocol reports only that the pipe closed. Rook drained that pipe (an undrained
+one blocks the server mid-write) straight into a debug log, so the user was told
+"the server exited" and had to go and find out why. The last few lines are now
+kept, bounded in lines and in bytes, and appear in `Closed` and `Timeout`. The
+part worth having is the ordering: two tasks drain the two pipes, and the one
+draining stdout is what releases the waiters, so without waiting for its sibling
+whether the error carries the explanation is up to the scheduler.

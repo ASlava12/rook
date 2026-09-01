@@ -32,14 +32,25 @@ pub enum McpError {
     Transport { server: String, message: String },
     #[error("{server}: {method} returned an error: {} (code {})", .error.message, .error.code)]
     Rpc { server: String, method: String, error: RpcError },
-    #[error("{server}: {method} did not answer within {}s", timeout.as_secs())]
-    Timeout { server: String, method: String, timeout: Duration },
-    #[error("{server}: the server exited")]
-    Closed { server: String },
+    #[error("{server}: {method} did not answer within {}s{}", timeout.as_secs(), last_words(said))]
+    Timeout { server: String, method: String, timeout: Duration, said: String },
+    #[error("{server}: the server exited{}", last_words(said))]
+    Closed { server: String, said: String },
     #[error("{server}: could not parse the response to {method}: {message}")]
     Decode { server: String, method: String, message: String },
     #[error("{server}: needs either a command or a url")]
     NotConfigured { server: String },
+}
+
+/// A failing subprocess explains itself on stderr and nowhere else — the
+/// protocol reports only that the pipe closed — so what it said is carried into
+/// the error rather than left in a debug log nobody has enabled. Empty for a
+/// server that said nothing, and for HTTP, which has no such channel.
+fn last_words(said: &str) -> String {
+    match said.is_empty() {
+        true => String::new(),
+        false => format!(", last saying: {said}"),
+    }
 }
 
 impl McpError {

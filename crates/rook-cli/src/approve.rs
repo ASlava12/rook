@@ -29,7 +29,7 @@ impl Approver for Terminal {
             match answer.trim().to_lowercase().as_str() {
                 "y" | "yes" | "" => Approval::Once,
                 "a" | "always" => Approval::ForRun,
-                _ => Approval::Deny("the user declined".into()),
+                _ => Approval::declined(),
             }
         })
         .await

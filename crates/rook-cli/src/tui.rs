@@ -435,7 +435,7 @@ impl App {
             let approval = match key.code {
                 KeyCode::Char('y') | KeyCode::Enter => Approval::Once,
                 KeyCode::Char('a') => Approval::ForRun,
-                KeyCode::Char('n') | KeyCode::Esc => Approval::Deny("the user declined".into()),
+                KeyCode::Char('n') | KeyCode::Esc => Approval::declined(),
                 _ => return,
             };
             self.chat.push("stat", &format!("  {} → {}", request.action, approval.describe()));

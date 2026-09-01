@@ -2621,6 +2621,57 @@ async fn a_compaction_whose_summary_failed_still_moves_the_session_on() {
     assert!(!carried.contains("question 0"), "the span is not carried: {carried}");
 }
 
+/// Answers the summarisation with the summary in its reasoning channel and
+/// nothing in `content`, which is what a reasoning model does when the whole
+/// answer is short enough to be one thought.
+struct ThinksTheSummary(ScriptedProvider);
+
+#[async_trait]
+impl Provider for ThinksTheSummary {
+    fn id(&self) -> &str {
+        "scripted/thinks-the-summary"
+    }
+    fn context_window(&self) -> usize {
+        16_000
+    }
+    async fn complete(&self, request: Request) -> rook_llm::Result<Response> {
+        self.0.complete(request).await
+    }
+    async fn stream(&self, request: Request) -> rook_llm::Result<rook_llm::ResponseStream> {
+        if !request.messages.first().is_some_and(|m| m.content.contains("compacting an agent")) {
+            return self.0.stream(request).await;
+        }
+        let deltas = vec![
+            Ok(rook_llm::Delta::Reasoning("they asked forty questions about the parser".into())),
+            Ok(rook_llm::Delta::Done {
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+                model: "thinker".into(),
+            }),
+        ];
+        Ok(Box::pin(futures_util::stream::iter(deltas)))
+    }
+}
+
+/// The empty `content` was read as a summariser that produced nothing, so a
+/// summary that had been written was replaced by the note saying none was.
+#[tokio::test]
+async fn a_summary_the_model_only_thought_is_still_the_summary() {
+    let f = fixture();
+    let session = long_session(&f, 40);
+
+    let provider = ThinksTheSummary(ScriptedProvider::new(vec![reply("carrying on")]));
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), session);
+    agent.set_window_for_test(4_000);
+    agent.run("and now?").await.unwrap();
+
+    let (from, summary) = f.rook.last_compaction(session).unwrap();
+    assert!(from > 0, "the span is behind us");
+    let summary = summary.expect("something stands in for the span");
+    assert!(summary.contains("forty questions about the parser"), "{summary}");
+    assert!(!summary.contains("could not be summarised"), "{summary}");
+}
+
 /// A session with nothing worth compacting recorded a compaction anyway, which
 /// poisoned the position it was supposed to describe.
 #[tokio::test]

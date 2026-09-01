@@ -18,7 +18,13 @@ pub struct ContextBudget {
 }
 
 impl ContextBudget {
+    /// `compact_at` comes from config, so it is clamped here rather than
+    /// trusted: the check runs before a request is built, and a threshold near
+    /// the top of the window is one a turn reaches with nowhere left to put the
+    /// tool results it is about to receive. Near the bottom it summarises a
+    /// transcript that has barely started, every turn.
     pub fn new(window: usize, compact_at: f32) -> Self {
+        let compact_at = if compact_at.is_finite() { compact_at.clamp(0.1, 0.9) } else { 0.75 };
         Self { window, compact_at, reserve_output: (window / 8).clamp(1024, 32_768) }
     }
 
@@ -112,6 +118,24 @@ pub fn kind_reaches_the_model(kind: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::ContextBudget;
+
+    /// A fraction is config, and config is written by hand: `compact_at = 1.0`
+    /// leaves the turn that trips the threshold no room to receive anything,
+    /// and `0` compacts a transcript of one message.
+    #[test]
+    fn a_threshold_out_of_config_cannot_be_one_no_turn_can_work_under() {
+        let usable = ContextBudget::new(200_000, 0.75).usable();
+        for absurd in [1.0, 5.0, 0.0, -1.0, f32::NAN, f32::INFINITY] {
+            let threshold = ContextBudget::new(200_000, absurd).threshold();
+            assert!(
+                threshold >= usable / 10 && threshold <= usable * 9 / 10,
+                "compact_at {absurd} gave a threshold of {threshold} in {usable} usable tokens"
+            );
+        }
+        assert_eq!(ContextBudget::new(200_000, 0.75).threshold(), usable * 3 / 4, "a sane one is untouched");
+    }
+
     /// `window_bytes` returns early when its input fits, so nothing ever asked
     /// this for a boundary at or past the end — until a caller with a limit
     /// larger than its input did, and it indexed one byte off the slice.

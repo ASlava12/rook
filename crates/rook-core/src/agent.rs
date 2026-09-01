@@ -237,7 +237,11 @@ type ClaimedResult<'a> = std::result::Result<(Option<crate::service::Writing<'a>
 /// itself.
 const CHANGES_THINGS: &[&str] = &[WRITE_SKILL, FIND_SKILL, REMEMBER, FORGET, DELEGATE, VERIFY];
 
-/// The verdict a checker committed to, if it committed to one.
+/// The same for the toolbox. `run_command` is deliberately absent — verifying a
+/// claim means running things — so this stops a checker editing the work it is
+/// judging, and is not a sandbox.
+const CHANGES_FILES: &[&str] = &["write_file", "edit_file", "delete_file"];
+
 /// The verdict a checker ended with, if it ended with one of the three.
 ///
 /// Tolerant of how a model dresses the line — bold, a bullet, a different case,
@@ -1635,7 +1639,7 @@ impl<'a> AgentLoop<'a> {
         let session = self.rook.fork_for_subtask(self.session, instruction)?;
         let mut child = AgentLoop::new(self.rook, self.provider.clone(), session);
         child.depth = self.depth + 1;
-        child.tools = self.tools.without(&["write_file", "edit_file"]);
+        child.tools = self.tools.without(CHANGES_FILES);
         child.tool_ctx = self.tool_ctx.clone();
         child.policy = self.policy.clone();
         child.approver = self.approver.clone();
@@ -2058,7 +2062,13 @@ impl AgentLoop<'_> {
                 .push(delta.map_err(|e| CoreError::Other(e.to_string()))?)
                 .map_err(|e| CoreError::Other(e.to_string()))?;
         }
-        let summary = assembler.finish().message.content;
+        // A model that wrote the summary into its reasoning channel and left
+        // `content` empty has still written one, and discarding it for the note
+        // that says the span could not be summarised throws away a transcript
+        // that exists.
+        let thought = assembler.reasoning().trim().to_string();
+        let said = assembler.finish().message.content;
+        let summary = if said.trim().is_empty() { thought } else { said };
         match summary.trim().is_empty() {
             true => Err(CoreError::Other("the model returned an empty summary".into())),
             false => Ok(summary),
@@ -2274,5 +2284,26 @@ mod gap_tests {
         assert_eq!(gap_before(100, 100 + 90 * HOUR).as_deref(), Some("3 days"));
         // A clock that went backwards is not a gap.
         assert_eq!(gap_before(10 * HOUR, HOUR), None);
+    }
+}
+
+#[cfg(test)]
+mod checker_tests {
+    use super::CHANGES_FILES;
+
+    /// Both lists a checker is held to are names, so a tool added later is
+    /// handed to it by default — which is how `delete_file` was, for a while,
+    /// something a read-only checker could call. A new tool fails this until
+    /// somebody has put it on one side or the other.
+    #[test]
+    fn a_tool_a_checker_may_call_is_one_somebody_decided_it_may_call() {
+        let checker = rook_tools::ToolBox::standard().without(CHANGES_FILES);
+        let mut allowed = checker.names();
+        allowed.sort_unstable();
+        assert_eq!(
+            allowed,
+            ["crate_api", "list_dir", "read_file", "run_command", "search"],
+            "a new toolbox tool reaches a checker unweighed; add it here or to CHANGES_FILES"
+        );
     }
 }

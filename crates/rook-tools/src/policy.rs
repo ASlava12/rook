@@ -303,6 +303,19 @@ pub enum Approval {
 }
 
 impl Approval {
+    /// A person said no. Worded so the model stops and asks rather than
+    /// looking for a route around it: a refusal that reads like a failure gets
+    /// retried through another tool, which is the one thing it was there to
+    /// prevent.
+    pub fn declined() -> Self {
+        Approval::Deny(
+            "the person driving this refused it deliberately — nothing failed, and no other \
+             tool or sub-agent will be allowed the same thing. Ask them what they would rather \
+             you did."
+                .into(),
+        )
+    }
+
     /// What the user is shown after answering. `ForRun` is a Rust name, and the
     /// TUI was printing it back at them.
     pub fn describe(&self) -> String {

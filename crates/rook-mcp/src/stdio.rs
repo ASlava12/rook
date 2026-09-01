@@ -17,6 +17,42 @@ use crate::{McpError, Result, ServerConfig};
 
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Incoming>>>>;
 
+/// The tail of the server's stderr, kept so a failure can say what the server
+/// said about it. Bounded twice — lines and bytes — because a server that dies
+/// in a loop writes as much as it likes on the way down.
+#[derive(Clone, Default)]
+struct LastWords(Arc<std::sync::Mutex<std::collections::VecDeque<String>>>);
+
+const MOST_LAST_WORDS: usize = 5;
+const MOST_LAST_WORD_BYTES: usize = 400;
+
+impl LastWords {
+    fn heard(&self, line: &str) {
+        let line = line.trim();
+        if line.is_empty() {
+            return;
+        }
+        let Ok(mut kept) = self.0.lock() else { return };
+        let mut line = line.to_string();
+        line.truncate(floor_char_boundary(&line, MOST_LAST_WORD_BYTES));
+        kept.push_back(line);
+        while kept.len() > MOST_LAST_WORDS {
+            kept.pop_front();
+        }
+    }
+
+    fn said(&self) -> String {
+        self.0.lock().map(|kept| kept.iter().cloned().collect::<Vec<_>>().join(" / ")).unwrap_or_default()
+    }
+}
+
+fn floor_char_boundary(text: &str, at: usize) -> usize {
+    match at >= text.len() {
+        true => text.len(),
+        false => (0..=at).rev().find(|&i| text.is_char_boundary(i)).unwrap_or(0),
+    }
+}
+
 /// The same cap the HTTP transport puts on one event, for the same reason:
 /// `lines()` grows a single line until the machine runs out of memory, and how
 /// long a line a server sends is decided by the server. Not a trust boundary —
@@ -27,6 +63,7 @@ const MAX_LINE_BYTES: u64 = 8 << 20;
 
 pub(crate) struct Stdio {
     name: String,
+    heard: LastWords,
     stdin: Mutex<ChildStdin>,
     pending: Pending,
     next_id: AtomicU64,
@@ -82,11 +119,15 @@ impl Stdio {
         // An undrained stderr pipe fills and blocks the server mid-write, which
         // presents as a hang with no output anywhere.
         let name = config.name.clone();
-        tokio::spawn(async move {
+        let heard = LastWords::default();
+        let keeping = heard.clone();
+        let listening = tokio::spawn(async move {
             let mut reader = BufReader::new(stderr);
             let mut line = Vec::new();
             while read_bounded(&mut reader, &mut line).await == Line::Read {
-                tracing::debug!(server = %name, "{}", String::from_utf8_lossy(&line).trim_end());
+                let said = String::from_utf8_lossy(&line);
+                tracing::debug!(server = %name, "{}", said.trim_end());
+                keeping.heard(&said);
             }
         });
 
@@ -110,12 +151,19 @@ impl Stdio {
                     None => tracing::debug!(server = %name, method = ?message.method, "notification"),
                 }
             }
+            // The two pipes are drained by separate tasks, and the waiters are
+            // released from this one: without waiting for the other to finish,
+            // whether the error carries the server's explanation depends on
+            // which task the scheduler reached first. Bounded, because stdout
+            // can close while the process is alive and stderr still open.
+            let _ = tokio::time::timeout(Duration::from_secs(1), listening).await;
             // The pipe closed: waiters would otherwise hang until their timeout.
             reader_pending.lock().await.clear();
         });
 
         Ok(Self {
             name: config.name.clone(),
+            heard,
             stdin: Mutex::new(stdin),
             pending,
             next_id: AtomicU64::new(1),
@@ -159,9 +207,14 @@ impl Transport for Stdio {
         match tokio::time::timeout(timeout, rx).await {
             Err(_) => {
                 self.pending.lock().await.remove(&id);
-                Err(McpError::Timeout { server: self.name.clone(), method: method.into(), timeout })
+                Err(McpError::Timeout {
+                    server: self.name.clone(),
+                    method: method.into(),
+                    timeout,
+                    said: self.heard.said(),
+                })
             }
-            Ok(Err(_)) => Err(McpError::Closed { server: self.name.clone() }),
+            Ok(Err(_)) => Err(McpError::Closed { server: self.name.clone(), said: self.heard.said() }),
             Ok(Ok(message)) => Ok(message),
         }
     }

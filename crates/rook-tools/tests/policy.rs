@@ -310,7 +310,18 @@ fn an_allow_rule_that_does_not_compile_is_dropped_and_reported() {
 fn what_the_user_is_told_after_answering_is_not_a_rust_name() {
     assert_eq!(Approval::ForRun.describe(), "allowed for the rest of the run");
     assert_eq!(Approval::Once.describe(), "allowed once");
-    assert!(Approval::Deny("the user declined".into()).describe().contains("the user declined"));
+    assert!(Approval::declined().describe().starts_with("refused — "));
+}
+
+/// The model is told "refused: {why}", and a bare "the user declined" reads to
+/// it like a fault to route around — the same failure the unattended refusal
+/// below was written for, with a person present to ask instead.
+#[test]
+fn a_person_saying_no_is_not_reported_to_the_model_as_something_that_went_wrong() {
+    let Approval::Deny(why) = Approval::declined() else { panic!("a refusal that allows is not one") };
+    assert!(why.contains("nothing failed"), "{why}");
+    assert!(why.contains("no other tool or sub-agent"), "{why}");
+    assert!(why.contains("Ask them"), "a refusal a model cannot act on is one it works around: {why}");
 }
 
 /// The remedies are all things only the person can do, and a refusal that

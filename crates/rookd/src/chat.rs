@@ -122,7 +122,7 @@ async fn serve(socket: WebSocket, engine: Arc<tokio::sync::RwLock<rook_core::Roo
                 match decision {
                     ApprovalDecision::Once => Approval::Once,
                     ApprovalDecision::ForRun => Approval::ForRun,
-                    ApprovalDecision::Deny => Approval::Deny("the user declined".into()),
+                    ApprovalDecision::Deny => Approval::declined(),
                 },
             ),
             ClientMessage::Answers { id, answers } => asker.answer(&id, answers),

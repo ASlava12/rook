@@ -27,6 +27,12 @@ fn main() {
         if mode == "crash" && method == "tools/call" {
             std::process::exit(1);
         }
+        // The common real failure: the server starts, takes a call, and dies
+        // saying why on the only channel it has left.
+        if mode == "last-words" && method == "tools/call" {
+            eprintln!("ANTHROPIC_API_KEY is not set");
+            std::process::exit(1);
+        }
         // Dies once and serves afterwards, which is what a server crashing on a
         // bad input and being restarted looks like.
         if mode == "crash-once" && method == "tools/call" && !std::path::Path::new(&died_marker()).exists() {
