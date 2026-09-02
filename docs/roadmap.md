@@ -187,6 +187,14 @@ what unblocks the most.
   `rook memory`. Both the TUI and the browser now have a Memory view over a new
   `/api/memory`, and the browser can forget a fact: one nobody can remove is one
   that quietly steers everything. 4 tests, including the tab drawn on a pty.
+- **A turn goes on while the sub-agents it started are running** — `delegate`
+  waited, so by the time the parent could speak its children had finished, and a
+  child going the wrong way went there to the end. `wait: false` answers at once
+  and leaves them running; `subagents` says where each got to, passes one a
+  remark it sees at its next step, and hands back their results. They advance
+  during the parent's own model call, which is the long wait in a step. A turn
+  does not end with work still out: anything the model did not collect is waited
+  for and appended rather than dropped at the door.
 - **A reply that changed writing system is asked for again** — small and
   quantised multilingual models sometimes finish a sentence in a script nobody
   used: a Russian answer with a Han word in the middle of it. The text cannot be
@@ -929,15 +937,6 @@ call it without a key. Until then it is a command a person runs, which is honest
 — a job that passes because no model could be pulled is worse than no job.
 
 ## After that
-
-**Talking to a sub-agent while it runs.** What the *user* says now reaches them:
-a remark typed while a delegation is out is handed to every running sub-task at
-its next step, and kept for the parent, which used to have to wait for all of
-them to land before hearing it. A checker is deliberately left out — it is asked
-to be the one party with no stake in the answer, and a remark from the person
-whose work is being checked is a stake. What is still missing is the parent
-sending something of its own, which is what codex's `spawn_agent`/`wait_agent`
-is for; it cannot, because it is blocked on the children it would be talking to.
 
 **Auto-installing language servers.** Detection is done; the other half of
 codex #8745 asks for installation too, which means downloading and running a

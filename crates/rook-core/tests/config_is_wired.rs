@@ -239,18 +239,22 @@ fn the_whole_advertised_tool_list_stays_within_a_budget() {
     };
 
     let (full, stubs) = (priced(false), priced(true));
-    // Raised once, from 1,800: `edit_file` grew a `files` array so a refactor
+    // Raised twice. From 1,800: `edit_file` grew a `files` array so a refactor
     // across several files is one call that either lands whole or writes
     // nothing, and the shape has to appear twice because `$ref` is not read the
-    // same way by all three dialects. Two descriptions were trimmed first.
+    // same way by all three dialects. From 1,900: `subagents`, which is how a
+    // parent reads and redirects children it left running — a capability with
+    // its own verbs rather than an argument on an existing one. Both times the
+    // new descriptions were cut to the bone first; what is left is the shape of
+    // the arguments, which a tool cannot be called without.
     assert!(
-        full < 1_900,
+        full < 2_050,
         "the whole list costs ~{full} tokens on every eager request; trim a description or \
          merge an argument before raising this"
     );
     // The number actually paid, since lazy loading is the default.
     assert!(
-        stubs < 780,
+        stubs < 850,
         "the stubs cost ~{stubs} tokens on every request, which is what is \
          actually paid: lazy loading is the default"
     );

@@ -235,7 +235,7 @@ type ClaimedResult<'a> = std::result::Result<(Option<crate::service::Writing<'a>
 /// a checker. `delegate` is here because a checker that can start an agent with
 /// the writing tools has not been stopped from writing, only from doing it
 /// itself.
-const CHANGES_THINGS: &[&str] = &[WRITE_SKILL, FIND_SKILL, REMEMBER, FORGET, DELEGATE, VERIFY];
+const CHANGES_THINGS: &[&str] = &[WRITE_SKILL, FIND_SKILL, REMEMBER, FORGET, DELEGATE, SUBAGENTS, VERIFY];
 
 /// The same for the toolbox. `run_command` is deliberately absent — verifying a
 /// claim means running things — so this stops a checker editing the work it is
@@ -364,6 +364,7 @@ pub const REMEMBER: &str = "remember";
 pub const FORGET: &str = "forget";
 pub const RECALL: &str = "recall";
 pub const DELEGATE: &str = "delegate";
+pub const SUBAGENTS: &str = "subagents";
 pub const VERIFY: &str = "verify";
 
 /// How deep delegation may nest. One level of sub-delegation is useful for
@@ -880,7 +881,26 @@ impl<'a> AgentLoop<'a> {
                                             exchanges; anything else is passed verbatim, which is \
                                             where a file it would otherwise go and read belongs."
                         },
-                        "max_steps": { "type": "integer" }
+                        "max_steps": { "type": "integer" },
+                        "wait": {
+                            "type": "boolean",
+                            "default": true,
+                            "description": "False answers at once and leaves them running; \
+                                            `subagents` reads and steers them."
+                        }
+                    }
+                }),
+            });
+            push(ToolSpec {
+                name: SUBAGENTS.into(),
+                description:
+                    "Where sub-agents left running got to, and their results. No id answers for all.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string" },
+                        "say": { "type": "string", "description": "A remark it sees at its next step." },
+                        "wait_secs": { "type": "integer", "description": "Answer when it lands, or after this." }
                     }
                 }),
             });
@@ -1006,6 +1026,13 @@ impl<'a> AgentLoop<'a> {
             compactions: 0,
         };
 
+        // Built once, before the loop borrows `self` mutably: a child's future
+        // takes the crew rather than the parent, which is what lets the parent
+        // go on stepping while it runs.
+        let crew = self.crew();
+        let (mut nursery, mut nursery_steps) = Nursery::new(self.rook.config.agent.max_parallel_subagents);
+        let mut carrying = tokio::time::interval(std::time::Duration::from_millis(200));
+
         let mut asked_for_one_script = false;
         let mut worth_compacting = true;
         // What the provider last said the request cost, and how many messages
@@ -1063,10 +1090,30 @@ impl<'a> AgentLoop<'a> {
             let mut stream =
                 self.provider.stream(request).await.map_err(|e| CoreError::Other(e.to_string()))?;
             let mut assembler = Assembler::default();
-            while let Some(delta) = stream.next().await {
-                let delta = delta.map_err(|e| CoreError::Other(e.to_string()))?;
-                on_progress(Progress::Delta(&delta));
-                assembler.push(delta).map_err(|e| CoreError::Other(e.to_string()))?;
+            // The model call is the long wait in a step, so it is where started
+            // sub-agents get to run. Without this they would only advance while
+            // the parent was blocked on them, which is the thing being undone.
+            let mut carried: Vec<String> = Vec::new();
+            loop {
+                tokio::select! {
+                    biased;
+                    Some((at, tool)) = nursery_steps.recv() => {
+                        on_progress(Progress::Delegating { task: short(&nursery.tasks[at]), tool: &tool });
+                    }
+                    _ = carrying.tick() => relay(&self.interjections, &nursery.said, &mut carried),
+                    Some((at, result)) = nursery.running.next(), if nursery.busy() => {
+                        nursery.landed[at] = Some(result);
+                    }
+                    delta = stream.next() => {
+                        let Some(delta) = delta else { break };
+                        let delta = delta.map_err(|e| CoreError::Other(e.to_string()))?;
+                        on_progress(Progress::Delta(&delta));
+                        assembler.push(delta).map_err(|e| CoreError::Other(e.to_string()))?;
+                    }
+                }
+            }
+            for text in carried {
+                self.interjections.say(&text);
             }
             if !assembler.reasoning().is_empty() {
                 self.rook.log(self.session, EventKind::Reasoning, "", assembler.reasoning()).ok();
@@ -1115,6 +1162,31 @@ impl<'a> AgentLoop<'a> {
                 // into it, which is not where the person put it.
                 let said = self.interjections.take();
                 if said.is_empty() {
+                    // A turn does not end with its work still out. What the
+                    // model never collected is waited for and appended rather
+                    // than dropped at the door: the children have already spent
+                    // the tokens, and their answers are the reason they ran.
+                    if nursery.busy() || nursery.taken.iter().any(|taken| !taken) {
+                        while let Some((landed, result)) = nursery.running.next().await {
+                            nursery.landed[landed] = Some(result);
+                        }
+                        let mut left = Vec::new();
+                        for at in 0..nursery.tasks.len() {
+                            if nursery.taken[at] {
+                                continue;
+                            }
+                            nursery.taken[at] = true;
+                            if let Some(result) = &nursery.landed[at] {
+                                left.push(collected(&nursery.tasks[at], result, &mut outcome));
+                            }
+                        }
+                        if !left.is_empty() {
+                            outcome.reply.push_str(&format!(
+                                "\n\n(sub-agents this turn started and did not collect)\n\n{}",
+                                left.join("\n\n")
+                            ));
+                        }
+                    }
                     // Once. A model that slips twice is one that cannot write
                     // the answer any other way, and a second ask spends a turn
                     // to be told so again.
@@ -1170,7 +1242,8 @@ impl<'a> AgentLoop<'a> {
             messages.push(asked.clone());
 
             for call in &asked.tool_calls {
-                let (mut result, failed) = self.dispatch(call, &mut outcome, &mut on_progress).await;
+                let (mut result, failed) =
+                    self.dispatch(call, &mut outcome, &mut on_progress, &crew, &mut nursery).await;
                 on_progress(Progress::ToolDone { name: &call.name, failed });
                 for (_, name) in dropped.iter().filter(|(id, _)| *id == call.id) {
                     result.push_str(&format!(
@@ -1189,12 +1262,17 @@ impl<'a> AgentLoop<'a> {
 
     /// The text the model sees, and whether the call failed — which the outcome
     /// knows and the text only hints at.
-    async fn dispatch(
+    async fn dispatch<'f>(
         &self,
         call: &rook_llm::ToolCall,
         outcome: &mut TurnOutcome,
         on_progress: &mut impl FnMut(Progress<'_>),
-    ) -> (String, bool) {
+        crew: &'f Crew<'a>,
+        nursery: &mut Nursery<'f>,
+    ) -> (String, bool)
+    where
+        'a: 'f,
+    {
         self.rook.log(self.session, EventKind::ToolCall, &call.name, &call.arguments.to_string()).ok();
 
         // Refused before it is recorded, and the order is the point: a verdict
@@ -1225,8 +1303,14 @@ impl<'a> AgentLoop<'a> {
         }
 
         if call.name == DELEGATE {
-            let text = self.delegate(&call.arguments, outcome, on_progress).await;
+            let text = self.delegate(&call.arguments, outcome, on_progress, crew, nursery).await;
             self.rook.log(self.session, EventKind::ToolResult, DELEGATE, &text).ok();
+            return (text, false);
+        }
+
+        if call.name == SUBAGENTS {
+            let text = self.subagents(&call.arguments, outcome, nursery).await;
+            self.rook.log(self.session, EventKind::ToolResult, SUBAGENTS, &text).ok();
             return (text, false);
         }
 
@@ -1421,12 +1505,17 @@ impl<'a> AgentLoop<'a> {
     /// The child's full transcript stays in the store, linked to this session by
     /// its parent, so the detail is recoverable without ever entering this
     /// conversation's context — which is the entire point.
-    async fn delegate(
+    async fn delegate<'f>(
         &self,
         args: &serde_json::Value,
         outcome: &mut TurnOutcome,
         on_progress: &mut impl FnMut(Progress<'_>),
-    ) -> String {
+        crew: &'f Crew<'a>,
+        nursery: &mut Nursery<'f>,
+    ) -> String
+    where
+        'a: 'f,
+    {
         let tasks = requested_tasks(args);
         if tasks.is_empty() {
             return "delegate needs a task, or a list of tasks".into();
@@ -1462,6 +1551,18 @@ impl<'a> AgentLoop<'a> {
                  limit of {ceiling}. Do the rest here, delegate fewer at a time, or raise \
                  `[agent] max_subagents_per_turn`.",
                 tasks.len()
+            );
+        }
+
+        // Started and left to run: the turn goes on, and `subagents` is how the
+        // parent looks at them, redirects one, and takes their results.
+        if !args.get("wait").and_then(|w| w.as_bool()).unwrap_or(true) {
+            let names: Vec<String> =
+                tasks.iter().map(|task| nursery.start(crew, task, inherited.clone(), max_steps)).collect();
+            return format!(
+                "started: {}. `{SUBAGENTS}` says where they got to, passes one a remark, and \
+                 hands back what they answer.",
+                names.join(", ")
             );
         }
 
@@ -1540,34 +1641,83 @@ impl<'a> AgentLoop<'a> {
             self.interjections.say(&text);
         }
 
-        let mut report = Vec::with_capacity(total);
-        for (task, result) in tasks.iter().zip(results.into_iter().flatten()) {
-            match result {
-                Ok((id, child)) => {
-                    outcome.delegated.push(id.clone());
-                    outcome.input_tokens += child.input_tokens;
-                    outcome.output_tokens += child.output_tokens;
-                    // Or the turn reports the children's input against only its
-                    // own cache, and the ratio a person reads is wrong.
-                    outcome.cached_tokens += child.cached_tokens;
-                    // A child that ran out of steps, or was cut off mid-answer,
-                    // reported the same way as one that finished: the stop
-                    // reason was in the line, and five uniform blocks are read
-                    // uniformly. What it managed still follows, because it is
-                    // usually most of the work.
-                    let how = match finished(&child.stopped) {
-                        true => format!("sub-agent {id}, {} steps ({}):", child.steps, child.stopped),
-                        false => format!(
-                            "sub-agent {id} did not finish — {} after {} steps. What it had done:",
-                            child.stopped, child.steps
-                        ),
-                    };
-                    report.push(format!("### {task}\n{how}\n{}", child.reply));
+        let report: Vec<String> = tasks
+            .iter()
+            .zip(results.into_iter().flatten())
+            .map(|(task, result)| collected(task, &result, outcome))
+            .collect();
+        report.join("\n\n")
+    }
+
+    /// Reading, steering and collecting the sub-agents this turn started.
+    ///
+    /// `delegate` waits, so by the time the parent could speak its children
+    /// have finished. This is the other half: what they are doing, a remark to
+    /// one of them, and their results when it wants them.
+    async fn subagents(
+        &self,
+        args: &serde_json::Value,
+        outcome: &mut TurnOutcome,
+        nursery: &mut Nursery<'_>,
+    ) -> String {
+        if nursery.tasks.is_empty() {
+            return format!(
+                "nothing was started this turn. `{DELEGATE}` with `wait: false` starts one and \
+                 answers with its name."
+            );
+        }
+        let at = match args.get("id").and_then(|i| i.as_str()) {
+            None => None,
+            Some(name) => match nursery.index_of(name) {
+                Some(at) => Some(at),
+                None => {
+                    return format!("no sub-agent {name}. Started: {}", nursery.names().join(", "));
                 }
-                Err(e) => report.push(format!("### {task}\nfailed: {e}")),
+            },
+        };
+
+        if let Some(text) = args.get("say").and_then(|s| s.as_str()).filter(|t| !t.trim().is_empty()) {
+            let Some(at) = at else {
+                return "say needs the id of the one to say it to".into();
+            };
+            if nursery.landed[at].is_some() {
+                return format!("{} has finished; nothing is listening.", name_of(at));
+            }
+            nursery.said[at].say(text);
+            return format!("{} sees it at its next step.", name_of(at));
+        }
+
+        // Bounded by what a command in the foreground would have been given,
+        // for the same reason `job` is: a wait the model wrote is a wait the
+        // model decides the length of.
+        if let Some(secs) = args.get("wait_secs").and_then(|w| w.as_u64()) {
+            let patience = std::time::Duration::from_secs(secs).min(self.tool_ctx.command_timeout);
+            let deadline = tokio::time::Instant::now() + patience;
+            while nursery.busy() && !nursery.all_in(at) {
+                let Ok(Some((landed, result))) =
+                    tokio::time::timeout_at(deadline, nursery.running.next()).await
+                else {
+                    break;
+                };
+                nursery.landed[landed] = Some(result);
             }
         }
-        report.join("\n\n")
+
+        let wanted: Vec<usize> = match at {
+            Some(at) => vec![at],
+            None => (0..nursery.tasks.len()).collect(),
+        };
+        let mut lines = Vec::with_capacity(wanted.len());
+        for at in wanted {
+            match (&nursery.landed[at], nursery.taken[at]) {
+                (Some(result), false) => {
+                    lines.push(collected(&nursery.tasks[at], result, outcome));
+                    nursery.taken[at] = true;
+                }
+                _ => lines.push(nursery.how_it_is_going(at)),
+            }
+        }
+        lines.join("\n\n")
     }
 
     /// Check a claim in a context that did not make it.
@@ -2145,6 +2295,142 @@ impl Crew<'_> {
         }))
         .await?;
         Ok((rook_store::format_session_id(session), outcome))
+    }
+}
+
+/// Sub-tasks a turn has started and not yet collected.
+///
+/// Held across the parent's steps, which is the whole difference between this
+/// and `delegate`: a parent blocked on its children can neither look at them,
+/// nor say anything to them, nor do anything else while they run.
+/// What a sub-task came back with: the session it ran in and what it did, or
+/// why it could not.
+type Landed = Result<(String, TurnOutcome)>;
+
+/// One sub-task, running. Boxed because this is the turn calling itself.
+type Child<'f> = std::pin::Pin<Box<dyn std::future::Future<Output = (usize, Landed)> + Send + 'f>>;
+
+struct Nursery<'f> {
+    running: futures_util::stream::FuturesUnordered<Child<'f>>,
+    tasks: Vec<String>,
+    /// One queue each, so a remark reaches every child rather than whichever
+    /// stepped first.
+    said: Vec<std::sync::Arc<Interjections>>,
+    landed: Vec<Option<Landed>>,
+    /// Reported to the model already. A result handed over twice is a turn
+    /// charged twice for the same tokens.
+    taken: Vec<bool>,
+    /// Shared with the blocking path for the same reason it has one: the
+    /// sub-tasks share a provider and a token budget.
+    limit: std::sync::Arc<tokio::sync::Semaphore>,
+    doing: tokio::sync::mpsc::UnboundedSender<(usize, String)>,
+}
+
+impl<'f> Nursery<'f> {
+    fn new(parallel: usize) -> (Self, tokio::sync::mpsc::UnboundedReceiver<(usize, String)>) {
+        let (doing, steps) = tokio::sync::mpsc::unbounded_channel();
+        let nursery = Self {
+            running: Default::default(),
+            tasks: Vec::new(),
+            said: Vec::new(),
+            landed: Vec::new(),
+            taken: Vec::new(),
+            limit: std::sync::Arc::new(tokio::sync::Semaphore::new(parallel.max(1))),
+            doing,
+        };
+        (nursery, steps)
+    }
+
+    /// Starts one, and answers with the name the model will call it by.
+    fn start<'a: 'f>(
+        &mut self,
+        crew: &'f Crew<'a>,
+        task: &str,
+        inherited: Option<String>,
+        max_steps: Option<u32>,
+    ) -> String {
+        let at = self.tasks.len();
+        let said: std::sync::Arc<Interjections> = Default::default();
+        self.tasks.push(task.to_string());
+        self.said.push(said.clone());
+        self.landed.push(None);
+        self.taken.push(false);
+        let task = task.to_string();
+        let (limit, doing) = (self.limit.clone(), self.doing.clone());
+        self.running.push(Box::pin(async move {
+            let _permit = limit.acquire().await;
+            (at, crew.run_subtask(&task, inherited.as_deref(), max_steps, doing, at, said).await)
+        }));
+        name_of(at)
+    }
+
+    fn busy(&self) -> bool {
+        !self.running.is_empty()
+    }
+
+    fn index_of(&self, name: &str) -> Option<usize> {
+        (0..self.tasks.len()).find(|at| name_of(*at) == name)
+    }
+
+    /// Where a child got to, as far as anyone here can see: a running one is
+    /// known by its task and nothing else until it lands.
+    /// Whether there is anything left to wait for: one named child, or all.
+    fn all_in(&self, at: Option<usize>) -> bool {
+        match at {
+            Some(at) => self.landed[at].is_some(),
+            None => self.landed.iter().all(Option::is_some),
+        }
+    }
+
+    fn names(&self) -> Vec<String> {
+        (0..self.tasks.len()).map(name_of).collect()
+    }
+
+    fn how_it_is_going(&self, at: usize) -> String {
+        if self.taken[at] {
+            return format!("{}: already reported", name_of(at));
+        }
+        match &self.landed[at] {
+            None => format!("{}: still running — {}", name_of(at), short(&self.tasks[at])),
+            Some(Ok((id, child))) => {
+                format!("{}: {} after {} steps — {}", name_of(at), child.stopped, child.steps, id)
+            }
+            Some(Err(e)) => format!("{}: failed — {e}", name_of(at)),
+        }
+    }
+}
+
+/// What the model calls a sub-agent it started. Positional rather than the
+/// session id, which is thirty characters of no meaning to it.
+fn name_of(at: usize) -> String {
+    format!("task{:02}", at + 1)
+}
+
+/// One sub-agent's block in a report, with its cost folded into the turn.
+///
+/// A child that ran out of steps, or was cut off mid-answer, used to read like
+/// one that finished: the stop reason was in the line, and uniform blocks are
+/// read uniformly. What it managed still follows, because it is usually most of
+/// the work.
+fn collected(task: &str, result: &Landed, outcome: &mut TurnOutcome) -> String {
+    match result {
+        Ok((id, child)) => {
+            outcome.delegated.push(id.clone());
+            outcome.input_tokens += child.input_tokens;
+            outcome.output_tokens += child.output_tokens;
+            // Or the turn reports the children's input against only its own
+            // cache, and the ratio a person reads is wrong.
+            outcome.cached_tokens += child.cached_tokens;
+            let how = match finished(&child.stopped) {
+                true => format!("sub-agent {id}, {} steps ({}):", child.steps, child.stopped),
+                false => format!(
+                    "sub-agent {id} did not finish — {} after {} steps. What it had done:",
+                    child.stopped, child.steps
+                ),
+            };
+            format!("### {task}\n{how}\n{}", child.reply)
+        }
+        Err(e) => format!("### {task}\nfailed: {e}"),
     }
 }
 

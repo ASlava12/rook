@@ -318,6 +318,94 @@ async fn a_mutating_tool_is_checkpointed_and_a_rewind_undoes_it() {
     assert_eq!(original.len(), entries.len());
 }
 
+/// Answers by what it was last asked rather than by position.
+///
+/// With a parent and its sub-agent both calling, the order they arrive in is
+/// the thing under test and cannot also be the thing the script depends on — a
+/// positional script makes the race decide who gets which reply.
+struct ByPrompt(Vec<(&'static str, Response)>);
+
+#[async_trait]
+impl Provider for ByPrompt {
+    fn id(&self) -> &str {
+        "scripted/by-prompt"
+    }
+    fn context_window(&self) -> usize {
+        16_000
+    }
+    async fn complete(&self, request: Request) -> rook_llm::Result<Response> {
+        let last = request.messages.last().map(|m| m.content.clone()).unwrap_or_default();
+        match self.0.iter().find(|(when, _)| last.contains(when)) {
+            Some((_, answer)) => Ok(answer.clone()),
+            None => Err(LlmError::Other(format!("nothing to say to {last:?}"))),
+        }
+    }
+}
+
+/// A parent blocked on its children cannot look at them, cannot redirect one,
+/// and cannot do anything else while they run. Started rather than waited for,
+/// they advance during the parent's own model call.
+#[tokio::test]
+async fn a_turn_goes_on_while_the_sub_agents_it_started_are_still_running() {
+    let f = fixture();
+    let session = f.rook.start_session("s").unwrap();
+    // Most specific first: the report of a task quotes the task, so a rule
+    // keyed on the task alone would answer for both.
+    let provider = Arc::new(ByPrompt(vec![
+        ("count the files", call("delegate", serde_json::json!({ "tasks": ["tally"], "wait": false }))),
+        ("started: task01", call("subagents", serde_json::json!({ "id": "task01", "wait_secs": 20 }))),
+        ("there are three", reply("it says three")),
+        ("tally", reply("there are three")),
+    ]));
+
+    let outcome = AgentLoop::new(&f.rook, provider, session).run("count the files").await.unwrap();
+
+    assert_eq!(outcome.reply, "it says three");
+    assert_eq!(outcome.tools_called, ["delegate", "subagents"]);
+    assert_eq!(outcome.delegated.len(), 1, "the child's cost is the turn's");
+}
+
+/// The point of starting them rather than waiting: a parent that sees a child
+/// going the wrong way can say so while it is still going, instead of reading
+/// the finished wrong answer.
+#[tokio::test]
+async fn a_parent_can_redirect_a_sub_agent_that_is_still_running() {
+    let f = fixture();
+    std::fs::write(f.workspace.path().join("a.txt"), "contents of a").unwrap();
+    let session = f.rook.start_session("s").unwrap();
+
+    // The child reads the same file until it is told otherwise, so the remark
+    // arriving is what ends it rather than a guess about scheduling.
+    let provider = Arc::new(ByPrompt(vec![
+        ("stop, tally instead", reply("switched to tallying")),
+        (
+            "started: task01",
+            call("subagents", serde_json::json!({ "id": "task01", "say": "stop, tally instead" })),
+        ),
+        (
+            "sees it at its next step",
+            call("subagents", serde_json::json!({ "id": "task01", "wait_secs": 20 })),
+        ),
+        ("switched to tallying", reply("it switched")),
+        ("redirect it", call("delegate", serde_json::json!({ "tasks": ["walk"], "wait": false }))),
+        ("walk", call("read_file", serde_json::json!({ "path": "a.txt" }))),
+        ("contents of a", call("read_file", serde_json::json!({ "path": "a.txt" }))),
+    ]));
+
+    let mut agent = AgentLoop::new(&f.rook, provider, session);
+    agent.allow_everything_not_denied();
+    let outcome = agent.run("redirect it").await.unwrap();
+
+    assert_eq!(outcome.reply, "it switched", "the parent saw what the child did after being told");
+    let child = rook_store::parse_session_id(&outcome.delegated[0]).unwrap();
+    let heard: Vec<String> =
+        f.rook.transcript(child, 0, 200, 512).unwrap().iter().map(|e| e.body.clone()).collect();
+    assert!(
+        heard.iter().any(|body| body.contains("stop, tally instead")),
+        "the remark reached the child while it was running: {heard:?}"
+    );
+}
+
 /// Reversibility is a property of the system, not of one session: a turn that
 /// delegated the writing is a turn whose rewind has to undo it. The child works
 /// in a forked session, so its checkpoints are in a log the parent's rewind was
