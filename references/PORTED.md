@@ -987,3 +987,50 @@ Dismissed: `fix(ios): omit deep-link URLs from logs` — the Google key goes in 
 header here and not the `?key=` the docs lead with, with a comment saying why.
 The rest of the two hundred are their gateway, their plugin registry, their
 desktop and their messaging bridges.
+
+## Twenty-first pass — goose, codex, openhands, acp, opencode, cline
+
+Acted on, from goose's `fix(openai): update stored tool call name when later
+delta carries non-empty name`. Their bug was a name arriving late and being
+ignored; the same line here had the worse direction. Some gateways repeat `id`
+and `name` on every continuation chunk with nothing in them, and
+`ToolCallBuffer` took an empty string as an update — after which `drain`
+discards the call as nameless and the model's tool call has silently not
+happened. Both directions are one condition: empty is not an update. The test
+for it fails with zero calls where one is expected, which is what the defect
+looked like from the outside.
+
+Acted on, from codex's `Fix relative MCP server spawning on macOS`: a server
+configured as `./bin/server` together with a `cwd` is resolved against the
+parent's directory on some platforms and the child's on others — Rust's own
+documentation says not to rely on it. Resolved before the spawn, in the same
+function that already looked a bare name up on PATH, it is neither. `rook-lsp`
+had it too, against the workspace root.
+
+Dismissed: openhands' `patch DOMPurify sanitization bypass` — the web UI builds
+every node with `createTextNode` and `setAttribute` and has no `innerHTML`
+anywhere, so there is nothing to sanitise; it also builds no attribute from
+data, which is where the other half of that class lives. opencode's `stop Azure
+model discovery from logging to stdout` — `rook mcp serve` speaks JSON-RPC on
+stdout and nothing in the library writes there; the diagnostics that exist are
+`eprintln!`. The rest are their consoles, desktops and marketplaces.
+
+Also from this pass, hermes' `fix(agent): stop the between-turns tool refresh
+from forking the cached prefix` — twice bitten there, and here the order of the
+tool list was pinned by a test while the list itself was not. A tool appearing
+or changing between turns invalidates everything behind it just as surely as
+reordering them, and the list is assembled from more places than the order is.
+Now pinned, with the precondition asserted: a request carrying no tools at all
+would otherwise pass it saying nothing.
+
+And openclaw's `fix(mcp): size OAuth-authenticated request bodies` found the
+same defect the provider client had, one crate over: `rook-mcp`'s HTTP
+transport read a body with `response.text()` and called `truncate` on it
+afterwards. A url is configuration, so what comes back is decided by whatever
+answers it.
+
+Dismissed from these two: hermes' compaction cooldown work, which still does not
+apply — a failed summary here records a position, so context is freed and there
+is nothing to retry. openclaw's `record empty subagent completion` — a turn that
+says nothing already answers with the reason it stopped rather than an empty
+string. The rest are their gateway, their multiplex and their desktop.

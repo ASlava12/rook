@@ -98,7 +98,16 @@ where
 /// Copied rather than shared: `rook-mcp`, `rook-lsp` and `rook-skills` each
 /// start a program somebody named in configuration, and the three sit on one
 /// layer with nothing beneath them to hold it.
-fn program(command: &str) -> std::path::PathBuf {
+fn program(command: &str, cwd: Option<&std::path::Path>) -> std::path::PathBuf {
+    let named = std::path::Path::new(command);
+    // A relative program *and* a working directory: resolved against the
+    // parent's on some platforms and the child's on others, which Rust's own
+    // documentation calls unreliable. Resolved here it is neither. A bare name
+    // is not this case — it belongs to the PATH search below.
+    let has_directory = named.parent().is_some_and(|at| at != std::path::Path::new(""));
+    if let Some(cwd) = cwd.filter(|_| named.is_relative() && has_directory) {
+        return cwd.join(named);
+    }
     match cfg!(windows) {
         true => resolved(
             command,
@@ -126,7 +135,10 @@ fn resolved(command: &str, path: &std::ffi::OsStr, exts: &str) -> std::path::Pat
 
 impl Stdio {
     pub(crate) fn spawn(config: &ServerConfig) -> Result<Self> {
-        let mut command = tokio::process::Command::new(program(&config.command));
+        let mut command = tokio::process::Command::new(program(
+            &config.command,
+            config.cwd.as_ref().map(std::path::Path::new),
+        ));
         command
             .args(&config.args)
             .envs(&config.env)
@@ -265,10 +277,30 @@ impl Transport for Stdio {
 
 #[cfg(test)]
 mod tests {
-    use super::resolved;
+    use super::{program, resolved};
 
     fn windows(command: &str, path: &std::path::Path) -> std::path::PathBuf {
         resolved(command, &std::env::join_paths([path]).unwrap(), ".EXE;.CMD;.BAT")
+    }
+
+    /// A server given as `./bin/server` with a `cwd` set: some platforms resolve
+    /// that against the parent's directory and some against the child's, which
+    /// Rust's own documentation says not to rely on.
+    #[test]
+    fn a_relative_program_is_resolved_against_the_directory_it_will_run_in() {
+        let cwd = std::path::Path::new("/srv/project");
+        assert_eq!(program("./bin/server", Some(cwd)), cwd.join("./bin/server"));
+        assert_eq!(program("bin/server", Some(cwd)), cwd.join("bin/server"));
+        assert_eq!(
+            program("/usr/bin/server", Some(cwd)),
+            std::path::PathBuf::from("/usr/bin/server"),
+            "an absolute one is already answered"
+        );
+        assert_eq!(
+            program("npx", Some(cwd)),
+            std::path::PathBuf::from("npx"),
+            "and a bare name is a PATH lookup, not a file in the working directory"
+        );
     }
 
     /// Every MCP README configures a server as `npx …`, and npm installs npx as

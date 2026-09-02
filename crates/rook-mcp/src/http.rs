@@ -22,6 +22,49 @@ const SESSION_HEADER: &str = "mcp-session-id";
 /// one small JSON object per event.
 const MAX_FRAME_BYTES: usize = 8 << 20;
 
+/// How much of a failing server's body is worth repeating back.
+const MOST_QUOTED_BYTES: usize = 500;
+
+/// The whole body, refused as it arrives rather than measured once it is here.
+///
+/// The url is configuration and the body is whatever answers it, so reading it
+/// all and then looking at the length is a cap already paid.
+async fn whole_text(mut response: reqwest::Response, server: &str) -> Result<String> {
+    let mut body = Vec::new();
+    loop {
+        match response.chunk().await {
+            Ok(None) => return Ok(String::from_utf8_lossy(&body).into_owned()),
+            Ok(Some(chunk)) => {
+                body.extend_from_slice(&chunk);
+                if body.len() > MAX_FRAME_BYTES {
+                    return Err(McpError::Transport {
+                        server: server.into(),
+                        message: format!(
+                            "answered with more than the {MAX_FRAME_BYTES} bytes one message may \
+                             be, and was still sending"
+                        ),
+                    });
+                }
+            }
+            Err(e) => {
+                return Err(McpError::Transport { server: server.into(), message: e.to_string() });
+            }
+        }
+    }
+}
+
+/// As much of a failure's body as the message will carry, and no more.
+async fn quoted_text(mut response: reqwest::Response) -> String {
+    let mut body = Vec::new();
+    while body.len() <= MOST_QUOTED_BYTES {
+        match response.chunk().await {
+            Ok(Some(chunk)) => body.extend_from_slice(&chunk),
+            _ => break,
+        }
+    }
+    truncate(&String::from_utf8_lossy(&body), MOST_QUOTED_BYTES)
+}
+
 pub(crate) struct Http {
     name: String,
     url: String,
@@ -106,20 +149,16 @@ impl Transport for Http {
             .is_some_and(|t| t.starts_with("text/event-stream"));
 
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
             return Err(McpError::Transport {
                 server: self.name.clone(),
-                message: format!("{status}: {}", truncate(&body, 500)),
+                message: format!("{status}: {}", quoted_text(response).await),
             });
         }
 
         if event_stream {
             read_event_stream(&self.name, method, id, response, timeout).await
         } else {
-            let text = response
-                .text()
-                .await
-                .map_err(|e| McpError::Transport { server: self.name.clone(), message: e.to_string() })?;
+            let text = whole_text(response, &self.name).await?;
             serde_json::from_str(&text).map_err(|e| McpError::Decode {
                 server: self.name.clone(),
                 method: method.into(),

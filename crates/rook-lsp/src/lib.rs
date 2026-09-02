@@ -144,7 +144,16 @@ pub struct Server {
 /// Copied rather than shared: `rook-mcp`, `rook-lsp` and `rook-skills` each
 /// start a program somebody named in configuration, and the three sit on one
 /// layer with nothing beneath them to hold it.
-fn program(command: &str) -> std::path::PathBuf {
+fn program(command: &str, cwd: Option<&std::path::Path>) -> std::path::PathBuf {
+    let named = std::path::Path::new(command);
+    // A relative program *and* a working directory: resolved against the
+    // parent's on some platforms and the child's on others, which Rust's own
+    // documentation calls unreliable. Resolved here it is neither. A bare name
+    // is not this case — it belongs to the PATH search below.
+    let has_directory = named.parent().is_some_and(|at| at != std::path::Path::new(""));
+    if let Some(cwd) = cwd.filter(|_| named.is_relative() && has_directory) {
+        return cwd.join(named);
+    }
     match cfg!(windows) {
         true => resolved(
             command,
@@ -172,7 +181,7 @@ fn resolved(command: &str, path: &std::ffi::OsStr, exts: &str) -> std::path::Pat
 
 impl Server {
     pub async fn start(config: &ServerConfig, root: &Path) -> Result<Self> {
-        let mut child = tokio::process::Command::new(program(&config.command))
+        let mut child = tokio::process::Command::new(program(&config.command, Some(root)))
             .args(&config.args)
             .current_dir(root)
             .stdin(Stdio::piped())

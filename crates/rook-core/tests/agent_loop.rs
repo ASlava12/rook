@@ -1744,6 +1744,32 @@ async fn the_system_prompt_does_not_vary_with_the_prompt() {
     assert!(carried.contains("fridays"), "but it must still reach the model");
 }
 
+/// The order was pinned and the list was not. A tool appearing or changing
+/// between turns invalidates everything behind it just as surely as reordering
+/// them, and the list is assembled from more places than the order is: the
+/// toolbox, the language servers, every MCP server, and the loop's own.
+#[tokio::test]
+async fn the_tools_a_session_advertises_do_not_change_between_its_turns() {
+    let f = fixture();
+    let session = f.rook.start_session("stable tools").unwrap();
+    let provider = ScriptedProvider::new(vec![reply("a"), reply("b")]);
+    let seen = provider.share();
+    let provider = Arc::new(provider);
+    AgentLoop::new(&f.rook, provider.clone(), session).run("first").await.unwrap();
+    AgentLoop::new(&f.rook, provider, session).run("second").await.unwrap();
+
+    let requests = seen.lock().unwrap().clone();
+    let rendered = |request: &rook_llm::Request| {
+        request.tools.iter().map(|t| serde_json::to_string(t).unwrap()).collect::<Vec<_>>()
+    };
+    assert!(!rendered(&requests[0]).is_empty(), "a request with no tools would pass this saying nothing");
+    assert_eq!(
+        rendered(&requests[0]),
+        rendered(&requests[1]),
+        "a list that differs between turns invalidates the prefix behind it"
+    );
+}
+
 #[tokio::test]
 async fn tools_are_advertised_in_a_stable_order() {
     let f = fixture();

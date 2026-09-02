@@ -170,3 +170,41 @@ async fn a_slow_endpoint_times_out_rather_than_hanging() {
     let Err(err) = Server::connect(&config).await else { panic!("it should not have connected") };
     assert!(matches!(err, McpError::Timeout { .. }), "{err}");
 }
+
+/// A url is configuration, so how much comes back is decided by whatever
+/// answers it. Reading the body and then measuring it is a cap already paid.
+#[tokio::test]
+async fn a_server_that_never_stops_answering_is_refused_rather_than_held() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut scratch = [0u8; 8192];
+                let _ = socket.read(&mut scratch).await;
+                let head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                            Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+                if socket.write_all(head.as_bytes()).await.is_err() {
+                    return;
+                }
+                let chunk = format!("{:x}\r\n{}\r\n", 64 * 1024, "x".repeat(64 * 1024));
+                while socket.write_all(chunk.as_bytes()).await.is_ok() {}
+            });
+        }
+    });
+
+    let config = ServerConfig {
+        name: "endless".into(),
+        url: Some(format!("http://{addr}/mcp")),
+        startup_timeout_secs: 30,
+        ..Default::default()
+    };
+    let answered = tokio::time::timeout(Duration::from_secs(120), Server::connect(&config))
+        .await
+        .expect("a body with no end must not be read to the end");
+    let Err(refused) = answered else { panic!("a server sending for ever must not connect") };
+    let refused = refused.to_string();
+
+    assert!(refused.contains("still sending"), "{refused}");
+    assert!(refused.contains("8388608"), "and says the bound it passed: {refused}");
+}

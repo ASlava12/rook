@@ -109,6 +109,65 @@ async fn a_tool_call_is_emitted_once_whole_not_in_fragments() {
     assert_eq!(stop, Some(StopReason::ToolUse));
 }
 
+/// Some gateways repeat `id` and `name` on every continuation chunk with
+/// nothing in them. Taken at face value the name is wiped, and a call with no
+/// name is dropped — so the model asked for a tool and nothing happened, with
+/// nothing anywhere saying so.
+#[tokio::test]
+async fn a_later_chunk_that_repeats_the_name_as_empty_does_not_erase_it() {
+    let url = serve(
+        vec![
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"read_file","arguments":"{\"pa"}}]}}]}"#,
+            "\n\n",
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"","function":{"name":"","arguments":"th\":\"a.txt\"}"}}]},"finish_reason":"tool_calls"}]}"#,
+            "\n\ndata: [DONE]\n\n",
+        ],
+        Duration::from_millis(5),
+        false,
+    )
+    .await;
+
+    let mut stream = provider(url, Duration::from_secs(5)).stream(request()).await.unwrap();
+    let mut calls = Vec::new();
+    while let Some(delta) = stream.next().await {
+        if let Delta::ToolCall(c) = delta.unwrap() {
+            calls.push(c);
+        }
+    }
+    assert_eq!(calls.len(), 1, "the call must survive a chunk that names nothing");
+    assert_eq!(calls[0].name, "read_file");
+    assert_eq!(calls[0].id, "c1");
+    assert_eq!(calls[0].arguments["path"], "a.txt");
+}
+
+/// And the other direction, which is what goose had: a provider that sends the
+/// index first and the name only once it knows it.
+#[tokio::test]
+async fn a_name_that_arrives_late_is_still_the_calls_name() {
+    let url = serve(
+        vec![
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":""}}]}}]}"#,
+            "\n\n",
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c2","function":{"name":"list_dir","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#,
+            "\n\ndata: [DONE]\n\n",
+        ],
+        Duration::from_millis(5),
+        false,
+    )
+    .await;
+
+    let mut stream = provider(url, Duration::from_secs(5)).stream(request()).await.unwrap();
+    let mut calls = Vec::new();
+    while let Some(delta) = stream.next().await {
+        if let Delta::ToolCall(c) = delta.unwrap() {
+            calls.push(c);
+        }
+    }
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].name, "list_dir");
+    assert_eq!(calls[0].id, "c2");
+}
+
 #[tokio::test]
 async fn a_stalled_stream_gives_up_instead_of_hanging() {
     let url = serve(

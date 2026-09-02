@@ -87,10 +87,16 @@ impl ToolCallBuffer {
             self.slots.resize_with(index + 1, Default::default);
         }
         let slot = &mut self.slots[index];
-        if let Some(id) = id {
+        // Empty is not an update. Some gateways repeat the `id` and `name` keys
+        // on every continuation chunk with nothing in them, and taking those at
+        // face value wipes the name — after which `drain` discards the call as
+        // nameless and the model's tool call has silently not happened.
+        if let Some(id) = id.filter(|id| !id.is_empty()) {
             slot.0 = id.to_string();
         }
-        if let Some(name) = name {
+        // The other direction is real too: a name that arrives in a later chunk
+        // than the index it belongs to has to be taken when it does.
+        if let Some(name) = name.filter(|name| !name.is_empty()) {
             slot.1 = name.to_string();
         }
         slot.2.push_str(args);
