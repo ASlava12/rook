@@ -196,9 +196,15 @@ what unblocks the most.
   release was not reviewed, and the digest comes from the same publisher as the
   file. One publishing shape so far — clangd ships zip and xz, gopls is built
   from source, the node servers come from npm — and a name this cannot fetch is
-  answered with where to get it rather than an attempt. Next: the agent asking
-  for one when a language has files here and no server, where the stance
-  decides whether to ask, install locally, or use the system's installer.
+  answered with where to get it rather than an attempt. The agent notices too:
+  a language with files here and no server is offered once per session, and the
+  stance decides what follows — at `assist` a person chooses between the state
+  directory, the machine's own installer and not now, or with nobody there it is
+  an open question; `autonomous` fetches into the state directory; `free` runs
+  the machine's own installer and falls back to fetching. What is installed
+  serves from the next session, because the pool of servers is built before the
+  first turn — the same fact that keeps rust-analyzer from re-indexing every
+  turn — and the report says so.
 - **What a run has to tell the person, sorted by what it is** — a refusal
   nobody made is a different thing from one somebody made, and the end of a run
   one was not watching has to say which. `TurnOutcome` carries `decisions` (a
@@ -982,11 +988,10 @@ call it without a key. Until then it is a command a person runs, which is honest
 
 ## After that
 
-**Auto-installing language servers, the agent's half.** `rook lsp install`
-exists for a person; what is left is the agent noticing a language with files
-here and no server, and the stance deciding what follows — ask, fetch into the
-state directory, or use the system's own installer — with the npm, zip and
-build-from-source shapes behind it.
+**More shapes of language server.** rust-analyzer is fetched and checked;
+clangd ships zip and xz, gopls is built from source, and the node servers come
+from npm. Each is a recipe of its own, and each needs its own way of being
+checked against what its publisher lists.
 
 **Driving physical devices, if the Model Hardware Standard becomes something to
 build against.** Anthropic's [research

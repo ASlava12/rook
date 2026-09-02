@@ -375,7 +375,7 @@ async fn a_new_session_offers_the_approval_modes_and_says_which_is_on() {
     assert_eq!(modes["currentModeId"], "assist", "the configured default");
     let ids: Vec<&str> =
         modes["availableModes"].as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect();
-    assert_eq!(ids, ["readonly", "assist", "autonomous"], "least latitude first: {modes}");
+    assert_eq!(ids, ["readonly", "assist", "autonomous", "free"], "least latitude first: {modes}");
     for mode in modes["availableModes"].as_array().unwrap() {
         assert!(mode["name"].is_string(), "an editor renders the name: {mode}");
         assert!(mode["description"].is_string(), "and explains it: {mode}");

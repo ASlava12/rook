@@ -34,6 +34,10 @@ pub enum Stance {
     /// A task and its boundaries: anything not denied runs.
     #[serde(alias = "auto")]
     Autonomous,
+    /// A goal and the freedom to choose how — including changing the machine
+    /// outside the workspace, which no other stance does: installing a program
+    /// the system's own way rather than under the state directory.
+    Free,
 }
 
 impl Stance {
@@ -43,6 +47,7 @@ impl Stance {
             Stance::ReadOnly => "readonly",
             Stance::Assist => "assist",
             Stance::Autonomous => "autonomous",
+            Stance::Free => "free",
         }
     }
 
@@ -50,7 +55,7 @@ impl Stance {
     /// and the policy answering it are the same question, and two lists of it
     /// drift — an ACP client was offered three names none of which was the one
     /// the policy reported as current.
-    pub const ALL: [Stance; 3] = [Stance::ReadOnly, Stance::Assist, Stance::Autonomous];
+    pub const ALL: [Stance; 4] = [Stance::ReadOnly, Stance::Assist, Stance::Autonomous, Stance::Free];
 
     /// The name a person reads.
     pub fn title(self) -> &'static str {
@@ -58,6 +63,7 @@ impl Stance {
             Stance::ReadOnly => "Read only",
             Stance::Assist => "Assist",
             Stance::Autonomous => "Autonomous",
+            Stance::Free => "Free",
         }
     }
 
@@ -67,6 +73,7 @@ impl Stance {
             Stance::ReadOnly => "Nothing that changes the machine runs at all.",
             Stance::Assist => "Ask before anything that changes the machine, and put a real choice to me.",
             Stance::Autonomous => "Run anything the deny list does not forbid, without asking.",
+            Stance::Free => "Choose the means as well: may change the machine outside the workspace.",
         }
     }
 
@@ -77,6 +84,7 @@ impl Stance {
             "readonly" => Some(Stance::ReadOnly),
             "assist" | "ask" => Some(Stance::Assist),
             "autonomous" | "auto" => Some(Stance::Autonomous),
+            "free" => Some(Stance::Free),
             _ => None,
         }
     }
@@ -334,7 +342,7 @@ impl Policy {
             return Decision::Ask;
         }
         match self.stance() {
-            Stance::Autonomous => Decision::Allow,
+            Stance::Autonomous | Stance::Free => Decision::Allow,
             _ => Decision::Ask,
         }
     }

@@ -32,6 +32,16 @@ pub fn recipe_for(name: &str) -> Option<&'static Recipe> {
 }
 
 impl Recipe {
+    /// How the machine's own tooling would install this, when it has any: what
+    /// a person at the keyboard would type. Runs as a command through the
+    /// policy like any other, and only a `free` stance reaches for it.
+    pub fn system_command(&self) -> Option<&'static str> {
+        match self.command {
+            "rust-analyzer" => Some("rustup component add rust-analyzer"),
+            _ => None,
+        }
+    }
+
     /// The asset this platform can run, or why there is none for it.
     pub fn asset_for(&self, os: &str, arch: &str, userland: &str) -> Result<String, String> {
         match os {
@@ -81,7 +91,14 @@ const MOST_HOPS: usize = 4;
 /// The binary `rook lsp install` put in place for `command`, whether or not
 /// there is one.
 pub fn current(command: &str) -> PathBuf {
-    let path = crate::paths::servers_dir().join(command).join("current").join(command);
+    current_in(&crate::paths::servers_dir(), command)
+}
+
+/// The same under any directory: an installer told where to put things must
+/// put `current` there too, or a test of one writes into the real state
+/// directory of whoever runs it.
+fn current_in(into: &Path, command: &str) -> PathBuf {
+    let path = into.join(command).join("current").join(command);
     if cfg!(windows) { path.with_extension("exe") } else { path }
 }
 
@@ -93,8 +110,13 @@ pub struct Installer {
 
 impl Installer {
     /// Against GitHub, into `into`.
+    ///
+    /// `ROOK_RELEASE_API` overrides where GitHub is, which is a seam and says
+    /// so: a test of the agent deciding to install must not reach GitHub, and
+    /// the loop builds this itself rather than taking it as an argument.
     pub fn new(into: PathBuf) -> Result<Self, String> {
-        Self::at("https://api.github.com".into(), into)
+        let api = std::env::var("ROOK_RELEASE_API").unwrap_or_else(|_| "https://api.github.com".into());
+        Self::at(api, into)
     }
 
     /// Against whatever answers like GitHub's API at `api`, which is how a
@@ -175,7 +197,7 @@ impl Installer {
         // `current` is a copy rather than a link: a link needs a privilege on
         // Windows that an ordinary account does not have, and a copy of one
         // binary is cheap next to the download that produced it.
-        let current = current(recipe.command);
+        let current = current_in(&self.into, recipe.command);
         if let Some(dir) = current.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
         }

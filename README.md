@@ -338,6 +338,10 @@ agent looks before `PATH` and where deleting the directory undoes all of it. It
 prints what was checked and what was not: the download is intact; the release
 was not reviewed. One publishing shape so far — clangd, gopls and the node
 servers each need their own, and asking for one names where to get it instead.
+The agent notices too: a language with files here and no server is offered once
+per session, and the stance decides what follows — a person chooses at `assist`,
+`autonomous` fetches into the state directory, `free` uses the machine's own
+installer. What is installed serves from the next session.
 
 When a language server is on `PATH`, the agent gets four more tools: what the
 type checker thinks is wrong with a file, where a name is defined, what actually

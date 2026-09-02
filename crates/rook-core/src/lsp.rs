@@ -22,16 +22,41 @@ use rook_lsp::{Server, ServerConfig};
 use rook_tools::{Result as ToolResult, Tool, ToolBox, ToolContext, ToolOutcome};
 
 /// Servers worth trying without being asked, when their binary is present.
+/// Language, command, arguments, extensions. The node-based servers multiplex
+/// several transports and need to be told which one; the rest speak stdio
+/// unprompted.
+const KNOWN: [(&str, &str, &[&str], &[&str]); 5] = [
+    ("rust", "rust-analyzer", &[], &["rs"]),
+    ("typescript", "typescript-language-server", &["--stdio"], &["ts", "tsx", "js", "jsx"]),
+    ("python", "pyright-langserver", &["--stdio"], &["py", "pyi"]),
+    ("go", "gopls", &[], &["go"]),
+    ("c", "clangd", &[], &["c", "h", "cpp", "hpp", "cc"]),
+];
+
+/// Known languages with files here and no server for them: what an install
+/// would be for. Each is the command that would serve it.
+pub fn missing_here(config: &crate::Config, root: &Path) -> Vec<(&'static str, &'static str)> {
+    let served: Vec<String> = configured(config).into_iter().map(|c| c.language).collect();
+    let candidates: Vec<ServerConfig> = KNOWN
+        .iter()
+        .filter(|(language, _, _, _)| !served.iter().any(|s| s == language))
+        .map(|(language, command, args, extensions)| ServerConfig {
+            language: (*language).into(),
+            command: (*command).into(),
+            args: args.iter().map(|a| (*a).into()).collect(),
+            extensions: extensions.iter().map(|e| (*e).into()).collect(),
+            ..Default::default()
+        })
+        .collect();
+    let wanted = present(&candidates, root);
+    KNOWN
+        .iter()
+        .filter(|(language, _, _, _)| wanted.iter().any(|w| w == language))
+        .map(|(language, command, _, _)| (*language, *command))
+        .collect()
+}
+
 pub fn detected() -> Vec<ServerConfig> {
-    // The node-based servers multiplex several transports and need to be told
-    // which one; the rest speak stdio unprompted.
-    const KNOWN: [(&str, &str, &[&str], &[&str]); 5] = [
-        ("rust", "rust-analyzer", &[], &["rs"]),
-        ("typescript", "typescript-language-server", &["--stdio"], &["ts", "tsx", "js", "jsx"]),
-        ("python", "pyright-langserver", &["--stdio"], &["py", "pyi"]),
-        ("go", "gopls", &[], &["go"]),
-        ("c", "clangd", &[], &["c", "h", "cpp", "hpp", "cc"]),
-    ];
     KNOWN
         .iter()
         .filter_map(|(language, command, args, extensions)| {
@@ -86,10 +111,17 @@ pub fn for_workspace(config: &crate::Config, root: &Path) -> Vec<ServerConfig> {
     if configured.is_empty() {
         return configured;
     }
-    // Bounded: the answer is "is there one of these anywhere near the top", and
-    // a monorepo should not be walked to the bottom to find out.
+    let wanted = present(&configured, root);
+    configured.into_iter().filter(|c| wanted.contains(&c.language)).collect()
+}
+
+/// Which of `servers` have a file to work on under `root`, by language.
+///
+/// Bounded: the answer is "is there one of these anywhere near the top", and a
+/// monorepo should not be walked to the bottom to find out.
+fn present(servers: &[ServerConfig], root: &Path) -> Vec<String> {
     const LOOKED_AT: usize = 4_000;
-    let mut wanted: Vec<bool> = vec![false; configured.len()];
+    let mut wanted: Vec<bool> = vec![false; servers.len()];
     for entry in ignore::WalkBuilder::new(root)
         .max_depth(Some(6))
         .follow_links(false)
@@ -98,14 +130,14 @@ pub fn for_workspace(config: &crate::Config, root: &Path) -> Vec<ServerConfig> {
         .flatten()
         .take(LOOKED_AT)
     {
-        for (i, server) in configured.iter().enumerate() {
+        for (i, server) in servers.iter().enumerate() {
             wanted[i] |= server.handles(entry.path());
         }
         if wanted.iter().all(|w| *w) {
             break;
         }
     }
-    configured.into_iter().zip(wanted).filter(|(_, wanted)| *wanted).map(|(c, _)| c).collect()
+    servers.iter().zip(wanted).filter(|(_, w)| *w).map(|(c, _)| c.language.clone()).collect()
 }
 
 /// The language servers available in one workspace.

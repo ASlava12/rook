@@ -26,6 +26,7 @@ const MEMORY_HEAD: &str = "memory/head";
 /// Key prefixes for the two positions a session carries besides its events.
 const COMPACTED: &str = "compacted";
 const FORK_AT: &str = "fork-at";
+const OFFERED_SERVER: &str = "offered-server";
 const MEMORY_LOG: &str = "memory/h/";
 
 pub struct Rook {
@@ -1039,6 +1040,17 @@ impl Rook {
     fn set_mark(&self, kind: &str, session: u128, seq: u64) -> Result<()> {
         self.store.kv_set(&format!("{kind}/{session:032x}"), seq.to_string().as_bytes())?;
         Ok(())
+    }
+
+    /// Whether this session has already been offered a language server it
+    /// lacks. Once per session: an offer declined is not one to repeat every
+    /// turn, and an install made needs no second.
+    pub fn offered_server(&self, session: u128) -> Result<bool> {
+        Ok(self.read_mark(OFFERED_SERVER, session)?.is_some())
+    }
+
+    pub fn note_offered_server(&self, session: u128) -> Result<()> {
+        self.set_mark(OFFERED_SERVER, session, 1)
     }
 
     /// The parent event a forked session diverged at, if it was forked.

@@ -406,6 +406,12 @@ pub struct TurnOutcome {
     pub open_questions: Vec<String>,
 }
 
+/// Where a language server goes when the agent installs one.
+enum How {
+    System,
+    Fetch,
+}
+
 /// What a turn has to tell the person at the end, by what it is.
 enum Reported {
     Decision(String),
@@ -428,6 +434,9 @@ pub struct AgentLoop<'a> {
     /// Collected where refusals happen, which has no `outcome` in hand, and
     /// moved into it when the turn ends.
     reported: std::sync::Mutex<Vec<Reported>>,
+    /// Whoever can answer a question, when somebody can. Kept as well as
+    /// registered as a tool, because the loop has questions of its own.
+    asker: Option<std::sync::Arc<dyn rook_tools::ask::Asker>>,
     /// Consulted whenever the policy says to ask. Refuses by default, so an
     /// unattended run cannot silently do something nobody reviewed.
     pub approver: std::sync::Arc<dyn Approver>,
@@ -500,6 +509,7 @@ impl<'a> AgentLoop<'a> {
             servers,
             session_context: std::sync::Mutex::new(None),
             reported: Default::default(),
+            asker: None,
             approver: std::sync::Arc::new(Unattended),
             interjections: Default::default(),
             depth: 0,
@@ -515,7 +525,140 @@ impl<'a> AgentLoop<'a> {
     /// the tool rather than storing a handle: a front end that cannot reach
     /// anyone never advertises it, and never pays for its schema.
     pub fn ask_via(&mut self, asker: std::sync::Arc<dyn rook_tools::ask::Asker>) {
-        self.tools.register(std::sync::Arc::new(rook_tools::ask::AskUser(asker)));
+        self.tools.register(std::sync::Arc::new(rook_tools::ask::AskUser(asker.clone())));
+        self.asker = Some(asker);
+    }
+
+    /// A language with files here and no server for it, and what the stance
+    /// says to do about that: ask, fetch, or use the machine's own installer.
+    ///
+    /// Once per session. What is installed serves the next session: the pool
+    /// of servers is built by the front end before the first turn, which is
+    /// what keeps rust-analyzer from re-indexing every turn, and the same fact
+    /// means one added now is not in it yet. The report says so.
+    async fn offer_language_server(&self) {
+        if self.depth > 0 || self.rook.offered_server(self.session).unwrap_or(true) {
+            return;
+        }
+        let missing = crate::lsp::missing_here(&self.rook.config, &self.rook.workspace);
+        let Some((language, recipe)) = missing
+            .iter()
+            .find_map(|(language, command)| crate::install::recipe_for(command).map(|r| (*language, r)))
+        else {
+            return;
+        };
+        self.rook.note_offered_server(self.session).ok();
+
+        let local = format!("fetch into {}", crate::paths::servers_dir().display());
+        let system = recipe.system_command().map(|c| format!("run `{c}`"));
+        let how = match self.policy.stance() {
+            // A person chooses where it goes. Without one there is nobody to
+            // choose, and the question waits for whoever reads the outcome.
+            Stance::ReadOnly | Stance::Assist => {
+                let Some(asker) = &self.asker else {
+                    self.report(Reported::Open(format!(
+                        "this workspace has {language} files and no {} — `rook lsp install {}` fetches \
+                         one, or run `{}` yourself",
+                        recipe.command,
+                        recipe.command,
+                        system.as_deref().unwrap_or("the system's installer")
+                    )));
+                    return;
+                };
+                let mut choices = vec![local.clone()];
+                choices.extend(system.clone());
+                choices.push("not now".into());
+                let question =
+                    format!("There are {language} files here and no {}. Install it?", recipe.command);
+                let asked = rook_tools::ask::Question { question, choices, multi: false };
+                let answer =
+                    asker.ask(&[asked]).await.into_iter().next().and_then(|a| a.chosen.into_iter().next());
+                match answer.as_deref() {
+                    Some(chosen) if chosen == local => How::Fetch,
+                    Some(chosen) if Some(chosen) == system.as_deref() => How::System,
+                    _ => {
+                        self.report(Reported::Decision(format!(
+                            "{} not installed — declined",
+                            recipe.command
+                        )));
+                        return;
+                    }
+                }
+            }
+            Stance::Autonomous => How::Fetch,
+            Stance::Free => match system {
+                Some(_) => How::System,
+                None => How::Fetch,
+            },
+        };
+
+        let done = match how {
+            How::System => match self.install_with_system(recipe).await {
+                Ok(said) => Ok(said),
+                // The machine's way failed; the state directory is the fallback,
+                // and the report names both.
+                Err(first) => {
+                    self.install_by_fetching(recipe).await.map_err(|second| format!("{first}; then {second}"))
+                }
+            },
+            How::Fetch => self.install_by_fetching(recipe).await,
+        };
+        match done {
+            Ok(said) => {
+                let said = format!("{said} — it serves from the next session on");
+                self.rook.log(self.session, EventKind::Note, "lsp install", &said).ok();
+                self.report(Reported::Decision(said));
+            }
+            Err(why) => {
+                let said = format!(
+                    "could not install {}: {why} — `rook lsp install {}` by hand, or say how",
+                    recipe.command, recipe.command
+                );
+                self.rook.log(self.session, EventKind::Note, "lsp install", &said).ok();
+                self.report(Reported::Open(said));
+            }
+        }
+    }
+
+    async fn install_with_system(
+        &self,
+        recipe: &crate::install::Recipe,
+    ) -> std::result::Result<String, String> {
+        let command = recipe.system_command().ok_or("no system installer for it")?;
+        let args = serde_json::json!({ "command": command });
+        if let Some(refusal) = self
+            .gate_risk(
+                "run_command",
+                &args,
+                rook_tools::policy::Risk::Execute(command.into()),
+                Shown::Nothing,
+            )
+            .await
+        {
+            return Err(refusal);
+        }
+        let out = self.tools.call(&self.tool_ctx, "run_command", &args).await.map_err(|e| e.to_string())?;
+        match out.is_error {
+            false => Ok(format!("installed {} with `{command}`", recipe.command)),
+            true => Err(format!("`{command}` failed: {}", short(&out.content))),
+        }
+    }
+
+    async fn install_by_fetching(
+        &self,
+        recipe: &crate::install::Recipe,
+    ) -> std::result::Result<String, String> {
+        let api = "https://api.github.com";
+        let args = serde_json::json!({ "url": api });
+        if let Some(refusal) = self
+            .gate_risk("lsp install", &args, rook_tools::policy::Risk::Network(api.into()), Shown::Nothing)
+            .await
+        {
+            return Err(refusal);
+        }
+        let installer = crate::install::Installer::new(crate::paths::servers_dir())?;
+        let done = installer.install(recipe, self.rook.env()).await?;
+        Ok(format!("installed {} {} at {} ({})", done.command, done.tag, done.path.display(), done.verified))
     }
 
     /// The system prompt: identity, environment, and the skill catalog.
@@ -565,6 +708,10 @@ impl<'a> AgentLoop<'a> {
             Stance::Autonomous => {
                 "Work to the task and the boundaries you were given without asking, and say what \
                  you did.\n"
+            }
+            Stance::Free => {
+                "You were given a goal, and the means are yours to choose. Say what you chose and \
+                 why.\n"
             }
         });
         if let Ok(Some(goal)) = self.rook.goal(self.session) {
@@ -929,14 +1076,14 @@ impl<'a> AgentLoop<'a> {
                 }),
             });
             // Only where there is more to ask for.
-            if self.policy.stance() < Stance::Autonomous {
+            if self.policy.stance() < Stance::Free {
                 push(ToolSpec {
                     name: STANCE.into(),
                     description: "Ask for more latitude for the rest of this run. A person decides.".into(),
                     parameters: json!({
                         "type": "object",
                         "properties": {
-                            "to": { "type": "string", "enum": ["assist", "autonomous"] },
+                            "to": { "type": "string", "enum": ["assist", "autonomous", "free"] },
                             "why": { "type": "string" }
                         },
                         "required": ["to"]
@@ -1048,6 +1195,7 @@ impl<'a> AgentLoop<'a> {
     ) -> Result<TurnOutcome> {
         self.rook.name_session_from(self.session, prompt).ok();
         self.run_session_hooks().await;
+        self.offer_language_server().await;
         let gate = self
             .hooks
             .run(hooks::Event::Prompt, prompt, &self.payload(serde_json::json!({ "prompt": prompt })))
