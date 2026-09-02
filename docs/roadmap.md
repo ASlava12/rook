@@ -187,6 +187,15 @@ what unblocks the most.
   `rook memory`. Both the TUI and the browser now have a Memory view over a new
   `/api/memory`, and the browser can forget a fact: one nobody can remove is one
   that quietly steers everything. 4 tests, including the tab drawn on a pty.
+- **A reply that changed writing system is asked for again** — small and
+  quantised multilingual models sometimes finish a sentence in a script nobody
+  used: a Russian answer with a Han word in the middle of it. The text cannot be
+  repaired locally, because only the model knows what it meant, so the turn asks
+  once for the whole answer again and names both scripts. Latin is never a slip
+  — identifiers and command lines are Latin inside prose of every script — and
+  anything in backticks is exempt, because a CJK string in a file the agent read
+  is not the model changing language. `[agent] one_script = false` turns it off
+  for work that mixes scripts on purpose.
 - **Tools for an endpoint that cannot carry them** — llama.cpp's server and a
   few gateways refuse a request with `tools` in it at all, and
   `Provider::supports_tools` said the agent fell back to describing them in the

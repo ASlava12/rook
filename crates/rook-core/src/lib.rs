@@ -27,6 +27,7 @@ pub mod mcp_server;
 pub mod memory;
 pub mod paths;
 pub mod plugins;
+pub mod script;
 pub mod search;
 pub mod service;
 pub mod telemetry;

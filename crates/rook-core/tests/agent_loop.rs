@@ -2137,6 +2137,46 @@ async fn tools_an_endpoint_cannot_be_sent_are_put_in_the_prompt_and_read_back() 
     );
 }
 
+/// Small and quantised models sometimes finish a sentence in a script nobody
+/// used. The text cannot be repaired from here — only the model knows what it
+/// meant — so it is asked for the answer again.
+#[tokio::test]
+async fn a_reply_that_changed_writing_system_is_asked_for_again() {
+    let f = fixture();
+    let session = f.rook.start_session("s").unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        reply("Готово, я 修复 сборку"),
+        reply("Готово, я починил сборку"),
+    ]));
+    let seen = provider.share();
+
+    let outcome = AgentLoop::new(&f.rook, provider, session).run("Почини сборку").await.unwrap();
+
+    assert_eq!(outcome.reply, "Готово, я починил сборку");
+    let turns = seen.lock().unwrap().clone();
+    assert_eq!(turns.len(), 2, "the slip cost exactly one more turn");
+    let told = &turns[1].messages.last().unwrap().content;
+    assert!(told.contains("Han"), "which names the script it slipped into: {told}");
+    assert!(told.contains("Cyrillic"), "and the one to go back to: {told}");
+}
+
+/// Translating, or quoting a file, or being asked about another script at all.
+#[tokio::test]
+async fn a_run_that_mixes_scripts_on_purpose_can_turn_the_check_off() {
+    let f = fixture();
+    let mut config = Config::default();
+    config.agent.one_script = false;
+    let rook = with_config(&f, "mixed-scripts", config);
+    let session = rook.start_session("s").unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![reply("Готово, я 修复 сборку")]));
+    let seen = provider.share();
+
+    let outcome = AgentLoop::new(&rook, provider, session).run("Почини сборку").await.unwrap();
+
+    assert_eq!(outcome.reply, "Готово, я 修复 сборку", "left exactly as the model wrote it");
+    assert_eq!(seen.lock().unwrap().len(), 1, "and it cost no second turn");
+}
+
 #[test]
 fn turning_off_lazy_tools_restores_the_argument_descriptions() {
     let f = fixture();

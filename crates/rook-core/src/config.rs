@@ -93,6 +93,10 @@ pub struct AgentConfig {
     /// Ask for a brief plan before multi-step work. One line in the system
     /// prompt, not a checklist tool — see ADR-0010.
     pub plan_first: bool,
+    /// Ask again when a reply slips into a writing system the conversation has
+    /// not used. Off for work that mixes scripts on purpose — translating,
+    /// or anything where the answer is meant to be in another one.
+    pub one_script: bool,
     /// Send tool definitions with the request. Off for an endpoint that refuses
     /// one carrying them — llama.cpp's server, some gateways — where the tools
     /// go in the prompt instead and the model's answer is read back.
@@ -278,6 +282,7 @@ impl Default for AgentConfig {
             effort: "high".into(),
             plan_first: true,
             native_tools: true,
+            one_script: true,
             context_window: None,
             max_parallel_subagents: 4,
             max_subagents_per_turn: 16,

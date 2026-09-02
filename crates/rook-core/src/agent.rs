@@ -1006,6 +1006,7 @@ impl<'a> AgentLoop<'a> {
             compactions: 0,
         };
 
+        let mut asked_for_one_script = false;
         let mut worth_compacting = true;
         // What the provider last said the request cost, and how many messages
         // that covered. See `measured`.
@@ -1114,6 +1115,22 @@ impl<'a> AgentLoop<'a> {
                 // into it, which is not where the person put it.
                 let said = self.interjections.take();
                 if said.is_empty() {
+                    // Once. A model that slips twice is one that cannot write
+                    // the answer any other way, and a second ask spends a turn
+                    // to be told so again.
+                    if self.rook.config.agent.one_script && !asked_for_one_script {
+                        let known: std::collections::BTreeSet<_> =
+                            messages.iter().flat_map(|m| crate::script::scripts(&m.content)).collect();
+                        let mine = crate::script::scripts(&response.message.content);
+                        if let Some(slip) = crate::script::slipped(&mine, &known) {
+                            asked_for_one_script = true;
+                            let note = crate::script::say_again(slip, &known);
+                            self.rook.log(self.session, EventKind::Note, "one script", &note).ok();
+                            messages.push(response.message.clone());
+                            messages.push(Message::user(&note));
+                            continue;
+                        }
+                    }
                     outcome.stopped = response.stop_reason.as_str().into();
                     // A turn that said nothing at any step ends in silence every
                     // front end renders as a hang. Set here rather than logged:
