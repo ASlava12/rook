@@ -331,6 +331,14 @@ that is not reachable from the others.
 
 ### Code intelligence
 
+A machine without one can fetch one. `rook lsp install rust-analyzer` takes the
+latest release, checks the bytes as they arrive against the digest the release
+lists for that asset, and keeps the binary under the state directory, where the
+agent looks before `PATH` and where deleting the directory undoes all of it. It
+prints what was checked and what was not: the download is intact; the release
+was not reviewed. One publishing shape so far — clangd, gopls and the node
+servers each need their own, and asking for one names where to get it instead.
+
 When a language server is on `PATH`, the agent gets four more tools: what the
 type checker thinks is wrong with a file, where a name is defined, what actually
 refers to it, and where a symbol lives in the workspace. It asks by name — the
@@ -342,6 +350,7 @@ rook lsp diagnostics src/main.rs              # without running a build
 rook lsp definition src/main.rs parse
 rook lsp references src/main.rs parse
 rook lsp symbol ObjectId
+rook lsp install rust-analyzer                # fetched, checked, kept under ~/.rook
 ```
 
 rust-analyzer, gopls, clangd, typescript-language-server and pyright are detected

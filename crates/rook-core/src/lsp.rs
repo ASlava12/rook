@@ -34,15 +34,26 @@ pub fn detected() -> Vec<ServerConfig> {
     ];
     KNOWN
         .iter()
-        .filter(|(_, command, _, _)| on_path(command))
+        .filter_map(|(language, command, args, extensions)| {
+            // What `rook lsp install` fetched wins over PATH: it is the one the
+            // user asked for by name, and it has a digest on record.
+            let command = installed(command).or_else(|| on_path(command).then(|| (*command).to_string()))?;
+            Some((language, command, args, extensions))
+        })
         .map(|(language, command, args, extensions)| ServerConfig {
             language: (*language).into(),
-            command: (*command).into(),
+            command,
             args: args.iter().map(|a| (*a).into()).collect(),
             extensions: extensions.iter().map(|e| (*e).into()).collect(),
             ..Default::default()
         })
         .collect()
+}
+
+/// The binary `rook lsp install` put under the state directory, if any.
+fn installed(command: &str) -> Option<String> {
+    let current = crate::install::current(command);
+    current.is_file().then(|| current.to_string_lossy().into_owned())
 }
 
 fn on_path(command: &str) -> bool {

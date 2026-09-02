@@ -97,8 +97,16 @@ pub fn builtin_skills_dir() -> Option<PathBuf> {
     [dir.join("skills"), dir.join("../share/rook/skills")].into_iter().find(|c| c.is_dir())
 }
 
+/// Language servers `rook lsp install` fetched: one directory per server, one
+/// per version under it, and `current` holding the one in use. Under the state
+/// directory rather than anywhere on `PATH`, so installing one changes nothing
+/// about the machine that removing this directory does not undo.
+pub fn servers_dir() -> PathBuf {
+    home().join("servers")
+}
+
 pub fn ensure_dirs() -> std::io::Result<()> {
-    for d in [home(), store_dir(), user_skills_dir(), logs_dir()] {
+    for d in [home(), store_dir(), user_skills_dir(), logs_dir(), servers_dir()] {
         private_dir(&d)?;
     }
     Ok(())

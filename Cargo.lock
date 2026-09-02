@@ -2311,8 +2311,11 @@ name = "rook-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "flate2",
  "futures-util",
+ "hex",
  "ignore",
+ "reqwest",
  "rook-llm",
  "rook-lsp",
  "rook-mcp",
@@ -2323,6 +2326,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "similar",
  "tempfile",
  "thiserror 2.0.20",

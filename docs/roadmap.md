@@ -187,6 +187,18 @@ what unblocks the most.
   `rook memory`. Both the TUI and the browser now have a Memory view over a new
   `/api/memory`, and the browser can forget a fact: one nobody can remove is one
   that quietly steers everything. 4 tests, including the tab drawn on a pty.
+- **Fetching a language server this machine does not have** — `rook lsp install
+  rust-analyzer` takes the latest release, checks the bytes as they arrive
+  against the digest the release API lists for that asset, unpacks the one
+  gzipped binary, and puts it under the state directory, where `lsp` looks
+  before `PATH` and where removing the directory undoes all of it. What was
+  checked and what was not is printed, in words: the download is intact; the
+  release was not reviewed, and the digest comes from the same publisher as the
+  file. One publishing shape so far — clangd ships zip and xz, gopls is built
+  from source, the node servers come from npm — and a name this cannot fetch is
+  answered with where to get it rather than an attempt. Next: the agent asking
+  for one when a language has files here and no server, where the stance
+  decides whether to ask, install locally, or use the system's installer.
 - **What a run has to tell the person, sorted by what it is** — a refusal
   nobody made is a different thing from one somebody made, and the end of a run
   one was not watching has to say which. `TurnOutcome` carries `decisions` (a
@@ -970,9 +982,11 @@ call it without a key. Until then it is a command a person runs, which is honest
 
 ## After that
 
-**Auto-installing language servers.** Detection is done; the other half of
-codex #8745 asks for installation too, which means downloading and running a
-binary on the user's behalf.
+**Auto-installing language servers, the agent's half.** `rook lsp install`
+exists for a person; what is left is the agent noticing a language with files
+here and no server, and the stance deciding what follows — ask, fetch into the
+state directory, or use the system's own installer — with the npm, zip and
+build-from-source shapes behind it.
 
 **Driving physical devices, if the Model Hardware Standard becomes something to
 build against.** Anthropic's [research

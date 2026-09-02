@@ -122,6 +122,9 @@ enum LspCmd {
     References { path: String, symbol: String },
     /// Find a symbol anywhere in the workspace.
     Symbol { query: String },
+    /// Fetch a language server this machine does not have, checked against the
+    /// digest its publisher lists, into the state directory.
+    Install { name: String },
 }
 
 #[derive(Subcommand)]
@@ -462,7 +465,9 @@ fn cmd_doctor(rook: &Rook, json: bool) -> Result<()> {
     println!();
     println!("language servers:");
     if servers.is_empty() {
-        println!("  none found on PATH (rust-analyzer, gopls, clangd, …)");
+        println!(
+            "  none found on PATH (rust-analyzer, gopls, clangd, …) — `rook lsp install rust-analyzer` fetches one"
+        );
     }
     let here: Vec<String> = rook_core::lsp::for_workspace(&rook.config, &rook.workspace)
         .into_iter()
@@ -1644,6 +1649,18 @@ fn cmd_lsp(workspace: Option<PathBuf>, cmd: LspCmd, json: bool) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     runtime.block_on(async move {
         let rook = Rook::open(workspace)?;
+        if let LspCmd::Install { name } = &cmd {
+            let Some(recipe) = rook_core::install::recipe_for(name) else {
+                anyhow::bail!("no recipe for {name:?} — this can fetch: rust-analyzer");
+            };
+            let into = rook_core::paths::servers_dir();
+            let installer = rook_core::install::Installer::new(into).map_err(anyhow::Error::msg)?;
+            let done = installer.install(recipe, rook.env()).await.map_err(anyhow::Error::msg)?;
+            println!("installed {} {} at {}", done.command, done.tag, done.path.display());
+            println!("verified:     {}", done.verified);
+            println!("not verified: {}", done.unverified);
+            return anyhow::Ok(());
+        }
         // What the agent would have, not what is installed: the comment below
         // claims this cannot drift from a turn, and a copy of the expression it
         // was built from is how it did.
@@ -1677,6 +1694,9 @@ fn cmd_lsp(workspace: Option<PathBuf>, cmd: LspCmd, json: bool) -> Result<()> {
                 ("references", serde_json::json!({ "path": path, "symbol": symbol }))
             }
             LspCmd::Symbol { query } => ("find_symbol", serde_json::json!({ "query": query })),
+            // Answered above, before any server was started: installing one is
+            // the one thing here that must not need one running.
+            LspCmd::Install { .. } => unreachable!("install returns before the servers are built"),
         };
 
         let outcome = tools.call(&ctx, tool, &args).await?;
