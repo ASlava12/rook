@@ -352,6 +352,51 @@ async fn a_sub_agent_is_never_given_more_latitude_than_the_turn_that_started_it(
     );
 }
 
+/// Autonomy is a task and its boundaries, and the boundary has to be held by
+/// something other than the turn's own opinion of its work. Before an
+/// autonomous turn with a goal ends, a checker asks whether the goal is met;
+/// `fails` gives the turn one more go, with the reason.
+#[tokio::test]
+async fn an_autonomous_turn_is_checked_against_its_goal_before_it_may_end() {
+    let f = fixture();
+    let session = f.rook.start_session("s").unwrap();
+    f.rook.set_goal(session, "notes.txt must say done").unwrap();
+
+    // Most specific first: the failed check quotes the checker, which quotes
+    // the file, so a rule keyed on the file's content would answer for both.
+    let provider = Arc::new(ByPrompt(vec![
+        (
+            "Checked against the goal before finishing",
+            call("write_file", serde_json::json!({ "path": "notes.txt", "content": "done" })),
+        ),
+        ("the agent has just finished a turn", call("read_file", serde_json::json!({ "path": "notes.txt" }))),
+        ("half", reply("VERDICT: fails — notes.txt says half, not done")),
+        ("overwrote", reply("fixed: it said half")),
+        ("created", reply("done")),
+        (
+            "make it say done",
+            call("write_file", serde_json::json!({ "path": "notes.txt", "content": "half" })),
+        ),
+    ]));
+
+    let mut agent = AgentLoop::new(&f.rook, provider, session);
+    agent.allow_everything_not_denied();
+    let outcome = agent.run("make it say done").await.unwrap();
+
+    assert_eq!(std::fs::read_to_string(f.workspace.path().join("notes.txt")).unwrap(), "done");
+    assert_eq!(outcome.reply, "fixed: it said half", "put right and said what was wrong");
+    let notes: Vec<String> = f
+        .rook
+        .transcript(session, 0, 200, 512)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == "note" && e.label == "goal check")
+        .map(|e| e.body)
+        .collect();
+    assert_eq!(notes.len(), 1, "checked once, and the check is on the record: {notes:?}");
+    assert!(notes[0].contains("fails"), "{notes:?}");
+}
+
 /// Answers by what it was last asked rather than by position.
 ///
 /// With a parent and its sub-agent both calling, the order they arrive in is

@@ -150,7 +150,7 @@ async fn several_commands_run_at_once_and_the_turn_waits_for_them() {
 
     let mut ids = Vec::new();
     for name in ["a", "b", "c"] {
-        let command = format!("sleep 0.3; echo done > {}/{name}", dir.path().display());
+        let command = format!("sleep 2; echo done > {}/{name}", dir.path().display());
         let out = RunCommand
             .call(&ctx, &serde_json::json!({"command": command, "background": true}))
             .await
@@ -158,13 +158,19 @@ async fn several_commands_run_at_once_and_the_turn_waits_for_them() {
         ids.push(out.meta.get("job").and_then(|j| j.as_str()).unwrap().to_string());
     }
 
-    let started = std::time::Instant::now();
+    // Together means overlapping, and overlap is observed rather than timed:
+    // with the third started, the first is still running. A wall-clock budget
+    // said the same thing on an idle laptop and read a loaded runner as "one
+    // by one".
+    for id in &ids {
+        let out = JobTool.call(&ctx, &serde_json::json!({"id": id})).await.unwrap();
+        assert_eq!(out.meta.get("running"), Some(&serde_json::json!(true)), "{}", out.content);
+    }
+
     for id in &ids {
         let out = JobTool.call(&ctx, &serde_json::json!({"id": id, "wait_secs": 20})).await.unwrap();
         assert_eq!(out.meta.get("running"), Some(&serde_json::json!(false)), "{}", out.content);
     }
-
-    assert!(started.elapsed() < std::time::Duration::from_secs(1), "they ran together, not one by one");
     for name in ["a", "b", "c"] {
         assert!(dir.path().join(name).exists(), "{name} never finished");
     }

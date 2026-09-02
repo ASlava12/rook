@@ -1051,6 +1051,7 @@ impl<'a> AgentLoop<'a> {
         let mut carrying = tokio::time::interval(std::time::Duration::from_millis(200));
 
         let mut asked_for_one_script = false;
+        let mut checked_goal = false;
         let mut worth_compacting = true;
         // What the provider last said the request cost, and how many messages
         // that covered. See `measured`.
@@ -1217,6 +1218,29 @@ impl<'a> AgentLoop<'a> {
                             self.rook.log(self.session, EventKind::Note, "one script", &note).ok();
                             messages.push(response.message.clone());
                             messages.push(Message::user(&note));
+                            continue;
+                        }
+                    }
+                    // Autonomy is a task and its boundaries, and this is the
+                    // boundary being held: before the turn ends, a checker asks
+                    // whether the goal is met and whether anything forbidden was
+                    // done. Once, and only for a turn that did something.
+                    let did_something = !outcome.tools_called.is_empty() || !outcome.delegated.is_empty();
+                    if self.policy.stance() == Stance::Autonomous
+                        && !checked_goal
+                        && did_something
+                        && let Ok(Some(goal)) = self.rook.goal(self.session)
+                    {
+                        checked_goal = true;
+                        let (report, verdict) = self.goal_check(&goal, &mut outcome, &mut on_progress).await;
+                        self.rook.log(self.session, EventKind::Note, "goal check", &report).ok();
+                        if verdict == Some("fails") {
+                            let told = format!(
+                                "Checked against the goal before finishing, and the check \
+                                 fails:\n\n{report}\n\nPut it right, and say what was wrong."
+                            );
+                            messages.push(response.message.clone());
+                            messages.push(Message::user(&told));
                             continue;
                         }
                     }
@@ -1470,7 +1494,14 @@ impl<'a> AgentLoop<'a> {
             Ok(o) => o,
             Err(e) => rook_tools::ToolOutcome::error(format!("tool error: {e}")),
         };
+        // A checker's reading is not recorded. The registry holds one holder
+        // per path, so a look from any session makes every other session's
+        // overwrite stale until it looks again — right for a sub-task, which
+        // may have changed the file, and a false alarm from a loop that has no
+        // writing tools: the goal check read a file and the turn it was
+        // checking was then refused the fix the check had just asked for.
         if !outcome.is_error
+            && !self.checking
             && let Some(tool) = self.tools.get(&call.name)
         {
             let seen: Vec<std::path::PathBuf> = tool
@@ -1764,7 +1795,18 @@ impl<'a> AgentLoop<'a> {
             return "verify needs a claim to check".into();
         }
         let settles = args.get("settles").and_then(|s| s.as_str()).unwrap_or("").trim();
+        self.check(claim, settles, outcome, on_progress).await.0
+    }
 
+    /// The report and the verdict it carries. The report is what a model reads;
+    /// the verdict is what the loop acts on when it asked the question itself.
+    async fn check(
+        &self,
+        claim: &str,
+        settles: &str,
+        outcome: &mut TurnOutcome,
+        on_progress: &mut impl FnMut(Progress<'_>),
+    ) -> (String, Option<&'static str>) {
         let ceiling = self.rook.config.agent.max_subagents_per_turn;
         let claimed = self.spawned.fetch_update(
             std::sync::atomic::Ordering::Relaxed,
@@ -1772,10 +1814,11 @@ impl<'a> AgentLoop<'a> {
             |started| (started < ceiling).then_some(started + 1),
         );
         if claimed.is_err() {
-            return format!(
+            let refused = format!(
                 "this turn has already started {ceiling} sub-agents, which is the limit \
                  (`[agent] max_subagents_per_turn`)."
             );
+            return (refused, None);
         }
 
         let mut instruction = format!("{VERDICT_INSTRUCTIONS}\n\nThe claim:\n{claim}");
@@ -1811,26 +1854,54 @@ impl<'a> AgentLoop<'a> {
                     // is the model's memory with a label on it, which is exactly
                     // what asking a second agent was supposed to get past. It is
                     // reported as unproven whatever it said.
-                    Some(verdict) if verdict != "unproven" && child.tools_called.is_empty() => {
+                    Some(verdict) if verdict != "unproven" && child.tools_called.is_empty() => (
                         format!(
                             "checked by {id}, which reached for nothing — no command, no file, \
                              no page — so `{verdict}` is recollection rather than a check, and \
                              the claim stands unproven:\n{}",
                             child.reply
-                        )
-                    }
-                    Some(_) => format!("checked by {id}:\n{}", child.reply),
+                        ),
+                        Some("unproven"),
+                    ),
+                    Some(verdict) => (format!("checked by {id}:\n{}", child.reply), Some(verdict)),
                     // Not treated as passing: a check that would not commit is
                     // the outcome this exists to make visible.
-                    None => format!(
-                        "checked by {id}, and it did not answer with a verdict, so the claim \
-                         is unchecked:\n{}",
-                        child.reply
+                    None => (
+                        format!(
+                            "checked by {id}, and it did not answer with a verdict, so the claim \
+                             is unchecked:\n{}",
+                            child.reply
+                        ),
+                        None,
                     ),
                 }
             }
-            Err(e) => format!("could not check {claim:?}: {e}"),
+            Err(e) => (format!("could not check {claim:?}: {e}"), None),
         }
+    }
+
+    /// Whether the goal is met, asked of a checker before an autonomous turn
+    /// ends — and whether anything the person said not to do was done anyway.
+    ///
+    /// A turn is the unit because it is the last moment the agent can still
+    /// act: told afterwards, it can only apologise. Asked of a checker rather
+    /// than of the turn itself, because the author is the worst judge of its
+    /// own work.
+    async fn goal_check(
+        &self,
+        goal: &str,
+        outcome: &mut TurnOutcome,
+        on_progress: &mut impl FnMut(Progress<'_>),
+    ) -> (String, Option<&'static str>) {
+        let claim = format!(
+            "The person set this goal for the session, and the agent has just finished a turn \
+             towards it:\n\n{goal}\n\nTwo questions, both answered from what is on disk and what \
+             runs rather than from the agent's own account: has the goal been met, and was anything \
+             the person asked not to do done anyway? `holds` means both are as they should be. \
+             `fails` means the goal is not met, or something the person forbade was done — say \
+             which, and what would put it right."
+        );
+        self.check(&claim, "", outcome, on_progress).await
     }
 
     async fn run_checker(

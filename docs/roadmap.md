@@ -187,6 +187,17 @@ what unblocks the most.
   `rook memory`. Both the TUI and the browser now have a Memory view over a new
   `/api/memory`, and the browser can forget a fact: one nobody can remove is one
   that quietly steers everything. 4 tests, including the tab drawn on a pty.
+- **An autonomous turn is checked against its goal before it may end** —
+  autonomy is a task and its boundaries, and the boundary has to be held by
+  something other than the turn's own opinion of its work. With a goal set, a
+  checker in a fresh session is asked two things before an autonomous turn that
+  did anything ends: is the goal met, and was anything the person asked not to
+  do done anyway. `fails` gives the turn one more go with the reason, so it puts
+  it right and says what was wrong; both outcomes are on the record as a note.
+  Finding it turned up a false alarm in the write fence: a checker's reading
+  was recorded as touching the file, so the turn being checked was then refused
+  the fix the check had just asked for. A loop with no writing tools records
+  nothing now.
 - **One idea where there were two** — an approval mode and a level of autonomy
   are the same question asked twice, so `Mode` became `Stance`: `readonly`,
   `assist`, `autonomous`. It is ordered, and the order carries weight — a
