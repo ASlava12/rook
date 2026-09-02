@@ -414,7 +414,13 @@ fn refs(action: RefsCmd) -> Result<()> {
                 Ok(log) if !log.is_empty() => println!("{log}"),
                 _ => println!("  (history too shallow to list; fetch deeper to see it)"),
             }
-            git_in(&r.path, &["checkout", "--detach", &head])?;
+            // Forced because a reference is read-only to us and nothing in one
+            // is ours to keep. It is not hypothetical: hermes tracks two paths
+            // that differ only in case, which a case-insensitive filesystem
+            // cannot hold both of, so its tree is dirty the moment it is
+            // checked out — and an ordinary checkout then refuses, at the tail
+            // of a two-hundred-line log where nobody is looking.
+            git_in(&r.path, &["checkout", "--detach", "--force", &head])?;
             git(&["add", &r.path])?;
             println!(
                 "\n{} advanced to {} — staged. Triage the above into references/PORTED.md",
