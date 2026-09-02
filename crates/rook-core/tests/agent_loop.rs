@@ -318,6 +318,42 @@ async fn a_mutating_tool_is_checkpointed_and_a_rewind_undoes_it() {
     assert_eq!(original.len(), entries.len());
 }
 
+/// Reversibility is a property of the system, not of one session: a turn that
+/// delegated the writing is a turn whose rewind has to undo it. The child works
+/// in a forked session, so its checkpoints are in a log the parent's rewind was
+/// not reading.
+#[tokio::test]
+async fn a_rewind_undoes_what_the_turn_delegated_as_well_as_what_it_did() {
+    let f = fixture();
+    let target = f.workspace.path().join("notes.txt");
+    std::fs::write(&target, "original\n").unwrap();
+    let session = f.rook.start_session("delegate an edit").unwrap();
+
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        // In order, and the child is served in the middle: the parent asks for
+        // the delegation, the child does the work, and the parent then speaks.
+        call("delegate", serde_json::json!({ "tasks": ["rewrite notes.txt"] })),
+        call("write_file", serde_json::json!({ "path": "notes.txt", "content": "rewritten\n" })),
+        reply("rewritten"),
+        reply("the sub-agent did it"),
+    ]));
+    let mut agent = AgentLoop::new(&f.rook, provider, session);
+    agent.allow_everything_not_denied();
+    agent.run("have someone rewrite notes.txt").await.unwrap();
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "rewritten\n", "the child did the work");
+
+    let kinds: Vec<String> =
+        f.rook.transcript(session, 0, 200, 256).unwrap().iter().map(|e| e.kind.clone()).collect();
+    assert!(!kinds.contains(&"checkpoint".to_string()), "the parent wrote nothing itself: {kinds:?}");
+
+    let report = f.rook.rewind(session, 1, true).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "original\n",
+        "rewinding the turn that delegated must undo what was delegated: {report:?}"
+    );
+}
+
 /// The point of having a tool for it: `rm` through the shell declares no path,
 /// so nothing is captured and the file is simply gone.
 #[tokio::test]

@@ -1475,6 +1475,8 @@ impl<'a> AgentLoop<'a> {
         // One queue each, filled from the parent's while they run.
         let relayed: Vec<std::sync::Arc<Interjections>> = (0..total).map(|_| Default::default()).collect();
         let (doing, mut steps) = tokio::sync::mpsc::unbounded_channel::<(usize, String)>();
+        let crew = self.crew();
+        let crew = &crew;
         let running: futures_util::stream::FuturesUnordered<_> = tasks
             .iter()
             .enumerate()
@@ -1485,7 +1487,7 @@ impl<'a> AgentLoop<'a> {
                 let said = relayed[i].clone();
                 async move {
                     let _permit = limit.acquire().await;
-                    (i, self.run_subtask(task, inherited.as_deref(), max_steps, doing, i, said).await)
+                    (i, crew.run_subtask(task, inherited.as_deref(), max_steps, doing, i, said).await)
                 }
             })
             .collect();
@@ -1697,53 +1699,26 @@ impl<'a> AgentLoop<'a> {
         Ok((rook_store::format_session_id(session), outcome))
     }
 
-    async fn run_subtask(
-        &self,
-        task: &str,
-        inherited: Option<&str>,
-        max_steps: Option<u32>,
-        doing: tokio::sync::mpsc::UnboundedSender<(usize, String)>,
-        index: usize,
-        said: std::sync::Arc<Interjections>,
-    ) -> Result<(String, TurnOutcome)> {
-        let session = self.rook.fork_for_subtask(self.session, task)?;
-        if let Some(context) = inherited {
-            self.rook.log(session, EventKind::Note, "inherited", context).ok();
+    /// What a sub-task needs from the turn that started it, owned.
+    ///
+    /// Taken out of the loop rather than read from it so a child's future
+    /// borrows the engine and not the parent: the parent has to keep stepping
+    /// while they run, and a future holding `&self` freezes it.
+    fn crew(&self) -> Crew<'a> {
+        Crew {
+            rook: self.rook,
+            provider: self.provider.clone(),
+            tools: self.tools.clone(),
+            tool_ctx: self.tool_ctx.clone(),
+            policy: self.policy.clone(),
+            approver: self.approver.clone(),
+            hooks: self.hooks.clone(),
+            servers: self.servers.clone(),
+            spawned: self.spawned.clone(),
+            parent: self.session,
+            depth: self.depth,
+            max_steps: self.max_steps,
         }
-
-        let mut child = AgentLoop::new(self.rook, self.provider.clone(), session);
-        child.depth = self.depth + 1;
-        child.tools = self.tools.clone();
-        child.tool_ctx = self.tool_ctx.clone();
-        child.policy = self.policy.clone();
-        child.approver = self.approver.clone();
-        // Deliberately not `ask_via`: a subagent the user did not start should
-        // not interrupt them, and its parent is the one holding the context to
-        // judge the answer.
-        child.hooks = self.hooks.clone();
-        child.servers = self.servers.clone();
-        child.spawned = self.spawned.clone();
-        // Its own queue, not the parent's: what the user says while several of
-        // these run has to reach all of them, and taking from one queue would
-        // give it to whichever child stepped first.
-        child.interjections = said;
-        // A sub-task is a bounded errand, and lower effort means fewer and more
-        // consolidated tool calls rather than a worse answer.
-        child.effort = rook_llm::Effort::Low;
-        if let Some(steps) = max_steps {
-            child.max_steps = steps;
-        }
-
-        // Boxed because this is `run` calling itself through a tool call. The
-        // channel carries only tool names, so it holds at most one short string
-        // per step the children are already bounded to.
-        let outcome = Box::pin(child.run_with(task, |progress| {
-            if let Progress::Delta(Delta::ToolCall(call)) = progress {
-                let _ = doing.send((index, call.name.clone()));
-            }
-        }))
-        .await?;
-        Ok((rook_store::format_session_id(session), outcome))
     }
 
     /// The last `count` exchanges as plain text, for a child asked to inherit
@@ -2106,6 +2081,70 @@ impl AgentLoop<'_> {
             true => Err(CoreError::Other("the model returned an empty summary".into())),
             false => Ok(summary),
         }
+    }
+}
+
+struct Crew<'a> {
+    rook: &'a Rook,
+    provider: std::sync::Arc<dyn Provider>,
+    tools: ToolBox,
+    tool_ctx: ToolContext,
+    policy: std::sync::Arc<Policy>,
+    approver: std::sync::Arc<dyn Approver>,
+    hooks: std::sync::Arc<Hooks>,
+    servers: std::sync::Arc<crate::lsp::Servers>,
+    spawned: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    parent: u128,
+    depth: u32,
+    max_steps: u32,
+}
+
+impl Crew<'_> {
+    async fn run_subtask(
+        &self,
+        task: &str,
+        inherited: Option<&str>,
+        max_steps: Option<u32>,
+        doing: tokio::sync::mpsc::UnboundedSender<(usize, String)>,
+        index: usize,
+        said: std::sync::Arc<Interjections>,
+    ) -> Result<(String, TurnOutcome)> {
+        let session = self.rook.fork_for_subtask(self.parent, task)?;
+        if let Some(context) = inherited {
+            self.rook.log(session, EventKind::Note, "inherited", context).ok();
+        }
+
+        let mut child = AgentLoop::new(self.rook, self.provider.clone(), session);
+        child.depth = self.depth + 1;
+        child.tools = self.tools.clone();
+        child.tool_ctx = self.tool_ctx.clone();
+        child.policy = self.policy.clone();
+        child.approver = self.approver.clone();
+        // Deliberately not `ask_via`: a subagent the user did not start should
+        // not interrupt them, and its parent is the one holding the context to
+        // judge the answer.
+        child.hooks = self.hooks.clone();
+        child.servers = self.servers.clone();
+        child.spawned = self.spawned.clone();
+        // Its own queue, not the parent's: what the user says while several of
+        // these run has to reach all of them, and taking from one queue would
+        // give it to whichever child stepped first.
+        child.interjections = said;
+        // A sub-task is a bounded errand, and lower effort means fewer and more
+        // consolidated tool calls rather than a worse answer.
+        child.effort = rook_llm::Effort::Low;
+        child.max_steps = max_steps.unwrap_or(self.max_steps);
+
+        // Boxed because this is `run` calling itself through a tool call. The
+        // channel carries only tool names, so it holds at most one short string
+        // per step the children are already bounded to.
+        let outcome = Box::pin(child.run_with(task, |progress| {
+            if let Progress::Delta(Delta::ToolCall(call)) = progress {
+                let _ = doing.send((index, call.name.clone()));
+            }
+        }))
+        .await?;
+        Ok((rook_store::format_session_id(session), outcome))
     }
 }
 

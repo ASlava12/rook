@@ -579,6 +579,11 @@ impl Rook {
         meta.parent = Some(parent);
         meta.tags.push("subtask".into());
         self.store.create_session(&meta)?;
+        // Where in the parent this errand was handed out. Rewinding the parent
+        // past that point has to undo the child's work as well as its own, and
+        // without the seq there is no way to tell which children are past it.
+        let at = self.store.events(parent, 0, usize::MAX)?.last().map(|e| e.seq).unwrap_or(0);
+        self.set_mark(FORK_AT, id, at)?;
         Ok(id)
     }
 
@@ -757,7 +762,15 @@ impl Rook {
         let mut checkpoints = 0;
 
         if restore_files {
-            for event in self.store.events(session, to_seq, usize::MAX)? {
+            // The turn's own checkpoints and its children's. Reversibility is a
+            // property of the workspace, not of one log: a turn that delegated
+            // the writing is a turn whose rewind has to undo it, and a sub-task
+            // keeps its checkpoints in a session of its own.
+            let mut logs = vec![self.store.events(session, to_seq, usize::MAX)?];
+            for child in self.delegated_after(session, to_seq)? {
+                logs.push(self.store.events(child, 0, usize::MAX)?);
+            }
+            for event in logs.into_iter().flatten() {
                 if event.record.kind != EventKind::Checkpoint {
                     continue;
                 }
@@ -1031,6 +1044,28 @@ impl Rook {
     /// The parent event a forked session diverged at, if it was forked.
     pub fn forked_at(&self, session: u128) -> Result<Option<u64>> {
         self.read_mark(FORK_AT, session)
+    }
+
+    /// Sub-tasks this session handed out after `seq`, however deep they nest.
+    ///
+    /// A scan of the sessions, which is what a rewind can afford: it is asked
+    /// for by hand, once, and the alternative is a list on the parent that has
+    /// to be kept in step with the sessions themselves.
+    fn delegated_after(&self, session: u128, seq: u64) -> Result<Vec<u128>> {
+        let all = self.store.list_sessions()?;
+        let mut found = Vec::new();
+        let mut frontier = vec![session];
+        while let Some(parent) = frontier.pop() {
+            for child in all.iter().filter(|m| m.parent == Some(parent)) {
+                // The parent's own children are the ones that must be past the
+                // rewind point; anything below them went with its parent.
+                if parent != session || self.forked_at(child.id)?.is_none_or(|at| at >= seq) {
+                    found.push(child.id);
+                    frontier.push(child.id);
+                }
+            }
+        }
+        Ok(found)
     }
 
     // ---------------------------------------------------------------- memory

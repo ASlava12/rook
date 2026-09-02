@@ -106,6 +106,17 @@ in. Getting this wrong is invisible in the code and expensive in use: language
 servers re-index, MCP servers respawn, and an approval granted "for the run" is
 forgotten.
 
+**Undo is a property of the workspace, not of a log.** Reversibility is not
+something to weigh per decision — it is the floor the whole design stands on,
+and a rewind that covers most of what happened is a rewind nobody can trust. It
+was one session deep: a turn that delegated its writing left a child's
+checkpoints in the child's session, so rewinding the parent restored nothing and
+said `checkpoints_applied: 0` while doing it. `Rewind` follows what a turn
+delegated now, and the test that found it asserts the parent wrote nothing
+itself — the first version of it passed while the parent did the work, because a
+scripted provider hands out replies in order and the child had taken a different
+one.
+
 **Three front ends, one engine.** New capability goes in `rook-core` and is
 exposed by the CLI, the API and the TUI. A feature reachable from one front end
 and not the others is a bug — the approver is shared for exactly this reason.
