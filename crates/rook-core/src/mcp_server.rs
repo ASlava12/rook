@@ -148,7 +148,7 @@ async fn refused(offered: &Offered, name: &str, risk: Risk, preview: Option<&str
                 offered.policy.grant_for_run(&risk.subject());
                 None
             }
-            Approval::Deny(why) => Some(format!("refused: {why}")),
+            Approval::Deny(why) | Approval::Unanswered(why) => Some(format!("refused: {why}")),
         },
     }
 }

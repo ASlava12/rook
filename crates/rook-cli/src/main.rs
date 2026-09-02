@@ -770,6 +770,12 @@ fn cmd_run(
         if let Some(note) = outcome.memory_note() {
             eprintln!("{note}");
         }
+        for text in &outcome.decisions {
+            eprintln!("decided: {text}");
+        }
+        for text in &outcome.open_questions {
+            eprintln!("open question: {text}");
+        }
         if let Some(changes) = changes.filter(|c| c.touched() > 0) {
             eprintln!(
                 "{} — `rook session diff {}`",

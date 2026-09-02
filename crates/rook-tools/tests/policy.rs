@@ -333,9 +333,10 @@ fn a_person_saying_no_is_not_reported_to_the_model_as_something_that_went_wrong(
 async fn an_unattended_refusal_tells_the_model_to_stop_before_it_tells_the_user_anything() {
     use rook_tools::policy::{Approver, Unattended};
 
-    let Approval::Deny(why) = Unattended.ask("write_file", &Risk::Write(vec!["a.py".into()]), None).await
+    let Approval::Unanswered(why) =
+        Unattended.ask("write_file", &Risk::Write(vec!["a.py".into()]), None).await
     else {
-        panic!("nothing can approve anything here")
+        panic!("nothing can approve anything here, and nobody refused either")
     };
 
     assert!(why.contains("Stop and say what you were about to do"), "{why}");

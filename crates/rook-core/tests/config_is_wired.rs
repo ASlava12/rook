@@ -253,8 +253,12 @@ fn the_whole_advertised_tool_list_stays_within_a_budget() {
          merge an argument before raising this"
     );
     // The number actually paid, since lazy loading is the default.
+    // Raised from 850 for `stance`, which is how the agent asks a person for
+    // more latitude — advertised only where there is more to ask for, which is
+    // the default. Its first sentence and its `required` were cut first; a
+    // stub is mostly the shape of its arguments.
     assert!(
-        stubs < 850,
+        stubs < 900,
         "the stubs cost ~{stubs} tokens on every request, which is what is \
          actually paid: lazy loading is the default"
     );

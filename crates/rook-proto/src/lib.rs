@@ -213,6 +213,10 @@ pub enum ChatEvent {
         output_tokens: u32,
         delegated: Vec<String>,
         compactions: u32,
+        #[serde(default)]
+        decisions: Vec<String>,
+        #[serde(default)]
+        open_questions: Vec<String>,
     },
     Error {
         message: String,

@@ -235,7 +235,8 @@ type ClaimedResult<'a> = std::result::Result<(Option<crate::service::Writing<'a>
 /// a checker. `delegate` is here because a checker that can start an agent with
 /// the writing tools has not been stopped from writing, only from doing it
 /// itself.
-const CHANGES_THINGS: &[&str] = &[WRITE_SKILL, FIND_SKILL, REMEMBER, FORGET, DELEGATE, SUBAGENTS, VERIFY];
+const CHANGES_THINGS: &[&str] =
+    &[WRITE_SKILL, FIND_SKILL, REMEMBER, FORGET, DELEGATE, SUBAGENTS, STANCE, VERIFY];
 
 /// The same for the toolbox. `run_command` is deliberately absent — verifying a
 /// claim means running things — so this stops a checker editing the work it is
@@ -364,6 +365,7 @@ pub const REMEMBER: &str = "remember";
 pub const FORGET: &str = "forget";
 pub const RECALL: &str = "recall";
 pub const DELEGATE: &str = "delegate";
+pub const STANCE: &str = "stance";
 pub const SUBAGENTS: &str = "subagents";
 pub const VERIFY: &str = "verify";
 
@@ -394,6 +396,20 @@ pub struct TurnOutcome {
     /// Sessions of sub-agents this turn ran, for reading their detail later.
     pub delegated: Vec<String>,
     pub compactions: u32,
+    /// Settled by somebody during the turn — a refusal, a stance granted.
+    #[serde(default)]
+    pub decisions: Vec<String>,
+    /// Waiting for somebody: what nobody was there to approve, a goal check that
+    /// could not settle. Told apart from decisions because they are different
+    /// things to read at the end of a run one was not watching.
+    #[serde(default)]
+    pub open_questions: Vec<String>,
+}
+
+/// What a turn has to tell the person at the end, by what it is.
+enum Reported {
+    Decision(String),
+    Open(String),
 }
 
 pub struct AgentLoop<'a> {
@@ -409,6 +425,9 @@ pub struct AgentLoop<'a> {
     pub servers: std::sync::Arc<crate::lsp::Servers>,
     /// What the `session_start` hooks contributed, computed once.
     session_context: std::sync::Mutex<Option<String>>,
+    /// Collected where refusals happen, which has no `outcome` in hand, and
+    /// moved into it when the turn ends.
+    reported: std::sync::Mutex<Vec<Reported>>,
     /// Consulted whenever the policy says to ask. Refuses by default, so an
     /// unattended run cannot silently do something nobody reviewed.
     pub approver: std::sync::Arc<dyn Approver>,
@@ -480,6 +499,7 @@ impl<'a> AgentLoop<'a> {
             hooks: std::sync::Arc::new(hooks),
             servers,
             session_context: std::sync::Mutex::new(None),
+            reported: Default::default(),
             approver: std::sync::Arc::new(Unattended),
             interjections: Default::default(),
             depth: 0,
@@ -908,6 +928,21 @@ impl<'a> AgentLoop<'a> {
                     }
                 }),
             });
+            // Only where there is more to ask for.
+            if self.policy.stance() < Stance::Autonomous {
+                push(ToolSpec {
+                    name: STANCE.into(),
+                    description: "Ask for more latitude for the rest of this run. A person decides.".into(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {
+                            "to": { "type": "string", "enum": ["assist", "autonomous"] },
+                            "why": { "type": "string" }
+                        },
+                        "required": ["to"]
+                    }),
+                });
+            }
             push(ToolSpec {
                 name: SUBAGENTS.into(),
                 description:
@@ -1041,6 +1076,8 @@ impl<'a> AgentLoop<'a> {
             facts_forgotten: Vec::new(),
             delegated: Vec::new(),
             compactions: 0,
+            decisions: Vec::new(),
+            open_questions: Vec::new(),
         };
 
         // Built once, before the loop borrows `self` mutably: a child's future
@@ -1234,14 +1271,22 @@ impl<'a> AgentLoop<'a> {
                         checked_goal = true;
                         let (report, verdict) = self.goal_check(&goal, &mut outcome, &mut on_progress).await;
                         self.rook.log(self.session, EventKind::Note, "goal check", &report).ok();
-                        if verdict == Some("fails") {
-                            let told = format!(
-                                "Checked against the goal before finishing, and the check \
-                                 fails:\n\n{report}\n\nPut it right, and say what was wrong."
-                            );
-                            messages.push(response.message.clone());
-                            messages.push(Message::user(&told));
-                            continue;
+                        match verdict {
+                            Some("fails") => {
+                                let told = format!(
+                                    "Checked against the goal before finishing, and the check \
+                                     fails:\n\n{report}\n\nPut it right, and say what was wrong."
+                                );
+                                messages.push(response.message.clone());
+                                messages.push(Message::user(&told));
+                                continue;
+                            }
+                            Some("holds") => {}
+                            // Not a pass and not a fail: the one thing this exists
+                            // to make visible to the person, rather than to bury.
+                            _ => self.report(Reported::Open(format!(
+                                "whether the goal was met could not be settled: {report}"
+                            ))),
                         }
                     }
                     outcome.stopped = response.stop_reason.as_str().into();
@@ -1255,6 +1300,7 @@ impl<'a> AgentLoop<'a> {
                             outcome.stopped
                         );
                     }
+                    self.settle_reports(&mut outcome);
                     self.finish(&outcome).await;
                     return Ok(outcome);
                 }
@@ -1297,6 +1343,7 @@ impl<'a> AgentLoop<'a> {
         }
 
         outcome.stopped = "max_steps".into();
+        self.settle_reports(&mut outcome);
         self.finish(&outcome).await;
         Ok(outcome)
     }
@@ -1346,6 +1393,12 @@ impl<'a> AgentLoop<'a> {
         if call.name == DELEGATE {
             let text = self.delegate(&call.arguments, outcome, on_progress, crew, nursery).await;
             self.rook.log(self.session, EventKind::ToolResult, DELEGATE, &text).ok();
+            return (text, false);
+        }
+
+        if call.name == STANCE {
+            let text = self.request_stance(&call.arguments).await;
+            self.rook.log(self.session, EventKind::ToolResult, STANCE, &text).ok();
             return (text, false);
         }
 
@@ -2150,8 +2203,63 @@ impl<'a> AgentLoop<'a> {
                     self.policy.grant_for_run(&risk.subject());
                     None
                 }
-                rook_tools::policy::Approval::Deny(why) => Some(format!("refused: {why}")),
+                rook_tools::policy::Approval::Deny(why) => {
+                    self.report(Reported::Decision(format!("{name}: {} — declined", risk.describe())));
+                    Some(format!("refused: {why}"))
+                }
+                rook_tools::policy::Approval::Unanswered(why) => {
+                    self.report(Reported::Open(format!(
+                        "{name} wanted to {}, and nobody was here to say",
+                        risk.describe()
+                    )));
+                    Some(format!("refused: {why}"))
+                }
             },
+        }
+    }
+
+    fn report(&self, what: Reported) {
+        if let Ok(mut list) = self.reported.lock() {
+            list.push(what);
+        }
+    }
+
+    /// Into the outcome, which is what every front end reads at the end.
+    fn settle_reports(&self, outcome: &mut TurnOutcome) {
+        let Ok(mut list) = self.reported.lock() else { return };
+        for what in list.drain(..) {
+            match what {
+                Reported::Decision(text) => outcome.decisions.push(text),
+                Reported::Open(text) => outcome.open_questions.push(text),
+            }
+        }
+    }
+
+    /// The agent asking for more latitude. A person grants it or nobody can;
+    /// the agent never raises its own stance.
+    async fn request_stance(&self, args: &serde_json::Value) -> String {
+        let Some(to) = args.get("to").and_then(|t| t.as_str()).and_then(Stance::parse) else {
+            let names: Vec<&str> = Stance::ALL.iter().map(|s| s.as_str()).collect();
+            return format!("stance needs `to`: one of {}", names.join(", "));
+        };
+        let now = self.policy.stance();
+        if to <= now {
+            return format!("already at `{}`; a stance is only ever asked up", now.as_str());
+        }
+        let why = args.get("why").and_then(|w| w.as_str()).unwrap_or("").trim().to_string();
+        let shown = match why.is_empty() {
+            true => Shown::Nothing,
+            false => Shown::Text(&why),
+        };
+        match self.gate_risk(STANCE, args, rook_tools::policy::Risk::Stance(to), shown).await {
+            Some(refusal) => refusal,
+            None => {
+                self.policy.set_stance(to);
+                let note = format!("stance raised to `{}` for the rest of the run", to.as_str());
+                self.rook.log(self.session, EventKind::Note, "stance", &note).ok();
+                self.report(Reported::Decision(note.clone()));
+                note
+            }
         }
     }
 

@@ -88,6 +88,8 @@ fn a_turn_says_what_it_changed_about_what_it_believes() {
         facts_forgotten: Vec::new(),
         delegated: Vec::new(),
         compactions: 0,
+        decisions: Vec::new(),
+        open_questions: Vec::new(),
     };
     assert!(quiet.memory_note().is_none(), "a turn that changed nothing says nothing");
 

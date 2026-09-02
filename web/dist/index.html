@@ -206,7 +206,12 @@ function connect() {
     else if (e.type === 'done') {
       say('stat', `\n[${e.steps} steps · ${e.input_tokens} in / ${e.output_tokens} out` +
         (e.compactions ? ` · ${e.compactions} compactions` : '') +
-        (e.delegated.length ? ` · ${e.delegated.length} sub-agent(s)` : '') + ']\n\n');
+        (e.delegated.length ? ` · ${e.delegated.length} sub-agent(s)` : '') + ']\n');
+      // Sorted by what they are: a decision is settled, an open question is
+      // waiting for whoever reads this.
+      for (const d of e.decisions || []) say('stat', `decided: ${d}\n`);
+      for (const q of e.open_questions || []) say('err', `open question: ${q}\n`);
+      say('stat', '\n');
       done();
     }
   };

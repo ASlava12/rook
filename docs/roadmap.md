@@ -187,6 +187,18 @@ what unblocks the most.
   `rook memory`. Both the TUI and the browser now have a Memory view over a new
   `/api/memory`, and the browser can forget a fact: one nobody can remove is one
   that quietly steers everything. 4 tests, including the tab drawn on a pty.
+- **What a run has to tell the person, sorted by what it is** — a refusal
+  nobody made is a different thing from one somebody made, and the end of a run
+  one was not watching has to say which. `TurnOutcome` carries `decisions` (a
+  person declined, a stance was granted) apart from `open_questions` (nobody was
+  there to approve, a goal check could not settle), and all three front ends
+  read them: `rook run` prints both, the browser lists them under the turn, an
+  editor gets them as the last thing said. `Approval::Unanswered` is what makes
+  the two tellable apart at the source. And the agent may ask for more latitude
+  — the `stance` tool goes through the approval policy like anything else, so a
+  person grants it for the rest of the run, a deny rule can forbid it outright,
+  and nobody being there leaves it an open question; a stance is only ever
+  asked up, never taken.
 - **An autonomous turn is checked against its goal before it may end** —
   autonomy is a task and its boundaries, and the boundary has to be held by
   something other than the turn's own opinion of its work. With a goal set, a

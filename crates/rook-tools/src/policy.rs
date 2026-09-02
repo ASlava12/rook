@@ -94,6 +94,12 @@ pub enum Risk {
     /// is where the request is going, so the subject is the url and an allow
     /// rule can name a host and mean it.
     Network(String),
+    /// The agent asking to work with more latitude for the rest of the run.
+    ///
+    /// Through the policy like anything else, because that is what a person's
+    /// approval is for: a deny rule can forbid it outright, and nobody being
+    /// there leaves it unanswered rather than granted.
+    Stance(Stance),
     /// A call into an MCP server's tool. Rook cannot see what one does, and the
     /// protocol's `readOnlyHint` is the claim of the very party whose behaviour
     /// is in question — so it goes through the policy like anything else that
@@ -117,6 +123,8 @@ impl Risk {
             Risk::Write(paths) => Some(paths.clone()),
             Risk::Execute(line) => commands_in(line),
             Risk::Network(url) => Some(vec![url.clone()]),
+            // Nothing to match an allow rule against: a raise is a person's to give.
+            Risk::Stance(_) => None,
             Risk::External { name, .. } => Some(vec![name.clone()]),
         }
     }
@@ -128,6 +136,7 @@ impl Risk {
             Risk::Write(paths) => paths.join(" "),
             Risk::Execute(command) => command.clone(),
             Risk::Network(url) => url.clone(),
+            Risk::Stance(to) => format!("stance {}", to.as_str()),
             Risk::External { name, .. } => name.clone(),
         }
     }
@@ -138,6 +147,7 @@ impl Risk {
             Risk::Write(paths) => format!("write {}", paths.join(", ")),
             Risk::Execute(command) => format!("run `{command}`"),
             Risk::Network(url) => format!("fetch {url}"),
+            Risk::Stance(to) => format!("work at `{}` for the rest of the run", to.as_str()),
             Risk::External { name, claims_read_only } => format!(
                 "call the MCP tool `{name}`{}",
                 if *claims_read_only { ", which its server calls read-only" } else { "" }
@@ -297,6 +307,11 @@ impl Policy {
         if let Some(rule) = self.deny.iter().find(|r| r.matches(&subject)) {
             return Decision::Deny(format!("matches the deny rule {rule:?}"));
         }
+        // Asked even at read-only: asking for more is the one thing a stance
+        // that changes nothing is still allowed to do.
+        if let Risk::Stance(_) = risk {
+            return Decision::Ask;
+        }
         if self.stance() == Stance::ReadOnly {
             return Decision::Deny("read-only mode: nothing may change the machine".into());
         }
@@ -336,7 +351,12 @@ pub enum Approval {
     Once,
     /// Allow this exact subject for the rest of the run.
     ForRun,
+    /// A person said no. What they decided is on the record as a decision.
     Deny(String),
+    /// Nobody was there to say anything. Told apart from a refusal because the
+    /// two are different things to report: one is settled, the other is a
+    /// question still waiting for whoever comes back.
+    Unanswered(String),
 }
 
 impl Approval {
@@ -360,6 +380,7 @@ impl Approval {
             Approval::Once => "allowed once".into(),
             Approval::ForRun => "allowed for the rest of the run".into(),
             Approval::Deny(why) => format!("refused — {why}"),
+            Approval::Unanswered(why) => format!("unanswered — {why}"),
         }
     }
 }
@@ -388,7 +409,7 @@ impl Approver for Unattended {
         // one line unattended, a real model spent nine steps and four minutes
         // trying other tools and then delegating the same task to a sub-agent,
         // which is refused for the same reason.
-        Approval::Deny(format!(
+        Approval::Unanswered(format!(
             "`{}` needs someone to approve it and nobody is here. Stop and say what you \
              were about to do — no other tool, and no sub-agent, can get past this. For the user: \
              re-run interactively, pass --yes, or add a rule under [sandbox] allow in config.toml.",

@@ -397,6 +397,115 @@ async fn an_autonomous_turn_is_checked_against_its_goal_before_it_may_end() {
     assert!(notes[0].contains("fails"), "{notes:?}");
 }
 
+/// Somebody answering the approval prompt, one way or the other.
+struct Answers(rook_tools::policy::Approval);
+
+#[async_trait]
+impl rook_tools::policy::Approver for Answers {
+    async fn ask(
+        &self,
+        _tool: &str,
+        _risk: &rook_tools::policy::Risk,
+        _preview: Option<&str>,
+    ) -> rook_tools::policy::Approval {
+        self.0.clone()
+    }
+}
+
+/// A refusal nobody made is a different thing from one somebody made, and the
+/// end of a run one was not watching has to say which: the first is still a
+/// question, the second is settled.
+#[tokio::test]
+async fn what_nobody_could_answer_is_an_open_question_and_what_somebody_refused_is_a_decision() {
+    let f = fixture();
+    let call_then_stop = || {
+        Arc::new(ScriptedProvider::new(vec![
+            call("write_file", serde_json::json!({ "path": "notes.txt", "content": "x" })),
+            reply("I could not"),
+        ]))
+    };
+
+    let unattended = f.rook.start_session("unattended").unwrap();
+    let outcome = AgentLoop::new(&f.rook, call_then_stop(), unattended).run("write it").await.unwrap();
+    assert_eq!(outcome.decisions, Vec::<String>::new(), "nobody decided anything");
+    assert_eq!(outcome.open_questions.len(), 1, "{:?}", outcome.open_questions);
+    assert!(outcome.open_questions[0].contains("write_file"), "{:?}", outcome.open_questions);
+
+    let attended = f.rook.start_session("attended").unwrap();
+    let mut agent = AgentLoop::new(&f.rook, call_then_stop(), attended);
+    agent.approver = Arc::new(Answers(rook_tools::policy::Approval::declined()));
+    let outcome = agent.run("write it").await.unwrap();
+    assert_eq!(outcome.open_questions, Vec::<String>::new(), "a person answered, so nothing is open");
+    assert_eq!(outcome.decisions.len(), 1, "{:?}", outcome.decisions);
+    assert!(outcome.decisions[0].contains("write_file"), "{:?}", outcome.decisions);
+}
+
+/// The agent may ask for more latitude; it may not take it. A person grants
+/// it for the rest of the run, nobody being there leaves the question open,
+/// and a stance is only ever asked up.
+#[tokio::test]
+async fn a_stance_is_raised_by_a_person_and_never_by_the_agent() {
+    use rook_tools::policy::{Approval, Stance};
+    let f = fixture();
+    let asks = || {
+        Arc::new(ScriptedProvider::new(vec![
+            call("stance", serde_json::json!({ "to": "autonomous", "why": "to finish the migration" })),
+            reply("thanks"),
+        ]))
+    };
+
+    let granted = f.rook.start_session("granted").unwrap();
+    let mut agent = AgentLoop::new(&f.rook, asks(), granted);
+    agent.approver = Arc::new(Answers(Approval::Once));
+    let outcome = agent.run("go").await.unwrap();
+    assert_eq!(agent.policy.stance(), Stance::Autonomous, "granted for the rest of the run");
+    assert!(outcome.decisions.iter().any(|d| d.contains("autonomous")), "{:?}", outcome.decisions);
+
+    let nobody = f.rook.start_session("nobody").unwrap();
+    let mut agent = AgentLoop::new(&f.rook, asks(), nobody);
+    let outcome = agent.run("go").await.unwrap();
+    assert_eq!(agent.policy.stance(), Stance::Assist, "nobody was there, so nothing changed");
+    assert!(outcome.open_questions.iter().any(|q| q.contains("autonomous")), "{:?}", outcome.open_questions);
+
+    let down = f.rook.start_session("down").unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("stance", serde_json::json!({ "to": "readonly", "why": "safer" })),
+        reply("ok"),
+    ]));
+    let seen = provider.share();
+    let mut agent = AgentLoop::new(&f.rook, provider, down);
+    agent.approver = Arc::new(Answers(Approval::Once));
+    agent.run("go").await.unwrap();
+    let told = seen.lock().unwrap()[1].messages.last().unwrap().content.clone();
+    assert!(told.contains("only ever asked up"), "{told}");
+    assert_eq!(agent.policy.stance(), Stance::Assist);
+}
+
+/// A checker that reached for nothing is reported as unproven whatever it
+/// said, and unproven is neither a pass nor a fail: it is the question the
+/// person has to settle, and it must reach them.
+#[tokio::test]
+async fn a_goal_check_that_could_not_settle_is_an_open_question() {
+    let f = fixture();
+    let session = f.rook.start_session("s").unwrap();
+    f.rook.set_goal(session, "notes.txt must say done").unwrap();
+    let provider = Arc::new(ByPrompt(vec![
+        ("the agent has just finished a turn", reply("VERDICT: holds")),
+        ("created", reply("done")),
+        (
+            "make it say done",
+            call("write_file", serde_json::json!({ "path": "notes.txt", "content": "done" })),
+        ),
+    ]));
+    let mut agent = AgentLoop::new(&f.rook, provider, session);
+    agent.allow_everything_not_denied();
+    let outcome = agent.run("make it say done").await.unwrap();
+
+    assert_eq!(outcome.reply, "done", "an unsettled check does not cost the turn another go");
+    assert_eq!(outcome.open_questions.len(), 1, "{:?}", outcome.open_questions);
+    assert!(outcome.open_questions[0].contains("could not be settled"), "{:?}", outcome.open_questions);
+}
+
 /// Answers by what it was last asked rather than by position.
 ///
 /// With a parent and its sub-agent both calling, the order they arrive in is
@@ -2250,26 +2359,36 @@ async fn a_skill_that_will_not_write_says_why_instead_of_failing_the_turn() {
     assert_eq!(outcome.reply, "understood", "the model gets to react rather than the turn dying");
 }
 
-/// Pseudo-tool schemas are on every request just as the toolbox's are, and are
-/// easier to miss because they are written inline rather than measured by
-/// `rook-tools`' example.
+/// The loop's own tools are written inline rather than measured by
+/// `rook-tools`' example, so they are the easy ones to let grow. Only those are
+/// priced here: the whole list has one budget already, in `config_is_wired`,
+/// and this used to be a second number for the same question — it sat under
+/// its limit only because this fixture registers no `ask`.
 #[test]
-fn the_pseudo_tool_schemas_stay_within_a_budget() {
+fn the_loops_own_tool_schemas_stay_within_a_budget() {
+    use rook_core::agent::{
+        DELEGATE, FIND_SKILL, FORGET, LOAD_SKILL, RECALL, REMEMBER, STANCE, SUBAGENTS, VERIFY, WRITE_SKILL,
+    };
     let f = fixture();
     let session = f.rook.start_session("budget").unwrap();
     let provider = Arc::new(ScriptedProvider::new(vec![reply("ok")]));
     let agent = AgentLoop::new(&f.rook, provider, session);
 
+    let own =
+        [LOAD_SKILL, WRITE_SKILL, FIND_SKILL, REMEMBER, FORGET, RECALL, DELEGATE, SUBAGENTS, STANCE, VERIFY];
     let cost = |t: &rook_llm::ToolSpec| {
         (t.name.len() + t.description.len() + t.parameters.to_string().len()).div_ceil(4)
     };
-    let total: usize = agent.tool_specs().iter().map(cost).sum();
+    let priced: Vec<(String, usize)> = agent
+        .tool_specs()
+        .iter()
+        .filter(|t| own.contains(&t.name.as_str()))
+        .map(|t| (t.name.clone(), cost(t)))
+        .collect();
+    assert_eq!(priced.len(), own.len(), "every one of the loop's tools is advertised here: {priced:?}");
+    let total: usize = priced.iter().map(|(_, c)| c).sum();
 
-    assert!(
-        total < 800,
-        "the advertised schemas cost ~{total} tokens on every request: {:?}",
-        agent.tool_specs().iter().map(|t| (t.name.clone(), cost(t))).collect::<Vec<_>>()
-    );
+    assert!(total < 500, "the loop's own schemas cost ~{total} tokens on every request: {priced:?}");
 }
 
 #[test]

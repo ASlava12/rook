@@ -266,6 +266,8 @@ async fn turn(
                 output_tokens: outcome.output_tokens,
                 delegated: outcome.delegated,
                 compactions: outcome.compactions,
+                decisions: outcome.decisions,
+                open_questions: outcome.open_questions,
             });
         }
         Err(e) => report(&outbound, e.to_string()),
