@@ -10,7 +10,7 @@ use rook_tools::policy::{Decision, Policy, Risk};
 
 fn decide(command: &str) -> Decision {
     let sandbox = Config::default().sandbox;
-    let (policy, errors) = Policy::compile(sandbox.mode, &sandbox.allow, &sandbox.ask, &sandbox.deny);
+    let (policy, errors) = Policy::compile(sandbox.stance, &sandbox.allow, &sandbox.ask, &sandbox.deny);
     assert!(errors.is_empty(), "{errors:?}");
     policy.decide(&Risk::Execute(command.to_string()))
 }
@@ -21,7 +21,7 @@ fn runs_without_asking(command: &str) -> bool {
 
 fn refuses(command: &str) -> bool {
     let sandbox = Config::default().sandbox;
-    let (policy, errors) = Policy::compile(sandbox.mode, &sandbox.allow, &sandbox.ask, &sandbox.deny);
+    let (policy, errors) = Policy::compile(sandbox.stance, &sandbox.allow, &sandbox.ask, &sandbox.deny);
     assert!(errors.is_empty(), "{errors:?}");
     matches!(policy.decide(&Risk::Execute(command.to_string())), Decision::Deny(_))
 }

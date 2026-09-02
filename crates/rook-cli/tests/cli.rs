@@ -569,18 +569,21 @@ fn an_unknown_command_says_so_rather_than_being_sent_to_the_model() {
 #[test]
 fn the_repl_can_change_the_approvals_and_the_effort() {
     let rook = Rook::new();
-    let out = rook.chat("/mode\n/mode readonly\n/mode\n/effort\n/effort low\n/effort\n/quit\n");
+    // Asked for by the name it had and by the name it has: an editor, a script
+    // or a habit holding `/mode` must keep working.
+    let out = rook.chat("/mode\n/stance readonly\n/stance\n/effort\n/effort low\n/effort\n/quit\n");
 
-    let lines: Vec<&str> = out.lines().filter(|l| ["ask", "readonly", "high", "low"].contains(l)).collect();
-    assert_eq!(lines, ["ask", "readonly", "high", "low"], "each reads back what was set:\n{out}");
+    let lines: Vec<&str> =
+        out.lines().filter(|l| ["assist", "readonly", "high", "low"].contains(l)).collect();
+    assert_eq!(lines, ["assist", "readonly", "high", "low"], "each reads back what was set:\n{out}");
 }
 
 #[test]
 fn a_setting_the_repl_does_not_have_is_refused_by_name() {
     let rook = Rook::new();
-    let out = rook.chat("/mode yolo\n/effort glacial\n/quit\n");
+    let out = rook.chat("/stance yolo\n/effort glacial\n/quit\n");
 
-    assert!(out.contains(r#"no mode "yolo""#), "{out}");
+    assert!(out.contains(r#"no stance "yolo""#), "{out}");
     assert!(out.contains(r#"no effort "glacial""#), "{out}");
 }
 

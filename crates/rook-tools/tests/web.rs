@@ -96,7 +96,7 @@ fn the_risk_a_fetch_reports_is_the_address() {
 
     assert_eq!(risk, Risk::Network("https://docs.rs/serde".into()));
     let (policy, _) = rook_tools::policy::Policy::compile(
-        rook_tools::policy::Mode::Ask,
+        rook_tools::policy::Stance::Assist,
         &["https://docs.rs/".into()],
         &[],
         &[],
@@ -199,7 +199,7 @@ fn the_risk_a_search_reports_is_the_engine_not_the_query() {
     let asking = serde_json::json!({ "query": "anything at all" });
 
     let (policy, _) = rook_tools::policy::Policy::compile(
-        rook_tools::policy::Mode::Ask,
+        rook_tools::policy::Stance::Assist,
         &["http://127.0.0.1:8888".into()],
         &[],
         &[],

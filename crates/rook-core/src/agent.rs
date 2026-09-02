@@ -19,7 +19,7 @@
 use futures_util::StreamExt;
 use rook_llm::{Assembler, Delta, Message, Provider, Request, Role, StopReason, ToolSpec};
 use rook_store::EventKind;
-use rook_tools::policy::{Approver, Decision, Policy, Unattended};
+use rook_tools::policy::{Approver, Decision, Policy, Stance, Unattended};
 use rook_tools::{ToolBox, ToolContext};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -175,7 +175,7 @@ impl Shown<'_> {
 /// to every loop, or the user is asked again the moment they said not to be.
 pub fn policy_for(config: &Config) -> std::sync::Arc<Policy> {
     let sandbox = &config.sandbox;
-    let (policy, unusable) = Policy::compile(sandbox.mode, &sandbox.allow, &sandbox.ask, &sandbox.deny);
+    let (policy, unusable) = Policy::compile(sandbox.stance, &sandbox.allow, &sandbox.ask, &sandbox.deny);
     for error in unusable {
         tracing::warn!("ignoring unusable sandbox rule: {error}");
     }
@@ -530,6 +530,23 @@ impl<'a> AgentLoop<'a> {
                  before acting, and say so when it changes. Do not keep a checklist.\n",
             );
         }
+        // What the stance means for the model, rather than only for the policy:
+        // being refused a call teaches it what it may do, one refusal at a
+        // time, and says nothing about whether to decide or to ask.
+        s.push_str(match self.policy.stance() {
+            Stance::ReadOnly => {
+                "Nothing you do may change this machine. Read, run what only reads, and say what \
+                 you would change.\n"
+            }
+            Stance::Assist => {
+                "At a fork with more than one defensible answer — a library, a shape, an order of \
+                 work — put it to the person with `ask` rather than settling it alone.\n"
+            }
+            Stance::Autonomous => {
+                "Work to the task and the boundaries you were given without asking, and say what \
+                 you did.\n"
+            }
+        });
         if let Ok(Some(goal)) = self.rook.goal(self.session) {
             s.push_str(&format!("\nThe user's goal for this session: {goal}\n"));
         }
@@ -1975,7 +1992,8 @@ impl<'a> AgentLoop<'a> {
     /// Skip every prompt: run whatever the deny list does not forbid.
     pub fn allow_everything_not_denied(&mut self) {
         let sandbox = &self.rook.config.sandbox;
-        let (policy, _) = Policy::compile(rook_tools::policy::Mode::Auto, &sandbox.allow, &[], &sandbox.deny);
+        let (policy, _) =
+            Policy::compile(rook_tools::policy::Stance::Autonomous, &sandbox.allow, &[], &sandbox.deny);
         self.policy = std::sync::Arc::new(policy);
     }
 

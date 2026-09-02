@@ -320,15 +320,15 @@ impl Settings {
 
     fn describe(&self) -> ChatEvent {
         ChatEvent::Settings {
-            mode: self.policy.mode().as_str().into(),
+            mode: self.policy.stance().as_str().into(),
             effort: self.effort().as_str().into(),
         }
     }
 
     fn set(&self, name: &str, value: &str) -> Result<(), String> {
         match name {
-            "mode" => rook_tools::policy::Mode::parse(value)
-                .map(|mode| self.policy.set_mode(mode))
+            "stance" | "mode" => rook_tools::policy::Stance::parse(value)
+                .map(|mode| self.policy.set_stance(mode))
                 .ok_or_else(|| format!("no mode {value:?}")),
             "effort" => rook_llm::Effort::parse(value)
                 .map(|effort| *self.effort.write().unwrap_or_else(|e| e.into_inner()) = effort)

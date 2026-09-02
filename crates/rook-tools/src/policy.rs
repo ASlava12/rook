@@ -13,33 +13,70 @@ use std::sync::{Mutex, RwLock};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// How much latitude the agent has: from watching every step to setting it a
+/// task and standing back.
+///
+/// One idea rather than two. An approval mode and a level of autonomy are the
+/// same question asked twice, and two ways to say one thing drift.
+///
+/// Ordered, and the order carries weight: a sub-agent inherits its parent's
+/// stance and may be given less, never more.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Mode {
-    /// Anything not denied runs.
-    Auto,
-    /// Anything not explicitly allowed is confirmed first.
-    #[default]
-    Ask,
+pub enum Stance {
     /// Nothing that changes the machine runs at all.
     ReadOnly,
+    /// Anything not explicitly allowed is confirmed first, and a fork in the
+    /// work is put to the person rather than settled alone.
+    #[default]
+    #[serde(alias = "ask")]
+    Assist,
+    /// A task and its boundaries: anything not denied runs.
+    #[serde(alias = "auto")]
+    Autonomous,
 }
 
-impl Mode {
+impl Stance {
     /// The spelling a user writes, in config and everywhere it is offered.
     pub fn as_str(self) -> &'static str {
         match self {
-            Mode::Auto => "auto",
-            Mode::Ask => "ask",
-            Mode::ReadOnly => "readonly",
+            Stance::ReadOnly => "readonly",
+            Stance::Assist => "assist",
+            Stance::Autonomous => "autonomous",
         }
     }
 
+    /// Every stance, least latitude first. One list, because an editor's menu
+    /// and the policy answering it are the same question, and two lists of it
+    /// drift — an ACP client was offered three names none of which was the one
+    /// the policy reported as current.
+    pub const ALL: [Stance; 3] = [Stance::ReadOnly, Stance::Assist, Stance::Autonomous];
+
+    /// The name a person reads.
+    pub fn title(self) -> &'static str {
+        match self {
+            Stance::ReadOnly => "Read only",
+            Stance::Assist => "Assist",
+            Stance::Autonomous => "Autonomous",
+        }
+    }
+
+    /// What it means, in a sentence that fits beside the name.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Stance::ReadOnly => "Nothing that changes the machine runs at all.",
+            Stance::Assist => "Ask before anything that changes the machine, and put a real choice to me.",
+            Stance::Autonomous => "Run anything the deny list does not forbid, without asking.",
+        }
+    }
+
+    /// The old spellings are still read: a config written before the two ideas
+    /// were one should keep working, and `as_str` answers with the name now.
     pub fn parse(name: &str) -> Option<Self> {
         match name {
-            "auto" => Some(Mode::Auto),
-            "ask" => Some(Mode::Ask),
-            "readonly" => Some(Mode::ReadOnly),
+            "readonly" => Some(Stance::ReadOnly),
+            "assist" | "ask" => Some(Stance::Assist),
+            "autonomous" | "auto" => Some(Stance::Autonomous),
             _ => None,
         }
     }
@@ -177,7 +214,7 @@ fn commands_in(line: &str) -> Option<Vec<String>> {
 pub struct Policy {
     /// Behind a lock so a front end can change it mid-run: the policy is shared
     /// and the editor offers the modes as a control.
-    mode: RwLock<Mode>,
+    stance: RwLock<Stance>,
     pub allow: Vec<Rule>,
     pub ask: Vec<Rule>,
     pub deny: Vec<Rule>,
@@ -190,22 +227,22 @@ pub struct Policy {
 }
 
 impl Policy {
-    pub fn new(mode: Mode) -> Self {
-        Self { mode: RwLock::new(mode), ..Default::default() }
+    pub fn new(stance: Stance) -> Self {
+        Self { stance: RwLock::new(stance), ..Default::default() }
     }
 
-    pub fn mode(&self) -> Mode {
-        *self.mode.read().unwrap_or_else(|e| e.into_inner())
+    pub fn stance(&self) -> Stance {
+        *self.stance.read().unwrap_or_else(|e| e.into_inner())
     }
 
-    pub fn set_mode(&self, mode: Mode) {
-        *self.mode.write().unwrap_or_else(|e| e.into_inner()) = mode;
+    pub fn set_stance(&self, stance: Stance) {
+        *self.stance.write().unwrap_or_else(|e| e.into_inner()) = stance;
     }
 
     /// Build from configured patterns, reporting the ones that would not compile
     /// rather than dropping them — a rule that silently never matches is worse
     /// than no rule.
-    pub fn compile(mode: Mode, allow: &[String], ask: &[String], deny: &[String]) -> (Self, Vec<String>) {
+    pub fn compile(stance: Stance, allow: &[String], ask: &[String], deny: &[String]) -> (Self, Vec<String>) {
         fn build(patterns: &[String]) -> (Vec<Rule>, Vec<String>) {
             let mut rules = Vec::new();
             let mut unusable = Vec::new();
@@ -230,7 +267,7 @@ impl Policy {
         errors.extend(broken_deny.iter().cloned());
 
         let policy = Self {
-            mode: RwLock::new(mode),
+            stance: RwLock::new(stance),
             allow: allow_rules,
             ask: ask_rules,
             deny: deny_rules,
@@ -260,7 +297,7 @@ impl Policy {
         if let Some(rule) = self.deny.iter().find(|r| r.matches(&subject)) {
             return Decision::Deny(format!("matches the deny rule {rule:?}"));
         }
-        if self.mode() == Mode::ReadOnly {
+        if self.stance() == Stance::ReadOnly {
             return Decision::Deny("read-only mode: nothing may change the machine".into());
         }
         if self.granted.lock().is_ok_and(|g| g.contains(&subject)) {
@@ -281,8 +318,8 @@ impl Policy {
         if self.ask.iter().any(|r| r.matches(&subject)) {
             return Decision::Ask;
         }
-        match self.mode() {
-            Mode::Auto => Decision::Allow,
+        match self.stance() {
+            Stance::Autonomous => Decision::Allow,
             _ => Decision::Ask,
         }
     }

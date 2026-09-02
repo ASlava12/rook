@@ -187,6 +187,15 @@ what unblocks the most.
   `rook memory`. Both the TUI and the browser now have a Memory view over a new
   `/api/memory`, and the browser can forget a fact: one nobody can remove is one
   that quietly steers everything. 4 tests, including the tab drawn on a pty.
+- **One idea where there were two** — an approval mode and a level of autonomy
+  are the same question asked twice, so `Mode` became `Stance`: `readonly`,
+  `assist`, `autonomous`. It is ordered, and the order carries weight — a
+  sub-agent inherits the stance of the turn that started it and is never given
+  more. The model is told what its stance means rather than learning it one
+  refusal at a time: at `assist` a real fork goes to the person instead of being
+  settled alone. `mode`, `ask` and `auto` are still read, through serde as well
+  as by hand — the config is not parsed by the function that accepts them, and a
+  `mode = "ask"` that stops deserializing takes the whole config with it.
 - **A turn goes on while the sub-agents it started are running** — `delegate`
   waited, so by the time the parent could speak its children had finished, and a
   child going the wrong way went there to the end. `wait: false` answers at once

@@ -179,32 +179,26 @@ pub fn tool_kind(name: &str) -> &'static str {
 /// The approval modes, as an editor offers them.
 ///
 /// The same three the CLI and the config have, so switching from an editor's
-/// menu and editing `sandbox.mode` reach the same policy.
-pub fn modes(current: rook_tools::policy::Mode) -> serde_json::Value {
+/// menu and editing `sandbox.stance` reach the same policy.
+pub fn modes(current: rook_tools::policy::Stance) -> serde_json::Value {
     serde_json::json!({
         "currentModeId": mode_id(current),
-        "availableModes": [
-            { "id": "auto", "name": "Auto",
-              "description": "Run anything the deny list does not forbid, without asking." },
-            { "id": "ask", "name": "Ask",
-              "description": "Ask before anything that changes the machine." },
-            { "id": "readonly", "name": "Read only",
-              "description": "Nothing that changes the machine runs at all." },
-        ],
+        "availableModes": rook_tools::policy::Stance::ALL
+            .map(|s| serde_json::json!({ "id": s.as_str(), "name": s.title(), "description": s.describe() })),
     })
 }
 
-pub fn mode_id(mode: rook_tools::policy::Mode) -> &'static str {
+pub fn mode_id(mode: rook_tools::policy::Stance) -> &'static str {
     mode.as_str()
 }
 
-pub fn mode_from_id(id: &str) -> Option<rook_tools::policy::Mode> {
-    rook_tools::policy::Mode::parse(id)
+pub fn mode_from_id(id: &str) -> Option<rook_tools::policy::Stance> {
+    rook_tools::policy::Stance::parse(id)
 }
 
 /// Told to the editor when the mode changes for any other reason, so its menu
 /// does not drift from what the policy is actually doing.
-pub fn current_mode_update(session: &str, mode: rook_tools::policy::Mode) -> serde_json::Value {
+pub fn current_mode_update(session: &str, mode: rook_tools::policy::Stance) -> serde_json::Value {
     serde_json::json!({
         "sessionId": session,
         "update": { "sessionUpdate": "current_mode_update", "currentModeId": mode_id(mode) },
@@ -215,7 +209,7 @@ pub fn current_mode_update(session: &str, mode: rook_tools::policy::Mode) -> ser
 ///
 /// The spec prefers these to `modes` and says modes will be removed, so both
 /// are sent: an older client renders the modes, a newer one these.
-pub fn config_options(mode: rook_tools::policy::Mode, effort: rook_llm::Effort) -> serde_json::Value {
+pub fn config_options(mode: rook_tools::policy::Stance, effort: rook_llm::Effort) -> serde_json::Value {
     serde_json::json!([
         {
             "id": "mode",
@@ -224,14 +218,8 @@ pub fn config_options(mode: rook_tools::policy::Mode, effort: rook_llm::Effort) 
             "category": "mode",
             "type": "select",
             "currentValue": mode_id(mode),
-            "options": [
-                { "value": "auto", "name": "Auto",
-                  "description": "Run anything the deny list does not forbid, without asking." },
-                { "value": "ask", "name": "Ask",
-                  "description": "Ask before anything that changes the machine." },
-                { "value": "readonly", "name": "Read only",
-                  "description": "Nothing that changes the machine runs at all." },
-            ],
+            "options": rook_tools::policy::Stance::ALL
+                .map(|s| serde_json::json!({ "value": s.as_str(), "name": s.title(), "description": s.describe() })),
         },
         {
             "id": "effort",

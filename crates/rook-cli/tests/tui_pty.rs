@@ -291,13 +291,13 @@ fn the_footer_shows_the_settings_and_f2_changes_them() {
     let workspace = tempfile::tempdir().unwrap();
     let mut pty = tui(home.path(), workspace.path());
 
-    let before = pty.screen_showing(100, 30, "ask/high").join("\n");
-    assert!(before.contains("ask/high"), "the configured defaults, in the footer:\n{before}");
+    let before = pty.screen_showing(100, 30, "assist/high").join("\n");
+    assert!(before.contains("assist/high"), "the configured defaults, in the footer:\n{before}");
 
     // F2 as a VT sequence; crossterm reads both this and SS3, and a pty is not
     // a terminal that will translate one for us.
     pty.send("\u{1b}[12~");
-    pty.screen_showing(100, 30, "readonly/high");
+    pty.screen_showing(100, 30, "autonomous/high");
 }
 
 #[test]
@@ -362,8 +362,8 @@ fn the_footer_shows_no_running_total_before_there_is_one() {
     let workspace = tempfile::tempdir().unwrap();
     let mut pty = tui(home.path(), workspace.path());
 
-    let screen = pty.screen_showing(100, 30, "ask/high").join("\n");
-    assert!(screen.contains("ask/high"), "{screen}");
+    let screen = pty.screen_showing(100, 30, "assist/high").join("\n");
+    assert!(screen.contains("assist/high"), "{screen}");
     assert!(!screen.contains(" in / "), "a total nobody has spent yet:\n{screen}");
 }
 

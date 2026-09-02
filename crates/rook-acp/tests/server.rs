@@ -127,7 +127,7 @@ async fn loading_a_session_that_does_not_exist_is_an_error_not_a_new_one() {
 async fn an_unknown_method_gets_method_not_found_rather_than_silence() {
     let mut editor = Editor::start();
     // Deliberately not a method anyone might implement later: this test named
-    // `session/set_mode` until that became one.
+    // `session/set_stance` until that became one.
     let reply = editor.call(1, "session/no_such_method", serde_json::json!({})).await;
     assert_eq!(reply["error"]["code"], -32601, "{reply}");
     assert!(reply["error"]["message"].as_str().unwrap().contains("session/no_such_method"));
@@ -283,7 +283,7 @@ async fn a_turn_reads_the_editors_unsaved_buffer_rather_than_the_file() {
 
     let mut config = Config::default();
     config.agent.model = "ollama/scripted".into();
-    config.sandbox.mode = rook_tools::policy::Mode::Auto;
+    config.sandbox.stance = rook_tools::policy::Stance::Autonomous;
     let mut editor = Editor::start_with(config, |workspace| {
         std::fs::write(workspace.join("notes.txt"), "what the disk has\n").unwrap();
     });
@@ -341,7 +341,7 @@ async fn a_client_that_cannot_serve_files_is_never_asked() {
 
     let mut config = Config::default();
     config.agent.model = "ollama/scripted".into();
-    config.sandbox.mode = rook_tools::policy::Mode::Auto;
+    config.sandbox.stance = rook_tools::policy::Stance::Autonomous;
     let mut editor = Editor::start_with(config, |workspace| {
         std::fs::write(workspace.join("notes.txt"), "what the disk has\n").unwrap();
     });
@@ -372,10 +372,10 @@ async fn a_new_session_offers_the_approval_modes_and_says_which_is_on() {
     let modes =
         editor.call(2, "session/new", serde_json::json!({ "cwd": "." })).await["result"]["modes"].clone();
 
-    assert_eq!(modes["currentModeId"], "ask", "the configured default");
+    assert_eq!(modes["currentModeId"], "assist", "the configured default");
     let ids: Vec<&str> =
         modes["availableModes"].as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect();
-    assert_eq!(ids, ["auto", "ask", "readonly"], "{modes}");
+    assert_eq!(ids, ["readonly", "assist", "autonomous"], "least latitude first: {modes}");
     for mode in modes["availableModes"].as_array().unwrap() {
         assert!(mode["name"].is_string(), "an editor renders the name: {mode}");
         assert!(mode["description"].is_string(), "and explains it: {mode}");
@@ -392,7 +392,7 @@ async fn setting_a_mode_takes_effect_and_an_unknown_one_is_refused() {
         .to_string();
 
     let set = editor
-        .call(3, "session/set_mode", serde_json::json!({ "sessionId": id, "modeId": "readonly" }))
+        .call(3, "session/set_stance", serde_json::json!({ "sessionId": id, "modeId": "readonly" }))
         .await;
     assert!(set["error"].is_null(), "{set}");
 
@@ -401,7 +401,7 @@ async fn setting_a_mode_takes_effect_and_an_unknown_one_is_refused() {
     assert_eq!(modes["currentModeId"], "readonly", "the change must outlive the request");
 
     let bad =
-        editor.call(5, "session/set_mode", serde_json::json!({ "sessionId": id, "modeId": "yolo" })).await;
+        editor.call(5, "session/set_stance", serde_json::json!({ "sessionId": id, "modeId": "yolo" })).await;
     assert_eq!(bad["error"]["code"], -32602, "{bad}");
     assert!(bad["error"]["message"].as_str().unwrap().contains("yolo"), "{bad}");
 }
@@ -415,7 +415,7 @@ async fn switching_to_readonly_stops_the_next_turn_writing() {
     let mut config = Config::default();
     config.agent.model = "ollama/scripted".into();
     // Auto to begin with: the point is that the editor can take it away.
-    config.sandbox.mode = rook_tools::policy::Mode::Auto;
+    config.sandbox.stance = rook_tools::policy::Stance::Autonomous;
     let mut editor = Editor::start_with(config, |_| {});
     let written = editor.workspace.join("new.txt");
 
@@ -424,7 +424,7 @@ async fn switching_to_readonly_stops_the_next_turn_writing() {
         .as_str()
         .unwrap()
         .to_string();
-    editor.call(3, "session/set_mode", serde_json::json!({ "sessionId": id, "modeId": "readonly" })).await;
+    editor.call(3, "session/set_stance", serde_json::json!({ "sessionId": id, "modeId": "readonly" })).await;
 
     let prompt = serde_json::json!({
         "jsonrpc": "2.0", "id": 4, "method": "session/prompt",
@@ -444,7 +444,7 @@ async fn a_command_runs_in_the_editors_terminal_when_it_has_one() {
 
     let mut config = Config::default();
     config.agent.model = "ollama/scripted".into();
-    config.sandbox.mode = rook_tools::policy::Mode::Auto;
+    config.sandbox.stance = rook_tools::policy::Stance::Autonomous;
     let mut editor = Editor::start_with(config, |_| {});
 
     editor
@@ -518,7 +518,7 @@ async fn a_client_without_a_terminal_is_never_asked_for_one() {
 
     let mut config = Config::default();
     config.agent.model = "ollama/scripted".into();
-    config.sandbox.mode = rook_tools::policy::Mode::Auto;
+    config.sandbox.stance = rook_tools::policy::Stance::Autonomous;
     let mut editor = Editor::start_with(config, |_| {});
 
     editor.call(1, "initialize", serde_json::json!({ "protocolVersion": 1 })).await;
@@ -617,11 +617,13 @@ async fn the_two_ways_to_set_the_mode_reach_the_same_policy() {
         .unwrap()
         .to_string();
 
-    editor.call(3, "session/set_mode", serde_json::json!({ "sessionId": id, "modeId": "auto" })).await;
+    // Sent as `auto`, which is what this was called: an editor holding the
+    // old name must keep working, and the answer comes back as the name now.
+    editor.call(3, "session/set_stance", serde_json::json!({ "sessionId": id, "modeId": "auto" })).await;
     let after = editor.call(4, "session/new", serde_json::json!({ "cwd": "." })).await;
     let mode =
         after["result"]["configOptions"].as_array().unwrap().iter().find(|o| o["id"] == "mode").unwrap();
 
-    assert_eq!(mode["currentValue"], "auto", "the older message must move the newer view: {after}");
-    assert_eq!(after["result"]["modes"]["currentModeId"], "auto");
+    assert_eq!(mode["currentValue"], "autonomous", "the older message must move the newer view: {after}");
+    assert_eq!(after["result"]["modes"]["currentModeId"], "autonomous");
 }

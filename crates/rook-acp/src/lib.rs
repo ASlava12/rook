@@ -14,7 +14,7 @@
 //! looking at instead of the version last saved. Commands run in the editor's
 //! terminal when it has one, so a build is watched rather than reported. The
 //! approval modes are offered as session modes, so an editor's menu and
-//! `sandbox.mode` are the same knob.
+//! `sandbox.stance` are the same knob.
 
 pub mod protocol;
 
@@ -159,7 +159,7 @@ struct Settings {
 
 impl Settings {
     fn describe(&self) -> serde_json::Value {
-        protocol::config_options(self.policy.mode(), *self.effort.read().unwrap())
+        protocol::config_options(self.policy.stance(), *self.effort.read().unwrap())
     }
 
     fn set(&self, id: &str, value: &str) -> Result<(), Error> {
@@ -167,7 +167,7 @@ impl Settings {
             "mode" => {
                 let mode = protocol::mode_from_id(value)
                     .ok_or_else(|| Error::invalid_params(format!("no mode {value:?}")))?;
-                self.policy.set_mode(mode);
+                self.policy.set_stance(mode);
             }
             "effort" => {
                 let effort = rook_llm::Effort::parse(value)
@@ -187,7 +187,7 @@ fn dispatch(
     params: serde_json::Value,
 ) -> Result<serde_json::Value, Error> {
     match method {
-        "session/set_mode" => {
+        "session/set_stance" => {
             settings.set("mode", params["modeId"].as_str().unwrap_or_default())?;
             Ok(serde_json::json!({}))
         }
@@ -221,7 +221,7 @@ fn dispatch(
             let session = rook.start_session("").map_err(|e| Error::internal(e.to_string()))?;
             Ok(serde_json::json!({
                 "sessionId": rook_store::format_session_id(session),
-                "modes": protocol::modes(settings.policy.mode()),
+                "modes": protocol::modes(settings.policy.stance()),
                 "configOptions": settings.describe(),
             }))
         }
@@ -235,7 +235,7 @@ fn dispatch(
                 .ok_or_else(|| Error::invalid_params("not a session id"))?;
             match rook.store.get_session(id) {
                 Ok(Some(_)) => Ok(serde_json::json!({
-                    "modes": protocol::modes(settings.policy.mode()),
+                    "modes": protocol::modes(settings.policy.stance()),
                     "configOptions": settings.describe(),
                 })),
                 Ok(None) => Err(Error::invalid_params("no such session")),

@@ -508,13 +508,13 @@ fn cmd_doctor(rook: &Rook, json: bool) -> Result<()> {
     }
 
     let (_, unusable) = rook_tools::policy::Policy::compile(
-        rook.config.sandbox.mode,
+        rook.config.sandbox.stance,
         &rook.config.sandbox.allow,
         &rook.config.sandbox.ask,
         &rook.config.sandbox.deny,
     );
     println!();
-    println!("approvals: {} mode", rook.config.sandbox.mode.as_str());
+    println!("approvals: {} mode", rook.config.sandbox.stance.as_str());
     for error in &unusable {
         println!("  ✗ {error}");
     }
@@ -1799,7 +1799,7 @@ fn cmd_mcp(workspace: Option<PathBuf>, cmd: McpCmd, json: bool) -> Result<()> {
                 .unwrap_or_else(|| PathBuf::from("."));
             let policy = rook_core::agent::policy_for(&config);
             if yes {
-                policy.set_mode(rook_tools::policy::Mode::Auto);
+                policy.set_stance(rook_tools::policy::Stance::Autonomous);
             }
             let mut tools = rook_tools::ToolBox::standard();
             rook_core::lsp::register(&mut tools, rook_core::agent::servers_for(&config, &here));

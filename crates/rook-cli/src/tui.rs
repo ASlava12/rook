@@ -405,7 +405,7 @@ impl App {
         // Before the per-tab dispatch: the chat tab is where you would want to
         // drop to read-only, and there a digit is a character in the message.
         match key.code {
-            KeyCode::F(2) => return self.cycle_mode(),
+            KeyCode::F(2) => return self.cycle_stance(),
             KeyCode::F(3) => return self.cycle_effort(),
             _ => {}
         }
@@ -481,15 +481,16 @@ impl App {
         }
     }
 
-    fn cycle_mode(&mut self) {
-        use rook_tools::policy::Mode;
-        let next = match self.shared.policy.mode() {
-            Mode::Auto => Mode::Ask,
-            Mode::Ask => Mode::ReadOnly,
-            Mode::ReadOnly => Mode::Auto,
-        };
-        self.shared.policy.set_mode(next);
-        self.chat.push("stat", &format!("  approvals: {}", next.as_str()));
+    /// Through the stances in the order they are declared, so the key walks
+    /// from least latitude to most and wraps — rather than an order of its own,
+    /// which is a second list of the same thing.
+    fn cycle_stance(&mut self) {
+        use rook_tools::policy::Stance;
+        let now = self.shared.policy.stance();
+        let at = Stance::ALL.iter().position(|s| *s == now).unwrap_or(0);
+        let next = Stance::ALL[(at + 1) % Stance::ALL.len()];
+        self.shared.policy.set_stance(next);
+        self.chat.push("stat", &format!("  stance: {}", next.as_str()));
     }
 
     fn cycle_effort(&mut self) {
@@ -703,7 +704,7 @@ impl App {
                 Span::styled("F2/F3 ", Style::default().fg(Color::Cyan)),
                 Span::raw(format!(
                     "{}/{}  {}  {}",
-                    self.shared.policy.mode().as_str(),
+                    self.shared.policy.stance().as_str(),
                     self.shared.effort.get().as_str(),
                     spent(self.chat.spent),
                     self.status

@@ -19,7 +19,7 @@ const HELP: &str = "  /context [window]   what this conversation costs, and of w
   /skills [name]      skills that apply here, or one skill's body
   /session            id, size and token totals
   /goal [text]        what this session is for; the agent is told
-  /mode [name]        approvals: auto, ask or readonly
+  /stance [name]      how much latitude: readonly, assist or autonomous
   /effort [name]      how much the model may think: low … max
   /memory [query]     what it remembers, or what matches
   /search <query>     find it in everything said, read and run
@@ -289,10 +289,12 @@ pub async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command
         "quit" | "exit" | "q" => return Ok(Said { text: String::new(), quit: true }),
         "help" | "?" => say!("{HELP}"),
 
-        "mode" if rest.is_empty() => say!("{}", shared.policy.mode().as_str()),
-        "mode" => match rook_tools::policy::Mode::parse(rest) {
-            Some(mode) => shared.policy.set_mode(mode),
-            None => say!("no mode {rest:?} — auto, ask or readonly"),
+        // `mode` is what this was called; a habit is not worth breaking over a
+        // rename, and both spell one setting.
+        "stance" | "mode" if rest.is_empty() => say!("{}", shared.policy.stance().as_str()),
+        "stance" | "mode" => match rook_tools::policy::Stance::parse(rest) {
+            Some(stance) => shared.policy.set_stance(stance),
+            None => say!("no stance {rest:?} — readonly, assist or autonomous"),
         },
 
         "effort" if rest.is_empty() => say!("{}", shared.effort.get().as_str()),

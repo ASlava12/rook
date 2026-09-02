@@ -318,6 +318,40 @@ async fn a_mutating_tool_is_checkpointed_and_a_rewind_undoes_it() {
     assert_eq!(original.len(), entries.len());
 }
 
+/// A stance is worth nothing if a sub-agent can be given more of one than the
+/// turn that started it. Today they share the parent's policy, which makes
+/// that true by construction — this says so out loud, so that giving children
+/// a policy of their own has to keep it true.
+#[tokio::test]
+async fn a_sub_agent_is_never_given_more_latitude_than_the_turn_that_started_it() {
+    let f = fixture();
+    let mut config = Config::default();
+    config.sandbox.stance = rook_tools::policy::Stance::ReadOnly;
+    let rook = with_config(&f, "read-only parent", config);
+    let session = rook.start_session("s").unwrap();
+    std::fs::write(rook.workspace.join("notes.txt"), "original\n").unwrap();
+
+    let provider = Arc::new(ByPrompt(vec![
+        ("rewrite it", call("delegate", serde_json::json!({ "tasks": ["rewrite notes.txt"] }))),
+        ("read-only", reply("I was not allowed to")),
+        (
+            "rewrite notes.txt",
+            call("write_file", serde_json::json!({ "path": "notes.txt", "content": "changed\n" })),
+        ),
+        ("### rewrite", reply("it could not")),
+    ]));
+
+    let mut agent = AgentLoop::new(&rook, provider, session);
+    agent.policy = rook_core::agent::policy_for(&rook.config);
+    agent.run("rewrite it").await.unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(rook.workspace.join("notes.txt")).unwrap(),
+        "original\n",
+        "the child inherited a stance that changes nothing, and changed nothing"
+    );
+}
+
 /// Answers by what it was last asked rather than by position.
 ///
 /// With a parent and its sub-agent both calling, the order they arrive in is
@@ -2403,7 +2437,7 @@ async fn a_post_tool_hook_is_given_the_facts_the_tool_measured() {
 async fn readonly_stops_the_agent_writing_a_skill_as_well_as_a_file() {
     let f = fixture();
     let mut config = Config::default();
-    config.sandbox.mode = rook_tools::policy::Mode::ReadOnly;
+    config.sandbox.stance = rook_tools::policy::Stance::ReadOnly;
     let rook = with_config(&f, "readonly-skill", config);
     let session = rook.start_session("readonly").unwrap();
 
@@ -2423,7 +2457,7 @@ async fn readonly_stops_the_agent_writing_a_skill_as_well_as_a_file() {
 async fn a_skill_is_still_written_when_the_policy_allows_it() {
     let f = fixture();
     let mut config = Config::default();
-    config.sandbox.mode = rook_tools::policy::Mode::Auto;
+    config.sandbox.stance = rook_tools::policy::Stance::Autonomous;
     let rook = with_config(&f, "auto-skill", config);
     let session = rook.start_session("auto").unwrap();
 

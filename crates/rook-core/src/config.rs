@@ -225,7 +225,11 @@ impl Default for WebConfig {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SandboxConfig {
-    pub mode: rook_tools::policy::Mode,
+    /// How much latitude the agent has. `mode` is read too: it is what this
+    /// was called before an approval mode and a level of autonomy turned out to
+    /// be one question.
+    #[serde(alias = "mode")]
+    pub stance: rook_tools::policy::Stance,
     /// Patterns the agent may act on without asking. A plain string matches as a
     /// substring; `/…/` is a regular expression.
     pub allow: Vec<String>,
@@ -325,7 +329,7 @@ const COMMAND: &str = r"(^|[;&|]\s*|\n\s*)(sudo\s+|doas\s+|env\s+\S+=\S+\s+)*";
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
-            mode: rook_tools::policy::Mode::Ask,
+            stance: rook_tools::policy::Stance::Assist,
             allow: vec![
                 "git status".into(),
                 "git diff".into(),

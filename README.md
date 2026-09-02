@@ -420,14 +420,21 @@ outright what the deny list forbids — no approval can override a denial:
 
 ```toml
 [sandbox]
-mode  = "ask"                      # auto | ask | readonly
+stance = "assist"                  # readonly | assist | autonomous
 allow = ["git status", '/^(ls|cat|rg)\b/']   # plain string, or /regex/
-ask   = ["git push"]                          # prompts even in auto mode
+ask   = ["git push"]                          # prompts even when autonomous
 deny  = ['/(^|[;&|]\s*)(sudo\s+)*rm\s+(-[a-zA-Z]+\s+)*\/(\s|\*|$)/']
 allow_outside_workspace = false    # file tools stay inside, symlinks included
 ```
 
-The mode is changeable while you work: `/mode` in the chat, F2 in the TUI, a
+The stance is how much latitude the agent has, and it is one setting rather than
+two: an approval mode and a level of autonomy are the same question asked twice.
+`readonly` changes nothing; `assist` confirms anything not explicitly allowed and
+puts a fork in the work to you rather than settling it alone; `autonomous` runs
+anything not denied. A sub-agent inherits the stance of the turn that started it
+and is never given more. `mode`, and the names `ask` and `auto`, are still read.
+
+It is changeable while you work: `/stance` in the chat, F2 in the TUI, a
 select in the browser, and a session config option over ACP — all the same
 policy. `rook --yes` skips the prompts for one run. Unattended runs with no `--yes`
 refuse rather than improvise, and say what would have made it possible.
