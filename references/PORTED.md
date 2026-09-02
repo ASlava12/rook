@@ -1034,3 +1034,23 @@ apply — a failed summary here records a position, so context is freed and ther
 is nothing to retry. openclaw's `record empty subagent completion` — a turn that
 says nothing already answers with the reason it stopped rather than an empty
 string. The rest are their gateway, their multiplex and their desktop.
+
+## Twenty-second pass — hermes, openclaw
+
+Dismissed, with the reason checked rather than assumed. hermes landed four
+fixes around an MCP "death supervisor" — a released one lingering as a zombie,
+respawning it on lifecycle events, forgetting groups once nothing is alive.
+Here a stdio server is a tokio `Child` with `kill_on_drop`, and a child dropped
+that way is handed to the runtime's orphan reaper, which waits on it when
+SIGCHLD arrives; both front ends build their runtime with `enable_all`, which
+is what makes that reaper exist. `restart` drops the old transport and so the
+old process, and nothing accumulates. The one gap is a runtime going away
+before the signal, at which point the process is exiting anyway.
+
+openclaw's `catch background subagent completion rejections`: a spawned child
+whose promise rejected was lost. A sub-agent here is not spawned but polled in
+place, and its `Err` lands in the parent's nursery like any other result and
+reaches the report as `failed: …` — the case is covered by the shape rather
+than by a handler. Their `preserve code blocks during duplicate collapse` has
+nothing to attach to: nothing here collapses repeated output. The rest are
+their CI, their proxies and their supervisor.
