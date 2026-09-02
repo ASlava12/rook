@@ -296,10 +296,15 @@ mod tests {
             std::path::PathBuf::from("/usr/bin/server"),
             "an absolute one is already answered"
         );
+        // A name nowhere on any PATH, so the answer is the same on every
+        // platform: on a runner with node installed, `npx` came back as
+        // `C:\Program Files\nodejs\npx.CMD` — the lookup working, and the
+        // test asserting a macOS reading of it.
+        let nowhere = "rook-no-such-program";
         assert_eq!(
-            program("npx", Some(cwd)),
-            std::path::PathBuf::from("npx"),
-            "and a bare name is a PATH lookup, not a file in the working directory"
+            program(nowhere, Some(cwd)),
+            std::path::PathBuf::from(nowhere),
+            "a bare name is a PATH lookup, not a file in the working directory"
         );
     }
 
