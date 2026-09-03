@@ -364,9 +364,13 @@ rook lsp update                               # fetch again what is in place; sa
 
 rust-analyzer, gopls, clangd, typescript-language-server and pyright are detected
 automatically; `[[lsp]]` in the config overrides that. Servers start lazily, on
-the first question that needs one. Auto-*installation* is deliberately not done:
-downloading and running a binary on your behalf is a different decision from
-using one you already have.
+the first question that needs one. Installing one is a different decision from
+using one you already have, so it follows the stance: a workspace with Rust
+files and no `rust-analyzer` is a question when assisting, a fetch when
+autonomous, and an open question in the outcome when read-only. A server
+fetched this way is offered again the same way once it is older than
+`[agent] server_update_after_days` (thirty by default, zero for never) — a
+server fetched once is otherwise one somebody has to remember to update.
 
 ### Hooks
 

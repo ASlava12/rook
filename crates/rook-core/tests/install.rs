@@ -184,11 +184,6 @@ impl rook_tools::ask::Asker for Chooses {
 /// A workspace with a Rust file and no rust-analyzer anywhere, under a state
 /// directory of its own.
 fn a_rust_workspace(home: &std::path::Path) -> (tempfile::TempDir, rook_core::Rook) {
-    unsafe { std::env::set_var("ROOK_HOME", home) };
-    let workspace = tempfile::tempdir().unwrap();
-    std::fs::write(workspace.path().join("main.rs"), "fn main() {}\n").unwrap();
-    let store = rook_store::Store::open(home.join("store")).unwrap();
-    let (skills, _) = rook_skills::SkillIndex::discover(&[]);
     // Named so the test does not depend on what is on this machine's PATH: a
     // configured list that serves no Rust is a Rust project with no server.
     let config = rook_core::Config {
@@ -200,6 +195,18 @@ fn a_rust_workspace(home: &std::path::Path) -> (tempfile::TempDir, rook_core::Ro
         }],
         ..Default::default()
     };
+    a_rust_workspace_with(home, config)
+}
+
+fn a_rust_workspace_with(
+    home: &std::path::Path,
+    config: rook_core::Config,
+) -> (tempfile::TempDir, rook_core::Rook) {
+    unsafe { std::env::set_var("ROOK_HOME", home) };
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("main.rs"), "fn main() {}\n").unwrap();
+    let store = rook_store::Store::open(home.join("store")).unwrap();
+    let (skills, _) = rook_skills::SkillIndex::discover(&[]);
     let rook = rook_core::Rook::from_parts(
         store,
         config,
@@ -521,4 +528,98 @@ async fn a_server_that_cannot_answer_its_version_is_not_offered() {
     std::fs::write(&shim, "#!/bin/sh\necho rust-analyzer 1.0\n").unwrap();
     let offered: Vec<String> = rook_core::lsp::detected().into_iter().map(|c| c.language).collect();
     assert!(offered.contains(&"rust".to_string()), "one that answers is: {offered:?}");
+}
+
+/// The tag file's own age says when a server was fetched, so nothing has to
+/// be stored for it — and a fresh one is not offered.
+#[tokio::test]
+async fn a_server_fetched_long_ago_is_stale_and_a_fresh_one_is_not() {
+    let payload = b"#!/bin/sh\necho v1\n".to_vec();
+    let gz = Arc::new(gzipped(&payload));
+    let api = github("rust-analyzer-x86_64-unknown-linux-gnu.gz", gz.clone(), sha256_of(&gz)).await;
+    let into = tempfile::tempdir().unwrap();
+    let installer = Installer::at(api, into.path().to_path_buf()).unwrap();
+    installer.install(&RUST_ANALYZER, &here()).await.unwrap();
+
+    let month = std::time::Duration::from_secs(30 * 86_400);
+    assert!(installer.stale(month).is_empty(), "just fetched");
+
+    backdate(&into.path().join("rust-analyzer").join("current").join(".tag"), 40);
+    let stale = installer.stale(month);
+    let commands: Vec<&str> = stale.iter().map(|(recipe, ..)| recipe.command).collect();
+    assert_eq!(commands, ["rust-analyzer"]);
+    let (recipe, tag, days) = &stale[0];
+    assert_eq!((recipe.command, tag.as_str()), ("rust-analyzer", "2026-01-01"));
+    assert!(*days >= 40, "{days}");
+}
+
+fn backdate(path: &std::path::Path, days: u64) {
+    let then = std::time::SystemTime::now() - std::time::Duration::from_secs(days * 86_400);
+    std::fs::File::options().write(true).open(path).unwrap().set_modified(then).unwrap();
+}
+
+/// A server this agent fetched is one nobody else will update: an autonomous
+/// turn fetches it again past the configured age, once, and says what it found.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_autonomous_turn_refetches_a_server_past_its_age() {
+    let _one = one_at_a_time().await;
+    let payload = b"#!/bin/sh\necho v1\n".to_vec();
+    let gz = Arc::new(gzipped(&payload));
+    let api = github("rust-analyzer-x86_64-unknown-linux-gnu.gz", gz.clone(), sha256_of(&gz)).await;
+    unsafe { std::env::set_var("ROOK_RELEASE_API", &api) };
+
+    let home = tempfile::tempdir().unwrap();
+    let (_workspace, rook) = a_rust_workspace_with(home.path(), rook_core::Config::default());
+    let servers = rook_core::paths::servers_dir();
+    let installer = Installer::at(api.clone(), servers.clone()).unwrap();
+    installer.install(&RUST_ANALYZER, rook.env()).await.unwrap();
+    let tag = servers.join("rust-analyzer").join("current").join(".tag");
+    backdate(&tag, 40);
+    assert_eq!(
+        installer.stale(std::time::Duration::from_secs(30 * 86_400)).len(),
+        1,
+        "stale before the turn"
+    );
+
+    let session = rook.start_session("s").unwrap();
+    let mut agent = AgentLoop::new(&rook, Arc::new(Says("ok")), session);
+    agent.allow_everything_not_denied();
+    let outcome = agent.run("hello").await.unwrap();
+    unsafe { std::env::remove_var("ROOK_RELEASE_API") };
+
+    assert!(outcome.open_questions.is_empty(), "{:?}", outcome.open_questions);
+    assert_eq!(outcome.decisions.len(), 1, "{:?}", outcome.decisions);
+    assert!(outcome.decisions[0].contains("already at 2026-01-01"), "{:?}", outcome.decisions);
+    assert!(
+        installer.stale(std::time::Duration::from_secs(30 * 86_400)).is_empty(),
+        "fetched again, so fresh"
+    );
+    assert!(rook.offered_update(session).unwrap(), "and not offered again this session");
+}
+
+/// Read-only may change nothing, so nobody is asked, and the age is left for
+/// whoever reads the outcome — with the command that does it.
+#[cfg(unix)]
+#[tokio::test]
+async fn at_read_only_a_stale_server_is_an_open_question() {
+    let _one = one_at_a_time().await;
+    let payload = b"#!/bin/sh\necho v1\n".to_vec();
+    let gz = Arc::new(gzipped(&payload));
+    let api = github("rust-analyzer-x86_64-unknown-linux-gnu.gz", gz.clone(), sha256_of(&gz)).await;
+    let home = tempfile::tempdir().unwrap();
+    let (_workspace, rook) = a_rust_workspace_with(home.path(), rook_core::Config::default());
+    let servers = rook_core::paths::servers_dir();
+    let installer = Installer::at(api, servers.clone()).unwrap();
+    installer.install(&RUST_ANALYZER, rook.env()).await.unwrap();
+    backdate(&servers.join("rust-analyzer").join("current").join(".tag"), 40);
+
+    let session = rook.start_session("s").unwrap();
+    let mut agent = AgentLoop::new(&rook, Arc::new(Says("ok")), session);
+    agent.policy.set_stance(rook_tools::policy::Stance::ReadOnly);
+    let outcome = agent.run("hello").await.unwrap();
+
+    assert_eq!(outcome.open_questions.len(), 1, "{:?}", outcome.open_questions);
+    assert!(outcome.open_questions[0].contains("rook lsp update"), "{:?}", outcome.open_questions);
+    assert!(outcome.open_questions[0].contains("40 days ago"), "{:?}", outcome.open_questions);
 }

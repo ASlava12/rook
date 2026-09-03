@@ -997,12 +997,15 @@ that was wrong, and a checker that ends without a verdict is asked once, in its
 own session, to do what it described and commit. What is left is watching how often it is red and why, and moving to a larger tag if
 the small one cannot carry the four scenarios.
 
-## After that
+**A server fetched once is one somebody has to remember to update.** Now the
+agent remembers: past `[agent] server_update_after_days` (thirty by default,
+zero for never) the tag file's own age says so, and once per session the offer
+follows the stance — an autonomous turn fetches again and says whether the tag
+moved, a person is asked, and with nobody to ask it is an open question naming
+`rook lsp update`. Nothing new is stored for it; the tag file's mtime was
+already there.
 
-**The installer is whole.** Every known server has a recipe, and `rook lsp
-update` fetches again whatever is in place and says which tag moved. What it
-does not do is decide when: nothing here checks age, and a server fetched once
-is still a server somebody has to remember to update.
+## After that
 
 **Driving physical devices, if the Model Hardware Standard becomes something to
 build against.** Anthropic's [research

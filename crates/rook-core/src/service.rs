@@ -27,6 +27,7 @@ const MEMORY_HEAD: &str = "memory/head";
 const COMPACTED: &str = "compacted";
 const FORK_AT: &str = "fork-at";
 const OFFERED_SERVER: &str = "offered-server";
+const OFFERED_UPDATE: &str = "offered-update";
 const MEMORY_LOG: &str = "memory/h/";
 
 pub struct Rook {
@@ -1051,6 +1052,14 @@ impl Rook {
 
     pub fn note_offered_server(&self, session: u128) -> Result<()> {
         self.set_mark(OFFERED_SERVER, session, 1)
+    }
+
+    pub fn offered_update(&self, session: u128) -> Result<bool> {
+        Ok(self.read_mark(OFFERED_UPDATE, session)?.is_some())
+    }
+
+    pub fn note_offered_update(&self, session: u128) -> Result<()> {
+        self.set_mark(OFFERED_UPDATE, session, 1)
     }
 
     /// The parent event a forked session diverged at, if it was forked.

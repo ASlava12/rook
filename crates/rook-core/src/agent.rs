@@ -608,11 +608,13 @@ impl<'a> AgentLoop<'a> {
                 Ok(said) => Ok(said),
                 // The machine's way failed; the state directory is the fallback,
                 // and the report names both.
-                Err(first) => {
-                    self.install_by_fetching(recipe).await.map_err(|second| format!("{first}; then {second}"))
-                }
+                Err(first) => self
+                    .install_by_fetching(recipe)
+                    .await
+                    .map(|done| done.describe())
+                    .map_err(|second| format!("{first}; then {second}")),
             },
-            How::Fetch => self.install_by_fetching(recipe).await,
+            How::Fetch => self.install_by_fetching(recipe).await.map(|done| done.describe()),
         };
         match done {
             Ok(said) => {
@@ -658,7 +660,7 @@ impl<'a> AgentLoop<'a> {
     async fn install_by_fetching(
         &self,
         recipe: &crate::install::Recipe,
-    ) -> std::result::Result<String, String> {
+    ) -> std::result::Result<crate::install::Installed, String> {
         // Gated as what it is: a command for the sources that are one, a
         // request to the release host for the one that is a download.
         let into = crate::paths::servers_dir().join(recipe.command).join("current");
@@ -675,8 +677,73 @@ impl<'a> AgentLoop<'a> {
             return Err(refusal);
         }
         let installer = crate::install::Installer::new(crate::paths::servers_dir())?;
-        let done = installer.install(recipe, self.rook.env()).await?;
-        Ok(format!("installed {} {} at {} ({})", done.command, done.tag, done.path.display(), done.verified))
+        installer.install(recipe, self.rook.env()).await
+    }
+
+    /// A server fetched once is one somebody has to remember to update. Past
+    /// the configured age, once per session: an autonomous turn fetches again,
+    /// one with a person asks, and one with nobody to ask leaves it for whoever
+    /// reads the outcome.
+    async fn offer_server_update(&self) {
+        let after = self.rook.config.agent.server_update_after_days;
+        if after == 0 || self.depth > 0 || self.rook.offered_update(self.session).unwrap_or(true) {
+            return;
+        }
+        let Ok(installer) = crate::install::Installer::new(crate::paths::servers_dir()) else { return };
+        let stale = installer.stale(std::time::Duration::from_secs(after * 86_400));
+        if stale.is_empty() {
+            return;
+        }
+        self.rook.note_offered_update(self.session).ok();
+        let named = stale
+            .iter()
+            .map(|(r, tag, days)| format!("{} ({tag}, {days} days ago)", r.command))
+            .collect::<Vec<_>>();
+        let named = named.join(", ");
+
+        let fetch = match (self.policy.stance(), &self.asker) {
+            (Stance::Autonomous | Stance::Free, _) => true,
+            (Stance::Assist, Some(asker)) => {
+                let question = format!("Fetched more than {after} days ago: {named}. Update now?");
+                let choices = vec!["update now".to_string(), "not now".to_string()];
+                let asked = rook_tools::ask::Question { question, choices, multi: false };
+                let answer =
+                    asker.ask(&[asked]).await.into_iter().next().and_then(|a| a.chosen.into_iter().next());
+                answer.as_deref() == Some("update now")
+            }
+            (Stance::Assist, None) | (Stance::ReadOnly, _) => {
+                self.report(Reported::Open(format!(
+                    "fetched more than {after} days ago: {named} — `rook lsp update` fetches them again"
+                )));
+                return;
+            }
+        };
+        if !fetch {
+            self.report(Reported::Decision(format!("not updated — declined: {named}")));
+            return;
+        }
+        for (recipe, before, _) in stale {
+            let said = match self.install_by_fetching(recipe).await {
+                Ok(done) if done.tag == before => Ok(format!("{} already at {before}", recipe.command)),
+                Ok(done) => Ok(format!(
+                    "{} {before} → {} — it serves from the next session on",
+                    recipe.command, done.tag
+                )),
+                Err(why) => {
+                    Err(format!("could not update {}: {why} — `rook lsp update` by hand", recipe.command))
+                }
+            };
+            match said {
+                Ok(said) => {
+                    self.rook.log(self.session, EventKind::Note, "lsp update", &said).ok();
+                    self.report(Reported::Decision(said));
+                }
+                Err(said) => {
+                    self.rook.log(self.session, EventKind::Note, "lsp update", &said).ok();
+                    self.report(Reported::Open(said));
+                }
+            }
+        }
     }
 
     /// The system prompt: identity, environment, and the skill catalog.
@@ -1214,6 +1281,7 @@ impl<'a> AgentLoop<'a> {
         self.rook.name_session_from(self.session, prompt).ok();
         self.run_session_hooks().await;
         self.offer_language_server().await;
+        self.offer_server_update().await;
         let gate = self
             .hooks
             .run(hooks::Event::Prompt, prompt, &self.payload(serde_json::json!({ "prompt": prompt })))

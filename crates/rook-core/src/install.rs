@@ -221,6 +221,12 @@ pub struct Installed {
     pub unverified: String,
 }
 
+impl Installed {
+    pub fn describe(&self) -> String {
+        format!("installed {} {} at {} ({})", self.command, self.tag, self.path.display(), self.verified)
+    }
+}
+
 /// An asset past this is not a language server, whatever it is called.
 const MOST_ASSET_BYTES: usize = 256 << 20;
 /// A gzip that inflates past this is a bomb, not a binary.
@@ -421,6 +427,19 @@ impl Installer {
             .collect();
         found.sort_by_key(|(recipe, _)| recipe.command);
         found
+    }
+
+    /// Servers whose tag was recorded longer ago than `after`, with the age in
+    /// days. The tag file's own age, so nothing is stored for it.
+    pub fn stale(&self, after: std::time::Duration) -> Vec<(&'static Recipe, String, u64)> {
+        self.installed()
+            .into_iter()
+            .filter_map(|(recipe, tag)| {
+                let recorded = current_in(&self.into, recipe.command).join(".tag");
+                let age = std::fs::metadata(recorded).ok()?.modified().ok()?.elapsed().ok()?;
+                (age >= after).then_some((recipe, tag, age.as_secs() / 86_400))
+            })
+            .collect()
     }
 
     /// Install again whatever is installed, and say for each whether the tag
