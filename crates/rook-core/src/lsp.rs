@@ -101,15 +101,19 @@ fn starts(command: &str) -> bool {
     else {
         return false;
     };
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    // Generous, because it only tells a version check from a server that
+    // started serving instead: a real server answers in milliseconds, and so
+    // does a shim that exits — but under a full `cargo xtask ci` a shell had
+    // not exited in three seconds, and the shim was offered as a server.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return status.success(),
             Ok(None) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
-            // Still running after three seconds is not a version check; it is
-            // a server that started serving, which is as good an answer.
+            // Still running by then is not a version check; it is a server
+            // that started serving, which is as good an answer.
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
