@@ -223,7 +223,11 @@ pub(crate) fn contained(command: &str, isolation: &Isolation) -> std::io::Result
     Ok(cmd)
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+// Unix without a sandbox — FreeBSD — reaches `contained` only through
+// `choose`, which never asks for it there; the arm exists so the shell path
+// compiles. Windows has its own shell path and no arm at all: an unreachable
+// function is a warning the gate refuses.
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
 pub(crate) fn contained(_: &str, _: &Isolation) -> std::io::Result<tokio::process::Command> {
     Err(std::io::Error::other(available().unwrap_err()))
 }

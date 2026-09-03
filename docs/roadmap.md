@@ -1111,7 +1111,10 @@ that quietly did nothing is worse than none: Landlock before kernel 6.7 cannot
 restrain the network and never restrains UDP, and Windows and FreeBSD have
 nothing yet — `auto` runs the command as it is and says so, `required` refuses.
 `[sandbox] writable` names the directories a build's caches live in, and a
-failed contained command says it was contained and names that setting.
+failed contained command says it was contained and names that setting. The
+tests run the same command contained and not, and CI's Linux runner passes
+all of them under Landlock with the network restrained; FreeBSD passes by
+skipping, which is what a platform with nothing to contain a command does.
 [ADR-0011](adr/0011-containment-is-the-platforms.md) has the reasons: no
 helper binary, no container, and the network open by default.
 
