@@ -74,7 +74,9 @@ containment. `[sandbox] network` is **on** by default.
   because it is believed.
 - The language-server installer and hooks run uncontained: the first writes
   outside the workspace and reaches the network by definition, after the
-  person said to; the second is the person's own command. A command run in an
-  editor's terminal is the editor's.
+  person said to; the second is the person's own command, as are the MCP
+  servers `[[mcp]]` names and the language servers that answer `rook lsp`. A
+  command run in an editor's terminal is the editor's. What is contained is
+  what the model asked to run.
 - The file tools' path check and the pattern rules stay. They are cheaper,
   they cover the platforms this does not, and a deny rule is still final.
