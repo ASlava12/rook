@@ -429,6 +429,17 @@ fn cmd_doctor(rook: &Rook, json: bool) -> Result<()> {
     }
 
     println!();
+    println!("commands:");
+    // Asked of the same context a turn runs with, so what doctor says is
+    // what a command gets — and what its result would say it got.
+    let ctx = rook_core::agent::tool_context(&rook.config, &rook.workspace, &rook_core::paths::output_dir());
+    match rook_tools::isolate::choose(ctx.isolate, &ctx.isolation) {
+        Ok((Some(_), how)) => println!("  contained — {how}"),
+        Ok((None, how)) => println!("  not contained — {how}"),
+        Err(refused) => println!("  refused — {refused}"),
+    }
+
+    println!();
     println!("standing instructions:");
     // Named, because the difference between a file the agent reads and one it
     // does not is invisible until something it says is ignored.

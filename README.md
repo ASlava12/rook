@@ -70,7 +70,7 @@ Requires a Rust toolchain and a C compiler (two dependencies vendor C — see
 
 ```sh
 rook init                                  # create ~/.rook, config, store
-rook doctor                                # environment, model reachability, skills
+rook doctor                                # environment, what contains a command, model reachability
 rook models                                # what the configured provider serves
 
 rook                                       # talk to it

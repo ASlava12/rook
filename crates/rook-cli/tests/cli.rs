@@ -495,6 +495,14 @@ fn doctor_carries_the_advice_rather_than_only_the_failure() {
     let model = out.split("model:").nth(1).unwrap();
     assert!(model.contains("cannot reach"), "{model}");
     assert!(model.contains("Start the server"), "doctor exists to say what to do: {model}");
+
+    // What contains a command here is said either way, in the words a
+    // command's own result would use.
+    let commands = out.split("commands:").nth(1).unwrap().lines().nth(1).unwrap_or_default().to_string();
+    assert!(
+        commands.contains("contained — ") || commands.contains("not contained — no sandbox"),
+        "{commands}"
+    );
 }
 
 /// A session is bound to a project: its transcript names that project's files,

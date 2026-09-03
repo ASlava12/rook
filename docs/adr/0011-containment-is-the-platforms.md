@@ -63,6 +63,11 @@ containment. `[sandbox] network` is **on** by default.
   network, and it never restrains UDP, so a command can always resolve a
   name. The result says which of these held. A container would close that
   and is a different product.
+- Reading is everywhere, and that includes the agent's own store under
+  `ROOK_HOME`: a contained command can print a transcript, as it can print any
+  file. With the network open that is an exfiltration path, and it is the same
+  one the file tools have always had. A secret in a transcript is a secret on
+  disk; the store's own permissions are the boundary there, not this.
 - Reporting is the point. `auto` on a platform with nothing to contain a
   command is the same as `off` in effect, and the difference is that the
   result says so. A sandbox that quietly did nothing is worse than none,
