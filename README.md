@@ -766,8 +766,10 @@ lose people's trust:
   covers bytes — and replayed first in the assistant message for the rest of that
   turn. Earlier turns carry none, which is what the API expects. What it costs
   the other two dialects is nothing: they sign nothing and ask for nothing back.
-  Whether a capable model reasons better for having its own thinking returned is
-  still unmeasured here.
+  Checked against a socket replaying that API's documented shape, and against
+  the live API never: nobody here has a key. So the shape is right by
+  construction and unconfirmed in practice, which is worth saying plainly
+  because it is the one dialect where getting it wrong fails every turn.
 - **No structured plan state.** The agent is asked for a plan in prose and told
   not to keep a checklist — deliberately, on the strength of someone else's
   benchmark ([ADR-0010](docs/adr/0010-no-todo-tool.md)). There is nothing for a

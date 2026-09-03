@@ -1191,6 +1191,21 @@ without the change.
 
 ## After that
 
+**One live Anthropic turn, when there is a key.** The thinking round trip is
+built and tested against a socket that replays the documented wire shape —
+signed blocks in, the same bytes back, first in the assistant message — but
+never against the API itself. It is the one dialect where a wrong guess fails
+every turn with a tool call rather than degrading, so the confirmation is worth
+having and is one command:
+
+```sh
+ANTHROPIC_API_KEY=… cargo xtask smoke --model anthropic/claude-sonnet-5
+```
+
+Any of the families in `takes_adaptive_thinking` will do; the scenarios that
+edit a file and read a command's output both call a tool, so a refusal would be
+the first thing they report. Until then the entry in the README says so.
+
 **Driving physical devices, if the Model Hardware Standard becomes something to
 build against.** Anthropic's [research
 preview](https://www.anthropic.com/news/model-hardware-standard-research-preview)
