@@ -86,7 +86,10 @@ jobs:
     name: smoke ollama
     runs-on: ubuntu-latest
     continue-on-error: true
-    timeout-minutes: 40
+    # Sized for the work, not for a hang: five scenarios against a 3b model on
+    # a CPU runner, and every autonomous turn now ends with a goal check, which
+    # is a whole extra turn. Runs have taken 16 to 39 minutes.
+    timeout-minutes: 60
     services:
       ollama:
         image: ollama/ollama

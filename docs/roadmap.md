@@ -1157,6 +1157,12 @@ sending it for the life of the process. Tool definitions are the other thing
 the agent adds; dropping those would leave an agent that cannot act and does
 not say why, so the refusal names `[agent] native_tools = false` instead.
 
+**The smoke job got slower for a reason.** Every autonomous turn now ends
+with a goal check, which is a whole extra turn, and the job runs `--yes`. Runs
+that took sixteen minutes take up to forty; the timeout is sixty now, sized
+for the work rather than for a hang. Each scenario's verdict is printed as it
+finishes, so a job that is killed still leaves the readings it had.
+
 **A long store pass belongs on a thread, not on the runtime.** `rookd` ran a
 prune, a collection and zstd dictionary training where they were awaited —
 holding a runtime worker for all of it, which on a small machine is the thread
