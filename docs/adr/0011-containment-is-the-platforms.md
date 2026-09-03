@@ -77,11 +77,18 @@ containment. `[sandbox] network` is **on** by default.
   network, and it never restrains UDP, so a command can always resolve a
   name. The result says which of these held. A container would close that
   and is a different product.
-- Reading is everywhere, and that includes the agent's own store under
-  `ROOK_HOME`: a contained command can print a transcript, as it can print any
-  file. With the network open that is an exfiltration path, and it is the same
-  one the file tools have always had. A secret in a transcript is a secret on
-  disk; the store's own permissions are the boundary there, not this.
+- Reading is everywhere a build might need, which is nearly everywhere. The
+  exception is the agent's own state directory: it holds every project's
+  transcripts, every checkpoint's contents and everything it was told to
+  remember, and a command run for one project has no business reading
+  another's — with the network open, reading is the whole of what an
+  exfiltration needs. Seatbelt denies it outright, which is a rule after the
+  blanket read because the last match wins. Landlock grants and never denies,
+  so "everything except this" is spelled as everything else: walk down the
+  excluded path and name every sibling at each level. A path that cannot be
+  read is left ungranted, which errs towards refusing a read rather than
+  allowing one. A Windows integrity level is about writing and cannot do this
+  at all, and the result of every command says which of the two it got.
 - Reporting is the point. `auto` on a platform with nothing to contain a
   command is the same as `off` in effect, and the difference is that the
   result says so. A sandbox that quietly did nothing is worse than none,

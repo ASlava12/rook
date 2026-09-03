@@ -789,11 +789,15 @@ lose people's trust:
 - **Containment is real but partial.** A command the model asks for runs under
   Seatbelt on macOS, Landlock on Linux and a low integrity level on Windows: it
   writes the workspace and a scratch directory and nothing else, whatever it
-  starts. It reads everywhere, this agent's own store included, and the network
-  is open by default — so a command that is refused a write can still send what
-  it read. FreeBSD has no containment at all and says so. The pattern rules over
-  the command line are still pattern matching: `curl … | sh` is one obfuscation
-  away from any rule, and they are what covers the platform that has nothing.
+  starts. It reads everywhere else, because a build needs its toolchain — with
+  one exception, the agent's own state directory, which holds every project's
+  transcripts and checkpoints and is kept out of reach on the two platforms that
+  can; an integrity level restricts writing, so on Windows it is not, and the
+  result says which. The network is open by default, so a command refused a
+  write can still send what it did read. FreeBSD has no containment at all and
+  says so. The pattern rules over the command line are still pattern matching:
+  `curl … | sh` is one obfuscation away from any rule, and they are what covers
+  the platform that has nothing.
 - **Undo covers what a tool declared, not what a command did — and now says
   which.** A checkpoint holds the paths a tool said it would touch; a
   `run_command` says none, so nothing holds what its files were before and

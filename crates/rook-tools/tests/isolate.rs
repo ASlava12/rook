@@ -37,7 +37,12 @@ async fn a_contained_command_writes_the_workspace_and_scratch_and_nothing_else()
     for dir in [&workspace, &scratch, &outside] {
         std::fs::create_dir(dir).unwrap();
     }
-    let isolation = Isolation { workspace: workspace.clone(), scratch: vec![scratch.clone()], network: true };
+    let isolation = Isolation {
+        workspace: workspace.clone(),
+        scratch: vec![scratch.clone()],
+        network: true,
+        unreadable: vec![],
+    };
     let touch = |dir: &Path, name: &str| match cfg!(windows) {
         true => format!("type nul > \"{}\"", dir.join(name).display()),
         false => format!("touch '{}'", dir.join(name).display()),
@@ -82,7 +87,8 @@ async fn tcp_is_refused_when_the_policy_says_no_network() {
     let (code, said) = run(&connect, workspace.path(), None).await;
     assert_eq!(code, 0, "the precondition: uncontained, the connection is made: {said}");
 
-    let closed = Isolation { workspace: workspace.path().into(), scratch: vec![], network: false };
+    let closed =
+        Isolation { workspace: workspace.path().into(), scratch: vec![], network: false, unreadable: vec![] };
     let (code, said) = run(&connect, workspace.path(), Some(&closed)).await;
     assert_ne!(code, 0, "with the network switched off it is refused: {said}");
 
@@ -119,7 +125,8 @@ async fn a_failed_contained_command_says_it_was_contained() {
     std::fs::create_dir(&outside).unwrap();
     let mut ctx = ToolContext::new(workspace.clone());
     ctx.isolate = rook_tools::isolate::Mode::Auto;
-    ctx.isolation = Isolation { workspace: workspace.clone(), scratch: vec![], network: true };
+    ctx.isolation =
+        Isolation { workspace: workspace.clone(), scratch: vec![], network: true, unreadable: vec![] };
     ctx.allow_outside_workspace = true;
 
     let args = serde_json::json!({ "command": format!("touch '{}'", outside.join("x").display()) });
@@ -145,4 +152,59 @@ async fn a_failed_contained_command_says_it_was_contained() {
     let out = rook_tools::exec::RunCommand.call(&ctx, &missing).await.unwrap();
     assert!(out.is_error, "{}", out.content);
     assert!(!out.content.contains("ran contained"), "a missing file is not the sandbox: {}", out.content);
+}
+
+/// Reading is allowed everywhere a build might need, which is nearly
+/// everywhere — but the agent's own state directory is every project's
+/// transcripts, every checkpoint's contents and everything it was told to
+/// remember. A command run for one project has no business reading another's,
+/// and with the network on, reading is the whole of what an exfiltration needs.
+#[tokio::test]
+async fn a_contained_command_cannot_read_the_agents_own_store() {
+    let Some(backend) = backend() else { return };
+    if !backend.hides_paths() {
+        eprintln!("skipped: {backend:?} restricts writing, not reading");
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let (workspace, state) = (root.path().join("ws"), root.path().join("state"));
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::create_dir(&state).unwrap();
+    std::fs::write(state.join("transcript"), "another project's history\n").unwrap();
+    let read = format!("cat '{}'", state.join("transcript").display());
+
+    let (code, said) = run(&read, &workspace, None).await;
+    assert_eq!(code, 0, "the precondition: uncontained, it reads: {said}");
+    assert!(said.contains("another project"), "{said}");
+
+    let isolation = Isolation {
+        workspace: workspace.clone(),
+        scratch: vec![],
+        network: true,
+        unreadable: vec![state.clone()],
+    };
+    let (code, said) = run(&read, &workspace, Some(&isolation)).await;
+    assert_ne!(code, 0, "contained, the read is refused: {said}");
+    assert!(!said.contains("another project"), "and nothing of it came back: {said}");
+
+    // Everything else still reads, or a build could not run at all.
+    let (code, said) = run("cat /etc/hosts > /dev/null", &workspace, Some(&isolation)).await;
+    assert_eq!(code, 0, "the rest of the machine is still readable: {said}");
+}
+
+/// What was kept out of reach is said, and where the platform cannot keep it
+/// out of reach that is said instead — a boundary believed to hold and not
+/// holding is worse than none.
+#[test]
+fn whether_the_store_is_out_of_reach_is_said_either_way() {
+    let Ok(backend) = available() else { return };
+    let plain = Isolation::for_workspace(".");
+    assert!(!backend.describe(&plain).contains("store"), "nothing to say when nothing is hidden");
+
+    let hiding = Isolation { unreadable: vec!["/nowhere".into()], ..Isolation::for_workspace(".") };
+    let said = backend.describe(&hiding);
+    match backend.hides_paths() {
+        true => assert!(said.contains("cannot read the agent's own store"), "{said}"),
+        false => assert!(said.contains("cannot stop it reading"), "{said}"),
+    }
 }

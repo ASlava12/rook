@@ -94,6 +94,10 @@ pub fn tool_context(config: &Config, workspace: &Path, output_dir: &Path) -> Too
     ctx.allow_outside_workspace = sandbox.allow_outside_workspace;
     ctx.isolate = sandbox.isolate;
     ctx.isolation.network = sandbox.network;
+    // Every project's transcripts, checkpoints and memory live under here, so
+    // a command run for one project has no business reading another's — and
+    // with the network on, reading is the whole of what an exfiltration needs.
+    ctx.isolation.unreadable = vec![crate::paths::home()];
     ctx.isolation.scratch.extend(sandbox.writable.iter().map(|dir| match dir.strip_prefix("~/") {
         Some(rest) => crate::paths::user_home().join(rest),
         None => std::path::PathBuf::from(dir),

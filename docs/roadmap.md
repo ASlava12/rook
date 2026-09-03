@@ -1148,6 +1148,15 @@ hold the one invariant that matters there: every module loaded is embedded and
 served as script. [ADR-0012](adr/0012-hand-written-modules-no-bundler.md)
 supersedes the one-file part of ADR-0007 and keeps the rest.
 
+**A contained command cannot read the agent's own store.** Reading was allowed
+everywhere, the state directory included — every project's transcripts, every
+checkpoint's content, everything the agent was told to remember — and with the
+network open, reading is the whole of what an exfiltration needs. Seatbelt
+denies it after the blanket read, where the last match wins; Landlock grants
+and never denies, so everything-but-this is spelled as every sibling down the
+excluded path. A Windows integrity level restricts writing and cannot do this,
+and the result of every command says which it got.
+
 **Who else can read the agent's history is a question `doctor` answers.** The
 state directory is created for its owner alone and an existing one is left as
 its owner made it — right, and silent: a `~/.rook` from an older build or a

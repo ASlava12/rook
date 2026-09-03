@@ -41,7 +41,12 @@ async fn a_command_contained_by_rook_writes_the_workspace_and_scratch_and_nothin
     for dir in [&workspace, &scratch, &outside] {
         std::fs::create_dir(dir).unwrap();
     }
-    let isolation = Isolation { workspace: workspace.clone(), scratch: vec![scratch.clone()], network: true };
+    let isolation = Isolation {
+        workspace: workspace.clone(),
+        scratch: vec![scratch.clone()],
+        network: true,
+        unreadable: vec![],
+    };
 
     let (code, said) = run(&touch(&outside, "plain"), &workspace, None).await;
     assert_eq!(code, 0, "the precondition: uncontained, the write outside succeeds: {said}");
@@ -79,7 +84,8 @@ async fn a_refused_write_is_reported_as_contained() {
     std::fs::create_dir(&outside).unwrap();
     let mut ctx = ToolContext::new(workspace.clone());
     ctx.isolate = rook_tools::isolate::Mode::Auto;
-    ctx.isolation = Isolation { workspace: workspace.clone(), scratch: vec![], network: true };
+    ctx.isolation =
+        Isolation { workspace: workspace.clone(), scratch: vec![], network: true, unreadable: vec![] };
     ctx.allow_outside_workspace = true;
 
     let args = serde_json::json!({ "command": touch(&outside, "x") });

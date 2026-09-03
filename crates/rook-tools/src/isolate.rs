@@ -28,11 +28,25 @@ pub struct Isolation {
     /// whatever the caller adds.
     pub scratch: Vec<PathBuf>,
     pub network: bool,
+    /// Kept out of reach entirely, read included.
+    ///
+    /// Reading is otherwise allowed everywhere, because a build needs its
+    /// toolchain — but the agent's own state directory is every project's
+    /// transcripts, every checkpoint's contents and everything it was told to
+    /// remember. A command run for one project has no business reading
+    /// another's, and with the network on, reading is the whole of what an
+    /// exfiltration needs.
+    pub unreadable: Vec<PathBuf>,
 }
 
 impl Isolation {
     pub fn for_workspace(workspace: impl Into<PathBuf>) -> Self {
-        Self { workspace: workspace.into(), scratch: vec![std::env::temp_dir()], network: true }
+        Self {
+            workspace: workspace.into(),
+            scratch: vec![std::env::temp_dir()],
+            network: true,
+            unreadable: Vec::new(),
+        }
     }
 }
 
@@ -63,7 +77,23 @@ pub enum Backend {
 }
 
 impl Backend {
+    /// Whether this backend can keep a directory unreadable. An integrity
+    /// level is about writing; it says nothing about reads, so on Windows the
+    /// store is as readable to a contained command as to any other.
+    pub fn hides_paths(self) -> bool {
+        !matches!(self, Self::LowIntegrity)
+    }
+
     pub fn describe(self, isolation: &Isolation) -> String {
+        let kept = match (isolation.unreadable.is_empty(), self.hides_paths()) {
+            (true, _) => "",
+            (false, true) => ", and cannot read the agent's own store",
+            (false, false) => ", and an integrity level cannot stop it reading the agent's own store",
+        };
+        format!("{}{kept}", self.without_paths(isolation))
+    }
+
+    fn without_paths(self, isolation: &Isolation) -> String {
         match self {
             Self::Seatbelt if isolation.network => {
                 "seatbelt: writes to the workspace and scratch, network open".into()
@@ -185,6 +215,13 @@ pub(crate) fn contained(command: &str, isolation: &Isolation) -> std::io::Result
     Ok(cmd)
 }
 
+/// A path as the profile spells one. The only character the language cares
+/// about inside a string is the quote that ends it.
+#[cfg(target_os = "macos")]
+fn quoted(path: &std::path::Path) -> String {
+    path.display().to_string().replace('"', "\\\"")
+}
+
 /// Deny by default and allow what a build needs: every read, its own
 /// processes, the kernel's answers about the machine, and writes where the
 /// policy says. Paths are the real ones — Seatbelt matches after resolving
@@ -196,17 +233,60 @@ fn profile(isolation: &Isolation) -> String {
          (allow sysctl-read)\n(allow mach-lookup)\n(allow ipc-posix*)\n(allow file-read*)\n\
          (allow file-ioctl)\n(allow system-socket)\n(allow file-write-data (literal \"/dev/null\"))\n",
     );
+    // After the blanket read and before the writes: Seatbelt takes the last
+    // rule that matches, so this is where a denial has to sit to hold.
+    for kept in &isolation.unreadable {
+        let real = kept.canonicalize().unwrap_or_else(|_| kept.clone());
+        p.push_str(&format!("(deny file-read* (subpath \"{}\"))\n", quoted(&real)));
+    }
     for root in std::iter::once(&isolation.workspace).chain(&isolation.scratch) {
         let real = root.canonicalize().unwrap_or_else(|_| root.clone());
-        p.push_str(&format!(
-            "(allow file-write* (subpath \"{}\"))\n",
-            real.display().to_string().replace('"', "\\\"")
-        ));
+        p.push_str(&format!("(allow file-write* (subpath \"{}\"))\n", quoted(&real)));
     }
     if isolation.network {
         p.push_str("(allow network*)\n");
     }
     p
+}
+
+/// Everything readable, expressed as roots, with `kept` left out.
+///
+/// Landlock grants and never denies, so "everything except this" has to be
+/// spelled as a list of everything else: walk down the excluded path and, at
+/// each level, name every sibling but the one the path goes through. A
+/// directory that cannot be read is left out, which errs towards refusing a
+/// read rather than allowing one — the safe direction for a mistake here.
+///
+/// With nothing excluded this is `/`, which is what it was before.
+#[cfg(target_os = "linux")]
+fn readable(kept: &[PathBuf]) -> Vec<PathBuf> {
+    if kept.is_empty() {
+        return vec![PathBuf::from("/")];
+    }
+    let mut roots = vec![PathBuf::from("/")];
+    for hidden in kept {
+        let hidden = hidden.canonicalize().unwrap_or_else(|_| hidden.clone());
+        let mut allowed = Vec::new();
+        for root in roots {
+            // A root the excluded path does not pass through survives whole.
+            let Ok(rest) = hidden.strip_prefix(&root) else {
+                allowed.push(root);
+                continue;
+            };
+            let mut walked = root;
+            for step in rest.iter() {
+                let Ok(entries) = std::fs::read_dir(&walked) else { break };
+                for entry in entries.flatten() {
+                    if entry.file_name() != step {
+                        allowed.push(entry.path());
+                    }
+                }
+                walked = walked.join(step);
+            }
+        }
+        roots = allowed;
+    }
+    roots
 }
 
 /// `/bin/sh -c <command>`, with the ruleset applied in the child before it
@@ -229,7 +309,9 @@ pub(crate) fn contained(command: &str, isolation: &Isolation) -> std::io::Result
         .collect();
     let created = ruleset
         .and_then(|r| r.create())
-        .and_then(|r| r.add_rules(path_beneath_rules(["/"], AccessFs::from_read(abi))))
+        .and_then(|r| {
+            r.add_rules(path_beneath_rules(readable(&isolation.unreadable), AccessFs::from_read(abi)))
+        })
         .and_then(|r| r.add_rules(path_beneath_rules(writable, AccessFs::from_all(abi))))
         .and_then(|r| r.add_rules(path_beneath_rules(["/dev/null"], AccessFs::WriteFile)))
         .map_err(|e| std::io::Error::other(format!("building the landlock ruleset: {e}")))?;
