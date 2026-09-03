@@ -1052,8 +1052,11 @@ one back it wrote the other two again, every step. Every object naming an
 offered tool is a call now, in the order written. And with eight steps a
 scenario, a turn that runs out of them with a call as its last word has done
 work nobody was told about: it is asked once more, with nothing to reach
-for, what it found — so it ends on the answer rather than on the limit. What
-the scenarios say at the new size is open again.
+for, what it found — so it ends on the answer rather than on the limit. And
+the limit is the model's, not the children's: a turn that ran out of steps
+with sub-agents still out dropped them with the nursery, tokens spent and
+answers unread, and waits for them now as a finished turn does. What the
+scenarios say at the new size is open again.
 
 **A server fetched once is one somebody has to remember to update.** Now the
 agent remembers: past `[agent] server_update_after_days` (thirty by default,

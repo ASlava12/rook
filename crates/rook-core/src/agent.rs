@@ -368,6 +368,34 @@ fn plural(n: i64) -> &'static str {
     }
 }
 
+/// A turn does not end with its work still out. What the model never collected
+/// is waited for and appended rather than dropped at the door: the children
+/// have already spent the tokens, and their answers are the reason they ran.
+async fn drain_uncollected(nursery: &mut Nursery<'_>, outcome: &mut TurnOutcome) {
+    if !nursery.busy() && nursery.taken.iter().all(|taken| *taken) {
+        return;
+    }
+    while let Some((landed, result)) = nursery.running.next().await {
+        nursery.landed[landed] = Some(result);
+    }
+    let mut left = Vec::new();
+    for at in 0..nursery.tasks.len() {
+        if nursery.taken[at] {
+            continue;
+        }
+        nursery.taken[at] = true;
+        if let Some(result) = &nursery.landed[at] {
+            left.push(collected(&nursery.tasks[at], result, outcome));
+        }
+    }
+    if !left.is_empty() {
+        outcome.reply.push_str(&format!(
+            "\n\n(sub-agents this turn started and did not collect)\n\n{}",
+            left.join("\n\n")
+        ));
+    }
+}
+
 fn close_open_call(messages: &mut Vec<Message>, open: &mut Option<String>) {
     if let Some(id) = open.take() {
         messages.push(Message::tool_result(id, "no result was recorded: the turn did not finish"));
@@ -1505,31 +1533,7 @@ impl<'a> AgentLoop<'a> {
                 // into it, which is not where the person put it.
                 let said = self.interjections.take();
                 if said.is_empty() {
-                    // A turn does not end with its work still out. What the
-                    // model never collected is waited for and appended rather
-                    // than dropped at the door: the children have already spent
-                    // the tokens, and their answers are the reason they ran.
-                    if nursery.busy() || nursery.taken.iter().any(|taken| !taken) {
-                        while let Some((landed, result)) = nursery.running.next().await {
-                            nursery.landed[landed] = Some(result);
-                        }
-                        let mut left = Vec::new();
-                        for at in 0..nursery.tasks.len() {
-                            if nursery.taken[at] {
-                                continue;
-                            }
-                            nursery.taken[at] = true;
-                            if let Some(result) = &nursery.landed[at] {
-                                left.push(collected(&nursery.tasks[at], result, &mut outcome));
-                            }
-                        }
-                        if !left.is_empty() {
-                            outcome.reply.push_str(&format!(
-                                "\n\n(sub-agents this turn started and did not collect)\n\n{}",
-                                left.join("\n\n")
-                            ));
-                        }
-                    }
+                    drain_uncollected(&mut nursery, &mut outcome).await;
                     // Once. A model that slips twice is one that cannot write
                     // the answer any other way, and a second ask spends a turn
                     // to be told so again.
@@ -1642,6 +1646,9 @@ impl<'a> AgentLoop<'a> {
         }
 
         outcome.stopped = "max_steps".into();
+        // The limit is the model's, not the children's: what they were still
+        // doing is waited for here as it is at the end of a turn that finished.
+        drain_uncollected(&mut nursery, &mut outcome).await;
         // A turn that ran out of steps with a call as its last word has done
         // work nobody was told about. One more call, with nothing to reach
         // for, so the turn ends on what it found rather than on the limit.

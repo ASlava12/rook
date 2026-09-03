@@ -4095,3 +4095,28 @@ async fn a_turn_out_of_steps_that_already_spoke_is_left_as_it_is() {
     assert_eq!(outcome.reply, "still looking");
     assert_eq!(seen.lock().unwrap().len(), 2, "two steps and no last word");
 }
+
+/// The limit is the model's, not the children's. A parent that runs out of
+/// steps with a sub-agent still out waits for it and appends what came back,
+/// as a turn that finished would — and has nothing further to say itself.
+#[tokio::test]
+async fn a_turn_out_of_steps_still_collects_the_sub_agents_it_started() {
+    let f = fixture();
+    let session = f.rook.start_session("limit-with-children").unwrap();
+    // No rule answers "out of steps": were the last word asked for with the
+    // children's answers already in hand, the provider would refuse and the
+    // turn would fail here.
+    let provider = Arc::new(ByPrompt(vec![
+        ("count the files", call("delegate", serde_json::json!({ "tasks": ["tally"], "wait": false }))),
+        ("started: task01", call("list_dir", serde_json::json!({ "path": "." }))),
+        ("tally", reply("there are three")),
+    ]));
+    let mut agent = AgentLoop::new(&f.rook, provider, session);
+    agent.max_steps = 2;
+    let outcome = agent.run("count the files").await.unwrap();
+
+    assert_eq!(outcome.stopped, "max_steps");
+    assert_eq!(outcome.delegated.len(), 1, "the child's cost is the turn's");
+    assert!(outcome.reply.contains("did not collect"), "{}", outcome.reply);
+    assert!(outcome.reply.contains("there are three"), "{}", outcome.reply);
+}
