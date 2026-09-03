@@ -640,11 +640,17 @@ fn apply(text: &str, edit: &Edit) -> std::result::Result<(String, usize), String
 /// what a model that misremembered a value needs shown.
 fn nearest_line<'a>(text: &'a str, wanted: &str) -> Option<&'a str> {
     let words: Vec<&str> = wanted.lines().next()?.split_whitespace().collect();
-    text.lines()
-        .map(|line| (line.split_whitespace().filter(|w| words.contains(w)).count(), line))
-        .filter(|(shared, _)| *shared > 0)
-        .max_by_key(|(shared, _)| *shared)
-        .map(|(_, line)| line.trim())
+    // The first of the lines sharing the most: `max_by_key` keeps the last of
+    // equals, which in a file of assignments sharing `=` is whichever came
+    // last, and a nearest line should not depend on that.
+    let mut best: Option<(usize, &str)> = None;
+    for line in text.lines() {
+        let shared = line.split_whitespace().filter(|w| words.contains(w)).count();
+        if shared > 0 && best.is_none_or(|(most, _)| shared > most) {
+            best = Some((shared, line));
+        }
+    }
+    best.map(|(_, line)| line.trim())
 }
 
 pub struct ListDir;
