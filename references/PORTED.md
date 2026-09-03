@@ -1093,3 +1093,15 @@ and a failed one records a position and a note rather than trying again.
 `hot-apply native compaction settings` — a loop is built per turn, so a
 setting changed between turns is in force on the next one. cline and codex
 moved without anything that touches a loop, a tool or a boundary.
+
+## Twenty-sixth pass — goose, hermes, openclaw
+
+Dismissed, each against the code. goose's `show authoritative tool approval
+details`: an approval prompt that shows a model's own summary of what a call
+will do is a prompt about something else — here the preview is built by the
+tool from the arguments it will run with, a diff for an edit and the command
+line for a command, and the model's prose is not consulted. hermes'
+`accumulate streamed tool arguments linearly`: `ToolCallBuffer` appends each
+fragment to its slot and parses once at the end, which is the linear shape
+already. Their compression heartbeat and openclaw's Codex-chat ownership and
+Gateway reroutes have nothing to attach to.
