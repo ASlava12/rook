@@ -1072,3 +1072,11 @@ recent-session browsing` — session listing is paged already. openclaw's
 `avoid eager discovery for ordinary replies` — skills are discovered once when
 the engine opens, not per turn. The rest are their worktrees, swarms and
 selectors.
+
+## Twenty-fourth pass — openclaw
+
+One commit, dismissed: `fix(sessions): archive capped sessions safely` — a
+session that hits their size cap is archived, and the archiving lost data.
+Sessions here are not archived; retention deletes by age, size and tag, and a
+transcript past what is worth rendering is answered by its hash. Nothing to
+attach the fix to.

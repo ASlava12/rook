@@ -446,7 +446,10 @@ async fn a_zipped_server_is_picked_by_prefix_unpacked_whole_and_put_in_place() {
     let stored = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Stored)
         .unix_permissions(0o755);
-    w.start_file("clangd_22.1.6/bin/clangd", stored).unwrap();
+    // Named as the real archive names it on this platform: `clangd.exe` on
+    // Windows, where the installer looks for exactly that.
+    let inside = if cfg!(windows) { "clangd_22.1.6/bin/clangd.exe" } else { "clangd_22.1.6/bin/clangd" };
+    w.start_file(inside, stored).unwrap();
     w.write_all(b"#!/bin/sh\necho clangd\n").unwrap();
     w.start_file("clangd_22.1.6/lib/clang/22/include/stddef.h", stored).unwrap();
     w.write_all(b"").unwrap();
@@ -461,7 +464,8 @@ async fn a_zipped_server_is_picked_by_prefix_unpacked_whole_and_put_in_place() {
         .unwrap();
 
     let current = into.path().join("clangd").join("current");
-    assert_eq!(done.path, current.join("bin").join("clangd"));
+    assert_eq!(done.path, rook_core::install::CLANGD.binary_in(&current), "asked of the recipe, not spelled");
+    assert!(done.path.starts_with(current.join("bin")), "{}", done.path.display());
     assert!(done.path.is_file());
     assert!(
         current.join("lib").join("clang").join("22").join("include").join("stddef.h").exists(),

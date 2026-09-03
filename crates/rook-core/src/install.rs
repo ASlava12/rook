@@ -602,7 +602,12 @@ fn unpack_zip(bytes: &[u8], into: &Path, strip_top: bool) -> Result<(), String> 
 /// is copied: a link needs a privilege on Windows that an ordinary account
 /// does not have.
 fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
-    for entry in ignore::WalkBuilder::new(from).hidden(false).git_ignore(false).build().flatten() {
+    // Everything, whatever the tree says about itself: a walker that honours
+    // ignore files would leave behind whatever a package chose to hide from
+    // its own repository, which is not the question here.
+    let mut walk = ignore::WalkBuilder::new(from);
+    walk.hidden(false).ignore(false).git_ignore(false).git_global(false).git_exclude(false).parents(false);
+    for entry in walk.build().flatten() {
         let rel = entry.path().strip_prefix(from).unwrap_or(entry.path());
         let dest = to.join(rel);
         if entry.path().is_dir() {
