@@ -1059,6 +1059,27 @@ impl Rook {
             .filter(|goal| !goal.trim().is_empty()))
     }
 
+    /// The checklist the model keeps, when it is given one to keep.
+    ///
+    /// Beside the goal and stored the same way, for the same reason: session
+    /// state that is not an event, so it survives compaction and costs the
+    /// transcript nothing. Only [`crate::Config::agent`]'s `todo_tool` puts a
+    /// tool in front of it — the default is a line in the prompt and no
+    /// bookkeeping at all ([ADR-0010](../../docs/adr/0010-no-todo-tool.md)).
+    pub fn plan(&self, session: u128) -> Result<Option<String>> {
+        Ok(self
+            .store
+            .kv_get(&format!("plan/{:032x}", session))?
+            .map(|v| String::from_utf8_lossy(&v).into_owned())
+            .filter(|p| !p.trim().is_empty()))
+    }
+
+    pub fn set_plan(&self, session: u128, plan: &str) -> Result<()> {
+        self.store.kv_set(&format!("plan/{:032x}", session), plan.trim().as_bytes())?;
+        self.log(session, EventKind::Note, "plan", plan.trim())?;
+        Ok(())
+    }
+
     pub fn set_goal(&self, session: u128, goal: &str) -> Result<()> {
         self.store.kv_set(&format!("goal/{:032x}", session), goal.trim().as_bytes())?;
         self.log(session, EventKind::Note, "goal", goal.trim())?;

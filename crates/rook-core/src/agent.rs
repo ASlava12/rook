@@ -422,6 +422,9 @@ pub const REMEMBER: &str = "remember";
 pub const FORGET: &str = "forget";
 pub const RECALL: &str = "recall";
 pub const DELEGATE: &str = "delegate";
+/// Only under `[agent] todo_tool`, which is off: the default is a line in the
+/// prompt and no bookkeeping (ADR-0010).
+pub const PLAN: &str = "plan";
 pub const STANCE: &str = "stance";
 pub const SUBAGENTS: &str = "subagents";
 pub const VERIFY: &str = "verify";
@@ -855,7 +858,17 @@ impl<'a> AgentLoop<'a> {
             "You are Rook, an autonomous agent working in a local workspace.\n\
              Work in small verified steps. Prefer reading before editing. State what you did.\n",
         );
-        if self.rook.config.agent.plan_first {
+        // One or the other, never both: they are the two answers to the same
+        // question, and asking for a sentence and a checklist at once measures
+        // neither.
+        if self.rook.config.agent.todo_tool {
+            s.push_str(
+                "For anything that takes more than one step, write the plan with `plan` before \
+                 acting: one line per step. Keep it current — mark a step done as soon as it is, \
+                 and rewrite the list when the plan changes. Before you finish, make sure every \
+                 step is done or struck.\n",
+            );
+        } else if self.rook.config.agent.plan_first {
             s.push_str(
                 "For anything that takes more than one step, say the plan in a sentence or two \
                  before acting, and say so when it changes. Do not keep a checklist.\n",
@@ -1101,6 +1114,30 @@ impl<'a> AgentLoop<'a> {
             }
             specs.push(if lazy { spec.stub() } else { spec })
         };
+        if self.rook.config.agent.todo_tool {
+            push(ToolSpec {
+                name: PLAN.into(),
+                description: "Write the plan for this task as a checklist, replacing whatever was there. Keep it current: mark a step done as soon as it is."
+                    .into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "steps": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "step": { "type": "string" },
+                                    "done": { "type": "boolean" }
+                                },
+                                "required": ["step"]
+                            }
+                        }
+                    },
+                    "required": ["steps"]
+                }),
+            });
+        }
         push(ToolSpec {
             name: LOAD_SKILL.into(),
             description: "Load a skill's full instructions into context by name. An unknown \
@@ -1305,10 +1342,18 @@ impl<'a> AgentLoop<'a> {
         // vary: a date is the example that rule names. A model with a training
         // cutoff otherwise guesses what "now" is, and guesses low.
         let today = format!("Today is {}.", rook_store::today());
-        let volatile = match self.recalled(prompt) {
+        let mut volatile = match self.recalled(prompt) {
             Some(memory) => format!("{today}\n\n{memory}"),
             None => today,
         };
+        // Here rather than in the system block for the reason above, and it is
+        // the half that makes the tool a tool: a checklist the model cannot see
+        // is one it cannot check off. Only under `todo_tool`, which is off.
+        if self.rook.config.agent.todo_tool
+            && let Ok(Some(plan)) = self.rook.plan(self.session)
+        {
+            volatile.push_str(&format!("\n\nThe plan you are keeping:\n{plan}"));
+        }
         messages.insert(messages.len().saturating_sub(1), Message::user(volatile));
         Ok(messages)
     }
@@ -1446,6 +1491,22 @@ impl<'a> AgentLoop<'a> {
                 // The anchor counted messages that are no longer there.
                 anchor = None;
                 worth_compacting = measured(&messages, anchor) < before;
+                // Said once, when it stops being incidental. Each compaction is
+                // a summarisation call, so a turn compacting every few steps is
+                // spending most of itself on bookkeeping — which is visible as
+                // an hour of nothing and, until this, was reported only in the
+                // count at the end.
+                if outcome.compactions == TOO_MUCH_COMPACTION {
+                    let said = format!(
+                        "compacted {} times in {} steps: the context window ({} tokens) is small \
+                         for this work, and most of the turn is going into summarising it. \
+                         `[agent] context_window` sets it; a model with a larger one costs less \
+                         than this.",
+                        outcome.compactions, outcome.steps, self.budget.window
+                    );
+                    self.rook.log(self.session, EventKind::Note, "compaction", &said).ok();
+                    self.report(Reported::Open(said));
+                }
             }
 
             // Compaction summarises history; it cannot make one message smaller.
@@ -1855,6 +1916,33 @@ impl<'a> AgentLoop<'a> {
                 return (text, false);
             }
             _ => {}
+        }
+
+        if call.name == PLAN {
+            let steps: Vec<serde_json::Value> =
+                call.arguments.get("steps").and_then(|s| s.as_array()).cloned().unwrap_or_default();
+            let list: Vec<String> = steps
+                .iter()
+                .map(|s| {
+                    let done = s.get("done").and_then(serde_json::Value::as_bool).unwrap_or(false);
+                    let text = s.get("step").and_then(serde_json::Value::as_str).unwrap_or("");
+                    format!("- [{}] {text}", if done { "x" } else { " " })
+                })
+                .collect();
+            if list.is_empty() {
+                return ("a plan needs at least one step".into(), true);
+            }
+            let plan = list.join("\n");
+            if let Err(e) = self.rook.set_plan(self.session, &plan) {
+                return (format!("could not keep the plan: {e}"), true);
+            }
+            let left = steps
+                .iter()
+                .filter(|s| !s.get("done").and_then(serde_json::Value::as_bool).unwrap_or(false))
+                .count();
+            let said = format!("plan kept, {left} step(s) left:\n{plan}");
+            self.rook.log(self.session, EventKind::ToolResult, PLAN, &said).ok();
+            return (said, false);
         }
 
         if call.name == LOAD_SKILL {
@@ -3137,6 +3225,13 @@ you found, what you did, and what is left.";
 const GO_ON: &str = "\
 Your reply was cut off at the output limit. Go on from where it stopped, briefly: a call you \
 were writing, make it whole; an answer, finish it.";
+
+/// Compactions in one turn past which the window, not the work, is the story.
+///
+/// Three, because one is ordinary and two is a long turn: at three the calls
+/// spent summarising outnumber anything a person would call progress, and the
+/// number that fixes it is in the config rather than in the model.
+const TOO_MUCH_COMPACTION: u32 = 3;
 
 /// The label on the note that says what a command wrote. Read by `changes`,
 /// which is the other half of this: one function writes it and one reads it,

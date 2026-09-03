@@ -1148,6 +1148,28 @@ hold the one invariant that matters there: every module loaded is embedded and
 served as script. [ADR-0012](adr/0012-hand-written-modules-no-bundler.md)
 supersedes the one-file part of ADR-0007 and keeps the rest.
 
+**Measuring the checklist tool here, rather than believing somebody else's
+measurement.** [ADR-0010](adr/0010-no-todo-tool.md) declined a planning tool on
+a benchmark that was k=3 on one harness, and said in as many words that a
+future model is worth re-measuring rather than assuming. So: `cargo xtask
+bench` runs three arms — the plan line, nothing at all, and a `plan` tool with
+instructions to keep the list — across six multi-step tasks, three of them with
+somewhere to go wrong, each scored by looking at the workspace afterwards and
+never by reading what the model said about it. The tool exists behind
+`[agent] todo_tool`, off, because an arm cannot be measured without building
+it. Cost is recorded beside the pass, since cost is what the tool was declined
+for.
+
+**A turn spending itself on compaction says so.** Found by watching a real
+model do long work: a task of three one-line fixes took an hour and a quarter
+against a 27b model, and the transcript said why — seven auto-compactions in
+seventy-four events, because the window had been set to 8000 tokens. Each
+compaction is a summarisation call, so most of the turn went into bookkeeping,
+and the only report of it was the count in the outcome, an hour later. At the
+third compaction the turn now says what is happening and names the setting that
+fixes it. The work itself was done correctly, which is the other half of that
+observation.
+
 **A contained command cannot read the agent's own store.** Reading was allowed
 everywhere, the state directory included — every project's transcripts, every
 checkpoint's content, everything the agent was told to remember — and with the

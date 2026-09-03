@@ -4356,3 +4356,101 @@ async fn a_tool_that_declares_its_paths_is_diffed_rather_than_only_named() {
     assert_eq!(changed.files.len(), 1, "{:?}", changed.files);
     assert_eq!(changed.files[0].lines_added, 1, "the diff is the whole point of declaring paths");
 }
+
+/// A window too small for the work turns a turn into summarising: each
+/// compaction is a model call, and a turn compacting every few steps spends
+/// most of itself on bookkeeping. Watched live it looks like an hour of
+/// nothing — and the count only arrived at the end, when it was too late to
+/// act on. Said once, when it stops being incidental.
+#[tokio::test]
+async fn a_turn_that_keeps_compacting_says_the_window_is_the_reason() {
+    let f = fixture();
+    let session = long_session(&f, 60);
+    std::fs::write(f.workspace.path().join("a.txt"), "x".repeat(6_000)).unwrap();
+
+    // By prompt, because a compaction is itself a model call: a scripted list
+    // would have the summariser eating the replies meant for the turn.
+    // Each read refills what the compaction freed, which is what a real turn
+    // does with a window this size.
+    let provider = Arc::new(ByPrompt(vec![
+        ("compacting an agent's working transcript", reply("## Goal\nread it\n\n## Done\nread once more")),
+        // Anything else: read again, which refills what the compaction freed.
+        // A compacted turn's last message is the summary, not the prompt, so a
+        // rule keyed on the prompt would stop matching after the first one.
+        ("", call("read_file", serde_json::json!({ "path": "a.txt" }))),
+    ]));
+    let mut agent = AgentLoop::new(&f.rook, provider, session);
+    agent.set_window_for_test(4_000);
+    agent.max_steps = 14;
+    let outcome = agent.run("read the file a few times").await.unwrap();
+
+    assert!(outcome.compactions >= 3, "the precondition: it compacted enough to matter: {outcome:?}");
+    let said: Vec<&String> = outcome.open_questions.iter().filter(|q| q.contains("compacted")).collect();
+    assert_eq!(said.len(), 1, "said once, not once a compaction: {:?}", outcome.open_questions);
+    assert!(said[0].contains("context_window"), "and names what fixes it: {}", said[0]);
+}
+
+/// The arm ADR-0010 declined, built so the measurement can be repeated here
+/// rather than believed: a checklist tool, off by default. Both halves have to
+/// work for the comparison to mean anything — the list is kept, and it comes
+/// back to the model, because a checklist it cannot see is one it cannot check
+/// off.
+#[tokio::test]
+async fn the_todo_tool_keeps_a_list_and_hands_it_back() {
+    let f = fixture();
+    let mut config = Config::default();
+    config.agent.todo_tool = true;
+    let rook = with_config(&f, "planning", config);
+    let session = rook.start_session("planning").unwrap();
+
+    let script = vec![
+        call(
+            "plan",
+            serde_json::json!({ "steps": [
+                { "step": "read the file", "done": true },
+                { "step": "fix the bug" }
+            ] }),
+        ),
+        reply("one down"),
+    ];
+    let provider = ScriptedProvider::new(script);
+    let seen = provider.share();
+    let outcome = AgentLoop::new(&rook, Arc::new(provider), session).run("fix it").await.unwrap();
+
+    assert_eq!(outcome.tools_called, ["plan"]);
+    assert_eq!(
+        rook.plan(session).unwrap().as_deref(),
+        Some("- [x] read the file\n- [ ] fix the bug"),
+        "the list is kept"
+    );
+
+    // Within the turn the list comes back as the call's own result, which is
+    // what lets the next step check a step off.
+    let second = seen.lock().unwrap()[1].clone();
+    let answered = second.messages.iter().rev().find(|m| m.role == Role::Tool).unwrap().content.clone();
+    assert!(answered.contains("1 step(s) left"), "{answered}");
+    assert!(answered.contains("[ ] fix the bug"), "{answered}");
+
+    // And a later turn starts with it, beside the date, because a turn that
+    // began after a break has no tool result to remember it by.
+    let later = ScriptedProvider::new(vec![reply("carrying on")]);
+    let seen = later.share();
+    AgentLoop::new(&rook, Arc::new(later), session).run("go on").await.unwrap();
+    let carried: String = seen.lock().unwrap()[0].messages.iter().map(|m| m.content.clone()).collect();
+    assert!(carried.contains("The plan you are keeping"), "{carried}");
+    assert!(carried.contains("[ ] fix the bug"), "{carried}");
+}
+
+/// Off by default, which is the decision: no tool, and the line that asks for a
+/// sentence and forbids the bookkeeping.
+#[tokio::test]
+async fn without_the_flag_there_is_no_tool_and_the_line_says_no_checklist() {
+    let f = fixture();
+    let session = f.rook.start_session("default").unwrap();
+    let agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(vec![reply("ok")])), session);
+
+    assert!(!agent.tool_specs().iter().any(|t| t.name == "plan"), "no tool by default");
+    let prompt = agent.system_prompt();
+    assert!(prompt.contains("Do not keep a checklist"), "{prompt}");
+    assert!(!prompt.contains("write the plan with `plan`"), "{prompt}");
+}

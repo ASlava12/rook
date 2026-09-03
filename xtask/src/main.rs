@@ -3,6 +3,7 @@
 //! the same on Windows as it does on the BSDs — which is the whole point of a
 //! four-platform target list.
 
+mod bench;
 mod smoke;
 
 use std::process::{Command, ExitCode};
@@ -111,6 +112,18 @@ enum Task {
         /// `provider/model`, else `ROOK_SMOKE_MODEL`, else the configured one.
         #[arg(long)]
         model: Option<String>,
+    },
+    /// Measure whether a checklist tool earns its keep, against ADR-0010.
+    Bench {
+        /// `provider/model`, else `ROOK_BENCH_MODEL`.
+        #[arg(long)]
+        model: Option<String>,
+        /// Runs per task per arm. Three is what the reference used.
+        #[arg(long, default_value_t = 3)]
+        repeats: usize,
+        /// Only these arms, comma separated: plan-line, nothing, todo-tool.
+        #[arg(long)]
+        arms: Option<String>,
     },
     /// Work with the upstream agent sources in `references/`.
     Refs {
@@ -262,6 +275,7 @@ fn run() -> Result<()> {
         Task::Compaction => cargo(&["run", "--release", "-p", "rook-store", "--example", "compaction"]),
         Task::Clean { all } => clean(all),
         Task::Smoke { model } => smoke::smoke(model),
+        Task::Bench { model, repeats, arms } => bench::bench(model, repeats, arms),
         Task::Refs { action } => refs(action),
     }
 }

@@ -93,6 +93,13 @@ pub struct AgentConfig {
     /// Ask for a brief plan before multi-step work. One line in the system
     /// prompt, not a checklist tool — see ADR-0010.
     pub plan_first: bool,
+    /// Give the model a `plan` tool and ask it to keep the list current, in
+    /// place of the line `plan_first` adds.
+    ///
+    /// Off, and deliberately: [ADR-0010](../../docs/adr/0010-no-todo-tool.md)
+    /// declined it on somebody else's measurement, and this exists so that
+    /// measurement can be repeated here rather than believed.
+    pub todo_tool: bool,
     /// Ask again when a reply slips into a writing system the conversation has
     /// not used. Off for work that mixes scripts on purpose — translating,
     /// or anything where the answer is meant to be in another one.
@@ -307,6 +314,7 @@ impl Default for AgentConfig {
             lazy_tools: true,
             effort: "high".into(),
             plan_first: true,
+            todo_tool: false,
             native_tools: true,
             one_script: true,
             context_window: None,

@@ -175,6 +175,13 @@ A test of such a path asks the code that made it (`install::current`), or
 spells both answers under `cfg!(windows)`. A name that exists on no PATH is the
 way to assert that a lookup fell through.
 
+**A decision taken on somebody else's numbers is worth our own.** `cargo xtask
+bench --model …` is the harness for that: arms that differ by one variable,
+tasks scored from the workspace rather than from what the model claimed, and
+cost beside the pass. It was built to re-measure ADR-0010 and is not specific
+to it. A model capable enough to pass everything measures cost only, which is
+a result and not a failure of the harness — say which it was.
+
 **A red smoke is read, not rerun.** The `smoke ollama` job is not a gate, and
 its transcript is the most productive reading in the repository: five passes
 over one day found the rustup shim offered as a server, a misleading
