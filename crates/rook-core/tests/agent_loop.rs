@@ -4105,12 +4105,11 @@ async fn a_turn_out_of_steps_that_already_spoke_is_left_as_it_is() {
 async fn a_turn_out_of_steps_still_collects_the_sub_agents_it_started() {
     let f = fixture();
     let session = f.rook.start_session("limit-with-children").unwrap();
-    // No rule answers "out of steps": were the last word asked for with the
-    // children's answers already in hand, the provider would refuse and the
-    // turn would fail here.
     let provider = Arc::new(ByPrompt(vec![
         ("count the files", call("delegate", serde_json::json!({ "tasks": ["tally"], "wait": false }))),
         ("started: task01", call("list_dir", serde_json::json!({ "path": "." }))),
+        // Before the child's rule: the hand-over quotes the task's name.
+        ("out of steps", reply("three, per the sub-agent")),
         ("tally", reply("there are three")),
     ]));
     let mut agent = AgentLoop::new(&f.rook, provider, session);
@@ -4119,8 +4118,11 @@ async fn a_turn_out_of_steps_still_collects_the_sub_agents_it_started() {
 
     assert_eq!(outcome.stopped, "max_steps");
     assert_eq!(outcome.delegated.len(), 1, "the child's cost is the turn's");
-    assert!(outcome.reply.contains("did not collect"), "{}", outcome.reply);
-    assert!(outcome.reply.contains("there are three"), "{}", outcome.reply);
+    // The child's answer went in front of the model for its last word, which
+    // is the answer; the transcript keeps the hand-over.
+    assert_eq!(outcome.reply, "three, per the sub-agent");
+    let transcript = f.rook.transcript(session, 0, 200, 8000).unwrap();
+    assert!(transcript.iter().any(|e| e.body.contains("there are three")), "the child's answer was recorded");
 }
 
 /// The same call answered the same way twice is a loop. The third is not made;
@@ -4177,4 +4179,26 @@ async fn a_call_whose_answer_changed_is_not_a_loop() {
         outcome.reply
     );
     assert_eq!(outcome.reply, "beta now");
+}
+
+/// A parent that ends the turn with a sub-agent still out is handed what came
+/// back and asked to go on, so it answers from it rather than from memory:
+/// asked what it found with the readers' answers appended below where it
+/// never looked, a model made the number up.
+#[tokio::test]
+async fn an_uncollected_sub_agents_answer_reaches_the_model_before_the_turn_ends() {
+    let f = fixture();
+    let session = f.rook.start_session("handed").unwrap();
+    let provider = Arc::new(ByPrompt(vec![
+        ("count the files", call("delegate", serde_json::json!({ "tasks": ["tally"], "wait": false }))),
+        ("started: task01", reply("done for now")),
+        // Before the child's rule: the hand-over quotes the task's name.
+        ("did not collect", reply("it says three")),
+        ("tally", reply("there are three")),
+    ]));
+    let outcome = AgentLoop::new(&f.rook, provider, session).run("count the files").await.unwrap();
+
+    assert_eq!(outcome.reply, "it says three");
+    assert_eq!(outcome.tools_called, ["delegate"]);
+    assert_eq!(outcome.delegated.len(), 1);
 }

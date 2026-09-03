@@ -1063,8 +1063,14 @@ apologised for the ceiling instead of reporting the verdict. The same call
 answered the same way twice is a loop, not a question: the third is refused
 and pointed at the answer it has. Same result is the test, not same
 arguments, and a call that changed something starts the count over — a
-command run again after an edit is not caught by it. What the scenarios say
-at the new size is open again.
+command run again after an edit is not caught by it. The tenth reading
+failed all five, and the delegation scenario said why in its own words: the
+parent started three readers without waiting, ended the turn, was asked what
+it found, and made a number up — with the readers' answers appended below
+where it never looked. What a turn's sub-agents brought back is handed to the
+model once before the turn ends, so it answers from them; a turn out of steps
+gets them in front of it for its last word. What the scenarios say at the new
+size is open again.
 
 **A server fetched once is one somebody has to remember to update.** Now the
 agent remembers: past `[agent] server_update_after_days` (thirty by default,

@@ -369,11 +369,12 @@ fn plural(n: i64) -> &'static str {
 }
 
 /// A turn does not end with its work still out. What the model never collected
-/// is waited for and appended rather than dropped at the door: the children
+/// is waited for and handed back rather than dropped at the door: the children
 /// have already spent the tokens, and their answers are the reason they ran.
-async fn drain_uncollected(nursery: &mut Nursery<'_>, outcome: &mut TurnOutcome) {
+/// The report, if there was anything to collect.
+async fn drain_uncollected(nursery: &mut Nursery<'_>, outcome: &mut TurnOutcome) -> Option<String> {
     if !nursery.busy() && nursery.taken.iter().all(|taken| *taken) {
-        return;
+        return None;
     }
     while let Some((landed, result)) = nursery.running.next().await {
         nursery.landed[landed] = Some(result);
@@ -388,12 +389,8 @@ async fn drain_uncollected(nursery: &mut Nursery<'_>, outcome: &mut TurnOutcome)
             left.push(collected(&nursery.tasks[at], result, outcome));
         }
     }
-    if !left.is_empty() {
-        outcome.reply.push_str(&format!(
-            "\n\n(sub-agents this turn started and did not collect)\n\n{}",
-            left.join("\n\n")
-        ));
-    }
+    (!left.is_empty())
+        .then(|| format!("(sub-agents this turn started and did not collect)\n\n{}", left.join("\n\n")))
 }
 
 fn close_open_call(messages: &mut Vec<Message>, open: &mut Option<String>) {
@@ -1399,6 +1396,7 @@ impl<'a> AgentLoop<'a> {
 
         let mut asked_for_one_script = false;
         let mut asked_to_say = false;
+        let mut handed_left = false;
         let mut repeated: std::collections::BTreeMap<(String, String), (String, u32)> =
             std::collections::BTreeMap::new();
         let mut checked_goal = false;
@@ -1535,7 +1533,22 @@ impl<'a> AgentLoop<'a> {
                 // into it, which is not where the person put it.
                 let said = self.interjections.take();
                 if said.is_empty() {
-                    drain_uncollected(&mut nursery, &mut outcome).await;
+                    // Handed to the model once, so it can answer from them: a
+                    // parent that started three readers and ended the turn was
+                    // asked what it found and made a number up, with the
+                    // readers' answers appended below where it never looked.
+                    // A second time they go to the reply, or a model that
+                    // keeps starting readers keeps the turn open.
+                    if let Some(left) = drain_uncollected(&mut nursery, &mut outcome).await {
+                        if !handed_left {
+                            handed_left = true;
+                            self.rook.log(self.session, EventKind::Note, "sub-agents", &left).ok();
+                            messages.push(response.message.clone());
+                            messages.push(Message::user(&left));
+                            continue;
+                        }
+                        outcome.reply.push_str(&format!("\n\n{left}"));
+                    }
                     // Once. A model that slips twice is one that cannot write
                     // the answer any other way, and a second ask spends a turn
                     // to be told so again.
@@ -1686,11 +1699,16 @@ impl<'a> AgentLoop<'a> {
         outcome.stopped = "max_steps".into();
         // The limit is the model's, not the children's: what they were still
         // doing is waited for here as it is at the end of a turn that finished.
-        drain_uncollected(&mut nursery, &mut outcome).await;
+        let left = drain_uncollected(&mut nursery, &mut outcome).await;
         // A turn that ran out of steps with a call as its last word has done
         // work nobody was told about. One more call, with nothing to reach
-        // for, so the turn ends on what it found rather than on the limit.
+        // for, so the turn ends on what it found rather than on the limit —
+        // and with what its sub-agents brought back in front of it.
         if outcome.reply.trim().is_empty() && !outcome.tools_called.is_empty() {
+            if let Some(left) = &left {
+                self.rook.log(self.session, EventKind::Note, "sub-agents", left).ok();
+                messages.push(Message::user(left));
+            }
             messages.push(Message::user(OUT_OF_STEPS));
             self.rook.log(self.session, EventKind::Note, "out of steps", OUT_OF_STEPS).ok();
             let mut request = Request::new(messages);
@@ -1721,6 +1739,8 @@ impl<'a> AgentLoop<'a> {
                 )?;
                 outcome.reply = response.message.content;
             }
+        } else if let Some(left) = &left {
+            outcome.reply.push_str(&format!("\n\n{left}"));
         }
         // For a front end, which renders silence as a hang. A child's silence
         // is the parent's to report, by what the child called.
