@@ -617,13 +617,34 @@ fn apply(text: &str, edit: &Edit) -> std::result::Result<(String, usize), String
         return Err("`old` and `new` are the same, so this edit would change nothing".into());
     }
     match text.matches(&edit.old).count() {
-        0 => Err("that text is not in the file as given — read it again, it may have changed".into()),
+        0 => Err(match nearest_line(text, &edit.old) {
+            // A model that guessed the text is told what is there instead: a
+            // `9001` written for a port it never read was refused twice
+            // before it looked.
+            Some(line) => format!(
+                "that text is not in the file as given — read it again, it may have changed. \
+                 The nearest line is: {line}"
+            ),
+            None => "that text is not in the file as given — read it again, it may have changed".into(),
+        }),
         n if n > 1 && !edit.replace_all => {
             Err(format!("that text appears {n} times; add surrounding context or set replace_all"))
         }
         n if edit.replace_all => Ok((text.replace(&edit.old, &edit.new), n)),
         _ => Ok((text.replacen(&edit.old, &edit.new, 1), 1)),
     }
+}
+
+/// The line sharing the most words with the first line of `wanted`, if any
+/// share one. Words, not characters: a line with the same identifier in it is
+/// what a model that misremembered a value needs shown.
+fn nearest_line<'a>(text: &'a str, wanted: &str) -> Option<&'a str> {
+    let words: Vec<&str> = wanted.lines().next()?.split_whitespace().collect();
+    text.lines()
+        .map(|line| (line.split_whitespace().filter(|w| words.contains(w)).count(), line))
+        .filter(|(shared, _)| *shared > 0)
+        .max_by_key(|(shared, _)| *shared)
+        .map(|(_, line)| line.trim())
 }
 
 pub struct ListDir;

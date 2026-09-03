@@ -345,3 +345,36 @@ async fn a_list_of_paths_beside_one_edits_applies_them_to_each() {
         .to_string();
     assert!(err.contains("appears twice"), "{err}");
 }
+
+/// Text that is not in the file is refused with the nearest line shown: a
+/// model that guessed a value is told what is there, not only that it is not.
+/// The refusal is a tool outcome the model reads, not an error in the arguments.
+#[tokio::test]
+async fn text_not_in_the_file_is_refused_with_the_nearest_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = "pub const HOST: &str = \"::1\";\npub const PORT: u16 = 8443;\n";
+    std::fs::write(dir.path().join("config.rs"), file).unwrap();
+    let ctx = ToolContext::new(dir.path().to_path_buf());
+    let guessed = serde_json::json!({
+        "path": "config.rs",
+        "edits": [{ "old": "pub const PORT: u16 = 9001;", "new": "pub const PORT: u16 = 9000;" }]
+    });
+    let refused = EditFile.call(&ctx, &guessed).await.unwrap();
+    assert!(refused.is_error, "{}", refused.content);
+    assert!(refused.content.contains("not in the file"), "{}", refused.content);
+    assert!(
+        refused.content.contains("The nearest line is: pub const PORT: u16 = 8443;"),
+        "{}",
+        refused.content
+    );
+
+    let unlike =
+        serde_json::json!({ "path": "config.rs", "edits": [{ "old": "nothing like it", "new": "x" }] });
+    let refused = EditFile.call(&ctx, &unlike).await.unwrap();
+    assert!(refused.is_error);
+    assert!(
+        !refused.content.contains("nearest"),
+        "no line shares a word, so none is offered: {}",
+        refused.content
+    );
+}

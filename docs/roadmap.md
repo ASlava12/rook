@@ -1034,8 +1034,10 @@ fourth had hidden: a reply carrying tool calls arrived with `finish_reason:
 the word rather than the calls — so the calls were logged as text and never
 run, which is what the fenced retry in the fourth reading had been. A message
 that carries tool calls is a tool use whatever the finish reason said, in the
-dialect and in the loop. What the scenarios say at the new size is open
-again.
+dialect and in the loop. And a guess is answered with what is there: an edit
+whose text is not in the file is refused with the nearest line shown, so a
+`9001` written for a port never read is told about the `8443`. What the
+scenarios say at the new size is open again.
 
 **A server fetched once is one somebody has to remember to update.** Now the
 agent remembers: past `[agent] server_update_after_days` (thirty by default,
