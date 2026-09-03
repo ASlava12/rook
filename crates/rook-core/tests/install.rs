@@ -267,6 +267,10 @@ async fn an_autonomous_turn_fetches_the_missing_server_into_the_state_directory(
     assert!(outcome.open_questions.is_empty(), "{:?}", outcome.open_questions);
     assert_eq!(outcome.decisions.len(), 1, "{:?}", outcome.decisions);
     assert!(outcome.decisions[0].contains("next session"), "{:?}", outcome.decisions);
-    let installed = home.path().join("servers").join("rust-analyzer").join("current").join("rust-analyzer");
-    assert_eq!(std::fs::read(&installed).unwrap(), payload, "in place under the state directory");
+    // Asked of the crate rather than spelled out: on Windows the one in place
+    // is `rust-analyzer.exe`, and a test that wrote the unix name read a
+    // Windows runner as having installed nothing.
+    let installed = rook_core::install::current("rust-analyzer");
+    assert!(installed.starts_with(home.path()), "under the state directory: {}", installed.display());
+    assert_eq!(std::fs::read(&installed).unwrap(), payload, "in place: {}", installed.display());
 }
