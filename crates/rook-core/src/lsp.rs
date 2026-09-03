@@ -62,7 +62,9 @@ pub fn detected() -> Vec<ServerConfig> {
         .filter_map(|(language, command, args, extensions)| {
             // What `rook lsp install` fetched wins over PATH: it is the one the
             // user asked for by name, and it has a digest on record.
-            let command = installed(command).or_else(|| on_path(command).then(|| (*command).to_string()))?;
+            let command = installed(command)
+                .or_else(|| on_path(command).then(|| (*command).to_string()))
+                .filter(|command| starts(command))?;
             Some((language, command, args, extensions))
         })
         .map(|(language, command, args, extensions)| ServerConfig {
@@ -79,6 +81,42 @@ pub fn detected() -> Vec<ServerConfig> {
 fn installed(command: &str) -> Option<String> {
     let current = crate::install::current(command);
     current.is_file().then(|| current.to_string_lossy().into_owned())
+}
+
+/// Whether the program answers `--version` at all.
+///
+/// A file on PATH is not a server that runs: rustup installs a `rust-analyzer`
+/// shim whether or not the component is, and the shim exits at once saying so.
+/// Offered on the strength of the file, the four tools reached a model that
+/// used them first and read the file never — "the language server exited: 15"
+/// was the whole of what it learned. Bounded, because an unknown binary asked
+/// a question may not answer it.
+fn starts(command: &str) -> bool {
+    let Ok(mut child) = std::process::Command::new(command)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            // Still running after three seconds is not a version check; it is
+            // a server that started serving, which is as good an answer.
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return true;
+            }
+        }
+    }
 }
 
 /// Whether `command` would start from PATH.

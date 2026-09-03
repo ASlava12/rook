@@ -987,9 +987,14 @@ of them found a defect here than found something worth porting.
 **The smoke job's model.** `cargo xtask smoke` now runs in CI against a
 small model in a service container, and is deliberately not a gate: a model
 that size fails for reasons that are not ours, and a job that goes red on a
-coin-flip teaches everyone to stop reading it. What is left is watching how
-often it is red and why, and moving to a larger tag if the small one cannot
-carry the four scenarios.
+coin-flip teaches everyone to stop reading it. Its first reading paid: of
+three failures, two were ours — rustup's `rust-analyzer` shim was offered as a
+server on the strength of the file, and `edit_file` told a model that had
+written `path` three times that `path` was missing — and one was the model's,
+a checker that gave no verdict. Both of ours are fixed; a server is probed
+before it is offered, and the message names the shape that was wrong. What is
+left is watching how often it is red and why, and moving to a larger tag if
+the small one cannot carry the four scenarios.
 
 ## After that
 

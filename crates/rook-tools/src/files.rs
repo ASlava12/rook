@@ -502,6 +502,16 @@ fn parse_targets(args: &serde_json::Value) -> Result<Vec<Target>> {
                 .into(),
         )
     })?;
+    // Said before the entry is read, and by what it is: a model handed a
+    // list of path strings here, and was told that `path` was missing from
+    // an argument it had just written three times.
+    if let Some(wrong) = files.iter().find(|f| !f.is_object()) {
+        return Err(invalid(format!(
+            "each entry of `files` is an object {{path, edits}}, not {} — for one file pass `path` \
+             and `edits` at the top instead",
+            kind_of(wrong)
+        )));
+    }
     let targets: Vec<Target> = files
         .iter()
         .map(|f| Ok(Target { path: arg_str(f, "edit_file", "path")?, edits: parse_edits(f)? }))
@@ -519,6 +529,18 @@ fn parse_targets(args: &serde_json::Value) -> Result<Vec<Target>> {
         )));
     }
     Ok(targets)
+}
+
+/// What a JSON value is, in the word a message uses.
+fn kind_of(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "an array",
+        serde_json::Value::Object(_) => "an object",
+    }
 }
 
 /// The change as a person reads one. Bounded, because a rewritten file is a diff

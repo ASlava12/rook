@@ -275,3 +275,21 @@ async fn an_edit_that_would_change_nothing_says_so_instead_of_reporting_a_replac
     assert!(out.is_error, "a step that did nothing must not read as progress: {}", out.content);
     assert_eq!(f.contents(), "let a = 1;\n");
 }
+
+/// A model handed `files` a list of path strings and was told `path` was
+/// missing from an argument it had just written three times. The message
+/// names what was actually wrong: the shape of the entry.
+#[tokio::test]
+async fn a_files_entry_that_is_not_an_object_is_named_by_what_it_is() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "port = 8080\n").unwrap();
+    let ctx = ToolContext::new(dir.path().to_path_buf());
+    let err = EditFile
+        .call(&ctx, &serde_json::json!({ "files": ["a.txt"], "edits": [{ "old": "8080", "new": "9000" }] }))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("each entry of `files` is an object"), "{err}");
+    assert!(err.contains("not a string"), "says what it got instead: {err}");
+    assert!(!err.contains("\"path\" is missing"), "and not the misleading thing: {err}");
+}

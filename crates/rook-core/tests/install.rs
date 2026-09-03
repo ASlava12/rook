@@ -496,3 +496,29 @@ async fn update_fetches_again_what_is_in_place_and_says_what_moved() {
     std::fs::create_dir_all(into.path().join("notes")).unwrap();
     assert_eq!(installer.installed().len(), 1);
 }
+
+/// A file on PATH is not a server that runs: rustup installs a `rust-analyzer`
+/// shim whether or not the component is, and the shim exits at once saying
+/// so. Offered on the strength of the file, the tools reached a model that
+/// used them first and read the file never.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_server_that_cannot_answer_its_version_is_not_offered() {
+    use std::os::unix::fs::PermissionsExt;
+    let _one = one_at_a_time().await;
+    let home = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("ROOK_HOME", home.path()) };
+    let tools = tempfile::tempdir().unwrap();
+    let shim = tools.path().join("rust-analyzer");
+    std::fs::write(&shim, "#!/bin/sh\necho \"error: 'rust-analyzer' is not installed\" >&2\nexit 1\n")
+        .unwrap();
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let _first = ToolsFirst::new(tools.path());
+    let offered: Vec<String> = rook_core::lsp::detected().into_iter().map(|c| c.language).collect();
+    assert!(!offered.contains(&"rust".to_string()), "a shim that exits is not a server: {offered:?}");
+
+    std::fs::write(&shim, "#!/bin/sh\necho rust-analyzer 1.0\n").unwrap();
+    let offered: Vec<String> = rook_core::lsp::detected().into_iter().map(|c| c.language).collect();
+    assert!(offered.contains(&"rust".to_string()), "one that answers is: {offered:?}");
+}
