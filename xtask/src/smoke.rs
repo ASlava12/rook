@@ -88,11 +88,15 @@ const SCENARIOS: &[Scenario] = &[
     },
 ];
 
-/// No server is ever asked anything here, and a fetched one served from the
-/// next session on — which a scenario never has. Off, or every scenario
-/// downloaded rust-analyzer first.
+/// The config every scenario runs under. No server is ever asked anything
+/// here, and a fetched one serves from the next session on — which a scenario
+/// never has — so installing is off, or every scenario downloaded
+/// rust-analyzer first. And eight steps a scenario: each is a model call, half
+/// a minute on a CPU runner, and a small model that has not answered in eight
+/// is not going to. Left at the default of two hundred, one scenario ran for
+/// an hour and took the job past its timeout.
 fn config_for(model: &str) -> String {
-    format!("[agent]\nmodel = \"{model}\"\ninstall_servers = false\n")
+    format!("[agent]\nmodel = \"{model}\"\ninstall_servers = false\nmax_steps = 8\n")
 }
 
 fn expect(held: bool, why: &str, turn: &Turn) -> Result<()> {
