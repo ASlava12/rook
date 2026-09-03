@@ -167,14 +167,56 @@ fn run(rook: &Path, home: &Path, workspace: &Path, prompt: &str) -> Result<Turn>
         .output()
         .context("running a turn")?;
     let text = String::from_utf8_lossy(&out.stdout);
-    let turn: serde_json::Value = serde_json::from_str(text.trim())
+    let printed: serde_json::Value = serde_json::from_str(text.trim())
         .with_context(|| format!("reading the turn: {}{}", text, String::from_utf8_lossy(&out.stderr)))?;
+    turn_from(&printed).with_context(|| {
+        format!(
+            "the turn printed no outcome (exit {}):\n{}{}",
+            out.status,
+            text.trim(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )
+    })
+}
+
+/// What `rook run --json` prints is `{"session", "outcome", "changes"}`, and
+/// the outcome is what a scenario judges. Read from the nested object: the
+/// first shape of this read the top level, every field came back empty, and
+/// four scenarios failed in CI saying nothing about why.
+fn turn_from(printed: &serde_json::Value) -> Result<Turn> {
+    let outcome =
+        printed.get("outcome").filter(|o| o.is_object()).context("no `outcome` in what was printed")?;
     Ok(Turn {
-        reply: turn["reply"].as_str().unwrap_or_default().to_string(),
-        tools: turn["tools_called"]
+        reply: outcome["reply"].as_str().unwrap_or_default().to_string(),
+        tools: outcome["tools_called"]
             .as_array()
             .map(|a| a.iter().filter_map(|t| t.as_str().map(str::to_string)).collect())
             .unwrap_or_default(),
-        stopped: turn["stopped"].as_str().unwrap_or_default().to_string(),
+        stopped: outcome["stopped"].as_str().unwrap_or_default().to_string(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::turn_from;
+
+    /// The contract with `rook run --json`, pinned: the outcome is nested,
+    /// and a print with none is an error rather than an empty turn.
+    #[test]
+    fn a_turn_is_read_from_the_nested_outcome_the_cli_prints() {
+        let printed = serde_json::json!({
+            "session": "01ABC",
+            "outcome": { "reply": "done", "stopped": "end_turn", "tools_called": ["read_file"] },
+            "changes": null
+        });
+        let turn = turn_from(&printed).unwrap();
+        assert_eq!((turn.reply.as_str(), turn.stopped.as_str()), ("done", "end_turn"));
+        assert_eq!(turn.tools, ["read_file"]);
+
+        let flat = serde_json::json!({ "reply": "done", "stopped": "end_turn", "tools_called": [] });
+        assert!(
+            turn_from(&flat).is_err(),
+            "the top-level shape is not the CLI's, and reading it is how every field came back empty"
+        );
+    }
 }

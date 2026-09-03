@@ -38,6 +38,10 @@ jobs:
   freebsd:
     name: test freebsd
     runs-on: ubuntu-latest
+    # The VM action has hung for hours, and a run that never completes holds
+    # every other job's log hostage: GitHub serves none until the whole run
+    # is done. The tests take about ten minutes when the VM comes up.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: vmactions/freebsd-vm@v1
@@ -100,7 +104,7 @@ jobs:
       - name: pull the model
         # The pull streams progress until it is done; curl returns when it is.
         run: |
-          for i in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             curl -fsS http://127.0.0.1:11434/api/tags > /dev/null && break
             sleep 2
           done
