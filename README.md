@@ -475,8 +475,11 @@ The stance is how much latitude the agent has, and it is one setting rather than
 two: an approval mode and a level of autonomy are the same question asked twice.
 `readonly` changes nothing; `assist` confirms anything not explicitly allowed and
 puts a fork in the work to you rather than settling it alone; `autonomous` runs
-anything not denied. A sub-agent inherits the stance of the turn that started it
-and is never given more. `mode`, and the names `ask` and `auto`, are still read.
+anything not denied — and before a turn of it ends, a checker that did not do
+the work asks whether the goal was met and nothing forbidden done: the session's
+goal, or with none set what the turn was asked, and `fails` gives it one more
+go. A sub-agent inherits the stance of the turn that started it and is never
+given more. `mode`, and the names `ask` and `auto`, are still read.
 
 It is changeable while you work: `/stance` in the chat, F2 in the TUI, a
 select in the browser, and a session config option over ACP — all the same
