@@ -1023,8 +1023,13 @@ found the number, and stopped without a word, which every front end renders as
 a hang. A turn that did something and said nothing is asked once, in words,
 what it found. The rest was the model's: `read_file` for a prompt that said
 `cat`, a checker whose `fails` was right for the wrong reason, and a parent
-that rewrote `lib.rs` until the claim came true. What the scenarios say at the
-new size is open again.
+that rewrote `lib.rs` until the claim came true. The fifth reading, with the
+edit tool's readings in: the edit scenario passed, and the new delegation
+scenario found the next shape — `delegate` handed a tool call in place of a
+task, told "delegate needs a task", which it thought it had given. The
+refusal names the shape now and shows the one that works, and an object with
+the sentence under `task` is read for it. What the scenarios say at the new
+size is open again.
 
 **A server fetched once is one somebody has to remember to update.** Now the
 agent remembers: past `[agent] server_update_after_days` (thirty by default,

@@ -1909,10 +1909,10 @@ impl<'a> AgentLoop<'a> {
     where
         'a: 'f,
     {
-        let tasks = requested_tasks(args);
-        if tasks.is_empty() {
-            return "delegate needs a task, or a list of tasks".into();
-        }
+        let tasks = match requested_tasks(args) {
+            Ok(tasks) => tasks,
+            Err(why) => return why,
+        };
 
         // Anything that is not one of the two words is context the parent wrote
         // out for the child. A live model filled this with the file it had just
@@ -3036,12 +3036,30 @@ fn render_span(entries: &[crate::TranscriptEntry], budget_tokens: usize) -> Stri
 /// genuinely different sub-tasks — `a.py` against `b.py` — 0.94, against a
 /// threshold of 0.95. A hundredth of a point between "one task said twice" and
 /// "two files to check" is not a distinction to spend real work on.
-fn requested_tasks(args: &serde_json::Value) -> Vec<String> {
-    let listed: Vec<&str> = args
-        .get("tasks")
-        .and_then(|t| t.as_array())
-        .map(|items| items.iter().filter_map(|t| t.as_str()).collect())
-        .unwrap_or_default();
+/// What the model asked to delegate. A task is words — a sentence of what to
+/// do — one as `task`, several as `tasks`. An entry that is an object with the
+/// sentence under `task` is read for it; one that is anything else, a tool
+/// call say, is refused by its shape: a child is handed a task it decides how
+/// to do, not a call somebody else decided on.
+fn requested_tasks(args: &serde_json::Value) -> std::result::Result<Vec<String>, String> {
+    let mut listed: Vec<&str> = Vec::new();
+    for item in args.get("tasks").and_then(|t| t.as_array()).into_iter().flatten() {
+        let text = item.as_str().or_else(|| {
+            ["task", "goal", "prompt", "description"].iter().find_map(|key| item.get(key)?.as_str())
+        });
+        match (text, item.as_object()) {
+            (Some(text), _) => listed.push(text),
+            (None, Some(object)) => {
+                let keys: Vec<&str> = object.keys().map(String::as_str).collect();
+                return Err(format!(
+                    "each task is a sentence of what to do — words, not an object with {} — as in \
+                     `tasks: [\"read notes/port.txt and report the port it names\"]`",
+                    keys.join(", ")
+                ));
+            }
+            (None, None) => return Err("each task is a sentence of what to do, as a string".into()),
+        }
+    }
     let single = args.get("task").and_then(|t| t.as_str());
 
     let mut tasks: Vec<String> = Vec::new();
@@ -3051,7 +3069,10 @@ fn requested_tasks(args: &serde_json::Value) -> Vec<String> {
             tasks.push(task.to_string());
         }
     }
-    tasks
+    if tasks.is_empty() {
+        return Err("delegate needs a task, or a list of tasks".into());
+    }
+    Ok(tasks)
 }
 
 /// A breakpoint below the minimum cacheable prefix only pays the write premium,

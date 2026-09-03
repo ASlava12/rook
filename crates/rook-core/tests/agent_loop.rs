@@ -3884,3 +3884,49 @@ async fn a_fenced_call_after_prose_is_adopted_under_native_tools() {
         "pub const PORT: u16 = 9000;\n"
     );
 }
+
+/// A task is words. A model handed `delegate` a tool call in place of one and
+/// was told it needed a task, which it thought it had given; the refusal now
+/// names the shape and shows the one that works.
+#[tokio::test]
+async fn a_task_given_as_a_tool_call_is_refused_by_its_shape() {
+    let f = fixture();
+    let session = f.rook.start_session("shape").unwrap();
+    let script = vec![
+        call(
+            "delegate",
+            serde_json::json!({ "tasks": [{ "tool": "read_file", "arguments": { "path": "x" } }] }),
+        ),
+        reply("noted"),
+    ];
+    let outcome =
+        AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session).run("go").await.unwrap();
+
+    assert!(outcome.delegated.is_empty(), "{:?}", outcome.delegated);
+    let said = f
+        .rook
+        .transcript(session, 0, usize::MAX, 4096)
+        .unwrap()
+        .into_iter()
+        .rfind(|e| e.kind == "tool-result")
+        .unwrap()
+        .body;
+    assert!(said.contains("words, not an object with arguments, tool"), "{said}");
+    assert!(said.contains("tasks: [\""), "and shows the shape that works: {said}");
+}
+
+/// An object with the sentence under `task` is read for it.
+#[tokio::test]
+async fn a_task_given_as_an_object_carrying_task_is_read() {
+    let f = fixture();
+    let session = f.rook.start_session("object-task").unwrap();
+    let script = vec![
+        call("delegate", serde_json::json!({ "tasks": [{ "task": "say hello", "why": "a test" }] })),
+        reply("hello"),
+        reply("it said hello"),
+    ];
+    let outcome =
+        AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session).run("go").await.unwrap();
+    assert_eq!(outcome.delegated.len(), 1, "{:?}", outcome.delegated);
+    assert_eq!(outcome.reply, "it said hello");
+}

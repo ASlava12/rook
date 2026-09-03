@@ -79,7 +79,10 @@ impl Editor {
     }
 
     async fn next(&mut self) -> serde_json::Value {
-        let line = tokio::time::timeout(std::time::Duration::from_secs(5), self.lines.next_line())
+        // Only to tell "failed" from "hung", so generous: five seconds was met
+        // here and missed on the Windows runner, where twenty of these run at
+        // once and one of them starts a shell.
+        let line = tokio::time::timeout(std::time::Duration::from_secs(60), self.lines.next_line())
             .await
             .expect("the server went quiet")
             .unwrap()
