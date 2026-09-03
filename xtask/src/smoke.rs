@@ -60,6 +60,16 @@ const SCENARIOS: &[Scenario] = &[
         },
     },
     Scenario {
+        name: "delegates and uses what came back",
+        seed: &[("notes/port.txt", "the service listens on 7331\n")],
+        prompt: "Use the delegate tool to have a sub-agent read notes/port.txt and report the port \
+                 it names; then answer with that number only.",
+        check: |turn, _| {
+            expect(turn.tools.iter().any(|t| t == "delegate"), "the tool has to be the one used", turn)?;
+            expect(turn.reply.contains("7331"), "the number came back through a sub-agent", turn)
+        },
+    },
+    Scenario {
         name: "does not settle a claim from memory",
         seed: &[("lib.rs", "pub fn add(a: i32, b: i32) -> i32 { a - b }\n")],
         prompt: "Use the verify tool to check this claim: `add` in lib.rs returns the sum of its \
@@ -137,7 +147,9 @@ pub fn smoke(model: Option<String>) -> Result<()> {
         let workspace = tempfile::tempdir()?;
         std::fs::write(home.path().join("config.toml"), config_for(&model))?;
         for (name, body) in scenario.seed {
-            std::fs::write(workspace.path().join(name), body)?;
+            let path = workspace.path().join(name);
+            std::fs::create_dir_all(path.parent().unwrap_or(workspace.path()))?;
+            std::fs::write(path, body)?;
         }
 
         let outcome = run(&rook, home.path(), workspace.path(), scenario.prompt);
