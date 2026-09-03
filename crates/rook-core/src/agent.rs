@@ -727,7 +727,7 @@ impl<'a> AgentLoop<'a> {
         }
         let stale = crate::install::stale(
             &crate::paths::servers_dir(),
-            std::time::Duration::from_secs(after * 86_400),
+            std::time::Duration::from_secs(after.saturating_mul(86_400)),
         );
         if stale.is_empty() {
             return;
@@ -1456,8 +1456,7 @@ impl<'a> AgentLoop<'a> {
             // only way a call arrives; with them, a small model still writes
             // one as text some of the time, and the turn ended with nothing
             // called. Only a tool that was offered is taken as called.
-            let offered = self.tool_specs();
-            rook_llm::prompted::adopt(&mut response, |name| offered.iter().any(|t| t.name == name));
+            rook_llm::prompted::adopt(&mut response, |name| self.tool_specs().iter().any(|t| t.name == name));
 
             // Only when it is at least what the text plainly weighs. A provider
             // reporting less than that is not counting what this needs counted —
