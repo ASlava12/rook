@@ -1085,8 +1085,10 @@ written a second time after the nearest line and the file had both shown
 the model's — and one delegation ended at `max_tokens` inside a fenced JSON
 call, with nothing called. That last one is ours: a reply cut at the output
 limit is neither an answer nor a call, and is asked once to go on, so a call
-gets written whole and an answer gets finished. The job stays as it is, read
-rather than rerun.
+gets written whole and an answer gets finished. The reading after that ran
+two of five with nothing of ours in the three: the readings have found what
+they are going to find at this size. The job stays as it is, read rather than
+rerun.
 
 **Autonomy is a task and its boundaries, and the task is what was asked.**
 The goal check ran only for a session with a goal set, so `rook run` at
