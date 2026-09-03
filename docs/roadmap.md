@@ -1069,8 +1069,15 @@ parent started three readers without waiting, ended the turn, was asked what
 it found, and made a number up — with the readers' answers appended below
 where it never looked. What a turn's sub-agents brought back is handed to the
 model once before the turn ends, so it answers from them; a turn out of steps
-gets them in front of it for its last word. What the scenarios say at the new
-size is open again.
+gets them in front of it for its last word. The eleventh reading, with the
+repeat rule in, passed one of five, and every failure was the model's: a
+`find_skill` for a skill named `rust` to answer a question it had already
+read the answer to, an edit of `9001` written again after the nearest line
+and the file itself had both shown `8443`, `read_file` for a prompt that said
+`cat`, and a claim made true by rewriting the file under it. The readings
+have run out of mechanism to fix at this size; what is left is the model, and
+a larger one does not fit the runner's forty minutes. The job stays as it is,
+read rather than rerun.
 
 **A server fetched once is one somebody has to remember to update.** Now the
 agent remembers: past `[agent] server_update_after_days` (thirty by default,
