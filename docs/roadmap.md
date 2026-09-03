@@ -1115,6 +1115,10 @@ failed contained command says it was contained and names that setting. The
 tests run the same command contained and not, and CI's Linux runner passes
 all of them under Landlock with the network restrained; FreeBSD passes by
 skipping, which is what a platform with nothing to contain a command does.
+The first smoke run under Landlock passed the same three of five as before —
+containment cost the scenarios nothing — and a failed command's result
+carried the note. The note is for a failure that reads as a refusal, not for
+every failure: a missing `Cargo.toml` is not the sandbox's doing.
 [ADR-0011](adr/0011-containment-is-the-platforms.md) has the reasons: no
 helper binary, no container, and the network open by default.
 

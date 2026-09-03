@@ -130,4 +130,10 @@ async fn a_failed_contained_command_says_it_was_contained() {
     let out = rook_tools::exec::RunCommand.call(&ctx, &fine).await.unwrap();
     assert!(!out.is_error, "{}", out.content);
     assert!(!out.content.contains("ran contained"), "a success says nothing about it: {}", out.content);
+
+    // A failure that is not a refusal is not blamed on the sandbox.
+    let missing = serde_json::json!({ "command": "cat /nowhere/at/all" });
+    let out = rook_tools::exec::RunCommand.call(&ctx, &missing).await.unwrap();
+    assert!(out.is_error, "{}", out.content);
+    assert!(!out.content.contains("ran contained"), "a missing file is not the sandbox: {}", out.content);
 }

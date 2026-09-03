@@ -148,13 +148,15 @@ impl Tool for RunCommand {
         let kept = settle(spill, truncated);
 
         // A refused write looks like any other permission error, and a model
-        // that does not know the command was contained keeps trying: the
-        // failure says so, and what would widen it.
-        let held = match (code != 0, isolation.is_some()) {
-            (true, true) => {
+        // that does not know the command was contained keeps trying: a failure
+        // that reads as one says so, and what would widen it. Only that kind —
+        // a note on every failure would have a missing Cargo.toml blamed on
+        // the sandbox.
+        let held = match code != 0 && isolation.is_some() && denied(&combined) {
+            true => {
                 "\n(ran contained: writes only to the workspace and scratch — `[sandbox] writable` adds a directory)"
             }
-            _ => "",
+            false => "",
         };
         let outcome = ToolOutcome {
             content: format!(
@@ -271,6 +273,16 @@ async fn elsewhere(
         meta: Default::default(),
     }
     .with("exit_code", i64::from(ran.exit_code)))
+}
+
+/// Whether output reads as a refusal by the operating system. Text, because
+/// the kernel's answer reaches us as text: the shell prints it, and the exit
+/// code says only that something failed.
+fn denied(output: &str) -> bool {
+    let lower = output.to_ascii_lowercase();
+    ["permission denied", "operation not permitted", "read-only file system", "eacces", "eperm", "erofs"]
+        .iter()
+        .any(|word| lower.contains(word))
 }
 
 /// Start `command` the way the machine's shell would, with `env` added to
