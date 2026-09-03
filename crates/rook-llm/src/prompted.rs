@@ -19,6 +19,8 @@
 
 use crate::{Response, StopReason, ToolCall, ToolSpec};
 
+static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// What the model is told it may call.
 ///
 /// Goes in the system block, so it must be stable for a given tool list: the
@@ -77,7 +79,11 @@ pub fn calls_in(text: &str, known: impl Fn(&str) -> bool) -> (Vec<ToolCall>, Str
         }
         said.push_str(&text[kept_until..at]);
         kept_until = seen_until;
-        calls.push(ToolCall { id: format!("prompted-{at}"), name: called.tool, arguments: called.arguments });
+        // Unique for the process, not the reply: an id made from the offset
+        // recurred across replies that each began with the object, and a
+        // history replayed with the same id twice is one a dialect may refuse.
+        let n = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        calls.push(ToolCall { id: format!("prompted-{n}"), name: called.tool, arguments: called.arguments });
     }
     said.push_str(&text[kept_until..]);
     // The fences the objects sat in are left behind on their own lines.
@@ -125,6 +131,11 @@ mod tests {
         assert!(said.contains(r#"{"name": "widget""#), "an object naming no tool stays: {said}");
         assert!(!said.contains("```"), "{said}");
         assert_ne!(calls[0].id, calls[1].id);
+        let (again, _) = calls_in(text, |name| name != "widget");
+        assert!(
+            !again.iter().any(|c| calls.iter().any(|earlier| earlier.id == c.id)),
+            "ids do not recur across replies"
+        );
     }
 
     /// An answer that is JSON may carry a tool-shaped object inside it. The
