@@ -1017,7 +1017,14 @@ model was asked for names none. The call it wrote for the edit would then have
 been refused twice over — `from`/`to` for the two strings, and a list of paths
 beside one `edits` — so `edit_file` reads both now: the names other tools
 taught a model, and a list of paths beside one `edits` as those edits in each
-file. What the scenarios say at the new size is open again.
+file. The fourth reading, with the object read back: every scenario called
+real tools, and two of them ended the same new way — the model read the file,
+found the number, and stopped without a word, which every front end renders as
+a hang. A turn that did something and said nothing is asked once, in words,
+what it found. The rest was the model's: `read_file` for a prompt that said
+`cat`, a checker whose `fails` was right for the wrong reason, and a parent
+that rewrote `lib.rs` until the claim came true. What the scenarios say at the
+new size is open again.
 
 **A server fetched once is one somebody has to remember to update.** Now the
 agent remembers: past `[agent] server_update_after_days` (thirty by default,

@@ -1366,6 +1366,7 @@ impl<'a> AgentLoop<'a> {
         let mut carrying = tokio::time::interval(std::time::Duration::from_millis(200));
 
         let mut asked_for_one_script = false;
+        let mut asked_to_say = false;
         let mut checked_goal = false;
         let mut worth_compacting = true;
         // What the provider last said the request cost, and how many messages
@@ -1538,11 +1539,22 @@ impl<'a> AgentLoop<'a> {
                             continue;
                         }
                     }
+                    let did_something = !outcome.tools_called.is_empty() || !outcome.delegated.is_empty();
+                    // Once. A small model does the work and stops without a
+                    // word — read the file, found the number, said nothing —
+                    // and every front end renders that as a hang. Asked, it
+                    // says what it found; asked twice, it had nothing to say.
+                    if did_something && response.message.content.trim().is_empty() && !asked_to_say {
+                        asked_to_say = true;
+                        self.rook.log(self.session, EventKind::Note, "say it", SAY_IT).ok();
+                        messages.push(response.message.clone());
+                        messages.push(Message::user(SAY_IT));
+                        continue;
+                    }
                     // Autonomy is a task and its boundaries, and this is the
                     // boundary being held: before the turn ends, a checker asks
                     // whether the goal is met and whether anything forbidden was
                     // done. Once, and only for a turn that did something.
-                    let did_something = !outcome.tools_called.is_empty() || !outcome.delegated.is_empty();
                     if self.policy.stance() == Stance::Autonomous
                         && !checked_goal
                         && did_something
@@ -2929,6 +2941,10 @@ fn collected(task: &str, result: &Landed, outcome: &mut TurnOutcome) -> String {
 /// The shape of the answer is part of the instruction because a verdict that can
 /// be hedged is one that will be: "looks reasonable" is what a model says when it
 /// has read something and run nothing.
+const SAY_IT: &str = "\
+You ended the turn without saying anything. Answer now, in words: what you found, or what \
+you did and what is left.";
+
 const VERDICT_NUDGE: &str = "\
 You stopped without a verdict. If something is still to be run or read, do it now \
 with the tools rather than describing it; then end with exactly one of \

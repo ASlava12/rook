@@ -3809,3 +3809,78 @@ async fn an_object_naming_nothing_offered_is_an_answer() {
     assert!(outcome.tools_called.is_empty(), "{:?}", outcome.tools_called);
     assert_eq!(outcome.reply, json);
 }
+
+/// A model that did the work and stopped without a word is asked once to say
+/// what it found. The transcript keeps the silence and the ask; the outcome
+/// carries the answer.
+#[tokio::test]
+async fn a_turn_that_did_the_work_and_said_nothing_is_asked_once_to_say_it() {
+    let f = fixture();
+    let session = f.rook.start_session("say-it").unwrap();
+    std::fs::write(f.workspace.path().join("config.rs"), "pub const PORT: u16 = 8443;\n").unwrap();
+
+    let script =
+        vec![call("read_file", serde_json::json!({ "path": "config.rs" })), reply(""), reply("8443")];
+    let provider = ScriptedProvider::new(script);
+    let seen = provider.share();
+    let outcome = AgentLoop::new(&f.rook, Arc::new(provider), session).run("what port?").await.unwrap();
+
+    assert_eq!(outcome.reply, "8443");
+    assert_eq!(outcome.tools_called, vec!["read_file".to_string()]);
+    let asked = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| r.messages.last().is_some_and(|m| m.content.contains("without saying anything")))
+        .count();
+    assert_eq!(asked, 1, "asked once");
+}
+
+/// Asked once. A second silence ends the turn as a silence, named as such,
+/// rather than a third request.
+#[tokio::test]
+async fn a_turn_silent_twice_ends_as_a_silence() {
+    let f = fixture();
+    let session = f.rook.start_session("silent").unwrap();
+    std::fs::write(f.workspace.path().join("config.rs"), "pub const PORT: u16 = 8443;\n").unwrap();
+
+    let script = vec![
+        call("read_file", serde_json::json!({ "path": "config.rs" })),
+        reply(""),
+        reply(""),
+        reply("never reached"),
+    ];
+    let provider = ScriptedProvider::new(script);
+    let seen = provider.share();
+    let outcome = AgentLoop::new(&f.rook, Arc::new(provider), session).run("what port?").await.unwrap();
+
+    assert!(outcome.reply.contains("without saying anything"), "{}", outcome.reply);
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        3,
+        "the model was called for the read, the silence, and the ask — not again"
+    );
+}
+
+/// The call a small model writes back after a refusal: prose, then the object
+/// in a fence. Adopted like a bare one, with the prose kept as what it said.
+#[tokio::test]
+async fn a_fenced_call_after_prose_is_adopted_under_native_tools() {
+    let f = fixture();
+    let session = f.rook.start_session("fenced").unwrap();
+    std::fs::write(f.workspace.path().join("config.rs"), "pub const PORT: u16 = 9001;\n").unwrap();
+
+    let fenced = "It seems there was an error in the previous response. Let's try again by providing the \
+                  correct format for the `edit_file` function.\n\n```json\n{\"name\": \"edit_file\", \
+                  \"arguments\": {\"files\":[{\"path\":\"config.rs\",\"edits\":[{\"from\":\"9001\",\"to\":\"9000\"}]}]}}\n```";
+    let script = vec![reply(fenced), reply("changed")];
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
+    agent.allow_everything_not_denied();
+    let outcome = agent.run("set the port to 9000").await.unwrap();
+
+    assert_eq!(outcome.tools_called, vec!["edit_file".to_string()], "{outcome:?}");
+    assert_eq!(
+        std::fs::read_to_string(f.workspace.path().join("config.rs")).unwrap(),
+        "pub const PORT: u16 = 9000;\n"
+    );
+}
