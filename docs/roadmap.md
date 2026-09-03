@@ -1078,8 +1078,12 @@ and the file itself had both shown `8443`, `read_file` for a prompt that said
 have run out of mechanism to fix at this size; what is left is the model, and
 a larger one does not fit the runner's forty minutes. The twelfth, with the
 hand-over in, passed three of five — reading, editing and delegating — and
-the two it failed were the model's. The job stays as it is, read rather than
-rerun.
+the two it failed were the model's. Four more readings after the sandbox
+landed ran one to two of five: the edit scenario now fails on a `9001`
+written a second time after the nearest line and the file had both shown
+`8443`, and the claim scenario on a file rewritten to fit the claim — both
+the model's — and one delegation ended at `max_tokens` inside a fenced JSON
+call, with nothing called. The job stays as it is, read rather than rerun.
 
 **Autonomy is a task and its boundaries, and the task is what was asked.**
 The goal check ran only for a session with a goal set, so `rook run` at
