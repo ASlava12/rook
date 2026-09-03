@@ -199,8 +199,10 @@ what unblocks the most.
   where npm checks each tarball against the registry's integrity hash
   (typescript-language-server, pyright); and a build from source by the Go
   toolchain, which checks the module against the checksum database (gopls).
-  Each says in words what that did and did not check. clangd ships zip and xz
-  and has no recipe; asking for it names where to get it. The agent notices too:
+  Each says in words what that did and did not check. Zips open too — clangd
+  ships one with its `lib/clang` beside the binary, which is kept whole, and
+  rust-analyzer's Windows build is one — bounded on what they inflate to and
+  refusing an entry that names a path outside the archive. The agent notices too:
   a language with files here and no server is offered once per session, and the
   stance decides what follows — at `assist` a person chooses between the state
   directory, the machine's own installer and not now, or with nobody there it is
@@ -992,8 +994,9 @@ call it without a key. Until then it is a command a person runs, which is honest
 
 ## After that
 
-**clangd.** The one known server with no recipe: it ships as zip and xz, and
-nothing in the tree opens either. Asking for it names where to get it.
+**rust-analyzer on Windows and clangd are fetched now**, so every known
+server has a recipe. What is left of the installer is keeping them current: a
+server fetched once is a server that is a year old a year later.
 
 **Driving physical devices, if the Model Hardware Standard becomes something to
 build against.** Anthropic's [research

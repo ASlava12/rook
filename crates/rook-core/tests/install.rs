@@ -435,3 +435,37 @@ async fn a_failed_install_reports_the_reason_at_the_end_of_what_it_printed() {
     assert!(refused.contains("progress line 0,"), "and the first is kept too");
     assert!(refused.len() < 80 << 10, "bounded: {} bytes", refused.len());
 }
+
+/// clangd ships a zip with a versioned top directory and needs the tree beside
+/// its binary; it is picked by the beginning and end of its name, because the
+/// version is in the middle.
+#[tokio::test]
+async fn a_zipped_server_is_picked_by_prefix_unpacked_whole_and_put_in_place() {
+    use std::io::Write;
+    let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let stored = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .unix_permissions(0o755);
+    w.start_file("clangd_22.1.6/bin/clangd", stored).unwrap();
+    w.write_all(b"#!/bin/sh\necho clangd\n").unwrap();
+    w.start_file("clangd_22.1.6/lib/clang/22/include/stddef.h", stored).unwrap();
+    w.write_all(b"").unwrap();
+    let bytes = Arc::new(w.finish().unwrap().into_inner());
+    let api = github("clangd-linux-22.1.6.zip", bytes.clone(), sha256_of(&bytes)).await;
+    let into = tempfile::tempdir().unwrap();
+
+    let done = Installer::at(api, into.path().to_path_buf())
+        .unwrap()
+        .install(&rook_core::install::CLANGD, &here())
+        .await
+        .unwrap();
+
+    let current = into.path().join("clangd").join("current");
+    assert_eq!(done.path, current.join("bin").join("clangd"));
+    assert!(done.path.is_file());
+    assert!(
+        current.join("lib").join("clang").join("22").join("include").join("stddef.h").exists(),
+        "the tree it needs"
+    );
+    assert!(done.verified.contains("clangd-linux-22.1.6.zip"), "{}", done.verified);
+}

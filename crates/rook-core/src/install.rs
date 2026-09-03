@@ -17,9 +17,11 @@ use sha2::Digest;
 
 /// Where a server comes from, and how it is checked.
 pub enum Source {
-    /// A GitHub release listing a digest per asset, shipping one gzipped
-    /// binary per unix target. Checked here, byte for byte, as it arrives.
-    GithubGz { repo: &'static str },
+    /// A GitHub release listing a digest per asset. The asset is one gzipped
+    /// binary or a zip; both are checked here, byte for byte, as they arrive.
+    /// `strip_top` drops the archive's single top-level directory, which is
+    /// how clangd ships (`clangd_<version>/bin/clangd`).
+    Github { repo: &'static str, strip_top: bool },
     /// Packages from the npm registry, installed under a prefix of ours with
     /// their install scripts not run. npm checks each tarball against the
     /// integrity hash the registry lists; the binary is a shim under
@@ -35,8 +37,12 @@ pub struct Recipe {
     pub source: Source,
 }
 
-pub const RUST_ANALYZER: Recipe =
-    Recipe { command: "rust-analyzer", source: Source::GithubGz { repo: "rust-lang/rust-analyzer" } };
+pub const RUST_ANALYZER: Recipe = Recipe {
+    command: "rust-analyzer",
+    source: Source::Github { repo: "rust-lang/rust-analyzer", strip_top: false },
+};
+pub const CLANGD: Recipe =
+    Recipe { command: "clangd", source: Source::Github { repo: "clangd/clangd", strip_top: true } };
 pub const TYPESCRIPT: Recipe = Recipe {
     command: "typescript-language-server",
     source: Source::Npm { packages: &["typescript-language-server", "typescript"] },
@@ -50,11 +56,21 @@ pub const GOPLS: Recipe =
 pub fn recipe_for(name: &str) -> Option<&'static Recipe> {
     match name {
         "rust-analyzer" | "rust" => Some(&RUST_ANALYZER),
+        "clangd" | "c" | "cpp" | "c++" => Some(&CLANGD),
         "typescript-language-server" | "typescript" | "javascript" => Some(&TYPESCRIPT),
         "pyright-langserver" | "pyright" | "python" => Some(&PYRIGHT),
         "gopls" | "go" => Some(&GOPLS),
         _ => None,
     }
+}
+
+/// How to recognise the asset for this platform in a release's list: clangd
+/// puts the version in the name, so a name cannot be known ahead of the
+/// release, but its beginning and its end can.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Pick {
+    pub prefix: String,
+    pub suffix: &'static str,
 }
 
 impl Recipe {
@@ -63,10 +79,10 @@ impl Recipe {
     /// other, and only a `free` stance reaches for it.
     pub fn system_command(&self) -> Option<String> {
         match &self.source {
-            Source::GithubGz { .. } if self.command == "rust-analyzer" => {
+            Source::Github { .. } if self.command == "rust-analyzer" => {
                 Some("rustup component add rust-analyzer".into())
             }
-            Source::GithubGz { .. } => None,
+            Source::Github { .. } => None,
             Source::Npm { packages } => Some(format!("npm install -g {}", packages.join(" "))),
             Source::Go { module } => Some(format!("go install {module}@latest")),
         }
@@ -77,7 +93,7 @@ impl Recipe {
     /// this fetches itself.
     pub fn command_into(&self, dir: &Path) -> Option<(String, Vec<(String, String)>)> {
         match &self.source {
-            Source::GithubGz { .. } => None,
+            Source::Github { .. } => None,
             // Scripts off: a package's `postinstall` is arbitrary code, and a
             // language server has no business running any at install time.
             Source::Npm { packages } => Some((
@@ -99,7 +115,7 @@ impl Recipe {
     /// environment probes use. `None` needs nothing but a network.
     pub fn needs(&self) -> Option<&'static str> {
         match &self.source {
-            Source::GithubGz { .. } => None,
+            Source::Github { .. } => None,
             Source::Npm { .. } => Some("npm"),
             Source::Go { .. } => Some("go"),
         }
@@ -109,6 +125,9 @@ impl Recipe {
     pub fn binary_in(&self, current: &Path) -> PathBuf {
         let path = match &self.source {
             Source::Npm { .. } => current.join("node_modules").join(".bin").join(self.command),
+            // clangd needs its `lib/clang` beside `bin/`, so the tree is kept
+            // and the binary is where the archive put it.
+            Source::Github { strip_top: true, .. } => current.join("bin").join(self.command),
             _ => current.join(self.command),
         };
         match (cfg!(windows), &self.source) {
@@ -121,7 +140,7 @@ impl Recipe {
     /// In words, what an install of this checked and what it did not.
     fn checked(&self, tag: &str, asset: &str, sha256: &str) -> (String, String) {
         match &self.source {
-            Source::GithubGz { repo } => (
+            Source::Github { repo, .. } => (
                 format!("sha256 {sha256} matches the digest {repo} listed for {asset} in release {tag}"),
                 "the release itself was not reviewed — the digest and the file come from the same \
                  publisher, so this shows the download is intact, not that the program is good"
@@ -146,24 +165,37 @@ impl Recipe {
         }
     }
 
-    /// The asset this platform can run, or why there is none for it. Only a
-    /// GitHub source has assets.
-    pub fn asset_for(&self, os: &str, arch: &str, userland: &str) -> Result<String, String> {
-        let Source::GithubGz { repo } = &self.source else {
+    /// How to pick the asset this platform can run, or why there is none.
+    pub fn picks(&self, os: &str, arch: &str, userland: &str) -> Result<Pick, String> {
+        let Source::Github { repo, .. } = &self.source else {
             return Err(format!("{} is not fetched from a release", self.command));
         };
-        match os {
-            "macos" => Ok(format!("{}-{arch}-apple-darwin.gz", self.command)),
-            "linux" => {
-                let libc = if userland == "musl" { "musl" } else { "gnu" };
-                Ok(format!("{}-{arch}-unknown-linux-{libc}.gz", self.command))
-            }
-            "windows" => Err(format!(
-                "{} is published for Windows as a zip, which this cannot open yet — take it from \
-                 https://github.com/{repo}/releases",
+        let none = |why: &str| {
+            Err(format!(
+                "{} publishes no build for {why} — see https://github.com/{repo}/releases",
                 self.command
-            )),
-            other => Err(format!("{} publishes no build for {other}", self.command)),
+            ))
+        };
+        match (self.command, os) {
+            ("rust-analyzer", "macos") => {
+                Ok(Pick { prefix: format!("rust-analyzer-{arch}-apple-darwin"), suffix: ".gz" })
+            }
+            ("rust-analyzer", "linux") => {
+                let libc = if userland == "musl" { "musl" } else { "gnu" };
+                Ok(Pick { prefix: format!("rust-analyzer-{arch}-unknown-linux-{libc}"), suffix: ".gz" })
+            }
+            ("rust-analyzer", "windows") => {
+                Ok(Pick { prefix: format!("rust-analyzer-{arch}-pc-windows-msvc"), suffix: ".zip" })
+            }
+            // One build per OS: x86_64, which an arm Mac runs translated.
+            ("clangd", "macos") => Ok(Pick { prefix: "clangd-mac-".into(), suffix: ".zip" }),
+            ("clangd", "linux") if arch == "x86_64" => {
+                Ok(Pick { prefix: "clangd-linux-".into(), suffix: ".zip" })
+            }
+            ("clangd", "windows") if arch == "x86_64" => {
+                Ok(Pick { prefix: "clangd-windows-".into(), suffix: ".zip" })
+            }
+            (_, os) => none(&format!("{os} {arch}")),
         }
     }
 }
@@ -172,6 +204,7 @@ impl Recipe {
 #[derive(Debug)]
 pub struct Asset {
     pub tag: String,
+    pub name: String,
     pub url: String,
     pub sha256: String,
     pub size: u64,
@@ -251,10 +284,10 @@ impl Installer {
         Ok(Self { client, api, into })
     }
 
-    /// The latest release's asset named `asset`, with the digest the publisher
-    /// listed for it.
-    pub async fn latest(&self, recipe: &Recipe, asset: &str) -> Result<Asset, String> {
-        let Source::GithubGz { repo } = &recipe.source else {
+    /// The latest release's asset matching `pick`, with the digest the
+    /// publisher listed for it.
+    pub async fn latest(&self, recipe: &Recipe, pick: &Pick) -> Result<Asset, String> {
+        let Source::Github { repo, .. } = &recipe.source else {
             return Err(format!("{} has no release to look up", recipe.command));
         };
         let url = format!("{}/repos/{repo}/releases/latest", self.api);
@@ -276,16 +309,22 @@ impl Installer {
             .as_array()
             .into_iter()
             .flatten()
-            .find(|a| a["name"].as_str() == Some(asset))
-            .ok_or_else(|| format!("release {tag} of {repo} has no asset named {asset}"))?;
+            .find(|a| {
+                a["name"].as_str().is_some_and(|n| n.starts_with(&pick.prefix) && n.ends_with(pick.suffix))
+            })
+            .ok_or_else(|| {
+                format!("release {tag} of {repo} has no asset named {}…{}", pick.prefix, pick.suffix)
+            })?;
+        let name = found["name"].as_str().unwrap_or("").to_string();
         let Some(sha256) = listed_sha256(found) else {
             return Err(format!(
-                "release {tag} lists no sha256 digest for {asset}, so a download could not be checked \
+                "release {tag} lists no sha256 digest for {name}, so a download could not be checked \
                  — nothing was fetched"
             ));
         };
         Ok(Asset {
             tag,
+            name,
             url: found["browser_download_url"].as_str().unwrap_or("").to_string(),
             sha256,
             size: found["size"].as_u64().unwrap_or(0),
@@ -321,25 +360,35 @@ impl Installer {
                 ("latest".to_string(), verified, unverified)
             }
             None => {
-                let asset = recipe.asset_for(&env.os, &env.arch, &env.userland)?;
-                let release = self.latest(recipe, &asset).await?;
+                let pick = recipe.picks(&env.os, &env.arch, &env.userland)?;
+                let release = self.latest(recipe, &pick).await?;
                 let bytes = self.download(&release).await?;
                 // Nothing on disk until the bytes have matched: a refused
                 // download leaves not even a directory behind.
                 let versioned = self.into.join(recipe.command).join(&release.tag);
                 make(&versioned)?;
                 make(&current)?;
-                let binary = versioned.join(recipe.command);
-                unpack_gz(&bytes, &binary)?;
-                executable(&binary)?;
-                // A copy rather than a link: a link needs a privilege on Windows
-                // that an ordinary account does not have, and one binary is
-                // cheap next to the download that produced it.
-                let placed = recipe.binary_in(&current);
-                std::fs::copy(&binary, &placed)
-                    .map_err(|e| format!("could not put {} in place: {e}", placed.display()))?;
-                executable(&placed)?;
-                let (verified, unverified) = recipe.checked(&release.tag, &asset, &release.sha256);
+                let Source::Github { strip_top, .. } = &recipe.source else {
+                    unreachable!("picked from a release")
+                };
+                match pick.suffix {
+                    ".zip" => {
+                        unpack_zip(&bytes, &versioned, *strip_top)?;
+                        copy_tree(&versioned, &current)?;
+                    }
+                    _ => {
+                        let binary = versioned.join(recipe.command);
+                        unpack_gz(&bytes, &binary)?;
+                        executable(&binary)?;
+                        // A copy rather than a link: a link needs a privilege
+                        // on Windows that an ordinary account does not have.
+                        let placed = recipe.binary_in(&current);
+                        std::fs::copy(&binary, &placed)
+                            .map_err(|e| format!("could not put {} in place: {e}", placed.display()))?;
+                        executable(&placed)?;
+                    }
+                }
+                let (verified, unverified) = recipe.checked(&release.tag, &release.name, &release.sha256);
                 (release.tag, verified, unverified)
             }
         };
@@ -497,6 +546,80 @@ fn unpack_gz(bytes: &[u8], to: &Path) -> Result<(), String> {
     }
 }
 
+/// Unpack a zip into `into`, bounded on what it inflates to and refusing any
+/// entry that would land outside `into`: an archive names its own paths, and
+/// `../` in one is how a download writes somewhere it was not told to.
+fn unpack_zip(bytes: &[u8], into: &Path, strip_top: bool) -> Result<(), String> {
+    use std::io::Read;
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
+        .map_err(|e| format!("not a zip this can open: {e}"))?;
+    let mut inflated: u64 = 0;
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).map_err(|e| format!("entry {i} of the zip: {e}"))?;
+        let Some(inside) = entry.enclosed_name() else {
+            return Err(format!("the zip names a path outside itself: {:?} — refused", entry.name()));
+        };
+        let inside = match strip_top {
+            true => inside.components().skip(1).collect::<PathBuf>(),
+            false => inside,
+        };
+        if inside.as_os_str().is_empty() {
+            continue;
+        }
+        let to = into.join(&inside);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&to).map_err(|e| format!("could not create {}: {e}", to.display()))?;
+            continue;
+        }
+        if let Some(dir) = to.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+        }
+        let mut out =
+            std::fs::File::create(&to).map_err(|e| format!("could not write {}: {e}", to.display()))?;
+        let mut chunk = vec![0u8; 64 << 10];
+        loop {
+            let n = entry.read(&mut chunk).map_err(|e| format!("{}: {e}", to.display()))?;
+            if n == 0 {
+                break;
+            }
+            inflated += n as u64;
+            if inflated > MOST_UNPACKED_BYTES {
+                return Err(format!("the archive inflates past {MOST_UNPACKED_BYTES} bytes — refused"));
+            }
+            std::io::Write::write_all(&mut out, &chunk[..n])
+                .map_err(|e| format!("could not write {}: {e}", to.display()))?;
+        }
+        #[cfg(unix)]
+        if let Some(mode) = entry.unix_mode() {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&to, std::fs::Permissions::from_mode(mode));
+        }
+    }
+    Ok(())
+}
+
+/// `current` as a copy of the versioned tree, for the same reason one binary
+/// is copied: a link needs a privilege on Windows that an ordinary account
+/// does not have.
+fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
+    for entry in ignore::WalkBuilder::new(from).hidden(false).git_ignore(false).build().flatten() {
+        let rel = entry.path().strip_prefix(from).unwrap_or(entry.path());
+        let dest = to.join(rel);
+        if entry.path().is_dir() {
+            std::fs::create_dir_all(&dest)
+                .map_err(|e| format!("could not create {}: {e}", dest.display()))?;
+        } else {
+            if let Some(dir) = dest.parent() {
+                std::fs::create_dir_all(dir)
+                    .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+            }
+            std::fs::copy(entry.path(), &dest)
+                .map_err(|e| format!("could not copy to {}: {e}", dest.display()))?;
+        }
+    }
+    Ok(())
+}
+
 fn executable(path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
@@ -567,19 +690,79 @@ mod tests {
 
     #[test]
     fn the_asset_follows_the_platform_and_says_when_there_is_none() {
-        let ra = &RUST_ANALYZER;
-        assert_eq!(ra.asset_for("macos", "aarch64", "bsd").unwrap(), "rust-analyzer-aarch64-apple-darwin.gz");
+        let pick = |r: &Recipe, os, arch, userland| r.picks(os, arch, userland);
         assert_eq!(
-            ra.asset_for("linux", "x86_64", "gnu").unwrap(),
-            "rust-analyzer-x86_64-unknown-linux-gnu.gz"
+            pick(&RUST_ANALYZER, "macos", "aarch64", "bsd").unwrap(),
+            Pick { prefix: "rust-analyzer-aarch64-apple-darwin".into(), suffix: ".gz" }
         );
         assert_eq!(
-            ra.asset_for("linux", "aarch64", "musl").unwrap(),
-            "rust-analyzer-aarch64-unknown-linux-musl.gz"
+            pick(&RUST_ANALYZER, "linux", "aarch64", "musl").unwrap().prefix,
+            "rust-analyzer-aarch64-unknown-linux-musl"
         );
-        let windows = ra.asset_for("windows", "x86_64", "msvc").unwrap_err();
-        assert!(windows.contains("zip") && windows.contains("releases"), "{windows}");
-        assert!(ra.asset_for("freebsd", "x86_64", "bsd").unwrap_err().contains("no build"));
+        assert_eq!(
+            pick(&RUST_ANALYZER, "windows", "x86_64", "msvc").unwrap().suffix,
+            ".zip",
+            "a zip there, and it opens now"
+        );
+        assert_eq!(
+            pick(&CLANGD, "macos", "aarch64", "bsd").unwrap().prefix,
+            "clangd-mac-",
+            "one mac build, run translated"
+        );
+        assert_eq!(
+            pick(&CLANGD, "linux", "x86_64", "gnu").unwrap(),
+            Pick { prefix: "clangd-linux-".into(), suffix: ".zip" }
+        );
+        let none = pick(&CLANGD, "linux", "aarch64", "gnu").unwrap_err();
+        assert!(none.contains("no build for linux aarch64") && none.contains("releases"), "{none}");
+        assert!(pick(&RUST_ANALYZER, "freebsd", "x86_64", "bsd").unwrap_err().contains("no build"));
+        assert!(pick(&GOPLS, "linux", "x86_64", "gnu").unwrap_err().contains("not fetched from a release"));
+    }
+
+    fn zipped(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        use std::io::Write;
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let stored = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            .unix_permissions(0o755);
+        for (name, body) in entries {
+            w.start_file(*name, stored).unwrap();
+            w.write_all(body).unwrap();
+        }
+        w.finish().unwrap().into_inner()
+    }
+
+    /// The archive names its own paths, and `../` in one is a download writing
+    /// somewhere it was not told to.
+    #[test]
+    fn a_zip_naming_a_path_outside_itself_is_refused_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = zipped(&[("fine.txt", b"ok"), ("../escape.txt", b"no")]);
+        let refused = unpack_zip(&bytes, dir.path(), false).unwrap_err();
+        assert!(refused.contains("outside itself"), "{refused}");
+        assert!(!dir.path().parent().unwrap().join("escape.txt").exists());
+    }
+
+    #[test]
+    fn a_zip_is_unpacked_with_its_top_directory_dropped_when_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = zipped(&[
+            ("clangd_1.0/bin/clangd", b"#!/bin/sh\necho clangd\n"),
+            ("clangd_1.0/lib/clang/x.h", b""),
+        ]);
+        unpack_zip(&bytes, dir.path(), true).unwrap();
+        assert_eq!(
+            std::fs::read(dir.path().join("bin").join("clangd")).unwrap(),
+            b"#!/bin/sh\necho clangd\n"
+        );
+        assert!(dir.path().join("lib").join("clang").join("x.h").exists(), "the tree beside it is kept");
+        assert!(!dir.path().join("clangd_1.0").exists(), "and the top directory is gone");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.path().join("bin").join("clangd")).unwrap().permissions().mode();
+            assert_ne!(mode & 0o111, 0, "the mode the archive recorded is kept");
+        }
     }
 
     #[test]
