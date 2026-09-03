@@ -175,6 +175,18 @@ A test of such a path asks the code that made it (`install::current`), or
 spells both answers under `cfg!(windows)`. A name that exists on no PATH is the
 way to assert that a lookup fell through.
 
+**A red smoke is read, not rerun.** The `smoke ollama` job is not a gate, and
+its transcript is the most productive reading in the repository: five passes
+over one day found the rustup shim offered as a server, a misleading
+`edit_file` message, a checker's discounted `holds` quoted where a small model
+reads it, tool calls written as text under native tools, a turn that did the
+work and said nothing, and a task handed over as a tool call. Each was ours;
+what was the model's — a `sed` for a port it never read, `read_file` for a
+prompt that said `cat` — was left alone. Read the transcript the job prints,
+sort the failures into ours and the model's, and fix ours at the mechanism:
+a nudge asked once, a shape read as what it plainly means, a message that
+names what was actually wrong.
+
 **Verifying a change to `rookd`.** The daemon tests in
 `crates/rook-cli/tests/cli.rs` run the binary, and they build it themselves —
 so `cargo test -p rook-cli` after editing `rookd` can run against the previous
