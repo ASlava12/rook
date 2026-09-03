@@ -1340,8 +1340,9 @@ async fn a_post_tool_hook_appends_what_it_prints_to_the_result() {
     let provider =
         ScriptedProvider::new(vec![call("read_file", serde_json::json!({ "path": "a.txt" })), reply("read")]);
     let seen = provider.share();
+    // Assisting, not autonomous: a read needs no approval, and an autonomous
+    // turn ends with a goal check whose request is not the one being read.
     let mut agent = AgentLoop::new(&rook, Arc::new(provider), session);
-    agent.allow_everything_not_denied();
     agent.run("read a.txt").await.unwrap();
 
     let sent: String =

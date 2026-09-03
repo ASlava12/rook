@@ -1076,8 +1076,17 @@ read the answer to, an edit of `9001` written again after the nearest line
 and the file itself had both shown `8443`, `read_file` for a prompt that said
 `cat`, and a claim made true by rewriting the file under it. The readings
 have run out of mechanism to fix at this size; what is left is the model, and
-a larger one does not fit the runner's forty minutes. The job stays as it is,
-read rather than rerun.
+a larger one does not fit the runner's forty minutes. The twelfth, with the
+hand-over in, passed three of five — reading, editing and delegating — and
+the two it failed were the model's. The job stays as it is, read rather than
+rerun.
+
+**Autonomy is a task and its boundaries, and the task is what was asked.**
+The goal check ran only for a session with a goal set, so `rook run` at
+autonomous — the stance with nobody else to check — checked nothing. With no
+goal set, the turn's prompt is the goal now. The front end's turn only: a
+checker checking itself against the claim it was handed, or a sub-task
+checked against its errand, is a checker per step at every depth.
 
 **A server fetched once is one somebody has to remember to update.** Now the
 agent remembers: past `[agent] server_update_after_days` (thirty by default,

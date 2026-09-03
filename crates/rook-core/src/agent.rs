@@ -1581,12 +1581,22 @@ impl<'a> AgentLoop<'a> {
                     // boundary being held: before the turn ends, a checker asks
                     // whether the goal is met and whether anything forbidden was
                     // done. Once, and only for a turn that did something.
+                    // The front end's turn only: a checker checking itself
+                    // against the claim it was handed, or a sub-task checked
+                    // against its errand, is a checker per step at every depth.
                     if self.policy.stance() == Stance::Autonomous
+                        && self.depth == 0
+                        && !self.checking
                         && !checked_goal
                         && did_something
-                        && let Ok(Some(goal)) = self.rook.goal(self.session)
                     {
                         checked_goal = true;
+                        // Autonomy is a task and its boundaries; with no goal
+                        // set for the session, the task is what this turn was
+                        // asked. Without that, `rook run` at autonomous checked
+                        // nothing, which is the stance with nobody else to.
+                        let goal =
+                            self.rook.goal(self.session).ok().flatten().unwrap_or_else(|| prompt.to_string());
                         let (report, verdict) = self.goal_check(&goal, &mut outcome, &mut on_progress).await;
                         self.rook.log(self.session, EventKind::Note, "goal check", &report).ok();
                         match verdict {
