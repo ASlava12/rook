@@ -1055,8 +1055,16 @@ work nobody was told about: it is asked once more, with nothing to reach
 for, what it found — so it ends on the answer rather than on the limit. And
 the limit is the model's, not the children's: a turn that ran out of steps
 with sub-agents still out dropped them with the nursery, tokens spent and
-answers unread, and waits for them now as a finished turn does. What the
-scenarios say at the new size is open again.
+answers unread, and waits for them now as a finished turn does. The ninth
+reading passed three of five, and the claim scenario showed the shape of a
+loop: the same `verify` with the same arguments, answered `fails` the same
+way, five times over, until the sub-agent ceiling ended it and the parent
+apologised for the ceiling instead of reporting the verdict. The same call
+answered the same way twice is a loop, not a question: the third is refused
+and pointed at the answer it has. Same result is the test, not same
+arguments, and a call that changed something starts the count over — a
+command run again after an edit is not caught by it. What the scenarios say
+at the new size is open again.
 
 **A server fetched once is one somebody has to remember to update.** Now the
 agent remembers: past `[agent] server_update_after_days` (thirty by default,

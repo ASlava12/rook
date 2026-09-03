@@ -1399,6 +1399,8 @@ impl<'a> AgentLoop<'a> {
 
         let mut asked_for_one_script = false;
         let mut asked_to_say = false;
+        let mut repeated: std::collections::BTreeMap<(String, String), (String, u32)> =
+            std::collections::BTreeMap::new();
         let mut checked_goal = false;
         let mut worth_compacting = true;
         // What the provider last said the request cost, and how many messages
@@ -1632,8 +1634,44 @@ impl<'a> AgentLoop<'a> {
             messages.push(asked.clone());
 
             for call in &asked.tool_calls {
-                let (mut result, failed) =
-                    self.dispatch(call, &mut outcome, &mut on_progress, &crew, &mut nursery).await;
+                // The same call answered the same way twice is a loop, not a
+                // question: a model verified one claim five times over, told
+                // `fails` each time, until the sub-agent ceiling ended it. The
+                // third is refused and pointed at the answer it has. Same
+                // result is the test, so a command run again after an edit is
+                // not caught by it.
+                let key = (call.name.clone(), call.arguments.to_string());
+                let (mut result, failed) = match repeated.get(&key) {
+                    Some((_, times)) if *times >= 2 => (
+                        format!(
+                            "`{}` with these same arguments was made {times} times this turn and \
+                             answered the same each time; the answer is above — act on it, or ask \
+                             something different",
+                            call.name
+                        ),
+                        true,
+                    ),
+                    _ => {
+                        let done =
+                            self.dispatch(call, &mut outcome, &mut on_progress, &crew, &mut nursery).await;
+                        // A call that changed the workspace makes every earlier
+                        // answer stale: the file read twice reads differently
+                        // after the edit, and the count starts over. Not the
+                        // loop's own tools — a claim verified twice to the same
+                        // verdict is the loop this exists for.
+                        if CHANGES_FILES.contains(&call.name.as_str()) || call.name == "run_command" {
+                            repeated.clear();
+                        }
+                        repeated
+                            .entry(key)
+                            .and_modify(|(last, times)| {
+                                *times = if *last == done.0 { *times + 1 } else { 1 };
+                                *last = done.0.clone();
+                            })
+                            .or_insert((done.0.clone(), 1));
+                        done
+                    }
+                };
                 on_progress(Progress::ToolDone { name: &call.name, failed });
                 for (_, name) in dropped.iter().filter(|(id, _)| *id == call.id) {
                     result.push_str(&format!(

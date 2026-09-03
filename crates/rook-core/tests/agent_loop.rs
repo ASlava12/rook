@@ -4000,8 +4000,10 @@ async fn an_unfinished_sub_task_is_reported_by_what_it_called() {
 
     let script = vec![
         call("delegate", serde_json::json!({ "tasks": ["look around"], "max_steps": 3 })),
+        // Three different calls: the same one three times over would be
+        // refused as the loop it is, and the report is about the budget.
         call("read_file", serde_json::json!({ "path": "a.txt" })),
-        call("read_file", serde_json::json!({ "path": "a.txt" })),
+        call("list_dir", serde_json::json!({ "path": "." })),
         call("read_file", serde_json::json!({ "path": "a.txt" })),
         // Its last word, asked for, is nothing — so what it called is the report.
         reply(""),
@@ -4020,7 +4022,7 @@ async fn an_unfinished_sub_task_is_reported_by_what_it_called() {
         .unwrap()
         .body;
     assert!(said.contains("did not finish — max_steps after 3 steps"), "{said}");
-    assert!(said.contains("called read_file, read_file, read_file, and the budget ended"), "{said}");
+    assert!(said.contains("called read_file, list_dir, read_file, and the budget ended"), "{said}");
 }
 
 /// Two calls written in one reply are two calls, both run, both answered:
@@ -4119,4 +4121,60 @@ async fn a_turn_out_of_steps_still_collects_the_sub_agents_it_started() {
     assert_eq!(outcome.delegated.len(), 1, "the child's cost is the turn's");
     assert!(outcome.reply.contains("did not collect"), "{}", outcome.reply);
     assert!(outcome.reply.contains("there are three"), "{}", outcome.reply);
+}
+
+/// The same call answered the same way twice is a loop. The third is not made;
+/// the model is pointed at the answer it already has.
+#[tokio::test]
+async fn the_same_call_answered_the_same_way_twice_is_refused_the_third_time() {
+    let f = fixture();
+    let session = f.rook.start_session("loop").unwrap();
+    std::fs::write(f.workspace.path().join("a.txt"), "alpha\n").unwrap();
+
+    let read = || call("read_file", serde_json::json!({ "path": "a.txt" }));
+    let script = vec![read(), read(), read(), reply("alpha, then")];
+    let provider = ScriptedProvider::new(script);
+    let seen = provider.share();
+    let outcome = AgentLoop::new(&f.rook, Arc::new(provider), session).run("read a").await.unwrap();
+
+    assert_eq!(outcome.tools_called.len(), 2, "the third was not made: {:?}", outcome.tools_called);
+    let last = seen.lock().unwrap().last().cloned().unwrap();
+    let told = last.messages.iter().rev().find(|m| m.role == Role::Tool).unwrap().content.clone();
+    assert!(told.contains("made 2 times this turn and answered the same"), "{told}");
+    assert_eq!(outcome.reply, "alpha, then");
+}
+
+/// Same result is the test, not same arguments: a file read again after it
+/// changed is a different answer, and the count starts over.
+#[tokio::test]
+async fn a_call_whose_answer_changed_is_not_a_loop() {
+    let f = fixture();
+    let session = f.rook.start_session("changed").unwrap();
+    std::fs::write(f.workspace.path().join("a.txt"), "alpha\n").unwrap();
+
+    let read = || call("read_file", serde_json::json!({ "path": "a.txt" }));
+    let script = vec![
+        read(),
+        read(),
+        call(
+            "edit_file",
+            serde_json::json!({ "path": "a.txt", "edits": [{ "old": "alpha", "new": "beta" }] }),
+        ),
+        read(),
+        read(),
+        reply("beta now"),
+    ];
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
+    agent.allow_everything_not_denied();
+    let outcome = agent.run("read a").await.unwrap();
+
+    assert_eq!(
+        outcome.tools_called.len(),
+        5,
+        "every call ran: {:?} — stopped {} reply {:?}",
+        outcome.tools_called,
+        outcome.stopped,
+        outcome.reply
+    );
+    assert_eq!(outcome.reply, "beta now");
 }
