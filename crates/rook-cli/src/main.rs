@@ -1317,6 +1317,17 @@ fn show_changes(changes: &rook_core::changes::Changes, json: bool) -> Result<()>
             }
         }
     }
+    // After the diffs, because there is nothing to show for them: a command
+    // declares no paths, so nothing holds what these were before.
+    if !changes.written_by_commands.is_empty() {
+        println!("\nwritten by commands, with nothing kept to diff or restore:");
+        for path in &changes.written_by_commands {
+            println!("  ? {path}");
+        }
+    }
+    if !changes.watched {
+        println!("\nthe workspace was too large to walk, so more may have been written");
+    }
     println!("\n{}", changes.summary());
     Ok(())
 }

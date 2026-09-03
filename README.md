@@ -788,11 +788,17 @@ lose people's trust:
   it read. FreeBSD has no containment at all and says so. The pattern rules over
   the command line are still pattern matching: `curl … | sh` is one obfuscation
   away from any rule, and they are what covers the platform that has nothing.
-- **Undo covers what a tool declared, not what a command did.** A checkpoint
-  holds the paths a tool said it would touch; a `run_command` says none, so what
-  a shell command changes is outside `rook session rewind`. `delete_file` closes
-  the case that cannot be recovered any other way — everything else a command
-  writes leaves its content somewhere.
+- **Undo covers what a tool declared, not what a command did — and now says
+  which.** A checkpoint holds the paths a tool said it would touch; a
+  `run_command` says none, so nothing holds what its files were before and
+  `rook session rewind` cannot put them back. What it no longer does is answer
+  in silence: after a command the workspace is walked for what was written
+  since it started, and those paths are named in `session changes`, in `/diff`
+  and in the browser, apart from the diffable ones and counted in the total. A
+  turn that ran `sed -i` used to report no files changed at all. mtime is what
+  that walk reads, so a command that rewrites a file with the same bytes is
+  listed too, and a workspace too large to walk says so rather than reporting
+  nothing.
 
 ## Development
 

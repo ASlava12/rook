@@ -1979,10 +1979,17 @@ impl<'a> AgentLoop<'a> {
                 return (refusal, true);
             }
         };
+        // A command names no paths, so nothing was checkpointed and nothing
+        // can be put back. What can be had is the list of what it wrote, and
+        // without it a turn that ran `sed -i` reports no files changed at all.
+        let watching = self.watching_a_command(call).then(std::time::SystemTime::now);
         let outcome = match self.tools.call(&self.tool_ctx, &call.name, &call.arguments).await {
             Ok(o) => o,
             Err(e) => rook_tools::ToolOutcome::error(format!("tool error: {e}")),
         };
+        if let Some(since) = watching {
+            self.note_what_was_written(since);
+        }
         // A checker's reading is not recorded. The registry holds one holder
         // per path, so a look from any session makes every other session's
         // overwrite stale until it looks again — right for a sub-task, which
@@ -2727,6 +2734,26 @@ impl<'a> AgentLoop<'a> {
     /// restores from these, so a file edited without one is edited for good.
     /// That was a line in the log file, where neither the model nor the user was
     /// looking, and both believed the edit was recoverable.
+    /// Whether this call is a command: something that changes the machine and
+    /// will not say what it touches. A tool that declares its paths is
+    /// checkpointed and diffed properly, and a read needs no watching.
+    fn watching_a_command(&self, call: &rook_llm::ToolCall) -> bool {
+        let Some(tool) = self.tools.get(&call.name) else { return false };
+        tool.touched_paths(&call.arguments).is_empty()
+            && matches!(tool.risk(&call.arguments), rook_tools::policy::Risk::Execute(_))
+    }
+
+    /// Record what the command wrote, or that the workspace was too large to
+    /// tell. Both belong in the log: the second is why the first is empty.
+    fn note_what_was_written(&self, since: std::time::SystemTime) {
+        let (written, whole) = self.rook.written_since(since, &crate::CaptureLimits::for_skill());
+        if written.is_empty() && whole {
+            return;
+        }
+        let note = serde_json::json!({ "paths": written, "complete": whole });
+        self.rook.log(self.session, EventKind::Note, WROTE, &note.to_string()).ok();
+    }
+
     fn checkpoint_before(&self, call: &rook_llm::ToolCall) -> ClaimedResult<'_> {
         // Not a tool of the toolbox — the loop's own, which write through their
         // own paths and take their own checkpoints.
@@ -3106,6 +3133,11 @@ you found, what you did, and what is left.";
 const GO_ON: &str = "\
 Your reply was cut off at the output limit. Go on from where it stopped, briefly: a call you \
 were writing, make it whole; an answer, finish it.";
+
+/// The label on the note that says what a command wrote. Read by `changes`,
+/// which is the other half of this: one function writes it and one reads it,
+/// and a third spelling of the word would be a third answer.
+pub const WROTE: &str = "wrote";
 
 const SAY_IT: &str = "\
 You ended the turn without saying anything. Answer now, in words: what you found, or what \

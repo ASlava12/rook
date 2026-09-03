@@ -369,6 +369,9 @@ pub async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command
             if changes.touched() == 0 {
                 say!("nothing changed on disk yet");
             }
+            for path in &changes.written_by_commands {
+                say!("? {path} (written by a command; nothing was kept to diff or restore)");
+            }
             for file in changes.files.iter().filter(|f| f.change != rook_core::changes::Change::Unchanged) {
                 say!("{} {}  +{} -{}", file.change.sigil(), file.path, file.lines_added, file.lines_removed);
             }

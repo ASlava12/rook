@@ -4277,3 +4277,82 @@ async fn a_reply_cut_twice_ends_as_cut() {
     assert_eq!(outcome.reply, "goes on and");
     assert_eq!(seen.lock().unwrap().len(), 2, "the reply, the ask, and not a third");
 }
+
+/// A tool that declares its paths is checkpointed and diffed exactly. A command
+/// declares none, so "what did this turn change" was answered with silence — a
+/// turn that ran `sed -i` reported no files changed at all, which is not a gap
+/// in an answer but a wrong one.
+#[tokio::test]
+async fn a_file_a_command_wrote_is_named_in_what_the_session_changed() {
+    let f = fixture();
+    let session = f.rook.start_session("commands").unwrap();
+    std::fs::write(f.workspace.path().join("config.rs"), "port = 8080\n").unwrap();
+
+    let script = vec![
+        call("run_command", serde_json::json!({ "command": "printf 'port = 9000\\n' > config.rs" })),
+        reply("changed it"),
+    ];
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
+    agent.allow_everything_not_denied();
+    agent.run("set the port to 9000").await.unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(f.workspace.path().join("config.rs")).unwrap(),
+        "port = 9000\n",
+        "the precondition: the command wrote the file"
+    );
+
+    let changed = f.rook.changes(session, false).unwrap();
+    assert!(changed.watched, "the workspace was small enough to walk");
+    assert!(
+        changed.written_by_commands.iter().any(|p| p == "config.rs"),
+        "the command's file has to be named: {:?}",
+        changed.written_by_commands
+    );
+    assert_eq!(changed.touched(), 1, "and counted as a file this session changed");
+    assert!(changed.files.is_empty(), "with no diff, because nothing holds what it was");
+}
+
+/// A read is not a write. Watching every call would put half the workspace in
+/// the log for a turn that only looked at it.
+#[tokio::test]
+async fn a_command_that_writes_nothing_leaves_nothing_behind() {
+    let f = fixture();
+    let session = f.rook.start_session("reading").unwrap();
+    std::fs::write(f.workspace.path().join("a.txt"), "hello\n").unwrap();
+
+    let script = vec![call("run_command", serde_json::json!({ "command": "cat a.txt" })), reply("hello")];
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
+    agent.allow_everything_not_denied();
+    agent.run("read it").await.unwrap();
+
+    let changed = f.rook.changes(session, false).unwrap();
+    assert!(changed.written_by_commands.is_empty(), "{:?}", changed.written_by_commands);
+    assert_eq!(changed.touched(), 0);
+}
+
+/// A tool that says what it touches is checkpointed and diffed, and must not
+/// also be reported as an unknown write: that is one file twice, once with its
+/// diff and once without.
+#[tokio::test]
+async fn a_tool_that_declares_its_paths_is_diffed_rather_than_only_named() {
+    let f = fixture();
+    let session = f.rook.start_session("declared").unwrap();
+    std::fs::write(f.workspace.path().join("config.rs"), "port = 8080\n").unwrap();
+
+    let script = vec![
+        call(
+            "edit_file",
+            serde_json::json!({ "path": "config.rs", "edits": [{ "old": "8080", "new": "9000" }] }),
+        ),
+        reply("done"),
+    ];
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
+    agent.allow_everything_not_denied();
+    agent.run("set the port").await.unwrap();
+
+    let changed = f.rook.changes(session, false).unwrap();
+    assert!(changed.written_by_commands.is_empty(), "{:?}", changed.written_by_commands);
+    assert_eq!(changed.files.len(), 1, "{:?}", changed.files);
+    assert_eq!(changed.files[0].lines_added, 1, "the diff is the whole point of declaring paths");
+}

@@ -1148,6 +1148,18 @@ hold the one invariant that matters there: every module loaded is embedded and
 served as script. [ADR-0012](adr/0012-hand-written-modules-no-bundler.md)
 supersedes the one-file part of ADR-0007 and keeps the rest.
 
+**What a command wrote is named, even though it cannot be undone.** A tool
+that declares its paths is checkpointed and diffed exactly; a command declares
+none, so `changes` — the CLI's `/diff`, the browser's table, the API — answered
+"nothing changed" for a turn that had rewritten a file with `sed -i`. That is
+not a gap in an answer but a wrong one. The workspace is now walked after a
+command for what was written since it started, and those paths are named apart
+from the diffable ones: no diff and no restore, because nothing holds what they
+were, but no silence either. mtime is the question asked, so the word is
+"written" rather than "changed", and a workspace too large to walk says so.
+Capturing content instead was measured and refused: eighteen seconds a command
+on this repository.
+
 **A 401 from an MCP server says what to do, and a rate limit is waited out
 as long as it asked.** Two ports from the thirtieth reference pass. An MCP
 server answering 401 was reported as a transport error with the status and

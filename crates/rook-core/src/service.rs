@@ -917,6 +917,46 @@ impl Rook {
             .collect()
     }
 
+    /// Which files under the workspace were written since `since`, and whether
+    /// the walk saw the whole of it.
+    ///
+    /// mtime rather than content, because there is nothing to compare against:
+    /// a command declares no paths, so no checkpoint holds what its files were
+    /// before it ran. That makes the honest question the cheap one — was this
+    /// written — and the honest word for the answer "written" rather than
+    /// "changed": a command that rewrites a file with the same bytes is in this
+    /// list, and a file that changed is never missing from it.
+    ///
+    /// The second half of the answer is whether the walk finished. A list that
+    /// stopped at its ceiling and did not say so is the wrong answer told
+    /// confidently, which is the failure this exists to prevent.
+    pub fn written_since(&self, since: std::time::SystemTime, limits: &CaptureLimits) -> (Vec<String>, bool) {
+        let mut walker = ignore::WalkBuilder::new(&self.workspace);
+        walker.hidden(false).git_ignore(limits.respect_ignore_files).git_global(false);
+        let mut written = Vec::new();
+        let mut seen = 0usize;
+        for entry in walker.build().flatten() {
+            let path = entry.path();
+            let relative = path.strip_prefix(&self.workspace).unwrap_or(path).to_string_lossy();
+            let relative = relative.replace('\\', "/");
+            if limits.exclude.iter().any(|skip| relative.contains(skip.as_str())) {
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else { continue };
+            if !meta.is_file() {
+                continue;
+            }
+            seen += 1;
+            if seen > limits.max_files {
+                return (written, false);
+            }
+            if meta.modified().is_ok_and(|at| at >= since) {
+                written.push(relative);
+            }
+        }
+        (written, true)
+    }
+
     /// Capture `paths` before something modifies them, and record it in the log.
     ///
     /// `limits` because the two callers are different sizes: one tool call

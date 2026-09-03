@@ -71,6 +71,16 @@ export async function renderSessions() {
           el('td', {}, `+${f.lines_added}`),
           el('td', {}, `−${f.lines_removed}`)))));
     }
+    // A command declares no paths, so nothing holds what these were before:
+    // they can be named and neither diffed nor put back.
+    const byCommand = changed.written_by_commands || [];
+    if (byCommand.length) {
+      right.append(el('p', { class: 'sub' }, 'written by commands — nothing kept to diff or restore:'));
+      right.append(el('ul', {}, byCommand.map(p => el('li', { class: 'sub' }, p))));
+    }
+    if (changed.watched === false) {
+      right.append(el('p', { class: 'warn' }, 'the workspace was too large to walk, so more may have been written'));
+    }
     const { items: entries } = await api(`/api/sessions/${state.session}/transcript?limit=200`);
     const box = el('div', { class: 'scroll' });
     if (!entries.length) box.append(el('p', { class: 'empty' }, 'no events yet'));

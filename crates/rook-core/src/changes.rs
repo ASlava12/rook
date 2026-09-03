@@ -48,20 +48,53 @@ pub struct FileChange {
     pub diff: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Changes {
     pub files: Vec<FileChange>,
+    /// Files a command wrote. Nothing holds what they were before — a command
+    /// declares no paths, so none was checkpointed — so they cannot be diffed
+    /// and `session rewind` cannot put them back. Naming them is all there is,
+    /// and it is the difference between a wrong answer and a partial one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub written_by_commands: Vec<String>,
+    /// False when the workspace was too large to walk, so the list above is
+    /// short for a reason that is not "nothing was written".
+    #[serde(default = "watched_by_default")]
+    pub watched: bool,
+}
+
+fn watched_by_default() -> bool {
+    true
+}
+
+impl Default for Changes {
+    fn default() -> Self {
+        Self { files: Vec::new(), written_by_commands: Vec::new(), watched: true }
+    }
 }
 
 impl Changes {
     pub fn touched(&self) -> usize {
-        self.files.iter().filter(|f| f.change != Change::Unchanged).count()
+        self.files.iter().filter(|f| f.change != Change::Unchanged).count() + self.written_by_commands.len()
     }
 
     pub fn summary(&self) -> String {
         let (added, removed): (usize, usize) =
             self.files.iter().fold((0, 0), |(a, r), f| (a + f.lines_added, r + f.lines_removed));
-        format!("{} file(s), +{added} -{removed}", self.touched())
+        let mut said = format!("{} file(s), +{added} -{removed}", self.touched());
+        // Counted in the total and named apart from it: they have no line
+        // counts to add, and saying so is the difference between a partial
+        // answer and one that looks whole.
+        if !self.written_by_commands.is_empty() {
+            said.push_str(&format!(
+                ", {} written by commands and not diffable",
+                self.written_by_commands.len()
+            ));
+        }
+        if !self.watched {
+            said.push_str(", and the workspace was too large to watch for more");
+        }
+        said
     }
 }
 
@@ -76,7 +109,22 @@ impl Rook {
         // the agent touched it, and later ones are already its own work.
         let mut before: BTreeMap<PathBuf, Option<ObjectId>> = BTreeMap::new();
 
+        // What a command wrote, which no checkpoint holds: the loop records it
+        // by name and this is where it is read back.
+        let mut written: std::collections::BTreeSet<String> = Default::default();
+        let mut watched = true;
         for event in self.store.events(session, 0, usize::MAX)? {
+            if event.record.kind == EventKind::Note && event.record.label == crate::agent::WROTE {
+                let Ok(body) = self.store.get(&event.record.body) else { continue };
+                let said: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+                watched &= said["complete"].as_bool().unwrap_or(true);
+                for path in said["paths"].as_array().into_iter().flatten() {
+                    if let Some(path) = path.as_str() {
+                        written.insert(path.to_string());
+                    }
+                }
+                continue;
+            }
             if event.record.kind != EventKind::Checkpoint {
                 continue;
             }
@@ -118,7 +166,7 @@ impl Rook {
             });
         }
         files.sort_by(|a, b| a.path.cmp(&b.path));
-        Ok(Changes { files })
+        Ok(Changes { files, written_by_commands: written.into_iter().collect(), watched })
     }
 }
 
