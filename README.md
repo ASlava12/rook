@@ -268,6 +268,22 @@ verdict from a checker that ran nothing and read nothing is reported as unproven
 however sure it sounded. Reaching for nothing is what a fabricated check looks
 like, and it is what asking a second agent was supposed to get past.
 
+### When a small model wanders
+
+The loop holds a few lines that a large model never meets and a small one meets
+every turn, each found by running a real one in CI and reading the transcript.
+A tool call written as text — `{"name": "read_file", "arguments": {...}}` as
+the reply — is a call, every one of them in the order written, when it names a
+tool that was offered. A turn that did the work and ended without a word is
+asked once, in words, what it found; one that ran out of steps with a call as
+its last word is asked the same with nothing left to reach for. The same call
+answered the same way twice is a loop, not a question, and the third is refused
+and pointed at the answer it has — unless something changed the workspace in
+between, which starts the count over. A checker that stops without a verdict is
+asked once to finish, and a sub-agent's step budget is never below the three a
+task needs. None of it is a retry: each is asked once, and a second silence is
+reported as one.
+
 ### More than one project at a time
 
 The store is one per `~/.rook` and takes a single writer; a workspace is one per
