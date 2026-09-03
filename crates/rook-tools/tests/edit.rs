@@ -284,11 +284,7 @@ async fn a_files_entry_that_is_not_an_object_is_named_by_what_it_is() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("a.txt"), "port = 8080\n").unwrap();
     let ctx = ToolContext::new(dir.path().to_path_buf());
-    let err = EditFile
-        .call(&ctx, &serde_json::json!({ "files": ["a.txt"], "edits": [{ "old": "8080", "new": "9000" }] }))
-        .await
-        .unwrap_err()
-        .to_string();
+    let err = EditFile.call(&ctx, &serde_json::json!({ "files": ["a.txt"] })).await.unwrap_err().to_string();
     assert!(err.contains("each entry of `files` is an object"), "{err}");
     assert!(err.contains("not a string"), "says what it got instead: {err}");
     assert!(!err.contains("\"path\" is missing"), "and not the misleading thing: {err}");
@@ -318,4 +314,34 @@ async fn an_edit_spelled_from_and_to_lands() {
         std::fs::read_to_string(dir.path().join("config.rs")).unwrap(),
         "pub const PORT: u16 = 9001;\n"
     );
+}
+
+/// A list of paths beside one `edits` means those edits in each file. It is
+/// the shape a model wrote when told to change one thing in one file, and
+/// refusing it taught it nothing.
+#[tokio::test]
+async fn a_list_of_paths_beside_one_edits_applies_them_to_each() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["a.toml", "b.toml"] {
+        std::fs::write(dir.path().join(name), "port = 8080\n").unwrap();
+    }
+    let ctx = ToolContext::new(dir.path().to_path_buf());
+    EditFile
+        .call(&ctx, &serde_json::json!({ "files": ["a.toml", "b.toml"], "edits": [{ "old": "8080", "new": "9000" }] }))
+        .await
+        .unwrap();
+    for name in ["a.toml", "b.toml"] {
+        assert_eq!(std::fs::read_to_string(dir.path().join(name)).unwrap(), "port = 9000\n", "{name}");
+    }
+
+    // The same path twice is still the mistake it was.
+    let err = EditFile
+        .call(
+            &ctx,
+            &serde_json::json!({ "files": ["a.toml", "a.toml"], "edits": [{ "old": "9000", "new": "1" }] }),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("appears twice"), "{err}");
 }

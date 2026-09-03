@@ -1013,8 +1013,11 @@ tool call — written as text, `{"name": "read_file", "arguments": {...}}` as th
 whole reply, with the tools offered natively — and the turn ended with nothing
 called. The reading the prompt-tools mode already did of such an object is
 done either way now, for an object that names a tool that was offered; JSON a
-model was asked for names none. What the scenarios say at the new size is
-open again.
+model was asked for names none. The call it wrote for the edit would then have
+been refused twice over — `from`/`to` for the two strings, and a list of paths
+beside one `edits` — so `edit_file` reads both now: the names other tools
+taught a model, and a list of paths beside one `edits` as those edits in each
+file. What the scenarios say at the new size is open again.
 
 **A server fetched once is one somebody has to remember to update.** Now the
 agent remembers: past `[agent] server_update_after_days` (thirty by default,

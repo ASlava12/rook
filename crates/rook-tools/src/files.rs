@@ -367,7 +367,7 @@ pub struct EditFile;
 /// The names other tools taught a model for the same two strings, accepted
 /// rather than corrected: a small model wrote `from`/`to` and the edit was
 /// refused for its spelling, not its content.
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Clone)]
 struct Edit {
     #[serde(alias = "from", alias = "search", alias = "find", alias = "old_string")]
     old: String,
@@ -507,6 +507,17 @@ fn parse_targets(args: &serde_json::Value) -> Result<Vec<Target>> {
                 .into(),
         )
     })?;
+    // A list of paths beside one `edits` is one reading, not a guess: the
+    // same edits, in each file. A model wrote exactly that.
+    if files.iter().all(|f| f.is_string()) && args.get("edits").is_some() {
+        let edits = parse_edits(args)?;
+        let targets = files
+            .iter()
+            .filter_map(|f| f.as_str())
+            .map(|path| Target { path: path.into(), edits: edits.clone() })
+            .collect();
+        return distinct(targets);
+    }
     // Said before the entry is read, and by what it is: a model handed a
     // list of path strings here, and was told that `path` was missing from
     // an argument it had just written three times.
@@ -521,17 +532,23 @@ fn parse_targets(args: &serde_json::Value) -> Result<Vec<Target>> {
         .iter()
         .map(|f| Ok(Target { path: arg_str(f, "edit_file", "path")?, edits: parse_edits(f)? }))
         .collect::<Result<_>>()?;
+    distinct(targets)
+}
 
-    // Each entry is read from disk on its own, so two for the same file would
-    // both start from the original and the second write would quietly undo the
-    // first.
+/// Each entry is read from disk on its own, so two for the same file would
+/// both start from the original and the second write would quietly undo the
+/// first.
+fn distinct(targets: Vec<Target>) -> Result<Vec<Target>> {
     let mut seen = std::collections::BTreeSet::new();
     if let Some(twice) = targets.iter().find(|t| !seen.insert(&t.path)) {
-        return Err(invalid(format!(
-            "{} appears twice in `files` — put all of its edits in one entry, in the order they \
-             should apply",
-            twice.path
-        )));
+        return Err(ToolError::Invalid {
+            tool: "edit_file".into(),
+            message: format!(
+                "{} appears twice in `files` — put all of its edits in one entry, in the order they \
+                 should apply",
+                twice.path
+            ),
+        });
     }
     Ok(targets)
 }
