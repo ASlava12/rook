@@ -179,6 +179,78 @@ impl Source {
     /// code: a listing that narrowed differently depending on where it read from
     /// would be a difference the user can see, which is the one thing routing is
     /// not allowed to be.
+    /// The writes the daemon's API already serves. Routed for the same reason
+    /// the reads are: the store takes one writer, and a person who has `rookd`
+    /// running should not have to stop it to set a goal.
+    ///
+    /// Each is the same call the daemon would make on its own store, so there
+    /// is one implementation and two ways in — which is what keeps the direct
+    /// path and the routed one from drifting.
+    /// Reading a goal has no endpoint of its own: it is a field of the session
+    /// the listing already carries, which is one round trip rather than two
+    /// and one thing to keep in step rather than two.
+    pub fn goal(&self, session: u128) -> Result<Option<String>> {
+        match self {
+            Source::Local(rook) => Ok(rook.goal(session)?),
+            Source::Daemon(_) => {
+                Ok(self.sessions()?.into_iter().find(|s| s.meta.id == session).and_then(|s| s.goal))
+            }
+        }
+    }
+
+    pub fn set_goal(&self, session: u128, goal: &str) -> Result<()> {
+        match self {
+            Source::Local(rook) => Ok(rook.set_goal(session, goal)?),
+            Source::Daemon(daemon) => {
+                let id = rook_store::format_session_id(session);
+                daemon
+                    .post::<serde_json::Value>(
+                        &format!("/api/sessions/{id}/goal"),
+                        &serde_json::json!({ "goal": goal }),
+                    )
+                    .map(|_| ())
+            }
+        }
+    }
+
+    pub fn rewind(&self, session: u128, to_seq: u64, restore_files: bool) -> Result<rook_core::Rewind> {
+        match self {
+            Source::Local(rook) => Ok(rook.rewind(session, to_seq, restore_files)?),
+            Source::Daemon(daemon) => {
+                let id = rook_store::format_session_id(session);
+                daemon.post(
+                    &format!("/api/sessions/{id}/rewind"),
+                    &serde_json::json!({ "to_seq": to_seq, "restore_files": restore_files }),
+                )
+            }
+        }
+    }
+
+    pub fn forget(&self, id: &str) -> Result<Option<rook_core::Fact>> {
+        match self {
+            Source::Local(rook) => Ok(rook.forget(id, Some("removed from the command line".into()))?),
+            // The endpoint answers `{"forgot": …}` and 404s for a fact that
+            // was not there; both are the same two answers the direct call
+            // gives, said differently.
+            Source::Daemon(daemon) => {
+                match daemon.post::<serde_json::Value>("/api/memory", &serde_json::json!({ "id": id })) {
+                    Ok(said) => Ok(serde_json::from_value(said["forgot"].clone()).ok()),
+                    Err(e) if e.to_string().contains("404") => Ok(None),
+                    Err(e) => Err(e),
+                }
+            }
+        }
+    }
+
+    pub fn maintenance(&self, dry_run: bool) -> Result<rook_core::MaintenanceReport> {
+        match self {
+            Source::Local(rook) => Ok(rook.maintenance(dry_run)?),
+            Source::Daemon(daemon) => {
+                daemon.post("/api/maintenance", &serde_json::json!({ "dry_run": dry_run }))
+            }
+        }
+    }
+
     pub fn memory(&self) -> Result<Vec<rook_core::Fact>> {
         match self {
             Self::Local(rook) => Ok(rook.memory()?.facts.clone()),
@@ -250,6 +322,20 @@ impl Daemon {
         let daemon = Self { base, runtime, http };
         daemon.get::<serde_json::Value>("/api/health").ok()?;
         Some(daemon)
+    }
+
+    fn post<T: DeserializeOwned>(&self, path: &str, body: &serde_json::Value) -> Result<T> {
+        let url = format!("{}{path}", self.base);
+        self.runtime.block_on(async {
+            let response =
+                self.http.post(&url).json(body).send().await.with_context(|| format!("POST {url}"))?;
+            let status = response.status();
+            let said = response.text().await.with_context(|| format!("reading {url}"))?;
+            if !status.is_success() {
+                bail!("{url} answered {status}: {said}");
+            }
+            serde_json::from_str(&said).with_context(|| format!("decoding {url}"))
+        })
     }
 
     fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {

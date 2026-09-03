@@ -24,22 +24,27 @@ API at http://127.0.0.1:7717 instead.
 Every read the CLI has goes over the API when the store is held: `store stat`,
 `store ls`, `store cat`, `store refs`, `session ls`, `session show`,
 `session diff`, `session context`, `skills ls`, `skills show`, `search` and
-`memory ls`. Writes and maintenance still refuse, which is the decision above
-rather than a gap.
+`memory ls`. Four writes route too, being the ones the daemon's API already
+serves: `session goal`, `session rewind`, `memory rm` and `store maintain`.
+Each is the same call the daemon makes on its own store, so there is one
+implementation and two ways in.
+
+The rest still refuse — `store gc`, `store train`, `session rm`, `skills
+capture` and `skills install` — because they have no endpoint, and inventing
+one per command is how the two paths start to drift. Adding an endpoint is
+what makes each of them route; the honest error is what they get until then.
 
 One of them is not identical routed. `store cat` over the API gets a windowed,
 text-decoded payload, because the endpoint that serves it also serves a browser
 and must not be the thing that takes it down; it says so when it happens.
 
-## Why not fix it now
+## Why it is still not finished
 
-The fix is for the CLI to detect a running daemon and route through its HTTP API,
-falling back to direct access. That is the right end state, and it is a meaningful
-amount of work: every command needs a client path as well as a direct path, and the
-two must not drift.
-
-Shipping the honest error first is better than shipping a silent divergence between
-two code paths. It is on the [roadmap](../roadmap.md).
+The end state is that every command routes. Getting there is a meaningful
+amount of work per command — an endpoint, a client path, and the two kept in
+step — so it is done where the endpoint already exists and left honest where it
+does not. Shipping the error is better than shipping a silent divergence
+between two code paths.
 
 ## Alternatives rejected
 

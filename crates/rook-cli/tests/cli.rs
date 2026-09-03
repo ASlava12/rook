@@ -380,9 +380,49 @@ fn a_read_routes_through_the_daemon_and_answers_the_same() {
     assert_eq!(rook.json(&["store", "stat"]), direct_stats);
 
     let write = rook.run(&["store", "gc"]);
-    assert!(!write.status.success(), "a write cannot go over the API");
+    assert!(!write.status.success(), "a write with no endpoint still cannot go over the API");
     let err = String::from_utf8_lossy(&write.stderr);
     assert!(err.contains(&daemon.address), "and must say where the lock is: {err}");
+}
+
+/// The writes the daemon already serves. Refusing these meant stopping the
+/// daemon to set a goal or to forget a fact, which is the same store answering
+/// either way — and `store maintain` is what somebody reaches for exactly when
+/// a long-running daemon has filled the disk.
+#[test]
+fn the_writes_the_daemon_serves_go_over_it_rather_than_refusing() {
+    let rook = Rook::new();
+    // A failed run leaves a session behind, which is all a goal needs.
+    let _ = rook.run(&["run", "something to remember"]);
+    let session = rook.json(&["session", "ls", "--all"])[0]["id"].as_str().unwrap().to_string();
+
+    let daemon = Daemon::start(&rook);
+    // The precondition: with the daemon up the store is held, so a write with
+    // no endpoint refuses. Without this the rest could pass by opening the
+    // store directly and prove nothing about routing.
+    assert!(!rook.run(&["store", "gc"]).status.success(), "the daemon has to be holding the lock");
+
+    let set = rook.run(&["session", "goal", &session, "ship", "the", "thing"]);
+    assert!(set.status.success(), "{}", String::from_utf8_lossy(&set.stderr));
+    let read = rook.ok(&["session", "goal", &session]);
+    assert!(read.contains("ship the thing"), "the goal has to come back: {read}");
+
+    let maintained = rook.run(&["store", "maintain", "--dry-run"]);
+    assert!(maintained.status.success(), "{}", String::from_utf8_lossy(&maintained.stderr));
+    assert!(
+        String::from_utf8_lossy(&maintained.stdout).contains("sessions deleted"),
+        "{}",
+        String::from_utf8_lossy(&maintained.stdout)
+    );
+
+    let missing = rook.run(&["memory", "rm", "01NOSUCHFACT"]);
+    assert!(!missing.status.success(), "a fact that is not there is still not there");
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("no fact"),
+        "and says so rather than naming the lock: {}",
+        String::from_utf8_lossy(&missing.stderr)
+    );
+    drop(daemon);
 }
 
 /// A transcript and a search are what somebody wants while the daemon is up, and

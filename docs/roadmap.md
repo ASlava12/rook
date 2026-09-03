@@ -1148,6 +1148,15 @@ hold the one invariant that matters there: every module loaded is embedded and
 served as script. [ADR-0012](adr/0012-hand-written-modules-no-bundler.md)
 supersedes the one-file part of ADR-0007 and keeps the rest.
 
+**The writes the daemon already serves go over it.** `session goal`, `session
+rewind`, `memory rm` and `store maintain` refused while `rookd` was up, which
+meant stopping the daemon to set a goal — and `store maintain` is what somebody
+reaches for exactly when a long-running daemon has filled the disk. Each is now
+the same call the daemon makes on its own store, so there is one implementation
+and two ways in. What still refuses is what has no endpoint: `store gc`, `store
+train`, `session rm`, `skills capture`, `skills install`. Adding an endpoint is
+what makes each of them route.
+
 **What a command wrote is named, even though it cannot be undone.** A tool
 that declares its paths is checkpointed and diffed exactly; a command declares
 none, so `changes` — the CLI's `/diff`, the browser's table, the API — answered

@@ -1074,6 +1074,13 @@ fn cmd_store(source: &Source, cmd: StoreCmd, json: bool) -> Result<()> {
     if let StoreCmd::Refs { prefix } = &cmd {
         return show_refs(&source.refs(prefix.as_deref().unwrap_or(""))?, json);
     }
+    // The one write here the daemon serves. Routed for the reason the reads
+    // are: a store the daemon is holding is one this cannot open, and
+    // maintenance is what somebody reaches for when the disk is full.
+    if let StoreCmd::Maintain { dry_run } = cmd {
+        let report = source.maintenance(dry_run)?;
+        return show_maintenance(&report, dry_run, json, source.local().ok());
+    }
     if let StoreCmd::Cat { id } = &cmd {
         let (bytes, elided) = source.object(id, CAT_BYTES)?;
         std::io::Write::write_all(&mut std::io::stdout(), &bytes)?;
@@ -1088,7 +1095,7 @@ fn cmd_store(source: &Source, cmd: StoreCmd, json: bool) -> Result<()> {
     let rook = source.local()?;
     match cmd {
         StoreCmd::Stat => unreachable!("routed above"),
-        StoreCmd::Ls { .. } | StoreCmd::Cat { .. } | StoreCmd::Refs { .. } => {
+        StoreCmd::Ls { .. } | StoreCmd::Cat { .. } | StoreCmd::Refs { .. } | StoreCmd::Maintain { .. } => {
             unreachable!("routed above")
         }
         StoreCmd::Gc { dry_run } => {
@@ -1130,53 +1137,6 @@ fn cmd_store(source: &Source, cmd: StoreCmd, json: bool) -> Result<()> {
             }
             if rook.config.storage.retention.max_total_bytes.is_some() {
                 println!("`store maintain` also enforces the size budget, which needs gc to measure");
-            }
-        }
-        StoreCmd::Maintain { dry_run } => {
-            let report = rook.maintenance(dry_run)?;
-            let tag = if dry_run { "[dry run] " } else { "" };
-            println!(
-                "{tag}sessions deleted {}, events deleted {}, protected {}",
-                report.prune.sessions_deleted, report.prune.events_deleted, report.prune.protected
-            );
-            println!("{tag}collected {} ({} freed)", report.gc.collected, fmt::bytes(report.gc.bytes_freed));
-            if report.history_dropped > 0 {
-                println!(
-                    "{tag}dropped {} history entr{} past `[storage.retention] max_history_entries`",
-                    report.history_dropped,
-                    if report.history_dropped == 1 { "y" } else { "ies" }
-                );
-            }
-            if report.outputs_dropped > 0 {
-                println!(
-                    "{tag}removed {} kept command output(s) past `[sandbox] max_output_files`",
-                    report.outputs_dropped
-                );
-            }
-            for (kind, samples) in &report.dictionaries_trained {
-                println!("trained {kind} dictionary from {samples} objects");
-            }
-            match report.over_budget_by {
-                0 => println!("stored {}", fmt::bytes(rook.content_bytes()?)),
-                over => {
-                    let policy = &rook.config.storage.retention;
-                    let left = rook.store.list_sessions()?;
-                    let protected = left
-                        .iter()
-                        .filter(|s| s.tags.iter().any(|t| policy.protect_tags.contains(t)))
-                        .count();
-                    println!(
-                        "still {} over the {} budget",
-                        fmt::bytes(over),
-                        fmt::bytes(policy.max_total_bytes.unwrap_or(0))
-                    );
-                    println!(
-                        "  {} session(s) remain, {protected} protected; the rest is held by refs \
-                         — the newest {} entries of each history, which retention keeps",
-                        left.len(),
-                        policy.max_history_entries.map(|n| n.to_string()).unwrap_or("all".into())
-                    );
-                }
             }
         }
         StoreCmd::Verify => {
@@ -1370,24 +1330,34 @@ fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, json: bool) -
         let session = source.session_named(id, workspace)?;
         return show_context(&source.context_usage(session, *window, workspace)?, json);
     }
+    // Writes the daemon's API serves, routed for the same reason the reads
+    // are: the store takes one writer, and stopping the daemon to set a goal
+    // is not an answer.
+    if let SessionCmd::Goal { id, goal } = &cmd {
+        let session = source.session_named(id, workspace)?;
+        if goal.is_empty() {
+            match source.goal(session)? {
+                Some(goal) => println!("{goal}"),
+                None => println!("no goal set for this session"),
+            }
+            return Ok(());
+        }
+        source.set_goal(session, &goal.join(" "))?;
+        println!("goal set");
+        return Ok(());
+    }
+    if let SessionCmd::Rewind { id, to, keep_files } = &cmd {
+        let session = source.session_named(id, workspace)?;
+        return show_rewind(&source.rewind(session, *to, !keep_files)?, *keep_files, json);
+    }
     let rook = source.local()?;
     match cmd {
         SessionCmd::Ls { .. }
         | SessionCmd::Show { .. }
         | SessionCmd::Diff { .. }
-        | SessionCmd::Context { .. } => unreachable!("routed above"),
-        SessionCmd::Goal { id, goal } => {
-            let session = rook.session_named(&id)?;
-            if goal.is_empty() {
-                match rook.goal(session)? {
-                    Some(goal) => println!("{goal}"),
-                    None => println!("no goal set for this session"),
-                }
-            } else {
-                rook.set_goal(session, &goal.join(" "))?;
-                println!("goal set");
-            }
-        }
+        | SessionCmd::Context { .. }
+        | SessionCmd::Goal { .. }
+        | SessionCmd::Rewind { .. } => unreachable!("routed above"),
         SessionCmd::Fork { id, at } => {
             let source = rook.session_named(&id)?;
             let meta = rook.store.get_session(source)?.context("no such session")?;
@@ -1403,31 +1373,95 @@ fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, json: bool) -
                 rook_store::format_session_id(forked.id)
             );
         }
-        SessionCmd::Rewind { id, to, keep_files } => {
-            let report = rook.rewind(rook.session_named(&id)?, to, !keep_files)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
-                return Ok(());
-            }
-            println!("rewound to #{to} as session {}", report.session);
-            println!("  {} events kept, parent {} left intact", report.events_kept, report.parent);
-            if !keep_files {
-                println!(
-                    "  {} checkpoint(s) applied: {} file(s) restored, {} removed",
-                    report.checkpoints_applied, report.files_restored, report.files_removed
-                );
-                if report.files_kept > 0 {
-                    println!(
-                        "  {} file(s) captured as they were first: `rook session rewind {} {}` \
-                         puts them back",
-                        report.files_kept, report.session, report.events_kept
-                    );
-                }
-            }
-        }
         SessionCmd::Rm { id } => {
             let removed = rook.store.delete_session(rook.session_named(&id)?)?;
             println!("removed session with {removed} events; run `rook store gc` to reclaim space");
+        }
+    }
+    Ok(())
+}
+
+/// The report, and the local detail when there is a local engine to ask.
+///
+/// Routed through the daemon there is no store here to count sessions in, so
+/// the over-budget line says the number and stops rather than guessing at the
+/// breakdown — which is the difference between a shorter answer and a wrong one.
+fn show_maintenance(
+    report: &rook_core::MaintenanceReport,
+    dry_run: bool,
+    json: bool,
+    local: Option<&Rook>,
+) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(report)?);
+        return Ok(());
+    }
+    let tag = if dry_run { "[dry run] " } else { "" };
+    println!(
+        "{tag}sessions deleted {}, events deleted {}, protected {}",
+        report.prune.sessions_deleted, report.prune.events_deleted, report.prune.protected
+    );
+    println!("{tag}collected {} ({} freed)", report.gc.collected, fmt::bytes(report.gc.bytes_freed));
+    if report.history_dropped > 0 {
+        println!(
+            "{tag}dropped {} history entr{} past `[storage.retention] max_history_entries`",
+            report.history_dropped,
+            if report.history_dropped == 1 { "y" } else { "ies" }
+        );
+    }
+    if report.outputs_dropped > 0 {
+        println!(
+            "{tag}removed {} kept command output(s) past `[sandbox] max_output_files`",
+            report.outputs_dropped
+        );
+    }
+    for (kind, samples) in &report.dictionaries_trained {
+        println!("trained {kind} dictionary from {samples} objects");
+    }
+    match (report.over_budget_by, local) {
+        (0, Some(rook)) => println!("stored {}", fmt::bytes(rook.content_bytes()?)),
+        (0, None) => {}
+        (over, local) => {
+            let budget = local.map(|r| r.config.storage.retention.max_total_bytes.unwrap_or(0));
+            match budget {
+                Some(budget) => {
+                    println!("still {} over the {} budget", fmt::bytes(over), fmt::bytes(budget))
+                }
+                None => println!("still {} over the size budget", fmt::bytes(over)),
+            }
+            let Some(rook) = local else { return Ok(()) };
+            let policy = &rook.config.storage.retention;
+            let left = rook.store.list_sessions()?;
+            let protected =
+                left.iter().filter(|s| s.tags.iter().any(|t| policy.protect_tags.contains(t))).count();
+            println!(
+                "  {} session(s) remain, {protected} protected; the rest is held by refs — the \
+                 newest {} entries of each history, which retention keeps",
+                left.len(),
+                policy.max_history_entries.map(|n| n.to_string()).unwrap_or("all".into())
+            );
+        }
+    }
+    Ok(())
+}
+
+fn show_rewind(report: &rook_core::Rewind, keep_files: bool, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(report)?);
+        return Ok(());
+    }
+    println!("rewound to session {}", report.session);
+    println!("  {} events kept, parent {} left intact", report.events_kept, report.parent);
+    if !keep_files {
+        println!(
+            "  {} checkpoint(s) applied: {} file(s) restored, {} removed",
+            report.checkpoints_applied, report.files_restored, report.files_removed
+        );
+        if report.files_kept > 0 {
+            println!(
+                "  {} file(s) captured as they were first: `rook session rewind {} {}` puts them back",
+                report.files_kept, report.session, report.events_kept
+            );
         }
     }
     Ok(())
@@ -1769,9 +1803,16 @@ fn cmd_memory(source: &Source, cmd: MemoryCmd, workspace: &Path, json: bool) -> 
         };
         return show_memory(&facts, &held, all, json);
     }
+    if let MemoryCmd::Rm { id } = &cmd {
+        match source.forget(id)? {
+            Some(fact) => println!("forgot [{}] {}", fact.id, fact.text),
+            None => bail!("no fact {id:?}"),
+        }
+        return Ok(());
+    }
     let rook = source.local()?;
     match cmd {
-        MemoryCmd::Ls { .. } => unreachable!("routed above"),
+        MemoryCmd::Ls { .. } | MemoryCmd::Rm { .. } => unreachable!("routed above"),
         MemoryCmd::Search { query } => {
             let book = rook.memory()?;
             let hits = rook_core::memory::search(book.in_scope(&workspace), &query.join(" "));
@@ -1804,11 +1845,6 @@ fn cmd_memory(source: &Source, cmd: MemoryCmd, workspace: &Path, json: bool) -> 
                 ),
             }
         }
-
-        MemoryCmd::Rm { id } => match rook.forget(&id, Some("removed from the command line".into()))? {
-            Some(fact) => println!("forgot [{}] {}", fact.id, fact.text),
-            None => bail!("no fact {id:?}"),
-        },
 
         MemoryCmd::History => {
             let history = rook.memory_history()?;

@@ -755,9 +755,11 @@ lose people's trust:
   transcripts has found a dozen defects here that no scripted answer would have.
   What is still unwatched is long work: five short scenarios are not an
   afternoon, and nothing here has run against a hosted model at all.
-- **The CLI writes to the store directly**, so a command that changes it cannot
-  run while `rookd` holds the lock. Every read routes over the daemon's API
-  instead and prints the same thing; writes say where the lock is
+- **Some CLI writes still need the store to themselves.** Every read routes over
+  the daemon's API and prints the same thing, and so now do the four writes the
+  API serves: `session goal`, `session rewind`, `memory rm` and `store maintain`.
+  The rest — `store gc`, `store train`, `session rm`, `skills capture` and
+  `skills install` — have no endpoint and say where the lock is instead
   ([ADR-0006](docs/adr/0006-single-writer-store.md)).
 - **Reasoning is carried across a tool call, and only for Anthropic.** It was
   not, and that was a turn Anthropic refuses outright: with extended thinking on,
