@@ -746,13 +746,15 @@ more than CI actually does. Details: [docs/platforms.md](docs/platforms.md).
 Being explicit, because a roadmap presented as a feature list is how these projects
 lose people's trust:
 
-- **No model with judgement has ever driven it.** A real one does: five scenarios
-  run against a 3-billion-parameter model in CI on every push, and reading those
+- **A capable model has driven it once, locally.** Five scenarios against a
+  27-billion-parameter model in LM Studio pass on the first attempt — reading,
+  editing, using what a command printed, delegating, and refusing to settle a
+  false claim from memory — with none of the nudges the loop keeps for smaller
+  models needed. CI runs the same five against a 3-billion-parameter model on
+  every push, where they mostly fail for the model's own reasons; reading those
   transcripts has found a dozen defects here that no scripted answer would have.
-  But a model that size fails for its own reasons more often than for ours, and
-  what a capable model does with the loop — whether it is steered well, whether
-  the nudges help or annoy — nobody has watched. `cargo xtask smoke --model
-  anthropic/…` is one command away and has not been run.
+  What is still unwatched is long work: five short scenarios are not an
+  afternoon, and nothing here has run against a hosted model at all.
 - **The CLI writes to the store directly**, so a command that changes it cannot
   run while `rookd` holds the lock. Every read routes over the daemon's API
   instead and prints the same thing; writes say where the lock is

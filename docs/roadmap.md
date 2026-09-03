@@ -1148,6 +1148,15 @@ hold the one invariant that matters there: every module loaded is embedded and
 served as script. [ADR-0012](adr/0012-hand-written-modules-no-bundler.md)
 supersedes the one-file part of ADR-0007 and keeps the rest.
 
+**A capable model drove it, and everything worked.** Five scenarios against
+`qwen3.8-27b` in LM Studio: five passes, first attempt, none of the nudges the
+loop keeps for small models needed — no silence to break, no cut reply to
+continue, no loop to refuse. That is the first evidence that the failures the
+CI readings kept finding after the mechanism was fixed were the 3b model's own,
+and it is what the README's largest admission was waiting for. What it does not
+cover: the Anthropic thinking round trip, which is that dialect's and needs a
+key, and work longer than five short scenarios.
+
 **Thinking is carried across a tool call.** A turn that thought, called a
 tool and went on was sending Anthropic an assistant message with the call and
 not the signed thinking block that led to it — which that API refuses, so
