@@ -106,7 +106,7 @@ result of every command says what was applied.
 | macOS | Seatbelt (`sandbox-exec`) | none known; deprecated by Apple, present in every release |
 | Linux | Landlock, unprivileged | network only from kernel 6.7, and TCP only — never UDP, so never DNS |
 | FreeBSD | none yet | Capsicum's capability mode breaks a shell; jails need root |
-| Windows | a low integrity level, through a launcher that is `rook` itself | the network is never restrained; the workspace and scratch are labelled low, which persists |
+| Windows | a low integrity level, through a launcher that is `rook` itself | the network is never restrained; the workspace and a scratch directory of rook's own are labelled low, which persists |
 
 `[sandbox] isolate = "required"` refuses to run a command where the table says
 none; `auto`, the default, runs it as it is and says so.

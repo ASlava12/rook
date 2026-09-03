@@ -260,8 +260,16 @@ pub(crate) fn contained(command: &str, isolation: &Isolation) -> std::io::Result
 pub(crate) fn contained(command: &str, isolation: &Isolation) -> std::io::Result<tokio::process::Command> {
     static LABELLED: std::sync::Mutex<std::collections::BTreeSet<PathBuf>> =
         std::sync::Mutex::new(std::collections::BTreeSet::new());
-    let scratch = isolation.scratch.first().cloned().unwrap_or_else(std::env::temp_dir);
-    for root in std::iter::once(&isolation.workspace).chain(&isolation.scratch) {
+    // Not the user's whole temporary directory, which the label would walk
+    // and mark for every program that uses it: a directory of rook's own
+    // under it, which the command is told is its TEMP.
+    let temp = std::env::temp_dir();
+    let scratch = temp.join("rook-scratch");
+    std::fs::create_dir_all(&scratch)?;
+    let roots = std::iter::once(&isolation.workspace)
+        .chain(std::iter::once(&scratch))
+        .chain(isolation.scratch.iter().filter(|dir| **dir != temp));
+    for root in roots {
         let mut done = LABELLED.lock().map_err(|_| std::io::Error::other("label lock"))?;
         if done.contains(root) || !root.exists() {
             continue;

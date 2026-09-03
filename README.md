@@ -545,9 +545,9 @@ tool's result says so, and `"required"` refuses instead. What was applied is
 recorded on every command, not assumed: a sandbox that quietly did nothing is
 worse than none. Landlock older than kernel 6.7 cannot restrain the network at
 all, and never restrains UDP, so DNS; a Windows integrity level never restrains
-it; the result says that too. On Windows the workspace and the temporary
-directory are given a low integrity label so the command may write them — a
-persistent mark on the directory, and only that. A command run in an editor's
+it; the result says that too. On Windows the workspace, and a scratch directory
+of rook's own under the temporary directory, are given a low integrity label so
+the command may write them — a persistent mark on the directory, and only that. A command run in an editor's
 terminal is the editor's, and the language-server installer runs uncontained by
 design, after the person said to.
 

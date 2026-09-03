@@ -43,8 +43,10 @@ of every command.
   through a launcher — the same `rook` binary, told by an environment variable
   to lower itself and run `cmd /C` — and inherits the level and the pipes. A
   process at low integrity reads what any process reads and writes only what
-  is labelled low, so the parent labels the workspace and the scratch
-  directory low first: a persistent mark on the directory, and only that. Not
+  is labelled low, so the parent labels the workspace low first, and a scratch
+  directory of rook's own under the temporary directory — not the temporary
+  directory itself, which the label would walk and mark for every program that
+  uses it. A persistent mark on the directory, and only that. Not
   an AppContainer: one reads nothing of the user's profile by default, so the
   toolchain under `~/.cargo` would not run without rewriting the profile's
   ACLs. Not Codex's design of dedicated sandbox users, DPAPI secrets and
