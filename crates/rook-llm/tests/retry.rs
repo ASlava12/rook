@@ -89,3 +89,129 @@ async fn an_endpoint_that_stays_down_gives_up_and_says_which_status() {
     assert!(tries <= 4, "and stopped at the ceiling rather than going on: {tries} tries");
     assert!(refused.to_string().contains("529"), "the last status is the real one: {refused}");
 }
+
+/// Answers each request with the next entry, then serves a real reply for ever
+/// after. Keeps every request body, so a test can say what was actually sent.
+async fn recording(
+    refusals: Vec<(&'static str, &'static str)>,
+) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let sent: Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+    let kept = sent.clone();
+
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let mut scratch = vec![0u8; 16 << 10];
+            let read = socket.read(&mut scratch).await.unwrap_or(0);
+            let whole = String::from_utf8_lossy(&scratch[..read]).into_owned();
+            let body = whole.split_once("\r\n\r\n").map(|(_, b)| b.to_string()).unwrap_or_default();
+            let n = {
+                let mut kept = kept.lock().unwrap();
+                kept.push(body);
+                kept.len() - 1
+            };
+            let (status, body) = match refusals.get(n) {
+                Some((status, body)) => (*status, (*body).to_string()),
+                None => (
+                    "200 OK",
+                    r#"{"choices":[{"message":{"role":"assistant","content":"answered"},
+                        "finish_reason":"stop"}],"model":"m"}"#
+                        .to_string(),
+                ),
+            };
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+        }
+    });
+    (format!("http://{addr}/v1"), sent)
+}
+
+/// A model name is what decides whether the effort is sent, so the test needs
+/// one this dialect maps.
+fn reasoning_provider(url: String) -> Retrying {
+    let inner = OpenAiCompatible::new("test/gpt-5-mini", "gpt-5-mini", Config::new(url, None, 8192)).unwrap();
+    Retrying::new(Box::new(inner))
+}
+
+fn thinking_hard() -> Request {
+    let mut request = Request::new(Vec::new());
+    request.effort = Some(rook_llm::Effort::High);
+    request
+}
+
+/// A route that will not take the effort refuses the whole request, and a turn
+/// that has been running for minutes ends on a field the user never set. The
+/// same request answers the same for ever; a request without that field need
+/// not, so it is asked once more.
+#[tokio::test]
+async fn an_effort_the_endpoint_refuses_is_dropped_and_the_request_asked_again() {
+    let (url, sent) = recording(vec![(
+        "400 Bad Request",
+        r#"{"error":{"message":"Unsupported parameter: 'reasoning_effort'"}}"#,
+    )])
+    .await;
+
+    let answered = reasoning_provider(url).complete(thinking_hard()).await;
+
+    let sent = sent.lock().unwrap();
+    assert_eq!(sent.len(), 2, "asked again, once: {sent:?}");
+    assert!(sent[0].contains("reasoning_effort"), "the precondition: the first request carried it");
+    assert!(!sent[1].contains("reasoning_effort"), "and the second did not: {}", sent[1]);
+    assert_eq!(answered.expect("the second request is the answer").message.content, "answered");
+}
+
+/// One refusal per process, not one per step: the endpoint's own answer
+/// overrides the guess the model name made, for the rest of the session.
+#[tokio::test]
+async fn an_endpoint_that_refused_the_effort_is_not_asked_with_it_again() {
+    let (url, sent) = recording(vec![(
+        "400 Bad Request",
+        r#"{"error":{"message":"Reasoning is mandatory for this endpoint and cannot be disabled"}}"#,
+    )])
+    .await;
+    let provider = reasoning_provider(url);
+
+    provider.complete(thinking_hard()).await.expect("the retry answers");
+    provider.complete(thinking_hard()).await.expect("and so does the next turn");
+
+    let sent = sent.lock().unwrap();
+    assert_eq!(sent.len(), 3, "one refusal, its retry, and a later turn: {}", sent.len());
+    assert!(!sent[2].contains("reasoning_effort"), "the later turn pays nothing for it: {}", sent[2]);
+}
+
+/// A 400 about anything else is still a refusal that will not change, and one
+/// naming the effort on a request that never had one cannot loop.
+#[tokio::test]
+async fn a_refusal_that_names_the_effort_without_one_sent_is_reported_at_once() {
+    let (url, sent) = recording(vec![("400 Bad Request", r#"{"error":"reasoning is mandatory"}"#); 8]).await;
+
+    let refused = provider(url).complete(Request::new(Vec::new())).await.unwrap_err();
+
+    assert_eq!(sent.lock().unwrap().len(), 1, "there was nothing to drop, so nothing to ask again");
+    assert!(refused.to_string().contains("400"), "{refused}");
+}
+
+/// Tool definitions are the other thing the agent adds rather than the user.
+/// Dropping them would leave an agent that cannot act and does not say why, so
+/// the message names the setting that puts them in the prompt instead.
+#[tokio::test]
+async fn a_refusal_about_tools_names_the_setting_that_answers_it() {
+    let (url, _) = recording(vec![
+        (
+            "400 Bad Request",
+            r#"{"error":{"message":"this endpoint does not support the tools parameter"}}"#,
+        );
+        4
+    ])
+    .await;
+
+    let refused = provider(url).complete(Request::new(Vec::new())).await.unwrap_err().to_string();
+
+    assert!(refused.contains("native_tools = false"), "the message has to say what to do: {refused}");
+}

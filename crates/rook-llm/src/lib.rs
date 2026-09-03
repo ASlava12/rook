@@ -27,7 +27,7 @@ use async_trait::async_trait;
 pub enum LlmError {
     #[error("cannot reach {endpoint}: {detail}\n{}", advice(.endpoint))]
     Unreachable { endpoint: String, detail: String },
-    #[error("provider returned {status}: {body}")]
+    #[error("provider returned {status}: {body}{}", what_to_try(*.status, .body))]
     Status { status: u16, body: String },
     #[error("could not parse the provider's response: {0}")]
     Decode(String),
@@ -49,6 +49,25 @@ pub enum LlmError {
     NoSuchModel { model: String, endpoint: String, available: Vec<String> },
     #[error("{0}")]
     Other(String),
+}
+
+/// What a person can do about a request this endpoint will not take.
+///
+/// A 400 is the agent's request being wrong, and one shape of wrong is a field
+/// the agent added rather than the user: the tool definitions, which some
+/// OpenAI-compatible servers refuse outright. Dropping them here would leave an
+/// agent that cannot act and does not say why, so the setting that puts them in
+/// the prompt instead is named and the choice is left where it belongs.
+fn what_to_try(status: u16, body: &str) -> &'static str {
+    let said = body.to_ascii_lowercase();
+    let about_tools = ["tool", "function"].iter().any(|word| said.contains(word));
+    match status == 400 && about_tools {
+        true => {
+            "\nThis endpoint may not take tool definitions. `[agent] native_tools = false` \
+                 describes them in the prompt and reads the model's answer back instead."
+        }
+        false => "",
+    }
 }
 
 /// The answer to "which model, then" is on the same server that just refused, so

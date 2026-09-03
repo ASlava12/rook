@@ -203,12 +203,15 @@ async fn maintain(state: Arc<AppState>, every_hours: u32) {
     let mut waiting = period;
     loop {
         tokio::time::sleep(waiting).await;
-        let Ok(rook) = state.rook.try_write() else {
+        let Ok(rook) = state.rook.clone().try_write_owned() else {
             tracing::debug!("maintenance postponed: a turn is holding the store");
             waiting = WHEN_BUSY;
             continue;
         };
-        match rook.maintenance(false) {
+        // As in the handler: off the runtime, so the hours-long timer does not
+        // become a stall the moment it fires.
+        let done = tokio::task::spawn_blocking(move || rook.maintenance(false)).await;
+        match done.unwrap_or_else(|e| Err(rook_core::CoreError::Other(e.to_string()))) {
             Ok(report) => tracing::info!(
                 sessions = report.prune.sessions_deleted,
                 collected = report.gc.collected,

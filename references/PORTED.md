@@ -1146,3 +1146,40 @@ hermes' `route task-learned knowledge to skills; memory is the rest` is the
 line `write_skill` and `remember` already draw, and openclaw's `make forget
 rewrites atomic` is a file rewrite here the store never does — `forget` marks
 an object, and nothing is rewritten in place.
+
+## Twenty-ninth pass — acp, goose, hermes, opencode, openclaw, openhands
+
+Two ported, both as the class rather than the case.
+
+hermes' two reasoning fixes — `GLM-5.3 no longer 400s when thinking is
+disabled` and `a retry after a mandatory-reasoning 400 resends the user's own
+effort` — are one shape: a route refuses the reasoning field, in either
+direction, and the turn dies on a field the user never set. Here the three
+dialects decide by model name whether to send an effort, and a gateway serving
+something else under that name is exactly where a name is wrong. `Retrying`
+now asks once more without the effort when a 400 names it, and stops sending
+it for the life of the process — the endpoint's own answer overriding the
+guess. Tool definitions are the other thing the agent adds rather than the
+user; dropping those would leave an agent that cannot act and does not say
+why, so a 400 that names them carries `[agent] native_tools = false` instead.
+
+openclaw's `prevent gateway stalls during large session cleanup` is the same
+question asked of a different runtime: their reclamation ran on the gateway's
+event loop, and `rookd` ran a prune, a collection and zstd dictionary training
+on the runtime that answers requests. Both the handler and the hours-long
+timer now run it on a blocking thread. The test is on a single-threaded
+runtime — what a small machine amounts to — and fails without the change.
+
+Dismissed, each against the code. goose's `bind CLI session naming to trusted
+path` stops a provider being called to name a session; here a session is named
+from the first line of the prompt and no provider is asked. Their `enforce
+subagent platform guards` is stance inheritance, which a child gets and can
+only lower. Their `honor content capture opt-out` is telemetry, which never
+leaves the machine. openclaw's `reuse Windows shell wrapper patterns` is a
+cache of quoting shapes; there is one wrapper here and it is `cmd /C`. Their
+`generated images disappear after failed tool calls` and `reject out-of-range
+claim confidence` have nothing here to attach to. acp's registry docs,
+opencode's desktop device auth, and openhands' automation permissions and
+i18n placeholders are product surfaces this repository does not have, as are
+the three openclaw commits the pointer advanced past: control-UI locales, a
+runner-packing change to their CI, and a WeChat login provider.

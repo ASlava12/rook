@@ -447,7 +447,16 @@ endpoint that refuses tool definitions gets them in the prompt instead
 (`[agent] native_tools = false`) and the model's reply is read back for the
 calls; the same reading applies with native tools, because a small model
 handed them still answers with the JSON object some of the time — it is taken
-as a call when it names a tool that was offered, and as an answer when not.
+as a call when it names a tool that was offered, and as an answer when not. A
+refusal that names them says so, because the setting is the answer and nobody
+finds it by reading provider JSON.
+
+A request refused for something the agent added rather than you is asked again
+without it. Whether a model takes a reasoning effort is decided by its name, and
+a gateway serving something else under that name is where a name is wrong: the
+route answers 400, and rather than ending the turn on a field you never set, the
+effort is dropped and the request made once more — and not sent again for the
+rest of the run.
 
 `prompt_cache_ttl` is which side of a pause you pay on. A cache write costs more
 for the hour and a hit costs a tenth either way, so `1h` pays off exactly when a

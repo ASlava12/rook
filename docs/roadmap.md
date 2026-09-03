@@ -1148,6 +1148,22 @@ hold the one invariant that matters there: every module loaded is embedded and
 served as script. [ADR-0012](adr/0012-hand-written-modules-no-bundler.md)
 supersedes the one-file part of ADR-0007 and keeps the rest.
 
+**A request refused for what the agent added is asked again without it.** The
+three dialects decide by model name whether to send a reasoning effort, and a
+gateway serving something else under that name is where a name is wrong: the
+route answers 400 and a turn that has been running for minutes ends on a field
+the user never set. `Retrying` drops the effort and asks once more, then stops
+sending it for the life of the process. Tool definitions are the other thing
+the agent adds; dropping those would leave an agent that cannot act and does
+not say why, so the refusal names `[agent] native_tools = false` instead.
+
+**A long store pass belongs on a thread, not on the runtime.** `rookd` ran a
+prune, a collection and zstd dictionary training where they were awaited —
+holding a runtime worker for all of it, which on a small machine is the thread
+the chat socket needed. Both the handler and the hours-long timer run it on a
+blocking thread now; the test runs on a single-threaded runtime and fails
+without the change.
+
 ## After that
 
 **Driving physical devices, if the Model Hardware Standard becomes something to

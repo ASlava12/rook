@@ -525,12 +525,21 @@ struct Writer {
     held_for_secs: u64,
 }
 
+/// On a thread of its own, because it is the one request here that is neither
+/// quick nor waiting on IO: a prune walks every session, a collection walks
+/// every object, and training a dictionary is zstd doing arithmetic for as long
+/// as that takes. Run where it was awaited, it holds a runtime worker for all of
+/// it, and on a small machine that is the thread the chat socket needed to say
+/// anything at all.
 async fn maintenance(
     State(s): State<Shared>,
     Json(body): Json<MaintenanceBody>,
 ) -> ApiResult<rook_core::MaintenanceReport> {
-    let rook = s.rook.read().await;
-    Ok(Json(rook.maintenance(body.dry_run)?))
+    let rook = s.rook.clone().read_owned().await;
+    let report = tokio::task::spawn_blocking(move || rook.maintenance(body.dry_run))
+        .await
+        .map_err(|e| Fail(StatusCode::INTERNAL_SERVER_ERROR, ApiError::new("panic", e.to_string())))??;
+    Ok(Json(report))
 }
 
 #[cfg(test)]
@@ -994,6 +1003,55 @@ mod tests {
         // origin check exists for.
         let headless = f.router.clone().oneshot(upgrade_request(None)).await.unwrap();
         assert_eq!(headless.status(), StatusCode::UPGRADE_REQUIRED, "a client with no origin gets through");
+    }
+
+    /// Maintenance is the one request here that is neither quick nor waiting on
+    /// IO — a prune, a collection and zstd training, all arithmetic and disk.
+    /// Run where it was awaited it holds a runtime worker for the whole of it,
+    /// and this test runs on a single-threaded runtime, which is what a small
+    /// machine amounts to: the daemon has to keep answering.
+    #[tokio::test]
+    async fn a_long_maintenance_does_not_stop_the_daemon_answering() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let f = fixture();
+        // Enough that the work is tens of milliseconds rather than none: with
+        // an empty store there would be nothing to be blocked by.
+        {
+            let rook = f.state.rook.read().await;
+            for i in 0..400 {
+                rook.log(f.session, rook_store::EventKind::UserMessage, "p", &format!("event {i}")).unwrap();
+            }
+        }
+
+        let finished = Arc::new(AtomicBool::new(false));
+        let flag = finished.clone();
+        let router = f.router.clone();
+        let maintaining = tokio::spawn(async move {
+            let response = router
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/maintenance")
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"dry_run":false}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            flag.store(true, Ordering::SeqCst);
+            response.status()
+        });
+        // Let it start and reach its blocking call. Run on this thread, it
+        // would instead run to completion here and the flag would already be
+        // set — which is the failure this is about.
+        tokio::task::yield_now().await;
+
+        let (status, _) = get(&f, "/api/health").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(!finished.load(Ordering::SeqCst), "the daemon answered only after maintenance was done");
+        assert_eq!(maintaining.await.unwrap(), StatusCode::OK, "and the maintenance itself finished");
     }
 
     #[tokio::test]
