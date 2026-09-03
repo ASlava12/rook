@@ -1080,3 +1080,16 @@ session that hits their size cap is archived, and the archiving lost data.
 Sessions here are not archived; retention deletes by age, size and tag, and a
 transcript past what is worth rendering is answered by its hash. Nothing to
 attach the fix to.
+
+## Twenty-fifth pass — hermes, cline, codex
+
+Dismissed, each against the code. hermes' two `fix(approval)` commits make
+unattended platforms deny by default and keep webhook sessions out of the
+gateway's approval context; here nothing can approve where nobody is — the
+`Unattended` approver answers `Unanswered`, which grants nothing and lands in
+the outcome as a question for whoever comes back. `lean compaction makes
+exactly one auxiliary request per attempt` — a summary here is one request,
+and a failed one records a position and a note rather than trying again.
+`hot-apply native compaction settings` — a loop is built per turn, so a
+setting changed between turns is in force on the next one. cline and codex
+moved without anything that touches a loop, a tool or a boundary.
