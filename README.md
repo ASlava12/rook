@@ -746,11 +746,13 @@ more than CI actually does. Details: [docs/platforms.md](docs/platforms.md).
 Being explicit, because a roadmap presented as a feature list is how these projects
 lose people's trust:
 
-- **No model with judgement has ever driven it.** Whole turns run in CI against a
-  server that speaks the OpenAI dialect over a real socket — the request shape,
-  the tool-call round trip and the streaming are all covered — but everything
-  that model says is scripted. Whether the agent behaves well when the answers
-  are not is untested.
+- **No model with judgement has ever driven it.** A real one does: five scenarios
+  run against a 3-billion-parameter model in CI on every push, and reading those
+  transcripts has found a dozen defects here that no scripted answer would have.
+  But a model that size fails for its own reasons more often than for ours, and
+  what a capable model does with the loop — whether it is steered well, whether
+  the nudges help or annoy — nobody has watched. `cargo xtask smoke --model
+  anthropic/…` is one command away and has not been run.
 - **The CLI writes to the store directly**, so a command that changes it cannot
   run while `rookd` holds the lock. Every read routes over the daemon's API
   instead and prints the same thing; writes say where the lock is
@@ -775,9 +777,14 @@ lose people's trust:
   and `rook store cat` prints any of it back. `rook search` finds where a secret
   ended up — it names the file and the capture — and `rook session rm` followed
   by `rook store gc` removes it.
-- **Permissions are pattern matching, not a sandbox.** They raise the floor;
-  `curl … | sh` is one obfuscation away from any rule. Not a jail. The workspace
-  boundary binds the file tools, not commands the agent runs.
+- **Containment is real but partial.** A command the model asks for runs under
+  Seatbelt on macOS, Landlock on Linux and a low integrity level on Windows: it
+  writes the workspace and a scratch directory and nothing else, whatever it
+  starts. It reads everywhere, this agent's own store included, and the network
+  is open by default — so a command that is refused a write can still send what
+  it read. FreeBSD has no containment at all and says so. The pattern rules over
+  the command line are still pattern matching: `curl … | sh` is one obfuscation
+  away from any rule, and they are what covers the platform that has nothing.
 - **Undo covers what a tool declared, not what a command did.** A checkpoint
   holds the paths a tool said it would touch; a `run_command` says none, so what
   a shell command changes is outside `rook session rewind`. `delete_file` closes
