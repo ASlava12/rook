@@ -83,11 +83,29 @@ pub fn available() -> Result<Backend, String> {
     PROBED.get_or_init(probe).clone()
 }
 
+/// Asked by running one: a process already inside a sandbox — a CI step, an
+/// app's helper — cannot apply another, and `sandbox-exec` says so only when
+/// tried, which would otherwise be on the first command of every turn.
 #[cfg(target_os = "macos")]
 fn probe() -> Result<Backend, String> {
-    match Path::new(SANDBOX_EXEC).exists() {
-        true => Ok(Backend::Seatbelt),
-        false => Err(format!("no sandbox: {SANDBOX_EXEC} is missing, so commands run as they are")),
+    if !Path::new(SANDBOX_EXEC).exists() {
+        return Err(format!("no sandbox: {SANDBOX_EXEC} is missing, so commands run as they are"));
+    }
+    let tried = std::process::Command::new(SANDBOX_EXEC)
+        .args(["-p", "(version 1)(allow default)", "--", "/usr/bin/true"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output();
+    match tried {
+        Ok(out) if out.status.success() => Ok(Backend::Seatbelt),
+        Ok(out) => Err(format!(
+            "no sandbox: {SANDBOX_EXEC} cannot apply a profile here ({}), so commands run as they are",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+        Err(e) => {
+            Err(format!("no sandbox: {SANDBOX_EXEC} would not start ({e}), so commands run as they are"))
+        }
     }
 }
 
