@@ -62,6 +62,46 @@ track" visibility with no model overhead at all, because nothing has to be
 maintained. It also survives compaction, which a checklist in the transcript
 would not.
 
+## Measured here
+
+The ADR above stood on somebody else's benchmark and said so. `cargo xtask
+bench` is ours: three arms differing by one variable, six multi-step tasks —
+three of them with somewhere to go wrong — each scored by looking at the
+workspace afterwards rather than by reading what the model said about it. Three
+runs each, against `qwen3.6-35b-a3b` through LM Studio.
+
+| arm | passed | tokens | steps |
+|---|---|---|---|
+| plan-line (the decision) | 18/18 | 669,578 | 136 |
+| nothing | 18/18 | 643,094 | 141 |
+| todo-tool | 18/18 | 1,190,124 | 229 |
+
+Two findings, and the second is the one worth keeping.
+
+**The tool cost 78% more tokens and 68% more steps for no difference in
+outcome.** Every arm passed every task, including the three with traps in
+them, so what this measures is price rather than quality — which is the same
+place the reference's own opus row landed. The plan line costs 4% over saying
+nothing at all, which at k=3 is noise.
+
+**Without a per-turn reminder the model does not use the tool at all.** Told
+once in the system prompt to write a plan with `plan` before acting, a capable
+model made nine tool calls on a three-part task and not one of them was a plan.
+The first version of this measurement therefore compared nothing to nothing;
+the arm only became real once the turn started carrying "you have no plan yet"
+and "mark a step done as soon as it is". That nag is the tool's active
+ingredient, and it is also the whole of its cost — which is what the reference
+found from the other direction when reframing the prompts as optional notes
+made the models stop calling it.
+
+## What would change the decision
+
+Not a better tool: a task set where the arms come apart. Everything here
+passed everything, so nothing was learned about hard work, and the honest next
+step is harder tasks or a weaker model rather than more repeats of these. The
+tool stays behind `[agent] todo_tool`, off, because an arm that cannot be run
+is a measurement that cannot be repeated.
+
 ## Cost
 
 - No structured progress for a UI to render. `session context` and the transcript

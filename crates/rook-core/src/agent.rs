@@ -1349,10 +1349,21 @@ impl<'a> AgentLoop<'a> {
         // Here rather than in the system block for the reason above, and it is
         // the half that makes the tool a tool: a checklist the model cannot see
         // is one it cannot check off. Only under `todo_tool`, which is off.
-        if self.rook.config.agent.todo_tool
-            && let Ok(Some(plan)) = self.rook.plan(self.session)
-        {
-            volatile.push_str(&format!("\n\nThe plan you are keeping:\n{plan}"));
+        // The reminder, and it is the arm's active ingredient rather than a
+        // decoration: told once in the system prompt to use a `plan` tool, a
+        // capable model does not — nine tool calls on a three-part task and not
+        // one of them a plan. The reference found the same, and found that this
+        // nag is what drives the usage its cost is made of. Measuring the tool
+        // without it measures an unused schema entry.
+        if self.rook.config.agent.todo_tool {
+            match self.rook.plan(self.session) {
+                Ok(Some(plan)) => volatile.push_str(&format!(
+                    "\n\nThe plan you are keeping:\n{plan}\n\nMark a step done as soon as it is, \
+                     with `plan`. Do not finish while a step is unmarked."
+                )),
+                _ => volatile
+                    .push_str("\n\nYou have no plan for this task yet. Write one with `plan` before acting."),
+            }
         }
         messages.insert(messages.len().saturating_sub(1), Message::user(volatile));
         Ok(messages)

@@ -1148,8 +1148,18 @@ hold the one invariant that matters there: every module loaded is embedded and
 served as script. [ADR-0012](adr/0012-hand-written-modules-no-bundler.md)
 supersedes the one-file part of ADR-0007 and keeps the rest.
 
-**Measuring the checklist tool here, rather than believing somebody else's
-measurement.** [ADR-0010](adr/0010-no-todo-tool.md) declined a planning tool on
+**The checklist tool was measured here, and the decision holds.** Three arms,
+six multi-step tasks, three runs each against a 35b mixture-of-experts: every
+arm passed every task, and the tool cost 78% more tokens and 68% more steps to
+do it. The finding worth keeping is the other one — told once in the system
+prompt to keep a plan, the model ignored the tool entirely, nine calls on a
+three-part task and not one a plan. It only became a real arm once the turn
+carried a reminder every step, and that reminder is both what makes the tool
+used and the whole of what it costs. What was not learned: anything about hard
+work, because nothing failed. [ADR-0010](adr/0010-no-todo-tool.md) carries the
+numbers.
+
+**How that was measured.** [ADR-0010](adr/0010-no-todo-tool.md) declined a planning tool on
 a benchmark that was k=3 on one harness, and said in as many words that a
 future model is worth re-measuring rather than assuming. So: `cargo xtask
 bench` runs three arms — the plan line, nothing at all, and a `plan` tool with
