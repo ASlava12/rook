@@ -1123,3 +1123,22 @@ result here sits in its own slot until taken, and a later wave adds slots
 rather than clearing them. Their `accept native empty tool catalogs`: all
 three bodies omit `tools` when there are none. Their `retry preferred profile
 after cooldown` is about auth profiles, which there are none of here.
+
+## Twenty-eighth pass — hermes, openclaw
+
+Nothing to port; each was checked against the code. hermes' `stream cut mid
+tool-call markup no longer persists as assistant prose`: here a stream cut
+inside a tool call written as text leaves an object that does not parse, and
+it stays in the reply as the text it is — visible, which is the honest half of
+their fix, and the whole of it once the object is read back on the next
+attempt. Their `usage-less empty responses`: an empty reply with no usage
+neither anchors the count nor ends a turn that did something — it is asked
+once to say what it found. Their three delegation perf fixes keep a finished
+child's transcript out of the parent's heap; here a child's transcript is in
+the store and never in the parent. openclaw's `deliver subagent completions
+during recoverable timeouts` is what a turn out of steps does now — it waits
+for its children and hands the model what came back. Their `show a question
+tool's prompt on every harness` is the shared asker; their `arm supervisor
+timeouts before adapter construction` is the handshake timeout the MCP and
+LSP clients already test. The rest — cron handoff, gateway ownership, Muse
+Spark, Code Mode budgets — has nothing to attach to.
