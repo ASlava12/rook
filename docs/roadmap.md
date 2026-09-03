@@ -1086,7 +1086,12 @@ The goal check ran only for a session with a goal set, so `rook run` at
 autonomous — the stance with nobody else to check — checked nothing. With no
 goal set, the turn's prompt is the goal now. The front end's turn only: a
 checker checking itself against the claim it was handed, or a sub-task
-checked against its errand, is a checker per step at every depth.
+checked against its errand, is a checker per step at every depth. The smoke
+job runs with `--yes`, which is the autonomous stance, so its thirteenth
+reading exercised this with a real model: three of five again, one check
+that held, and one that failed for the wrong reason and gave the turn a
+second go it did not use well — the mechanism's first live turn, and the
+model's usual share of it.
 
 **A server fetched once is one somebody has to remember to update.** Now the
 agent remembers: past `[agent] server_update_after_days` (thirty by default,
