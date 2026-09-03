@@ -145,6 +145,12 @@ pub fn smoke(model: Option<String>) -> Result<()> {
             Err(e) => {
                 failed += 1;
                 println!("{:<34} FAILED — {e}", scenario.name);
+                // What the turn actually did: the verdict names the symptom and
+                // the transcript names the cause — which tool, with what
+                // arguments, answered what. Without it a red run against a
+                // small model reads as "the model is small" whether or not the
+                // tool it reached for was broken.
+                println!("{}", transcript(&rook, home.path()));
             }
         }
     }
@@ -156,6 +162,43 @@ pub fn smoke(model: Option<String>) -> Result<()> {
             Ok(())
         }
         n => bail!("{n} of {} scenarios failed against {model}", SCENARIOS.len()),
+    }
+}
+
+/// The tool calls and results of the one session in `home`, bounded.
+fn transcript(rook: &Path, home: &Path) -> String {
+    let listed = Command::new(rook)
+        .env("ROOK_HOME", home)
+        .env("ROOK_LOG", "error")
+        .args(["--json", "session", "ls", "--all"])
+        .output();
+    let Ok(listed) = listed else { return "    (no transcript: `session ls` failed)".into() };
+    let sessions: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap_or_default();
+    // The turn's own session, not a checker's: `verify` forks one, and it
+    // is listed too.
+    let Some(id) = sessions
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|s| s["parent"].is_null())
+        .and_then(|s| s["id"].as_str())
+    else {
+        return "    (no transcript: no session was recorded)".into();
+    };
+    let shown = Command::new(rook)
+        .env("ROOK_HOME", home)
+        .env("ROOK_LOG", "error")
+        .args(["session", "show", id, "--limit", "40", "--max-body", "400"])
+        .output();
+    match shown {
+        Ok(out) => String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .take(60)
+            .map(|l| format!("    {l}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Err(e) => format!("    (no transcript: {e})"),
     }
 }
 
