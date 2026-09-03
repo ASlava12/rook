@@ -191,6 +191,8 @@ pub fn parse_arguments(raw: &str) -> serde_json::Value {
 }
 
 impl Effort {
+    pub const ALL: [Effort; 5] = [Effort::Low, Effort::Medium, Effort::High, Effort::XHigh, Effort::Max];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Effort::Low => "low",

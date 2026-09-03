@@ -58,9 +58,20 @@ fn the_settings_the_browser_sends_and_receives_match_what_it_reads() {
     };
     assert_eq!((name.as_str(), value.as_str()), ("effort", "low"));
 
+    // The lists are what the page draws its selects from; an old page that
+    // does not read them is unaffected by their presence.
+    let settings = ChatEvent::Settings {
+        mode: "assist".into(),
+        effort: "high".into(),
+        stances: vec!["readonly".into(), "assist".into()],
+        efforts: vec!["low".into(), "high".into()],
+    };
     assert_eq!(
-        serde_json::to_value(ChatEvent::Settings { mode: "ask".into(), effort: "high".into() }).unwrap(),
-        serde_json::json!({ "type": "settings", "mode": "ask", "effort": "high" }),
+        serde_json::to_value(settings).unwrap(),
+        serde_json::json!({
+            "type": "settings", "mode": "assist", "effort": "high",
+            "stances": ["readonly", "assist"], "efforts": ["low", "high"]
+        }),
         "the page branches on this tag by hand"
     );
 }

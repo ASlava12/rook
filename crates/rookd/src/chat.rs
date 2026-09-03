@@ -324,6 +324,8 @@ impl Settings {
         ChatEvent::Settings {
             mode: self.policy.stance().as_str().into(),
             effort: self.effort().as_str().into(),
+            stances: rook_tools::policy::Stance::ALL.iter().map(|s| s.as_str().to_string()).collect(),
+            efforts: rook_llm::Effort::ALL.iter().map(|e| e.as_str().to_string()).collect(),
         }
     }
 
@@ -381,4 +383,30 @@ fn approver(
         }
     });
     (Arc::new(ChannelApprover::new(requests, patience)), relay)
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use super::*;
+
+    /// The page draws its selects from these lists, so a stance the engine
+    /// grows appears without the page learning its name — and one it loses
+    /// disappears rather than sitting in a menu as a choice that errors.
+    #[test]
+    fn the_settings_event_carries_the_engines_own_lists() {
+        let config = rook_core::Config::default();
+        let settings = Settings {
+            policy: rook_core::agent::policy_for(&config),
+            effort: std::sync::RwLock::new(config.agent.effort()),
+        };
+        let ChatEvent::Settings { mode, effort, stances, efforts } = settings.describe() else {
+            panic!("describe() is the settings event");
+        };
+        let expected: Vec<String> =
+            rook_tools::policy::Stance::ALL.iter().map(|s| s.as_str().to_string()).collect();
+        assert_eq!(stances, expected);
+        assert!(stances.contains(&mode), "the current stance is one of the offered: {mode} in {stances:?}");
+        assert_eq!(efforts, ["low", "medium", "high", "xhigh", "max"]);
+        assert!(efforts.contains(&effort), "{effort} in {efforts:?}");
+    }
 }

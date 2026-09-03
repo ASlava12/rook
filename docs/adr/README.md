@@ -17,3 +17,4 @@ usually goes missing.
 | [0009](0009-ask-before-acting.md) | Ask before acting; a denial always wins | accepted |
 | [0010](0010-no-todo-tool.md) | A line in the prompt instead of a checklist tool | accepted |
 | [0011](0011-containment-is-the-platforms.md) | Containment is the platform's, best-effort, and reported | accepted |
+| [0012](0012-hand-written-modules-no-bundler.md) | The web UI is hand-written ES modules, still with no bundler | accepted |

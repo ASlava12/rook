@@ -199,10 +199,15 @@ pub enum ChatEvent {
         questions: Vec<AskQuestion>,
     },
     /// What the settings are now, after a [`ClientMessage::Setting`] or on
-    /// connecting.
+    /// connecting — and what they may be set to, so the page draws the
+    /// engine's lists rather than its own memory of them.
     Settings {
         mode: String,
         effort: String,
+        #[serde(default)]
+        stances: Vec<String>,
+        #[serde(default)]
+        efforts: Vec<String>,
     },
     /// The turn was stopped before it finished. Sent instead of `Done`, so a
     /// client waiting on one of them is never left waiting.

@@ -1135,6 +1135,19 @@ every failure: a missing `Cargo.toml` is not the sandbox's doing.
 [ADR-0011](adr/0011-containment-is-the-platforms.md) has the reasons: no
 helper binary, no container, and the network open by default.
 
+**The browser is a front end.** It was a viewer with a chat bolted on: a new
+session per tab, no way to stop a turn, a stance select that spelled the three
+old modes by hand, and the model's answer as raw text. Now the chat resumes any
+session and reads it back, stops a turn, draws its selects from the engine's
+own lists, renders the little of Markdown an answer uses, and asks — with
+permission — to notify when a turn is waiting on a person, which is the case
+for a notification. The sessions tab follows a transcript being written by a
+terminal and hands it to the chat. The page split into hand-written ES modules
+the browser loads as they are, still with no bundler, and the daemon's tests
+hold the one invariant that matters there: every module loaded is embedded and
+served as script. [ADR-0012](adr/0012-hand-written-modules-no-bundler.md)
+supersedes the one-file part of ADR-0007 and keeps the rest.
+
 ## After that
 
 **Driving physical devices, if the Model Hardware Standard becomes something to
@@ -1181,9 +1194,6 @@ than rediscovered.
 SmartScreen warns on every download and macOS Gatekeeper needs a right-click to
 open. cline signs with Azure Trusted Signing; both need a certificate this
 repository does not have.
-
-**Interactive web UI.** Would trigger revisiting
-[ADR-0007](adr/0007-no-js-build-step.md).
 
 ## Not planned
 

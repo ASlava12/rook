@@ -1,6 +1,7 @@
 # 0007 — The web UI is one hand-written file with no bundler
 
-**Status:** accepted
+**Status:** accepted; the "one file" part superseded by
+[ADR-0012](0012-hand-written-modules-no-bundler.md), the rest kept.
 
 ## Context
 

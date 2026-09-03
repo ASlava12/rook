@@ -195,6 +195,16 @@ with the job id from `gh run view <run> --json jobs`. Strip the colour codes
 before grepping. A Windows compile error costs one round trip this way, not
 three.
 
+**Verifying the web UI.** It is hand-written ES modules under `web/dist`,
+embedded into `rookd` (ADR-0012). `cargo test -p rookd` checks that every
+module the page or another module loads is embedded and served as script, and
+that every tab has a renderer; it cannot check JavaScript syntax, so run
+`node --check web/dist/*.js` where `node` happens to be installed before
+trusting a change, and open the page against a scratch daemon
+(`ROOK_HOME=/tmp/rook-scratch cargo run -p rookd`) for anything the tests do
+not see. Markdown from the model is rendered by building nodes, never by
+assigning HTML.
+
 **Verifying a change to `rookd`.** The daemon tests in
 `crates/rook-cli/tests/cli.rs` run the binary, and they build it themselves —
 so `cargo test -p rook-cli` after editing `rookd` can run against the previous

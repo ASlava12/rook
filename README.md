@@ -84,6 +84,16 @@ rook tui                                   # full terminal UI: chat plus a store
 rookd                                      # http://127.0.0.1:7717 — web UI + API
 ```
 
+The browser is a front end, not a viewer: the chat resumes any session, stops a
+turn, answers the agent's approvals and questions in place, and renders what
+the model says; a session being written by a terminal is read live from the
+sessions tab, which can hand it to the chat. The stance and effort selects are
+the engine's own lists. With permission, a turn that stops to ask for a person
+sends a notification, which is the case for one: an autonomous run in a
+background tab. It is hand-written HTML and ES modules served by `rookd` with
+no bundler and no toolchain — `cargo build` is the whole story
+([ADR-0012](docs/adr/0012-hand-written-modules-no-bundler.md)).
+
 In a conversation, slash commands reach the same engine the subcommands do:
 
 ```

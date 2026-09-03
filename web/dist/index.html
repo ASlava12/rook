@@ -7,11 +7,12 @@
 <style>
 :root{
   --bg:#fbfbfa; --panel:#fff; --line:#e4e2dd; --fg:#1c1b19; --dim:#78736c;
-  --accent:#2f6f4f; --warn:#9a6a00; --bad:#a33; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --accent:#2f6f4f; --warn:#9a6a00; --bad:#a33; --you:#eef3ef;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 }
 @media (prefers-color-scheme:dark){
   :root{ --bg:#14150f; --panel:#1b1c16; --line:#2c2e25; --fg:#e8e6df; --dim:#8f8b81;
-         --accent:#7fbf95; --warn:#d9a441; --bad:#e07a6a; }
+         --accent:#7fbf95; --warn:#d9a441; --bad:#e07a6a; --you:#1f2a22; }
 }
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);
@@ -44,19 +45,33 @@ td.t{font-family:inherit}
 .kv dd{margin:0}
 .entry{border-left:2px solid var(--line);padding:.1rem 0 .8rem .8rem;margin-bottom:.4rem}
 .entry .hd{font-family:var(--mono);font-size:.78rem;color:var(--dim);display:flex;gap:.7rem;flex-wrap:wrap}
-.entry pre{margin:.35rem 0 0;white-space:pre-wrap;word-break:break-word;font-family:var(--mono);
+.entry pre,pre.body{margin:.35rem 0 0;white-space:pre-wrap;word-break:break-word;font-family:var(--mono);
   font-size:.82rem;max-height:26rem;overflow:auto}
 .tag{font-family:var(--mono);font-size:.72rem;padding:.05rem .35rem;border-radius:3px;border:1px solid var(--line)}
 .ok{color:var(--accent)} .warn{color:var(--warn)} .bad{color:var(--bad)}
 .empty{color:var(--dim);padding:1.5rem 0;text-align:center}
-.stream{min-height:12rem;max-height:60vh;overflow:auto;white-space:pre-wrap;word-break:break-word;
-  font-family:var(--mono);font-size:.85rem;line-height:1.6}
-.stream .tool{color:var(--accent)} .stream .think{color:var(--dim);font-style:italic}
-.stream .err{color:var(--bad)} .stream .stat{color:var(--dim);font-size:.78rem}
+/* The chat stream: one block per thing said, done or asked. */
+.stream{min-height:12rem;max-height:62vh;overflow:auto;font-size:.9rem;line-height:1.55;
+  display:flex;flex-direction:column;gap:.35rem}
+.stream>div{white-space:pre-wrap;word-break:break-word}
+.stream .you{background:var(--you);border-radius:8px;padding:.45rem .7rem;align-self:flex-end;max-width:85%}
+.stream .md{white-space:normal;padding:.2rem 0}
+.stream .md p{margin:.3rem 0}
+.stream .md p.h{font-weight:600;margin-top:.7rem}
+.stream .md ul{margin:.3rem 0;padding-left:1.4rem}
+.stream .md code{font-family:var(--mono);font-size:.85em;background:var(--bg);padding:.05rem .3rem;border-radius:3px}
+.stream .md pre.code{margin:.4rem 0;padding:.6rem .8rem;background:var(--bg);border:1px solid var(--line);
+  border-radius:6px;overflow:auto;white-space:pre;font-family:var(--mono);font-size:.82rem}
+.stream .md pre.code code{background:none;padding:0;font-size:inherit}
+.stream .tool{color:var(--accent);font-family:var(--mono);font-size:.82rem}
+.stream .think{color:var(--dim);font-style:italic;font-size:.85rem}
+.stream .err{color:var(--bad)} .stream .stat{color:var(--dim);font-size:.78rem;font-family:var(--mono)}
+.stream .decided,.stream .open{border-left:3px solid var(--line);padding:.3rem .7rem;margin:.2rem 0}
+.stream .open{border-left-color:var(--warn)}
 form.ask{display:flex;gap:.5rem;margin-top:.8rem}
 form.ask input{flex:1;padding:.55rem .7rem;border:1px solid var(--line);border-radius:6px;
   background:var(--bg);color:var(--fg);font:inherit}
-.row{display:flex;gap:.5rem;margin:.5rem 0;align-items:center}
+.row{display:flex;gap:.5rem;margin:.5rem 0;align-items:center;flex-wrap:wrap}
 .row label{color:var(--dim);font-size:.82rem}
 .row select,.row input{background:var(--panel);color:var(--fg);border:1px solid var(--line);
   border-radius:4px;padding:.2rem .3rem;font:inherit}
@@ -66,8 +81,8 @@ button.quiet{background:none;border:0;color:var(--dim);cursor:pointer;font:inher
 button.quiet:hover{color:var(--fg)}
 .muted{color:var(--dim);font-size:.82rem}
 #maintenance-report{white-space:pre-wrap;font-family:var(--mono);margin:0}
-form.ask button,.row button,.approve button{padding:.5rem .9rem;border:1px solid var(--line);border-radius:6px;
-  background:var(--panel);color:var(--fg);cursor:pointer;font:inherit}
+form.ask button,.row button,.approve button,.ask-form button{padding:.5rem .9rem;border:1px solid var(--line);
+  border-radius:6px;background:var(--panel);color:var(--fg);cursor:pointer;font:inherit}
 form.ask button[disabled]{opacity:.5;cursor:default}
 .approve{border:1px solid var(--warn);border-radius:6px;padding:.6rem .8rem;margin:.5rem 0;
   display:flex;gap:.5rem;align-items:center;flex-wrap:wrap}
@@ -98,534 +113,8 @@ form.ask button[disabled]{opacity:.5;cursor:default}
   <button data-tab="store">Store</button>
 </nav>
 <main id="view"></main>
-
-<script>
-const $ = (s, r=document) => r.querySelector(s);
-const el = (tag, attrs={}, ...kids) => {
-  const n = document.createElement(tag);
-  for (const [k,v] of Object.entries(attrs)) {
-    if (k === 'class') n.className = v;
-    else if (k.startsWith('on')) n.addEventListener(k.slice(2), v);
-    else if (v !== null && v !== undefined) n.setAttribute(k, v);
-  }
-  for (const kid of kids.flat()) if (kid !== null && kid !== undefined)
-    n.append(kid.nodeType ? kid : document.createTextNode(kid));
-  return n;
-};
-const bytes = n => {
-  const u = ['B','KiB','MiB','GiB','TiB']; let i = 0, v = Number(n) || 0;
-  while (v >= 1024 && i < u.length-1) { v /= 1024; i++; }
-  return i === 0 ? `${v} B` : `${v.toFixed(1)} ${u[i]}`;
-};
-const ago = ts => {
-  const d = Math.floor(Date.now()/1000) - ts;
-  if (d < 60) return `${d}s ago`;
-  if (d < 3600) return `${Math.floor(d/60)}m ago`;
-  if (d < 86400) return `${Math.floor(d/3600)}h ago`;
-  return `${Math.floor(d/86400)}d ago`;
-};
-const api = async (path, body) => {
-  const r = await fetch(path, body === undefined ? undefined : {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  const parsed = await r.json().catch(() => ({ error: r.statusText, kind: 'transport' }));
-  if (!r.ok) throw parsed;
-  return parsed;
-};
-
-const state = { tab: 'chat', session: null, skill: null, query: '',
-  chat: { log: [], session: null, busy: false, settings: null, spent: null } };
-
-async function boot() {
-  try {
-    const h = await api('/api/health');
-    $('#meta').textContent = `v${h.version} · ${h.os}/${h.arch} · ${h.workspace}`;
-  } catch { $('#meta').textContent = 'backend unreachable'; }
-  document.querySelectorAll('nav button').forEach(b =>
-    b.addEventListener('click', () => {
-      state.tab = b.dataset.tab;
-      document.querySelectorAll('nav button').forEach(x =>
-        x.setAttribute('aria-selected', String(x === b)));
-      render();
-    }));
-  render();
-}
-
-function render() {
-  const v = $('#view'); v.replaceChildren(el('p', {class:'empty'}, 'loading…'));
-  ({ chat: renderChat, sessions: renderSessions, search: renderSearch, memory: renderMemory,
-     skills: renderSkills, jobs: renderJobs, store: renderStore })[state.tab]().catch(e => {
-    v.replaceChildren(el('div', {class:'card'},
-      el('h2', {}, 'error'),
-      el('p', {}, e.error || String(e)),
-      e.hint ? el('p', {class:'sub'}, e.hint) : null));
-  });
-}
-
-// One socket for the tab's lifetime; reconnecting per prompt would drop the
-// approval channel mid-turn.
-let socket = null;
-const chatOut = () => document.querySelector('#stream');
-
-// Scrollback, not the record: the session holds every word of this and the
-// sessions list reads it back, so a tab left open for a day need not keep an
-// afternoon of turns in the document to stay recoverable.
-const MAX_SCROLLBACK_BLOCKS = 2000;
-
-function say(kind, text) {
-  const out = chatOut();
-  if (!out) return;
-  const last = out.lastElementChild;
-  if (kind === 'text' && last && last.className === 'text') last.append(text);
-  else out.append(el('div', { class: kind }, text));
-  while (out.childElementCount > MAX_SCROLLBACK_BLOCKS) out.firstElementChild.remove();
-  out.scrollTop = out.scrollHeight;
-}
-
-function connect() {
-  if (socket && socket.readyState <= 1) return socket;
-  socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/chat`);
-  socket.onmessage = (event) => {
-    const e = JSON.parse(event.data);
-    if (e.type === 'started') { state.chat.session = e.session; state.chat.spent = null; }
-    else if (e.type === 'text') say('text', e.text);
-    else if (e.type === 'reasoning') say('think', e.text);
-    else if (e.type === 'tool') say('tool', `\n  · ${e.name}`);
-    else if (e.type === 'tool_done') say('tool', e.failed ? ' ✗\n' : ' ✓\n');
-    else if (e.type === 'settings') { state.chat.settings = e; renderSettings(); }
-    else if (e.type === 'spent') { state.chat.spent = e; renderSettings(); }
-    else if (e.type === 'remembered') say('stat', `\nremembered: ${e.text}\n`);
-    else if (e.type === 'forgot') say('stat', `\nforgot: ${e.text}\n`);
-    else if (e.type === 'error') { say('err', `\n${e.message}\n`); done(); }
-    else if (e.type === 'cancelled') { say('stat', '\n[stopped]\n\n'); done(); }
-    else if (e.type === 'interjected') say('you', `\n› ${e.text}\n(the turn will see this at its next step)\n`);
-    else if (e.type === 'approval') askApproval(e);
-    else if (e.type === 'ask') askUser(e);
-    else if (e.type === 'done') {
-      say('stat', `\n[${e.steps} steps · ${e.input_tokens} in / ${e.output_tokens} out` +
-        (e.compactions ? ` · ${e.compactions} compactions` : '') +
-        (e.delegated.length ? ` · ${e.delegated.length} sub-agent(s)` : '') + ']\n');
-      // Sorted by what they are: a decision is settled, an open question is
-      // waiting for whoever reads this.
-      for (const d of e.decisions || []) say('stat', `decided: ${d}\n`);
-      for (const q of e.open_questions || []) say('err', `open question: ${q}\n`);
-      say('stat', '\n');
-      done();
-    }
-  };
-  socket.onclose = () => { say('err', '\ndisconnected\n'); done(); };
-  return socket;
-}
-
-function done() {
-  state.chat.busy = false;
-  const button = document.querySelector('#send');
-  if (button) { button.textContent = 'Send'; }
-}
-
-function askApproval(request) {
-  const out = chatOut();
-  const decide = (decision) => {
-    socket.send(JSON.stringify({ type: 'approval', id: request.id, decision }));
-    box.replaceWith(el('div', { class: 'stat' }, `  approval: ${decision}\n`));
-  };
-  const box = el('div', { class: 'approve' },
-    el('span', {}, `${request.tool} wants to ${request.action}`),
-    ...(request.preview ? [el('pre', { class: 'preview' }, request.preview)] : []),
-    el('button', { onclick: () => decide('once') }, 'Allow once'),
-    el('button', { onclick: () => decide('for_run') }, 'Always'),
-    el('button', { onclick: () => decide('deny') }, 'Deny'));
-  out.append(box);
-  out.scrollTop = out.scrollHeight;
-}
-
-// One form for every question in the call: the agent asked them together
-// because they are independent, and a chain of dialogs would undo that.
-function askUser(request) {
-  const out = chatOut();
-  const fields = request.questions.map((q, i) => {
-    const name = `q${request.id}_${i}`;
-    const rows = q.choices.map((choice) => el('label', {},
-      el('input', { type: q.multi ? 'checkbox' : 'radio', name, value: choice }), ` ${choice}`));
-    // Always a free-text row: the answer worth having is often not on the list.
-    const other = el('input', { type: 'text', name: `${name}_other`,
-      placeholder: q.choices.length ? 'or type your own answer' : 'your answer' });
-    return el('fieldset', {}, el('p', {}, q.question), ...rows, other);
-  });
-
-  const submit = (answers) => {
-    socket.send(JSON.stringify({ type: 'answers', id: request.id, answers }));
-    form.replaceWith(el('div', { class: 'stat' },
-      answers.map((a) => `  answered: ${a.join(', ') || '(skipped)'}`).join('\n') + '\n'));
-  };
-  const typed = (q, i) => {
-    const name = `q${request.id}_${i}`;
-    // A typed answer wins: someone who wrote past the options meant to.
-    const own = form.querySelector(`[name="${name}_other"]`).value.trim();
-    return own ? [own] : [...form.querySelectorAll(`[name="${name}"]:checked`)].map((n) => n.value);
-  };
-
-  const form = el('form', { class: 'ask-form', onsubmit: (e) => {
-      e.preventDefault();
-      submit(request.questions.map(typed));
-    } },
-    ...fields,
-    el('button', { type: 'submit' }, 'Answer'),
-    el('button', { type: 'button', onclick: () => submit(request.questions.map(() => [])) }, 'Skip'));
-  out.append(form);
-  out.scrollTop = out.scrollHeight;
-}
-
-// A select each, because the values are few and named. The server answers every
-// change with the whole state, so the controls cannot drift from the policy.
-function renderSettings() {
-  const bar = $('#settings');
-  if (!bar || !state.chat.settings) return;
-  const pick = (name, values, current) => el('label', {},
-    `${name} `,
-    el('select', { onchange: (e) => socket.send(JSON.stringify(
-        { type: 'setting', name, value: e.target.value })) },
-      values.map(v => el('option', { value: v, ...(v === current ? { selected: '' } : {}) }, v))));
-  const spent = state.chat.spent;
-  bar.replaceChildren(
-    pick('mode', ['auto', 'ask', 'readonly'], state.chat.settings.mode),
-    pick('effort', ['low', 'medium', 'high', 'xhigh', 'max'], state.chat.settings.effort),
-    // Beside the settings rather than in the transcript: it changes on every
-    // step, and a running total that scrolled away would be no use.
-    spent ? el('span', { class: 'sub' },
-      `${spent.input_tokens} in / ${spent.output_tokens} out` +
-      (spent.cached_tokens ? ` (${spent.cached_tokens} cached)` : '')) : null);
-}
-
-async function renderChat() {
-  const stream = el('div', { class: 'stream', id: 'stream' });
-  const input = el('input', { placeholder: 'Ask the agent…', autofocus: 'true' });
-  const send = el('button', { id: 'send' }, 'Send');
-
-  const form = el('form', { class: 'ask', onsubmit: (event) => {
-    event.preventDefault();
-    const text = input.value.trim();
-    if (!text) return;
-    connect();
-    const deliver = () => socket.send(JSON.stringify({
-      type: 'prompt', session: state.chat.session, text,
-    }));
-    if (socket.readyState === 1) deliver(); else socket.addEventListener('open', deliver, { once: true });
-    input.value = '';
-    // While a turn runs this is something to say to it, and the server echoes
-    // it back as `interjected` — so the transcript is written there, once, and
-    // the working state is left alone.
-    if (state.chat.busy) return;
-    say('stat', `› ${text}\n`);
-    state.chat.busy = true;
-    send.textContent = '…';
-  } }, input, send);
-
-  $('#view').replaceChildren(el('div', { class: 'card' },
-    el('h2', {}, state.chat.session ? `session ${state.chat.session}` : 'new session'),
-    el('div', { class: 'row', id: 'settings' }),
-    stream, form));
-  renderSettings();
-  connect();
-  input.focus();
-}
-
-async function renderSearch() {
-  const input = el('input', { placeholder: 'Search everything said, read and run…', value: state.query });
-  const results = el('div', { class: 'scroll' });
-
-  const look = async () => {
-    state.query = input.value.trim();
-    if (!state.query) { results.replaceChildren(); return; }
-    results.replaceChildren(el('p', { class: 'empty' }, 'searching…'));
-    const found = await api(`/api/search?q=${encodeURIComponent(state.query)}`);
-    if (!found.hits.length) {
-      results.replaceChildren(el('p', { class: 'empty' }, `nothing in ${found.objects_scanned} objects`));
-      return;
-    }
-    results.replaceChildren(...found.hits.map(h => el('div', { class: 'entry' },
-      el('div', { class: 'hd' },
-        el('span', {}, h.title || '(untitled)'),
-        el('span', { class: 'tag' }, h.kind),
-        // A file hit belongs to a path, not to a place in a transcript.
-        el('span', {}, h.file ? h.file : `#${h.seq}`),
-        el('span', {}, ago(h.when))),
-      el('pre', {}, h.snippet))),
-      el('p', { class: 'sub' },
-        `${found.hits.length} hit(s) across ${found.objects_scanned} object(s)` +
-        (found.truncated ? ' — the scan hit its budget' : '')));
-  };
-
-  const form = el('form', { class: 'ask', onsubmit: (e) => { e.preventDefault(); look(); } },
-    input, el('button', {}, 'Find'));
-
-  $('#view').replaceChildren(el('div', { class: 'card' }, el('h2', {}, 'search'), form, results));
-  input.focus();
-  if (state.query) look();
-}
-
-async function rewindTo(seq) {
-  const files = confirm(`Rewind to #${seq}. Put the workspace files back too?\n\n` +
-    'Cancel forks the conversation alone, which changes nothing on disk.');
-  try {
-    const done = await api(`/api/sessions/${state.session}/rewind`,
-      { to_seq: seq, restore_files: files });
-    state.session = done.session;
-    render();
-  } catch (e) {
-    alert(e.error || e);
-  }
-}
-
-async function renderSessions() {
-  const { items } = await api('/api/sessions');
-  if (!state.session && items.length) state.session = items[0].id;
-  const list = el('ul', {class:'list'}, items.map(s => el('li', {
-      'aria-current': String(String(s.id) === String(state.session)),
-      onclick: () => { state.session = s.id; render(); }
-    },
-    el('div', {class:'name'}, s.title || '(untitled)'),
-    el('div', {class:'sub'}, `${ago(s.updated_at)} · ${s.event_count} events · ${s.model||'—'}`),
-    s.forked_at != null ? el('div', {class:'sub'}, `forked at event ${s.forked_at}`) : null,
-    s.goal ? el('div', {class:'sub'}, `goal: ${s.goal}`) : null)));
-
-  const right = el('div', {class:'card'}, el('h2', {}, 'transcript'));
-  if (state.session) {
-    right.append(el('div', { class: 'row' },
-      el('label', {}, 'goal '),
-      el('input', { id: 'goal', placeholder: 'what this session is for',
-        value: (items.find(s => String(s.id) === String(state.session)) || {}).goal || '' }),
-      el('button', { onclick: async () => {
-        await api(`/api/sessions/${state.session}/goal`, { goal: $('#goal').value });
-        render();
-      } }, 'Set')));
-
-    // What it changed on disk, before what it said: that is the question a
-    // transcript is usually being read to answer.
-    const changed = await api(`/api/sessions/${state.session}/changes`);
-    if (changed.files.length) {
-      right.append(el('table', {},
-        el('tr', {}, ['file', '', '+', '−'].map(h => el('th', {}, h))),
-        changed.files.map(f => el('tr', {},
-          el('td', {class:'t'}, f.path),
-          el('td', {class:'tag'}, String(f.change).toLowerCase()),
-          el('td', {}, `+${f.lines_added}`),
-          el('td', {}, `−${f.lines_removed}`)))));
-    }
-    const { items: entries } = await api(`/api/sessions/${state.session}/transcript?limit=200`);
-    const box = el('div', {class:'scroll'});
-    if (!entries.length) box.append(el('p', {class:'empty'}, 'no events yet'));
-    for (const e of entries) {
-      box.append(el('div', {class:'entry'},
-        el('div', {class:'hd'},
-          el('span', {}, `#${e.seq}`),
-          el('span', {class:'tag'}, e.kind),
-          e.label ? el('span', {}, e.label) : null,
-          el('span', {}, `${bytes(e.bytes)} → ${bytes(e.stored_bytes)}`),
-          e.truncated ? el('span', {class:'warn'}, 'elided') : null),
-        el('pre', {}, e.body),
-        // Rewinding forks rather than truncating, so nothing is lost — but it
-        // does put files back, which is why it asks first.
-        el('button', { class: 'quiet', onclick: () => rewindTo(e.seq) }, `rewind to #${e.seq}`)));
-    }
-    right.append(box);
-  } else {
-    right.append(el('p', {class:'empty'}, 'no sessions yet — run `rook run "…"`'));
-  }
-  $('#view').replaceChildren(el('div', {class:'grid'},
-    el('div', {class:'card'}, el('h2', {}, `sessions (${items.length})`), list), right));
-}
-
-// What the agent believes about you, and a way to correct it. Forgetting is the
-// point: a fact nobody can remove is one that quietly steers every later turn.
-async function renderMemory() {
-  const all = state.memoryAll || false;
-  const { items } = await api(`/api/memory?all=${all}`);
-
-  const forget = async (fact) => {
-    if (!confirm(`Forget "${fact.text}"?`)) return;
-    try {
-      await api('/api/memory', { id: fact.id });
-      render();
-    } catch (e) {
-      alert(e.error || e);
-    }
-  };
-
-  const rows = items.map(f => el('tr', {},
-    el('td', {class:'t'}, f.id),
-    el('td', {}, f.pinned ? 'pinned' : ''),
-    el('td', {class:'t'}, f.scope.kind === 'global' ? 'global' : (f.scope.path || '').split('/').pop()),
-    el('td', {}, f.text),
-    el('td', {class:'t'}, (f.tags || []).join(' ')),
-    el('td', {}, el('button', { onclick: () => forget(f) }, 'Forget'))));
-
-  $('#view').replaceChildren(el('div', { class: 'card' },
-    el('h2', {}, `memory (${items.length})`),
-    el('div', { class: 'row' },
-      el('label', {},
-        el('input', { type: 'checkbox', ...(all ? { checked: '' } : {}),
-          onchange: (e) => { state.memoryAll = e.target.checked; render(); } }),
-        ' every workspace')),
-    items.length
-      ? el('table', {}, el('tr', {}, ['id', '', 'scope', 'fact', 'tags', ''].map(h => el('th', {}, h))), rows)
-      : el('p', { class: 'empty' }, 'nothing remembered yet')));
-}
-
-async function renderSkills() {
-  const { items } = await api('/api/skills');
-  if (!state.skill && items.length) state.skill = items[0].name;
-  const list = el('ul', {class:'list'}, items.map(c => el('li', {
-      'aria-current': String(c.name === state.skill),
-      onclick: () => { state.skill = c.name; render(); }
-    },
-    el('div', {class:'name'},
-      el('span', {class: c.applicable ? 'ok' : 'sub'}, c.applicable ? '✓ ' : '· '), c.name),
-    el('div', {class:'sub'}, `${c.version} · ${c.source} · ~${c.body_tokens} tok`))));
-
-  const right = el('div', {class:'card'}, el('h2', {}, 'skill'));
-  if (state.skill) {
-    const card = items.find(c => c.name === state.skill);
-    right.append(el('p', {}, card.description));
-    if (!card.applicable) {
-      right.append(el('p', {class:'warn'}, 'blocked in this environment:'));
-      right.append(el('ul', {}, card.mismatches.map(m => el('li', {class:'sub'}, m))));
-    }
-    let history = [];
-    try { history = (await api(`/api/skills/${encodeURIComponent(state.skill)}/history`)).items; } catch {}
-    right.append(el('h2', {style:'margin-top:1rem'}, `versions (${history.length})`));
-    if (!history.length) {
-      right.append(el('p', {class:'sub'}, 'no captures yet — `rook skills capture ' + state.skill + '`'));
-    } else {
-      right.append(el('table', {},
-        el('tr', {}, ['object','version','captured','files','size','note'].map(h => el('th', {}, h))),
-        history.map(h => el('tr', {},
-          el('td', {}, h.object.slice(0,12)),
-          el('td', {}, h.version),
-          el('td', {}, new Date(h.captured_at*1000).toISOString().slice(0,16).replace('T',' ')),
-          el('td', {}, String(h.files)),
-          el('td', {}, bytes(h.bytes)),
-          el('td', {class:'t'}, h.note || '')))));
-    }
-    try {
-      const full = await api(`/api/skills/${encodeURIComponent(state.skill)}`);
-      right.append(el('h2', {style:'margin-top:1rem'},
-        full.variant ? `body — variant ${full.variant}` : 'body'));
-      right.append(el('pre', {style:'white-space:pre-wrap;font-size:.82rem;max-height:24rem;overflow:auto'}, full.body));
-    } catch {}
-  }
-  $('#view').replaceChildren(el('div', {class:'grid'},
-    el('div', {class:'card'}, el('h2', {}, `skills (${items.length})`), list), right));
-}
-
-// Commands the agent left running. The CLI and the TUI have had `/jobs` since
-// they had jobs; a browser could start a dev server and then not see it.
-async function renderJobs() {
-  const { items } = await api('/api/jobs');
-  if (state.job && !items.some(j => j.id === state.job)) state.job = null;
-
-  const state_of = (j) => j.exit_code === null || j.exit_code === undefined
-    ? `running ${Math.max(0, Math.round(Date.now()/1000) - j.started_at)}s`
-    : `exit ${j.exit_code}`;
-
-  const stop = async (id) => {
-    try { await api(`/api/jobs/${id}/stop`, {}); render(); } catch (e) { alert(e.error || e); }
-  };
-
-  const list = el('ul', {class:'list'}, items.map(j => el('li', {
-      'aria-current': String(j.id === state.job),
-      onclick: () => { state.job = j.id; render(); }
-    },
-    el('div', {class:'name'}, `${j.id} · ${state_of(j)}`),
-    el('div', {class:'sub'}, j.command))));
-
-  const right = el('div', {class:'card'}, el('h2', {}, 'output'));
-  if (state.job) {
-    const full = await api(`/api/jobs/${state.job}`);
-    right.append(el('div', {class:'row'},
-      el('span', {class:'sub'}, `${full.id} · ${state_of(full)}`),
-      full.exit_code === null ? el('button', { onclick: () => stop(full.id) }, 'Stop') : null));
-    right.append(el('pre', {style:'white-space:pre-wrap;font-size:.82rem;max-height:28rem;overflow:auto'},
-      full.output || '(nothing printed yet)'));
-  }
-  $('#view').replaceChildren(el('div', {class:'grid'},
-    el('div', {class:'card'}, el('h2', {}, `jobs (${items.length})`),
-      items.length ? list : el('p', {class:'empty'}, 'nothing running in the background')), right));
-}
-
-// Deletion is not undoable, so the dry run is offered first and reported in the
-// same place as the real one.
-async function runMaintenance(dryRun) {
-  const out = $('#maintenance-report');
-  out.textContent = dryRun ? 'checking…' : 'running…';
-  try {
-    const r = await api('/api/maintenance', { dry_run: dryRun });
-    out.textContent = [
-      `${dryRun ? 'would delete' : 'deleted'} ${r.prune.sessions_deleted} session(s), ` +
-        `${r.prune.events_deleted} event(s), ${r.prune.protected} protected`,
-      `${dryRun ? 'would collect' : 'collected'} ${r.gc.collected} object(s), ${bytes(r.gc.bytes_freed)} freed`,
-      r.dictionaries_trained.length
-        ? `trained ${r.dictionaries_trained.map(d => `${d[0]} from ${d[1]}`).join(', ')}` : null,
-      r.over_budget_by ? `still ${bytes(r.over_budget_by)} over the size budget` : null,
-    ].filter(Boolean).join('\n');
-    if (!dryRun) render();
-  } catch (e) {
-    out.textContent = `failed: ${e.error || e}`;
-  }
-}
-
-async function renderStore() {
-  const s = await api('/api/store/stats');
-  const { items } = await api('/api/store/objects?limit=200');
-  const max = Math.max(1, ...s.per_kind.map(k => k.bytes_stored));
-  const ratio = s.bytes_stored ? (s.bytes_raw / s.bytes_stored) : 1;
-
-  $('#view').replaceChildren(el('div', {class:'grid', style:'grid-template-columns:1fr 1fr'},
-    el('div', {class:'card'}, el('h2', {}, 'footprint'),
-      el('dl', {class:'kv'},
-        el('dt', {}, 'logical'), el('dd', {}, bytes(s.bytes_raw)),
-        el('dt', {}, 'stored'), el('dd', {}, `${bytes(s.bytes_stored)} (${ratio.toFixed(1)}× compression)`),
-        el('dt', {}, 'saved by dedup'), el('dd', {}, bytes(s.dedup_saved_hint)),
-        el('dt', {}, 'on disk'), el('dd', {}, `${bytes(s.index_bytes + s.external_bytes)} (index ${bytes(s.index_bytes)})`),
-        el('dt', {}, 'objects'), el('dd', {}, String(s.objects)),
-        el('dt', {}, 'events'), el('dd', {}, String(s.events)),
-        el('dt', {}, 'sessions'), el('dd', {}, String(s.sessions)),
-        el('dt', {}, 'dictionaries'), el('dd', {},
-          s.dictionaries.length ? s.dictionaries.map(d => `${d[0]} ${bytes(d[1])}`).join(', ')
-                                : 'none yet — `rook store train`')),
-      el('h2', {style:'margin-top:1.2rem'}, 'by kind'),
-      el('table', {},
-        el('tr', {}, ['kind','objects','logical','stored','ratio',''].map(h => el('th', {}, h))),
-        s.per_kind.map(k => el('tr', {},
-          el('td', {class:'t'}, k.kind),
-          el('td', {}, String(k.objects)),
-          el('td', {}, bytes(k.bytes_raw)),
-          el('td', {}, bytes(k.bytes_stored)),
-          el('td', {}, (k.bytes_raw/Math.max(1,k.bytes_stored)).toFixed(1)+'×'),
-          el('td', {}, el('span', {class:'bar', style:`width:${(k.bytes_stored/max*100).toFixed(0)}%`})))))),
-
-    el('div', {class:'card'}, el('h2', {}, 'maintenance'),
-      el('p', {class:'muted'},
-        'Prune to the retention policy, collect what that frees, and enforce the size budget.'),
-      el('div', {class:'row'},
-        el('button', {onclick: () => runMaintenance(true)}, 'Dry run'),
-        el('button', {onclick: () => runMaintenance(false)}, 'Run')),
-      el('pre', {id: 'maintenance-report', class: 'muted'}, '')),
-
-    el('div', {class:'card'}, el('h2', {}, `objects (newest ${items.length})`),
-      el('div', {class:'scroll'}, el('table', {},
-        el('tr', {}, ['id','kind','logical','stored','where'].map(h => el('th', {}, h))),
-        items.map(o => el('tr', {},
-          el('td', {}, o.short),
-          el('td', {class:'t'}, o.kind),
-          el('td', {}, bytes(o.size_raw)),
-          el('td', {}, bytes(o.size_stored)),
-          el('td', {}, o.external ? 'file' : 'inline')))))) ));
-}
-
-boot();
-</script>
+<!-- ES modules the browser loads as they are: no bundler, no toolchain (ADR-0012).
+     The chat socket is /api/chat. -->
+<script type="module" src="/app.js"></script>
 </body>
 </html>

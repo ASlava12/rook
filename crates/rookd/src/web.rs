@@ -1,9 +1,10 @@
 //! Static hosting for the web UI.
 //!
-//! The UI is a single hand-written HTML file with no build step and no
-//! dependencies. That is a deliberate constraint: adding a JavaScript toolchain
-//! would make `npm` a prerequisite for building Rook on every platform it
-//! targets, and FreeBSD support is exactly where that goes wrong.
+//! The UI is hand-written HTML and ES modules with no build step and no
+//! dependencies, embedded at compile time. That is a deliberate constraint:
+//! adding a JavaScript toolchain would make `npm` a prerequisite for building
+//! Rook on every platform it targets, and FreeBSD support is exactly where
+//! that goes wrong. The browser loads the modules as they are (ADR-0012).
 
 use axum::Router;
 use axum::http::{StatusCode, Uri, header};
@@ -88,13 +89,51 @@ mod tests {
         assert!(body.contains("<title>"));
     }
 
-    /// The page is one hand-written file with no build step, so a tab wired to
-    /// a renderer that does not exist is a blank screen and nothing else
-    /// notices. The two lists are twelve hundred lines apart.
+    fn embedded_text(name: &str) -> String {
+        let file = Assets::get(name).unwrap_or_else(|| panic!("{name} is embedded"));
+        String::from_utf8_lossy(&file.data).into_owned()
+    }
+
+    /// Every module the page or another module loads must be embedded, or a
+    /// browser gets the page back in place of the script — the SPA fallback —
+    /// and a blank screen with a syntax error in the console.
+    #[tokio::test]
+    async fn every_module_the_page_loads_is_embedded_and_served_as_script() {
+        let page = embedded_text("index.html");
+        let mut wanted: Vec<String> = page
+            .split("src=\"/")
+            .skip(1)
+            .filter_map(|rest| rest.split('"').next())
+            .map(String::from)
+            .collect();
+        assert!(!wanted.is_empty(), "the page loads no module, so the markup moved and this checks nothing");
+        let mut seen = std::collections::BTreeSet::new();
+        while let Some(name) = wanted.pop() {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            let (status, content_type, body) = fetch(&format!("/{name}")).await;
+            assert_eq!(status, StatusCode::OK, "{name}");
+            assert!(content_type.contains("javascript"), "{name} is served as {content_type}");
+            assert!(!body.contains("<title>"), "{name} came back as the page: it is not embedded");
+            for import in body.split("from './").skip(1).filter_map(|rest| rest.split('\'').next()) {
+                wanted.push(import.to_string());
+            }
+        }
+        assert!(seen.len() >= 4, "the modules: {seen:?}");
+    }
+
+    /// A tab wired to a renderer that does not exist is a blank screen, and
+    /// nothing else notices: the tab list is in the page and the renderers
+    /// are in the modules.
     #[test]
     fn every_tab_the_page_offers_has_something_to_draw_it() {
-        let page = Assets::get("index.html").expect("the UI is embedded");
-        let page = std::str::from_utf8(&page.data).expect("the page is text");
+        let page = embedded_text("index.html");
+        let modules: String = Assets::iter()
+            .filter(|name| name.ends_with(".js"))
+            .map(|name| embedded_text(&name))
+            .collect::<Vec<_>>()
+            .join("\n");
 
         let tabs: Vec<&str> =
             page.split("data-tab=\"").skip(1).filter_map(|rest| rest.split('"').next()).collect();
@@ -102,13 +141,13 @@ mod tests {
 
         for tab in tabs {
             let named = format!("{tab}: render");
-            let at = page.find(&named).unwrap_or_else(|| panic!("nothing draws the {tab} tab"));
-            let renderer: String = page[at + named.len() - "render".len()..]
+            let at = modules.find(&named).unwrap_or_else(|| panic!("nothing draws the {tab} tab"));
+            let renderer: String = modules[at + named.len() - "render".len()..]
                 .chars()
                 .take_while(char::is_ascii_alphanumeric)
                 .collect();
             assert!(
-                page.contains(&format!("function {renderer}(")),
+                modules.contains(&format!("function {renderer}(")),
                 "the {tab} tab is drawn by {renderer}, which is not defined"
             );
         }
