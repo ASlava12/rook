@@ -61,17 +61,22 @@ pub fn calls_in(text: &str, known: impl Fn(&str) -> bool) -> (Vec<ToolCall>, Str
     let mut calls = Vec::new();
     let mut said = String::new();
     let mut kept_until = 0;
+    // Past the end of the last object that parsed, taken or not: an answer
+    // that is JSON may carry a tool-shaped object inside it, and that is part
+    // of the answer.
+    let mut seen_until = 0;
     for (at, _) in text.match_indices('{') {
-        if at < kept_until {
+        if at < seen_until {
             continue;
         }
         let mut objects = serde_json::Deserializer::from_str(&text[at..]).into_iter::<Called>();
         let Some(Ok(called)) = objects.next() else { continue };
+        seen_until = at + objects.byte_offset();
         if !known(&called.tool) {
             continue;
         }
         said.push_str(&text[kept_until..at]);
-        kept_until = at + objects.byte_offset();
+        kept_until = seen_until;
         calls.push(ToolCall { id: format!("prompted-{at}"), name: called.tool, arguments: called.arguments });
     }
     said.push_str(&text[kept_until..]);
@@ -120,6 +125,16 @@ mod tests {
         assert!(said.contains(r#"{"name": "widget""#), "an object naming no tool stays: {said}");
         assert!(!said.contains("```"), "{said}");
         assert_ne!(calls[0].id, calls[1].id);
+    }
+
+    /// An answer that is JSON may carry a tool-shaped object inside it. The
+    /// outer object names no tool, so nothing inside it is a call either.
+    #[test]
+    fn an_object_inside_an_answer_is_not_a_call() {
+        let text = r#"{"name": "widget", "arguments": {"name": "read_file", "arguments": {"path": "a"}}}"#;
+        let (calls, said) = calls_in(text, |name| name == "read_file");
+        assert!(calls.is_empty(), "{calls:?}");
+        assert_eq!(said, text);
     }
 
     #[test]

@@ -418,7 +418,7 @@ Three dialects are spoken natively — Anthropic's Messages API, Google's
 `lmstudio`, `ollama`, vLLM, llama.cpp and anything else that answers it. An
 endpoint that refuses tool definitions gets them in the prompt instead
 (`[agent] native_tools = false`) and the model's reply is read back for the
-call; the same reading applies with native tools, because a small model
+calls; the same reading applies with native tools, because a small model
 handed them still answers with the JSON object some of the time — it is taken
 as a call when it names a tool that was offered, and as an answer when not.
 
