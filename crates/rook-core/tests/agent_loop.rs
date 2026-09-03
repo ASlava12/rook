@@ -4018,3 +4018,27 @@ async fn an_unfinished_sub_task_is_reported_by_what_it_called() {
     assert!(said.contains("did not finish — max_steps after 3 steps"), "{said}");
     assert!(said.contains("called read_file, read_file, read_file, and the budget ended"), "{said}");
 }
+
+/// Two calls written in one reply are two calls, both run, both answered:
+/// given only the first back, a small model wrote the second again every step.
+#[tokio::test]
+async fn two_calls_written_in_one_reply_are_both_run() {
+    let f = fixture();
+    let session = f.rook.start_session("two-text-calls").unwrap();
+    std::fs::write(f.workspace.path().join("a.txt"), "alpha\n").unwrap();
+    std::fs::write(f.workspace.path().join("b.txt"), "beta\n").unwrap();
+
+    let both = "{\"name\": \"read_file\", \"arguments\": {\"path\": \"a.txt\"}}\n\
+                {\"name\": \"read_file\", \"arguments\": {\"path\": \"b.txt\"}}";
+    let script = vec![reply(both), reply("alpha and beta")];
+    let provider = ScriptedProvider::new(script);
+    let seen = provider.share();
+    let outcome = AgentLoop::new(&f.rook, Arc::new(provider), session).run("read both").await.unwrap();
+
+    assert_eq!(outcome.tools_called, vec!["read_file".to_string(), "read_file".to_string()], "{outcome:?}");
+    let second = seen.lock().unwrap()[1].clone();
+    let results: Vec<&str> =
+        second.messages.iter().filter(|m| m.role == Role::Tool).map(|m| m.content.as_str()).collect();
+    assert_eq!(results.len(), 2, "{results:?}");
+    assert!(results[0].contains("alpha") && results[1].contains("beta"), "{results:?}");
+}

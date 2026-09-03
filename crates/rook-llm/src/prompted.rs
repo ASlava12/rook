@@ -48,38 +48,50 @@ struct Called {
     arguments: serde_json::Value,
 }
 
-/// The first call in `text`, and what the model said around it.
+/// Every call in `text`, in order, and what the model said around them.
 ///
 /// Every `{` is tried in turn and the parser decides: a brace in prose fails to
 /// deserialize and costs nothing, and a fenced block needs no special case
-/// because the fence is simply text either side of the object.
-pub fn call_in(text: &str) -> Option<(ToolCall, String)> {
+/// because the fence is simply text either side of the object. All of them,
+/// not the first: a small model writes three calls in one reply, and given
+/// one of them back it writes the other two again, every step. `known` says
+/// which names are tools that were offered; an object naming anything else is
+/// left in the text as the answer it is.
+pub fn calls_in(text: &str, known: impl Fn(&str) -> bool) -> (Vec<ToolCall>, String) {
+    let mut calls = Vec::new();
+    let mut said = String::new();
+    let mut kept_until = 0;
     for (at, _) in text.match_indices('{') {
+        if at < kept_until {
+            continue;
+        }
         let mut objects = serde_json::Deserializer::from_str(&text[at..]).into_iter::<Called>();
         let Some(Ok(called)) = objects.next() else { continue };
-        let said = format!("{}{}", &text[..at], &text[at + objects.byte_offset()..]);
-        // The fence the object sat in is left behind on its own lines.
-        let said: Vec<&str> = said.lines().filter(|line| !line.trim_start().starts_with("```")).collect();
-        let call = ToolCall { id: format!("prompted-{at}"), name: called.tool, arguments: called.arguments };
-        return Some((call, said.join("\n").trim().to_string()));
+        if !known(&called.tool) {
+            continue;
+        }
+        said.push_str(&text[kept_until..at]);
+        kept_until = at + objects.byte_offset();
+        calls.push(ToolCall { id: format!("prompted-{at}"), name: called.tool, arguments: called.arguments });
     }
-    None
+    said.push_str(&text[kept_until..]);
+    // The fences the objects sat in are left behind on their own lines.
+    let said: Vec<&str> = said.lines().filter(|line| !line.trim_start().starts_with("```")).collect();
+    (calls, said.join("\n").trim().to_string())
 }
 
-/// Move a call the model wrote into the fields a native one would have used, so
-/// nothing above here has to know which kind of endpoint answered. `known`
-/// says whether a name is a tool that was offered; a call to anything else is
-/// left as the text it was.
+/// Move the calls the model wrote into the fields native ones would have used,
+/// so nothing above here has to know which kind of endpoint answered.
 pub fn adopt(response: &mut Response, known: impl Fn(&str) -> bool) {
     if !response.message.tool_calls.is_empty() {
         return;
     }
-    let Some((call, said)) = call_in(&response.message.content) else { return };
-    if !known(&call.name) {
+    let (calls, said) = calls_in(&response.message.content, known);
+    if calls.is_empty() {
         return;
     }
     response.message.content = said;
-    response.message.tool_calls = vec![call];
+    response.message.tool_calls = calls;
     response.stop_reason = StopReason::ToolUse;
 }
 
@@ -88,7 +100,26 @@ mod tests {
     use super::*;
 
     fn called(text: &str) -> (ToolCall, String) {
-        call_in(text).unwrap_or_else(|| panic!("no call found in {text:?}"))
+        let (mut calls, said) = calls_in(text, |_| true);
+        assert_eq!(calls.len(), 1, "one call expected in {text:?}: {calls:?}");
+        (calls.remove(0), said)
+    }
+
+    /// Three calls in one reply are three calls, in the order written, with
+    /// the prose between them kept and the fences gone.
+    #[test]
+    fn every_call_in_a_reply_is_read_in_order() {
+        let text = "First:\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"a\"}}\n\
+                    then\n```json\n{\"name\": \"list_dir\", \"arguments\": {}}\n```\n\
+                    and {\"name\": \"widget\", \"arguments\": {}} is not a tool.";
+        let (calls, said) = calls_in(text, |name| name != "widget");
+        let names: Vec<&str> = calls.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["read_file", "list_dir"]);
+        assert_eq!(calls[0].arguments["path"], "a");
+        assert!(said.contains("First:") && said.contains("then") && said.contains("is not a tool"), "{said}");
+        assert!(said.contains(r#"{"name": "widget""#), "an object naming no tool stays: {said}");
+        assert!(!said.contains("```"), "{said}");
+        assert_ne!(calls[0].id, calls[1].id);
     }
 
     #[test]
@@ -133,9 +164,9 @@ mod tests {
     /// and in the model explaining itself. A parser finds an object or fails.
     #[test]
     fn prose_that_talks_about_a_call_is_not_one() {
-        assert!(call_in("I would call {tool} but the path is unclear").is_none());
-        assert!(call_in(r#"The "tool" field takes a name, e.g. { "tool": 3 }"#).is_none());
-        assert!(call_in("no braces here at all").is_none());
+        assert!(calls_in("I would call {tool} but the path is unclear", |_| true).0.is_empty());
+        assert!(calls_in(r#"The "tool" field takes a name, e.g. { "tool": 3 }"#, |_| true).0.is_empty());
+        assert!(calls_in("no braces here at all", |_| true).0.is_empty());
     }
 
     #[test]

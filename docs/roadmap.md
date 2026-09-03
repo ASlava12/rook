@@ -1042,8 +1042,15 @@ scenario found the next thing: the model gave its sub-agent `max_steps: 1`,
 which reads the file and has no step left to say what it read, and the
 report said "what it had done:" and nothing. A sub-task's budget is never
 below a call, a look, and an answer now, and a child that ran out with a
-call as its last word is reported by what it called. What the scenarios say
-at the new size is open again.
+call as its last word is reported by what it called. And a scenario has eight
+steps now: left at the default of two hundred, one ran for an hour and took
+the job past its timeout, with every other job's log held hostage behind it.
+The eighth reading, with the calls deciding: the delegation scenario passed,
+three of five now, and the one that still wandered showed why — the model
+writes three calls in one reply, the reading took the first, and given that
+one back it wrote the other two again, every step. Every object naming an
+offered tool is a call now, in the order written. What the scenarios say at
+the new size is open again.
 
 **A server fetched once is one somebody has to remember to update.** Now the
 agent remembers: past `[agent] server_update_after_days` (thirty by default,
