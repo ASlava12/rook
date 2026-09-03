@@ -432,6 +432,21 @@ fn cmd_doctor(rook: &Rook, json: bool) -> Result<()> {
     }
 
     println!();
+    println!("state:");
+    // What accumulates under here is every transcript the agent has written,
+    // the files it read included — so who else can read it is a fact about
+    // this machine worth one line.
+    match rook_core::paths::readable_by_others() {
+        loose if loose.is_empty() => println!("  {} — yours alone", rook_core::paths::home().display()),
+        loose => {
+            for (dir, mode) in loose {
+                println!("  {} is mode {mode:o}: other accounts on this machine can read it", dir.display());
+                println!("    chmod 700 {}", dir.display());
+            }
+        }
+    }
+
+    println!();
     println!("commands:");
     // Asked of the same context a turn runs with, so what doctor says is
     // what a command gets — and what its result would say it got.

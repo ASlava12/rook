@@ -781,7 +781,11 @@ lose people's trust:
   a command printed. Nothing leaves the machine, but nothing is encrypted either,
   and `rook store cat` prints any of it back. `rook search` finds where a secret
   ended up — it names the file and the capture — and `rook session rm` followed
-  by `rook store gc` removes it.
+  by `rook store gc` removes it. What protects it is the state directory's mode:
+  created for the owner alone, and left as it is if it already existed, which is
+  how a `~/.rook` made by an older build or a shell stays readable by every
+  account on the machine. `rook doctor` says which directories those are and the
+  `chmod` that closes them.
 - **Containment is real but partial.** A command the model asks for runs under
   Seatbelt on macOS, Landlock on Linux and a low integrity level on Windows: it
   writes the workspace and a scratch directory and nothing else, whatever it

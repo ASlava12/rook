@@ -106,10 +106,43 @@ pub fn servers_dir() -> PathBuf {
 }
 
 pub fn ensure_dirs() -> std::io::Result<()> {
-    for d in [home(), store_dir(), user_skills_dir(), logs_dir(), servers_dir()] {
+    for d in state_dirs() {
         private_dir(&d)?;
     }
     Ok(())
+}
+
+/// Everything the agent keeps, in one list, so the two questions asked of it —
+/// create these, and check these — cannot come to different answers.
+pub fn state_dirs() -> [PathBuf; 5] {
+    [home(), store_dir(), user_skills_dir(), logs_dir(), servers_dir()]
+}
+
+/// State directories any other account on this machine can read, with the mode
+/// that lets them.
+///
+/// [`private_dir`] creates them shut and leaves an existing one alone, which is
+/// right — a mode its owner chose is not this program's to change — but silent:
+/// a directory made before that code existed, or by a shell, keeps handing every
+/// transcript to every account and nothing says so. Reported rather than fixed,
+/// with the mode, so the answer is one `chmod` away and is the owner's to give.
+#[cfg(unix)]
+pub fn readable_by_others() -> Vec<(PathBuf, u32)> {
+    use std::os::unix::fs::PermissionsExt;
+    state_dirs()
+        .into_iter()
+        .filter_map(|dir| {
+            let mode = std::fs::metadata(&dir).ok()?.permissions().mode() & 0o777;
+            (mode & 0o077 != 0).then_some((dir, mode))
+        })
+        .collect()
+}
+
+/// Windows has no mode; a directory under the user's profile inherits an ACL
+/// that is already the user's.
+#[cfg(not(unix))]
+pub fn readable_by_others() -> Vec<(PathBuf, u32)> {
+    Vec::new()
 }
 
 /// Create a directory readable only by its owner.
@@ -136,4 +169,39 @@ pub fn private_dir(path: &Path) -> std::io::Result<()> {
 #[cfg(not(unix))]
 pub fn private_dir(path: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(path)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::*;
+
+    /// A directory made before `private_dir` existed, or by a shell, keeps its
+    /// mode and hands every transcript to every account on the machine. It was
+    /// created shut and left alone ever after, which is right and silent — so
+    /// this is the half that is not silent.
+    #[test]
+    fn a_state_directory_others_can_read_is_named_with_the_mode_that_lets_them() {
+        // Under the temporary directory rather than at it: `private_dir` leaves
+        // an existing directory alone, and a temporary one arrives with
+        // whatever mode the platform gives it.
+        let parent = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ROOK_HOME", parent.path().join("state")) };
+        ensure_dirs().unwrap();
+
+        assert!(readable_by_others().is_empty(), "made shut: {:?}", readable_by_others());
+
+        std::fs::set_permissions(store_dir(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let loose = readable_by_others();
+        assert_eq!(loose.len(), 1, "{loose:?}");
+        assert_eq!(loose[0], (store_dir(), 0o755));
+
+        // Group-only counts too: "others" is everyone who is not the owner.
+        std::fs::set_permissions(store_dir(), std::fs::Permissions::from_mode(0o750)).unwrap();
+        assert_eq!(readable_by_others().len(), 1, "a group is other accounts as well");
+
+        std::fs::set_permissions(store_dir(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(readable_by_others().is_empty());
+    }
 }

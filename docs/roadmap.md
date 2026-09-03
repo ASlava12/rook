@@ -1148,6 +1148,14 @@ hold the one invariant that matters there: every module loaded is embedded and
 served as script. [ADR-0012](adr/0012-hand-written-modules-no-bundler.md)
 supersedes the one-file part of ADR-0007 and keeps the rest.
 
+**Who else can read the agent's history is a question `doctor` answers.** The
+state directory is created for its owner alone and an existing one is left as
+its owner made it — right, and silent: a `~/.rook` from an older build or a
+`mkdir` keeps mode 755 and hands every transcript, and every file the agent
+ever read, to every account on the machine. The check found exactly that here.
+Reported with the mode and the `chmod`, not fixed: changing a mode its owner
+chose is not this program's to do.
+
 **The writes the daemon already serves go over it.** `session goal`, `session
 rewind`, `memory rm` and `store maintain` refused while `rookd` was up, which
 meant stopping the daemon to set a goal — and `store maintain` is what somebody
