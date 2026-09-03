@@ -2849,6 +2849,8 @@ async fn a_sub_task_that_did_not_finish_is_not_reported_like_one_that_did() {
         call("list_dir", serde_json::json!({ "path": "." })),
         call("list_dir", serde_json::json!({ "path": "." })),
         call("list_dir", serde_json::json!({ "path": "." })),
+        // Out of steps, the child gets a last word; then the parent's.
+        reply("I listed the directory three times"),
         reply("so much for that"),
     ];
 
@@ -4001,6 +4003,8 @@ async fn an_unfinished_sub_task_is_reported_by_what_it_called() {
         call("read_file", serde_json::json!({ "path": "a.txt" })),
         call("read_file", serde_json::json!({ "path": "a.txt" })),
         call("read_file", serde_json::json!({ "path": "a.txt" })),
+        // Its last word, asked for, is nothing — so what it called is the report.
+        reply(""),
         reply("it kept reading"),
     ];
     let outcome =
@@ -4041,4 +4045,53 @@ async fn two_calls_written_in_one_reply_are_both_run() {
         second.messages.iter().filter(|m| m.role == Role::Tool).map(|m| m.content.as_str()).collect();
     assert_eq!(results.len(), 2, "{results:?}");
     assert!(results[0].contains("alpha") && results[1].contains("beta"), "{results:?}");
+}
+
+/// A turn that ran out of steps with a call as its last word is asked once,
+/// with no tools to reach for, what it found — so it ends on the answer
+/// rather than on the limit.
+#[tokio::test]
+async fn a_turn_out_of_steps_with_work_done_gets_a_last_word() {
+    let f = fixture();
+    let session = f.rook.start_session("last-word").unwrap();
+    std::fs::write(f.workspace.path().join("config.rs"), "pub const PORT: u16 = 8443;\n").unwrap();
+
+    let script = vec![
+        call("read_file", serde_json::json!({ "path": "config.rs" })),
+        call("read_file", serde_json::json!({ "path": "config.rs" })),
+        reply("8443"),
+    ];
+    let provider = ScriptedProvider::new(script);
+    let seen = provider.share();
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), session);
+    agent.max_steps = 2;
+    let outcome = agent.run("what port?").await.unwrap();
+
+    assert_eq!(outcome.stopped, "max_steps", "the precondition: the limit was what ended it");
+    assert_eq!(outcome.reply, "8443");
+    let last = seen.lock().unwrap().last().cloned().unwrap();
+    assert!(last.tools.is_empty(), "nothing to reach for on the last word");
+    assert!(last.messages.last().unwrap().content.contains("out of steps"), "{:?}", last.messages.last());
+}
+
+/// A turn that reached its limit having said something is not asked again.
+#[tokio::test]
+async fn a_turn_out_of_steps_that_already_spoke_is_left_as_it_is() {
+    let f = fixture();
+    let session = f.rook.start_session("spoke").unwrap();
+    std::fs::write(f.workspace.path().join("config.rs"), "pub const PORT: u16 = 8443;\n").unwrap();
+
+    let mut second = call("read_file", serde_json::json!({ "path": "config.rs" }));
+    second.message.content = "still looking".into();
+    let script =
+        vec![call("read_file", serde_json::json!({ "path": "config.rs" })), second, reply("never asked")];
+    let provider = ScriptedProvider::new(script);
+    let seen = provider.share();
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), session);
+    agent.max_steps = 2;
+    let outcome = agent.run("what port?").await.unwrap();
+
+    assert_eq!(outcome.stopped, "max_steps");
+    assert_eq!(outcome.reply, "still looking");
+    assert_eq!(seen.lock().unwrap().len(), 2, "two steps and no last word");
 }

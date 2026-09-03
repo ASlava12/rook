@@ -1049,8 +1049,11 @@ The eighth reading, with the calls deciding: the delegation scenario passed,
 three of five now, and the one that still wandered showed why — the model
 writes three calls in one reply, the reading took the first, and given that
 one back it wrote the other two again, every step. Every object naming an
-offered tool is a call now, in the order written. What the scenarios say at
-the new size is open again.
+offered tool is a call now, in the order written. And with eight steps a
+scenario, a turn that runs out of them with a call as its last word has done
+work nobody was told about: it is asked once more, with nothing to reach
+for, what it found — so it ends on the answer rather than on the limit. What
+the scenarios say at the new size is open again.
 
 **A server fetched once is one somebody has to remember to update.** Now the
 agent remembers: past `[agent] server_update_after_days` (thirty by default,

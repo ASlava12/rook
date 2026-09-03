@@ -1642,6 +1642,47 @@ impl<'a> AgentLoop<'a> {
         }
 
         outcome.stopped = "max_steps".into();
+        // A turn that ran out of steps with a call as its last word has done
+        // work nobody was told about. One more call, with nothing to reach
+        // for, so the turn ends on what it found rather than on the limit.
+        if outcome.reply.trim().is_empty() && !outcome.tools_called.is_empty() {
+            messages.push(Message::user(OUT_OF_STEPS));
+            self.rook.log(self.session, EventKind::Note, "out of steps", OUT_OF_STEPS).ok();
+            let mut request = Request::new(messages);
+            request.effort = Some(self.effort);
+            request.cache_ttl = self.rook.config.agent.cache_ttl();
+            let mut stream =
+                self.provider.stream(request).await.map_err(|e| CoreError::Other(e.to_string()))?;
+            let mut assembler = Assembler::default();
+            while let Some(delta) = stream.next().await {
+                let delta = delta.map_err(|e| CoreError::Other(e.to_string()))?;
+                on_progress(Progress::Delta(&delta));
+                assembler.push(delta).map_err(|e| CoreError::Other(e.to_string()))?;
+            }
+            let response = assembler.finish();
+            outcome.input_tokens += response.usage.input_tokens;
+            outcome.output_tokens += response.usage.output_tokens;
+            outcome.cached_tokens += response.usage.cache_read_tokens;
+            if !response.message.content.is_empty() {
+                self.rook.store.append_event(
+                    self.session,
+                    rook_store::NewEvent::new(
+                        EventKind::AssistantMessage,
+                        rook_store::Kind::Message,
+                        response.message.content.as_bytes(),
+                    )
+                    .label(&response.model)
+                    .usage(response.usage.input_tokens, response.usage.output_tokens),
+                )?;
+                outcome.reply = response.message.content;
+            }
+        }
+        // For a front end, which renders silence as a hang. A child's silence
+        // is the parent's to report, by what the child called.
+        if self.depth == 0 && outcome.reply.is_empty() {
+            outcome.reply =
+                format!("(the model ended the turn without saying anything — {})", outcome.stopped);
+        }
         self.settle_reports(&mut outcome);
         self.finish(&outcome).await;
         Ok(outcome)
@@ -2962,6 +3003,10 @@ fn collected(task: &str, result: &Landed, outcome: &mut TurnOutcome) -> String {
 /// The shape of the answer is part of the instruction because a verdict that can
 /// be hedged is one that will be: "looks reasonable" is what a model says when it
 /// has read something and run nothing.
+const OUT_OF_STEPS: &str = "\
+You are out of steps for this turn. Say now, in words and without calling anything: what \
+you found, what you did, and what is left.";
+
 const SAY_IT: &str = "\
 You ended the turn without saying anything. Answer now, in words: what you found, or what \
 you did and what is left.";
