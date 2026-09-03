@@ -382,3 +382,34 @@ async fn a_content_delta_shaped_as_a_list_is_read_the_same_as_a_string() {
     }
     assert_eq!(text, "in parts and a string", "both shapes are the same text");
 }
+
+/// Ollama says `finish_reason: "stop"` for a reply that spoke and called. The
+/// calls decide: a stream that carried one ends as a tool use whatever the
+/// word said, or the calls are logged as text and never run.
+#[tokio::test]
+async fn a_call_beside_a_stop_finish_reason_is_still_a_tool_use() {
+    let url = serve(
+        vec![
+            r#"data: {"choices":[{"delta":{"content":"Let me look."}}]}"#,
+            "\n\n",
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"read_file","arguments":"{\"path\":\"a.txt\"}"}}]},"finish_reason":"stop"}]}"#,
+            "\n\ndata: [DONE]\n\n",
+        ],
+        Duration::from_millis(5),
+        false,
+    )
+    .await;
+
+    let mut stream = provider(url, Duration::from_secs(5)).stream(request()).await.unwrap();
+    let mut calls = 0;
+    let mut stop = None;
+    while let Some(delta) = stream.next().await {
+        match delta.unwrap() {
+            Delta::ToolCall(_) => calls += 1,
+            Delta::Done { stop_reason, .. } => stop = Some(stop_reason),
+            _ => {}
+        }
+    }
+    assert_eq!(calls, 1);
+    assert_eq!(stop, Some(StopReason::ToolUse), "the word was stop; the call decides");
+}

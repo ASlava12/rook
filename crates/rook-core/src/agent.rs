@@ -17,7 +17,7 @@
 //!   turn, and usually the task with it.
 
 use futures_util::StreamExt;
-use rook_llm::{Assembler, Delta, Message, Provider, Request, Role, StopReason, ToolSpec};
+use rook_llm::{Assembler, Delta, Message, Provider, Request, Role, ToolSpec};
 use rook_store::EventKind;
 use rook_tools::policy::{Approver, Decision, Policy, Stance, Unattended};
 use rook_tools::{ToolBox, ToolContext};
@@ -1491,7 +1491,10 @@ impl<'a> AgentLoop<'a> {
                 outcome.reply = response.message.content.clone();
             }
 
-            if response.stop_reason != StopReason::ToolUse || response.message.tool_calls.is_empty() {
+            // What the message carries decides, not what the provider said
+            // about it: a dialect that reported `stop` beside two calls had
+            // them logged as text and never run.
+            if response.message.tool_calls.is_empty() {
                 // Said while this was answering, and the answer is now in front
                 // of it: the turn is not over, whatever the model thinks. Left
                 // in the queue it would reach the next prompt instead, folded

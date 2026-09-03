@@ -169,9 +169,16 @@ impl Provider for Anthropic {
             }
         }
 
+        // The calls decide, not the word: the API itself says `tool_use`
+        // beside them, and a gateway imitating it need not.
+        let stop_reason = if tool_calls.is_empty() {
+            stop_reason(wire.stop_reason.as_deref())
+        } else {
+            StopReason::ToolUse
+        };
         Ok(Response {
             message: Message { role: Role::Assistant, content, tool_calls, tool_call_id: None, cache: false },
-            stop_reason: stop_reason(wire.stop_reason.as_deref()),
+            stop_reason,
             usage: Usage {
                 input_tokens: wire.usage.input_tokens,
                 output_tokens: wire.usage.output_tokens,
@@ -280,7 +287,7 @@ impl Provider for Anthropic {
                 });
             }
             yield Delta::Done {
-                stop_reason: stop.unwrap_or(if had_tools { StopReason::ToolUse } else { StopReason::EndTurn }),
+                stop_reason: if had_tools { StopReason::ToolUse } else { stop.unwrap_or(StopReason::EndTurn) },
                 usage,
                 model,
             };

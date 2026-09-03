@@ -99,9 +99,12 @@ impl Provider for OpenAiCompatible {
             })
             .collect();
 
+        // The calls decide, not the word: Ollama says `stop` for a reply that
+        // spoke and called, and read as the word the calls were logged as
+        // text and never run.
         let stop_reason = match choice.finish_reason.as_deref() {
+            _ if !tool_calls.is_empty() => StopReason::ToolUse,
             Some(reason) => finish_reason(reason),
-            None if !tool_calls.is_empty() => StopReason::ToolUse,
             None => StopReason::Other,
         };
 
@@ -256,7 +259,8 @@ impl Provider for OpenAiCompatible {
                 yield Delta::ToolCall(call);
             }
             yield Delta::Done {
-                stop_reason: stop.unwrap_or(if had_tools { StopReason::ToolUse } else { StopReason::EndTurn }),
+                // The calls decide, not the word, as above.
+                stop_reason: if had_tools { StopReason::ToolUse } else { stop.unwrap_or(StopReason::EndTurn) },
                 usage,
                 model,
             };

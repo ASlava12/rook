@@ -3930,3 +3930,23 @@ async fn a_task_given_as_an_object_carrying_task_is_read() {
     assert_eq!(outcome.delegated.len(), 1, "{:?}", outcome.delegated);
     assert_eq!(outcome.reply, "it said hello");
 }
+
+/// A provider that reports the end of the turn beside a call it also
+/// delivered has delivered a call. The loop runs what the message carries.
+#[tokio::test]
+async fn a_call_delivered_beside_an_end_turn_is_still_run() {
+    let f = fixture();
+    let session = f.rook.start_session("stop-beside-call").unwrap();
+    std::fs::write(f.workspace.path().join("config.rs"), "pub const PORT: u16 = 8443;\n").unwrap();
+
+    let mut called = call("read_file", serde_json::json!({ "path": "config.rs" }));
+    called.stop_reason = StopReason::EndTurn;
+    let script = vec![called, reply("8443")];
+    let outcome = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session)
+        .run("what port?")
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.tools_called, vec!["read_file".to_string()], "{outcome:?}");
+    assert_eq!(outcome.reply, "8443");
+}

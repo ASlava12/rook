@@ -1028,8 +1028,14 @@ edit tool's readings in: the edit scenario passed, and the new delegation
 scenario found the next shape — `delegate` handed a tool call in place of a
 task, told "delegate needs a task", which it thought it had given. The
 refusal names the shape now and shows the one that works, and an object with
-the sentence under `task` is read for it. What the scenarios say at the new
-size is open again.
+the sentence under `task` is read for it. The sixth reading was the one the
+fourth had hidden: a reply carrying tool calls arrived with `finish_reason:
+"stop"`, Ollama's word for a turn that also spoke, and the OpenAI dialect read
+the word rather than the calls — so the calls were logged as text and never
+run, which is what the fenced retry in the fourth reading had been. A message
+that carries tool calls is a tool use whatever the finish reason said, in the
+dialect and in the loop. What the scenarios say at the new size is open
+again.
 
 **A server fetched once is one somebody has to remember to update.** Now the
 agent remembers: past `[agent] server_update_after_days` (thirty by default,
