@@ -187,6 +187,14 @@ sort the failures into ours and the model's, and fix ours at the mechanism:
 a nudge asked once, a shape read as what it plainly means, a message that
 names what was actually wrong.
 
+**A job's log does not wait for the run.** `gh run view --log` serves nothing
+until every job in the run has finished, and the FreeBSD VM holds a run open
+for up to forty-five minutes. A job that has finished is readable at once:
+`gh api --allow-escape-sequences repos/<owner>/<repo>/actions/jobs/<job id>/logs`,
+with the job id from `gh run view <run> --json jobs`. Strip the colour codes
+before grepping. A Windows compile error costs one round trip this way, not
+three.
+
 **Verifying a change to `rookd`.** The daemon tests in
 `crates/rook-cli/tests/cli.rs` run the binary, and they build it themselves —
 so `cargo test -p rook-cli` after editing `rookd` can run against the previous
