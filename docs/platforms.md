@@ -95,3 +95,18 @@ Windows, and works for paths that do not exist yet.
 pkg install -y rust
 cargo build --release
 ```
+
+## Containing a command
+
+`run_command` is contained by the platform where the platform can, and the
+result of every command says what was applied.
+
+| Platform | Containment | Limits |
+|---|---|---|
+| macOS | Seatbelt (`sandbox-exec`) | none known; deprecated by Apple, present in every release |
+| Linux | Landlock, unprivileged | network only from kernel 6.7, and TCP only — never UDP, so never DNS |
+| FreeBSD | none yet | Capsicum's capability mode breaks a shell; jails need root |
+| Windows | none yet | a restricted token or an AppContainer is the shape it would take |
+
+`[sandbox] isolate = "required"` refuses to run a command where the table says
+none; `auto`, the default, runs it as it is and says so.

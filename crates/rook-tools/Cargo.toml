@@ -25,6 +25,9 @@ tracing = "0.1.44"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.180"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4"
+
 [dev-dependencies]
 regex = "1.13.1"
 tempfile = "3.24.0"

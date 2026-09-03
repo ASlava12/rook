@@ -533,7 +533,9 @@ fn listed_sha256(asset: &serde_json::Value) -> Option<String> {
 async fn run_to_completion(command: &str, cwd: &Path, env: &[(String, String)]) -> Result<(), String> {
     const KEPT: usize = 64 << 10;
     let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-    let mut child = rook_tools::exec::spawn_shell(command, cwd, &env).map_err(|e| e.to_string())?;
+    // Uncontained on purpose: an installer writes outside the workspace and
+    // reaches the network by definition, and it runs after the person said to.
+    let mut child = rook_tools::exec::spawn_shell(command, cwd, &env, None).map_err(|e| e.to_string())?;
     let (mut out, mut err) = (child.stdout.take(), child.stderr.take());
     let printed = std::sync::Mutex::new(rook_tools::jobs::Printed::default());
     let reading = async {

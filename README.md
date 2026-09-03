@@ -531,6 +531,19 @@ File tools are bounded by the workspace, and the boundary is where a path leads
 rather than how it is spelled: a symlink inside the workspace that points out of
 it is refused, and the refusal names where it really went.
 
+A command is contained by the platform where the platform can. On macOS it runs
+under Seatbelt and on Linux under Landlock, and in both it — and everything it
+starts — may write only the workspace and the temporary directory, and read
+anywhere; the network is a switch, `[sandbox] network`, on by default because a
+build fetches its dependencies. `[sandbox] isolate = "auto"` is the default and
+does this where it can; where it cannot — Windows and FreeBSD, for now — the
+command runs as it is and the tool's result says so, and `"required"` refuses
+instead. What was applied is recorded on every command, not assumed: a sandbox
+that quietly did nothing is worse than none. Landlock older than kernel 6.7
+cannot restrain the network at all, and never restrains UDP, so DNS; the result
+says that too. A command run in an editor's terminal is the editor's, and the
+language-server installer runs uncontained by design, after the person said to.
+
 ### Delegation
 
 A turn can hand self-contained sub-tasks to fresh agents and get back only their

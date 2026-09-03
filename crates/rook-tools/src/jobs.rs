@@ -63,7 +63,12 @@ impl Jobs {
     ///
     /// Refuses past the cap rather than evicting: what would be evicted is a
     /// process somebody is waiting on, and the message says which to stop.
-    pub fn start(&self, command: &str, cwd: &std::path::Path) -> Result<String> {
+    pub fn start(
+        &self,
+        command: &str,
+        cwd: &std::path::Path,
+        isolation: Option<&crate::isolate::Isolation>,
+    ) -> Result<String> {
         let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
         // A finished job is kept so its output can still be read, and a turn
         // that starts a thousand short ones would otherwise keep all thousand.
@@ -88,7 +93,7 @@ impl Jobs {
             });
         }
 
-        let mut child = crate::exec::spawn_shell(command, cwd, &[])?;
+        let mut child = crate::exec::spawn_shell(command, cwd, &[], isolation)?;
         let id = format!("job{:03}", self.started.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1);
         let printed = Arc::new(Mutex::new(Printed::default()));
         let exit = Arc::new(Mutex::new(None));

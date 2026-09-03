@@ -15,6 +15,7 @@ pub mod ask;
 pub mod crates;
 pub mod exec;
 pub mod files;
+pub mod isolate;
 pub mod jobs;
 pub mod mcp;
 pub mod pending;
@@ -125,6 +126,11 @@ pub struct ToolContext {
     pub command_timeout: std::time::Duration,
     /// When false, tools refuse paths outside the workspace.
     pub allow_outside_workspace: bool,
+    /// What a command may write and reach, and whether it is held to it: the
+    /// platform's containment where there is some, none, or a refusal to run
+    /// without it.
+    pub isolation: isolate::Isolation,
+    pub isolate: isolate::Mode,
     /// Set by a front end whose environment owns the files — an editor, so far.
     pub files: Option<Arc<dyn Files>>,
     /// Set by a front end that has a terminal of its own to run in.
@@ -191,6 +197,8 @@ impl ToolContext {
 impl ToolContext {
     pub fn new(workspace: PathBuf) -> Self {
         Self {
+            isolation: isolate::Isolation::for_workspace(&workspace),
+            isolate: isolate::Mode::Off,
             workspace,
             max_output_bytes: 256 * 1024,
             command_timeout: std::time::Duration::from_secs(120),

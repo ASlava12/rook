@@ -1101,6 +1101,18 @@ moved, a person is asked, and with nobody to ask it is an open question naming
 `rook lsp update`. Nothing new is stored for it; the tag file's mtime was
 already there.
 
+**A command is contained by the platform, where the platform can.** The
+boundary was text — a path check in the file tools and pattern rules over the
+command line, which a command's own children never met. Now `run_command` and
+a background job run under Seatbelt on macOS and Landlock on Linux: the
+workspace and the temporary directory writable, everything else read-only,
+the network a switch. What was applied is on every result, because a sandbox
+that quietly did nothing is worse than none: Landlock before kernel 6.7 cannot
+restrain the network and never restrains UDP, and Windows and FreeBSD have
+nothing yet — `auto` runs the command as it is and says so, `required` refuses.
+[ADR-0011](adr/0011-containment-is-the-platforms.md) has the reasons: no
+helper binary, no container, and the network open by default.
+
 ## After that
 
 **Driving physical devices, if the Model Hardware Standard becomes something to
@@ -1147,11 +1159,6 @@ than rediscovered.
 SmartScreen warns on every download and macOS Gatekeeper needs a right-click to
 open. cline signs with Azure Trusted Signing; both need a certificate this
 repository does not have.
-
-**Real sandboxing.** Today's boundary is a workspace path check and pattern
-rules ([ADR-0009](adr/0009-ask-before-acting.md)) — text matching, not containment.
-Platform-native containment — seccomp, Seatbelt, Capsicum, Job Objects — is a
-serious piece of work and platform-specific by nature.
 
 **Interactive web UI.** Would trigger revisiting
 [ADR-0007](adr/0007-no-js-build-step.md).

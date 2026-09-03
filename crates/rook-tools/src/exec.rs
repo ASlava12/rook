@@ -60,7 +60,11 @@ impl Tool for RunCommand {
                 let why = "this front end does not keep background commands — give it a                            `timeout_secs` long enough instead";
                 return Ok(ToolOutcome::error(why.to_string()));
             };
-            let id = jobs.start(&command, &cwd)?;
+            let (isolation, _) = match crate::isolate::choose(ctx.isolate, &ctx.isolation) {
+                Ok(chosen) => chosen,
+                Err(refused) => return Ok(ToolOutcome::error(refused)),
+            };
+            let id = jobs.start(&command, &cwd, isolation)?;
             return Ok(ToolOutcome::ok(format!("started {id}; `job` reads what it prints")).with("job", id));
         }
 
@@ -68,7 +72,11 @@ impl Tool for RunCommand {
             return elsewhere(terminals.as_ref(), &command, &cwd, ctx, timeout).await;
         }
 
-        let mut child = spawn_shell(&command, &cwd, &[])?;
+        let (isolation, contained) = match crate::isolate::choose(ctx.isolate, &ctx.isolation) {
+            Ok(chosen) => chosen,
+            Err(refused) => return Ok(ToolOutcome::error(refused)),
+        };
+        let mut child = spawn_shell(&command, &cwd, &[], isolation)?;
         let group = child.id();
         let mut stdout = child.stdout.take();
         let mut stderr = child.stderr.take();
@@ -149,7 +157,8 @@ impl Tool for RunCommand {
             full_bytes: full,
             meta: Default::default(),
         }
-        .with("exit_code", code);
+        .with("exit_code", code)
+        .with("isolation", contained);
         Ok(match kept {
             Some((_, path)) => outcome.with("output_file", path),
             None => outcome,
@@ -256,13 +265,15 @@ async fn elsewhere(
 }
 
 /// Start `command` the way the machine's shell would, with `env` added to
-/// the child's. Public because the language-server installer runs `npm` and
-/// `go install` and needs the same shell — on Windows `npm` is `npm.cmd`, and
-/// the shell is what knows that — and `go install` needs `GOBIN` set.
+/// the child's, contained by `isolation` when there is one. Public because the
+/// language-server installer runs `npm` and `go install` and needs the same
+/// shell — on Windows `npm` is `npm.cmd`, and the shell is what knows that —
+/// and `go install` needs `GOBIN` set.
 pub fn spawn_shell(
     command: &str,
     cwd: &std::path::Path,
     env: &[(&str, &str)],
+    isolation: Option<&crate::isolate::Isolation>,
 ) -> Result<tokio::process::Child> {
     #[cfg(windows)]
     // `cmd /C` rather than PowerShell: it is always present, and skills that
@@ -278,11 +289,18 @@ pub fn spawn_shell(
         c
     };
     #[cfg(not(windows))]
-    let mut cmd = {
-        let mut c = tokio::process::Command::new("/bin/sh");
-        c.arg("-c").arg(command);
-        c
+    let mut cmd = match isolation {
+        Some(isolation) => crate::isolate::contained(command, isolation)
+            .map_err(|e| ToolError::Io { path: cwd.to_path_buf(), source: e })?,
+        None => {
+            let mut c = tokio::process::Command::new("/bin/sh");
+            c.arg("-c").arg(command);
+            c
+        }
     };
+    #[cfg(windows)]
+    // Nothing contains a command here yet; `choose` never asks for it.
+    let _ = isolation;
     cmd.envs(env.iter().copied())
         .current_dir(cwd)
         .stdout(std::process::Stdio::piped())

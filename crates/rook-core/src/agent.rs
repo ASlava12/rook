@@ -92,6 +92,8 @@ pub fn tool_context(config: &Config, workspace: &Path, output_dir: &Path) -> Too
     ctx.max_output_bytes = sandbox.max_output_bytes;
     ctx.command_timeout = std::time::Duration::from_secs(sandbox.command_timeout_secs);
     ctx.allow_outside_workspace = sandbox.allow_outside_workspace;
+    ctx.isolate = sandbox.isolate;
+    ctx.isolation.network = sandbox.network;
     // Outside the workspace on purpose: it is the agent's record of a command,
     // not a file of the project's, and a checkpoint should not capture it.
     ctx.spill_dir = Some(output_dir.to_path_buf());

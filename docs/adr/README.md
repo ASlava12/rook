@@ -16,3 +16,4 @@ usually goes missing.
 | [0008](0008-hand-written-mcp-client.md) | A hand-written MCP client instead of the SDK | accepted |
 | [0009](0009-ask-before-acting.md) | Ask before acting; a denial always wins | accepted |
 | [0010](0010-no-todo-tool.md) | A line in the prompt instead of a checklist tool | accepted |
+| [0011](0011-containment-is-the-platforms.md) | Containment is the platform's, best-effort, and reported | accepted |

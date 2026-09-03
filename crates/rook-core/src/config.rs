@@ -268,6 +268,16 @@ pub struct SandboxConfig {
     /// a symlink that leads out of it. Off by default: a workspace that cannot
     /// be left is the one boundary a prompt cannot argue its way past.
     pub allow_outside_workspace: bool,
+    /// Whether a command is contained by the platform — Seatbelt on macOS,
+    /// Landlock on Linux — so that it, and everything it starts, can write only
+    /// the workspace and the temporary directory. `auto` does so where it can
+    /// and says where it cannot; `required` refuses to run a command without
+    /// it; `off` never does.
+    pub isolate: rook_tools::isolate::Mode,
+    /// Whether a contained command may reach the network. On by default: a
+    /// build fetches its dependencies, and a sandbox that breaks every build
+    /// is one that gets turned off. Off, it is refused at the socket.
+    pub network: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -369,6 +379,8 @@ impl Default for SandboxConfig {
             max_files_searched: 20_000,
             command_timeout_secs: 120,
             allow_outside_workspace: false,
+            isolate: rook_tools::isolate::Mode::Auto,
+            network: true,
         }
     }
 }

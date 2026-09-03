@@ -604,7 +604,7 @@ mod tests {
             rook.workspace.clone()
         };
         let jobs = equipment.get().unwrap().jobs.clone();
-        let id = jobs.start("echo dev-server-up; sleep 30", &workspace).unwrap();
+        let id = jobs.start("echo dev-server-up; sleep 30", &workspace, None).unwrap();
 
         let (status, body) = get(&f, "/api/jobs").await;
         assert_eq!(status, StatusCode::OK);

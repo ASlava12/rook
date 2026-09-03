@@ -1,0 +1,96 @@
+//! What a contained command can and cannot do, checked by running one. Each
+//! test first runs the same command uncontained and asserts it succeeds, so a
+//! refusal is the sandbox's and not the machine's.
+
+use std::path::Path;
+
+use rook_tools::exec::spawn_shell;
+use rook_tools::isolate::{Backend, Isolation, available};
+
+async fn run(command: &str, cwd: &Path, isolation: Option<&Isolation>) -> (i32, String) {
+    let child = spawn_shell(command, cwd, &[], isolation).expect("spawns");
+    let out = child.wait_with_output().await.expect("finishes");
+    let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    (out.status.code().unwrap_or(-1), said)
+}
+
+/// Whether anything here contains a command, said once per run when nothing
+/// does, so a skipped test is not a silent one.
+fn backend() -> Option<Backend> {
+    match available() {
+        Ok(backend) => Some(backend),
+        Err(why) => {
+            eprintln!("skipped: {why}");
+            None
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_contained_command_writes_the_workspace_and_scratch_and_nothing_else() {
+    if backend().is_none() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let (workspace, scratch, outside) =
+        (root.path().join("ws"), root.path().join("scratch"), root.path().join("outside"));
+    for dir in [&workspace, &scratch, &outside] {
+        std::fs::create_dir(dir).unwrap();
+    }
+    let isolation = Isolation { workspace: workspace.clone(), scratch: vec![scratch.clone()], network: true };
+    let touch = |dir: &Path, name: &str| format!("touch '{}'", dir.join(name).display());
+
+    let (code, said) = run(&touch(&outside, "plain"), &workspace, None).await;
+    assert_eq!(code, 0, "the precondition: uncontained, the write outside succeeds: {said}");
+    assert!(outside.join("plain").exists());
+
+    let (code, said) = run(&touch(&outside, "blocked"), &workspace, Some(&isolation)).await;
+    assert_ne!(code, 0, "contained, the write outside is refused: {said}");
+    assert!(!outside.join("blocked").exists(), "and nothing was written");
+
+    let both = format!("{} && {}", touch(&workspace, "inside"), touch(&scratch, "temp"));
+    let (code, said) = run(&both, &workspace, Some(&isolation)).await;
+    assert_eq!(code, 0, "the workspace and scratch are writable: {said}");
+    assert!(workspace.join("inside").exists() && scratch.join("temp").exists());
+
+    let (code, said) =
+        run("cat /etc/hosts > /dev/null && ls / > /dev/null", &workspace, Some(&isolation)).await;
+    assert_eq!(code, 0, "reading is everywhere, and /dev/null takes writes: {said}");
+}
+
+#[tokio::test]
+async fn tcp_is_refused_when_the_policy_says_no_network() {
+    let Some(backend) = backend() else { return };
+    if backend == (Backend::Landlock { tcp: false }) {
+        eprintln!("skipped: this kernel's landlock cannot restrain the network");
+        return;
+    }
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let workspace = tempfile::tempdir().unwrap();
+    let connect = format!("bash -c 'exec 3<>/dev/tcp/127.0.0.1/{port}'");
+
+    let (code, said) = run(&connect, workspace.path(), None).await;
+    assert_eq!(code, 0, "the precondition: uncontained, the connection is made: {said}");
+
+    let closed = Isolation { workspace: workspace.path().into(), scratch: vec![], network: false };
+    let (code, said) = run(&connect, workspace.path(), Some(&closed)).await;
+    assert_ne!(code, 0, "with the network switched off it is refused: {said}");
+
+    let open = Isolation { network: true, ..closed };
+    let (code, said) = run(&connect, workspace.path(), Some(&open)).await;
+    assert_eq!(code, 0, "and with it on, made again: {said}");
+}
+
+/// A platform with nothing to contain a command says so, in words a person
+/// can act on, rather than pretending.
+#[test]
+fn what_contains_a_command_here_is_said_either_way() {
+    match available() {
+        Ok(backend) => {
+            let words = backend.describe(&Isolation::for_workspace("."));
+            assert!(words.contains("writes to the workspace"), "{words}");
+        }
+        Err(why) => assert!(why.starts_with("no sandbox"), "{why}"),
+    }
+}
