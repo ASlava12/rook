@@ -248,7 +248,10 @@ the Agent Skills spec leaves free, and keep unknown fields round-tripping —
 
 ## Platform work
 
-Platform branches belong in `paths.rs`, `exec.rs` or the `userland` predicate —
-not scattered through call sites. FreeBSD is a tested target; see
+Platform branches belong in `paths.rs`, `exec.rs`, `isolate.rs` or the `userland`
+predicate — not scattered through call sites. Win32 calls live in `rook-contain`,
+which has no C dependencies, so `cargo check --target x86_64-pc-windows-msvc -p
+rook-contain` works from a Mac; the rest of the workspace does not cross-check,
+because `ring` needs a C toolchain for the target. FreeBSD is a tested target; see
 [docs/platforms.md](docs/platforms.md) for the two C dependencies that constrain
 cross-compilation.
