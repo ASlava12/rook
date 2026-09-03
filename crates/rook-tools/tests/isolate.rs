@@ -38,7 +38,10 @@ async fn a_contained_command_writes_the_workspace_and_scratch_and_nothing_else()
         std::fs::create_dir(dir).unwrap();
     }
     let isolation = Isolation { workspace: workspace.clone(), scratch: vec![scratch.clone()], network: true };
-    let touch = |dir: &Path, name: &str| format!("touch '{}'", dir.join(name).display());
+    let touch = |dir: &Path, name: &str| match cfg!(windows) {
+        true => format!("type nul > \"{}\"", dir.join(name).display()),
+        false => format!("touch '{}'", dir.join(name).display()),
+    };
 
     let (code, said) = run(&touch(&outside, "plain"), &workspace, None).await;
     assert_eq!(code, 0, "the precondition: uncontained, the write outside succeeds: {said}");
@@ -53,16 +56,22 @@ async fn a_contained_command_writes_the_workspace_and_scratch_and_nothing_else()
     assert_eq!(code, 0, "the workspace and scratch are writable: {said}");
     assert!(workspace.join("inside").exists() && scratch.join("temp").exists());
 
-    let (code, said) =
-        run("cat /etc/hosts > /dev/null && ls / > /dev/null", &workspace, Some(&isolation)).await;
-    assert_eq!(code, 0, "reading is everywhere, and /dev/null takes writes: {said}");
+    let reads = match cfg!(windows) {
+        true => "type C:\\Windows\\System32\\drivers\\etc\\hosts > nul && dir C:\\ > nul",
+        false => "cat /etc/hosts > /dev/null && ls / > /dev/null",
+    };
+    let (code, said) = run(reads, &workspace, Some(&isolation)).await;
+    assert_eq!(code, 0, "reading is everywhere, and the null device takes writes: {said}");
 }
 
 #[tokio::test]
 async fn tcp_is_refused_when_the_policy_says_no_network() {
     let Some(backend) = backend() else { return };
-    if backend == (Backend::Landlock { tcp: false }) {
-        eprintln!("skipped: this kernel's landlock cannot restrain the network");
+    if matches!(backend, Backend::Landlock { tcp: false } | Backend::LowIntegrity) {
+        eprintln!(
+            "skipped: {} cannot restrain the network",
+            backend.describe(&Isolation::for_workspace("."))
+        );
         return;
     }
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -132,7 +141,7 @@ async fn a_failed_contained_command_says_it_was_contained() {
     assert!(!out.content.contains("ran contained"), "a success says nothing about it: {}", out.content);
 
     // A failure that is not a refusal is not blamed on the sandbox.
-    let missing = serde_json::json!({ "command": "cat /nowhere/at/all" });
+    let missing = serde_json::json!({ "command": if cfg!(windows) { "type C:\\nowhere\\at\\all" } else { "cat /nowhere/at/all" } });
     let out = rook_tools::exec::RunCommand.call(&ctx, &missing).await.unwrap();
     assert!(out.is_error, "{}", out.content);
     assert!(!out.content.contains("ran contained"), "a missing file is not the sandbox: {}", out.content);

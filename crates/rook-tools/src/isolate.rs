@@ -8,8 +8,11 @@
 //! network is a switch — and what was applied is said, not assumed, because a
 //! sandbox that quietly did nothing is worse than none.
 //!
-//! There is none on Windows or FreeBSD yet. `Mode::Auto` runs a command as it
-//! is there and says so; `Mode::Required` refuses instead.
+//! On Windows the command runs at low integrity, through a launcher that is
+//! this same binary lowered: reading is everywhere, writing only to what is
+//! labelled low — the workspace and scratch, labelled by the parent — and the
+//! network is not restrained at all. There is none on FreeBSD yet. `Mode::Auto`
+//! runs a command as it is there and says so; `Mode::Required` refuses instead.
 
 use std::path::PathBuf;
 
@@ -54,6 +57,9 @@ pub enum Backend {
     /// enough (6.7) to restrict connections too; UDP, and so DNS, it never
     /// does.
     Landlock { tcp: bool },
+    /// A low integrity level, which forbids writing anything not labelled
+    /// low and says nothing about the network.
+    LowIntegrity,
 }
 
 impl Backend {
@@ -71,6 +77,10 @@ impl Backend {
             }
             Self::Landlock { tcp: false } => {
                 "landlock: writes to the workspace and scratch; this kernel cannot restrain the network"
+                    .into()
+            }
+            Self::LowIntegrity => {
+                "low integrity: writes to the workspace and scratch, labelled low for it; the network is not restrained"
                     .into()
             }
         }
@@ -127,7 +137,21 @@ fn probe() -> Result<Backend, String> {
     Ok(Backend::Landlock { tcp })
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+/// The launcher is a rook binary that said so at start. A process that never
+/// did — a test binary — has no way to lower a command, and must not try to
+/// start itself as one.
+#[cfg(windows)]
+fn probe() -> Result<Backend, String> {
+    match std::env::var_os(rook_contain::LAUNCHER) {
+        Some(_) => Ok(Backend::LowIntegrity),
+        None => {
+            Err("no sandbox: this process is not a rook binary, so nothing here can run as the launcher"
+                .into())
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn probe() -> Result<Backend, String> {
     Err(format!("no sandbox on {}: commands run as they are", std::env::consts::OS))
 }
@@ -147,6 +171,11 @@ pub fn choose(mode: Mode, isolation: &Isolation) -> Result<(Option<&Isolation>, 
 
 #[cfg(target_os = "macos")]
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
+
+/// Where the launcher is told to run the command, since the launcher and
+/// not `spawn_shell` is what starts it.
+#[cfg(windows)]
+pub(crate) const CWD_ENV: &str = rook_contain::ENV_CWD;
 
 /// The command `/bin/sh -c <command>` becomes under `isolation`.
 #[cfg(target_os = "macos")]
@@ -223,10 +252,33 @@ pub(crate) fn contained(command: &str, isolation: &Isolation) -> std::io::Result
     Ok(cmd)
 }
 
+/// This binary again, as the launcher: it lowers itself and runs the command
+/// through `cmd /C`, which inherits the level and the pipes. The directories
+/// the command may write are labelled low here first — once per directory
+/// per process, because the label persists and the call walks the tree.
+#[cfg(windows)]
+pub(crate) fn contained(command: &str, isolation: &Isolation) -> std::io::Result<tokio::process::Command> {
+    static LABELLED: std::sync::Mutex<std::collections::BTreeSet<PathBuf>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    let scratch = isolation.scratch.first().cloned().unwrap_or_else(std::env::temp_dir);
+    for root in std::iter::once(&isolation.workspace).chain(&isolation.scratch) {
+        let mut done = LABELLED.lock().map_err(|_| std::io::Error::other("label lock"))?;
+        if done.contains(root) || !root.exists() {
+            continue;
+        }
+        rook_contain::label_low(root).map_err(std::io::Error::other)?;
+        done.insert(root.clone());
+    }
+    let launcher = std::env::var_os(rook_contain::LAUNCHER)
+        .ok_or_else(|| std::io::Error::other("no launcher: this process is not a rook binary"))?;
+    let mut cmd = tokio::process::Command::new(launcher);
+    cmd.env(rook_contain::ENV, command).env(rook_contain::ENV_SCRATCH, &scratch);
+    Ok(cmd)
+}
+
 // Unix without a sandbox — FreeBSD — reaches `contained` only through
 // `choose`, which never asks for it there; the arm exists so the shell path
-// compiles. Windows has its own shell path and no arm at all: an unreachable
-// function is a warning the gate refuses.
+// compiles.
 #[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
 pub(crate) fn contained(_: &str, _: &Isolation) -> std::io::Result<tokio::process::Command> {
     Err(std::io::Error::other(available().unwrap_err()))

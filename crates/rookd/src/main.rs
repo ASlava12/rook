@@ -135,6 +135,7 @@ pub struct About {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    rook_contain::launcher_entry();
     let args = Args::parse();
     let rook = Rook::open(args.workspace).context("opening the store")?;
     let config = rook.config.clone();

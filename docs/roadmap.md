@@ -1104,12 +1104,14 @@ already there.
 **A command is contained by the platform, where the platform can.** The
 boundary was text — a path check in the file tools and pattern rules over the
 command line, which a command's own children never met. Now `run_command` and
-a background job run under Seatbelt on macOS and Landlock on Linux: the
-workspace and the temporary directory writable, everything else read-only,
-the network a switch. What was applied is on every result, because a sandbox
-that quietly did nothing is worse than none: Landlock before kernel 6.7 cannot
-restrain the network and never restrains UDP, and Windows and FreeBSD have
-nothing yet — `auto` runs the command as it is and says so, `required` refuses.
+a background job run under Seatbelt on macOS, Landlock on Linux, and a low
+integrity level on Windows — through a launcher that is `rook` itself, lowered
+— with the workspace and the temporary directory writable, everything else
+read-only, the network a switch. What was applied is on every result, because
+a sandbox that quietly did nothing is worse than none: Landlock before kernel
+6.7 cannot restrain the network and never restrains UDP, an integrity level
+never does, and FreeBSD has nothing yet — `auto` runs the command as it is
+and says so, `required` refuses.
 `[sandbox] writable` names the directories a build's caches live in, and a
 failed contained command says it was contained and names that setting. The
 tests run the same command contained and not, and CI's Linux runner passes

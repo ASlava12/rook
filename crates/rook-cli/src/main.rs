@@ -344,6 +344,9 @@ enum CheckpointCmd {
 }
 
 fn main() -> Result<()> {
+    // Before anything else: started as the launcher, this process lowers
+    // itself and runs a command instead of being rook.
+    rook_contain::launcher_entry();
     let cli = Cli::parse();
     // Defaults if the config is unreadable: logging must not be what reports a
     // broken config, and the command about to run will report it properly.

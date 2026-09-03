@@ -17,6 +17,7 @@ fn layers() -> BTreeMap<&'static str, u8> {
         // learn what a skill or a checkpoint is.
         ("rook-llm", 0),
         ("rook-lsp", 0),
+        ("rook-contain", 0),
         ("rook-proto", 0),
         ("rook-skills", 0),
         ("rook-store", 0),

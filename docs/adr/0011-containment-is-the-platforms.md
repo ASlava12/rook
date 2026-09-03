@@ -37,9 +37,21 @@ of every command.
   runs after the fork is the syscall that applies it. No helper binary and no
   bubblewrap: a second executable to ship, find and trust is a dependency the
   kernel's own mechanism does not need.
-- **Windows and FreeBSD: nothing yet.** Capsicum's capability mode breaks a
-  shell and jails need root; on Windows a restricted token or an
-  AppContainer is the shape, and neither is a day's work.
+- **Windows: a low integrity level.** Windows has no fork, so nothing runs
+  between the parent and the command; what it has is integrity levels, and a
+  process may lower its own and never raise it. So the command is started
+  through a launcher — the same `rook` binary, told by an environment variable
+  to lower itself and run `cmd /C` — and inherits the level and the pipes. A
+  process at low integrity reads what any process reads and writes only what
+  is labelled low, so the parent labels the workspace and the scratch
+  directory low first: a persistent mark on the directory, and only that. Not
+  an AppContainer: one reads nothing of the user's profile by default, so the
+  toolchain under `~/.cargo` would not run without rewriting the profile's
+  ACLs. Not Codex's design of dedicated sandbox users, DPAPI secrets and
+  firewall rules, which needs an administrator to set up. An integrity level
+  says nothing about the network, and the result says so.
+- **FreeBSD: nothing yet.** Capsicum's capability mode breaks a shell and
+  jails need root.
 
 `[sandbox] isolate` is `auto` by default — contain where possible, run as-is
 and say so where not — and `required` refuses to run a command without
@@ -49,7 +61,7 @@ containment. `[sandbox] network` is **on** by default.
 
 - A runaway command cannot write outside the workspace and the temporary
   directory, whatever it is called and whatever it starts. That is the whole
-  of the protection, and it is real on two of the four platforms. A build's
+  of the protection, and it is real on three of the four platforms. A build's
   caches — `~/.cargo`, `~/.npm` — are outside it, so the first build under
   containment fails until `[sandbox] writable` names them: each is a hole,
   and the person whose caches they are is the one to cut it. A failed

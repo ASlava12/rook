@@ -9,6 +9,7 @@ members = [
     "crates/rook-lsp",
     "crates/rook-mcp",
     "crates/rook-tools",
+    "crates/rook-contain",
     "crates/rook-proto",
     "crates/rookd",
     "crates/rook-cli",

@@ -280,9 +280,17 @@ async fn elsewhere(
 /// code says only that something failed.
 fn denied(output: &str) -> bool {
     let lower = output.to_ascii_lowercase();
-    ["permission denied", "operation not permitted", "read-only file system", "eacces", "eperm", "erofs"]
-        .iter()
-        .any(|word| lower.contains(word))
+    [
+        "permission denied",
+        "operation not permitted",
+        "read-only file system",
+        "access is denied",
+        "eacces",
+        "eperm",
+        "erofs",
+    ]
+    .iter()
+    .any(|word| lower.contains(word))
 }
 
 /// Start `command` the way the machine's shell would, with `env` added to
@@ -303,11 +311,20 @@ pub fn spawn_shell(
     // `\"`, which `cmd.exe` does not read that way — it takes the backslash
     // literally. A command with a quotation mark in it, which is most of the
     // ones worth running, arrived at the shell mangled.
-    let mut cmd = {
-        use std::os::windows::process::CommandExt;
-        let mut c = tokio::process::Command::new("cmd");
-        c.as_std_mut().raw_arg(format!("/C {command}"));
-        c
+    let mut cmd = match isolation {
+        // The launcher runs `cmd /C` itself, in the directory it is told.
+        Some(isolation) => {
+            let mut c = crate::isolate::contained(command, isolation)
+                .map_err(|e| ToolError::Io { path: cwd.to_path_buf(), source: e })?;
+            c.env(crate::isolate::CWD_ENV, cwd);
+            c
+        }
+        None => {
+            use std::os::windows::process::CommandExt;
+            let mut c = tokio::process::Command::new("cmd");
+            c.as_std_mut().raw_arg(format!("/C {command}"));
+            c
+        }
     };
     #[cfg(not(windows))]
     let mut cmd = match isolation {
@@ -319,9 +336,6 @@ pub fn spawn_shell(
             c
         }
     };
-    #[cfg(windows)]
-    // Nothing contains a command here yet; `choose` never asks for it.
-    let _ = isolation;
     cmd.envs(env.iter().copied())
         .current_dir(cwd)
         .stdout(std::process::Stdio::piped())
