@@ -1004,8 +1004,11 @@ the smoke runs autonomous in a Rust workspace with no server, which is exactly
 when the offer fetches one. `[agent] install_servers = false` exists now, for
 the runner and for anyone who would rather choose their own. What is left is
 watching how often it is red and why, and moving to a larger tag if the small
-one cannot carry the four scenarios: two of the four failed this time on the
-model narrating a step instead of taking it.
+one cannot carry the four scenarios. The third reading settled that: all
+four failed on the model's own account — a step narrated and not taken, a
+`sed` for a port it never read, `quiet-heron-4417` reported as "token", and
+a discounted recollection restated as true — so the tag is `qwen2.5-coder:3b`
+now, and the question is open again at the new size.
 
 **A server fetched once is one somebody has to remember to update.** Now the
 agent remembers: past `[agent] server_update_after_days` (thirty by default,

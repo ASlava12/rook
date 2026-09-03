@@ -96,7 +96,7 @@ jobs:
       OLLAMA_HOST: http://127.0.0.1:11434
       # The smallest tag with tool calling that gets the four scenarios right
       # more often than not. `cargo xtask smoke --model …` takes any other.
-      ROOK_SMOKE_MODEL: ollama/qwen2.5:1.5b
+      ROOK_SMOKE_MODEL: ollama/qwen2.5-coder:3b
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -108,7 +108,7 @@ jobs:
             curl -fsS http://127.0.0.1:11434/api/tags > /dev/null && break
             sleep 2
           done
-          curl -fsS http://127.0.0.1:11434/api/pull -d '{"name":"qwen2.5:1.5b"}' | tail -c 200
+          curl -fsS http://127.0.0.1:11434/api/pull -d '{"name":"qwen2.5-coder:3b"}' | tail -c 200
       - run: cargo xtask smoke
 
   msrv:

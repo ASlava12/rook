@@ -1121,4 +1121,5 @@ meant to outlive the turn, so the leak is the one the design accepts.
 openclaw's `preserve completion handoff across overlapping waves`: a landed
 result here sits in its own slot until taken, and a later wave adds slots
 rather than clearing them. Their `accept native empty tool catalogs`: all
-three bodies omit `tools` when there are none.
+three bodies omit `tools` when there are none. Their `retry preferred profile
+after cooldown` is about auth profiles, which there are none of here.
