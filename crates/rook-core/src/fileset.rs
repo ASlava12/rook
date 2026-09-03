@@ -260,6 +260,14 @@ pub fn capture_paths(
             absent.push(rel(path));
             continue;
         };
+        // A directory has no content to keep, and recording it absent would
+        // have a rewind delete it. Skipped, because the alternative is what
+        // happened: a model naming a directory where a file goes turned the
+        // whole capture into "no checkpoint was taken" — an alarm that is
+        // meant to be rare and serious, raised by an ordinary bad argument.
+        if meta.is_dir() {
+            continue;
+        }
         if meta.len() > limits.max_file_bytes {
             return Err(CoreError::CaptureTooBig {
                 what: format!("{} is {} bytes", path.display(), meta.len()),

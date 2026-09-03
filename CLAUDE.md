@@ -194,6 +194,15 @@ sort the failures into ours and the model's, and fix ours at the mechanism:
 a nudge asked once, a shape read as what it plainly means, a message that
 names what was actually wrong.
 
+The same applies to `cargo xtask bench`, which is why a failed run there now
+keeps its store and workspace and prints the `session show` that reads them.
+It used to delete both, so a red cell could only be rerun — and a rerun of a
+model is a different run, not the same one again. Its first find was
+`edit_file` handed a directory: the tool answered with the operating system's
+`Is a directory (os error 21)`, and the checkpoint taken before it failed on
+the same path, so an ordinary bad argument was reported as work that could not
+be undone.
+
 **A job's log does not wait for the run.** `gh run view --log` serves nothing
 until every job in the run has finished, and the FreeBSD VM holds a run open
 for up to forty-five minutes. A job that has finished is readable at once:

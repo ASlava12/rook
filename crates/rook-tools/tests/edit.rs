@@ -1,7 +1,10 @@
 //! Editing is where a wrong guess costs the most: a replacement in the wrong
 //! place is a silent corruption, and a half-applied batch is worse than none.
 
-use rook_tools::{Tool, ToolContext, ToolOutcome, files::EditFile};
+use rook_tools::{
+    Tool, ToolContext, ToolOutcome,
+    files::{DeleteFile, EditFile, ReadFile, WriteFile},
+};
 
 struct File {
     dir: tempfile::TempDir,
@@ -377,4 +380,36 @@ async fn text_not_in_the_file_is_refused_with_the_nearest_line() {
         "no line shares a word, so none is offered: {}",
         refused.content
     );
+}
+
+/// A model that means `src/main.rs` and writes `src` gets `Is a directory (os
+/// error 21)` from the operating system — which names no argument, suggests
+/// nothing, and reads as the tool being broken. Every tool that takes one file
+/// says the same thing instead, and says where to look.
+#[tokio::test]
+async fn a_directory_where_a_file_goes_is_refused_in_words() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    let ctx = ToolContext::new(dir.path().to_path_buf());
+    let at_a_directory = serde_json::json!({
+        "path": "src",
+        "content": "x",
+        "edits": [{ "old": "a", "new": "b" }],
+    });
+
+    for (tool, name) in [
+        (Box::new(EditFile) as Box<dyn Tool>, "edit_file"),
+        (Box::new(WriteFile), "write_file"),
+        (Box::new(ReadFile), "read_file"),
+        (Box::new(DeleteFile), "delete_file"),
+    ] {
+        let refused = tool.call(&ctx, &at_a_directory).await.expect("a bad argument is not a crash");
+        assert!(refused.is_error, "{name} accepted a directory: {}", refused.content);
+        assert!(
+            refused.content.contains("is a directory") && !refused.content.contains("os error"),
+            "{name} must say what to do, not what errno it got: {}",
+            refused.content
+        );
+    }
+    assert!(dir.path().join("src").is_dir(), "and none of them touched it");
 }

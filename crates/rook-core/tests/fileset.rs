@@ -165,6 +165,30 @@ fn capture_paths_takes_an_explicit_file_list() {
     assert!(set.files.contains_key("one.txt") && set.files.contains_key("three.txt"));
 }
 
+/// A tool call naming a directory where a file goes used to fail the capture
+/// for everything else in it, and the loop reported that as "no checkpoint was
+/// taken" — the one warning that is supposed to mean the work cannot be undone.
+/// An ordinary bad argument must not raise it.
+#[test]
+fn a_directory_among_the_paths_does_not_cost_the_checkpoint() {
+    let store_dir = tempfile::tempdir().unwrap();
+    let src = tempfile::tempdir().unwrap();
+    let store = Store::open(store_dir.path()).unwrap();
+    seed(src.path(), &[("one.txt", "1")]);
+    std::fs::create_dir(src.path().join("src")).unwrap();
+
+    let picks = vec![src.path().join("src"), src.path().join("one.txt")];
+    let (set, _) = capture_paths(&store, "checkpoint", "c", src.path(), &picks, &CaptureLimits::default())
+        .expect("a directory in the list is not a failed capture");
+
+    assert!(set.files.contains_key("one.txt"), "the file beside it is still kept: {:?}", set.files);
+    assert!(
+        !set.absent.iter().any(|p| p == "src"),
+        "and the directory is not called absent, or a rewind would delete it: {:?}",
+        set.absent
+    );
+}
+
 #[test]
 fn context_windows_keep_the_head_and_the_tail() {
     let data = format!("{}{}{}", "HEAD".repeat(100), "MIDDLE".repeat(1000), "TAIL".repeat(100));

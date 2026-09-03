@@ -313,11 +313,26 @@ fn once(rook: &Path, model: &str, arm: &Arm, task: &Task) -> Result<Run> {
     let seconds = started.elapsed().as_secs_f64();
     let printed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
     let turn = printed.get("outcome").unwrap_or(&printed);
+    // The workspace decides, not the turn: a run that ended badly and left the
+    // work done is a pass, and one that reported success and left it undone is
+    // not.
+    let passed = (task.done)(workspace.path());
+    if !passed {
+        // A failure that deletes its own evidence can only be rerun, and a
+        // rerun of a model is a different run. The one defect this harness has
+        // found so far was visible in a transcript nobody had asked it to keep.
+        let (home, workspace) = (home.keep(), workspace.keep());
+        println!(
+            "  {} × {} failed — ROOK_HOME={} {} session show, workspace {}",
+            arm.name,
+            task.name,
+            home.display(),
+            rook.display(),
+            workspace.display()
+        );
+    }
     Ok(Run {
-        // The workspace decides, not the turn: a run that ended badly and left
-        // the work done is a pass, and one that reported success and left it
-        // undone is not.
-        passed: (task.done)(workspace.path()),
+        passed,
         steps: turn["steps"].as_u64().unwrap_or(0),
         input_tokens: turn["input_tokens"].as_u64().unwrap_or(0),
         output_tokens: turn["output_tokens"].as_u64().unwrap_or(0),

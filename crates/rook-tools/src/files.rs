@@ -1,11 +1,21 @@
 //! File tools. Paged rather than capped, and refusing ambiguous edits.
 
+use std::path::Path;
+
 use async_trait::async_trait;
 use serde_json::json;
 
 use rook_llm::ToolSpec;
 
 use crate::{Result, Tool, ToolContext, ToolError, ToolOutcome, arg_str, arg_usize};
+
+/// A directory where a file was expected, refused in words rather than in
+/// `Is a directory (os error 21)` — which names neither the argument that was
+/// wrong nor what a right one looks like, and reads as a broken tool rather
+/// than a bad call.
+fn not_a_file(path: &Path, instead: &str) -> Option<ToolOutcome> {
+    path.is_dir().then(|| ToolOutcome::error(format!("{} is a directory — {instead}", path.display())))
+}
 
 fn path_arg(args: &serde_json::Value) -> Vec<String> {
     args.get("path").and_then(|v| v.as_str()).map(|p| vec![p.to_string()]).unwrap_or_default()
@@ -43,6 +53,9 @@ impl Tool for ReadFile {
 
     async fn call(&self, ctx: &ToolContext, args: &serde_json::Value) -> Result<ToolOutcome> {
         let path = ctx.resolve(&arg_str(args, self.name(), "path")?)?;
+        if let Some(refused) = not_a_file(&path, "`list_files` shows what is in it") {
+            return Ok(refused);
+        }
         let offset = arg_usize(args, "offset", 0);
         // A limit of zero returned no lines and a note to call again from where
         // it stopped, which is where it started. This tool pages rather than
@@ -254,6 +267,9 @@ impl Tool for WriteFile {
 
     async fn call(&self, ctx: &ToolContext, args: &serde_json::Value) -> Result<ToolOutcome> {
         let path = ctx.resolve(&arg_str(args, self.name(), "path")?)?;
+        if let Some(refused) = not_a_file(&path, "name the file to write inside it") {
+            return Ok(refused);
+        }
         let content = arg_str(args, self.name(), "content")?;
         let existed = path.exists();
         ctx.write_text(&path, &content).await?;
@@ -326,12 +342,12 @@ impl Tool for DeleteFile {
 
     async fn call(&self, ctx: &ToolContext, args: &serde_json::Value) -> Result<ToolOutcome> {
         let path = ctx.resolve(&arg_str(args, self.name(), "path")?)?;
-        if path.is_dir() {
-            return Ok(ToolOutcome::error(format!(
-                "{} is a directory — this deletes one file, so name the files or use \
-                 `run_command` and accept that a rewind will not bring them back",
-                path.display()
-            )));
+        if let Some(refused) = not_a_file(
+            &path,
+            "this deletes one file, so name the files or use `run_command` and accept that a \
+             rewind will not bring them back",
+        ) {
+            return Ok(refused);
         }
         let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         std::fs::remove_file(&path).map_err(|e| ToolError::Io { path: path.clone(), source: e })?;
@@ -417,6 +433,9 @@ impl Tool for EditFile {
         // already kept within one file.
         for target in parse_targets(args)? {
             let path = ctx.resolve(&target.path)?;
+            if let Some(refused) = not_a_file(&path, "name the file to edit inside it. Nothing was written") {
+                return Ok(refused);
+            }
             let mut text = ctx.read_text(&path).await?;
             for (i, edit) in target.edits.iter().enumerate() {
                 match apply(&text, edit) {
