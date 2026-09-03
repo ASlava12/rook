@@ -1402,6 +1402,7 @@ impl<'a> AgentLoop<'a> {
 
         let mut asked_for_one_script = false;
         let mut asked_to_say = false;
+        let mut asked_to_go_on = false;
         let mut handed_left = false;
         let mut repeated: std::collections::BTreeMap<(String, String), (String, u32)> =
             std::collections::BTreeMap::new();
@@ -1570,6 +1571,17 @@ impl<'a> AgentLoop<'a> {
                             messages.push(Message::user(&note));
                             continue;
                         }
+                    }
+                    // Once. A reply cut at the output limit is not an answer
+                    // and not a call — a delegation ended inside a fenced JSON
+                    // object, with nothing called. Asked to go on, a call gets
+                    // written whole and an answer gets finished.
+                    if response.stop_reason == rook_llm::StopReason::MaxTokens && !asked_to_go_on {
+                        asked_to_go_on = true;
+                        self.rook.log(self.session, EventKind::Note, "cut off", GO_ON).ok();
+                        messages.push(response.message.clone());
+                        messages.push(Message::user(GO_ON));
+                        continue;
                     }
                     let did_something = !outcome.tools_called.is_empty() || !outcome.delegated.is_empty();
                     // Once. A small model does the work and stops without a
@@ -3087,6 +3099,10 @@ fn collected(task: &str, result: &Landed, outcome: &mut TurnOutcome) -> String {
 const OUT_OF_STEPS: &str = "\
 You are out of steps for this turn. Say now, in words and without calling anything: what \
 you found, what you did, and what is left.";
+
+const GO_ON: &str = "\
+Your reply was cut off at the output limit. Go on from where it stopped, briefly: a call you \
+were writing, make it whole; an answer, finish it.";
 
 const SAY_IT: &str = "\
 You ended the turn without saying anything. Answer now, in words: what you found, or what \

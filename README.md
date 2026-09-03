@@ -276,7 +276,8 @@ A tool call written as text — `{"name": "read_file", "arguments": {...}}` as
 the reply — is a call, every one of them in the order written, when it names a
 tool that was offered. A turn that did the work and ended without a word is
 asked once, in words, what it found; one that ran out of steps with a call as
-its last word is asked the same with nothing left to reach for. The same call
+its last word is asked the same with nothing left to reach for; one whose reply
+was cut at the output limit is asked once to go on. The same call
 answered the same way twice is a loop, not a question, and the third is refused
 and pointed at the answer it has — unless something changed the workspace in
 between, which starts the count over. A checker that stops without a verdict is

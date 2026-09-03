@@ -4231,3 +4231,48 @@ fn the_sandbox_config_reaches_the_tool_context() {
         ctx.isolation.scratch
     );
 }
+
+/// A reply cut at the output limit is neither an answer nor a call. Asked
+/// once to go on, the model makes the call it was writing; the turn ends on
+/// the answer rather than on the limit.
+#[tokio::test]
+async fn a_reply_cut_at_the_output_limit_is_asked_once_to_go_on() {
+    let f = fixture();
+    let session = f.rook.start_session("cut").unwrap();
+    std::fs::write(f.workspace.path().join("config.rs"), "pub const PORT: u16 = 8443;\n").unwrap();
+
+    let mut cut = reply("```json\n{\"name\": \"read_file\", \"arguments\": {\"pa");
+    cut.stop_reason = StopReason::MaxTokens;
+    let script = vec![cut, call("read_file", serde_json::json!({ "path": "config.rs" })), reply("8443")];
+    let provider = ScriptedProvider::new(script);
+    let seen = provider.share();
+    let outcome = AgentLoop::new(&f.rook, Arc::new(provider), session).run("what port?").await.unwrap();
+
+    assert_eq!(outcome.reply, "8443");
+    assert_eq!(outcome.tools_called, vec!["read_file".to_string()]);
+    let asked = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| r.messages.last().is_some_and(|m| m.content.contains("cut off at the output limit")))
+        .count();
+    assert_eq!(asked, 1, "asked once");
+}
+
+/// Asked once. A second cut ends the turn as what it is, `max_tokens`.
+#[tokio::test]
+async fn a_reply_cut_twice_ends_as_cut() {
+    let f = fixture();
+    let session = f.rook.start_session("cut-twice").unwrap();
+    let mut first = reply("a long answer that");
+    first.stop_reason = StopReason::MaxTokens;
+    let mut second = reply("goes on and");
+    second.stop_reason = StopReason::MaxTokens;
+    let provider = ScriptedProvider::new(vec![first, second, reply("never reached")]);
+    let seen = provider.share();
+    let outcome = AgentLoop::new(&f.rook, Arc::new(provider), session).run("explain").await.unwrap();
+
+    assert_eq!(outcome.stopped, "max_tokens");
+    assert_eq!(outcome.reply, "goes on and");
+    assert_eq!(seen.lock().unwrap().len(), 2, "the reply, the ask, and not a third");
+}
