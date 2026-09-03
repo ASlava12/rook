@@ -469,6 +469,9 @@ allow = ["git status", '/^(ls|cat|rg)\b/']   # plain string, or /regex/
 ask   = ["git push"]                          # prompts even when autonomous
 deny  = ['/(^|[;&|]\s*)(sudo\s+)*rm\s+(-[a-zA-Z]+\s+)*\/(\s|\*|$)/']
 allow_outside_workspace = false    # file tools stay inside, symlinks included
+isolate  = "auto"                  # contain commands where the platform can: off | auto | required
+network  = true                    # a contained command may reach the network
+writable = []                      # directories it may write besides the workspace, e.g. "~/.cargo"
 ```
 
 The stance is how much latitude the agent has, and it is one setting rather than

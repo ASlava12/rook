@@ -49,7 +49,11 @@ containment. `[sandbox] network` is **on** by default.
 
 - A runaway command cannot write outside the workspace and the temporary
   directory, whatever it is called and whatever it starts. That is the whole
-  of the protection, and it is real on two of the four platforms.
+  of the protection, and it is real on two of the four platforms. A build's
+  caches — `~/.cargo`, `~/.npm` — are outside it, so the first build under
+  containment fails until `[sandbox] writable` names them: each is a hole,
+  and the person whose caches they are is the one to cut it. A failed
+  contained command says it was contained and names the setting.
 - The network being open by default is a deliberate weakening. A build that
   fetches its dependencies is most builds; Codex's off-by-default costs a
   round of approval prompts per build, and a sandbox that breaks every build

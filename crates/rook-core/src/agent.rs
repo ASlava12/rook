@@ -94,6 +94,10 @@ pub fn tool_context(config: &Config, workspace: &Path, output_dir: &Path) -> Too
     ctx.allow_outside_workspace = sandbox.allow_outside_workspace;
     ctx.isolate = sandbox.isolate;
     ctx.isolation.network = sandbox.network;
+    ctx.isolation.scratch.extend(sandbox.writable.iter().map(|dir| match dir.strip_prefix("~/") {
+        Some(rest) => crate::paths::user_home().join(rest),
+        None => std::path::PathBuf::from(dir),
+    }));
     // Outside the workspace on purpose: it is the agent's record of a command,
     // not a file of the project's, and a checkpoint should not capture it.
     ctx.spill_dir = Some(output_dir.to_path_buf());

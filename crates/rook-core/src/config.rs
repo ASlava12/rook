@@ -278,6 +278,12 @@ pub struct SandboxConfig {
     /// build fetches its dependencies, and a sandbox that breaks every build
     /// is one that gets turned off. Off, it is refused at the socket.
     pub network: bool,
+    /// Directories a contained command may write besides the workspace and
+    /// the temporary directory — a build's caches, `~/.cargo` or `~/.npm`,
+    /// which it fills on the first build and cannot without this. `~` is the
+    /// home directory. Empty by default: each is a hole, and the person whose
+    /// caches they are is the one to cut it.
+    pub writable: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -381,6 +387,7 @@ impl Default for SandboxConfig {
             allow_outside_workspace: false,
             isolate: rook_tools::isolate::Mode::Auto,
             network: true,
+            writable: Vec::new(),
         }
     }
 }

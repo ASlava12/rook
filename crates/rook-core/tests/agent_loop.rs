@@ -4203,3 +4203,31 @@ async fn an_uncollected_sub_agents_answer_reaches_the_model_before_the_turn_ends
     assert_eq!(outcome.tools_called, ["delegate"]);
     assert_eq!(outcome.delegated.len(), 1);
 }
+
+/// The directories `[sandbox] writable` names reach the command's containment,
+/// with `~` the home directory, and the switches reach it as they are.
+#[test]
+fn the_sandbox_config_reaches_the_tool_context() {
+    let mut config = Config::default();
+    config.sandbox.writable = vec!["~/.cargo".into(), "/opt/cache".into()];
+    config.sandbox.network = false;
+    config.sandbox.isolate = rook_tools::isolate::Mode::Required;
+    let workspace = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let ctx = rook_core::agent::tool_context(&config, workspace.path(), out.path());
+
+    assert_eq!(ctx.isolate, rook_tools::isolate::Mode::Required);
+    assert!(!ctx.isolation.network);
+    let home = rook_core::paths::user_home();
+    assert!(ctx.isolation.scratch.contains(&home.join(".cargo")), "{:?}", ctx.isolation.scratch);
+    assert!(
+        ctx.isolation.scratch.contains(&std::path::PathBuf::from("/opt/cache")),
+        "{:?}",
+        ctx.isolation.scratch
+    );
+    assert!(
+        ctx.isolation.scratch.contains(&std::env::temp_dir()),
+        "the temporary directory stays: {:?}",
+        ctx.isolation.scratch
+    );
+}

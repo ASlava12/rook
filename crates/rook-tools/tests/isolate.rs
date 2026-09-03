@@ -94,3 +94,40 @@ fn what_contains_a_command_here_is_said_either_way() {
         Err(why) => assert!(why.starts_with("no sandbox"), "{why}"),
     }
 }
+
+/// A refused write looks like any permission error. The tool's result says
+/// the command was contained and what would widen it, so a model does not
+/// keep trying the same write — and a person reading the transcript knows.
+#[tokio::test]
+async fn a_failed_contained_command_says_it_was_contained() {
+    use rook_tools::{Tool, ToolContext};
+    if backend().is_none() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let (workspace, outside) = (root.path().join("ws"), root.path().join("outside"));
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    let mut ctx = ToolContext::new(workspace.clone());
+    ctx.isolate = rook_tools::isolate::Mode::Auto;
+    ctx.isolation = Isolation { workspace: workspace.clone(), scratch: vec![], network: true };
+    ctx.allow_outside_workspace = true;
+
+    let args = serde_json::json!({ "command": format!("touch '{}'", outside.join("x").display()) });
+    let out = rook_tools::exec::RunCommand.call(&ctx, &args).await.unwrap();
+    assert!(out.is_error, "{}", out.content);
+    assert!(out.content.contains("ran contained"), "{}", out.content);
+    assert!(out.content.contains("[sandbox] writable"), "{}", out.content);
+    assert!(
+        out.meta
+            .get("isolation")
+            .is_some_and(|v| v.as_str().is_some_and(|s| s.contains("writes to the workspace"))),
+        "{:?}",
+        out.meta
+    );
+
+    let fine = serde_json::json!({ "command": format!("touch '{}'", workspace.join("y").display()) });
+    let out = rook_tools::exec::RunCommand.call(&ctx, &fine).await.unwrap();
+    assert!(!out.is_error, "{}", out.content);
+    assert!(!out.content.contains("ran contained"), "a success says nothing about it: {}", out.content);
+}

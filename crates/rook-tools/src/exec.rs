@@ -147,9 +147,18 @@ impl Tool for RunCommand {
 
         let kept = settle(spill, truncated);
 
+        // A refused write looks like any other permission error, and a model
+        // that does not know the command was contained keeps trying: the
+        // failure says so, and what would widen it.
+        let held = match (code != 0, isolation.is_some()) {
+            (true, true) => {
+                "\n(ran contained: writes only to the workspace and scratch — `[sandbox] writable` adds a directory)"
+            }
+            _ => "",
+        };
         let outcome = ToolOutcome {
             content: format!(
-                "exit {code}\n{combined}{}",
+                "exit {code}\n{combined}{}{held}",
                 kept.as_ref().map(|(n, _)| n.as_str()).unwrap_or("")
             ),
             is_error: code != 0,
