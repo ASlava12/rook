@@ -407,3 +407,31 @@ async fn at_read_only_nobody_is_asked_and_the_question_is_left_open() {
     assert!(outcome.open_questions[0].contains("read-only"), "{:?}", outcome.open_questions);
     assert!(!home.path().join("servers").join("rust-analyzer").exists());
 }
+
+/// An install that fails explains itself in its last lines, after however
+/// much progress it printed. A reader that kept the head reported the noise.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failed_install_reports_the_reason_at_the_end_of_what_it_printed() {
+    use std::os::unix::fs::PermissionsExt;
+    let _one = one_at_a_time().await;
+    let tools = tempfile::tempdir().unwrap();
+    let npm = tools.path().join("npm");
+    std::fs::write(
+        &npm,
+        "#!/bin/sh\ni=0\nwhile [ $i -lt 4000 ]; do echo \"npm progress line $i, nothing to see\"; i=$((i+1)); done\n\
+         echo 'npm ERR! the real reason: EACCES' >&2\nexit 1\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&npm, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let into = tempfile::tempdir().unwrap();
+    let env = rook_skills::Environment::bare("linux", "x86_64", "0.1.0").with_tool("npm", "10");
+
+    let installer = Installer::at("http://127.0.0.1:1".into(), into.path().to_path_buf()).unwrap();
+    let _first = ToolsFirst::new(tools.path());
+    let refused = installer.install(&rook_core::install::TYPESCRIPT, &env).await.unwrap_err();
+
+    assert!(refused.contains("the real reason: EACCES"), "the last line is the one that matters:\n{refused}");
+    assert!(refused.contains("progress line 0,"), "and the first is kept too");
+    assert!(refused.len() < 80 << 10, "bounded: {} bytes", refused.len());
+}

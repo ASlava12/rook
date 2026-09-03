@@ -242,7 +242,7 @@ async fn invoke(config: &HookConfig, payload: &serde_json::Value) -> std::io::Re
 /// Not `take`: stopping the read leaves the writer blocked on a full pipe, so a
 /// hook that printed more than the cap would never exit and every one of them
 /// would end at its timeout. The pipe is drained; only the memory is bounded.
-pub(crate) async fn bounded(stream: &mut Option<impl tokio::io::AsyncRead + Unpin>) -> String {
+async fn bounded(stream: &mut Option<impl tokio::io::AsyncRead + Unpin>) -> String {
     use tokio::io::AsyncReadExt;
     let Some(stream) = stream else { return String::new() };
     let (mut kept, mut chunk) = (Vec::new(), vec![0u8; 16 * 1024]);

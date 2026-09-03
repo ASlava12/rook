@@ -204,14 +204,17 @@ impl Drop for Jobs {
 /// is the one it printed most recently. Unlike `run_command` this arrives over
 /// hours, so the head is kept as it goes and the tail slides.
 #[derive(Default)]
-struct Printed {
+pub struct Printed {
     head: String,
     tail: String,
     elided: usize,
 }
 
 impl Printed {
-    fn push(&mut self, text: &str, cap: usize) {
+    /// Public because the language-server installer runs `npm` and `go` and
+    /// has the same problem: a failed install explains itself at the end of a
+    /// long output, and a reader that keeps the head reports the noise.
+    pub fn push(&mut self, text: &str, cap: usize) {
         let head_room = cap / 3;
         match head_room.checked_sub(self.head.len()) {
             Some(room) => {
@@ -229,7 +232,7 @@ impl Printed {
         }
     }
 
-    fn seen(&self) -> String {
+    pub fn seen(&self) -> String {
         match self.elided {
             0 => format!("{}{}", self.head, self.tail),
             gone => format!("{}\n… {gone} bytes elided …\n{}", self.head, self.tail),

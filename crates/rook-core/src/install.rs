@@ -411,21 +411,44 @@ fn listed_sha256(asset: &serde_json::Value) -> Option<String> {
 }
 
 /// Run an installer's command to the end, through the machine's shell, with
-/// both pipes drained and bounded. An install that fails says what the tool
-/// printed, which is the only thing that explains a failed one.
+/// both pipes drained and both ends of what they said kept. A failed install
+/// explains itself in its last lines, after however much progress it printed,
+/// so the tail is what the error carries.
 async fn run_to_completion(command: &str, cwd: &Path, env: &[(String, String)]) -> Result<(), String> {
+    const KEPT: usize = 64 << 10;
     let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     let mut child = rook_tools::exec::spawn_shell(command, cwd, &env).map_err(|e| e.to_string())?;
     let (mut out, mut err) = (child.stdout.take(), child.stderr.take());
-    let printed = async {
-        let (stdout, stderr) = tokio::join!(crate::hooks::bounded(&mut out), crate::hooks::bounded(&mut err));
-        format!("{stdout}{stderr}")
+    let printed = std::sync::Mutex::new(rook_tools::jobs::Printed::default());
+    let reading = async {
+        tokio::join!(keep_ends(&mut out, &printed, KEPT), keep_ends(&mut err, &printed, KEPT));
     };
-    let (printed, status) = tokio::join!(printed, child.wait());
+    let (_, status) = tokio::join!(reading, child.wait());
     let status = status.map_err(|e| format!("`{command}` could not be waited for: {e}"))?;
     match status.success() {
         true => Ok(()),
-        false => Err(format!("`{command}` failed ({status}): {}", printed.trim())),
+        false => {
+            let said = printed.lock().unwrap_or_else(|e| e.into_inner()).seen();
+            Err(format!("`{command}` failed ({status}): {}", said.trim()))
+        }
+    }
+}
+
+/// Drain one pipe into the shared record, so a writer is never blocked on a
+/// full pipe and only the memory is bounded.
+async fn keep_ends(
+    stream: &mut Option<impl tokio::io::AsyncRead + Unpin>,
+    into: &std::sync::Mutex<rook_tools::jobs::Printed>,
+    cap: usize,
+) {
+    use tokio::io::AsyncReadExt;
+    let Some(stream) = stream else { return };
+    let mut chunk = vec![0u8; 16 * 1024];
+    while let Ok(n) = stream.read(&mut chunk).await {
+        if n == 0 {
+            return;
+        }
+        into.lock().unwrap_or_else(|e| e.into_inner()).push(&String::from_utf8_lossy(&chunk[..n]), cap);
     }
 }
 
