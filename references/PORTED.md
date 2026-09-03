@@ -1141,4 +1141,8 @@ for its children and hands the model what came back. Their `show a question
 tool's prompt on every harness` is the shared asker; their `arm supervisor
 timeouts before adapter construction` is the handshake timeout the MCP and
 LSP clients already test. The rest — cron handoff, gateway ownership, Muse
-Spark, Code Mode budgets — has nothing to attach to.
+Spark, Code Mode budgets — has nothing to attach to. Past the heads read,
+hermes' `route task-learned knowledge to skills; memory is the rest` is the
+line `write_skill` and `remember` already draw, and openclaw's `make forget
+rewrites atomic` is a file rewrite here the store never does — `forget` marks
+an object, and nothing is rewritten in place.
