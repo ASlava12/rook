@@ -1651,7 +1651,10 @@ fn cmd_lsp(workspace: Option<PathBuf>, cmd: LspCmd, json: bool) -> Result<()> {
         let rook = Rook::open(workspace)?;
         if let LspCmd::Install { name } = &cmd {
             let Some(recipe) = rook_core::install::recipe_for(name) else {
-                anyhow::bail!("no recipe for {name:?} — this can fetch: rust-analyzer");
+                anyhow::bail!(
+                    "no recipe for {name:?} — this can install rust-analyzer, typescript-language-server, \
+                     pyright-langserver and gopls, by those names or by language"
+                );
             };
             let into = rook_core::paths::servers_dir();
             let installer = rook_core::install::Installer::new(into).map_err(anyhow::Error::msg)?;

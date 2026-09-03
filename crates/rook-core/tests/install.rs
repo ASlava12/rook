@@ -274,3 +274,110 @@ async fn an_autonomous_turn_fetches_the_missing_server_into_the_state_directory(
     assert!(installed.starts_with(home.path()), "under the state directory: {}", installed.display());
     assert_eq!(std::fs::read(&installed).unwrap(), payload, "in place: {}", installed.display());
 }
+
+/// A directory of stand-ins first on PATH: an `npm` that creates the shim
+/// under the prefix it was given, and a `go` that puts `gopls` into `GOBIN`.
+/// Each writes what it was asked, so the test can read the command back.
+#[cfg(unix)]
+fn fake_tools() -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let npm = r#"#!/bin/sh
+all="$*"
+prefix=""
+while [ $# -gt 0 ]; do
+  case "$1" in --prefix) prefix="$2"; shift ;; esac
+  shift
+done
+echo "$all" > "$prefix/asked"
+mkdir -p "$prefix/node_modules/.bin"
+printf '#!/bin/sh\necho ts\n' > "$prefix/node_modules/.bin/typescript-language-server"
+chmod +x "$prefix/node_modules/.bin/typescript-language-server"
+"#;
+    let go = r#"#!/bin/sh
+mkdir -p "$GOBIN"
+printf '#!/bin/sh\necho gopls\n' > "$GOBIN/gopls"
+chmod +x "$GOBIN/gopls"
+echo "$@" > "$GOBIN/asked"
+"#;
+    for (name, body) in [("npm", npm), ("go", go)] {
+        let path = dir.path().join(name);
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    dir
+}
+
+/// PATH with `tools` first, restored on drop. PATH is read when the command
+/// is spawned, inside the future, so it has to stay set until the await.
+#[cfg(unix)]
+struct ToolsFirst(std::ffi::OsString);
+
+#[cfg(unix)]
+impl ToolsFirst {
+    fn new(tools: &std::path::Path) -> Self {
+        let was = std::env::var_os("PATH").unwrap_or_default();
+        let paths = std::iter::once(tools.to_path_buf()).chain(std::env::split_paths(&was));
+        unsafe { std::env::set_var("PATH", std::env::join_paths(paths).unwrap()) };
+        Self(was)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ToolsFirst {
+    fn drop(&mut self) {
+        unsafe { std::env::set_var("PATH", &self.0) };
+    }
+}
+
+/// npm installs under a prefix of ours, with scripts off, and the shim it
+/// leaves under `node_modules/.bin` is what `current` points at.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_node_server_is_installed_under_our_prefix_with_no_scripts_run() {
+    let _one = one_at_a_time().await;
+    let tools = fake_tools();
+    let into = tempfile::tempdir().unwrap();
+    let env = rook_skills::Environment::bare("linux", "x86_64", "0.1.0").with_tool("npm", "10");
+
+    let installer = Installer::at("http://127.0.0.1:1".into(), into.path().to_path_buf()).unwrap();
+    let _first = ToolsFirst::new(tools.path());
+    let done = installer.install(&rook_core::install::TYPESCRIPT, &env).await.unwrap();
+    let current = into.path().join("typescript-language-server").join("current");
+    assert_eq!(done.path, current.join("node_modules").join(".bin").join("typescript-language-server"));
+    assert!(done.path.is_file());
+    let asked = std::fs::read_to_string(current.join("asked")).unwrap();
+    assert!(asked.contains("--ignore-scripts"), "scripts off: {asked}");
+    assert!(asked.contains("typescript-language-server@latest"), "{asked}");
+    assert!(done.verified.contains("no install scripts"), "{}", done.verified);
+}
+
+/// gopls is built from source into `GOBIN`, which is our directory.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_go_server_is_built_into_our_directory() {
+    let _one = one_at_a_time().await;
+    let tools = fake_tools();
+    let into = tempfile::tempdir().unwrap();
+    let env = rook_skills::Environment::bare("linux", "x86_64", "0.1.0").with_language("go", "1.25");
+
+    let installer = Installer::at("http://127.0.0.1:1".into(), into.path().to_path_buf()).unwrap();
+    let _first = ToolsFirst::new(tools.path());
+    let done = installer.install(&rook_core::install::GOPLS, &env).await.unwrap();
+    let current = into.path().join("gopls").join("current");
+    assert_eq!(done.path, current.join("gopls"));
+    let asked = std::fs::read_to_string(current.join("asked")).unwrap();
+    assert!(asked.contains("golang.org/x/tools/gopls@latest"), "{asked}");
+    assert!(done.verified.contains("checksum database"), "{}", done.verified);
+}
+
+/// A tool this machine does not have is said so, before anything runs.
+#[tokio::test]
+async fn a_recipe_whose_toolchain_is_missing_says_which_one() {
+    let into = tempfile::tempdir().unwrap();
+    let env = rook_skills::Environment::bare("linux", "x86_64", "0.1.0");
+    let installer = Installer::at("http://127.0.0.1:1".into(), into.path().to_path_buf()).unwrap();
+    let refused = installer.install(&rook_core::install::GOPLS, &env).await.unwrap_err();
+    assert!(refused.contains("`go`"), "{refused}");
+    assert!(!into.path().join("gopls").exists(), "and nothing was made");
+}

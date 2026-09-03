@@ -194,9 +194,13 @@ what unblocks the most.
   before `PATH` and where removing the directory undoes all of it. What was
   checked and what was not is printed, in words: the download is intact; the
   release was not reviewed, and the digest comes from the same publisher as the
-  file. One publishing shape so far — clangd ships zip and xz, gopls is built
-  from source, the node servers come from npm — and a name this cannot fetch is
-  answered with where to get it rather than an attempt. The agent notices too:
+  file. Three shapes: a GitHub release checked byte for byte against the digest
+  it lists (rust-analyzer); npm under a prefix of ours with install scripts off,
+  where npm checks each tarball against the registry's integrity hash
+  (typescript-language-server, pyright); and a build from source by the Go
+  toolchain, which checks the module against the checksum database (gopls).
+  Each says in words what that did and did not check. clangd ships zip and xz
+  and has no recipe; asking for it names where to get it. The agent notices too:
   a language with files here and no server is offered once per session, and the
   stance decides what follows — at `assist` a person chooses between the state
   directory, the machine's own installer and not now, or with nobody there it is
@@ -988,10 +992,8 @@ call it without a key. Until then it is a command a person runs, which is honest
 
 ## After that
 
-**More shapes of language server.** rust-analyzer is fetched and checked;
-clangd ships zip and xz, gopls is built from source, and the node servers come
-from npm. Each is a recipe of its own, and each needs its own way of being
-checked against what its publisher lists.
+**clangd.** The one known server with no recipe: it ships as zip and xz, and
+nothing in the tree opens either. Asking for it names where to get it.
 
 **Driving physical devices, if the Model Hardware Standard becomes something to
 build against.** Anthropic's [research

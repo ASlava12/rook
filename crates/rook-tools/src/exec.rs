@@ -68,7 +68,7 @@ impl Tool for RunCommand {
             return elsewhere(terminals.as_ref(), &command, &cwd, ctx, timeout).await;
         }
 
-        let mut child = spawn_shell(&command, &cwd)?;
+        let mut child = spawn_shell(&command, &cwd, &[])?;
         let group = child.id();
         let mut stdout = child.stdout.take();
         let mut stderr = child.stderr.take();
@@ -255,7 +255,15 @@ async fn elsewhere(
     .with("exit_code", i64::from(ran.exit_code)))
 }
 
-pub(crate) fn spawn_shell(command: &str, cwd: &std::path::Path) -> Result<tokio::process::Child> {
+/// Start `command` the way the machine's shell would, with `env` added to
+/// the child's. Public because the language-server installer runs `npm` and
+/// `go install` and needs the same shell — on Windows `npm` is `npm.cmd`, and
+/// the shell is what knows that — and `go install` needs `GOBIN` set.
+pub fn spawn_shell(
+    command: &str,
+    cwd: &std::path::Path,
+    env: &[(&str, &str)],
+) -> Result<tokio::process::Child> {
     #[cfg(windows)]
     // `cmd /C` rather than PowerShell: it is always present, and skills that
     // need PowerShell can invoke it explicitly. `raw_arg` rather than `arg`:
@@ -275,7 +283,8 @@ pub(crate) fn spawn_shell(command: &str, cwd: &std::path::Path) -> Result<tokio:
         c.arg("-c").arg(command);
         c
     };
-    cmd.current_dir(cwd)
+    cmd.envs(env.iter().copied())
+        .current_dir(cwd)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .stdin(std::process::Stdio::null())

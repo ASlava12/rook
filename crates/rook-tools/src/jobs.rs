@@ -88,7 +88,7 @@ impl Jobs {
             });
         }
 
-        let mut child = crate::exec::spawn_shell(command, cwd)?;
+        let mut child = crate::exec::spawn_shell(command, cwd, &[])?;
         let id = format!("job{:03}", self.started.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1);
         let printed = Arc::new(Mutex::new(Printed::default()));
         let exit = Arc::new(Mutex::new(None));

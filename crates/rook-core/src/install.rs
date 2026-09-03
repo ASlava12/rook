@@ -15,35 +15,143 @@ use std::path::{Path, PathBuf};
 
 use sha2::Digest;
 
-/// Where a server comes from.
-pub struct Recipe {
-    pub command: &'static str,
-    repo: &'static str,
+/// Where a server comes from, and how it is checked.
+pub enum Source {
+    /// A GitHub release listing a digest per asset, shipping one gzipped
+    /// binary per unix target. Checked here, byte for byte, as it arrives.
+    GithubGz { repo: &'static str },
+    /// Packages from the npm registry, installed under a prefix of ours with
+    /// their install scripts not run. npm checks each tarball against the
+    /// integrity hash the registry lists; the binary is a shim under
+    /// `node_modules/.bin`.
+    Npm { packages: &'static [&'static str] },
+    /// Built from source by the Go toolchain, which fetches the module through
+    /// the proxy and checks it against the checksum database.
+    Go { module: &'static str },
 }
 
-pub const RUST_ANALYZER: Recipe = Recipe { command: "rust-analyzer", repo: "rust-lang/rust-analyzer" };
+pub struct Recipe {
+    pub command: &'static str,
+    pub source: Source,
+}
 
-/// The recipe for a name somebody typed, if there is one.
+pub const RUST_ANALYZER: Recipe =
+    Recipe { command: "rust-analyzer", source: Source::GithubGz { repo: "rust-lang/rust-analyzer" } };
+pub const TYPESCRIPT: Recipe = Recipe {
+    command: "typescript-language-server",
+    source: Source::Npm { packages: &["typescript-language-server", "typescript"] },
+};
+pub const PYRIGHT: Recipe =
+    Recipe { command: "pyright-langserver", source: Source::Npm { packages: &["pyright"] } };
+pub const GOPLS: Recipe =
+    Recipe { command: "gopls", source: Source::Go { module: "golang.org/x/tools/gopls" } };
+
+/// The recipe for a name somebody typed — the server's or the language's.
 pub fn recipe_for(name: &str) -> Option<&'static Recipe> {
     match name {
         "rust-analyzer" | "rust" => Some(&RUST_ANALYZER),
+        "typescript-language-server" | "typescript" | "javascript" => Some(&TYPESCRIPT),
+        "pyright-langserver" | "pyright" | "python" => Some(&PYRIGHT),
+        "gopls" | "go" => Some(&GOPLS),
         _ => None,
     }
 }
 
 impl Recipe {
-    /// How the machine's own tooling would install this, when it has any: what
-    /// a person at the keyboard would type. Runs as a command through the
-    /// policy like any other, and only a `free` stance reaches for it.
-    pub fn system_command(&self) -> Option<&'static str> {
-        match self.command {
-            "rust-analyzer" => Some("rustup component add rust-analyzer"),
-            _ => None,
+    /// How the machine's own tooling would install this: what a person at the
+    /// keyboard would type. Runs as a command through the policy like any
+    /// other, and only a `free` stance reaches for it.
+    pub fn system_command(&self) -> Option<String> {
+        match &self.source {
+            Source::GithubGz { .. } if self.command == "rust-analyzer" => {
+                Some("rustup component add rust-analyzer".into())
+            }
+            Source::GithubGz { .. } => None,
+            Source::Npm { packages } => Some(format!("npm install -g {}", packages.join(" "))),
+            Source::Go { module } => Some(format!("go install {module}@latest")),
         }
     }
 
-    /// The asset this platform can run, or why there is none for it.
+    /// The command that installs this under `dir` and nowhere else, for the
+    /// sources that are a command rather than a download. `None` is a source
+    /// this fetches itself.
+    pub fn command_into(&self, dir: &Path) -> Option<(String, Vec<(String, String)>)> {
+        match &self.source {
+            Source::GithubGz { .. } => None,
+            // Scripts off: a package's `postinstall` is arbitrary code, and a
+            // language server has no business running any at install time.
+            Source::Npm { packages } => Some((
+                format!(
+                    "npm install --ignore-scripts --no-audit --no-fund --prefix \"{}\" {}",
+                    dir.display(),
+                    packages.iter().map(|p| format!("{p}@latest")).collect::<Vec<_>>().join(" ")
+                ),
+                Vec::new(),
+            )),
+            Source::Go { module } => Some((
+                format!("go install {module}@latest"),
+                vec![("GOBIN".into(), dir.display().to_string())],
+            )),
+        }
+    }
+
+    /// The toolchain a command-shaped source needs, by the name the
+    /// environment probes use. `None` needs nothing but a network.
+    pub fn needs(&self) -> Option<&'static str> {
+        match &self.source {
+            Source::GithubGz { .. } => None,
+            Source::Npm { .. } => Some("npm"),
+            Source::Go { .. } => Some("go"),
+        }
+    }
+
+    /// Where the binary is inside a `current` directory.
+    pub fn binary_in(&self, current: &Path) -> PathBuf {
+        let path = match &self.source {
+            Source::Npm { .. } => current.join("node_modules").join(".bin").join(self.command),
+            _ => current.join(self.command),
+        };
+        match (cfg!(windows), &self.source) {
+            (true, Source::Npm { .. }) => path.with_extension("cmd"),
+            (true, _) => path.with_extension("exe"),
+            _ => path,
+        }
+    }
+
+    /// In words, what an install of this checked and what it did not.
+    fn checked(&self, tag: &str, asset: &str, sha256: &str) -> (String, String) {
+        match &self.source {
+            Source::GithubGz { repo } => (
+                format!("sha256 {sha256} matches the digest {repo} listed for {asset} in release {tag}"),
+                "the release itself was not reviewed — the digest and the file come from the same \
+                 publisher, so this shows the download is intact, not that the program is good"
+                    .into(),
+            ),
+            Source::Npm { .. } => (
+                "npm checked each tarball against the integrity hash the registry lists, and \
+                 ran no install scripts"
+                    .into(),
+                "the packages themselves were not reviewed, and neither were their dependencies — \
+                 the registry's hash says what was published is what arrived, not that it is good"
+                    .into(),
+            ),
+            Source::Go { .. } => (
+                "the Go toolchain fetched the module through the proxy and checked it against \
+                 the checksum database, then built it from source"
+                    .into(),
+                "the source was not reviewed — the checksum database says the module is the one \
+                 everyone else gets, not that it is good"
+                    .into(),
+            ),
+        }
+    }
+
+    /// The asset this platform can run, or why there is none for it. Only a
+    /// GitHub source has assets.
     pub fn asset_for(&self, os: &str, arch: &str, userland: &str) -> Result<String, String> {
+        let Source::GithubGz { repo } = &self.source else {
+            return Err(format!("{} is not fetched from a release", self.command));
+        };
         match os {
             "macos" => Ok(format!("{}-{arch}-apple-darwin.gz", self.command)),
             "linux" => {
@@ -52,8 +160,8 @@ impl Recipe {
             }
             "windows" => Err(format!(
                 "{} is published for Windows as a zip, which this cannot open yet — take it from \
-                 https://github.com/{}/releases",
-                self.command, self.repo
+                 https://github.com/{repo}/releases",
+                self.command
             )),
             other => Err(format!("{} publishes no build for {other}", self.command)),
         }
@@ -89,17 +197,21 @@ const MOST_API_BYTES: usize = 4 << 20;
 const MOST_HOPS: usize = 4;
 
 /// The binary `rook lsp install` put in place for `command`, whether or not
-/// there is one.
+/// there is one — asked of the recipe, which knows where inside `current` it
+/// lives.
 pub fn current(command: &str) -> PathBuf {
-    current_in(&crate::paths::servers_dir(), command)
+    let current = current_in(&crate::paths::servers_dir(), command);
+    match recipe_for(command) {
+        Some(recipe) => recipe.binary_in(&current),
+        None => current.join(command),
+    }
 }
 
-/// The same under any directory: an installer told where to put things must
-/// put `current` there too, or a test of one writes into the real state
-/// directory of whoever runs it.
+/// The `current` directory under any root: an installer told where to put
+/// things must put `current` there too, or a test of one writes into the real
+/// state directory of whoever runs it.
 fn current_in(into: &Path, command: &str) -> PathBuf {
-    let path = into.join(command).join("current").join(command);
-    if cfg!(windows) { path.with_extension("exe") } else { path }
+    into.join(command).join("current")
 }
 
 pub struct Installer {
@@ -142,7 +254,10 @@ impl Installer {
     /// The latest release's asset named `asset`, with the digest the publisher
     /// listed for it.
     pub async fn latest(&self, recipe: &Recipe, asset: &str) -> Result<Asset, String> {
-        let url = format!("{}/repos/{}/releases/latest", self.api, recipe.repo);
+        let Source::GithubGz { repo } = &recipe.source else {
+            return Err(format!("{} has no release to look up", recipe.command));
+        };
+        let url = format!("{}/repos/{repo}/releases/latest", self.api);
         let response = self
             .client
             .get(&url)
@@ -162,7 +277,7 @@ impl Installer {
             .into_iter()
             .flatten()
             .find(|a| a["name"].as_str() == Some(asset))
-            .ok_or_else(|| format!("release {tag} of {} has no asset named {asset}", recipe.repo))?;
+            .ok_or_else(|| format!("release {tag} of {repo} has no asset named {asset}"))?;
         let Some(sha256) = listed_sha256(found) else {
             return Err(format!(
                 "release {tag} lists no sha256 digest for {asset}, so a download could not be checked \
@@ -177,47 +292,63 @@ impl Installer {
         })
     }
 
-    /// Fetch, check, unpack, put in place.
+    /// Fetch or build, check, put in place under `current`.
     pub async fn install(
         &self,
         recipe: &Recipe,
         env: &rook_skills::Environment,
     ) -> Result<Installed, String> {
-        let asset = recipe.asset_for(&env.os, &env.arch, &env.userland)?;
-        let release = self.latest(recipe, &asset).await?;
-        let bytes = self.download(&release).await?;
-
-        let versioned = self.into.join(recipe.command).join(&release.tag);
-        std::fs::create_dir_all(&versioned)
-            .map_err(|e| format!("could not create {}: {e}", versioned.display()))?;
-        let binary = versioned.join(recipe.command);
-        unpack_gz(&bytes, &binary)?;
-        executable(&binary)?;
-
-        // `current` is a copy rather than a link: a link needs a privilege on
-        // Windows that an ordinary account does not have, and a copy of one
-        // binary is cheap next to the download that produced it.
-        let current = current_in(&self.into, recipe.command);
-        if let Some(dir) = current.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+        if let Some(tool) = recipe.needs()
+            && !env.tools.contains_key(tool)
+            && !env.languages.contains_key(tool)
+        {
+            return Err(format!(
+                "{} is installed with `{tool}`, which this machine does not have",
+                recipe.command
+            ));
         }
-        std::fs::copy(&binary, &current)
-            .map_err(|e| format!("could not put {} in place: {e}", current.display()))?;
-        executable(&current)?;
+        let current = current_in(&self.into, recipe.command);
+        let make = |dir: &Path| {
+            std::fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))
+        };
 
-        Ok(Installed {
-            command: recipe.command.into(),
-            tag: release.tag.clone(),
-            path: current,
-            verified: format!(
-                "sha256 {} matches the digest {} listed for {asset} in release {}",
-                release.sha256, recipe.repo, release.tag
-            ),
-            unverified: "the release itself was not reviewed — the digest and the file come from \
-                         the same publisher, so this shows the download is intact, not that the \
-                         program is good"
-                .into(),
-        })
+        let (tag, verified, unverified) = match recipe.command_into(&current) {
+            // The prefix has to exist for the tool to install into it.
+            Some((command, env_vars)) => {
+                make(&current)?;
+                run_to_completion(&command, &current, &env_vars).await?;
+                let (verified, unverified) = recipe.checked("latest", "", "");
+                ("latest".to_string(), verified, unverified)
+            }
+            None => {
+                let asset = recipe.asset_for(&env.os, &env.arch, &env.userland)?;
+                let release = self.latest(recipe, &asset).await?;
+                let bytes = self.download(&release).await?;
+                // Nothing on disk until the bytes have matched: a refused
+                // download leaves not even a directory behind.
+                let versioned = self.into.join(recipe.command).join(&release.tag);
+                make(&versioned)?;
+                make(&current)?;
+                let binary = versioned.join(recipe.command);
+                unpack_gz(&bytes, &binary)?;
+                executable(&binary)?;
+                // A copy rather than a link: a link needs a privilege on Windows
+                // that an ordinary account does not have, and one binary is
+                // cheap next to the download that produced it.
+                let placed = recipe.binary_in(&current);
+                std::fs::copy(&binary, &placed)
+                    .map_err(|e| format!("could not put {} in place: {e}", placed.display()))?;
+                executable(&placed)?;
+                let (verified, unverified) = recipe.checked(&release.tag, &asset, &release.sha256);
+                (release.tag, verified, unverified)
+            }
+        };
+
+        let path = recipe.binary_in(&current);
+        if !path.is_file() {
+            return Err(format!("{} finished but left no {} behind", recipe.command, path.display()));
+        }
+        Ok(Installed { command: recipe.command.into(), tag, path, verified, unverified })
     }
 
     /// The asset's bytes, checked against the digest as they arrive. A body
@@ -277,6 +408,25 @@ impl Installer {
 fn listed_sha256(asset: &serde_json::Value) -> Option<String> {
     let hex = asset["digest"].as_str()?.strip_prefix("sha256:")?.to_ascii_lowercase();
     (hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit())).then_some(hex)
+}
+
+/// Run an installer's command to the end, through the machine's shell, with
+/// both pipes drained and bounded. An install that fails says what the tool
+/// printed, which is the only thing that explains a failed one.
+async fn run_to_completion(command: &str, cwd: &Path, env: &[(String, String)]) -> Result<(), String> {
+    let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let mut child = rook_tools::exec::spawn_shell(command, cwd, &env).map_err(|e| e.to_string())?;
+    let (mut out, mut err) = (child.stdout.take(), child.stderr.take());
+    let printed = async {
+        let (stdout, stderr) = tokio::join!(crate::hooks::bounded(&mut out), crate::hooks::bounded(&mut err));
+        format!("{stdout}{stderr}")
+    };
+    let (printed, status) = tokio::join!(printed, child.wait());
+    let status = status.map_err(|e| format!("`{command}` could not be waited for: {e}"))?;
+    match status.success() {
+        true => Ok(()),
+        false => Err(format!("`{command}` failed ({status}): {}", printed.trim())),
+    }
 }
 
 /// The body and its sha256, read together so the hash is of what arrived and
@@ -342,6 +492,48 @@ fn host_of(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_source_says_how_it_installs_and_what_that_checks() {
+        let (cmd, env) = TYPESCRIPT.command_into(Path::new("/srv/ts")).unwrap();
+        assert!(cmd.contains("--ignore-scripts"), "no package script runs at install: {cmd}");
+        assert!(cmd.contains("--prefix \"/srv/ts\""), "and it goes where it was told: {cmd}");
+        assert!(
+            cmd.contains("typescript-language-server@latest") && cmd.contains(" typescript@latest"),
+            "{cmd}"
+        );
+        assert!(env.is_empty());
+        let (cmd, env) = GOPLS.command_into(Path::new("/srv/go")).unwrap();
+        assert_eq!(cmd, "go install golang.org/x/tools/gopls@latest");
+        assert_eq!(
+            env,
+            vec![("GOBIN".to_string(), "/srv/go".to_string())],
+            "which is how it lands under ours"
+        );
+        assert!(RUST_ANALYZER.command_into(Path::new("/srv")).is_none(), "fetched, not run");
+
+        assert_eq!(TYPESCRIPT.needs(), Some("npm"));
+        assert_eq!(GOPLS.needs(), Some("go"));
+        assert_eq!(RUST_ANALYZER.needs(), None);
+
+        let (verified, unverified) = TYPESCRIPT.checked("", "", "");
+        assert!(verified.contains("integrity hash") && verified.contains("no install scripts"), "{verified}");
+        assert!(unverified.contains("not reviewed"), "{unverified}");
+        let (verified, _) = GOPLS.checked("", "", "");
+        assert!(verified.contains("checksum database"), "{verified}");
+    }
+
+    #[test]
+    fn the_binary_is_where_the_source_puts_it() {
+        let current = Path::new("/state/servers/x/current");
+        assert_eq!(RUST_ANALYZER.binary_in(current), current.join("rust-analyzer"));
+        assert_eq!(GOPLS.binary_in(current), current.join("gopls"));
+        assert_eq!(
+            TYPESCRIPT.binary_in(current),
+            current.join("node_modules").join(".bin").join("typescript-language-server"),
+            "npm's shim, under the prefix"
+        );
+    }
 
     #[test]
     fn the_asset_follows_the_platform_and_says_when_there_is_none() {

@@ -630,7 +630,7 @@ impl<'a> AgentLoop<'a> {
             .gate_risk(
                 "run_command",
                 &args,
-                rook_tools::policy::Risk::Execute(command.into()),
+                rook_tools::policy::Risk::Execute(command.clone()),
                 Shown::Nothing,
             )
             .await
@@ -648,12 +648,19 @@ impl<'a> AgentLoop<'a> {
         &self,
         recipe: &crate::install::Recipe,
     ) -> std::result::Result<String, String> {
-        let api = "https://api.github.com";
-        let args = serde_json::json!({ "url": api });
-        if let Some(refusal) = self
-            .gate_risk("lsp install", &args, rook_tools::policy::Risk::Network(api.into()), Shown::Nothing)
-            .await
-        {
+        // Gated as what it is: a command for the sources that are one, a
+        // request to the release host for the one that is a download.
+        let into = crate::paths::servers_dir().join(recipe.command).join("current");
+        let (args, risk) = match recipe.command_into(&into) {
+            Some((command, _)) => {
+                (serde_json::json!({ "command": command }), rook_tools::policy::Risk::Execute(command))
+            }
+            None => {
+                let api = "https://api.github.com";
+                (serde_json::json!({ "url": api }), rook_tools::policy::Risk::Network(api.into()))
+            }
+        };
+        if let Some(refusal) = self.gate_risk("lsp install", &args, risk, Shown::Nothing).await {
             return Err(refusal);
         }
         let installer = crate::install::Installer::new(crate::paths::servers_dir())?;

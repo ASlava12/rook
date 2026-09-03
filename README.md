@@ -336,8 +336,10 @@ latest release, checks the bytes as they arrive against the digest the release
 lists for that asset, and keeps the binary under the state directory, where the
 agent looks before `PATH` and where deleting the directory undoes all of it. It
 prints what was checked and what was not: the download is intact; the release
-was not reviewed. One publishing shape so far — clangd, gopls and the node
-servers each need their own, and asking for one names where to get it instead.
+was not reviewed. `typescript-language-server`, `pyright` and `gopls` install the
+same way by their own means — npm under a prefix of ours with install scripts
+off, the Go toolchain building from source — and each says what its publisher's
+check covered. clangd has no recipe yet; asking for it names where to get it.
 The agent notices too: a language with files here and no server is offered once
 per session, and the stance decides what follows — a person chooses at `assist`,
 `autonomous` fetches into the state directory, `free` uses the machine's own
