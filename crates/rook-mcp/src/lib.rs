@@ -40,6 +40,26 @@ pub enum McpError {
     Decode { server: String, method: String, message: String },
     #[error("{server}: needs either a command or a url")]
     NotConfigured { server: String },
+    #[error(
+        "{server}: the server wants authentication and this connection has none{}\n\
+         Credentials go in the `[[mcp]]` table for it: `headers = {{ Authorization = \"Bearer …\" }}`.",
+        challenged(offered)
+    )]
+    Unauthorized { server: String, offered: Vec<String> },
+}
+
+/// What the server said it would accept, verbatim and all of it.
+///
+/// `WWW-Authenticate` may appear more than once, and the one that matters is
+/// not always the first: a server offering both Bearer and something else
+/// names the authorisation server in only one of them. Dropping the rest — or
+/// the header entirely, which is what reporting the status alone does — leaves
+/// a person with "401" and nowhere to go.
+fn challenged(offered: &[String]) -> String {
+    match offered {
+        [] => String::new(),
+        challenges => format!(", and offers: {}", challenges.join("; ")),
+    }
 }
 
 /// A failing subprocess explains itself on stderr and nowhere else — the

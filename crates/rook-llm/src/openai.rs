@@ -75,7 +75,8 @@ impl Provider for OpenAiCompatible {
         let resp = self.send(&request, false).await?;
         let status = resp.status();
         if !status.is_success() {
-            return Err(self.refused(status, &crate::quoted_text(resp).await).await);
+            let asked = crate::retry_after(resp.headers());
+            return Err(self.refused(status, asked, &crate::quoted_text(resp).await).await);
         }
         let text = crate::whole_text(resp, &self.config.base_url).await?;
 
@@ -157,6 +158,7 @@ impl Provider for OpenAiCompatible {
         if !status.is_success() {
             return Err(LlmError::Status {
                 status: status.as_u16(),
+                retry_after: crate::retry_after(response.headers()),
                 body: crate::quoted_text(response).await,
             });
         }
@@ -174,7 +176,8 @@ impl Provider for OpenAiCompatible {
         let resp = self.send(&request, true).await?;
         let status = resp.status();
         if !status.is_success() {
-            return Err(self.refused(status, &crate::quoted_text(resp).await).await);
+            let asked = crate::retry_after(resp.headers());
+            return Err(self.refused(status, asked, &crate::quoted_text(resp).await).await);
         }
 
         let idle = self.config.stream_idle_timeout;
@@ -273,14 +276,19 @@ impl OpenAiCompatible {
     /// A 404 from a server that is otherwise answering means the model is not
     /// there — the common first-run failure, because the default spec names a
     /// model nobody has pulled yet. The server knows which it does have.
-    async fn refused(&self, status: reqwest::StatusCode, body: &str) -> LlmError {
+    async fn refused(
+        &self,
+        status: reqwest::StatusCode,
+        retry_after: Option<std::time::Duration>,
+        body: &str,
+    ) -> LlmError {
         if status != reqwest::StatusCode::NOT_FOUND {
-            return LlmError::Status { status: status.as_u16(), body: truncate(body, 2000) };
+            return LlmError::Status { status: status.as_u16(), body: truncate(body, 2000), retry_after };
         }
         // If the listing does not answer either, the base URL is the likelier
         // fault and "the model is missing" would be a guess: say what happened.
         let Ok(models) = self.models().await else {
-            return LlmError::Status { status: status.as_u16(), body: truncate(body, 2000) };
+            return LlmError::Status { status: status.as_u16(), body: truncate(body, 2000), retry_after };
         };
         LlmError::NoSuchModel {
             model: self.model.clone(),

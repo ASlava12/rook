@@ -63,7 +63,7 @@ async fn an_http_error_carries_the_status_and_the_body() {
     let url = serve("401 Unauthorized", r#"{"error":"bad key"}"#).await;
     let Err(err) = provider(url).models().await else { panic!("a 401 must not look like no models") };
     match err {
-        LlmError::Status { status, body } => {
+        LlmError::Status { status, body, .. } => {
             assert_eq!(status, 401);
             assert!(body.contains("bad key"), "{body}");
         }

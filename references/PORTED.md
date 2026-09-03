@@ -1183,3 +1183,44 @@ opencode's desktop device auth, and openhands' automation permissions and
 i18n placeholders are product surfaces this repository does not have, as are
 the three openclaw commits the pointer advanced past: control-UI locales, a
 runner-packing change to their CI, and a WeChat login provider.
+
+## Thirtieth pass — acp, codex, goose, opencode, openclaw, openhands
+
+Two ported.
+
+codex's `Preserve MCP authentication challenges on tool calls`: a 401 from an
+MCP server was reported here as `transport error: 401 Unauthorized`, which is
+a dead end — the `WWW-Authenticate` header, where the authorisation server is
+named, was thrown away with the rest of the response. It is its own error now,
+carrying every challenge the server sent (there may be more than one, and the
+one that names the authorisation server is not always the first) and saying
+where credentials go: the `[[mcp]]` table's `headers`.
+
+openclaw's `preserve ChatGPT HTTP status for retry pacing`: the retry here
+doubled from a second, four times, and ignored `Retry-After` entirely — so a
+rate limiter answering "come back in thirty seconds" was asked again at one,
+two and four, and the turn died on a refusal the server had already explained
+how to avoid. The wait is now the longer of the doubling and what the provider
+asked for, up to a two-minute ceiling past which "later" is not a useful
+answer. Only the delta-seconds form is read: the HTTP-date form is legal,
+nobody sends it, and a date needs a clock and a parser to disagree about. The
+test caught a second bug while proving the first — this dialect's real failure
+path went through a helper the first fix had missed.
+
+Dismissed, each against the code. codex's `target-native paths in command
+approvals` and their Guardian thread context are for remote executors and a
+feature that has no counterpart here. openclaw's `reject unverifiable pinned
+npm installs` is the question the installer already answers for the source it
+can: a GitHub asset is checked against the digest the release lists, and npm
+and go are command-shaped, where the tool's own integrity check is the one
+there is. Their `hide policy-denied plugin tools from ACP sessions` is a
+deliberate difference: one tool list serves all three front ends and the
+policy decides at the call, which is what keeps a capability from being
+reachable in one and not another. Their `selected tools recommend unavailable
+companions`, cron, gateway, backup, release and multi-user work, goose's
+removed UI files and version bump, opencode's console endpoint and translated
+docs, openhands' review-evidence policy and acp's registry docs are product
+surfaces this repository does not have. Past the head read, openclaw's
+`bound restored requester-settle recovery` is their own settle machinery,
+and `prevent startup stalls on large agent configs` is a config load this
+repository does at open and measures nowhere near their size.

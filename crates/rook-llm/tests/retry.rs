@@ -215,3 +215,61 @@ async fn a_refusal_about_tools_names_the_setting_that_answers_it() {
 
     assert!(refused.contains("native_tools = false"), "the message has to say what to do: {refused}");
 }
+
+/// Answers 429 with the wait it wants, then a real reply. The header is what
+/// this is about, so the server sends it and nothing else does.
+async fn paced(seconds: &'static str) -> (String, Arc<AtomicUsize>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let seen = Arc::new(AtomicUsize::new(0));
+    let counted = seen.clone();
+
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let mut scratch = [0u8; 8192];
+            let _ = socket.read(&mut scratch).await;
+            let n = counted.fetch_add(1, Ordering::SeqCst);
+            let response = match n {
+                0 => {
+                    let body = r#"{"error":"slow down"}"#;
+                    format!(
+                        "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\n\
+                         Retry-After: {seconds}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                }
+                _ => {
+                    let body = r#"{"choices":[{"message":{"role":"assistant","content":"answered"},
+                        "finish_reason":"stop"}],"model":"m"}"#;
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+                         Connection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                }
+            };
+            let _ = socket.write_all(response.as_bytes()).await;
+        }
+    });
+    (format!("http://{addr}/v1"), seen)
+}
+
+/// A rate limiter that names its window has given the only number worth
+/// waiting. Doubling from a second spends every try inside that window and
+/// ends the turn on a refusal the server had already explained how to avoid.
+#[tokio::test]
+async fn the_wait_is_the_one_the_provider_asked_for() {
+    let (url, seen) = paced("2").await;
+
+    let started = std::time::Instant::now();
+    let answered = provider(url).complete(Request::new(Vec::new())).await;
+    let waited = started.elapsed();
+
+    assert_eq!(seen.load(Ordering::SeqCst), 2, "asked again after waiting");
+    assert_eq!(answered.expect("the second request answers").message.content, "answered");
+    // A sleep does not finish early, so the floor is the assertion: without
+    // reading the header the first wait is one second.
+    assert!(waited >= std::time::Duration::from_secs(2), "waited only {waited:?}");
+}

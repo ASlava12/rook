@@ -208,3 +208,44 @@ async fn a_server_that_never_stops_answering_is_refused_rather_than_held() {
     assert!(refused.contains("still sending"), "{refused}");
     assert!(refused.contains("8388608"), "and says the bound it passed: {refused}");
 }
+
+/// A server that answers 401 and says what it would accept. Two challenges,
+/// because more than one is allowed and the one that names the authorisation
+/// server is not always the first.
+async fn refusing() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let mut scratch = [0u8; 8192];
+            let _ = socket.read(&mut scratch).await;
+            let body = r#"{"error":"unauthorized"}"#;
+            let response = format!(
+                "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\n\
+                 WWW-Authenticate: Bearer resource_metadata=\"https://auth.example/.well-known\"\r\n\
+                 WWW-Authenticate: Basic realm=\"mcp\"\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+        }
+    });
+    format!("http://{addr}/mcp")
+}
+
+/// A 401 is the one failure here a person can act on, and the header is where
+/// the authorisation server is named. Reported as a status alone it is a dead
+/// end: the challenge is gone and nothing says credentials are the answer.
+#[tokio::test]
+async fn a_server_that_wants_authentication_says_so_and_keeps_every_challenge() {
+    let Err(refused) = Server::connect(&config(refusing().await)).await else {
+        panic!("a server that answers 401 cannot have connected")
+    };
+
+    let said = refused.to_string();
+    assert!(matches!(refused, McpError::Unauthorized { .. }), "{said}");
+    assert!(said.contains("wants authentication"), "{said}");
+    assert!(said.contains("https://auth.example/.well-known"), "the challenge is the way out: {said}");
+    assert!(said.contains("Basic realm=\"mcp\""), "and every challenge is kept: {said}");
+    assert!(said.contains("[[mcp]]"), "and it says where credentials go: {said}");
+}

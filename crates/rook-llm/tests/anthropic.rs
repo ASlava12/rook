@@ -262,7 +262,7 @@ async fn an_http_error_carries_the_status_and_the_body() {
         panic!("a 400 must not look like a reply")
     };
     match err {
-        LlmError::Status { status, body } => {
+        LlmError::Status { status, body, .. } => {
             assert_eq!(status, 400);
             assert!(body.contains("bad model"), "{body}");
         }

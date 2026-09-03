@@ -28,7 +28,16 @@ pub enum LlmError {
     #[error("cannot reach {endpoint}: {detail}\n{}", advice(.endpoint))]
     Unreachable { endpoint: String, detail: String },
     #[error("provider returned {status}: {body}{}", what_to_try(*.status, .body))]
-    Status { status: u16, body: String },
+    Status {
+        status: u16,
+        body: String,
+        /// What the provider said about when to come back, if it said. A rate
+        /// limiter that answers `Retry-After: 30` has given the only number
+        /// worth waiting: guessing a shorter one spends the tries and ends the
+        /// turn on a refusal the server had already told us how to avoid.
+        #[allow(dead_code)]
+        retry_after: Option<std::time::Duration>,
+    },
     #[error("could not parse the provider's response: {0}")]
     Decode(String),
     #[error(
@@ -50,6 +59,23 @@ pub enum LlmError {
     #[error("{0}")]
     Other(String),
 }
+
+/// How long the provider asked us to wait, in seconds.
+///
+/// Only the delta-seconds form: the HTTP-date form is legal and nobody sends
+/// it, and a date needs a clock and a parser to disagree about. A header that
+/// is not a number is no answer, which is what `None` means here.
+pub fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<std::time::Duration> {
+    let said = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
+    let seconds: u64 = said.trim().parse().ok()?;
+    // A provider that says to come back tomorrow is a provider to give up on
+    // rather than to sleep through: a turn nobody is watching is still a turn
+    // somebody is paying for.
+    (seconds <= MOST_PATIENCE_SECS).then(|| std::time::Duration::from_secs(seconds))
+}
+
+/// Beyond this, the answer is not "later" in any useful sense.
+const MOST_PATIENCE_SECS: u64 = 120;
 
 /// What a person can do about a request this endpoint will not take.
 ///
@@ -345,4 +371,42 @@ fn env_or(key: &str, default: &str) -> String {
 /// full C toolchain, which is the usual blocker for the FreeBSD target.
 pub fn init_tls() {
     let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    fn headers(pairs: &[(&str, &str)]) -> reqwest::header::HeaderMap {
+        let mut map = reqwest::header::HeaderMap::new();
+        for (name, value) in pairs {
+            map.insert(
+                reqwest::header::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                value.parse().unwrap(),
+            );
+        }
+        map
+    }
+
+    #[test]
+    fn the_wait_a_provider_asks_for_is_read_when_it_is_a_number_it_means() {
+        assert_eq!(retry_after(&headers(&[("retry-after", "30")])), Some(Duration::from_secs(30)));
+        assert_eq!(retry_after(&headers(&[("retry-after", " 5 ")])), Some(Duration::from_secs(5)));
+        assert_eq!(retry_after(&headers(&[])), None, "no header is no answer");
+
+        // The date form is legal and nobody sends it; a clock and a parser
+        // disagreeing about one is worse than falling back to doubling.
+        assert_eq!(retry_after(&headers(&[("retry-after", "Wed, 21 Oct 2026 07:28:00 GMT")])), None);
+
+        // Past the ceiling is not "later" in any useful sense: a turn nobody
+        // is watching is still one somebody is paying for.
+        assert_eq!(retry_after(&headers(&[("retry-after", "86400")])), None);
+        assert_eq!(
+            retry_after(&headers(&[("retry-after", &MOST_PATIENCE_SECS.to_string())])),
+            Some(Duration::from_secs(MOST_PATIENCE_SECS)),
+            "the ceiling itself is still an answer"
+        );
+    }
 }

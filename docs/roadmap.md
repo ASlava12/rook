@@ -1148,6 +1148,17 @@ hold the one invariant that matters there: every module loaded is embedded and
 served as script. [ADR-0012](adr/0012-hand-written-modules-no-bundler.md)
 supersedes the one-file part of ADR-0007 and keeps the rest.
 
+**A 401 from an MCP server says what to do, and a rate limit is waited out
+as long as it asked.** Two ports from the thirtieth reference pass. An MCP
+server answering 401 was reported as a transport error with the status and
+nothing else — the `WWW-Authenticate` header, which is where the
+authorisation server is named, went in the bin with the rest of the response;
+it is its own error now, carrying every challenge and naming the `[[mcp]]`
+table's `headers`. And the retry doubled from a second and ignored
+`Retry-After`, so a limiter saying "thirty seconds" was asked again at one,
+two and four and the turn died on a refusal it had already explained. The wait
+is the longer of the two now, up to a two-minute ceiling.
+
 **A capable model drove it, and everything worked.** Five scenarios against
 `qwen3.8-27b` in LM Studio: five passes, first attempt, none of the nudges the
 loop keeps for small models needed — no silence to break, no cut reply to

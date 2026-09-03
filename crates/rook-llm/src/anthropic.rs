@@ -130,6 +130,7 @@ impl Provider for Anthropic {
         if !status.is_success() {
             return Err(LlmError::Status {
                 status: status.as_u16(),
+                retry_after: crate::retry_after(response.headers()),
                 body: crate::quoted_text(response).await,
             });
         }
@@ -149,6 +150,7 @@ impl Provider for Anthropic {
         if !status.is_success() {
             return Err(LlmError::Status {
                 status: status.as_u16(),
+                retry_after: crate::retry_after(response.headers()),
                 body: crate::quoted_text(response).await,
             });
         }
@@ -209,6 +211,7 @@ impl Provider for Anthropic {
         if !status.is_success() {
             return Err(LlmError::Status {
                 status: status.as_u16(),
+                retry_after: crate::retry_after(response.headers()),
                 body: crate::quoted_text(response).await,
             });
         }

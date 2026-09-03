@@ -148,6 +148,19 @@ impl Transport for Http {
             .and_then(|v| v.to_str().ok())
             .is_some_and(|t| t.starts_with("text/event-stream"));
 
+        // Said as what it is rather than as a status: a 401 is the one
+        // failure here a person can act on, and the header is where the
+        // authorisation server is named.
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            let offered = response
+                .headers()
+                .get_all(reqwest::header::WWW_AUTHENTICATE)
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .map(str::to_string)
+                .collect();
+            return Err(McpError::Unauthorized { server: self.name.clone(), offered });
+        }
         if !status.is_success() {
             return Err(McpError::Transport {
                 server: self.name.clone(),

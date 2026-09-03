@@ -267,7 +267,7 @@ async fn an_http_error_is_reported_before_any_delta() {
         panic!("a 404 must fail the call, not produce an empty stream");
     };
     match err {
-        LlmError::Status { status, body } => {
+        LlmError::Status { status, body, .. } => {
             assert_eq!(status, 404);
             assert!(body.contains("model not found"), "{body}");
         }

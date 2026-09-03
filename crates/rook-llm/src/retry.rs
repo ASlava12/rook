@@ -48,7 +48,7 @@ fn worth_asking_again(error: &LlmError) -> bool {
 /// than the shape, and the request having an effort at all is what makes this
 /// worth acting on.
 fn names_the_effort(error: &LlmError) -> bool {
-    let LlmError::Status { status, body } = error else { return false };
+    let LlmError::Status { status, body, .. } = error else { return false };
     let said = body.to_ascii_lowercase();
     *status == 400 && ["reasoning", "thinking", "effort"].iter().any(|word| said.contains(word))
 }
@@ -91,12 +91,20 @@ impl Retrying {
         true
     }
 
-    /// Waits before attempt `n`, doubling. Returns whether there is another try.
+    /// Waits before attempt `n`, doubling — or for as long as the provider
+    /// asked, when it said. A rate limiter answering `Retry-After: 30` has
+    /// given the only number worth waiting: doubling from a second spends
+    /// every try inside the window it named and ends the turn on a refusal it
+    /// had already explained how to avoid.
     async fn wait_before(&self, attempt: u32, error: &LlmError) -> bool {
         if attempt >= ATTEMPTS {
             return false;
         }
-        let wait = FIRST_WAIT * 2u32.pow(attempt - 1);
+        let doubling = FIRST_WAIT * 2u32.pow(attempt - 1);
+        let wait = match error {
+            LlmError::Status { retry_after: Some(asked), .. } => doubling.max(*asked),
+            _ => doubling,
+        };
         tracing::debug!(provider = self.inner.id(), "{error}; trying again in {}s", wait.as_secs());
         tokio::time::sleep(wait).await;
         true
