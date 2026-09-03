@@ -3773,3 +3773,39 @@ async fn a_checker_silent_twice_is_reported_as_silent() {
         .count();
     assert_eq!(nudged, 1, "once: {nudged}");
 }
+
+/// A tool call the model wrote as text, with the tools offered natively, is a
+/// call: `qwen2.5-coder:3b` answered every smoke scenario with one and the turn
+/// ended with nothing called. The result reaches the model like any other.
+#[tokio::test]
+async fn a_call_written_as_text_under_native_tools_is_still_a_call() {
+    let f = fixture();
+    let session = f.rook.start_session("text-call").unwrap();
+    std::fs::write(f.workspace.path().join("config.rs"), "pub const PORT: u16 = 8443;\n").unwrap();
+
+    let script = vec![reply(r#"{"name": "read_file", "arguments": {"path": "config.rs"}}"#), reply("8443")];
+    let provider = ScriptedProvider::new(script);
+    let seen = provider.share();
+    let outcome = AgentLoop::new(&f.rook, Arc::new(provider), session).run("what port?").await.unwrap();
+
+    assert_eq!(outcome.tools_called, vec!["read_file".to_string()], "{outcome:?}");
+    assert_eq!(outcome.reply, "8443");
+    let second = seen.lock().unwrap()[1].clone();
+    let result = second.messages.iter().find(|m| m.role == Role::Tool).expect("the result went back");
+    assert!(result.content.contains("8443"), "{}", result.content);
+}
+
+/// And an object that names no offered tool is an answer, not a call: a model
+/// asked for JSON gives JSON.
+#[tokio::test]
+async fn an_object_naming_nothing_offered_is_an_answer() {
+    let f = fixture();
+    let session = f.rook.start_session("json-answer").unwrap();
+    let json = r#"{"name": "widget", "arguments": {"size": 3}}"#;
+    let outcome = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(vec![reply(json)])), session)
+        .run("describe a widget as JSON")
+        .await
+        .unwrap();
+    assert!(outcome.tools_called.is_empty(), "{:?}", outcome.tools_called);
+    assert_eq!(outcome.reply, json);
+}

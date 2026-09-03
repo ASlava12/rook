@@ -1452,9 +1452,12 @@ impl<'a> AgentLoop<'a> {
                 self.rook.log(self.session, EventKind::Reasoning, "", assembler.reasoning()).ok();
             }
             let mut response = assembler.finish();
-            if !self.native_tools() {
-                rook_llm::prompted::adopt(&mut response);
-            }
+            // Read back either way. Without native tools the object is the
+            // only way a call arrives; with them, a small model still writes
+            // one as text some of the time, and the turn ended with nothing
+            // called. Only a tool that was offered is taken as called.
+            let offered = self.tool_specs();
+            rook_llm::prompted::adopt(&mut response, |name| offered.iter().any(|t| t.name == name));
 
             // Only when it is at least what the text plainly weighs. A provider
             // reporting less than that is not counting what this needs counted —

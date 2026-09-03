@@ -9,6 +9,13 @@
 //! The encoding is the smallest thing a small model gets right: one JSON
 //! object. Reading it back is a parse rather than a scan for markers and
 //! quotes — a scanner finds "command": in prose and in the tool list itself.
+//!
+//! The same reading serves an endpoint that does carry tools, because a small
+//! model handed them natively still answers with the object some of the time:
+//! `qwen2.5-coder:3b` wrote `{"name": "read_file", "arguments": {...}}` as its
+//! whole reply in every smoke scenario, and the turn ended with nothing called.
+//! There the object is adopted only when it names a tool that was offered — a
+//! reply that is JSON because JSON was asked for is not a call.
 
 use crate::{Response, StopReason, ToolCall, ToolSpec};
 
@@ -31,10 +38,13 @@ pub fn describe(tools: &[ToolSpec]) -> String {
     s
 }
 
+/// The shapes a model reaches for: ours, OpenAI's `name`/`arguments`, and
+/// Anthropic's `name`/`input`.
 #[derive(serde::Deserialize)]
 struct Called {
+    #[serde(alias = "name")]
     tool: String,
-    #[serde(default)]
+    #[serde(default, alias = "input", alias = "parameters")]
     arguments: serde_json::Value,
 }
 
@@ -57,12 +67,17 @@ pub fn call_in(text: &str) -> Option<(ToolCall, String)> {
 }
 
 /// Move a call the model wrote into the fields a native one would have used, so
-/// nothing above here has to know which kind of endpoint answered.
-pub fn adopt(response: &mut Response) {
+/// nothing above here has to know which kind of endpoint answered. `known`
+/// says whether a name is a tool that was offered; a call to anything else is
+/// left as the text it was.
+pub fn adopt(response: &mut Response, known: impl Fn(&str) -> bool) {
     if !response.message.tool_calls.is_empty() {
         return;
     }
     let Some((call, said)) = call_in(&response.message.content) else { return };
+    if !known(&call.name) {
+        return;
+    }
     response.message.content = said;
     response.message.tool_calls = vec![call];
     response.stop_reason = StopReason::ToolUse;
@@ -86,6 +101,32 @@ mod tests {
         let fenced = called("Let me look.\n```json\n{\"tool\": \"list_dir\", \"arguments\": {}}\n```");
         assert_eq!(fenced.0.name, "list_dir");
         assert_eq!(fenced.1, "Let me look.", "and what it said around the call is kept");
+
+        // The shapes the providers taught it.
+        let openai = called(r#"{"name": "read_file", "arguments": {"path": "config.rs"}}"#);
+        assert_eq!((openai.0.name.as_str(), &openai.0.arguments["path"]), ("read_file", &"config.rs".into()));
+        let anthropic = called(r#"{"name": "read_file", "input": {"path": "config.rs"}}"#);
+        assert_eq!(anthropic.0.arguments["path"], "config.rs");
+    }
+
+    /// A reply that is JSON because JSON was asked for is not a call, and the
+    /// way to tell is whether the name is a tool that was offered.
+    #[test]
+    fn an_object_naming_no_offered_tool_is_left_as_text() {
+        let text = r#"{"name": "widget", "arguments": {"size": 3}}"#;
+        let mut response = Response {
+            message: crate::Message::assistant(text),
+            stop_reason: StopReason::EndTurn,
+            usage: Default::default(),
+            model: "test".into(),
+        };
+        adopt(&mut response, |name| name == "read_file");
+        assert!(response.message.tool_calls.is_empty(), "{:?}", response.message.tool_calls);
+        assert_eq!(response.message.content, text);
+
+        adopt(&mut response, |name| name == "widget");
+        assert_eq!(response.message.tool_calls.len(), 1);
+        assert!(matches!(response.stop_reason, StopReason::ToolUse));
     }
 
     /// A scanner for `"tool":` finds one in the tool list, in a quoted example,
@@ -105,7 +146,7 @@ mod tests {
             usage: Default::default(),
             model: "m".into(),
         };
-        adopt(&mut answered);
+        adopt(&mut answered, |_| true);
         assert_eq!(answered.stop_reason, StopReason::EndTurn);
         assert_eq!(answered.message.content, "the file has 40 lines");
     }

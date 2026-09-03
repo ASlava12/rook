@@ -1008,7 +1008,13 @@ one cannot carry the four scenarios. The third reading settled that: all
 four failed on the model's own account — a step narrated and not taken, a
 `sed` for a port it never read, `quiet-heron-4417` reported as "token", and
 a discounted recollection restated as true — so the tag is `qwen2.5-coder:3b`
-now, and the question is open again at the new size.
+now. Its first reading was the best one yet: it answered every scenario with a
+tool call — written as text, `{"name": "read_file", "arguments": {...}}` as the
+whole reply, with the tools offered natively — and the turn ended with nothing
+called. The reading the prompt-tools mode already did of such an object is
+done either way now, for an object that names a tool that was offered; JSON a
+model was asked for names none. What the scenarios say at the new size is
+open again.
 
 **A server fetched once is one somebody has to remember to update.** Now the
 agent remembers: past `[agent] server_update_after_days` (thirty by default,
