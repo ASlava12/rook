@@ -11,7 +11,7 @@
 //! There is none on Windows or FreeBSD yet. `Mode::Auto` runs a command as it
 //! is there and says so; `Mode::Required` refuses instead.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -88,7 +88,7 @@ pub fn available() -> Result<Backend, String> {
 /// tried, which would otherwise be on the first command of every turn.
 #[cfg(target_os = "macos")]
 fn probe() -> Result<Backend, String> {
-    if !Path::new(SANDBOX_EXEC).exists() {
+    if !std::path::Path::new(SANDBOX_EXEC).exists() {
         return Err(format!("no sandbox: {SANDBOX_EXEC} is missing, so commands run as they are"));
     }
     let tried = std::process::Command::new(SANDBOX_EXEC)
@@ -195,7 +195,7 @@ pub(crate) fn contained(command: &str, isolation: &Isolation) -> std::io::Result
     if !isolation.network {
         ruleset = ruleset.and_then(|r| r.handle_access(AccessNet::from_all(abi)));
     }
-    let writable: Vec<&Path> = std::iter::once(isolation.workspace.as_path())
+    let writable: Vec<&std::path::Path> = std::iter::once(isolation.workspace.as_path())
         .chain(isolation.scratch.iter().map(PathBuf::as_path))
         .collect();
     let created = ruleset
