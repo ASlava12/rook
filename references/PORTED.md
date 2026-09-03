@@ -1105,3 +1105,20 @@ line for a command, and the model's prose is not consulted. hermes'
 fragment to its slot and parses once at the end, which is the linear shape
 already. Their compression heartbeat and openclaw's Codex-chat ownership and
 Gateway reroutes have nothing to attach to.
+
+## Twenty-seventh pass — hermes, openclaw
+
+Nothing to port; each was checked against the code. hermes' `prune rearm lock
+out over-threshold sessions` — an estimate of the message bodies that never
+counted the system prompt and tool schemas, so the provider's counted prompt
+was over the window while the estimate said not — is what the anchor in
+`measured` already prevents: from the first response on, the count is the
+provider's own `input_tokens` plus an estimate of only what was appended
+since. Their `death pipe` — a kernel that outlives a host killed mid-cell —
+covers the case `kill_on_drop` cannot, a parent that never drops; here the
+language and MCP servers read stdin and leave at EOF, and a background job is
+meant to outlive the turn, so the leak is the one the design accepts.
+openclaw's `preserve completion handoff across overlapping waves`: a landed
+result here sits in its own slot until taken, and a later wave adds slots
+rather than clearing them. Their `accept native empty tool catalogs`: all
+three bodies omit `tools` when there are none.
