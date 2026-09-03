@@ -253,21 +253,34 @@ const CHANGES_FILES: &[&str] = &["write_file", "edit_file", "delete_file"];
 /// Not tolerant of a fourth word. `VERDICT: probably` is a hedge, and reporting
 /// a hedge as a verdict is what asking for one of three exists to prevent.
 fn verdict_in(reply: &str) -> Option<&'static str> {
+    reply.lines().rev().find_map(verdict_line)
+}
+
+fn verdict_line(line: &str) -> Option<&'static str> {
     const DRESSING: [char; 6] = ['*', '_', '#', '-', '>', '`'];
-    reply.lines().rev().find_map(|line| {
-        let line = line.trim().trim_start_matches(|c: char| DRESSING.contains(&c) || c == ' ');
-        let (head, rest) = line.split_at_checked("VERDICT:".len())?;
-        if !head.eq_ignore_ascii_case("VERDICT:") {
-            return None;
-        }
-        let word = rest
-            .trim_start_matches(|c: char| DRESSING.contains(&c) || c == ' ')
-            .split_whitespace()
-            .next()?
-            .trim_matches(|c: char| !c.is_ascii_alphabetic())
-            .to_ascii_lowercase();
-        ["holds", "fails", "unproven"].into_iter().find(|known| *known == word)
-    })
+    let line = line.trim().trim_start_matches(|c: char| DRESSING.contains(&c) || c == ' ');
+    let (head, rest) = line.split_at_checked("VERDICT:".len())?;
+    if !head.eq_ignore_ascii_case("VERDICT:") {
+        return None;
+    }
+    let word = rest
+        .trim_start_matches(|c: char| DRESSING.contains(&c) || c == ' ')
+        .split_whitespace()
+        .next()?
+        .trim_matches(|c: char| !c.is_ascii_alphabetic())
+        .to_ascii_lowercase();
+    ["holds", "fails", "unproven"].into_iter().find(|known| *known == word)
+}
+
+/// The reply with its verdict line taken out, for a report that overrules it.
+/// A small model reads the last line, and a discounted `holds` left at the
+/// bottom of the quotation was read as the answer.
+fn without_verdict(reply: &str) -> String {
+    let mut lines: Vec<&str> = reply.lines().collect();
+    if let Some(at) = lines.iter().rposition(|line| verdict_line(line).is_some()) {
+        lines.remove(at);
+    }
+    lines.join("\n").trim_end().to_string()
 }
 
 /// The head of a sub-task, for a progress line. A task is a whole instruction —
@@ -537,7 +550,9 @@ impl<'a> AgentLoop<'a> {
     /// what keeps rust-analyzer from re-indexing every turn, and the same fact
     /// means one added now is not in it yet. The report says so.
     async fn offer_language_server(&self) {
-        if self.depth > 0 || self.rook.offered_server(self.session).unwrap_or(true) {
+        let config = &self.rook.config.agent;
+        if !config.install_servers || self.depth > 0 || self.rook.offered_server(self.session).unwrap_or(true)
+        {
             return;
         }
         let missing = crate::lsp::missing_here(&self.rook.config, &self.rook.workspace);
@@ -685,8 +700,13 @@ impl<'a> AgentLoop<'a> {
     /// one with a person asks, and one with nobody to ask leaves it for whoever
     /// reads the outcome.
     async fn offer_server_update(&self) {
-        let after = self.rook.config.agent.server_update_after_days;
-        if after == 0 || self.depth > 0 || self.rook.offered_update(self.session).unwrap_or(true) {
+        let config = &self.rook.config.agent;
+        let after = config.server_update_after_days;
+        if !config.install_servers
+            || after == 0
+            || self.depth > 0
+            || self.rook.offered_update(self.session).unwrap_or(true)
+        {
             return;
         }
         let Ok(installer) = crate::install::Installer::new(crate::paths::servers_dir()) else { return };
@@ -2144,9 +2164,9 @@ impl<'a> AgentLoop<'a> {
                     Some(verdict) if verdict != "unproven" && child.tools_called.is_empty() => (
                         format!(
                             "checked by {id}, which reached for nothing — no command, no file, \
-                             no page — so `{verdict}` is recollection rather than a check, and \
-                             the claim stands unproven:\n{}",
-                            child.reply
+                             no page — so its `{verdict}` is recollection rather than a check:\n{}\n\n\
+                             VERDICT: unproven — nothing was run or read to settle it",
+                            without_verdict(&child.reply)
                         ),
                         Some("unproven"),
                     ),
@@ -2155,8 +2175,8 @@ impl<'a> AgentLoop<'a> {
                     // the outcome this exists to make visible.
                     None => (
                         format!(
-                            "checked by {id}, and it did not answer with a verdict, so the claim \
-                             is unchecked:\n{}",
+                            "checked by {id}, and it did not answer with a verdict:\n{}\n\n\
+                             The claim is unchecked — neither held nor failed",
                             child.reply
                         ),
                         None,

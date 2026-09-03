@@ -78,6 +78,13 @@ const SCENARIOS: &[Scenario] = &[
     },
 ];
 
+/// No server is ever asked anything here, and a fetched one served from the
+/// next session on — which a scenario never has. Off, or every scenario
+/// downloaded rust-analyzer first.
+fn config_for(model: &str) -> String {
+    format!("[agent]\nmodel = \"{model}\"\ninstall_servers = false\n")
+}
+
 fn expect(held: bool, why: &str, turn: &Turn) -> Result<()> {
     match held {
         true => Ok(()),
@@ -112,7 +119,7 @@ pub fn smoke(model: Option<String>) -> Result<()> {
     // is listening is one question, and `rook models` is the command the failure
     // itself recommends.
     let home = tempfile::tempdir()?;
-    std::fs::write(home.path().join("config.toml"), format!("[agent]\nmodel = \"{model}\"\n"))?;
+    std::fs::write(home.path().join("config.toml"), config_for(&model))?;
     let reachable = Command::new(&rook)
         .env("ROOK_HOME", home.path())
         .env("ROOK_LOG", "error")
@@ -128,7 +135,7 @@ pub fn smoke(model: Option<String>) -> Result<()> {
     for scenario in SCENARIOS {
         let home = tempfile::tempdir()?;
         let workspace = tempfile::tempdir()?;
-        std::fs::write(home.path().join("config.toml"), format!("[agent]\nmodel = \"{model}\"\n"))?;
+        std::fs::write(home.path().join("config.toml"), config_for(&model))?;
         for (name, body) in scenario.seed {
             std::fs::write(workspace.path().join(name), body)?;
         }

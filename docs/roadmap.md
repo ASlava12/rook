@@ -994,8 +994,18 @@ written `path` three times that `path` was missing — and one was the model's,
 a checker that narrated what it would run and stopped. All three are
 answered: a server is probed before it is offered, the message names the shape
 that was wrong, and a checker that ends without a verdict is asked once, in its
-own session, to do what it described and commit. What is left is watching how often it is red and why, and moving to a larger tag if
-the small one cannot carry the four scenarios.
+own session, to do what it described and commit. The second reading found
+two more. A checker's `holds` was discounted for reaching for nothing, and the
+report said so in its first line and quoted the `VERDICT: holds` in its last —
+which is the line a small model reads, and the parent answered "verified as
+true based on the recollection". The report now ends with the ruling and the
+quoted line is gone. And every scenario began by downloading rust-analyzer:
+the smoke runs autonomous in a Rust workspace with no server, which is exactly
+when the offer fetches one. `[agent] install_servers = false` exists now, for
+the runner and for anyone who would rather choose their own. What is left is
+watching how often it is red and why, and moving to a larger tag if the small
+one cannot carry the four scenarios: two of the four failed this time on the
+model narrating a step instead of taking it.
 
 **A server fetched once is one somebody has to remember to update.** Now the
 agent remembers: past `[agent] server_update_after_days` (thirty by default,

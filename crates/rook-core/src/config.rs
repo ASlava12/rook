@@ -115,6 +115,9 @@ pub struct AgentConfig {
     /// Days after which a server `rook lsp install` fetched is offered for
     /// updating, once per session. 0 never offers.
     pub server_update_after_days: u64,
+    /// Offer to install a language server the workspace lacks, and to update
+    /// one this agent fetched. Off, a missing server is simply not served.
+    pub install_servers: bool,
     /// How long the model may go silent mid-stream before the turn gives up.
     /// A dropped connection is indistinguishable from deep thought without it.
     pub stream_idle_timeout_secs: u64,
@@ -294,6 +297,7 @@ impl Default for AgentConfig {
             max_parallel_subagents: 4,
             max_subagents_per_turn: 16,
             server_update_after_days: 30,
+            install_servers: true,
             max_skill_cards: 50,
             stream_idle_timeout_secs: 90,
             answer_timeout_secs: 600,

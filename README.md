@@ -371,6 +371,7 @@ autonomous, and an open question in the outcome when read-only. A server
 fetched this way is offered again the same way once it is older than
 `[agent] server_update_after_days` (thirty by default, zero for never) — a
 server fetched once is otherwise one somebody has to remember to update.
+`[agent] install_servers = false` turns both offers off.
 
 ### Hooks
 

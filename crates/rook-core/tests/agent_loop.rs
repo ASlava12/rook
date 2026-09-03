@@ -3516,6 +3516,11 @@ async fn a_verdict_reached_without_touching_anything_is_not_a_check() {
         .body;
     assert!(said.contains("unproven"), "a recollection must not read as a pass: {said}");
     assert!(said.contains("reached for nothing"), "and must say why: {said}");
+    // A small model reads the last line. The checker's `holds` is not left
+    // there to be read as the answer; the ruling is.
+    assert!(said.trim_end().ends_with("nothing was run or read to settle it"), "{said}");
+    assert!(!said.contains("VERDICT: holds"), "the discounted line is not quoted: {said}");
+    assert!(said.contains("I recall that it did."), "the rest of what it said is: {said}");
     assert_eq!(outcome.delegated.len(), 1);
 }
 

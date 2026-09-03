@@ -623,3 +623,34 @@ async fn at_read_only_a_stale_server_is_an_open_question() {
     assert!(outcome.open_questions[0].contains("rook lsp update"), "{:?}", outcome.open_questions);
     assert!(outcome.open_questions[0].contains("40 days ago"), "{:?}", outcome.open_questions);
 }
+
+/// Off, nothing is offered, asked, fetched or left open: a missing server is
+/// simply not served. The smoke runner turns it off, and so can anyone who
+/// would rather choose their own servers.
+#[tokio::test]
+async fn with_installing_off_a_missing_server_is_nobody_s_business() {
+    let _one = one_at_a_time().await;
+    let home = tempfile::tempdir().unwrap();
+    let config = rook_core::Config {
+        agent: rook_core::config::AgentConfig { install_servers: false, ..Default::default() },
+        lsp: vec![rook_lsp::ServerConfig {
+            language: "go".into(),
+            command: "gopls".into(),
+            extensions: vec!["go".into()],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let (_workspace, rook) = a_rust_workspace_with(home.path(), config);
+    assert!(!rook_core::lsp::missing_here(&rook.config, &rook.workspace).is_empty(), "rust is unserved");
+    let session = rook.start_session("s").unwrap();
+
+    let mut agent = AgentLoop::new(&rook, Arc::new(Says("ok")), session);
+    agent.allow_everything_not_denied();
+    let outcome = agent.run("hello").await.unwrap();
+
+    assert!(outcome.open_questions.is_empty(), "{:?}", outcome.open_questions);
+    assert!(outcome.decisions.is_empty(), "{:?}", outcome.decisions);
+    assert!(!home.path().join("servers").join("rust-analyzer").exists());
+    assert!(!rook.offered_server(session).unwrap(), "not even marked as offered");
+}
