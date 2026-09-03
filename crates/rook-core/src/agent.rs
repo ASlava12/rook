@@ -2147,12 +2147,25 @@ impl<'a> AgentLoop<'a> {
         // for itself.
         child.effort = self.effort;
 
-        let outcome = Box::pin(child.run_with(instruction, |progress| {
+        let mut relay = |progress: Progress<'_>| {
             if let Progress::Delta(Delta::ToolCall(call)) = progress {
                 let _ = doing.send((0, call.name.clone()));
             }
-        }))
-        .await?;
+        };
+        let mut outcome = Box::pin(child.run_with(instruction, &mut relay)).await?;
+        // A small model narrates what it would run and stops, or reasons its
+        // way to the end and forgets the line. Asked once, in the same session,
+        // it usually does what it said; a second silence is reported as one.
+        if verdict_in(&outcome.reply).is_none() {
+            let finished = Box::pin(child.run_with(VERDICT_NUDGE, &mut relay)).await?;
+            outcome.reply = finished.reply;
+            outcome.stopped = finished.stopped;
+            outcome.steps += finished.steps;
+            outcome.input_tokens += finished.input_tokens;
+            outcome.output_tokens += finished.output_tokens;
+            outcome.cached_tokens += finished.cached_tokens;
+            outcome.tools_called.extend(finished.tools_called);
+        }
         Ok((rook_store::format_session_id(session), outcome))
     }
 
@@ -2802,6 +2815,11 @@ fn collected(task: &str, result: &Landed, outcome: &mut TurnOutcome) -> String {
 /// The shape of the answer is part of the instruction because a verdict that can
 /// be hedged is one that will be: "looks reasonable" is what a model says when it
 /// has read something and run nothing.
+const VERDICT_NUDGE: &str = "\
+You stopped without a verdict. If something is still to be run or read, do it now \
+with the tools rather than describing it; then end with exactly one of \
+`VERDICT: holds`, `VERDICT: fails`, `VERDICT: unproven`.";
+
 const VERDICT_INSTRUCTIONS: &str = "\
 You are checking a claim somebody else made. You did not do the work and you have \
 no stake in it being true.

@@ -3471,6 +3471,8 @@ async fn a_check_that_will_not_commit_is_not_a_pass() {
     let script = vec![
         call("verify", serde_json::json!({ "claim": "the build is clean" })),
         reply("seems reasonable to me"),
+        // Asked once to finish, and still will not.
+        reply("still seems fine"),
         reply("done"),
     ];
     let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
@@ -3686,4 +3688,83 @@ async fn a_refused_reach_is_not_a_check_either() {
         .body;
     assert!(said.contains("unproven"), "a refused reach is not evidence: {said}");
     assert!(said.contains("reached for nothing"), "{said}");
+}
+
+/// A checker that narrates what it would run and stops has not answered. Asked
+/// once more in its own session, it does the thing and commits; the parent sees
+/// the verdict, not the plan.
+#[tokio::test]
+async fn a_checker_that_stops_without_a_verdict_is_asked_once_to_finish() {
+    let f = fixture();
+    let session = f.rook.start_session("nudge").unwrap();
+    std::fs::write(f.workspace.path().join("lib.rs"), "fn add(a: i32, b: i32) -> i32 { a - b }\n").unwrap();
+
+    let script = vec![
+        call("verify", serde_json::json!({ "claim": "add returns the sum" })),
+        reply("To verify this I will read lib.rs and quote the line."),
+        call("read_file", serde_json::json!({ "path": "lib.rs" })),
+        reply("`a - b` subtracts.\n\nVERDICT: fails"),
+        reply("it fails"),
+    ];
+    let provider = ScriptedProvider::new(script);
+    let seen = provider.share();
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), session);
+    agent.allow_everything_not_denied();
+    let outcome = agent.run("check it").await.unwrap();
+
+    let said = f
+        .rook
+        .transcript(session, 0, usize::MAX, 4096)
+        .unwrap()
+        .into_iter()
+        .rfind(|e| e.kind == "tool-result")
+        .unwrap()
+        .body;
+    assert!(said.contains("VERDICT: fails"), "the verdict reached after the nudge stands: {said}");
+    assert!(!said.contains("did not answer"), "{said}");
+    let nudged = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| r.messages.last().is_some_and(|m| m.content.contains("stopped without a verdict")))
+        .count();
+    assert_eq!(nudged, 1, "asked once, in the checker's own session");
+    assert_eq!(outcome.delegated.len(), 1, "and not as a second checker");
+}
+
+/// Asked once. A checker that will not commit when told plainly to is reported
+/// as not having answered, not asked a third time.
+#[tokio::test]
+async fn a_checker_silent_twice_is_reported_as_silent() {
+    let f = fixture();
+    let session = f.rook.start_session("silent").unwrap();
+
+    let script = vec![
+        call("verify", serde_json::json!({ "claim": "the release shipped" })),
+        reply("I would look at the changelog."),
+        reply("The changelog would say."),
+        reply("unchecked then"),
+    ];
+    let provider = ScriptedProvider::new(script);
+    let seen = provider.share();
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), session);
+    agent.allow_everything_not_denied();
+    agent.run("check it").await.unwrap();
+
+    let said = f
+        .rook
+        .transcript(session, 0, usize::MAX, 4096)
+        .unwrap()
+        .into_iter()
+        .rfind(|e| e.kind == "tool-result")
+        .unwrap()
+        .body;
+    assert!(said.contains("did not answer with a verdict"), "{said}");
+    let nudged = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| r.messages.last().is_some_and(|m| m.content.contains("stopped without a verdict")))
+        .count();
+    assert_eq!(nudged, 1, "once: {nudged}");
 }

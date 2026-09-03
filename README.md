@@ -252,7 +252,9 @@ verify { "claim": "the tests pass after the change", "settles": "cargo test -p r
 
 The checker runs in its own session with every tool that changes something
 withheld — not asked not to use them, not given them — and must end with
-`VERDICT: holds`, `fails` or `unproven`. A reply that will not commit is reported
+`VERDICT: holds`, `fails` or `unproven`. A checker that stops without one — a
+small model describes the command it would run and ends there — is asked once,
+in its own session, to run it and commit. A reply that still will not is reported
 as unchecked rather than as a pass, because "looks reasonable" is what gets said
 after reading something and running nothing.
 

@@ -991,9 +991,10 @@ coin-flip teaches everyone to stop reading it. Its first reading paid: of
 three failures, two were ours — rustup's `rust-analyzer` shim was offered as a
 server on the strength of the file, and `edit_file` told a model that had
 written `path` three times that `path` was missing — and one was the model's,
-a checker that gave no verdict. Both of ours are fixed; a server is probed
-before it is offered, and the message names the shape that was wrong. What is
-left is watching how often it is red and why, and moving to a larger tag if
+a checker that narrated what it would run and stopped. All three are
+answered: a server is probed before it is offered, the message names the shape
+that was wrong, and a checker that ends without a verdict is asked once, in its
+own session, to do what it described and commit. What is left is watching how often it is red and why, and moving to a larger tag if
 the small one cannot carry the four scenarios.
 
 ## After that
