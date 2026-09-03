@@ -243,6 +243,11 @@ const CHANGES_THINGS: &[&str] =
 /// judging, and is not a sandbox.
 const CHANGES_FILES: &[&str] = &["write_file", "edit_file", "delete_file"];
 
+fn system_risk(recipe: &crate::install::Recipe) -> (serde_json::Value, rook_tools::policy::Risk) {
+    let command = recipe.system_command().unwrap_or_default();
+    (serde_json::json!({ "command": command }), rook_tools::policy::Risk::Execute(command))
+}
+
 /// The verdict a checker ended with, if it ended with one of the three.
 ///
 /// Tolerant of how a model dresses the line — bold, a bullet, a different case,
@@ -600,8 +605,14 @@ impl<'a> AgentLoop<'a> {
                 let answer =
                     asker.ask(&[asked]).await.into_iter().next().and_then(|a| a.chosen.into_iter().next());
                 match answer.as_deref() {
-                    Some(chosen) if chosen == local => How::Fetch,
-                    Some(chosen) if Some(chosen) == system.as_deref() => How::System,
+                    Some(chosen) if chosen == local => {
+                        self.answered(&self.fetch_risk(recipe).1);
+                        How::Fetch
+                    }
+                    Some(chosen) if Some(chosen) == system.as_deref() => {
+                        self.answered(&system_risk(recipe).1);
+                        How::System
+                    }
                     _ => {
                         self.report(Reported::Decision(format!(
                             "{} not installed — declined",
@@ -648,21 +659,21 @@ impl<'a> AgentLoop<'a> {
         }
     }
 
+    /// A person who chose an install through the asker has answered; the
+    /// approver asking about the command or the download it takes would be
+    /// the same question twice. Granted for the run rather than once, which
+    /// is the grant the policy has, and a deny rule still comes first.
+    fn answered(&self, risk: &rook_tools::policy::Risk) {
+        self.policy.grant_for_run(&risk.subject());
+    }
+
     async fn install_with_system(
         &self,
         recipe: &crate::install::Recipe,
     ) -> std::result::Result<String, String> {
+        let (args, risk) = system_risk(recipe);
         let command = recipe.system_command().ok_or("no system installer for it")?;
-        let args = serde_json::json!({ "command": command });
-        if let Some(refusal) = self
-            .gate_risk(
-                "run_command",
-                &args,
-                rook_tools::policy::Risk::Execute(command.clone()),
-                Shown::Nothing,
-            )
-            .await
-        {
+        if let Some(refusal) = self.gate_risk("run_command", &args, risk, Shown::Nothing).await {
             return Err(refusal);
         }
         let out = self.tools.call(&self.tool_ctx, "run_command", &args).await.map_err(|e| e.to_string())?;
@@ -676,10 +687,20 @@ impl<'a> AgentLoop<'a> {
         &self,
         recipe: &crate::install::Recipe,
     ) -> std::result::Result<crate::install::Installed, String> {
-        // Gated as what it is: a command for the sources that are one, a
-        // request to the release host for the one that is a download.
+        let (args, risk) = self.fetch_risk(recipe);
+        if let Some(refusal) = self.gate_risk("lsp install", &args, risk, Shown::Nothing).await {
+            return Err(refusal);
+        }
+        let installer = crate::install::Installer::new(crate::paths::servers_dir())?;
+        installer.install(recipe, self.rook.env()).await
+    }
+
+    /// What fetching a server is, for the policy: a command for the sources
+    /// that are one, a request to the release host for the one that is a
+    /// download.
+    fn fetch_risk(&self, recipe: &crate::install::Recipe) -> (serde_json::Value, rook_tools::policy::Risk) {
         let into = crate::paths::servers_dir().join(recipe.command).join("current");
-        let (args, risk) = match recipe.command_into(&into) {
+        match recipe.command_into(&into) {
             Some((command, _)) => {
                 (serde_json::json!({ "command": command }), rook_tools::policy::Risk::Execute(command))
             }
@@ -687,12 +708,7 @@ impl<'a> AgentLoop<'a> {
                 let api = "https://api.github.com";
                 (serde_json::json!({ "url": api }), rook_tools::policy::Risk::Network(api.into()))
             }
-        };
-        if let Some(refusal) = self.gate_risk("lsp install", &args, risk, Shown::Nothing).await {
-            return Err(refusal);
         }
-        let installer = crate::install::Installer::new(crate::paths::servers_dir())?;
-        installer.install(recipe, self.rook.env()).await
     }
 
     /// A server fetched once is one somebody has to remember to update. Past
@@ -731,7 +747,13 @@ impl<'a> AgentLoop<'a> {
                 let asked = rook_tools::ask::Question { question, choices, multi: false };
                 let answer =
                     asker.ask(&[asked]).await.into_iter().next().and_then(|a| a.chosen.into_iter().next());
-                answer.as_deref() == Some("update now")
+                let chosen = answer.as_deref() == Some("update now");
+                if chosen {
+                    for (recipe, ..) in &stale {
+                        self.answered(&self.fetch_risk(recipe).1);
+                    }
+                }
+                chosen
             }
             (Stance::Assist, None) | (Stance::ReadOnly, _) => {
                 self.report(Reported::Open(format!(

@@ -654,3 +654,44 @@ async fn with_installing_off_a_missing_server_is_nobody_s_business() {
     assert!(!home.path().join("servers").join("rust-analyzer").exists());
     assert!(!rook.offered_server(session).unwrap(), "not even marked as offered");
 }
+
+/// The person's choice is the approval. Asked "install it?" and answering
+/// "fetch it", they were then asked by the approver whether the download may
+/// happen — the same question, once more, at the step that does it.
+#[tokio::test]
+async fn a_person_who_chose_to_fetch_is_not_asked_again_by_the_approver() {
+    let _one = one_at_a_time().await;
+    let payload = b"#!/bin/sh\necho rust-analyzer\n".to_vec();
+    let gz = Arc::new(gzipped(&payload));
+    let api = github("rust-analyzer-x86_64-unknown-linux-gnu.gz", gz.clone(), sha256_of(&gz)).await;
+    unsafe { std::env::set_var("ROOK_RELEASE_API", &api) };
+
+    struct NeverApproves;
+    #[async_trait::async_trait]
+    impl rook_tools::policy::Approver for NeverApproves {
+        async fn ask(
+            &self,
+            tool: &str,
+            risk: &rook_tools::policy::Risk,
+            _: Option<&str>,
+        ) -> rook_tools::policy::Approval {
+            panic!("the person already answered; {tool} asked again about {}", risk.describe())
+        }
+    }
+
+    let home = tempfile::tempdir().unwrap();
+    let (_workspace, rook) = a_rust_workspace(home.path());
+    let session = rook.start_session("s").unwrap();
+    let mut agent = AgentLoop::new(&rook, Arc::new(Says("ok")), session);
+    agent.policy.set_stance(rook_tools::policy::Stance::Assist);
+    agent.ask_via(Arc::new(Chooses("fetch into")));
+    agent.approver = Arc::new(NeverApproves);
+    let outcome = agent.run("hello").await.unwrap();
+    unsafe { std::env::remove_var("ROOK_RELEASE_API") };
+
+    assert!(outcome.open_questions.is_empty(), "{:?}", outcome.open_questions);
+    assert_eq!(outcome.decisions.len(), 1, "{:?}", outcome.decisions);
+    assert!(outcome.decisions[0].contains("installed rust-analyzer"), "{:?}", outcome.decisions);
+    let installed = rook_core::install::current("rust-analyzer");
+    assert_eq!(std::fs::read(&installed).unwrap(), payload, "in place: {}", installed.display());
+}
