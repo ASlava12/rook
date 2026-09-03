@@ -1049,6 +1049,9 @@ impl<'a> AgentLoop<'a> {
                         }],
                         tool_call_id: None,
                         cache: false,
+                        // A replayed call is a turn that ended: the thinking
+                        // that led to it is not wanted back, and is not kept.
+                        reasoning: Vec::new(),
                     });
                     open_call = Some(id);
                 }

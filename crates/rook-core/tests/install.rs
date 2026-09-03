@@ -157,6 +157,7 @@ impl Provider for Says {
                 tool_calls: Vec::new(),
                 tool_call_id: None,
                 cache: false,
+                reasoning: Vec::new(),
             },
             stop_reason: StopReason::EndTurn,
             usage: Default::default(),

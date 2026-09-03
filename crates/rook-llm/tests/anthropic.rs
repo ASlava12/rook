@@ -120,6 +120,7 @@ async fn tool_results_are_blocks_in_one_user_message() {
         ],
         tool_call_id: None,
         cache: false,
+        reasoning: Vec::new(),
     };
     let request = Request::new(vec![
         Message::user("do both"),
@@ -209,6 +210,7 @@ async fn a_stream_assembles_text_thinking_and_a_tool_call() {
     let mut stream = provider(url).stream(Request::new(vec![Message::user("go")])).await.unwrap();
     let (mut text, mut thinking) = (String::new(), String::new());
     let mut calls = Vec::new();
+    let mut blocks: Vec<serde_json::Value> = Vec::new();
     let mut done = None;
     while let Some(delta) = stream.next().await {
         match delta.unwrap() {
@@ -216,6 +218,7 @@ async fn a_stream_assembles_text_thinking_and_a_tool_call() {
             Delta::Reasoning(t) => thinking.push_str(&t),
             Delta::ToolCall(c) => calls.push(c),
             Delta::Done { stop_reason, usage, model } => done = Some((stop_reason, usage, model)),
+            Delta::ReasoningDone(block) => blocks.push(block),
         }
     }
 
@@ -369,6 +372,7 @@ async fn a_marked_conversation_turn_carries_the_breakpoint_on_its_last_block() {
         tool_calls: vec![ToolCall { id: "a".into(), name: "t".into(), arguments: serde_json::json!({}) }],
         tool_call_id: None,
         cache: true,
+        reasoning: Vec::new(),
     };
     provider(url)
         .complete(Request::new(vec![Message::user("go"), assistant, Message::user("next")]))
@@ -441,4 +445,133 @@ fn an_unreadable_effort_setting_falls_back_rather_than_failing_a_turn() {
     assert_eq!(rook_llm::Effort::parse("  MAX "), Some(rook_llm::Effort::Max));
     assert_eq!(rook_llm::Effort::parse("very"), None);
     assert_eq!(rook_llm::Effort::default().as_str(), "high");
+}
+
+/// The round trip this dialect refuses without: a turn thinks, calls a tool,
+/// and continues. The thinking block has to come back beside the call it led
+/// to, whole and signed and before it — the API answers a request that dropped
+/// it with a 400, and every turn with a tool call has one.
+#[tokio::test]
+async fn thinking_comes_back_beside_the_call_it_led_to() {
+    let events = concat!(
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"the file\"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" first\"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"EqQBCgIYAh\"}}\n\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"read_file\",\"input\":{}}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"a.txt\\\"}\"}}\n\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":7}}\n\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    );
+    let (url, _) = serve("200 OK", "text/event-stream", events).await;
+
+    let mut stream =
+        provider(url).stream(Request::new(vec![Message::user("what is in a.txt?")])).await.unwrap();
+    let mut assembler = rook_llm::Assembler::default();
+    while let Some(delta) = stream.next().await {
+        assembler.push(delta.unwrap()).unwrap();
+    }
+    let thought = assembler.finish().message;
+
+    assert_eq!(thought.reasoning.len(), 1, "the block is kept: {:?}", thought.reasoning);
+    assert_eq!(thought.reasoning[0]["type"], "thinking");
+    assert_eq!(thought.reasoning[0]["thinking"], "the file first", "assembled from its deltas");
+    assert_eq!(thought.reasoning[0]["signature"], "EqQBCgIYAh", "and signed, or it is refused back");
+
+    // The turn goes on: the assistant message and the tool's answer.
+    let (url, seen) = serve("200 OK", "application/json", DONE).await;
+    let answer = Message {
+        role: Role::Tool,
+        content: "hello".into(),
+        tool_calls: vec![],
+        tool_call_id: Some("toolu_1".into()),
+        cache: false,
+        reasoning: Vec::new(),
+    };
+    provider(url)
+        .complete(Request::new(vec![Message::user("what is in a.txt?"), thought, answer]))
+        .await
+        .unwrap();
+
+    let sent = seen.lock().unwrap().clone().unwrap();
+    let assistant = sent["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["role"] == "assistant")
+        .expect("the assistant turn is replayed");
+    let blocks = assistant["content"].as_array().unwrap();
+    assert_eq!(blocks[0]["type"], "thinking", "first, as the API orders them: {blocks:?}");
+    assert_eq!(blocks[0]["signature"], "EqQBCgIYAh", "verbatim, signature and all");
+    assert!(
+        blocks.iter().any(|b| b["type"] == "tool_use"),
+        "and still beside the call it led to: {blocks:?}"
+    );
+}
+
+/// A redacted block is opaque and goes back as it came: reconstructing one is
+/// not possible and not needed.
+#[tokio::test]
+async fn a_redacted_thinking_block_is_carried_whole() {
+    let events = concat!(
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"redacted_thinking\",\"data\":\"EroBCkYIA\"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"done\"}}\n\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    );
+    let (url, _) = serve("200 OK", "text/event-stream", events).await;
+
+    let mut stream = provider(url).stream(Request::new(vec![Message::user("go")])).await.unwrap();
+    let mut assembler = rook_llm::Assembler::default();
+    while let Some(delta) = stream.next().await {
+        assembler.push(delta.unwrap()).unwrap();
+    }
+    let message = assembler.finish().message;
+
+    assert_eq!(message.reasoning.len(), 1, "{:?}", message.reasoning);
+    assert_eq!(message.reasoning[0]["type"], "redacted_thinking");
+    assert_eq!(message.reasoning[0]["data"], "EroBCkYIA");
+}
+
+/// A block the stream never signed is one it did not finish, and sending it
+/// back is a refused request. Dropped rather than guessed at.
+#[tokio::test]
+async fn an_unsigned_thinking_block_is_not_carried() {
+    let events = concat!(
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"cut off\"}}\n\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    );
+    let (url, _) = serve("200 OK", "text/event-stream", events).await;
+
+    let mut stream = provider(url).stream(Request::new(vec![Message::user("go")])).await.unwrap();
+    let mut assembler = rook_llm::Assembler::default();
+    while let Some(delta) = stream.next().await {
+        assembler.push(delta.unwrap()).unwrap();
+    }
+    let shown = assembler.reasoning().to_string();
+    let message = assembler.finish().message;
+
+    assert!(message.reasoning.is_empty(), "nothing to send back: {:?}", message.reasoning);
+    assert_eq!(shown, "cut off", "and the person still saw what there was");
+}
+
+/// The non-streaming path answers with the same blocks, so a caller that does
+/// not stream is not the one that gets refused.
+#[tokio::test]
+async fn a_whole_response_carries_its_thinking_too() {
+    const THOUGHT: &str = r#"{"model":"claude-opus-5","stop_reason":"tool_use","content":[
+        {"type":"thinking","thinking":"weighing it","signature":"sig-1"},
+        {"type":"text","text":"reading"},
+        {"type":"tool_use","id":"toolu_2","name":"read_file","input":{"path":"a.txt"}}],
+        "usage":{"input_tokens":5,"output_tokens":6}}"#;
+    let (url, _) = serve("200 OK", "application/json", THOUGHT).await;
+
+    let response = provider(url).complete(Request::new(vec![Message::user("go")])).await.unwrap();
+
+    assert_eq!(response.message.content, "reading");
+    assert_eq!(response.message.tool_calls[0].id, "toolu_2");
+    assert_eq!(response.message.tool_calls[0].arguments["path"], "a.txt");
+    assert_eq!(response.message.reasoning.len(), 1, "{:?}", response.message.reasoning);
+    assert_eq!(response.message.reasoning[0]["signature"], "sig-1");
 }

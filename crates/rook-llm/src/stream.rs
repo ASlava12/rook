@@ -13,8 +13,15 @@ use crate::{Message, Response, Result, StopReason, ToolCall, Usage};
 pub enum Delta {
     Text(String),
     Reasoning(String),
+    /// A whole block of reasoning, as the provider will want it back. Text for
+    /// a person is [`Delta::Reasoning`]; this is for the wire.
+    ReasoningDone(serde_json::Value),
     ToolCall(ToolCall),
-    Done { stop_reason: StopReason, usage: Usage, model: String },
+    Done {
+        stop_reason: StopReason,
+        usage: Usage,
+        model: String,
+    },
 }
 
 pub type ResponseStream = Pin<Box<dyn Stream<Item = Result<Delta>> + Send>>;
@@ -26,6 +33,7 @@ pub type ResponseStream = Pin<Box<dyn Stream<Item = Result<Delta>> + Send>>;
 pub struct Assembler {
     text: String,
     reasoning: String,
+    reasoning_blocks: Vec<serde_json::Value>,
     tool_calls: Vec<ToolCall>,
     finished: Option<(StopReason, Usage, String)>,
 }
@@ -35,6 +43,7 @@ impl Assembler {
         match delta {
             Delta::Text(t) => self.text.push_str(&t),
             Delta::Reasoning(t) => self.reasoning.push_str(&t),
+            Delta::ReasoningDone(block) => self.reasoning_blocks.push(block),
             Delta::ToolCall(c) => self.tool_calls.push(c),
             Delta::Done { stop_reason, usage, model } => self.finished = Some((stop_reason, usage, model)),
         }
@@ -65,6 +74,7 @@ impl Assembler {
                 tool_calls: self.tool_calls,
                 tool_call_id: None,
                 cache: false,
+                reasoning: self.reasoning_blocks,
             },
             stop_reason,
             usage,

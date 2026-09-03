@@ -90,6 +90,7 @@ async fn a_tool_result_names_the_call_it_answers() {
         }],
         tool_call_id: None,
         cache: false,
+        reasoning: Vec::new(),
     };
     let request =
         Request::new(vec![Message::user("read a.txt"), asked, Message::tool_result("read_file-0", "hello")]);
@@ -222,6 +223,8 @@ async fn a_stream_yields_text_as_it_arrives_and_calls_whole() {
         match delta.unwrap() {
             Delta::Text(t) => text.push_str(&t),
             Delta::Reasoning(t) => reasoning.push_str(&t),
+            // Google signs nothing and asks for nothing back.
+            Delta::ReasoningDone(block) => panic!("no blocks here: {block}"),
             Delta::ToolCall(c) => {
                 assert_eq!(c.arguments["at"], "up", "a call is delivered complete or not at all");
                 calls += 1;

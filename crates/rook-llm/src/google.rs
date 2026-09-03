@@ -179,7 +179,14 @@ impl Provider for Google {
 
         Ok(Response {
             stop_reason: stop_reason(finish.as_deref(), !tool_calls.is_empty()),
-            message: Message { role: Role::Assistant, content, tool_calls, tool_call_id: None, cache: false },
+            message: Message {
+                role: Role::Assistant,
+                content,
+                tool_calls,
+                tool_call_id: None,
+                cache: false,
+                reasoning: Vec::new(),
+            },
             usage: wire.usage.into(),
             model: wire.model_version.unwrap_or_else(|| self.model.clone()),
         })

@@ -23,6 +23,16 @@ pub struct Message {
     /// without prompt caching ignore it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cache: bool,
+    /// The model's own reasoning, as the provider gave it back and expects it
+    /// returned: whole blocks, never read or rebuilt here.
+    ///
+    /// Anthropic signs them, and refuses the next request of a turn whose tool
+    /// call arrives without the thinking that led to it. Kept verbatim because
+    /// a signature covers bytes: anything reconstructed is a different block,
+    /// and a field a later version adds would be dropped by anything that
+    /// parsed rather than carried.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasoning: Vec<serde_json::Value>,
 }
 
 impl Message {
@@ -40,7 +50,14 @@ impl Message {
     }
 
     fn of(role: Role, text: impl Into<String>) -> Self {
-        Self { role, content: text.into(), tool_calls: vec![], tool_call_id: None, cache: false }
+        Self {
+            role,
+            content: text.into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            cache: false,
+            reasoning: Vec::new(),
+        }
     }
 
     /// Mark this as the end of a stable prefix worth caching.

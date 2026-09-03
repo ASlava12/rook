@@ -621,7 +621,7 @@ impl App {
                         Progress::Spent { input, output, cached } => {
                             TurnEvent::Spent { input, output, cached }
                         }
-                        Progress::Delta(Delta::Done { .. }) => return,
+                        Progress::Delta(Delta::Done { .. } | Delta::ReasoningDone(_)) => return,
                     };
                     let _ = emit.send(event);
                 })

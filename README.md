@@ -757,16 +757,15 @@ lose people's trust:
   run while `rookd` holds the lock. Every read routes over the daemon's API
   instead and prints the same thing; writes say where the lock is
   ([ADR-0006](docs/adr/0006-single-writer-store.md)).
-- **Reasoning is not carried across a tool call.** A model that thought before
-  calling a tool gets its own thinking back as nothing: `Reasoning` is logged for
-  a person to read and is not replayed, and the assistant message pushed back
-  into the turn carries content and tool calls only. What that costs is not known
-  and should not be guessed: either the model merely re-derives its plan each
-  step, or Anthropic refuses a turn that dropped the thinking blocks it asked to
-  have returned — and since nothing here has run against a live model, both are
-  open. `cargo xtask smoke --model anthropic/…` settles it in one run: the
-  scenarios that edit a file and read a command's output both call a tool, so a
-  refusal would be the first thing they report.
+- **Reasoning is carried across a tool call, and only for Anthropic.** It was
+  not, and that was a turn Anthropic refuses outright: with extended thinking on,
+  a tool call must come back beside the signed thinking block that led to it. The
+  block is now kept whole — never parsed, never rebuilt, because a signature
+  covers bytes — and replayed first in the assistant message for the rest of that
+  turn. Earlier turns carry none, which is what the API expects. What it costs
+  the other two dialects is nothing: they sign nothing and ask for nothing back.
+  Whether a capable model reasons better for having its own thinking returned is
+  still unmeasured here.
 - **No structured plan state.** The agent is asked for a plan in prose and told
   not to keep a checklist — deliberately, on the strength of someone else's
   benchmark ([ADR-0010](docs/adr/0010-no-todo-tool.md)). There is nothing for a

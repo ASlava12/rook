@@ -1148,6 +1148,16 @@ hold the one invariant that matters there: every module loaded is embedded and
 served as script. [ADR-0012](adr/0012-hand-written-modules-no-bundler.md)
 supersedes the one-file part of ADR-0007 and keeps the rest.
 
+**Thinking is carried across a tool call.** A turn that thought, called a
+tool and went on was sending Anthropic an assistant message with the call and
+not the signed thinking block that led to it — which that API refuses, so
+every turn with a tool call against a thinking model would have failed on its
+second request. The blocks are kept whole and replayed first, never parsed and
+never rebuilt: a signature covers bytes, and a block reconstructed from parsed
+fields is a different block. Unsigned blocks — a stream that did not finish —
+are dropped rather than guessed at, and earlier turns carry none, which is what
+the API expects. The test is the round trip, and it fails without the replay.
+
 **A request refused for what the agent added is asked again without it.** The
 three dialects decide by model name whether to send a reasoning effort, and a
 gateway serving something else under that name is where a name is wrong: the

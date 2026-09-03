@@ -115,6 +115,7 @@ impl Provider for OpenAiCompatible {
                 tool_calls,
                 tool_call_id: None,
                 cache: false,
+                reasoning: Vec::new(),
             },
             stop_reason,
             usage: Usage {

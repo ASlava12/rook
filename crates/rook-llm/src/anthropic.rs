@@ -159,13 +159,20 @@ impl Provider for Anthropic {
 
         let mut content = String::new();
         let mut tool_calls = Vec::new();
+        let mut reasoning = Vec::new();
         for block in wire.content {
-            match block {
-                Block::Text { text } => content.push_str(&text),
-                Block::ToolUse { id, name, input } => {
-                    tool_calls.push(ToolCall { id, name, arguments: input })
-                }
-                Block::Other => {}
+            match block.get("type").and_then(serde_json::Value::as_str) {
+                Some("text") => content
+                    .push_str(block.get("text").and_then(serde_json::Value::as_str).unwrap_or_default()),
+                Some("tool_use") => tool_calls.push(ToolCall {
+                    id: block.get("id").and_then(serde_json::Value::as_str).unwrap_or_default().into(),
+                    name: block.get("name").and_then(serde_json::Value::as_str).unwrap_or_default().into(),
+                    arguments: block.get("input").cloned().unwrap_or(serde_json::Value::Null),
+                }),
+                // Carried, not read: the signature covers these bytes, and the
+                // next request of this turn is refused without them.
+                Some("thinking" | "redacted_thinking") => reasoning.push(block),
+                _ => {}
             }
         }
 
@@ -177,7 +184,14 @@ impl Provider for Anthropic {
             StopReason::ToolUse
         };
         Ok(Response {
-            message: Message { role: Role::Assistant, content, tool_calls, tool_call_id: None, cache: false },
+            message: Message {
+                role: Role::Assistant,
+                content,
+                tool_calls,
+                tool_call_id: None,
+                cache: false,
+                reasoning,
+            },
             stop_reason,
             usage: Usage {
                 input_tokens: wire.usage.input_tokens,
@@ -214,6 +228,10 @@ impl Provider for Anthropic {
             // the block index they belong to.
             let mut building: std::collections::BTreeMap<usize, (String, String, String)> =
                 Default::default();
+            // Thinking, by block index: the text and the signature that makes it
+            // acceptable back. Kept apart from `building` because a turn can have
+            // both, and their order on the wire is not the order they finish.
+            let mut thinking: std::collections::BTreeMap<usize, (String, String)> = Default::default();
 
             'outer: loop {
                 let chunk = match tokio::time::timeout(idle, bytes.next()).await {
@@ -242,17 +260,40 @@ impl Provider for Anthropic {
                                 usage.cache_read_tokens = message.usage.cache_read_input_tokens;
                                 usage.cache_write_tokens = message.usage.cache_creation_input_tokens;
                             }
-                            Event::ContentBlockStart { index, content_block } => {
-                                if let Block::ToolUse { id, name, .. } = content_block {
+                            Event::ContentBlockStart { index, content_block } => match content_block {
+                                Block::ToolUse { id, name } => {
                                     building.insert(index, (id, name, String::new()));
                                 }
-                            }
+                                Block::Thinking => {
+                                    thinking.insert(index, (String::new(), String::new()));
+                                }
+                                // Opaque by design: it arrives whole and goes
+                                // back whole.
+                                Block::RedactedThinking { data } => {
+                                    yield Delta::ReasoningDone(
+                                        serde_json::json!({ "type": "redacted_thinking", "data": data }),
+                                    )
+                                }
+                                Block::Other => {}
+                            },
                             Event::ContentBlockDelta { index, delta } => match delta {
                                 BlockDelta::TextDelta { text } if !text.is_empty() => {
                                     yield Delta::Text(text)
                                 }
-                                BlockDelta::ThinkingDelta { thinking } if !thinking.is_empty() => {
-                                    yield Delta::Reasoning(thinking)
+                                BlockDelta::ThinkingDelta { thinking: said } => {
+                                    if let Some(slot) = thinking.get_mut(&index) {
+                                        slot.0.push_str(&said);
+                                    }
+                                    if !said.is_empty() {
+                                        yield Delta::Reasoning(said);
+                                    }
+                                }
+                                // Last, and what makes the block acceptable
+                                // back: a thinking block without it is refused.
+                                BlockDelta::SignatureDelta { signature } => {
+                                    if let Some(slot) = thinking.get_mut(&index) {
+                                        slot.1 = signature;
+                                    }
                                 }
                                 BlockDelta::InputJsonDelta { partial_json } => {
                                     if let Some(slot) = building.get_mut(&index) {
@@ -276,6 +317,16 @@ impl Provider for Anthropic {
                     }
                 }
                 scanned = buffer.len().saturating_sub(1);
+            }
+
+            // Before the calls, as the API wants them ordered, and only the
+            // signed ones: an unsigned block is one this stream did not finish.
+            for (_, (said, signature)) in thinking {
+                if !signature.is_empty() {
+                    yield Delta::ReasoningDone(
+                        serde_json::json!({ "type": "thinking", "thinking": said, "signature": signature }),
+                    );
+                }
             }
 
             let had_tools = !building.is_empty();
@@ -368,7 +419,11 @@ fn wire_request(model: &str, request: &Request, stream: bool) -> serde_json::Val
                 "content": [text_block(&message.content, message.cache, request.cache_ttl)],
             })),
             Role::Assistant => {
-                let mut blocks = Vec::new();
+                // First, as the API orders them, and only when this turn is
+                // still going: thinking is required back beside the tool call
+                // it led to, and is neither wanted nor kept for a turn that
+                // ended — a replayed conversation carries none.
+                let mut blocks: Vec<serde_json::Value> = message.reasoning.clone();
                 if !message.content.trim().is_empty() {
                     blocks.push(text_block(&message.content, false, request.cache_ttl));
                 }
@@ -452,25 +507,27 @@ struct WireResponse {
     #[serde(default)]
     model: Option<String>,
     #[serde(default)]
-    content: Vec<Block>,
+    content: Vec<serde_json::Value>,
     #[serde(default)]
     stop_reason: Option<String>,
     #[serde(default)]
     usage: WireUsage,
 }
 
+/// A block as a stream announces it. The whole block is read from the raw
+/// JSON where it matters — a thinking block is carried verbatim — so this
+/// only has to say which kind started, and with what.
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Block {
-    Text {
-        #[serde(default)]
-        text: String,
-    },
     ToolUse {
         id: String,
         name: String,
+    },
+    Thinking,
+    RedactedThinking {
         #[serde(default)]
-        input: serde_json::Value,
+        data: String,
     },
     #[serde(other)]
     Other,
@@ -531,6 +588,9 @@ enum BlockDelta {
     },
     ThinkingDelta {
         thinking: String,
+    },
+    SignatureDelta {
+        signature: String,
     },
     InputJsonDelta {
         #[serde(default)]

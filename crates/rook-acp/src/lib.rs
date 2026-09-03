@@ -385,7 +385,11 @@ async fn prompt(
                 ),
                 // The protocol has no slot for a running total, and inventing
                 // one as a thought would put accounting in the transcript.
-                Progress::Spent { .. } | Progress::Delta(Delta::Done { .. }) => return,
+                // Nothing to show: the block is the wire's copy of what
+                // `Reasoning` already streamed to the person.
+                Progress::Spent { .. } | Progress::Delta(Delta::Done { .. } | Delta::ReasoningDone(_)) => {
+                    return;
+                }
             };
             peer.notify("session/update", update);
         })

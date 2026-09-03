@@ -66,6 +66,7 @@ fn call(name: &str, args: serde_json::Value) -> Response {
             tool_calls: vec![ToolCall { id: "call_1".into(), name: name.into(), arguments: args }],
             tool_call_id: None,
             cache: false,
+            reasoning: Vec::new(),
         },
         stop_reason: StopReason::ToolUse,
         usage: Usage { input_tokens: 100, output_tokens: 20, ..Default::default() },

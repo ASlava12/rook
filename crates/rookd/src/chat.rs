@@ -246,7 +246,7 @@ async fn turn(
                 Progress::Spent { input, output, cached } => {
                     ChatEvent::Spent { input_tokens: input, output_tokens: output, cached_tokens: cached }
                 }
-                Progress::Delta(Delta::Done { .. }) => return,
+                Progress::Delta(Delta::Done { .. } | Delta::ReasoningDone(_)) => return,
             };
             let _ = emit.send(event);
         })
