@@ -542,10 +542,10 @@ async fn a_server_fetched_long_ago_is_stale_and_a_fresh_one_is_not() {
     installer.install(&RUST_ANALYZER, &here()).await.unwrap();
 
     let month = std::time::Duration::from_secs(30 * 86_400);
-    assert!(installer.stale(month).is_empty(), "just fetched");
+    assert!(rook_core::install::stale(into.path(), month).is_empty(), "just fetched");
 
     backdate(&into.path().join("rust-analyzer").join("current").join(".tag"), 40);
-    let stale = installer.stale(month);
+    let stale = rook_core::install::stale(into.path(), month);
     let commands: Vec<&str> = stale.iter().map(|(recipe, ..)| recipe.command).collect();
     assert_eq!(commands, ["rust-analyzer"]);
     let (recipe, tag, days) = &stale[0];
@@ -577,7 +577,7 @@ async fn an_autonomous_turn_refetches_a_server_past_its_age() {
     let tag = servers.join("rust-analyzer").join("current").join(".tag");
     backdate(&tag, 40);
     assert_eq!(
-        installer.stale(std::time::Duration::from_secs(30 * 86_400)).len(),
+        rook_core::install::stale(&servers, std::time::Duration::from_secs(30 * 86_400)).len(),
         1,
         "stale before the turn"
     );
@@ -592,7 +592,7 @@ async fn an_autonomous_turn_refetches_a_server_past_its_age() {
     assert_eq!(outcome.decisions.len(), 1, "{:?}", outcome.decisions);
     assert!(outcome.decisions[0].contains("already at 2026-01-01"), "{:?}", outcome.decisions);
     assert!(
-        installer.stale(std::time::Duration::from_secs(30 * 86_400)).is_empty(),
+        rook_core::install::stale(&servers, std::time::Duration::from_secs(30 * 86_400)).is_empty(),
         "fetched again, so fresh"
     );
     assert!(rook.offered_update(session).unwrap(), "and not offered again this session");

@@ -18,11 +18,12 @@ cargo xtask smoke --model ollama/qwen3:8b   # real turns against a real model
 ```
 
 `cargo xtask clean` reclaims `target/` — incremental state and cross-target
-artifacts first, `--all` for the rest. A full debug build with tests is ~800 MB;
-if it is several gigabytes, either something has re-enabled full debug info or
-a day of editing test files has left every earlier test binary in `deps/` —
-sixty thousand files and 3 GB, once — which only `--all` reclaims, at the cost
-of one full rebuild.
+artifacts first, `--all` for the rest — and prints what it took. Incremental
+state is the bulk of a fresh build; after a day of editing test files the bulk
+is every earlier test binary still in `deps/` (sixty thousand files, once),
+which only `--all` reclaims, at the cost of one full rebuild. Dependencies are
+built without debug info on purpose; if `target/` grows past what those two
+explain, something has re-enabled it.
 
 `ROOK_HOME` redirects all agent state, which is how tests and manual runs stay out
 of a real store:

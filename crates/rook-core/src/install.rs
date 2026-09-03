@@ -227,6 +227,36 @@ impl Installed {
     }
 }
 
+fn installed_in(into: &Path) -> Vec<(&'static Recipe, String)> {
+    let Ok(entries) = std::fs::read_dir(into) else { return Vec::new() };
+    let mut found: Vec<(&'static Recipe, String)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let recipe = recipe_for(&name)?;
+            let tag = std::fs::read_to_string(current_in(into, recipe.command).join(".tag")).ok()?;
+            Some((recipe, tag.trim().to_string()))
+        })
+        .collect();
+    found.sort_by_key(|(recipe, _)| recipe.command);
+    found
+}
+
+/// Servers under `into` whose tag was recorded longer ago than `after`, with
+/// the age in days. The tag file's own age, so nothing is stored for it — and
+/// a question of the directory, not of an `Installer`, because it is asked at
+/// the start of every turn and a client is built only for the fetch.
+pub fn stale(into: &Path, after: std::time::Duration) -> Vec<(&'static Recipe, String, u64)> {
+    installed_in(into)
+        .into_iter()
+        .filter_map(|(recipe, tag)| {
+            let recorded = current_in(into, recipe.command).join(".tag");
+            let age = std::fs::metadata(recorded).ok()?.modified().ok()?.elapsed().ok()?;
+            (age >= after).then_some((recipe, tag, age.as_secs() / 86_400))
+        })
+        .collect()
+}
+
 /// An asset past this is not a language server, whatever it is called.
 const MOST_ASSET_BYTES: usize = 256 << 20;
 /// A gzip that inflates past this is a bomb, not a binary.
@@ -414,32 +444,7 @@ impl Installer {
     /// Every server under this directory that has a recipe, with the tag it
     /// was installed at.
     pub fn installed(&self) -> Vec<(&'static Recipe, String)> {
-        let Ok(entries) = std::fs::read_dir(&self.into) else { return Vec::new() };
-        let mut found: Vec<(&'static Recipe, String)> = entries
-            .flatten()
-            .filter_map(|entry| {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                let recipe = recipe_for(&name)?;
-                let tag =
-                    std::fs::read_to_string(current_in(&self.into, recipe.command).join(".tag")).ok()?;
-                Some((recipe, tag.trim().to_string()))
-            })
-            .collect();
-        found.sort_by_key(|(recipe, _)| recipe.command);
-        found
-    }
-
-    /// Servers whose tag was recorded longer ago than `after`, with the age in
-    /// days. The tag file's own age, so nothing is stored for it.
-    pub fn stale(&self, after: std::time::Duration) -> Vec<(&'static Recipe, String, u64)> {
-        self.installed()
-            .into_iter()
-            .filter_map(|(recipe, tag)| {
-                let recorded = current_in(&self.into, recipe.command).join(".tag");
-                let age = std::fs::metadata(recorded).ok()?.modified().ok()?.elapsed().ok()?;
-                (age >= after).then_some((recipe, tag, age.as_secs() / 86_400))
-            })
-            .collect()
+        installed_in(&self.into)
     }
 
     /// Install again whatever is installed, and say for each whether the tag

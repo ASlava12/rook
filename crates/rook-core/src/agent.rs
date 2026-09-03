@@ -709,8 +709,10 @@ impl<'a> AgentLoop<'a> {
         {
             return;
         }
-        let Ok(installer) = crate::install::Installer::new(crate::paths::servers_dir()) else { return };
-        let stale = installer.stale(std::time::Duration::from_secs(after * 86_400));
+        let stale = crate::install::stale(
+            &crate::paths::servers_dir(),
+            std::time::Duration::from_secs(after * 86_400),
+        );
         if stale.is_empty() {
             return;
         }
