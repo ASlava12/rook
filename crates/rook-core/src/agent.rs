@@ -374,6 +374,10 @@ fn close_open_call(messages: &mut Vec<Message>, open: &mut Option<String>) {
     }
 }
 
+/// The fewest steps a sub-task is given whatever the model asked for: a call,
+/// a look at what came back, and an answer.
+const SUBTASK_STEPS_FLOOR: u32 = 3;
+
 /// Pseudo-tools: implemented by the loop rather than the toolbox, because they
 /// need the agent's own state.
 pub const LOAD_SKILL: &str = "load_skill";
@@ -1928,9 +1932,14 @@ impl<'a> AgentLoop<'a> {
         };
         // Only ever shortens: the ceiling is the parent's, and this argument was
         // written by the model, so taken at face value it is the model that
-        // decides how long its own sub-agents may run.
-        let max_steps =
-            args.get("max_steps").and_then(|s| s.as_u64()).map(|s| (s as u32).min(self.max_steps));
+        // decides how long its own sub-agents may run. And never below what a
+        // task needs — a call, a look at what came back, an answer: a model
+        // wrote `max_steps: 1`, and its sub-agent read the file and had no
+        // step left to say what it read.
+        let max_steps = args
+            .get("max_steps")
+            .and_then(|s| s.as_u64())
+            .map(|s| (s as u32).max(SUBTASK_STEPS_FLOOR).min(self.max_steps));
 
         // The list of tasks is written by the model too, and nothing else bounds
         // its length: without this one tool call is tasks x max_steps model
@@ -2933,7 +2942,16 @@ fn collected(task: &str, result: &Landed, outcome: &mut TurnOutcome) -> String {
                     child.stopped, child.steps
                 ),
             };
-            format!("### {task}\n{how}\n{}", child.reply)
+            // A child whose last step was a call has no reply to show, and
+            // "what it had done" followed by nothing reads as nothing done.
+            let done = match child.reply.trim().is_empty() && !child.tools_called.is_empty() {
+                true => format!(
+                    "called {}, and the budget ended before it could answer",
+                    child.tools_called.join(", ")
+                ),
+                false => child.reply.clone(),
+            };
+            format!("### {task}\n{how}\n{done}")
         }
         Err(e) => format!("### {task}\nfailed: {e}"),
     }

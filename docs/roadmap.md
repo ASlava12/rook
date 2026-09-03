@@ -1036,8 +1036,14 @@ run, which is what the fenced retry in the fourth reading had been. A message
 that carries tool calls is a tool use whatever the finish reason said, in the
 dialect and in the loop. And a guess is answered with what is there: an edit
 whose text is not in the file is refused with the nearest line shown, so a
-`9001` written for a port never read is told about the `8443`. What the
-scenarios say at the new size is open again.
+`9001` written for a port never read is told about the `8443`. The seventh
+reading passed two of the five for the first time, and the delegation
+scenario found the next thing: the model gave its sub-agent `max_steps: 1`,
+which reads the file and has no step left to say what it read, and the
+report said "what it had done:" and nothing. A sub-task's budget is never
+below a call, a look, and an answer now, and a child that ran out with a
+call as its last word is reported by what it called. What the scenarios say
+at the new size is open again.
 
 **A server fetched once is one somebody has to remember to update.** Now the
 agent remembers: past `[agent] server_update_after_days` (thirty by default,

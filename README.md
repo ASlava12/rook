@@ -522,7 +522,8 @@ concurrently, bounded by `agent.max_parallel_subagents`. The list of sub-tasks i
 written by the model and one entry is a whole agent's worth of turns, so the total
 a turn may start — counting the ones its own children start — is capped by
 `agent.max_subagents_per_turn`, and a sub-agent's step budget can only be shorter
-than its parent's, never longer:
+than its parent's, never longer — and never below the three a task needs, a call,
+a look at what came back and an answer:
 
 ```sh
 rook session ls              # sub-tasks appear under ↳, linked to their parent

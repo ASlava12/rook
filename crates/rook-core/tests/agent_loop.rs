@@ -2842,9 +2842,12 @@ async fn a_sub_task_that_did_not_finish_is_not_reported_like_one_that_did() {
     let f = fixture();
     let session = f.rook.start_session("unfinished").unwrap();
     let script = vec![
-        call("delegate", serde_json::json!({ "tasks": ["look around"], "max_steps": 1 })),
-        // The child's one step asks for a tool, so it stops at its limit rather
-        // than at an answer.
+        call("delegate", serde_json::json!({ "tasks": ["look around"], "max_steps": 3 })),
+        // Every one of the child's steps asks for a tool, so it stops at its
+        // limit rather than at an answer. Three, because a budget is never
+        // below what a task needs.
+        call("list_dir", serde_json::json!({ "path": "." })),
+        call("list_dir", serde_json::json!({ "path": "." })),
         call("list_dir", serde_json::json!({ "path": "." })),
         reply("so much for that"),
     ];
@@ -3949,4 +3952,69 @@ async fn a_call_delivered_beside_an_end_turn_is_still_run() {
 
     assert_eq!(outcome.tools_called, vec!["read_file".to_string()], "{outcome:?}");
     assert_eq!(outcome.reply, "8443");
+}
+
+/// A budget of one step is a sub-agent that reads and cannot say what it read.
+/// The model's number is a ceiling it may lower, never below a call, a look,
+/// and an answer.
+#[tokio::test]
+async fn a_sub_task_budget_is_never_below_what_a_task_needs() {
+    let f = fixture();
+    let session = f.rook.start_session("budget").unwrap();
+    std::fs::write(f.workspace.path().join("config.rs"), "pub const PORT: u16 = 8443;\n").unwrap();
+
+    let script = vec![
+        call(
+            "delegate",
+            serde_json::json!({ "tasks": ["read config.rs and report the port"], "max_steps": 1 }),
+        ),
+        call("read_file", serde_json::json!({ "path": "config.rs" })),
+        reply("8443"),
+        reply("the port is 8443"),
+    ];
+    let outcome =
+        AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session).run("port?").await.unwrap();
+
+    assert_eq!(outcome.delegated.len(), 1, "{:?}", outcome.delegated);
+    let said = f
+        .rook
+        .transcript(session, 0, usize::MAX, 4096)
+        .unwrap()
+        .into_iter()
+        .rfind(|e| e.kind == "tool-result")
+        .unwrap()
+        .body;
+    assert!(said.contains("8443"), "the child had a step to answer in: {said}");
+    assert!(!said.contains("did not finish"), "{said}");
+}
+
+/// A child that ran out of steps with a call as its last word is reported by
+/// what it called, not by the nothing it said.
+#[tokio::test]
+async fn an_unfinished_sub_task_is_reported_by_what_it_called() {
+    let f = fixture();
+    let session = f.rook.start_session("unfinished").unwrap();
+    std::fs::write(f.workspace.path().join("a.txt"), "a\n").unwrap();
+
+    let script = vec![
+        call("delegate", serde_json::json!({ "tasks": ["look around"], "max_steps": 3 })),
+        call("read_file", serde_json::json!({ "path": "a.txt" })),
+        call("read_file", serde_json::json!({ "path": "a.txt" })),
+        call("read_file", serde_json::json!({ "path": "a.txt" })),
+        reply("it kept reading"),
+    ];
+    let outcome =
+        AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session).run("go").await.unwrap();
+
+    assert_eq!(outcome.delegated.len(), 1, "{:?}", outcome.delegated);
+    let said = f
+        .rook
+        .transcript(session, 0, usize::MAX, 4096)
+        .unwrap()
+        .into_iter()
+        .rfind(|e| e.kind == "tool-result")
+        .unwrap()
+        .body;
+    assert!(said.contains("did not finish — max_steps after 3 steps"), "{said}");
+    assert!(said.contains("called read_file, read_file, read_file, and the budget ended"), "{said}");
 }
