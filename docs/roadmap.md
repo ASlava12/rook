@@ -994,9 +994,10 @@ call it without a key. Until then it is a command a person runs, which is honest
 
 ## After that
 
-**rust-analyzer on Windows and clangd are fetched now**, so every known
-server has a recipe. What is left of the installer is keeping them current: a
-server fetched once is a server that is a year old a year later.
+**The installer is whole.** Every known server has a recipe, and `rook lsp
+update` fetches again whatever is in place and says which tag moved. What it
+does not do is decide when: nothing here checks age, and a server fetched once
+is still a server somebody has to remember to update.
 
 **Driving physical devices, if the Model Hardware Standard becomes something to
 build against.** Anthropic's [research

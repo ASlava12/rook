@@ -357,6 +357,7 @@ rook lsp definition src/main.rs parse
 rook lsp references src/main.rs parse
 rook lsp symbol ObjectId
 rook lsp install rust-analyzer                # fetched, checked, kept under ~/.rook
+rook lsp update                               # fetch again what is in place; say what moved
 ```
 
 rust-analyzer, gopls, clangd, typescript-language-server and pyright are detected

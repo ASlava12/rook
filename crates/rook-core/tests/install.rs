@@ -473,3 +473,26 @@ async fn a_zipped_server_is_picked_by_prefix_unpacked_whole_and_put_in_place() {
     );
     assert!(done.verified.contains("clangd-linux-22.1.6.zip"), "{}", done.verified);
 }
+
+/// A server fetched once is a server that is a year old a year later.
+/// `update` fetches again whatever is in place and says which tag moved.
+#[tokio::test]
+async fn update_fetches_again_what_is_in_place_and_says_what_moved() {
+    let payload = b"#!/bin/sh\necho v1\n".to_vec();
+    let gz = Arc::new(gzipped(&payload));
+    let api = github("rust-analyzer-x86_64-unknown-linux-gnu.gz", gz.clone(), sha256_of(&gz)).await;
+    let into = tempfile::tempdir().unwrap();
+    let installer = Installer::at(api, into.path().to_path_buf()).unwrap();
+    installer.install(&RUST_ANALYZER, &here()).await.unwrap();
+    assert_eq!(installer.installed().len(), 1, "one server in place, with its tag on record");
+
+    // The same release again: nothing moved, and it says so.
+    let report = installer.update(&here()).await;
+    assert_eq!(report.len(), 1);
+    assert_eq!(report[0].0, "rust-analyzer");
+    assert_eq!(report[0].1.as_deref(), Ok("already at 2026-01-01"));
+
+    // A directory with no recipe is not a server, whatever it is called.
+    std::fs::create_dir_all(into.path().join("notes")).unwrap();
+    assert_eq!(installer.installed().len(), 1);
+}

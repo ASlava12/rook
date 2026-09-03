@@ -125,6 +125,8 @@ enum LspCmd {
     /// Fetch a language server this machine does not have, checked against the
     /// digest its publisher lists, into the state directory.
     Install { name: String },
+    /// Fetch again every server `install` put in place, and say which moved.
+    Update,
 }
 
 #[derive(Subcommand)]
@@ -1649,6 +1651,21 @@ fn cmd_lsp(workspace: Option<PathBuf>, cmd: LspCmd, json: bool) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     runtime.block_on(async move {
         let rook = Rook::open(workspace)?;
+        if let LspCmd::Update = &cmd {
+            let into = rook_core::paths::servers_dir();
+            let installer = rook_core::install::Installer::new(into).map_err(anyhow::Error::msg)?;
+            let report = installer.update(rook.env()).await;
+            if report.is_empty() {
+                println!("nothing installed under {}", rook_core::paths::servers_dir().display());
+            }
+            for (command, said) in report {
+                match said {
+                    Ok(said) => println!("  ✓ {command:<28} {said}"),
+                    Err(why) => println!("  ✗ {command:<28} {why}"),
+                }
+            }
+            return anyhow::Ok(());
+        }
         if let LspCmd::Install { name } = &cmd {
             let Some(recipe) = rook_core::install::recipe_for(name) else {
                 anyhow::bail!(
@@ -1700,7 +1717,9 @@ fn cmd_lsp(workspace: Option<PathBuf>, cmd: LspCmd, json: bool) -> Result<()> {
             LspCmd::Symbol { query } => ("find_symbol", serde_json::json!({ "query": query })),
             // Answered above, before any server was started: installing one is
             // the one thing here that must not need one running.
-            LspCmd::Install { .. } => unreachable!("install returns before the servers are built"),
+            LspCmd::Install { .. } | LspCmd::Update => {
+                unreachable!("install and update return before the servers are built")
+            }
         };
 
         let outcome = tools.call(&ctx, tool, &args).await?;

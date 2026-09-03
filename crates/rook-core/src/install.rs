@@ -397,7 +397,50 @@ impl Installer {
         if !path.is_file() {
             return Err(format!("{} finished but left no {} behind", recipe.command, path.display()));
         }
+        // What is in place, for `update` to compare against: a server fetched
+        // once is a server that is a year old a year later, and nothing else
+        // says which year.
+        std::fs::write(current.join(".tag"), &tag)
+            .map_err(|e| format!("could not record the version: {e}"))?;
         Ok(Installed { command: recipe.command.into(), tag, path, verified, unverified })
+    }
+
+    /// Every server under this directory that has a recipe, with the tag it
+    /// was installed at.
+    pub fn installed(&self) -> Vec<(&'static Recipe, String)> {
+        let Ok(entries) = std::fs::read_dir(&self.into) else { return Vec::new() };
+        let mut found: Vec<(&'static Recipe, String)> = entries
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let recipe = recipe_for(&name)?;
+                let tag =
+                    std::fs::read_to_string(current_in(&self.into, recipe.command).join(".tag")).ok()?;
+                Some((recipe, tag.trim().to_string()))
+            })
+            .collect();
+        found.sort_by_key(|(recipe, _)| recipe.command);
+        found
+    }
+
+    /// Install again whatever is installed, and say for each whether the tag
+    /// moved. A command-shaped source is always "latest" and is reinstalled
+    /// rather than compared: npm and go decide what latest is.
+    pub async fn update(
+        &self,
+        env: &rook_skills::Environment,
+    ) -> Vec<(String, std::result::Result<String, String>)> {
+        let mut report = Vec::new();
+        for (recipe, before) in self.installed() {
+            let said = match self.install(recipe, env).await {
+                Ok(done) if done.tag == before && before != "latest" => Ok(format!("already at {before}")),
+                Ok(_) if before == "latest" => Ok("reinstalled at latest".into()),
+                Ok(done) => Ok(format!("{before} → {}", done.tag)),
+                Err(why) => Err(why),
+            };
+            report.push((recipe.command.to_string(), said));
+        }
+        report
     }
 
     /// The asset's bytes, checked against the digest as they arrive. A body
