@@ -293,3 +293,29 @@ async fn a_files_entry_that_is_not_an_object_is_named_by_what_it_is() {
     assert!(err.contains("not a string"), "says what it got instead: {err}");
     assert!(!err.contains("\"path\" is missing"), "and not the misleading thing: {err}");
 }
+
+/// The two strings under the names another tool taught the model land the same
+/// edit; a refusal for the spelling of a field is a refusal of nothing.
+#[tokio::test]
+async fn an_edit_spelled_from_and_to_lands() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("config.rs"), "pub const PORT: u16 = 8443;\n").unwrap();
+    let ctx = ToolContext::new(dir.path().to_path_buf());
+    EditFile
+        .call(&ctx, &serde_json::json!({ "path": "config.rs", "edits": [{ "from": "8443", "to": "9000" }] }))
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("config.rs")).unwrap(),
+        "pub const PORT: u16 = 9000;\n"
+    );
+
+    EditFile
+        .call(&ctx, &serde_json::json!({ "path": "config.rs", "edits": [{ "old_string": "9000", "new_string": "9001" }] }))
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("config.rs")).unwrap(),
+        "pub const PORT: u16 = 9001;\n"
+    );
+}

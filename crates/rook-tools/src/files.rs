@@ -364,9 +364,14 @@ impl Tool for DeleteFile {
 
 pub struct EditFile;
 
+/// The names other tools taught a model for the same two strings, accepted
+/// rather than corrected: a small model wrote `from`/`to` and the edit was
+/// refused for its spelling, not its content.
 #[derive(serde::Deserialize)]
 struct Edit {
+    #[serde(alias = "from", alias = "search", alias = "find", alias = "old_string")]
     old: String,
+    #[serde(alias = "to", alias = "replace", alias = "replacement", alias = "new_string")]
     new: String,
     #[serde(default)]
     replace_all: bool,
