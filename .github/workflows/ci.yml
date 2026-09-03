@@ -69,6 +69,44 @@ jobs:
       - uses: taiki-e/install-action@cross
       - run: cross check --workspace --target ${{ matrix.target }}
 
+  # Real turns against a real model: does the agent read the file rather than
+  # answer from memory, land the edit it was asked for, use what a command
+  # printed, and refuse to settle a claim it did not check. A small model on a
+  # CPU runner, pulled into a service container, so no key is needed.
+  #
+  # Not a gate. A model this size is a source of failures that are not ours,
+  # and a job that goes red on a coin-flip teaches everyone to stop reading
+  # it. Red here is a signal to open, and `continue-on-error` is what keeps
+  # it from being a reason to ignore the whole run.
+  smoke:
+    name: smoke ollama
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 40
+    services:
+      ollama:
+        image: ollama/ollama
+        ports:
+          - 11434:11434
+    env:
+      OLLAMA_HOST: http://127.0.0.1:11434
+      # The smallest tag with tool calling that gets the four scenarios right
+      # more often than not. `cargo xtask smoke --model …` takes any other.
+      ROOK_SMOKE_MODEL: ollama/qwen2.5:1.5b
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: pull the model
+        # The pull streams progress until it is done; curl returns when it is.
+        run: |
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:11434/api/tags > /dev/null && break
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:11434/api/pull -d '{"name":"qwen2.5:1.5b"}' | tail -c 200
+      - run: cargo xtask smoke
+
   msrv:
     name: msrv
     runs-on: ubuntu-latest

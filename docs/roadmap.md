@@ -984,13 +984,12 @@ pointer and prints what landed; the log in
 commit, so a dismissal is a decision. Every pass so far is dated there, and more
 of them found a defect here than found something worth porting.
 
-**A live-model smoke test in CI.** `cargo xtask smoke --model …` is the test —
-four turns against a real endpoint, checking that the agent read the file rather
-than answering from memory, that its edit landed and moved nothing else, that it
-used what a command printed, and that `verify` refused to settle a false claim.
-What is left is the container: an Ollama service running a small model, so CI can
-call it without a key. Until then it is a command a person runs, which is honest
-— a job that passes because no model could be pulled is worse than no job.
+**The smoke job's model.** `cargo xtask smoke` now runs in CI against a
+small model in a service container, and is deliberately not a gate: a model
+that size fails for reasons that are not ours, and a job that goes red on a
+coin-flip teaches everyone to stop reading it. What is left is watching how
+often it is red and why, and moving to a larger tag if the small one cannot
+carry the four scenarios.
 
 ## After that
 
