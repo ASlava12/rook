@@ -1054,3 +1054,21 @@ reaches the report as `failed: …` — the case is covered by the shape rather
 than by a handler. Their `preserve code blocks during duplicate collapse` has
 nothing to attach to: nothing here collapses repeated output. The rest are
 their CI, their proxies and their supervisor.
+
+## Twenty-third pass — hermes, openclaw
+
+Acted on: hermes' `fix(mcp): pick the Windows launcher, not the sh script,
+from an npx cache`. A node tool's bin directory holds both `foo` — a sh
+script for unix — and `foo.cmd`, and on Windows `lsp::on_path` counted the
+bare file as a server present, which the spawn then could not start: offered
+and broken in the same breath. Only a file with an extension the shell runs
+counts there now. The PATHEXT lookup that starts a server never had this
+problem, because it only ever tried `name + extension`; the check that decides
+whether to offer one was written separately and did.
+
+Dismissed: `restore separator after backgrounded compound rewrite` — a
+background command here runs the string it was given, unrewritten. `bound
+recent-session browsing` — session listing is paged already. openclaw's
+`avoid eager discovery for ordinary replies` — skills are discovered once when
+the engine opens, not per turn. The rest are their worktrees, swarms and
+selectors.

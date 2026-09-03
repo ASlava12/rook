@@ -81,11 +81,21 @@ fn installed(command: &str) -> Option<String> {
     current.is_file().then(|| current.to_string_lossy().into_owned())
 }
 
+/// Whether `command` would start from PATH.
+///
+/// On Windows only a file with an extension the shell runs counts. A node
+/// tool's bin directory holds both `foo` — a sh script for unix — and
+/// `foo.cmd`, and counting the bare one as present offered a server that the
+/// spawn then could not start. hermes hit the same in an npx cache.
 fn on_path(command: &str) -> bool {
     let Ok(path) = std::env::var("PATH") else { return false };
+    let runnable: &[&str] = if cfg!(windows) { &["exe", "cmd", "bat"] } else { &[""] };
     std::env::split_paths(&path).any(|dir| {
-        let candidate = dir.join(command);
-        candidate.is_file() || candidate.with_extension("exe").is_file()
+        runnable.iter().any(|ext| {
+            let candidate = dir.join(command);
+            let candidate = if ext.is_empty() { candidate } else { candidate.with_extension(ext) };
+            candidate.is_file()
+        })
     })
 }
 

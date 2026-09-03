@@ -162,6 +162,15 @@ loading only that first sentence is advertised; the rest is guidance on writing
 the arguments, which only matters once the model has decided to call the tool.
 `cargo run -p rook-core --example schema-cost` prices both forms — from core, because the loop adds six tools of its own and the two largest are among them.
 
+**A path that differs by platform is asked for, not spelled.** Three tests in
+a day asserted the unix spelling of a Windows-aware path — `npx` coming back
+untouched where the PATHEXT lookup had found `npx.CMD`, `current/rust-analyzer`
+where the installer had put `rust-analyzer.exe`, and the same again for a shim
+— and each passed here and failed only on the Windows runner, after the merge.
+A test of such a path asks the code that made it (`install::current`), or
+spells both answers under `cfg!(windows)`. A name that exists on no PATH is the
+way to assert that a lookup fell through.
+
 **Verifying a change to `rookd`.** The daemon tests in
 `crates/rook-cli/tests/cli.rs` run the binary, and they build it themselves —
 so `cargo test -p rook-cli` after editing `rookd` can run against the previous

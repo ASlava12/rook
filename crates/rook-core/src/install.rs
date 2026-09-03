@@ -523,14 +523,21 @@ mod tests {
         assert!(verified.contains("checksum database"), "{verified}");
     }
 
+    /// Spelled for both platforms: on Windows a binary is `.exe` and npm's
+    /// shim is `.cmd`, and a test that wrote the unix names read the Windows
+    /// runner as putting them in the wrong place.
     #[test]
     fn the_binary_is_where_the_source_puts_it() {
         let current = Path::new("/state/servers/x/current");
-        assert_eq!(RUST_ANALYZER.binary_in(current), current.join("rust-analyzer"));
-        assert_eq!(GOPLS.binary_in(current), current.join("gopls"));
+        let runs_as = |path: PathBuf, windows_ext: &str| match cfg!(windows) {
+            true => path.with_extension(windows_ext),
+            false => path,
+        };
+        assert_eq!(RUST_ANALYZER.binary_in(current), runs_as(current.join("rust-analyzer"), "exe"));
+        assert_eq!(GOPLS.binary_in(current), runs_as(current.join("gopls"), "exe"));
         assert_eq!(
             TYPESCRIPT.binary_in(current),
-            current.join("node_modules").join(".bin").join("typescript-language-server"),
+            runs_as(current.join("node_modules").join(".bin").join("typescript-language-server"), "cmd"),
             "npm's shim, under the prefix"
         );
     }

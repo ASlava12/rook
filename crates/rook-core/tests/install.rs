@@ -381,3 +381,29 @@ async fn a_recipe_whose_toolchain_is_missing_says_which_one() {
     assert!(refused.contains("`go`"), "{refused}");
     assert!(!into.path().join("gopls").exists(), "and nothing was made");
 }
+
+/// Read-only means nothing may change the machine, so there is nothing to
+/// ask: a question whose every answer the policy then refuses is a wasted one.
+#[tokio::test]
+async fn at_read_only_nobody_is_asked_and_the_question_is_left_open() {
+    let _one = one_at_a_time().await;
+    let home = tempfile::tempdir().unwrap();
+    let (_workspace, rook) = a_rust_workspace(home.path());
+    let session = rook.start_session("s").unwrap();
+
+    struct Never;
+    #[async_trait::async_trait]
+    impl rook_tools::ask::Asker for Never {
+        async fn ask(&self, q: &[rook_tools::ask::Question]) -> Vec<rook_tools::ask::Answer> {
+            panic!("nobody should have been asked: {:?}", q.iter().map(|q| &q.question).collect::<Vec<_>>())
+        }
+    }
+    let mut agent = AgentLoop::new(&rook, Arc::new(Says("ok")), session);
+    agent.policy.set_stance(rook_tools::policy::Stance::ReadOnly);
+    agent.ask_via(Arc::new(Never));
+    let outcome = agent.run("hello").await.unwrap();
+
+    assert_eq!(outcome.open_questions.len(), 1, "{:?}", outcome.open_questions);
+    assert!(outcome.open_questions[0].contains("read-only"), "{:?}", outcome.open_questions);
+    assert!(!home.path().join("servers").join("rust-analyzer").exists());
+}

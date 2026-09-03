@@ -552,9 +552,20 @@ impl<'a> AgentLoop<'a> {
         let local = format!("fetch into {}", crate::paths::servers_dir().display());
         let system = recipe.system_command().map(|c| format!("run `{c}`"));
         let how = match self.policy.stance() {
+            // Nothing may change the machine, so there is nothing to ask: a
+            // question whose every answer the policy then refuses is a wasted
+            // one. Said once, for whoever reads the outcome.
+            Stance::ReadOnly => {
+                self.report(Reported::Open(format!(
+                    "this workspace has {language} files and no {} — read-only, so nothing was \
+                     installed; `rook lsp install {}` does it by hand",
+                    recipe.command, recipe.command
+                )));
+                return;
+            }
             // A person chooses where it goes. Without one there is nobody to
             // choose, and the question waits for whoever reads the outcome.
-            Stance::ReadOnly | Stance::Assist => {
+            Stance::Assist => {
                 let Some(asker) = &self.asker else {
                     self.report(Reported::Open(format!(
                         "this workspace has {language} files and no {} — `rook lsp install {}` fetches \
