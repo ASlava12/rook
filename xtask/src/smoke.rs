@@ -207,7 +207,7 @@ fn transcript(rook: &Path, home: &Path) -> String {
     let shown = Command::new(rook)
         .env("ROOK_HOME", home)
         .env("ROOK_LOG", "error")
-        .args(["session", "show", id, "--limit", "40", "--max-body", "400"])
+        .args(["session", "show", id, "--limit", "40", "--max-body", "1200"])
         .output();
     match shown {
         Ok(out) => String::from_utf8_lossy(&out.stdout)
