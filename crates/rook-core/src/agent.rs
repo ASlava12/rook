@@ -2053,7 +2053,17 @@ impl<'a> AgentLoop<'a> {
                 }) {
                 Ok((name, path)) => {
                     outcome.skills_written.push(name.clone());
-                    let message = format!("wrote skill {name:?} to {}", path.display());
+                    // Where it went, and how to get it back: skills live in
+                    // the agent's own directory, which is outside the
+                    // workspace, so a model that reads the path out of this
+                    // message and hands it to `read_file` is refused for
+                    // being outside — which is what happened, twice, before
+                    // the sentence was here.
+                    let message = format!(
+                        "wrote skill {name:?} to {}. It is outside the workspace, so read it \
+                         back with `{FIND_SKILL}` rather than by path.",
+                        path.display()
+                    );
                     // A note rather than a kind of its own: a new `EventKind`
                     // is a record older builds cannot decode, and the log is
                     // just as readable with the fact in the label.

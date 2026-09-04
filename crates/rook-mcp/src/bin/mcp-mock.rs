@@ -4,7 +4,7 @@
 //! This is a binary in the same crate, so `CARGO_BIN_EXE_mcp-mock` always points
 //! at something that exists on every platform we build for.
 //!
-//! `mcp-mock [mode]` — `ok` (default), `slow`, `error`, `crash`, `noise`.
+//! `mcp-mock [mode]` — `ok` (default), `slow`, `error`, `crash`, `noise`, `mute`.
 
 use std::io::{BufRead, Write};
 
@@ -37,6 +37,28 @@ fn main() {
         // bad input and being restarted looks like.
         if mode == "crash-once" && method == "tools/call" && !std::path::Path::new(&died_marker()).exists() {
             std::fs::write(died_marker(), "1").ok();
+            std::process::exit(1);
+        }
+        // Alive, reading, and never answering again: stdout is closed and the
+        // process is not. A server killed by the OOM killer mid-write looks
+        // like this from here, and it is the one shape where writing to it
+        // still succeeds — so a caller waiting for the reply waits for the
+        // whole timeout unless something else says the answer is not coming.
+        if mode == "mute" && method == "tools/call" {
+            #[cfg(unix)]
+            {
+                // Taking ownership of fd 1 and dropping it closes stdout. The
+                // handle in `out` is dead after this and nothing writes to it.
+                use std::os::fd::FromRawFd;
+                drop(unsafe { std::fs::File::from_raw_fd(1) });
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                }
+            }
+            // Windows has no way to close a standard handle from the standard
+            // library, so there the mode is an ordinary death: the test still
+            // holds, by the path that was already fast.
+            #[cfg(not(unix))]
             std::process::exit(1);
         }
         if mode == "slow" && method != "initialize" {

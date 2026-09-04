@@ -1090,6 +1090,17 @@ two of five with nothing of ours in the three: the readings have found what
 they are going to find at this size. The job stays as it is, read rather than
 rerun.
 
+One more came out of a later reading, and it was a tool contradicting itself:
+the model wrote a skill, was told where it went, handed that path to
+`read_file` and was refused for being outside the workspace — which it is, and
+correctly so, since skills live in the agent's own directory. It spent two
+calls on the refusal and then said the agent was not installed. The result of
+a write says how to read it back now, which is `find_skill` and not a path.
+The other three failures in that reading were the model's: `read_file` for a
+prompt that said `cat`, an edit of `9001` written twice against a file it had
+just read as `8443`, and a `lib.rs` rewritten until the claim under test came
+true.
+
 **Autonomy is a task and its boundaries, and the task is what was asked.**
 The goal check ran only for a session with a goal set, so `rook run` at
 autonomous — the stance with nobody else to check — checked nothing. With no

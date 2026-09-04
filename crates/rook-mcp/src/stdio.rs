@@ -3,7 +3,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::process::Stdio as ProcessStdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -58,6 +58,11 @@ pub(crate) struct Stdio {
     heard: LastWords,
     stdin: Mutex<ChildStdin>,
     pending: Pending,
+    /// Set once the server's stdout ends, which is the last thing that can
+    /// release a waiter. A request registered after that would wait out the
+    /// whole call timeout for a reply nobody is left to deliver — thirty
+    /// seconds of a turn, per call, for a server that is already gone.
+    finished: Arc<AtomicBool>,
     next_id: AtomicU64,
     child: Mutex<Child>,
 }
@@ -173,6 +178,8 @@ impl Stdio {
 
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let reader_pending = pending.clone();
+        let finished = Arc::new(AtomicBool::new(false));
+        let reader_finished = finished.clone();
         let name = config.name.clone();
         tokio::spawn(async move {
             let mut reader = BufReader::new(stdout);
@@ -197,6 +204,10 @@ impl Stdio {
             // which task the scheduler reached first. Bounded, because stdout
             // can close while the process is alive and stderr still open.
             let _ = tokio::time::timeout(Duration::from_secs(1), listening).await;
+            // Marked before the waiters are released, not after: a request that
+            // registers in the gap would otherwise be neither cleared here nor
+            // stopped there, and would wait for the timeout.
+            reader_finished.store(true, Ordering::Relaxed);
             // The pipe closed: waiters would otherwise hang until their timeout.
             reader_pending.lock().await.clear();
         });
@@ -206,6 +217,7 @@ impl Stdio {
             heard,
             stdin: Mutex::new(stdin),
             pending,
+            finished,
             next_id: AtomicU64::new(1),
             child: Mutex::new(child),
         })
@@ -235,6 +247,12 @@ impl Transport for Stdio {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
+        // After registering, so the two orders are both covered: an insert
+        // before the reader's sweep is released by it, and one after sees this.
+        if self.finished.load(Ordering::Relaxed) {
+            self.pending.lock().await.remove(&id);
+            return Err(McpError::Closed { server: self.name.clone(), said: self.heard.said() });
+        }
 
         let line = serde_json::to_string(&Request { jsonrpc: "2.0", id, method, params }).map_err(|e| {
             McpError::Decode { server: self.name.clone(), method: method.into(), message: e.to_string() }

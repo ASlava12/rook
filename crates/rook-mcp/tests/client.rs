@@ -224,3 +224,37 @@ async fn restarts_are_capped_and_the_last_error_is_the_real_one() {
         assert!(err.is_transport(), "{err}");
     }
 }
+
+/// Past the restart cap the server is gone, and a call to a gone server has to
+/// fail now rather than wait out the call timeout: the waiters are released by
+/// the task reading its stdout, and that task has already finished. It cost
+/// thirty seconds a call, which is a turn's worth for a handful of them — and
+/// on a loaded runner it turned the test above into a timeout, which is not a
+/// transport failure, so a slow machine read as a cap that had not been hit.
+#[tokio::test]
+async fn a_call_to_a_server_that_has_gone_fails_now_rather_than_at_the_timeout() {
+    let _one = one_at_a_time().await;
+    // `mute` closes its stdout and stays alive, which is the shape that
+    // reaches this: the process is still there, so writing the request still
+    // succeeds, and the task that would deliver the answer has already ended.
+    // A server dying outright is caught earlier, by the write failing.
+    let mut config = mock("mute");
+    // Long enough that waiting for it would be unmistakable in the elapsed
+    // time, rather than something a slow machine could produce.
+    config.call_timeout_secs = 120;
+    let server = Server::connect(&config).await.unwrap();
+
+    for _ in 0..3 {
+        let _ = server.call_tool("echo", &serde_json::json!({})).await;
+    }
+
+    let started = std::time::Instant::now();
+    let err = server.call_tool("echo", &serde_json::json!({})).await.unwrap_err();
+    let waited = started.elapsed();
+
+    assert!(err.is_transport(), "the server is gone, which is a transport failure: {err}");
+    assert!(
+        waited < std::time::Duration::from_secs(10),
+        "it answered in {waited:?}, so it waited for a reply nobody was left to send"
+    );
+}
