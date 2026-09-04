@@ -31,12 +31,31 @@ pub fn router(state: Shared) -> Router {
         .route("/api/sessions/{id}/goal", post(set_goal))
         .route("/api/sessions/{id}/rewind", post(rewind))
         .route("/api/memory", get(memory).post(forget))
+        .route("/api/memory/search", get(memory_search))
+        .route("/api/memory/add", post(remember))
+        .route("/api/memory/history", get(memory_history))
+        .route("/api/memory/diff", get(memory_diff))
+        .route("/api/memory/since", get(memory_since))
         .route("/api/skills", get(skills))
         .route("/api/skills/{name}", get(skill))
         .route("/api/skills/{name}/history", get(skill_history))
-        .route("/api/checkpoints", get(checkpoints))
+        .route("/api/skills/{name}/why", get(skill_why))
+        .route("/api/skills/offered", get(skills_offered))
+        .route("/api/skills/diff", get(skill_diff))
+        .route("/api/skills/install", post(install_skill))
+        .route("/api/skills/new", post(new_skill))
+        .route("/api/skills/{name}/capture", post(capture_skill))
+        .route("/api/skills/{name}/rollback", post(rollback_skill))
+        .route("/api/checkpoints", get(checkpoints).post(create_checkpoint))
+        .route("/api/checkpoints/restore", post(restore_checkpoint))
         .route("/api/writing", get(writing))
         .route("/api/maintenance", post(maintenance))
+        .route("/api/store/gc", post(gc))
+        .route("/api/store/prune", post(prune))
+        .route("/api/store/verify", post(verify))
+        .route("/api/store/train", post(train))
+        .route("/api/sessions/{id}/fork", post(fork))
+        .route("/api/sessions/{id}", axum::routing::delete(delete_session))
         .route(
             "/api/chat",
             get(crate::chat::upgrade).layer(axum::middleware::from_fn(crate::chat::only_from_this_daemon)),
@@ -294,6 +313,83 @@ async fn memory(
 }
 
 #[derive(Deserialize)]
+struct SearchMemory {
+    q: String,
+    #[serde(default)]
+    workspace: Option<std::path::PathBuf>,
+}
+
+/// Scored search, which is not what `GET /api/memory?q=` does: that ranks by
+/// what would fit in a turn's budget. Both exist because both are asked.
+async fn memory_search(
+    State(s): State<Shared>,
+    Query(query): Query<SearchMemory>,
+) -> ApiResult<Page<rook_core::memory::Hit>> {
+    let engine = s.engine_for(query.workspace.as_deref()).await.map_err(CoreError::Other)?;
+    let rook = engine.read().await;
+    Ok(Json(Page::new(rook.memory_search(&query.q)?)))
+}
+
+#[derive(Deserialize)]
+struct Remember {
+    text: String,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    global: bool,
+    #[serde(default)]
+    pinned: bool,
+    #[serde(default)]
+    workspace: Option<std::path::PathBuf>,
+}
+
+async fn remember(State(s): State<Shared>, Json(body): Json<Remember>) -> ApiResult<serde_json::Value> {
+    let engine = s.engine_for(body.workspace.as_deref()).await.map_err(CoreError::Other)?;
+    let rook = engine.read().await;
+    let scope = if body.global {
+        rook_core::Scope::Global
+    } else {
+        rook_core::Scope::Project(rook.workspace.display().to_string())
+    };
+    let mut fact = rook_core::Fact::new(body.text, scope).with_tags(body.tags);
+    fact.pinned = body.pinned;
+    let id = fact.id.clone();
+    let learned = rook.remember(fact, Some("added over the API".into()))?;
+    Ok(Json(serde_json::json!({ "id": id, "learned": learned })))
+}
+
+async fn memory_history(State(s): State<Shared>) -> ApiResult<Page<rook_core::MemoryVersion>> {
+    let rook = s.rook.read().await;
+    Ok(Json(Page::new(rook.memory_history()?)))
+}
+
+#[derive(Deserialize)]
+struct Pair {
+    a: String,
+    b: String,
+}
+
+type Changes = Page<(rook_core::memory::Change, rook_core::Fact)>;
+
+async fn memory_diff(State(s): State<Shared>, Query(pair): Query<Pair>) -> ApiResult<Changes> {
+    let rook = s.rook.read().await;
+    // The prefixes are resolved here because only the process holding the store
+    // can say whether one is ambiguous.
+    let (a, b) = (rook.object_named(&pair.a)?, rook.object_named(&pair.b)?);
+    Ok(Json(Page::new(rook.memory_diff(&a, &b)?)))
+}
+
+#[derive(Deserialize)]
+struct Since {
+    days: i64,
+}
+
+async fn memory_since(State(s): State<Shared>, Query(since): Query<Since>) -> ApiResult<Changes> {
+    let rook = s.rook.read().await;
+    Ok(Json(Page::new(rook.memory_since(rook_store::now_unix() - since.days * 86_400)?)))
+}
+
+#[derive(Deserialize)]
 struct Forget {
     /// An id or the exact text, the same two things `rook memory rm` takes.
     id: String,
@@ -378,6 +474,109 @@ async fn skill_history(
 ) -> ApiResult<Page<rook_core::SkillVersionRecord>> {
     let rook = s.rook.read().await;
     Ok(Json(Page::new(rook.skill_history(&name)?)))
+}
+
+#[derive(Deserialize)]
+struct Named {
+    name: String,
+}
+
+/// Fetching a source and unpacking it is not something to hold a runtime
+/// worker for, and neither is walking a skill's files into the store.
+async fn install_skill(State(s): State<Shared>, Json(body): Json<Named>) -> ApiResult<serde_json::Value> {
+    let rook = s.rook.clone().read_owned().await;
+    let path = tokio::task::spawn_blocking(move || rook.install_skill(&body.name))
+        .await
+        .map_err(|e| Fail(StatusCode::INTERNAL_SERVER_ERROR, ApiError::new("panic", e.to_string())))??;
+    Ok(Json(serde_json::json!({ "path": path })))
+}
+
+#[derive(Deserialize)]
+struct NewSkill {
+    name: String,
+    description: String,
+}
+
+async fn new_skill(State(s): State<Shared>, Json(body): Json<NewSkill>) -> ApiResult<serde_json::Value> {
+    let rook = s.rook.read().await;
+    Ok(Json(serde_json::json!({ "dir": rook.new_skill(&body.name, &body.description)? })))
+}
+
+#[derive(Deserialize)]
+struct Note {
+    #[serde(default)]
+    message: Option<String>,
+}
+
+async fn capture_skill(
+    State(s): State<Shared>,
+    Path(name): Path<String>,
+    Json(body): Json<Note>,
+) -> ApiResult<serde_json::Value> {
+    let rook = s.rook.clone().read_owned().await;
+    let (set, id) = tokio::task::spawn_blocking(move || rook.capture_skill(&name, body.message))
+        .await
+        .map_err(|e| Fail(StatusCode::INTERNAL_SERVER_ERROR, ApiError::new("panic", e.to_string())))??;
+    Ok(Json(serde_json::json!({ "set": set, "object": id.to_hex() })))
+}
+
+#[derive(Deserialize)]
+struct Object {
+    object: String,
+}
+
+async fn rollback_skill(
+    State(s): State<Shared>,
+    Path(name): Path<String>,
+    Json(body): Json<Object>,
+) -> ApiResult<rook_core::Rollback> {
+    let rook = s.rook.clone().read_owned().await;
+    let done = tokio::task::spawn_blocking(move || {
+        let id = rook.object_named(&body.object)?;
+        rook.rollback_skill(&name, &id)
+    })
+    .await
+    .map_err(|e| Fail(StatusCode::INTERNAL_SERVER_ERROR, ApiError::new("panic", e.to_string())))??;
+    Ok(Json(done))
+}
+
+type SkillChanges = Page<(String, rook_core::fileset::Change)>;
+
+async fn skill_diff(State(s): State<Shared>, Query(pair): Query<Pair>) -> ApiResult<SkillChanges> {
+    let rook = s.rook.read().await;
+    let (a, b) = (rook.object_named(&pair.a)?, rook.object_named(&pair.b)?);
+    Ok(Json(Page::new(rook.skill_diff(&a, &b)?)))
+}
+
+async fn skill_why(
+    State(s): State<Shared>,
+    Path(name): Path<String>,
+    Query(q): Query<WorkspaceQuery>,
+) -> ApiResult<rook_core::SkillWhy> {
+    let engine = s.engine_for(q.workspace.as_deref()).await.map_err(CoreError::Other)?;
+    let rook = engine.read().await;
+    Ok(Json(rook.why_skill(&name)?))
+}
+
+#[derive(Deserialize)]
+struct Offered {
+    #[serde(default)]
+    q: String,
+    /// Fetch the sources again rather than answering from the cache.
+    #[serde(default)]
+    refresh: bool,
+}
+
+/// What the configured sources offer, and what went wrong reaching any of them
+/// — the errors travel with the answer because a shorter list and a source
+/// that was down look identical without them.
+async fn skills_offered(State(s): State<Shared>, Query(q): Query<Offered>) -> ApiResult<serde_json::Value> {
+    let rook = s.rook.clone().read_owned().await;
+    let (offered, errors) =
+        tokio::task::spawn_blocking(move || rook.skills_offered(&q.q, q.refresh))
+            .await
+            .map_err(|e| Fail(StatusCode::INTERNAL_SERVER_ERROR, ApiError::new("panic", e.to_string())))?;
+    Ok(Json(serde_json::json!({ "items": offered, "errors": errors })))
 }
 
 #[derive(Deserialize)]
@@ -477,6 +676,41 @@ async fn search(
     Ok(Json(rook.search(&query.q, &options)?))
 }
 
+#[derive(Deserialize)]
+struct NewCheckpoint {
+    name: String,
+    #[serde(default)]
+    path: Option<std::path::PathBuf>,
+}
+
+async fn create_checkpoint(
+    State(s): State<Shared>,
+    Json(body): Json<NewCheckpoint>,
+) -> ApiResult<serde_json::Value> {
+    let rook = s.rook.clone().read_owned().await;
+    let (set, id) = blocking(move || rook.checkpoint(&body.name, body.path.as_deref())).await?;
+    Ok(Json(serde_json::json!({ "set": set, "object": id.to_hex() })))
+}
+
+#[derive(Deserialize)]
+struct Restore {
+    object: String,
+    to: std::path::PathBuf,
+}
+
+async fn restore_checkpoint(
+    State(s): State<Shared>,
+    Json(body): Json<Restore>,
+) -> ApiResult<serde_json::Value> {
+    let rook = s.rook.clone().read_owned().await;
+    let written = blocking(move || {
+        let id = rook.object_named(&body.object)?;
+        rook.restore_checkpoint(&id, &body.to)
+    })
+    .await?;
+    Ok(Json(serde_json::json!({ "restored": written })))
+}
+
 async fn checkpoints(State(s): State<Shared>) -> ApiResult<Page<serde_json::Value>> {
     let rook = s.rook.read().await;
     let items = rook
@@ -540,6 +774,72 @@ async fn maintenance(
         .await
         .map_err(|e| Fail(StatusCode::INTERNAL_SERVER_ERROR, ApiError::new("panic", e.to_string())))??;
     Ok(Json(report))
+}
+
+#[derive(Deserialize)]
+struct DryRun {
+    #[serde(default)]
+    dry_run: bool,
+}
+
+/// Each of these walks the whole store, so each goes on a blocking thread: on a
+/// small machine the runtime worker it would hold is the one the chat socket
+/// needs.
+async fn gc(State(s): State<Shared>, Json(body): Json<DryRun>) -> ApiResult<rook_store::GcReport> {
+    let rook = s.rook.clone().read_owned().await;
+    Ok(Json(blocking(move || rook.collect_garbage(body.dry_run)).await?))
+}
+
+async fn prune(State(s): State<Shared>, Json(body): Json<DryRun>) -> ApiResult<rook_store::PruneReport> {
+    let rook = s.rook.clone().read_owned().await;
+    Ok(Json(blocking(move || rook.prune(body.dry_run)).await?))
+}
+
+async fn verify(State(s): State<Shared>) -> ApiResult<serde_json::Value> {
+    let rook = s.rook.clone().read_owned().await;
+    let bad = blocking(move || rook.verify()).await?;
+    let failed: Vec<_> =
+        bad.into_iter().map(|(id, why)| serde_json::json!({ "object": id.to_hex(), "why": why })).collect();
+    Ok(Json(serde_json::json!({ "failed": failed })))
+}
+
+async fn train(State(s): State<Shared>) -> ApiResult<serde_json::Value> {
+    let rook = s.rook.clone().read_owned().await;
+    let trained = blocking(move || rook.train_dictionaries()).await?;
+    Ok(Json(serde_json::json!({ "trained": trained })))
+}
+
+#[derive(Deserialize)]
+struct At {
+    at: u64,
+}
+
+async fn fork(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+    Json(body): Json<At>,
+) -> ApiResult<serde_json::Value> {
+    let rook = s.rook.read().await;
+    let forked = rook.fork_session(session_id(&id)?, body.at)?;
+    Ok(Json(serde_json::json!({
+        "id": rook_store::format_session_id(forked.id),
+        "event_count": forked.event_count,
+    })))
+}
+
+async fn delete_session(State(s): State<Shared>, Path(id): Path<String>) -> ApiResult<serde_json::Value> {
+    let rook = s.rook.read().await;
+    Ok(Json(serde_json::json!({ "events": rook.delete_session(session_id(&id)?)? })))
+}
+
+/// A store pass on a blocking thread, with the panic reported as one.
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> rook_core::Result<T> + Send + 'static,
+) -> std::result::Result<T, Fail> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|e| Fail(StatusCode::INTERNAL_SERVER_ERROR, ApiError::new("panic", e.to_string())))?
+        .map_err(Fail::from)
 }
 
 #[cfg(test)]

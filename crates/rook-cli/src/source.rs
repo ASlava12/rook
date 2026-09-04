@@ -37,7 +37,13 @@ impl Source {
         }
     }
 
-    /// For the commands that write, which the daemon does not expose.
+    /// The engine itself, when there is one here.
+    ///
+    /// No command needs this to do its work any more — every one of them
+    /// routes. What is left is the detail `store maintain` prints beside the
+    /// report, which counts sessions in a store this process may not have:
+    /// routed, it says the number and stops rather than guessing, which is the
+    /// difference between a shorter answer and a wrong one.
     pub fn local(&self) -> Result<&Rook> {
         match self {
             Self::Local(rook) => Ok(rook),
@@ -258,6 +264,311 @@ impl Source {
         }
     }
 
+    /// Scored search, which is `recall`'s question asked differently — so the
+    /// routed call is the same core function and not the listing endpoint
+    /// filtered down.
+    pub fn memory_search(
+        &self,
+        query: &str,
+        workspace: &std::path::Path,
+    ) -> Result<Vec<rook_core::memory::Hit>> {
+        match self {
+            Self::Local(rook) => Ok(rook.memory_search(query)?),
+            Self::Daemon(d) => Ok(d
+                .get::<Page<rook_core::memory::Hit>>(&format!(
+                    "/api/memory/search?q={}&workspace={}",
+                    escaped(query),
+                    here(workspace)
+                ))?
+                .items),
+        }
+    }
+
+    pub fn remember(
+        &self,
+        fact: rook_core::Fact,
+        workspace: &std::path::Path,
+    ) -> Result<rook_core::memory::Learned> {
+        match self {
+            Self::Local(rook) => Ok(rook.remember(fact, Some("added from the command line".into()))?),
+            // The scope travels as the workspace it is scoped to, because the
+            // daemon's own project is not necessarily the one being asked
+            // about — a fact filed against the wrong one is not a smaller
+            // answer but a different fact.
+            Self::Daemon(d) => {
+                let said: serde_json::Value = d.post(
+                    "/api/memory/add",
+                    &serde_json::json!({
+                        "text": fact.text,
+                        "tags": fact.tags,
+                        "global": fact.scope == rook_core::Scope::Global,
+                        "pinned": fact.pinned,
+                        "workspace": workspace,
+                    }),
+                )?;
+                Ok(serde_json::from_value(said["learned"].clone())?)
+            }
+        }
+    }
+
+    pub fn memory_history(&self) -> Result<Vec<rook_core::MemoryVersion>> {
+        match self {
+            Self::Local(rook) => Ok(rook.memory_history()?),
+            Self::Daemon(d) => Ok(d.get::<Page<rook_core::MemoryVersion>>("/api/memory/history")?.items),
+        }
+    }
+
+    pub fn memory_diff(&self, a: &str, b: &str) -> Result<Vec<(rook_core::memory::Change, rook_core::Fact)>> {
+        match self {
+            Self::Local(rook) => Ok(rook.memory_diff(&rook.object_named(a)?, &rook.object_named(b)?)?),
+            Self::Daemon(d) => {
+                Ok(d.get::<Page<_>>(&format!("/api/memory/diff?a={}&b={}", escaped(a), escaped(b)))?.items)
+            }
+        }
+    }
+
+    pub fn memory_since(&self, days: i64) -> Result<Vec<(rook_core::memory::Change, rook_core::Fact)>> {
+        match self {
+            Self::Local(rook) => Ok(rook.memory_since(rook_store::now_unix() - days * 86_400)?),
+            Self::Daemon(d) => Ok(d.get::<Page<_>>(&format!("/api/memory/since?days={days}"))?.items),
+        }
+    }
+
+    pub fn why_skill(&self, name: &str, workspace: &std::path::Path) -> Result<rook_core::SkillWhy> {
+        match self {
+            Self::Local(rook) => Ok(rook.why_skill(name)?),
+            Self::Daemon(d) => {
+                d.get(&format!("/api/skills/{}/why?workspace={}", escaped(name), here(workspace)))
+            }
+        }
+    }
+
+    /// What the sources offer, and what could not be reached. The errors come
+    /// back with the list because a source that is down and a source with
+    /// nothing to offer are the same short list otherwise.
+    pub fn skills_offered(
+        &self,
+        query: &str,
+        refresh: bool,
+    ) -> Result<(Vec<rook_core::catalog::Offered>, Vec<String>)> {
+        match self {
+            Self::Local(rook) => Ok(rook.skills_offered(query, refresh)),
+            Self::Daemon(d) => {
+                let said: serde_json::Value =
+                    d.get(&format!("/api/skills/offered?q={}&refresh={refresh}", escaped(query)))?;
+                Ok((
+                    serde_json::from_value(said["items"].clone())?,
+                    serde_json::from_value(said["errors"].clone())?,
+                ))
+            }
+        }
+    }
+
+    pub fn skill_history(&self, name: &str) -> Result<Vec<rook_core::SkillVersionRecord>> {
+        match self {
+            Self::Local(rook) => Ok(rook.skill_history(name)?),
+            Self::Daemon(d) => Ok(d
+                .get::<Page<rook_core::SkillVersionRecord>>(&format!(
+                    "/api/skills/{}/history",
+                    escaped(name)
+                ))?
+                .items),
+        }
+    }
+
+    pub fn skill_diff(&self, a: &str, b: &str) -> Result<Vec<(String, rook_core::fileset::Change)>> {
+        match self {
+            Self::Local(rook) => Ok(rook.skill_diff(&rook.object_named(a)?, &rook.object_named(b)?)?),
+            Self::Daemon(d) => {
+                Ok(d.get::<Page<_>>(&format!("/api/skills/diff?a={}&b={}", escaped(a), escaped(b)))?.items)
+            }
+        }
+    }
+
+    pub fn install_skill(&self, name: &str) -> Result<std::path::PathBuf> {
+        match self {
+            Self::Local(rook) => Ok(rook.install_skill(name)?),
+            Self::Daemon(d) => {
+                let said: serde_json::Value =
+                    d.post("/api/skills/install", &serde_json::json!({ "name": name }))?;
+                Ok(serde_json::from_value(said["path"].clone())?)
+            }
+        }
+    }
+
+    pub fn new_skill(&self, name: &str, description: &str) -> Result<std::path::PathBuf> {
+        match self {
+            Self::Local(rook) => Ok(rook.new_skill(name, description)?),
+            Self::Daemon(d) => {
+                let said: serde_json::Value = d.post(
+                    "/api/skills/new",
+                    &serde_json::json!({ "name": name, "description": description }),
+                )?;
+                Ok(serde_json::from_value(said["dir"].clone())?)
+            }
+        }
+    }
+
+    pub fn capture_skill(
+        &self,
+        name: &str,
+        message: Option<String>,
+    ) -> Result<(rook_core::fileset::FileSet, String)> {
+        match self {
+            Self::Local(rook) => {
+                let (set, id) = rook.capture_skill(name, message)?;
+                Ok((set, id.to_hex()))
+            }
+            Self::Daemon(d) => {
+                let said: serde_json::Value = d.post(
+                    &format!("/api/skills/{}/capture", escaped(name)),
+                    &serde_json::json!({ "message": message }),
+                )?;
+                Ok((
+                    serde_json::from_value(said["set"].clone())?,
+                    serde_json::from_value(said["object"].clone())?,
+                ))
+            }
+        }
+    }
+
+    pub fn rollback_skill(&self, name: &str, object: &str) -> Result<rook_core::Rollback> {
+        match self {
+            Self::Local(rook) => Ok(rook.rollback_skill(name, &rook.object_named(object)?)?),
+            Self::Daemon(d) => d.post(
+                &format!("/api/skills/{}/rollback", escaped(name)),
+                &serde_json::json!({ "object": object }),
+            ),
+        }
+    }
+
+    pub fn collect_garbage(&self, dry_run: bool) -> Result<rook_store::GcReport> {
+        match self {
+            Self::Local(rook) => Ok(rook.collect_garbage(dry_run)?),
+            Self::Daemon(d) => d.post("/api/store/gc", &serde_json::json!({ "dry_run": dry_run })),
+        }
+    }
+
+    pub fn prune(&self, dry_run: bool) -> Result<rook_store::PruneReport> {
+        match self {
+            Self::Local(rook) => Ok(rook.prune(dry_run)?),
+            Self::Daemon(d) => d.post("/api/store/prune", &serde_json::json!({ "dry_run": dry_run })),
+        }
+    }
+
+    pub fn verify(&self) -> Result<Vec<(String, String)>> {
+        match self {
+            Self::Local(rook) => Ok(rook.verify()?.into_iter().map(|(id, why)| (id.to_hex(), why)).collect()),
+            Self::Daemon(d) => {
+                let said: serde_json::Value = d.post("/api/store/verify", &serde_json::json!({}))?;
+                Ok(said["failed"]
+                    .as_array()
+                    .map(|rows| {
+                        rows.iter()
+                            .map(|r| {
+                                (
+                                    r["object"].as_str().unwrap_or_default().to_string(),
+                                    r["why"].as_str().unwrap_or_default().to_string(),
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default())
+            }
+        }
+    }
+
+    pub fn train_dictionaries(&self) -> Result<Vec<(String, usize)>> {
+        match self {
+            Self::Local(rook) => Ok(rook.train_dictionaries()?),
+            Self::Daemon(d) => {
+                let said: serde_json::Value = d.post("/api/store/train", &serde_json::json!({}))?;
+                Ok(serde_json::from_value(said["trained"].clone())?)
+            }
+        }
+    }
+
+    /// The new session's id and how many events it carries.
+    pub fn fork_session(&self, session: u128, at: u64) -> Result<(String, u64)> {
+        match self {
+            Self::Local(rook) => {
+                let forked = rook.fork_session(session, at)?;
+                Ok((rook_store::format_session_id(forked.id), forked.event_count))
+            }
+            Self::Daemon(d) => {
+                let id = rook_store::format_session_id(session);
+                let said: serde_json::Value =
+                    d.post(&format!("/api/sessions/{id}/fork"), &serde_json::json!({ "at": at }))?;
+                Ok((
+                    said["id"].as_str().unwrap_or_default().to_string(),
+                    said["event_count"].as_u64().unwrap_or(0),
+                ))
+            }
+        }
+    }
+
+    pub fn delete_session(&self, session: u128) -> Result<u64> {
+        match self {
+            Self::Local(rook) => Ok(rook.delete_session(session)?),
+            Self::Daemon(d) => {
+                let id = rook_store::format_session_id(session);
+                let said: serde_json::Value = d.delete(&format!("/api/sessions/{id}"))?;
+                Ok(said["events"].as_u64().unwrap_or(0))
+            }
+        }
+    }
+
+    pub fn checkpoint(
+        &self,
+        name: &str,
+        path: Option<&std::path::Path>,
+    ) -> Result<(rook_core::fileset::FileSet, String)> {
+        match self {
+            Self::Local(rook) => {
+                let (set, id) = rook.checkpoint(name, path)?;
+                Ok((set, id.to_hex()))
+            }
+            Self::Daemon(d) => {
+                let said: serde_json::Value =
+                    d.post("/api/checkpoints", &serde_json::json!({ "name": name, "path": path }))?;
+                Ok((
+                    serde_json::from_value(said["set"].clone())?,
+                    serde_json::from_value(said["object"].clone())?,
+                ))
+            }
+        }
+    }
+
+    pub fn checkpoints(&self) -> Result<Vec<(String, String)>> {
+        match self {
+            Self::Local(rook) => {
+                Ok(rook.checkpoints()?.into_iter().map(|(n, id)| (n, id.to_hex())).collect())
+            }
+            Self::Daemon(d) => Ok(d
+                .get::<Page<serde_json::Value>>("/api/checkpoints")?
+                .items
+                .iter()
+                .map(|row| {
+                    (
+                        row["ref"].as_str().unwrap_or_default().to_string(),
+                        row["object"].as_str().unwrap_or_default().to_string(),
+                    )
+                })
+                .collect()),
+        }
+    }
+
+    pub fn restore_checkpoint(&self, object: &str, to: &std::path::Path) -> Result<usize> {
+        match self {
+            Self::Local(rook) => Ok(rook.restore_checkpoint(&rook.object_named(object)?, to)?),
+            Self::Daemon(d) => {
+                let said: serde_json::Value =
+                    d.post("/api/checkpoints/restore", &serde_json::json!({ "object": object, "to": to }))?;
+                Ok(said["restored"].as_u64().unwrap_or(0) as usize)
+            }
+        }
+    }
+
     pub fn transcript(
         &self,
         session: u128,
@@ -329,6 +640,19 @@ impl Daemon {
         self.runtime.block_on(async {
             let response =
                 self.http.post(&url).json(body).send().await.with_context(|| format!("POST {url}"))?;
+            let status = response.status();
+            let said = response.text().await.with_context(|| format!("reading {url}"))?;
+            if !status.is_success() {
+                bail!("{url} answered {status}: {said}");
+            }
+            serde_json::from_str(&said).with_context(|| format!("decoding {url}"))
+        })
+    }
+
+    fn delete<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        let url = format!("{}{path}", self.base);
+        self.runtime.block_on(async {
+            let response = self.http.delete(&url).send().await.with_context(|| format!("DELETE {url}"))?;
             let status = response.status();
             let said = response.text().await.with_context(|| format!("reading {url}"))?;
             if !status.is_success() {

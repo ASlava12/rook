@@ -14,7 +14,7 @@ use crate::error::{CoreError, Result};
 use crate::paths;
 
 /// A skill a source offers, before anything is installed.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Offered {
     pub name: String,
     pub description: String,

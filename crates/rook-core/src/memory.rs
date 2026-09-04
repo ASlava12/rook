@@ -125,7 +125,8 @@ pub enum Change {
     Forgotten,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "learned", content = "scope", rename_all = "snake_case")]
 pub enum Learned {
     New,
     /// The fact was already known; tags, pinning or a wider scope were folded

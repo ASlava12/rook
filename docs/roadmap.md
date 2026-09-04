@@ -1202,9 +1202,31 @@ rewind`, `memory rm` and `store maintain` refused while `rookd` was up, which
 meant stopping the daemon to set a goal — and `store maintain` is what somebody
 reaches for exactly when a long-running daemon has filled the disk. Each is now
 the same call the daemon makes on its own store, so there is one implementation
-and two ways in. What still refuses is what has no endpoint: `store gc`, `store
-train`, `session rm`, `skills capture`, `skills install`. Adding an endpoint is
-what makes each of them route.
+and two ways in. Memory went the same way and was
+the worse case: `memory add`, `memory search`, `memory history`, `memory diff`
+and `memory since` all refused, which is the whole of what a person does with
+memory while an agent is working. Scored search is `recall`'s question asked
+differently, so it is one core function both call rather than the listing
+endpoint filtered down, and a fact travels with the workspace it is scoped to
+— the daemon's own project is not necessarily the one being asked about.
+
+Then the rest of them, because "stop the daemon" is not an
+answer a tool should give: `store gc`, `prune`, `verify` and `train`, `session
+fork` and `rm`, every `skills` subcommand, and `checkpoint` create, list and
+restore. Two of them — `skills sources` and `skills search` — turned out to
+read no store at all and to have been refusing only for where they sat in the
+match.
+
+Three things came out of doing it rather than being the point of it. `store
+gc` was assembling its own collection options and taking the library's
+ten-minute default instead of the configured `gc_grace_secs`, so a store told
+to hold new objects for an hour collected them after ten minutes when a person
+asked rather than when the timer did; it is one core call now, and both ask it.
+`rook skills why` was thirty lines of printing in the command line and nothing
+anywhere else — it is a value the API serves too. And the tests that proved
+routing were proving it by a refusal, which stops working the moment nothing
+refuses: they check the line a routed command prints instead, so a command that
+quietly opened the store itself fails them.
 
 **What a command wrote is named, even though it cannot be undone.** A tool
 that declares its paths is checkpointed and diffed exactly; a command declares

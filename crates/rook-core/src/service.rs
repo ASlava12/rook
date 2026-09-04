@@ -225,6 +225,34 @@ impl Rook {
         self.skills().catalog(self.env())
     }
 
+    /// Why a name resolves to the skill it does: every version carrying that
+    /// name, what this environment fails to satisfy for each, and the winner.
+    ///
+    /// A value rather than printed lines, because the question is asked from
+    /// the command line and over the API and the answer must not depend on
+    /// which — and because "why did it pick that one" is exactly the question
+    /// a `requires:` gets wrong in a way nobody can see.
+    pub fn why_skill(&self, name: &str) -> Result<SkillWhy> {
+        let skills = self.skills();
+        let versions = skills.versions_of(name);
+        if versions.is_empty() {
+            return Err(CoreError::Other(format!("no skill named {name:?}")));
+        }
+        let candidates = versions
+            .iter()
+            .map(|skill| SkillCandidate {
+                id: skill.id(),
+                source: skill.source.label().to_string(),
+                mismatches: skill.manifest.requires.check(self.env()),
+            })
+            .collect();
+        let (chosen, why_not) = match skills.resolve(name, self.env()) {
+            Ok(r) => (Some(format!("{} [{}]", r.skill.id(), r.skill.source.label())), None),
+            Err(e) => (None, Some(e.to_string())),
+        };
+        Ok(SkillWhy { environment: self.env().clone(), versions: candidates, chosen, why_not })
+    }
+
     // ------------------------------------------------------- skill versioning
 
     /// Capture the current on-disk content of a skill into the store and record
@@ -479,6 +507,11 @@ impl Rook {
             FileSet::capture(&self.store, "checkpoint", name, "", root, &CaptureLimits::default(), None)?;
         self.store.set_ref(&format!("checkpoint/{name}/{}", rook_store::history_key()), &id)?;
         Ok((set, id))
+    }
+
+    /// Write a capture's files back out under `to`, and say how many.
+    pub fn restore_checkpoint(&self, object: &ObjectId, to: &Path) -> Result<usize> {
+        Ok(FileSet::load(&self.store, object)?.restore(&self.store, to)?)
     }
 
     pub fn checkpoints(&self) -> Result<Vec<(String, ObjectId)>> {
@@ -1188,10 +1221,33 @@ impl Rook {
         Ok(memory::select(book.in_scope(&workspace), query, budget))
     }
 
+    /// Facts matching `query`, scored, in this workspace's scope.
+    ///
+    /// Here rather than in the caller because three front ends ask it and the
+    /// answer must not depend on which: `recall` answers a different question
+    /// — what fits in a turn's budget — and reading one for the other is how
+    /// `memory search` and the agent's own recall would drift apart.
+    pub fn memory_search(&self, query: &str) -> Result<Vec<memory::Hit>> {
+        let book = self.memory()?;
+        let workspace = self.workspace.display().to_string();
+        Ok(memory::search(book.in_scope(&workspace), query))
+    }
+
     /// Facts that already say close to this one, in the workspace's scope.
     pub fn similar_facts(&self, text: &str) -> Result<Vec<Fact>> {
         let book = self.memory()?;
         Ok(book.similar_to(text).into_iter().cloned().collect())
+    }
+
+    /// The object a person named by its first few characters.
+    ///
+    /// Resolved here so a command means the same thing whether it opened the
+    /// store itself or asked the daemon: a prefix is ambiguous against a
+    /// particular store, and only the process holding it can say so.
+    pub fn object_named(&self, prefix: &str) -> Result<ObjectId> {
+        self.store.resolve_prefix(prefix)?.ok_or_else(|| {
+            CoreError::Other(format!("no object matches {prefix:?} (or the prefix is ambiguous)"))
+        })
     }
 
     pub fn memory_history(&self) -> Result<Vec<MemoryVersion>> {
@@ -1283,6 +1339,55 @@ impl Rook {
     /// The cap has to be enforced here rather than inside `prune`: bytes are
     /// only released by garbage collection, so nothing can tell whether it has
     /// been met until that has run.
+    /// The collection `rook store gc` runs.
+    ///
+    /// Here rather than in the caller because the expander and the grace are
+    /// what make a collection correct, and the command line was assembling its
+    /// own: it took the library's ten-minute default and never the configured
+    /// `gc_grace_secs`, so a store told to hold new objects for an hour
+    /// collected them after ten minutes when a person asked rather than the
+    /// timer.
+    pub fn collect_garbage(&self, dry_run: bool) -> Result<rook_store::GcReport> {
+        Ok(self.store.gc(&GcOptions {
+            expand: Some(&fileset::gc_expander),
+            dry_run,
+            min_age_secs: self.config.storage.gc_grace_secs,
+            ..Default::default()
+        })?)
+    }
+
+    pub fn prune(&self, dry_run: bool) -> Result<rook_store::PruneReport> {
+        Ok(self.store.prune(&self.config.storage.retention, dry_run)?)
+    }
+
+    pub fn verify(&self) -> Result<Vec<(ObjectId, String)>> {
+        Ok(self.store.verify()?)
+    }
+
+    pub fn train_dictionaries(&self) -> Result<Vec<(String, usize)>> {
+        Ok(self.store.train_dictionaries(
+            self.config.storage.train_dictionaries_after,
+            self.config.storage.dictionary_bytes,
+        )?)
+    }
+
+    /// A copy of a session's first `at` events, under a new id.
+    pub fn fork_session(&self, session: u128, at: u64) -> Result<rook_store::SessionMeta> {
+        let meta =
+            self.store.get_session(session)?.ok_or_else(|| CoreError::Other("no such session".into()))?;
+        Ok(self.store.fork_session(
+            session,
+            rook_store::new_session_id(),
+            at,
+            &format!("{} @{at}", meta.title),
+        )?)
+    }
+
+    /// Returns how many events went with it.
+    pub fn delete_session(&self, session: u128) -> Result<u64> {
+        Ok(self.store.delete_session(session)?)
+    }
+
     pub fn maintenance(&self, dry_run: bool) -> Result<MaintenanceReport> {
         let policy = &self.config.storage.retention;
         // Before the collection, so the objects the dropped refs were holding
@@ -1440,6 +1545,27 @@ fn walk_files(root: &Path) -> Vec<PathBuf> {
         .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
         .map(|e| e.path().to_path_buf())
         .collect()
+}
+
+/// The answer to `rook skills why`: what was on offer, and what won.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SkillWhy {
+    pub environment: rook_skills::Environment,
+    pub versions: Vec<SkillCandidate>,
+    /// The one that applies, as `name@version [source]`.
+    pub chosen: Option<String>,
+    /// Why none does, when none does.
+    pub why_not: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SkillCandidate {
+    pub id: String,
+    pub source: String,
+    /// Empty when this version applies here. Kept as the mismatch rather than
+    /// its rendering, so a UI can lay it out and a person still reads the same
+    /// sentence.
+    pub mismatches: Vec<rook_skills::Mismatch>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

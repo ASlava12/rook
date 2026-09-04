@@ -380,15 +380,19 @@ fn a_read_routes_through_the_daemon_and_answers_the_same() {
     assert_eq!(rook.json(&["store", "stat"]), direct_stats);
 
     let write = rook.run(&["store", "gc"]);
-    assert!(!write.status.success(), "a write with no endpoint still cannot go over the API");
-    let err = String::from_utf8_lossy(&write.stderr);
-    assert!(err.contains(&daemon.address), "and must say where the lock is: {err}");
+    assert!(write.status.success(), "{}", String::from_utf8_lossy(&write.stderr));
+    assert!(
+        String::from_utf8_lossy(&write.stdout).contains("scanned"),
+        "a write goes over the API and answers: {}",
+        String::from_utf8_lossy(&write.stdout)
+    );
+    drop(daemon);
 }
 
-/// The writes the daemon already serves. Refusing these meant stopping the
-/// daemon to set a goal or to forget a fact, which is the same store answering
-/// either way — and `store maintain` is what somebody reaches for exactly when
-/// a long-running daemon has filled the disk.
+/// The writes the daemon serves. Refusing these meant stopping the daemon to
+/// set a goal or to forget a fact, which is the same store answering either
+/// way — and `store maintain` is what somebody reaches for exactly when a
+/// long-running daemon has filled the disk.
 #[test]
 fn the_writes_the_daemon_serves_go_over_it_rather_than_refusing() {
     let rook = Rook::new();
@@ -397,13 +401,14 @@ fn the_writes_the_daemon_serves_go_over_it_rather_than_refusing() {
     let session = rook.json(&["session", "ls", "--all"])[0]["id"].as_str().unwrap().to_string();
 
     let daemon = Daemon::start(&rook);
-    // The precondition: with the daemon up the store is held, so a write with
-    // no endpoint refuses. Without this the rest could pass by opening the
-    // store directly and prove nothing about routing.
-    assert!(!rook.run(&["store", "gc"]).status.success(), "the daemon has to be holding the lock");
 
     let set = rook.run(&["session", "goal", &session, "ship", "the", "thing"]);
     assert!(set.status.success(), "{}", String::from_utf8_lossy(&set.stderr));
+    // Succeeding is not the claim — going over the daemon is. A command that
+    // opened the store itself would pass every assertion below it and prove
+    // nothing, and the line it prints when it routes is what tells them apart.
+    let said = String::from_utf8_lossy(&set.stderr);
+    assert!(said.contains(&daemon.address), "it has to have routed: {said}");
     let read = rook.ok(&["session", "goal", &session]);
     assert!(read.contains("ship the thing"), "the goal has to come back: {read}");
 
@@ -422,6 +427,74 @@ fn the_writes_the_daemon_serves_go_over_it_rather_than_refusing() {
         "and says so rather than naming the lock: {}",
         String::from_utf8_lossy(&missing.stderr)
     );
+    drop(daemon);
+}
+
+/// Memory is what a person edits while an agent is working, and all of it
+/// refused: adding a fact, searching for one, and every way of asking what
+/// changed. None of that needed an endpoint it could not have.
+#[test]
+fn memory_is_readable_and_writable_with_the_daemon_up() {
+    let rook = Rook::new();
+    rook.ok(&["memory", "add", "the port is 8443"]);
+
+    let daemon = Daemon::start(&rook);
+    let added = rook.run(&["memory", "add", "deploys go out on Thursday"]);
+    assert!(added.status.success(), "{}", String::from_utf8_lossy(&added.stderr));
+    let said = String::from_utf8_lossy(&added.stderr);
+    assert!(said.contains(&daemon.address), "it has to have routed rather than opened the store: {said}");
+
+    let found = rook.ok(&["memory", "search", "deploys"]);
+    assert!(found.contains("Thursday"), "the fact just added has to be findable: {found}");
+
+    let history = rook.ok(&["memory", "history"]);
+    assert!(history.lines().count() >= 3, "two versions and a header: {history}");
+
+    let since = rook.ok(&["memory", "since", "1"]);
+    assert!(since.contains("Thursday"), "what changed today includes it: {since}");
+
+    // Two objects to diff, which is why the fact before the daemon started
+    // exists: a history of one has nothing to compare.
+    let versions: Vec<String> = rook
+        .json(&["memory", "history"])
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["object"].as_str().unwrap().to_string())
+        .collect();
+    let diff = rook.ok(&["memory", "diff", &versions[1], &versions[0]]);
+    assert!(diff.contains("Thursday"), "the diff names the fact that arrived: {diff}");
+    drop(daemon);
+}
+
+/// One command from each family that used to need the daemon stopped. The
+/// point is not that each works — it is that "stop the daemon" is no longer an
+/// answer the tool gives, so the list has to be walked rather than sampled.
+#[test]
+fn no_command_needs_the_daemon_stopped_any_more() {
+    let rook = Rook::new();
+    rook.skill("kept", "---\nname: kept\nversion: 1.0.0\ndescription: a skill to version\n---\n\nBody.");
+    let _ = rook.run(&["run", "something to fork"]);
+    let session = rook.json(&["session", "ls", "--all"])[0]["id"].as_str().unwrap().to_string();
+
+    let daemon = Daemon::start(&rook);
+    let routed = |args: &[&str]| {
+        let out = rook.run(args);
+        let said = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(out.status.success(), "`{}` failed: {said}", args.join(" "));
+        assert!(said.contains(&daemon.address), "`{}` did not route: {said}", args.join(" "));
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+
+    assert!(routed(&["skills", "capture", "kept", "-m", "first"]).contains("captured kept"));
+    assert!(routed(&["skills", "history", "kept"]).contains("first"));
+    assert!(routed(&["skills", "why", "kept"]).contains("chosen: kept"));
+    assert!(routed(&["checkpoint", "create", "before"]).contains("checkpoint before"));
+    assert!(routed(&["checkpoint", "ls"]).contains("before"));
+    assert!(routed(&["store", "verify"]).contains("verified"));
+    assert!(routed(&["store", "prune", "--dry-run"]).contains("sessions deleted"));
+    assert!(routed(&["session", "fork", &session, "--at", "1"]).contains("forked"));
+    assert!(routed(&["session", "rm", &session]).contains("removed session"));
     drop(daemon);
 }
 
@@ -497,15 +570,26 @@ fn every_read_answers_the_same_through_the_daemon_as_it_does_direct() {
     );
 }
 
+/// A command answering is no longer the question, because every command
+/// answers either way. What has to end with the daemon is the routing: after
+/// it stops, the store is opened here again and nothing is said about a
+/// daemon.
 #[test]
-fn the_store_is_readable_again_once_the_daemon_stops() {
+fn the_store_is_opened_here_again_once_the_daemon_stops() {
     let rook = Rook::new();
     {
-        let _daemon = Daemon::start(&rook);
-        assert!(!rook.run(&["store", "gc"]).status.success(), "the daemon holds the lock");
+        let daemon = Daemon::start(&rook);
+        let routed = rook.run(&["store", "stat"]);
+        assert!(
+            String::from_utf8_lossy(&routed.stderr).contains(&daemon.address),
+            "while it runs, a read goes over it: {}",
+            String::from_utf8_lossy(&routed.stderr)
+        );
     }
     for _ in 0..40 {
-        if rook.run(&["store", "gc"]).status.success() {
+        let out = rook.run(&["store", "stat"]);
+        let said = String::from_utf8_lossy(&out.stderr).into_owned();
+        if out.status.success() && !said.contains("using the running rookd") {
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
