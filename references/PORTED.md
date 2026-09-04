@@ -1285,3 +1285,30 @@ are their build. opencode's market-share chart, database query load and
 generated files are their hosted statistics; their `use unicode ellipses in
 interface text` is what `fmt` here already does. cline's desktop release is a
 version bump.
+
+## openclaw 09ae220ea → d2f262ac2, 2026-09-04
+
+Eighty-one commits, nothing to port, and one worth writing down because it is
+a question already answered here. Their `stop aborting healthy model responses
+as idle timeouts while the provider stream is still active` moved the idle
+watchdog from the events a stream emits to the transport underneath it: a
+response that is arriving but has not yet produced anything the consumer sees
+was being killed as stalled. All three dialects here already put
+`stream_idle_timeout` on `bytes.next()`, so a keepalive or a chunk that
+decodes to nothing still counts as alive — the same conclusion from the other
+end.
+
+`cleanup fails on large archive backlogs` is SQLite's bound-parameter limit,
+reached by binding a key per row; redb takes no parameters and the size
+budget deletes oldest-first in batches, re-measuring after each. The Doctor
+service-recovery work — `point Doctor service recovery to the right
+commands`, `avoid service install advice when installation is blocked`, `keep
+remote Doctor failures out of local recovery` — is systemd unit management for
+a gateway service; there is no service to install here, and the principle
+they are converging on is the one `doctor` already follows. `report newer
+releases behind official version pins` is their plugin registry.
+
+The rest is product surface this does not have: Slack, Discord, WhatsApp and
+webchat channels, Android, the cloud gateway and its workers, the plugin SDK,
+the control UI and its locales, media generation, voice calls, appcast
+releases, and about thirty test-fixture consolidations.
