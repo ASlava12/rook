@@ -3,6 +3,7 @@
 mod approve;
 mod chat;
 mod fmt;
+mod remote;
 mod source;
 mod tui;
 

@@ -1371,6 +1371,21 @@ the chat socket needed. Both the handler and the hours-long timer run it on a
 blocking thread now; the test runs on a single-threaded runtime and fails
 without the change.
 
+**Two windows, one engine.** Someone installed it and worked in it, and the
+first thing they hit was `rook tui` in a second project dying on the store's
+lock. Every other command had learned to route through `rookd`; the TUI opened
+the store as its first act. It reads through the daemon now — sessions,
+transcripts, memory, skills, objects, stats — and runs its turns over the same
+chat socket the browser uses, so the second window is another client of one
+engine rather than a second copy that cannot exist. What stays local is the
+slash commands, which read and write this process's store directly, and they
+say so. The rest of that afternoon's report is in the commits: reasoning
+streamed one word to a line, no wheel scrolling, a footer promising `j/k` where
+`j` and `k` are letters in the message box, commands discoverable only from
+`/help`, an approval that could be granted for one exact command and nothing
+like it, and a two-minute turn that showed a fixed `working…` and read as a
+hang.
+
 ## After that
 
 **One live Anthropic turn, when there is a key.** The thinking round trip is

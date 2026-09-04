@@ -21,6 +21,7 @@ use ratatui::{DefaultTerminal, Frame};
 use rook_core::agent::{AgentLoop, Progress};
 use rook_core::{SessionSummary, TranscriptEntry};
 use rook_llm::Delta;
+use rook_proto::{ApprovalDecision, ChatEvent, ClientMessage};
 use rook_skills::SkillCard;
 use rook_store::StoreStats;
 use rook_tools::ask::{Answer, AskRequest, ChannelAsker, Question};
@@ -34,12 +35,12 @@ const TABS: [&str; 6] = ["Chat", "Sessions", "Memory", "Skills", "Store", "Help"
 /// How often the loop wakes to drain turn events when no key is pressed.
 const TICK: Duration = Duration::from_millis(60);
 
-/// Said where a turn would have run. A window whose store is held by `rookd`
-/// browses everything and runs nothing: the tabs read over the daemon's API,
-/// and a turn writes as it goes, which is the one thing that cannot be a
-/// request against somebody else's lock.
-const NOT_HERE: &str = "`rookd` holds the store, so this window reads rather than runs. \
-                        Its own chat runs turns, and stopping it gives this one the store.";
+/// Said where a slash command would have run. Turns go to the daemon holding
+/// the store and come back over its socket, but these read and write this
+/// process's store directly — `/undo` rewinds files, `/new` starts a session —
+/// and there is no endpoint behind most of them.
+const NOT_HERE: &str = "`rookd` holds the store, so the slash commands are not available in this \
+                        window. Turns are: they run there and stream back here.";
 
 pub fn run(source: crate::source::Source, yes: bool) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
@@ -64,11 +65,18 @@ enum TurnEvent {
     Reasoning(String),
     Tool(String),
     ToolDone(String, bool),
-    Spent { input: u32, output: u32, cached: u32 },
+    Spent {
+        input: u32,
+        output: u32,
+        cached: u32,
+    },
     Approval(ApprovalRequest),
     Ask(AskRequest),
     Done(String),
     Error(String),
+    /// A turn the daemon is running, verbatim. Translated where the rest are
+    /// handled rather than at the socket, so the two paths meet in one place.
+    FromDaemon(Box<ChatEvent>),
 }
 
 struct Selected {
@@ -92,6 +100,23 @@ struct Chat {
     drawn: u16,
     /// Input, output and cached tokens so far in this turn.
     spent: Option<(u32, u32, u32)>,
+    /// When the turn in flight started. A long turn showed a fixed `working…`
+    /// and a stream that only moved when the model spoke, which reads as a
+    /// hang — and was reported as one.
+    since: Option<std::time::Instant>,
+    /// Where to send what the person answers while the daemon runs the turn:
+    /// approvals, answers and a cancellation. `None` when the turn is this
+    /// process's own.
+    remote: Option<mpsc::UnboundedSender<ClientMessage>>,
+}
+
+/// `12s`, `4m10s` — the two units a person waiting reads, and no more.
+fn elapsed(since: std::time::Duration) -> String {
+    let seconds = since.as_secs();
+    match seconds < 60 {
+        true => format!("{seconds}s"),
+        false => format!("{}m{:02}s", seconds / 60, seconds % 60),
+    }
 }
 
 /// Short enough for the footer, which already carries the mode, the effort and
@@ -423,14 +448,90 @@ impl App {
                     self.chat.push("err", &message);
                     self.chat.busy = false;
                 }
+                TurnEvent::FromDaemon(event) => self.heard_from_daemon(*event),
             }
         }
+    }
+
+    /// What the daemon streams, in the words this window already draws.
+    ///
+    /// One arm per event rather than a translation into `TurnEvent`: the two
+    /// sets are close but not the same, and a mapping that pretended otherwise
+    /// would have to invent a `Started` for a session id that arrives as text.
+    fn heard_from_daemon(&mut self, event: ChatEvent) {
+        match event {
+            ChatEvent::Started { session } => {
+                self.chat.session = rook_store::parse_session_id(&session);
+            }
+            ChatEvent::Text { text } => self.chat.push("text", &text),
+            ChatEvent::Reasoning { text } => self.chat.push("think", &text),
+            ChatEvent::Tool { name } => self.chat.push("tool", &format!("  · {name}")),
+            ChatEvent::ToolDone { name, failed } => {
+                self.chat.push("tool", &format!("  · {name} {}", if failed { "✗" } else { "✓" }))
+            }
+            ChatEvent::Remembered { text } => self.chat.push("stat", &format!("  remembered: {text}")),
+            ChatEvent::Forgot { text } => self.chat.push("stat", &format!("  forgot: {text}")),
+            ChatEvent::Spent { input_tokens, output_tokens, cached_tokens } => {
+                self.chat.spent = Some((input_tokens, output_tokens, cached_tokens))
+            }
+            ChatEvent::Interjected { text } => self.chat.push("stat", &format!("  ↩ {text}")),
+            ChatEvent::Approval { id, tool, action, preview, kind } => {
+                self.chat.pending = Some(ApprovalRequest { id, tool, action, preview, kind })
+            }
+            ChatEvent::Ask { id, questions } => {
+                self.chat.asking = Some(Asking {
+                    id,
+                    questions: questions
+                        .into_iter()
+                        .map(|q| rook_tools::ask::Question {
+                            question: q.question,
+                            choices: q.choices,
+                            multi: q.multi,
+                        })
+                        .collect(),
+                    at: 0,
+                    chosen: Vec::new(),
+                })
+            }
+            ChatEvent::Settings { mode, effort, .. } => {
+                self.chat.push("stat", &format!("  stance: {mode} · effort: {effort}"))
+            }
+            ChatEvent::Cancelled => {
+                self.chat.push("stat", "[stopped]");
+                self.finished();
+            }
+            ChatEvent::Done { steps, input_tokens, output_tokens, .. } => {
+                self.chat
+                    .push("stat", &format!("  {steps} step(s), {input_tokens} in / {output_tokens} out"));
+                self.finished();
+            }
+            ChatEvent::Error { message } => {
+                self.chat.push("err", &message);
+                self.finished();
+            }
+        }
+    }
+
+    /// A remote turn is over: the window stops waiting and forgets where to
+    /// send answers, so a key pressed afterwards is not sent into a turn that
+    /// has ended.
+    fn finished(&mut self) {
+        self.chat.busy = false;
+        self.chat.remote = None;
+        self.reload();
     }
 
     fn on_key(&mut self, key: crossterm::event::KeyEvent) {
         if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('c') {
             // A running turn is what there is to stop, as in the chat REPL and
             // the browser; quitting is what it means when there is nothing.
+            // A turn the daemon runs is stopped by asking it: dropping the
+            // socket here would leave the turn running with nobody reading it.
+            if let Some(say) = self.chat.remote.take() {
+                let _ = say.send(ClientMessage::Cancel);
+                self.chat.push("stat", "[stopping]");
+                return;
+            }
             match self.turn.take_if(|turn| !turn.is_finished()) {
                 Some(turn) => self.stop(turn),
                 None => self.quit = true,
@@ -475,7 +576,20 @@ impl App {
                 _ => return,
             };
             self.chat.push("stat", &format!("  {} → {}", request.action, approval.describe()));
-            self.approver.answer(&request.id, approval);
+            // To whoever asked: the loop in this process, or the daemon running
+            // the turn for this window.
+            match &self.chat.remote {
+                Some(say) => {
+                    let decision = match approval {
+                        Approval::Once => ApprovalDecision::Once,
+                        Approval::ForRun => ApprovalDecision::ForRun,
+                        Approval::KindForRun => ApprovalDecision::KindForRun,
+                        Approval::Deny(_) | Approval::Unanswered(_) => ApprovalDecision::Deny,
+                    };
+                    let _ = say.send(ClientMessage::Approval { id: request.id.clone(), decision });
+                }
+                None => self.approver.answer(&request.id, approval),
+            }
             self.chat.pending = None;
             return;
         }
@@ -498,6 +612,62 @@ impl App {
             KeyCode::Char(c) => self.chat.input.push(c),
             _ => {}
         }
+    }
+
+    /// A setting changed here, while the daemon is running the turn it applies
+    /// to. Between turns there is nothing to tell: the next prompt carries them.
+    fn tell_the_daemon(&self, name: &str, value: &str) {
+        if let Some(say) = &self.chat.remote {
+            let _ = say.send(ClientMessage::Setting { name: name.into(), value: value.into() });
+        }
+    }
+
+    /// Hand the prompt to the daemon holding the store, and stream what it
+    /// does back into the same events a local turn sends.
+    ///
+    /// The socket is the browser's, which is the point: one engine, and the
+    /// second window is another client of it rather than a second copy that
+    /// cannot exist.
+    fn send_to_daemon(&mut self, prompt: String) {
+        let Some(base) = self.source.daemon_base().map(|b| b.to_string()) else {
+            self.chat.busy = false;
+            return self.chat.push("err", "no daemon to run this");
+        };
+        let (say, mut outgoing) = mpsc::unbounded_channel::<ClientMessage>();
+        let (heard, mut incoming) = mpsc::unbounded_channel::<ChatEvent>();
+        let workspace = self.source.workspace().to_path_buf();
+
+        // The settings this window is showing, said before the prompt: a
+        // connection starts at the daemon's own and a stance cycled here would
+        // otherwise be a lie the footer keeps telling.
+        let _ = say.send(ClientMessage::Setting {
+            name: "mode".into(),
+            value: self.shared.policy.stance().as_str().to_string(),
+        });
+        let _ = say.send(ClientMessage::Setting {
+            name: "effort".into(),
+            value: self.shared.effort.get().as_str().to_string(),
+        });
+        let _ = say.send(ClientMessage::Prompt {
+            session: self.chat.session.map(rook_store::format_session_id),
+            text: prompt,
+        });
+        self.chat.remote = Some(say);
+
+        let to_loop = self.to_loop.clone();
+        let relay = to_loop.clone();
+        self.runtime.spawn(async move {
+            while let Some(event) = incoming.recv().await {
+                if relay.send(TurnEvent::FromDaemon(Box::new(event))).is_err() {
+                    break;
+                }
+            }
+        });
+        self.turn = Some(self.runtime.spawn(async move {
+            if let Err(e) = crate::remote::hold(&base, &workspace, &mut outgoing, heard).await {
+                fail(&to_loop, e.to_string());
+            }
+        }));
     }
 
     /// Finish the command being typed, as far as it is unambiguous.
@@ -571,6 +741,7 @@ impl App {
         let at = Stance::ALL.iter().position(|s| *s == now).unwrap_or(0);
         let next = Stance::ALL[(at + 1) % Stance::ALL.len()];
         self.shared.policy.set_stance(next);
+        self.tell_the_daemon("mode", next.as_str());
         self.chat.push("stat", &format!("  stance: {}", next.as_str()));
     }
 
@@ -584,6 +755,7 @@ impl App {
             Max => Low,
         };
         self.shared.effort.set(next);
+        self.tell_the_daemon("effort", next.as_str());
         self.chat.push("stat", &format!("  effort: {}", next.as_str()));
     }
 
@@ -591,9 +763,13 @@ impl App {
         let Some(mut asking) = self.chat.asking.take() else { return };
         let answer = asking.record(&std::mem::take(&mut self.chat.input));
         self.chat.push("stat", &format!("  {} → {}", answer.question, display(&answer.chosen)));
-        match asking.complete() {
-            true => self.asker.answer(&asking.id, asking.chosen),
-            false => self.chat.asking = Some(asking),
+        match (asking.complete(), &self.chat.remote) {
+            (false, _) => self.chat.asking = Some(asking),
+            (true, Some(say)) => {
+                let answers = asking.chosen.clone();
+                let _ = say.send(ClientMessage::Answers { id: asking.id.clone(), answers });
+            }
+            (true, None) => self.asker.answer(&asking.id, asking.chosen),
         }
     }
 
@@ -622,11 +798,11 @@ impl App {
         let aside = prompt.strip_prefix("/btw ").map(|q| q.trim().to_string());
         self.chat.push("you", &format!("› {prompt}"));
         self.chat.busy = true;
+        self.chat.since = Some(std::time::Instant::now());
         self.chat.scroll = 0;
 
         let Some(rook) = self.source.here().cloned() else {
-            self.chat.busy = false;
-            return self.chat.push("stat", &format!("  {NOT_HERE}"));
+            return self.send_to_daemon(prompt);
         };
         let to_loop = self.to_loop.clone();
         let approver = self.approver.clone();
@@ -926,10 +1102,14 @@ impl App {
             f.render_widget(Paragraph::new(lines).block(bordered(" commands · tab completes ")), ask);
         }
 
-        let prompt = if self.chat.busy && self.chat.asking.is_none() { "  working… " } else { "› " };
+        let prompt = match (self.chat.busy && self.chat.asking.is_none(), self.chat.since) {
+            (true, Some(since)) => format!("  working… {}  ", elapsed(since.elapsed())),
+            (true, None) => "  working… ".to_string(),
+            _ => "› ".to_string(),
+        };
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled(prompt, Style::default().fg(Color::DarkGray)),
+                Span::styled(prompt.clone(), Style::default().fg(Color::DarkGray)),
                 Span::raw(self.chat.input.as_str()),
             ]))
             .block(bordered("")),
@@ -1405,6 +1585,17 @@ mod tests {
 
         let kinds: Vec<&str> = chat.log.iter().map(|(kind, _)| *kind).collect();
         assert_eq!(kinds, ["think", "tool", "text"]);
+    }
+
+    /// A turn that thinks for two minutes showed a fixed `working…` and a
+    /// stream that moved only when the model spoke. It was reported as a hang,
+    /// which it was not.
+    #[test]
+    fn how_long_it_has_been_working_is_said_in_the_units_someone_waiting_reads() {
+        assert_eq!(elapsed(std::time::Duration::from_secs(9)), "9s");
+        assert_eq!(elapsed(std::time::Duration::from_secs(59)), "59s");
+        assert_eq!(elapsed(std::time::Duration::from_secs(60)), "1m00s");
+        assert_eq!(elapsed(std::time::Duration::from_secs(250)), "4m10s");
     }
 
     /// The commands were discoverable only from `/help`, which is where you

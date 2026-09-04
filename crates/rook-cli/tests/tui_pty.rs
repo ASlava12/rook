@@ -573,9 +573,38 @@ fn a_second_window_opens_and_browses_while_the_daemon_holds_the_store() {
     assert!(browsing.contains("held-open"), "the sessions tab reads over the daemon:\n{browsing}");
 
     pty.send("\t\t\t\t\t");
-    pty.send("hello\r");
+    pty.send("/context\r");
     let chat = pty.screen_showing(100, 30, "holds the store").join("\n");
-    assert!(chat.contains("holds the store"), "and a turn says why it cannot run here:\n{chat}");
+    assert!(chat.contains("holds the store"), "a slash command says why it cannot run here:\n{chat}");
+    drop(daemon);
+}
+
+/// And the turn itself: the store takes one writer, so this window cannot run
+/// its own loop — the daemon holding it does, and its socket is the same
+/// conversation from the other side. The approval that comes back is the proof
+/// the whole path is joined: prompt out, engine there, question here.
+#[test]
+fn a_second_window_runs_its_turn_through_the_daemon() {
+    let _one = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let command = format!("echo {} the-very-end", "some-long-argument ".repeat(4));
+    // Written before the daemon starts, so it is the config the daemon reads.
+    a_model_that_asks_to_run(home.path(), &command);
+
+    let daemon = Daemon::start(home.path(), workspace.path());
+    let mut pty = tui(home.path(), workspace.path());
+
+    pty.screen(100, 30);
+    pty.send("run it\r");
+    let asked = pty.screen_showing(100, 30, "the-very-end").join("\n");
+
+    assert!(asked.contains("approval"), "the daemon's approval arrives here:\n{asked}");
+    assert!(asked.contains("the-very-end"), "with the command whole:\n{asked}");
+    // Answered from this window, which is the other half of the path.
+    pty.send("y");
+    let ran = pty.screen_showing(100, 30, "run_command").join("\n");
+    assert!(ran.contains("run_command"), "and the call goes through:\n{ran}");
     drop(daemon);
 }
 

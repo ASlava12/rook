@@ -53,6 +53,15 @@ impl Source {
         }
     }
 
+    /// Where the daemon answers, when one is holding the store: the address a
+    /// second window opens its chat socket to.
+    pub fn daemon_base(&self) -> Option<&str> {
+        match self {
+            Self::Local(_) => None,
+            Self::Daemon(daemon) => Some(&daemon.base),
+        }
+    }
+
     /// The engine in this process, when the store is held here — and `None`
     /// when a daemon holds it, which is what a front end has to branch on
     /// before it can run a turn.

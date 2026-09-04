@@ -28,6 +28,11 @@ rustyline = { version = "18.0.1", default-features = false, features = ["with-fi
 serde = "1.0.229"
 serde_json = "1.0.151"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "signal"] }
+# Already in the tree, as what axum serves the browser's chat socket with. The
+# client side of the same protocol is how a second window runs a turn the
+# daemon holds the store for.
+tokio-tungstenite = "0.29.0"
+futures-util = "0.3.34"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 

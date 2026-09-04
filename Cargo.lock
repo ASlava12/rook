@@ -2316,6 +2316,7 @@ dependencies = [
  "async-trait",
  "clap",
  "crossterm",
+ "futures-util",
  "libc",
  "ratatui",
  "reqwest",
@@ -2334,6 +2335,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
 ]
