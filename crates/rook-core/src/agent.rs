@@ -2753,11 +2753,25 @@ impl<'a> AgentLoop<'a> {
             .take(10)
             .map(|o| format!("- {}: {}", o.name, o.description.chars().take(160).collect::<String>()))
             .collect();
-        match listed.is_empty() {
-            true => format!("no source offers a skill matching {query:?}. {}", errors.join("; ")),
-            false => {
-                format!("{}\n\nInstall one by name with `install`, or write your own.", listed.join("\n"))
-            }
+        if !listed.is_empty() {
+            return format!(
+                "{}\n\nInstall one by name with `install`, or write your own.",
+                listed.join("\n")
+            );
+        }
+        // "No source offers it" and "there are no sources" read the same and
+        // are not: the first is an answer, the second is a setting nobody has
+        // filled in, and a model told the first goes looking for another name.
+        if self.rook.config.skill_sources.is_empty() {
+            return format!(
+                "there are no skill sources configured, so nothing can be found or installed — \
+                 add them under `[skill_sources]` in config.toml, or write the skill with \
+                 `{WRITE_SKILL}`."
+            );
+        }
+        match errors.is_empty() {
+            true => format!("no source offers a skill matching {query:?}."),
+            false => format!("no source offers a skill matching {query:?}. {}", errors.join("; ")),
         }
     }
 

@@ -166,6 +166,36 @@ async fn a_failed_install_still_answers_the_search_that_came_with_it() {
     );
 }
 
+/// Emptying `[skill_sources]` is how a person says "do not fetch skills from
+/// anywhere", and the answer to a search was still "no source offers a skill
+/// matching …" — true, and read by a model as a name to try again with.
+/// Nothing was ever going to be found, and the reason is a setting.
+#[tokio::test]
+async fn a_search_with_no_sources_configured_says_that_rather_than_no_match() {
+    let mut f = fixture();
+    f.rook.config = Config { skill_sources: Vec::new(), ..Default::default() };
+    let session = f.rook.start_session("skills").unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("find_skill", serde_json::json!({ "query": "anything" })),
+        reply("understood"),
+    ]));
+
+    AgentLoop::new(&f.rook, provider, session).run("find me something").await.unwrap();
+
+    let said = f
+        .rook
+        .transcript(session, 0, 100, 4096)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.label == "find_skill" && e.kind != "tool-call")
+        .expect("the call answered");
+    assert!(
+        said.body.contains("no skill sources configured") && said.body.contains("config.toml"),
+        "it has to name the setting rather than report a miss: {}",
+        said.body
+    );
+}
+
 #[tokio::test]
 async fn a_plain_turn_is_logged_end_to_end() {
     let f = fixture();
