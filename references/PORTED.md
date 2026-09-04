@@ -1259,3 +1259,29 @@ WebSockets, detached review delivery, Guardian review for compaction
 checkpoints, a Windows private desktop, condensed TUI startup warnings and Vim
 escape recovery in legacy terminals — are product surfaces or platforms this
 repository does not have.
+
+## acp, cline, goose, opencode — small ranges, 2026-09-04
+
+**Ported from cline: an approval you cannot read whole.** Their toast box set
+only a maximum width, so a message past it was clipped to its first line and
+the instruction it existed to give never appeared. The same shape was here in
+a worse place: the TUI's approval panel was four rows whatever it held, with
+no wrapping, and its first line is the command being approved — so
+`run_command wants to run cargo test --workspace -- …` was cut at the panel's
+width, silently, and `y` approved a sentence nobody had seen the end of. The
+panel is sized to what it has to show now, capped at half the chat area so it
+cannot push the conversation off the screen, and it wraps.
+
+The pty suite could not drive an approval, because every fake model in it
+either refuses or never answers — so the test needed one that returns a tool
+call, streamed the way the loop reads it. That exists now, and the test types
+a prompt, waits for the panel and reads the end of the command off the screen.
+Without the fix it never appears: the run takes a minute and fails on the
+wait.
+
+Dismissed, each against the code. acp's `update registry agents` is docs for
+a registry this is not in. goose's maven smoke-test syntax and PyPI publishing
+are their build. opencode's market-share chart, database query load and
+generated files are their hosted statistics; their `use unicode ellipses in
+interface text` is what `fmt` here already does. cline's desktop release is a
+version bump.

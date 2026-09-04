@@ -719,7 +719,7 @@ impl App {
         // Only one of the two can be up: an approval blocks the turn that would
         // have to be running for a question to arrive.
         let blocking = match (&self.chat.pending, &self.chat.asking) {
-            (Some(_), _) => 4,
+            (Some(request), _) => approval_height(request, area.width, area.height),
             (_, Some(asking)) => asking.panel().len() as u16 + 2,
             _ => 0,
         };
@@ -791,7 +791,10 @@ impl App {
                 "[y]es once · [a]lways this run · [n]o",
                 Style::default().fg(Color::DarkGray),
             )));
-            f.render_widget(Paragraph::new(lines).block(bordered(" approval ")), ask);
+            f.render_widget(
+                Paragraph::new(lines).block(bordered(" approval ")).wrap(Wrap { trim: false }),
+                ask,
+            );
         } else if let Some(asking) = &self.chat.asking {
             f.render_widget(Paragraph::new(asking.panel()).block(bordered(&asking.title())), ask);
         }
@@ -1128,6 +1131,28 @@ fn fail(to_loop: &mpsc::UnboundedSender<TurnEvent>, message: String) {
     let _ = to_loop.send(TurnEvent::Error(message));
 }
 
+/// How tall the approval panel has to be for what it is approving to be read.
+///
+/// It was four rows whatever it held, and the first of those is the command
+/// itself — so `run_command wants to run cargo test --workspace …` was cut at
+/// the panel's width with nothing saying so, and the approval was of a
+/// sentence nobody had seen the end of. cline hit the same thing in a toast
+/// and fixed it the same way: give the box a real edge, and let the text wrap
+/// at it.
+///
+/// Capped at half the chat area, because the panel must not push the
+/// conversation off the screen — past the cap the preview scrolls off the top,
+/// which is what the drawing already does with it.
+fn approval_height(request: &ApprovalRequest, width: u16, room: u16) -> u16 {
+    let inside = width.saturating_sub(2).max(1) as usize;
+    let header = format!("{} wants to {}", request.tool, request.action);
+    let wrapped = header.lines().map(|line| line.chars().count().div_ceil(inside).max(1)).sum::<usize>();
+    let preview = request.preview.as_deref().map_or(0, |p| p.lines().count());
+    // The header, as much preview as there is, the key line, and two borders.
+    let wanted = wrapped + preview + 3;
+    (wanted as u16).clamp(4, (room / 2).max(4))
+}
+
 fn bordered(title: &str) -> Block<'_> {
     Block::default()
         .borders(Borders::ALL)
@@ -1155,6 +1180,43 @@ fn kind_style(kind: &str) -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn asking_to_run(command: &str) -> ApprovalRequest {
+        ApprovalRequest {
+            id: "1".into(),
+            tool: "run_command".into(),
+            action: format!("run {command}"),
+            preview: None,
+        }
+    }
+
+    /// The panel was four rows whatever it held, and the command is its first
+    /// line: at eighty columns everything past the sixtieth character of a
+    /// command was cut, silently, in the one place where reading the whole
+    /// thing is the point.
+    #[test]
+    fn the_approval_panel_is_tall_enough_for_the_command_being_approved() {
+        let long = format!("cargo test --workspace -- {}", "an-exact-test-name ".repeat(12));
+        let width = 80;
+        let inside = (width - 2) as usize;
+        let needed = format!("run_command wants to run {long}").chars().count().div_ceil(inside);
+        assert!(needed > 1, "the test has to need more than one line to be about wrapping: {needed}");
+
+        let tall = approval_height(&asking_to_run(&long), width, 40);
+
+        assert!(
+            tall as usize >= needed + 3,
+            "{tall} rows for {needed} lines of command, a key line and two borders"
+        );
+    }
+
+    /// And never so tall that the conversation it is about is off the screen.
+    #[test]
+    fn the_approval_panel_leaves_the_chat_on_the_screen() {
+        let sprawling = "x ".repeat(4_000);
+        assert!(approval_height(&asking_to_run(&sprawling), 80, 40) <= 20, "half of forty rows");
+        assert!(approval_height(&asking_to_run("ls"), 80, 6) >= 4, "and never less than it had");
+    }
 
     /// The pane kept every word of every turn for the life of the process. What
     /// makes a bound safe here is that the session holds all of it: the

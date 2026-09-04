@@ -386,6 +386,88 @@ fn a_model_that_never_answers(home: &std::path::Path) {
     unsafe { std::env::set_var("ROOK_LLM_BASE_URL", format!("http://{addr}/v1")) };
 }
 
+/// Answers every turn with one `run_command` call, streamed the way the loop
+/// reads it, so a test can put a real approval on the screen. The turn stops
+/// there: an approval blocks until somebody answers, which is the state being
+/// looked at.
+fn a_model_that_asks_to_run(home: &std::path::Path, command: &str) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let arguments = serde_json::json!({ "command": command, "cwd": "." }).to_string();
+    std::thread::spawn(move || {
+        use std::io::{BufRead, BufReader, Write};
+        while let Ok((mut socket, _)) = listener.accept() {
+            let mut reader = BufReader::new(socket.try_clone().unwrap());
+            let mut request = String::new();
+            let mut length = 0usize;
+            while reader.read_line(&mut request).unwrap_or(0) > 0 {
+                let line = request.rsplit('\n').nth(1).unwrap_or("").trim().to_string();
+                if let Some(said) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = said.trim().parse().unwrap_or(0);
+                }
+                if request.ends_with("\r\n\r\n") {
+                    break;
+                }
+            }
+            // Drained, or the client sees the connection close on its body.
+            std::io::copy(&mut reader.take(length as u64), &mut std::io::sink()).ok();
+
+            let body = if request.contains("chat/completions") {
+                let call = serde_json::json!({"choices": [{"index": 0, "delta": {"tool_calls": [{
+                    "index": 0, "id": "call-1", "type": "function",
+                    "function": { "name": "run_command", "arguments": arguments }
+                }]}, "finish_reason": null}]});
+                let end = serde_json::json!({"choices": [{"index": 0, "delta": {},
+                    "finish_reason": "tool_calls"}]});
+                format!("data: {call}\n\ndata: {end}\n\ndata: [DONE]\n\n")
+            } else {
+                r#"{"data":[]}"#.to_string()
+            };
+            let kind = match request.contains("chat/completions") {
+                true => "text/event-stream",
+                false => "application/json",
+            };
+            let _ = write!(
+                socket,
+                "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = socket.flush();
+        }
+    });
+    std::fs::write(
+        home.join("config.toml"),
+        // `ask` because the approval is the thing being looked at, and it is
+        // the stance a person gets by default.
+        "[agent]\nmodel = \"openai-compatible/asks\"\nnative_tools = true\n\n\
+         [sandbox]\nmode = \"ask\"\n",
+    )
+    .unwrap();
+    unsafe { std::env::set_var("ROOK_LLM_BASE_URL", format!("http://{addr}/v1")) };
+}
+
+/// The panel was four rows whatever it held, so the command being approved —
+/// its first line — was cut at the panel's width with nothing saying so, and
+/// `y` approved a sentence nobody had read the end of.
+#[test]
+fn an_approval_shows_the_whole_command_it_is_asking_about() {
+    let _one = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    // Longer than the panel is wide, which is the whole point, and ending in
+    // something unmistakable so a clipped screen cannot contain it by accident.
+    let command = format!("echo {} the-very-end", "some-long-argument ".repeat(6));
+    a_model_that_asks_to_run(home.path(), &command);
+    let mut pty = tui(home.path(), workspace.path());
+
+    pty.screen(100, 30);
+    pty.send("run it\r");
+    let shown = pty.screen_showing(100, 30, "the-very-end").join("\n");
+
+    assert!(shown.contains("approval"), "the approval panel is up:\n{shown}");
+    assert!(shown.contains("the-very-end"), "and the command is readable to its end:\n{shown}");
+}
+
 /// The chat REPL and the browser could both stop a turn; the TUI could only be
 /// killed, taking the browsing state and any approval granted for the run.
 #[test]
