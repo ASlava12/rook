@@ -1224,3 +1224,38 @@ surfaces this repository does not have. Past the head read, openclaw's
 `bound restored requester-settle recovery` is their own settle machinery,
 and `prevent startup stalls on large agent configs` is a config load this
 repository does at open and measures nowhere near their size.
+
+## codex 1d74c3ba1 → 0305dde92, 2026-09-04
+
+**Terminal input injection, ported.** A contained command inherits the
+terminal rook was started from, and `TIOCSTI` queues bytes into it as if they
+had been typed — read by the shell that resumes after rook exits. Our Seatbelt
+profile allowed `file-ioctl` outright, so the ioctl was permitted by the
+policy; the denial goes after that allowance, where the last matching rule
+wins.
+
+What could not be ported is their test. Codex drives a pty and proves the
+injection first. Here the profile refuses the ioctl on macOS 26 with or
+without the rule — measured, both ways, on a workspace file and on
+`/dev/null` — so a test that ran a command would have passed with the rule
+deleted, which is the shape this repository has three times called a test that
+proves nothing. What is asserted instead is the profile: that the denial is
+written after the allowance rather than before it, where it would be
+overridden and read exactly the same.
+
+Dismissed, each against the code. Their `report MCP tool discovery errors in
+server status` is the distinction `connect_mcp` already draws: a server whose
+`tools/list` failed is a `failure` with its reason, never a server offering
+nothing. `bound Noise handshakes by the exec server initialization timeout` is
+their remote exec transport; ours is bounded by `startup_timeout_secs`, which
+covers the handshake because the handshake is the only thing before it.
+`warn when saved model defaults are overridden` needs a command that saves a
+default and a layer above it to be overridden by; there is one config file
+here. `harden TUI parsing of assistant markup` is their directive grammar for
+git receipts and code comments, a surface this does not have. The rest —
+GStreamer in the voice host, an attachment store, prompt image detail modes,
+three model catalog entries, otel metrics, trusted headers for remote exec
+WebSockets, detached review delivery, Guardian review for compaction
+checkpoints, a Windows private desktop, condensed TUI startup warnings and Vim
+escape recovery in legacy terminals — are product surfaces or platforms this
+repository does not have.

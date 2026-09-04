@@ -233,6 +233,13 @@ fn profile(isolation: &Isolation) -> String {
          (allow sysctl-read)\n(allow mach-lookup)\n(allow ipc-posix*)\n(allow file-read*)\n\
          (allow file-ioctl)\n(allow system-socket)\n(allow file-write-data (literal \"/dev/null\"))\n",
     );
+    // A contained command inherits the terminal rook was started from, and
+    // `TIOCSTI` queues bytes into it as if they had been typed — read by the
+    // shell that resumes when rook exits. The whole point of the containment
+    // is that a command cannot reach past the workspace, and this reaches
+    // past every boundary there is, so it is denied after the blanket ioctl
+    // allowance where the last matching rule wins.
+    p.push_str("(deny file-ioctl (ioctl-command TIOCSTI))\n");
     // After the blanket read and before the writes: Seatbelt takes the last
     // rule that matches, so this is where a denial has to sit to hold.
     for kept in &isolation.unreadable {
@@ -372,4 +379,28 @@ pub(crate) fn contained(command: &str, isolation: &Isolation) -> std::io::Result
 #[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
 pub(crate) fn contained(_: &str, _: &Isolation) -> std::io::Result<tokio::process::Command> {
     Err(std::io::Error::other(available().unwrap_err()))
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    /// Seatbelt takes the last rule that matches, so a denial written before
+    /// the blanket `file-ioctl` allowance would be overridden by it and read
+    /// exactly like one that holds.
+    ///
+    /// This asserts the profile and not the kernel, deliberately: on macOS 26
+    /// the ioctl is refused under this profile with or without the rule, so a
+    /// test that ran a command would pass with the rule deleted. The rule is
+    /// here for the versions where the blanket allowance is honoured — it is
+    /// how [codex hardened the same
+    /// profile](../../../references/PORTED.md) — and what can be checked
+    /// here is that it is not written where it cannot work.
+    #[test]
+    fn terminal_injection_is_denied_after_the_ioctl_allowance() {
+        let text = profile(&Isolation::for_workspace(std::env::temp_dir()));
+        let allowed = text.find("(allow file-ioctl)").expect("the allowance is there to be overridden");
+        let denied = text.find("(deny file-ioctl (ioctl-command TIOCSTI))").expect("and the denial");
+        assert!(denied > allowed, "the denial has to come last to hold:\n{text}");
+    }
 }
