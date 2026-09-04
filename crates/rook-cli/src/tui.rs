@@ -218,6 +218,83 @@ struct Chat {
     remote: Option<mpsc::UnboundedSender<ClientMessage>>,
 }
 
+/// A model's answer, styled the little that Markdown is actually used for.
+///
+/// The same subset the browser draws — fenced code, headings, bullets, inline
+/// code and bold — because it is the same answer, and somebody moving between
+/// the two should not meet two renderings of it. Everything else is left as
+/// the text it is: a half-written table is more readable than a guess at one.
+fn answer(body: &str, base: Style) -> Vec<Line<'static>> {
+    let code = Style::default().fg(Color::Rgb(152, 195, 121));
+    let mut lines = Vec::new();
+    let mut fenced = false;
+    for raw in body.split('\n') {
+        let trimmed = raw.trim_start();
+        if trimmed.starts_with("```") {
+            // The fence itself is the marker, dimmed: dropping it as the
+            // browser does leaves a block of code with no edge in a pane that
+            // is all text.
+            fenced = !fenced;
+            lines.push(Line::from(Span::styled(raw.to_string(), Style::default().fg(Color::DarkGray))));
+            continue;
+        }
+        if fenced {
+            lines.push(Line::from(Span::styled(raw.to_string(), code)));
+            continue;
+        }
+        if let Some(heading) = trimmed.strip_prefix('#') {
+            let text = heading.trim_start_matches('#').trim_start();
+            if !text.is_empty() && heading.starts_with(['#', ' ']) {
+                lines.push(Line::from(Span::styled(text.to_string(), base.add_modifier(Modifier::BOLD))));
+                continue;
+            }
+        }
+        lines.push(Line::from(inline(raw, base, code)));
+    }
+    lines
+}
+
+/// `code` and **bold** inside one line, in that order of precedence: a `*`
+/// inside a span of code is code, which is how it is meant and how the
+/// browser reads it.
+fn inline(text: &str, base: Style, code: Style) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut plain = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find(['`', '*']) {
+        let (marker, closing) = match rest[at..].starts_with("**") {
+            true => ("**", "**"),
+            false if rest[at..].starts_with('`') => ("`", "`"),
+            // A single `*` is a bullet or a multiplication sign, not an
+            // emphasis this bothers with.
+            false => {
+                plain.push_str(&rest[..at + 1]);
+                rest = &rest[at + 1..];
+                continue;
+            }
+        };
+        let after = at + marker.len();
+        let Some(end) = rest[after..].find(closing).map(|e| after + e) else {
+            break;
+        };
+        plain.push_str(&rest[..at]);
+        if !plain.is_empty() {
+            spans.push(Span::styled(std::mem::take(&mut plain), base));
+        }
+        let inside = rest[after..end].to_string();
+        spans.push(match marker {
+            "`" => Span::styled(inside, code),
+            _ => Span::styled(inside, base.add_modifier(Modifier::BOLD)),
+        });
+        rest = &rest[end + closing.len()..];
+    }
+    plain.push_str(rest);
+    if !plain.is_empty() {
+        spans.push(Span::styled(plain, base));
+    }
+    spans
+}
+
 /// `12s`, `4m10s` — the two units a person waiting reads, and no more.
 fn elapsed(since: std::time::Duration) -> String {
     let seconds = since.as_secs();
@@ -1175,8 +1252,12 @@ impl App {
                 "err" => Style::default().fg(Color::Red),
                 _ => Style::default(),
             };
-            for line in body.split('\n') {
-                lines.push(Line::from(Span::styled(line.to_string(), style)));
+            // The model's own words are the only ones with Markdown in them:
+            // a tool line or a note is written here and says what it says.
+            match *kind {
+                "text" => lines.extend(answer(body, style)),
+                _ => lines
+                    .extend(body.split('\n').map(|line| Line::from(Span::styled(line.to_string(), style)))),
             }
             lines.push(Line::from(""));
         }
@@ -1776,6 +1857,45 @@ mod tests {
 
         let kinds: Vec<&str> = chat.log.iter().map(|(kind, _)| *kind).collect();
         assert_eq!(kinds, ["think", "tool", "text"]);
+    }
+
+    fn drawn(lines: &[Line<'static>]) -> Vec<String> {
+        lines.iter().map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect::<String>()).collect()
+    }
+
+    /// An answer arrived as its Markdown source: `## Heading`, fences, and
+    /// backticks around every identifier. The browser has drawn the little of
+    /// it a model uses since the beginning; the terminal showed the source.
+    #[test]
+    fn an_answer_is_drawn_rather_than_shown_as_its_source() {
+        let body = "## Where it goes\n\nThe dir comes from `tempfile`, **not** the config.\n\n                    ```rust\nlet f = NamedTemporaryFile::new();\n```\n";
+        let base = Style::default();
+
+        let lines = answer(body, base);
+        let text = drawn(&lines);
+
+        assert_eq!(text[0], "Where it goes", "the marker is the styling, not the text");
+        assert_eq!(text[2], "The dir comes from tempfile, not the config.", "and so are the ticks");
+        assert!(text.iter().any(|l| l.contains("let f = NamedTemporaryFile::new();")), "{text:?}");
+        assert!(lines[0].spans[0].style.add_modifier.contains(Modifier::BOLD), "a heading is bold");
+    }
+
+    /// A fence keeps its edge: dropping the ``` as the browser does leaves a
+    /// block of code with nothing marking it in a pane that is all text.
+    #[test]
+    fn a_fence_keeps_the_line_that_opened_it() {
+        let lines = drawn(&answer("before\n```sh\nls\n```\nafter", Style::default()));
+        assert_eq!(lines, ["before", "```sh", "ls", "```", "after"]);
+    }
+
+    /// A `*` on its own is a bullet or a multiplication sign, and an unclosed
+    /// tick is a model still typing. Neither is emphasis, and neither may eat
+    /// the rest of the line.
+    #[test]
+    fn half_written_markup_is_left_as_the_text_it_is() {
+        for text in ["2 * 3 * 4", "a `half written", "**unclosed bold", "- a bullet"] {
+            assert_eq!(drawn(&answer(text, Style::default()))[0], text, "{text:?}");
+        }
     }
 
     /// The input was a `String` with `push` and `pop`: the cursor never left
