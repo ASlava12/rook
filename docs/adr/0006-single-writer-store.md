@@ -19,20 +19,23 @@ The index allows one writer at a time. Stop the daemon, or read through its
 API at http://127.0.0.1:7717 instead.
 ```
 
-## What routes so far
+## What routes
 
-Every read the CLI has goes over the API when the store is held: `store stat`,
-`store ls`, `store cat`, `store refs`, `session ls`, `session show`,
-`session diff`, `session context`, `skills ls`, `skills show`, `search` and
-`memory ls`. Four writes route too, being the ones the daemon's API already
-serves: `session goal`, `session rewind`, `memory rm` and `store maintain`.
-Each is the same call the daemon makes on its own store, so there is one
-implementation and two ways in.
+All of it. Every `store`, `session`, `skills`, `memory` and `checkpoint`
+subcommand goes over the API when the store is held, and each is the same call
+the daemon makes on its own store — one implementation and two ways in, which
+is what keeps the paths from drifting. `rook doctor` and `rook models` do not
+route because they no longer need to: the configuration is a file and the
+environment is the machine, so neither opens a store at all.
 
-The rest still refuse — `store gc`, `store train`, `session rm`, `skills
-capture` and `skills install` — because they have no endpoint, and inventing
-one per command is how the two paths start to drift. Adding an endpoint is
-what makes each of them route; the honest error is what they get until then.
+Getting there found two commands refusing for nothing — `skills sources` and
+`skills search` read no store and had only been sitting behind the check — and
+one real inconsistency, `store gc` assembling its own collection options and
+ignoring the configured `gc_grace_secs`.
+
+What still needs the store here is a turn: `run`, `chat` and `acp` write as
+they go and cannot be a request. A person who wants a turn while `rookd` runs
+has the daemon's own chat, which is the same engine from the other side.
 
 One of them is not identical routed. `store cat` over the API gets a windowed,
 text-decoded payload, because the endpoint that serves it also serves a browser

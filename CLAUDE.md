@@ -182,6 +182,13 @@ cost beside the pass. It was built to re-measure ADR-0010 and is not specific
 to it. A model capable enough to pass everything measures cost only, which is
 a result and not a failure of the harness — say which it was.
 
+**The gate's verdict is its exit status.** Twice now a commit has landed on
+a red gate because the check for it was a `grep` for a line that is printed
+either way — `gate exit 1` contains `gate exit` — and the shell went on to
+`git commit` because the `grep` had succeeded. Test the status itself, or
+grep for the word that only a pass prints, and put the commit behind it:
+`grep -q '^ci: ok' gate.log && git commit …`.
+
 **A red smoke is read, not rerun.** The `smoke ollama` job is not a gate, and
 its transcript is the most productive reading in the repository: five passes
 over one day found the rustup shim offered as a server, a misleading

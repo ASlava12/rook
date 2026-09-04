@@ -498,6 +498,27 @@ fn no_command_needs_the_daemon_stopped_any_more() {
     drop(daemon);
 }
 
+/// The diagnostic has to answer when things are wrong, and a daemon holding
+/// the store is one of the times somebody runs it. It needs no store to say
+/// anything it says.
+#[test]
+fn doctor_answers_with_the_daemon_up() {
+    let rook = Rook::new();
+    let alone = rook.ok(&["doctor"]);
+
+    let daemon = Daemon::start(&rook);
+    let out = rook.run(&["doctor"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(said.contains("toolchains detected"), "and says the same things: {said}");
+    assert_eq!(
+        said.lines().find(|l| l.starts_with("store")),
+        alone.lines().find(|l| l.starts_with("store")),
+        "including where the store is, which it names without opening"
+    );
+    drop(daemon);
+}
+
 /// A transcript and a search are what somebody wants while the daemon is up, and
 /// both needed the store stopped to get. Routed, they must answer what the store
 /// answers — and the search must carry its filters, or a narrowed question comes

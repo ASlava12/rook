@@ -377,9 +377,9 @@ what unblocks the most.
   of each shape rather than adding one: the CLI and the API had each built their
   own JSON for an object listing, a ref and a skill, and had drifted. The daemon
   publishes its address on start and removes it on either signal, and a file left
-  by a crash is ignored because nothing answers there. Commands that write still
-  say plainly that the daemon holds the lock
-  ([ADR-0006](adr/0006-single-writer-store.md)). 4 tests.
+  by a crash is ignored because nothing answers there. Writes route too, now all
+  of them, and `doctor` and `models` stopped needing a store to answer at all
+  ([ADR-0006](adr/0006-single-writer-store.md)). 7 tests.
 - **Logs that go somewhere and stop growing** — both binaries share one setup:
   stderr and `$ROOK_HOME/logs/rook.log`, at `telemetry.log_level` unless
   `ROOK_LOG` overrides it, rotated once at `max_log_bytes` so the logs cost at

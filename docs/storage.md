@@ -182,9 +182,11 @@ conversation, and a hit in a file names the path and the capture it came from.
 
 ## Concurrency
 
-redb allows one writer process at a time. `rookd` normally holds it. A CLI read
-routes over the daemon's API instead of refusing — `rookd` writes its address to
-`$ROOK_HOME/rookd.addr` on start and removes it on shutdown, and a file left
-behind by a crash is ignored because nothing answers there. Commands that write
-say plainly that the daemon holds the lock. Why one writer rather than several is
-[ADR-0006](adr/0006-single-writer-store.md).
+redb allows one writer process at a time. `rookd` normally holds it, and the
+CLI routes over the daemon's API instead of refusing — every subcommand of
+`store`, `session`, `skills`, `memory` and `checkpoint`, reads and writes
+alike. `rookd` writes its address to `$ROOK_HOME/rookd.addr` on start and
+removes it on shutdown, and a file left behind by a crash is ignored because
+nothing answers there. What cannot route is a turn, which writes as it runs:
+`run`, `chat` and `acp` want the store itself. Why one writer rather than
+several is [ADR-0006](adr/0006-single-writer-store.md).

@@ -358,7 +358,7 @@ fn main() -> Result<()> {
         None => chat::run(cli.workspace, None, cli.yes),
         Some(Command::Tui) => tui::run(Rook::open(cli.workspace)?, cli.yes),
         Some(Command::Init) => cmd_init(cli.workspace),
-        Some(Command::Doctor) => cmd_doctor(&Rook::open(cli.workspace)?, cli.json),
+        Some(Command::Doctor) => cmd_doctor(&workspace_of(&cli.workspace), cli.json),
         Some(Command::Chat { session }) => chat::run(cli.workspace, session, cli.yes),
         Some(Command::Run { prompt, session }) => cmd_run(cli.workspace, prompt, session, cli.yes, cli.json),
         Some(Command::Models) => cmd_models(cli.workspace, cli.json),
@@ -403,17 +403,23 @@ fn cmd_init(workspace: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-fn cmd_doctor(rook: &Rook, json: bool) -> Result<()> {
+/// Diagnostics, and so the one command that must answer when things are wrong
+/// — including while `rookd` holds the store, which is exactly a time somebody
+/// runs it. Nothing here needs the store: the configuration is a file, the
+/// environment is the machine, and the store's path is a path.
+fn cmd_doctor(workspace: &Path, json: bool) -> Result<()> {
+    let config = rook_core::Config::load()?;
+    let env = rook_skills::Environment::detect(AGENT_VERSION);
     if json {
-        println!("{}", serde_json::to_string_pretty(rook.env())?);
+        println!("{}", serde_json::to_string_pretty(&env)?);
         return Ok(());
     }
-    let env = rook.env();
+    let env = &env;
     println!("rook {AGENT_VERSION}");
     println!("os        {} ({} userland)", env.os, env.userland);
     println!("arch      {}", env.arch);
-    println!("workspace {}", rook.workspace.display());
-    println!("store     {}", rook.store.root().display());
+    println!("workspace {}", workspace.display());
+    println!("store     {}", rook_core::paths::store_dir().display());
     println!();
     println!("toolchains detected:");
     if env.languages.is_empty() {
@@ -450,7 +456,7 @@ fn cmd_doctor(rook: &Rook, json: bool) -> Result<()> {
     println!("commands:");
     // Asked of the same context a turn runs with, so what doctor says is
     // what a command gets — and what its result would say it got.
-    let ctx = rook_core::agent::tool_context(&rook.config, &rook.workspace, &rook_core::paths::output_dir());
+    let ctx = rook_core::agent::tool_context(&config, workspace, &rook_core::paths::output_dir());
     match rook_tools::isolate::choose(ctx.isolate, &ctx.isolation) {
         Ok((Some(_), how)) => println!("  contained — {how}"),
         Ok((None, how)) => println!("  not contained — {how}"),
@@ -461,8 +467,7 @@ fn cmd_doctor(rook: &Rook, json: bool) -> Result<()> {
     println!("standing instructions:");
     // Named, because the difference between a file the agent reads and one it
     // does not is invisible until something it says is ignored.
-    let standing =
-        rook_core::instructions::applying_in(&rook.workspace, rook.config.agent.max_instructions_bytes);
+    let standing = rook_core::instructions::applying_in(workspace, config.agent.max_instructions_bytes);
     if standing.is_empty() {
         println!(
             "  (none — an {} here or in {} applies to every turn)",
@@ -480,19 +485,19 @@ fn cmd_doctor(rook: &Rook, json: bool) -> Result<()> {
 
     println!();
     println!("model:");
-    match probe_provider(rook) {
+    match probe_provider(&config) {
         Ok(note) => println!("  {note}"),
         Err(e) => {
             // Indented as one block: the advice belongs to the failure above it,
             // and doctor is read top to bottom.
-            println!("  {}", rook.config.agent.model);
+            println!("  {}", config.agent.model);
             for line in e.to_string().lines() {
                 println!("  {line}");
             }
         }
     }
 
-    let servers = rook_core::lsp::configured(&rook.config);
+    let servers = rook_core::lsp::configured(&config);
     println!();
     println!("language servers:");
     if servers.is_empty() {
@@ -500,11 +505,9 @@ fn cmd_doctor(rook: &Rook, json: bool) -> Result<()> {
             "  none found on PATH (rust-analyzer, gopls, clangd, …) — `rook lsp install rust-analyzer` fetches one"
         );
     }
-    let here: Vec<String> = rook_core::lsp::for_workspace(&rook.config, &rook.workspace)
-        .into_iter()
-        .map(|c| c.language)
-        .collect();
-    for (config, started) in probe_servers(&servers, &rook.workspace) {
+    let here: Vec<String> =
+        rook_core::lsp::for_workspace(&config, workspace).into_iter().map(|c| c.language).collect();
+    for (config, started) in probe_servers(&servers, workspace) {
         // Installed and working is one question; used in this workspace is
         // another, and a ✓ against a language with no files here reads as the
         // first answering the second.
@@ -525,12 +528,12 @@ fn cmd_doctor(rook: &Rook, json: bool) -> Result<()> {
 
     println!();
     println!("web:");
-    match rook.config.web.enabled {
+    match config.web.enabled {
         false => println!("  off — `[web] enabled = true` offers `web_fetch`"),
         true => {
             println!("  ✓ web_fetch");
-            let engine = rook_tools::web::Engine::named(&rook.config.web.search, &rook.config.web.search_url);
-            match (rook.config.web.search.trim(), engine) {
+            let engine = rook_tools::web::Engine::named(&config.web.search, &config.web.search_url);
+            match (config.web.search.trim(), engine) {
                 ("", _) => println!("  · no search engine — set `[web] search` to searxng or brave"),
                 (named, None) => {
                     println!("  ✗ {named}: named but unusable — brave needs BRAVE_API_KEY in the environment")
@@ -544,13 +547,13 @@ fn cmd_doctor(rook: &Rook, json: bool) -> Result<()> {
     }
 
     let (_, unusable) = rook_tools::policy::Policy::compile(
-        rook.config.sandbox.stance,
-        &rook.config.sandbox.allow,
-        &rook.config.sandbox.ask,
-        &rook.config.sandbox.deny,
+        config.sandbox.stance,
+        &config.sandbox.allow,
+        &config.sandbox.ask,
+        &config.sandbox.deny,
     );
     println!();
-    println!("approvals: {} mode", rook.config.sandbox.stance.as_str());
+    println!("approvals: {} mode", config.sandbox.stance.as_str());
     for error in &unusable {
         println!("  ✗ {error}");
     }
@@ -558,11 +561,11 @@ fn cmd_doctor(rook: &Rook, json: bool) -> Result<()> {
         println!("  a rule that does not compile is not applied — a broken deny rule stops the agent");
     }
 
-    if !rook.config.hooks.is_empty() {
-        let (_, unusable) = rook_core::hooks::Hooks::compile(&rook.config.hooks);
+    if !config.hooks.is_empty() {
+        let (_, unusable) = rook_core::hooks::Hooks::compile(&config.hooks);
         println!();
-        println!("hooks: {}", rook.config.hooks.len());
-        for hook in &rook.config.hooks {
+        println!("hooks: {}", config.hooks.len());
+        for hook in &config.hooks {
             println!("  {:<14} {}", hook.event.as_str(), hook.command);
         }
         for error in &unusable {
@@ -572,10 +575,11 @@ fn cmd_doctor(rook: &Rook, json: bool) -> Result<()> {
         }
     }
 
-    if !rook.plugins.is_empty() {
+    let (plugins, plugin_errors) = rook_core::plugins::discover(workspace);
+    if !plugins.is_empty() {
         println!();
         println!("plugins:");
-        for plugin in &rook.plugins {
+        for plugin in &plugins {
             println!(
                 "  {} {} — {} skills, {} servers",
                 plugin.name,
@@ -586,7 +590,8 @@ fn cmd_doctor(rook: &Rook, json: bool) -> Result<()> {
         }
     }
 
-    let cards = rook.catalog();
+    let (skills, skill_errors) = rook_core::Rook::discover_skills(workspace, &plugins);
+    let cards = skills.catalog(env);
     let (ok, blocked): (Vec<_>, Vec<_>) = cards.iter().partition(|c| c.applicable);
     println!();
     println!("skills: {} usable, {} blocked here", ok.len(), blocked.len());
@@ -601,10 +606,11 @@ fn cmd_doctor(rook: &Rook, json: bool) -> Result<()> {
     for c in blocked {
         println!("  {} — {}", c.name, c.mismatches.join("; "));
     }
-    if !rook.skill_errors.is_empty() {
+    let failed: Vec<&String> = skill_errors.iter().chain(&plugin_errors).collect();
+    if !failed.is_empty() {
         println!();
         println!("skills that failed to load:");
-        for e in &rook.skill_errors {
+        for e in failed {
             println!("  {e}");
         }
     }
@@ -640,13 +646,13 @@ fn probe_servers(
     })
 }
 
-fn probe_provider(rook: &Rook) -> Result<String> {
+fn probe_provider(config: &rook_core::Config) -> Result<String> {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-    let (_, configured) = rook_llm::split_spec(&rook.config.agent.model);
-    let provider = provider(rook)?;
+    let (_, configured) = rook_llm::split_spec(&config.agent.model);
+    let provider = provider(config)?;
     let models = runtime.block_on(provider.models())?;
 
-    let spec = &rook.config.agent.model;
+    let spec = &config.agent.model;
     let window = provider.context_window();
     let reported = models.iter().find(|m| m.id == configured).and_then(|m| m.context_window);
 
@@ -877,9 +883,10 @@ pub fn cached(tokens: u32) -> String {
 fn cmd_models(workspace: Option<PathBuf>, json: bool) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     runtime.block_on(async move {
-        let rook = Rook::open(workspace)?;
-        let (_, configured) = rook_llm::split_spec(&rook.config.agent.model);
-        let models = provider(&rook)?.models().await?;
+        let _ = workspace;
+        let config = rook_core::Config::load()?;
+        let (_, configured) = rook_llm::split_spec(&config.agent.model);
+        let models = provider(&config)?.models().await?;
         if json {
             println!("{}", serde_json::to_string_pretty(&models)?);
             return anyhow::Ok(());
@@ -907,13 +914,12 @@ fn cmd_models(workspace: Option<PathBuf>, json: bool) -> Result<()> {
     })
 }
 
-fn provider(rook: &Rook) -> Result<Box<dyn rook_llm::Provider>> {
-    rook_llm::from_spec_with(
-        &rook.config.agent.model,
-        rook.config.agent.stream_idle(),
-        rook.config.agent.context_window,
-    )
-    .with_context(|| format!("configuring model {:?}", rook.config.agent.model))
+/// Configured from the configuration and nothing else, so the two commands
+/// that only want to ask a provider a question — `doctor` and `models` — do
+/// not have to open a store to do it, and answer while `rookd` holds one.
+fn provider(config: &rook_core::Config) -> Result<Box<dyn rook_llm::Provider>> {
+    rook_llm::from_spec_with(&config.agent.model, config.agent.stream_idle(), config.agent.context_window)
+        .with_context(|| format!("configuring model {:?}", config.agent.model))
 }
 
 fn cmd_acp(workspace: Option<PathBuf>) -> Result<()> {
@@ -1653,7 +1659,7 @@ fn cmd_skills(source: &Source, cmd: SkillCmd, workspace: &Path, json: bool) -> R
         }
         SkillCmd::Rollback { name, object } => {
             let result = source.rollback_skill(&name, &object)?;
-            println!("restored {} file(s) for {name} from {}", result.restored, &object);
+            println!("restored {} file(s) for {name} from {object}", result.restored);
             match &result.undo {
                 Some(undo) => println!("undo with `rook skills rollback {name} {}`", undo.short()),
                 None => println!("{name} was not on disk, so there was nothing to capture first"),

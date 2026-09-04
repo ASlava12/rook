@@ -195,7 +195,10 @@ impl Rook {
         }
     }
 
-    fn discover_skills(workspace: &Path, plugins: &[Plugin]) -> (SkillIndex, Vec<String>) {
+    /// The skills a workspace has, and what failed to load. Public because
+    /// `rook doctor` asks it without a store — a diagnostic that needs the
+    /// lock is unavailable exactly when it is wanted.
+    pub fn discover_skills(workspace: &Path, plugins: &[Plugin]) -> (SkillIndex, Vec<String>) {
         let mut roots: Vec<(PathBuf, SkillSource)> = Vec::new();
         if let Some(builtin) = paths::builtin_skills_dir() {
             roots.push((builtin, SkillSource::Builtin));
@@ -511,7 +514,7 @@ impl Rook {
 
     /// Write a capture's files back out under `to`, and say how many.
     pub fn restore_checkpoint(&self, object: &ObjectId, to: &Path) -> Result<usize> {
-        Ok(FileSet::load(&self.store, object)?.restore(&self.store, to)?)
+        FileSet::load(&self.store, object)?.restore(&self.store, to)
     }
 
     pub fn checkpoints(&self) -> Result<Vec<(String, ObjectId)>> {
