@@ -47,13 +47,19 @@ pub fn matching<'a>(offered: &'a [Offered], query: &str) -> Vec<&'a Offered> {
     // The words that carry meaning, by the same rule memory ranks facts with:
     // scoring on "a" and "the" ranks whichever description is longest.
     let wanted = crate::memory::terms_of(query);
+    // Whole words, by the rule memory ranks facts with, and not substrings:
+    // `contains` had "port" matching "supports", so a search for a port offered
+    // five unrelated skills and told the model to install one by name. It did.
     let score = |o: &Offered| {
-        let name = o.name.to_lowercase();
-        let haystack = format!("{} {}", o.name, o.description).to_lowercase();
+        let name = crate::memory::terms_of(&o.name.replace('-', " "));
+        let described = crate::memory::terms_of(&format!("{} {}", o.name.replace('-', " "), o.description));
+        let like = |terms: &std::collections::BTreeSet<String>, w: &String| {
+            terms.iter().any(|t| crate::memory::akin(t, w))
+        };
         // A name match is the strong signal and a word in the description the
         // weak one, which is why they are not worth the same.
-        wanted.iter().map(|w| usize::from(name.contains(w.as_str())) * 4).sum::<usize>()
-            + wanted.iter().filter(|w| haystack.contains(w.as_str())).count()
+        wanted.iter().filter(|w| like(&name, w)).count() * 4
+            + wanted.iter().filter(|w| like(&described, w)).count()
     };
     let mut ranked: Vec<(usize, &Offered)> =
         offered.iter().map(|o| (score(o), o)).filter(|(n, _)| wanted.is_empty() || *n > 0).collect();
@@ -224,7 +230,45 @@ fn copy_tree(from: &Path, to: &Path, budget: &mut Budget) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::cache_name;
+    use super::{Offered, cache_name, matching};
+
+    fn offering(name: &str, description: &str) -> Offered {
+        Offered {
+            name: name.into(),
+            description: description.into(),
+            source: "somewhere".into(),
+            dir: std::path::PathBuf::new(),
+        }
+    }
+
+    /// Matching on substrings had "port" inside "supports", so a search for a
+    /// port answered with five unrelated skills and an invitation to install
+    /// one by name. A model that already had the answer took it, and ran out of
+    /// steps installing and loading skills about spreadsheets.
+    #[test]
+    fn a_search_matches_words_rather_than_the_middles_of_them() {
+        let offered = vec![
+            offering("webapp-testing", "Supports verifying frontend behaviour."),
+            offering("port-forwarding", "Forward a port to a local process."),
+        ];
+
+        let found = matching(&offered, "port");
+
+        assert_eq!(found.len(), 1, "only the one that is about ports: {:?}", found);
+        assert_eq!(found[0].name, "port-forwarding");
+    }
+
+    /// The prefix rule is what makes a search usable, and it is memory's, so
+    /// the two rank by the same idea of what a word is.
+    #[test]
+    fn a_plural_still_finds_the_singular_and_a_hyphenated_name_its_parts() {
+        let offered = vec![offering("theme-factory", "Styling for artifacts.")];
+
+        assert_eq!(matching(&offered, "styling").len(), 1, "a description word");
+        assert_eq!(matching(&offered, "factory").len(), 1, "and half a hyphenated name");
+        assert_eq!(matching(&offered, "artifact").len(), 1, "singular against a plural");
+        assert!(matching(&offered, "database").is_empty(), "and nothing that shares no word");
+    }
 
     /// The name becomes a directory under the cache, and it is built from
     /// configuration. No separator survives the mapping, so the only way out was

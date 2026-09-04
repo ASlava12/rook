@@ -1142,6 +1142,15 @@ now. And the checker itself keeps answering `fails` where its own words say
 instructions now separate the two in as many words — a command that would not
 run tells you nothing about the claim.
 
+And the reading after that caught the cost of the fix two readings earlier. A
+failed install answers the search that came with it, and the search for `port`
+answered with five skills about spreadsheets, documents and web testing, under
+the line "install one by name". The model, holding the answer since its first
+call, installed one and ran out of steps loading skills. The search was
+matching substrings: `port` is inside `supports`. It asks by word now, through
+the same `akin` that ranks memory — prefix matching from four characters, so
+`ports` still finds `port` and `supports` does not.
+
 **Autonomy is a task and its boundaries, and the task is what was asked.**
 The goal check ran only for a session with a goal set, so `rook run` at
 autonomous — the stance with nobody else to check — checked nothing. With no

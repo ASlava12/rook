@@ -283,7 +283,7 @@ pub fn search<'a>(facts: impl Iterator<Item = &'a Fact>, query: &str) -> Vec<Hit
 /// `deploy`/`deploys`/`deployment` and `migrate`/`migration` without a
 /// language-specific rule table, and the threshold keeps `on` from matching
 /// `once`.
-fn akin(a: &str, b: &str) -> bool {
+pub(crate) fn akin(a: &str, b: &str) -> bool {
     if a == b {
         return true;
     }
