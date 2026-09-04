@@ -237,10 +237,13 @@ fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
     GATE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// A window that takes the store for itself, which is what most of these are
+/// about. The default shares one through `rookd` — the tests for that start
+/// their own, so nothing here leaves a daemon behind a temporary directory.
 fn tui(home: &std::path::Path, workspace: &std::path::Path) -> Pty {
     Pty::spawn(
         std::path::Path::new(env!("CARGO_BIN_EXE_rook")),
-        &["--workspace", workspace.to_str().unwrap(), "tui"],
+        &["--workspace", workspace.to_str().unwrap(), "tui", "--alone"],
         &[("ROOK_HOME", home.to_str().unwrap()), ("ROOK_LOG", "error"), ("TERM", "xterm-256color")],
         100,
         30,
@@ -577,6 +580,75 @@ fn a_second_window_opens_and_browses_while_the_daemon_holds_the_store() {
     let chat = pty.screen_showing(100, 30, "holds the store").join("\n");
     assert!(chat.contains("holds the store"), "a slash command says why it cannot run here:\n{chat}");
     drop(daemon);
+}
+
+/// The case somebody actually meets: two projects, two windows, and no daemon
+/// started by hand. The first window starts one and works through it, so the
+/// second finds it and works too — where before it died on the lock the first
+/// had taken for itself.
+#[test]
+fn two_windows_open_with_no_daemon_started_by_hand() {
+    let _one = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+
+    let shared = |workspace: &std::path::Path| {
+        Pty::spawn(
+            std::path::Path::new(env!("CARGO_BIN_EXE_rook")),
+            &["--workspace", workspace.to_str().unwrap(), "tui"],
+            &[
+                ("ROOK_HOME", home.path().to_str().unwrap()),
+                ("ROOK_LOG", "error"),
+                ("TERM", "xterm-256color"),
+            ],
+            100,
+            30,
+        )
+    };
+    // The daemon it starts is the one the test has to clean up, whichever
+    // window started it: a temporary directory with a live process in it is
+    // not one that goes away.
+    let _stop = Stopper(home.path().to_path_buf());
+
+    let mut one = shared(first.path());
+    let started = one.screen_showing(100, 30, "via http://").join("\n");
+    assert!(started.contains("via http://"), "the first window says it is sharing:\n{started}");
+
+    let mut two = shared(second.path());
+    let beside = two.screen_showing(100, 30, "via http://").join("\n");
+    assert!(beside.contains("Chat"), "and the second opens rather than dying on the lock:\n{beside}");
+    assert!(beside.contains(&second.path().display().to_string()[..20]), "on its own project:\n{beside}");
+}
+
+/// Kills whatever `rookd` was started against a home, when a test is done with
+/// it. Nothing else knows to: a window leaves it running on purpose.
+struct Stopper(std::path::PathBuf);
+
+impl Drop for Stopper {
+    fn drop(&mut self) {
+        let address = self.0.join("rookd.addr");
+        for _ in 0..50 {
+            if address.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        // By the port it published, because that is the only thing about it on
+        // this machine rather than in its environment: the command line is
+        // `rookd --port 0` whichever home it was given, so matching on that
+        // would take a daemon this test never started.
+        let Some(port) = std::fs::read_to_string(&address)
+            .ok()
+            .and_then(|base| base.trim().rsplit(':').next().map(str::to_string))
+        else {
+            return;
+        };
+        let _ = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("kill $(lsof -ti :{port} -sTCP:LISTEN) 2>/dev/null || true"))
+            .status();
+    }
 }
 
 /// And the turn itself: the store takes one writer, so this window cannot run

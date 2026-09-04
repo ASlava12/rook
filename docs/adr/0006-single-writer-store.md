@@ -15,8 +15,9 @@ the error says exactly that and points at the alternative:
 
 ```
 Error: the store at …/index.redb is already open in another process (probably `rookd`).
-The index allows one writer at a time. `rook tui` works beside it, and so does
-its own page; a turn started here needs the store, so stop the daemon for one.
+The index allows one writer at a time, and only `rookd` shares it: start that
+first and every window works beside it, the browser included. A `rook tui`,
+`chat` or `run` takes it alone — close that one, or start `rookd` before them.
 ```
 
 ## What routes
@@ -32,6 +33,15 @@ Getting there found two commands refusing for nothing — `skills sources` and
 `skills search` read no store and had only been sitting behind the check — and
 one real inconsistency, `store gc` assembling its own collection options and
 ignoring the configured `gc_grace_secs`.
+
+`rook tui` goes further: rather than taking the store when it is free, it makes
+sure there is a daemon — starting one on a port the system picks if there is
+none — and works through it. That is what makes a second window ordinary. It
+was the first thing somebody who installed this hit, twice: two windows without
+a daemon are impossible, because the window that takes the store serves nobody,
+and the error said "`rook tui` works beside it" when what it works beside is
+`rookd`. A window that starts one leaves it running and says so on the way out;
+`--alone` is the single-process way back.
 
 What still needs the store here is a turn started here: `run`, `chat` and
 `acp` write as they go and cannot be a request. `rook tui` is the exception,

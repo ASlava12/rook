@@ -1382,6 +1382,16 @@ the chat socket needed. Both the handler and the hours-long timer run it on a
 blocking thread now; the test runs on a single-threaded runtime and fails
 without the change.
 
+**A window makes sure there is a daemon.** The first fix routed a window that
+found `rookd` already running, which was not the case anybody had: two `rook
+tui` and no daemon at all. The window that takes the store serves nobody, so
+the second still died on the lock — and the error message, rewritten in that
+same commit, said "`rook tui` works beside it", which is true only beside a
+daemon. It starts one now, on a port the system picks rather than the default
+one somebody else may be holding, and watches the child rather than waiting out
+a fixed thirty seconds if it cannot start. `--alone` takes the store for one
+window, which is what the tests that are about a window use.
+
 **Two windows, one engine.** Someone installed it and worked in it, and the
 first thing they hit was `rook tui` in a second project dying on the store's
 lock. Every other command had learned to route through `rookd`; the TUI opened

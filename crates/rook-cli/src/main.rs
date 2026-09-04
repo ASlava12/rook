@@ -65,8 +65,13 @@ enum Command {
         #[arg(long)]
         session: Option<String>,
     },
-    /// Browse the store, sessions and skills in a read-only terminal UI.
-    Tui,
+    /// Chat, and browse the store, sessions and skills, in the terminal.
+    Tui {
+        /// Take the store for this window alone rather than sharing it through
+        /// `rookd`. One process, and no second window while it runs.
+        #[arg(long)]
+        alone: bool,
+    },
     /// List the models the configured provider says it can serve.
     Models,
     /// Speak the Agent Client Protocol on stdio, for editors.
@@ -357,7 +362,16 @@ fn main() -> Result<()> {
         // Bare `rook` opens a conversation: talking to the agent is the point,
         // and every comparable tool starts there.
         None => chat::run(cli.workspace, None, cli.yes),
-        Some(Command::Tui) => tui::run(Source::open(cli.workspace)?, cli.yes),
+        Some(Command::Tui { alone }) => {
+            // Shared by default: the store takes one writer, so a window that
+            // takes it is a window nobody can open a second of — which is what
+            // somebody working in two projects meets first.
+            let (source, started) = match alone {
+                true => (Source::open(cli.workspace)?, None),
+                false => Source::shared(cli.workspace)?,
+            };
+            tui::run(source, cli.yes, started)
+        }
         Some(Command::Init) => cmd_init(cli.workspace),
         Some(Command::Doctor) => cmd_doctor(&workspace_of(&cli.workspace), cli.json),
         Some(Command::Chat { session }) => chat::run(cli.workspace, session, cli.yes),

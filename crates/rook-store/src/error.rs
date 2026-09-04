@@ -21,15 +21,16 @@ pub enum StoreError {
     Encoding(String),
     #[error("store format v{found} is newer than this build supports (v{supported}); upgrade rook")]
     FormatTooNew { found: u32, supported: u32 },
-    // Names what does work beside a daemon rather than only what does not:
-    // every `store`, `session`, `skills`, `memory` and `checkpoint` command
-    // routes over its API, and `rook tui` runs its turns over its socket. What
-    // is left holding the lock is a turn started from here — `run`, `chat`,
-    // `acp` — and the answer for those is the daemon's own chat or stopping it.
+    // Not "probably `rookd`": a reachable daemon is exactly the case that never
+    // reaches this, because everything routes over its API instead. Whoever
+    // holds it is a `tui`, a `chat`, a `run` — each of which takes the store
+    // for itself and serves nobody — or a daemon that is not answering where
+    // it said it would. So the message names the one program that shares.
     #[error(
-        "the store at {path} is already open in another process (probably `rookd`).\n\
-         The index allows one writer at a time. `rook tui` works beside it, and so does \
-         its own page; a turn started here needs the store, so stop the daemon for one."
+        "the store at {path} is already open in another process.\n\
+         The index allows one writer at a time, and only `rookd` shares it: start that \
+         first and every window works beside it, the browser included. A `rook tui`, \
+         `chat` or `run` takes it alone — close that one, or start `rookd` before them."
     )]
     Locked { path: PathBuf },
 }

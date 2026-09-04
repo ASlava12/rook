@@ -42,7 +42,7 @@ const TICK: Duration = Duration::from_millis(60);
 const NOT_HERE: &str = "`rookd` holds the store, so the slash commands are not available in this \
                         window. Turns are: they run there and stream back here.";
 
-pub fn run(source: crate::source::Source, yes: bool) -> Result<()> {
+pub fn run(source: crate::source::Source, yes: bool, started: Option<String>) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let mut terminal = ratatui::init();
     // The wheel is how a person scrolls back through what an agent said, and
@@ -50,11 +50,20 @@ pub fn run(source: crate::source::Source, yes: bool) -> Result<()> {
     // the alternate screen is empty. Selecting text with the mouse needs Shift
     // held while this is on, which is the usual bargain and is in the help.
     let mouse = execute!(std::io::stdout(), event::EnableMouseCapture).is_ok();
+    let daemon = source.daemon_base().map(str::to_string);
     let result = App::new(source, runtime, yes).run(&mut terminal);
     if mouse {
         let _ = execute!(std::io::stdout(), event::DisableMouseCapture);
     }
     ratatui::restore();
+    // Said on the way out rather than on the way in, where it would scroll past
+    // before the screen is drawn: a daemon this window started outlives it, on
+    // purpose — the next window wants it — and a background process nobody was
+    // told about is one nobody thinks to stop.
+    if let (Some(from), Some(base)) = (started, daemon) {
+        println!("`rookd` is still running at {base} — every window shares it.");
+        println!("Started from {from}; stop it with `pkill -f rookd` when you are done.");
+    }
     result
 }
 
@@ -1172,9 +1181,16 @@ impl App {
             .select(self.tab)
             .highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD))
             .block(Block::default().borders(Borders::ALL).border_type(BorderType::Rounded).title(format!(
-                " rook {} — {} ",
+                " rook {} — {}{} ",
                 rook_core::AGENT_VERSION,
-                self.source.workspace().display()
+                self.source.workspace().display(),
+                // Whether this window holds the store or shares one: it decides
+                // what the slash commands can do and whose engine runs the
+                // turns, and it was invisible.
+                match self.source.daemon_base() {
+                    Some(base) => format!(" — via {base}"),
+                    None => " — this window holds the store".into(),
+                }
             )));
         f.render_widget(tabs, header);
 

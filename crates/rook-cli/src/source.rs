@@ -21,13 +21,51 @@ pub enum Source {
 }
 
 impl Source {
+    /// A source for a window that expects other windows.
+    ///
+    /// The store takes one writer and a `tui` that takes it serves nobody, so
+    /// the second window was an error message however many projects somebody
+    /// works in. This makes sure there is a daemon — starting one if there is
+    /// none — and works through it, which makes every window the same kind of
+    /// client and takes nothing from the others when one is closed.
+    ///
+    /// Falling back to the store itself where no daemon can be had: one window
+    /// with no `rookd` beside it is still the ordinary case on a machine where
+    /// the binary was installed alone.
+    pub fn shared(workspace: Option<std::path::PathBuf>) -> Result<(Self, Option<String>)> {
+        if let Some(mut daemon) = Daemon::running() {
+            daemon.workspace = asked_about(workspace.clone());
+            return Ok((Self::Daemon(daemon), None));
+        }
+        let Some((mut child, started)) = start_daemon() else {
+            return Ok((Self::open(workspace)?, None));
+        };
+        // Its own address file is the only "it is up" there is, and it writes
+        // one after opening the store, discovering skills and binding a port.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
+            if let Some(mut daemon) = Daemon::running() {
+                daemon.workspace = asked_about(workspace.clone());
+                return Ok((Self::Daemon(daemon), Some(started)));
+            }
+            // Watched rather than waited out: a daemon that cannot start says
+            // so in a moment, and thirty seconds of nothing before a window
+            // opens is indistinguishable from a hang.
+            if matches!(child.try_wait(), Ok(Some(_)) | Err(_)) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let _ = child.kill();
+        // It did not come up. The direct path says what is actually wrong, and
+        // a window that opens is better than a window that explains.
+        Ok((Self::open(workspace)?, None))
+    }
+
     /// Local unless the store is locked and a daemon is reachable, which is the
     /// only case the fallback is for: any other failure is the user's to see.
     pub fn open(workspace: Option<std::path::PathBuf>) -> Result<Self> {
-        let here = workspace
-            .clone()
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let here = asked_about(workspace.clone());
         match Rook::open(workspace) {
             Ok(rook) => Ok(Self::Local(std::sync::Arc::new(rook))),
             Err(e) if is_locked(&e) => match Daemon::running() {
@@ -621,6 +659,42 @@ impl Source {
                 .items),
         }
     }
+}
+
+/// The project a command is about: what was asked for, else where it was run.
+fn asked_about(workspace: Option<std::path::PathBuf>) -> std::path::PathBuf {
+    workspace.or_else(|| std::env::current_dir().ok()).unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
+/// Start `rookd` beside this binary, detached, and say where it came from.
+///
+/// Beside rather than on the `PATH`: the two are installed together and a
+/// second `rookd` from somewhere else would open a different store. Its own
+/// output goes nowhere — it logs to `$ROOK_HOME/logs`, and a line printed into
+/// a terminal a TUI is drawing in is a line that corrupts the screen.
+fn start_daemon() -> Option<(std::process::Child, String)> {
+    let beside =
+        std::env::current_exe().ok()?.parent()?.join(if cfg!(windows) { "rookd.exe" } else { "rookd" });
+    if !beside.is_file() {
+        return None;
+    }
+    let mut command = std::process::Command::new(&beside);
+    command
+        // A port the system picks, not the default one: the address file is how
+        // anyone finds it, and a fixed port collides with whatever else is on
+        // it — including a daemon somebody started for a different `ROOK_HOME`.
+        .args(["--port", "0"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    // Its own process group, so ctrl-c in this terminal is this window's to
+    // handle and does not take the engine every other window is using.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    Some((command.spawn().ok()?, beside.display().to_string()))
 }
 
 /// The project being asked about, as a query value.
