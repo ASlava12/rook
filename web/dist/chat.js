@@ -126,11 +126,16 @@ function askApproval(request) {
     box.replaceWith(el('div', { class: 'stat' }, `approval: ${decision}`));
     answered();
   };
+  // The family is named on the button rather than called "this kind": what it
+  // allows is the difference between answering once and answering all
+  // afternoon, and nobody presses a button for a category with no visible edge.
+  const kinds = (request.kind || []).map((k) => `\`${k}\``).join(', ');
   const box = block('approve',
     el('span', {}, `${request.tool} wants to ${request.action}`),
     ...(request.preview ? [el('pre', { class: 'preview' }, request.preview)] : []),
     el('button', { onclick: () => decide('once') }, 'Allow once'),
-    el('button', { onclick: () => decide('for_run') }, 'Always'),
+    el('button', { onclick: () => decide('for_run') }, 'Always this one'),
+    ...(kinds ? [el('button', { onclick: () => decide('kind_for_run') }, `Every ${kinds}`)] : []),
     el('button', { onclick: () => decide('deny') }, 'Deny'));
 }
 

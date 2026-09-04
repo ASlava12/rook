@@ -84,6 +84,48 @@ fn approving_for_the_run_stops_the_second_prompt() {
     assert_eq!(p.decide(&run("cargo publish")), Decision::Ask, "only the exact subject is granted");
 }
 
+/// Approving `cargo test -p rook-core` for the run leaves `cargo test -p
+/// rook-cli` to be answered again, so an afternoon of building is the same
+/// question with a new argument. "Every one like it" is what a person means,
+/// and it is narrower than the stance, which allows everything.
+#[test]
+fn approving_the_kind_covers_the_next_one_like_it() {
+    let p = policy(Stance::Assist, &[], &[], &[]);
+    assert_eq!(p.decide(&run("cargo test -p rook-core")), Decision::Ask);
+
+    p.grant_kind_for_run(&run("cargo test -p rook-core"));
+
+    assert_eq!(p.decide(&run("cargo test -p rook-cli")), Decision::Allow, "a different argument");
+    assert_eq!(p.decide(&run("cargo publish")), Decision::Allow, "and a different subcommand");
+    assert_eq!(p.decide(&run("git push")), Decision::Ask, "but not a different program");
+}
+
+/// `ls && rm -rf ~` is two families. Granting the one in front of you is not
+/// granting the line, which is the same rule the allow list already follows.
+#[test]
+fn a_line_that_runs_two_programs_needs_both_families() {
+    let p = policy(Stance::Assist, &[], &[], &[]);
+    p.grant_kind_for_run(&run("cargo build"));
+
+    assert_eq!(p.decide(&run("cargo build && rm -rf ~")), Decision::Ask);
+    p.grant_kind_for_run(&run("rm -rf /tmp/x"));
+    assert_eq!(p.decide(&run("cargo build && rm -rf ~")), Decision::Allow, "both, now");
+}
+
+/// A write's family is where it lands, and a fetch's is the host. A stance is
+/// nobody's to grant wholesale, so it has no family to offer.
+#[test]
+fn what_counts_as_a_family_depends_on_what_is_being_asked() {
+    assert_eq!(run("cargo test").kind().unwrap(), ["cargo"]);
+    assert_eq!(Risk::Write(vec!["src/agent/loop.rs".into()]).kind().unwrap(), ["src/agent/"]);
+    assert_eq!(Risk::Write(vec!["Cargo.toml".into()]).kind().unwrap(), ["./"]);
+    assert_eq!(Risk::Network("https://docs.rs/rook/latest".into()).kind().unwrap(), ["docs.rs"]);
+    assert!(Risk::Stance(Stance::Autonomous).kind().is_none(), "a raise is a person's to give");
+    // A line this cannot take apart is one nobody should grant families from:
+    // the commands inside `$(…)` run too, and they are not in what was shown.
+    assert!(run("cargo build $(rm -rf ~)").kind().is_none());
+}
+
 #[test]
 fn rules_match_written_paths_too() {
     let p = policy(Stance::Assist, &["/^src\\//"], &[], &["/^\\.env/"]);

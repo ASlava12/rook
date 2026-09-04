@@ -15,24 +15,49 @@ use rustyline::error::ReadlineError;
 
 use crate::fmt;
 
-const HELP: &str = "  /context [window]   what this conversation costs, and of what
-  /skills [name]      skills that apply here, or one skill's body
-  /session            id, size and token totals
-  /goal [text]        what this session is for; the agent is told
-  /stance [name]      how much latitude: readonly, assist or autonomous
-  /effort [name]      how much the model may think: low … max
-  /memory [query]     what it remembers, or what matches
-  /search <query>     find it in everything said, read and run
-  /diff               what this session has changed on disk
-  /btw <question>     ask about this conversation without joining it
-  /mcp                connected tool servers
-  /jobs [id]          commands left running, or what one has printed
-  /undo               rewind past the last exchange, files included
-  /rewind <seq>       rewind to a specific point in the transcript
-  /new [title]        start a fresh session
-  /help  /quit        this, and leaving
+/// Every command, its argument shape and what it does — one list, because the
+/// help text and the TUI's completion both answer "what can I type here" and a
+/// second hand-written copy of the answer is one that drifts.
+pub const COMMANDS: &[(&str, &str, &str)] = &[
+    ("context", "[window]", "what this conversation costs, and of what"),
+    ("skills", "[name]", "skills that apply here, or one skill's body"),
+    ("session", "", "id, size and token totals"),
+    ("goal", "[text]", "what this session is for; the agent is told"),
+    ("stance", "[name]", "how much latitude: readonly, assist or autonomous"),
+    ("effort", "[name]", "how much the model may think: low … max"),
+    ("memory", "[query]", "what it remembers, or what matches"),
+    ("search", "<query>", "find it in everything said, read and run"),
+    ("diff", "", "what this session has changed on disk"),
+    ("btw", "<question>", "ask about this conversation without joining it"),
+    ("mcp", "", "connected tool servers"),
+    ("jobs", "[id]", "commands left running, or what one has printed"),
+    ("undo", "", "rewind past the last exchange, files included"),
+    ("rewind", "<seq>", "rewind to a specific point in the transcript"),
+    ("new", "[title]", "start a fresh session"),
+    ("help", "", "this list"),
+    ("quit", "", "leave"),
+];
 
-Ctrl-C stops the turn in flight. Ctrl-D leaves.";
+/// The ones that could follow what has been typed so far, for completion and
+/// for showing while it is typed.
+pub fn commands_matching(typed: &str) -> Vec<&'static (&'static str, &'static str, &'static str)> {
+    let typed = typed.trim_start_matches('/');
+    // Up to the first space: past that the word being typed is an argument,
+    // and offering command names there is offering the wrong thing.
+    match typed.split_once(' ') {
+        Some((name, _)) => COMMANDS.iter().filter(|(c, ..)| *c == name).collect(),
+        None => COMMANDS.iter().filter(|(c, ..)| c.starts_with(typed)).collect(),
+    }
+}
+
+fn help_text() -> String {
+    let mut out = String::new();
+    for (name, args, what) in COMMANDS {
+        out.push_str(&format!("  /{name} {args:<12} {what}\n"));
+    }
+    out.push_str("\nCtrl-C stops the turn in flight. Ctrl-D leaves.");
+    out
+}
 
 pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: bool) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
@@ -287,7 +312,7 @@ pub async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command
 
     match name {
         "quit" | "exit" | "q" => return Ok(Said { text: String::new(), quit: true }),
-        "help" | "?" => say!("{HELP}"),
+        "help" | "?" => say!("{}", help_text()),
 
         // `mode` is what this was called; a habit is not worth breaking over a
         // rename, and both spell one setting.

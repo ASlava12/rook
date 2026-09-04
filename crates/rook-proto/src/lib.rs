@@ -139,6 +139,9 @@ pub struct AskQuestion {
 pub enum ApprovalDecision {
     Once,
     ForRun,
+    /// Everything of the same family for the rest of the run: every `cargo`
+    /// command, every write under this directory.
+    KindForRun,
     Deny,
 }
 
@@ -192,6 +195,10 @@ pub enum ChatEvent {
         /// What the call would change, when the tool can say.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         preview: Option<String>,
+        /// The family the page can offer to allow wholesale, empty when this
+        /// risk has none.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        kind: Vec<String>,
     },
     /// The turn is blocked until a [`ClientMessage::Answers`] with this id.
     Ask {

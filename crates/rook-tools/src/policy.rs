@@ -137,6 +137,46 @@ impl Risk {
         }
     }
 
+    /// The family this belongs to, when there is one worth granting: the
+    /// program a command runs, the directory a write lands in, the host a
+    /// fetch reaches.
+    ///
+    /// Approving `cargo test -p rook-core` for the run does not cover `cargo
+    /// test -p rook-cli`, so a person driving a build answers the same question
+    /// with a different argument all afternoon. This is what they mean by "yes,
+    /// and every one like it" — narrower than the stance, which allows
+    /// everything, and wider than the line in front of them.
+    ///
+    /// `None` where there is no honest family: a stance is a person's to give,
+    /// an MCP tool is already named by what it is, and a command line this
+    /// cannot take apart is one nobody should be granting families from.
+    pub fn kind(&self) -> Option<Vec<String>> {
+        match self {
+            Risk::Execute(line) => {
+                let commands = commands_in(line)?;
+                let programs: Vec<String> =
+                    commands.iter().filter_map(|c| c.split_whitespace().next().map(str::to_string)).collect();
+                (!programs.is_empty()).then_some(programs)
+            }
+            Risk::Write(paths) => {
+                let dirs: Vec<String> = paths
+                    .iter()
+                    .map(|path| match path.rsplit_once(['/', '\\']) {
+                        Some((dir, _)) => format!("{dir}/"),
+                        None => "./".to_string(),
+                    })
+                    .collect();
+                (!dirs.is_empty()).then_some(dirs)
+            }
+            Risk::Network(url) => {
+                let host = url.split_once("://").map_or(url.as_str(), |(_, rest)| rest);
+                let host = host.split(['/', '?', '#']).next().filter(|h| !h.is_empty())?;
+                Some(vec![host.to_string()])
+            }
+            Risk::ReadOnly | Risk::Stance(_) | Risk::External { .. } => None,
+        }
+    }
+
     /// The text rules are matched against.
     pub fn subject(&self) -> String {
         match self {
@@ -242,6 +282,11 @@ pub struct Policy {
     broken_deny: Vec<String>,
     /// Approvals the user extended to the rest of the run.
     granted: Mutex<HashSet<String>>,
+    /// Families the user extended to the rest of the run — every `cargo`, every
+    /// write under `src/`. Kept apart from `granted`, which holds whole
+    /// subjects, because the two are matched differently: one is the thing
+    /// itself, the other is what the thing belongs to.
+    kinds: Mutex<HashSet<String>>,
 }
 
 impl Policy {
@@ -291,6 +336,7 @@ impl Policy {
             deny: deny_rules,
             broken_deny,
             granted: Mutex::new(HashSet::new()),
+            kinds: Mutex::new(HashSet::new()),
         };
         (policy, errors)
     }
@@ -326,6 +372,13 @@ impl Policy {
         if self.granted.lock().is_ok_and(|g| g.contains(&subject)) {
             return Decision::Allow;
         }
+        // Every part again, and for the same reason: `cargo build && rm -rf ~`
+        // is two families, and granting one of them is not granting the line.
+        if let Some(kinds) = risk.kind()
+            && self.kinds.lock().is_ok_and(|granted| kinds.iter().all(|k| granted.contains(k)))
+        {
+            return Decision::Allow;
+        }
         // Every part, not just one: `ls && rm -rf ~` began with something
         // allowed, and a write touching `src/main.rs` and `/etc/passwd` had one
         // path that matched. Allowing either meant not asking about the rest.
@@ -352,6 +405,14 @@ impl Policy {
             granted.insert(subject.to_string());
         }
     }
+
+    /// Allow everything of the same family for the rest of the run. Silent when
+    /// the risk has no family: the front end only offers it where there is one.
+    pub fn grant_kind_for_run(&self, risk: &Risk) {
+        if let (Some(kinds), Ok(mut granted)) = (risk.kind(), self.kinds.lock()) {
+            granted.extend(kinds);
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -359,6 +420,9 @@ pub enum Approval {
     Once,
     /// Allow this exact subject for the rest of the run.
     ForRun,
+    /// Allow everything of the same family for the rest of the run: every
+    /// `cargo` command, every write under this directory.
+    KindForRun,
     /// A person said no. What they decided is on the record as a decision.
     Deny(String),
     /// Nobody was there to say anything. Told apart from a refusal because the
@@ -387,6 +451,7 @@ impl Approval {
         match self {
             Approval::Once => "allowed once".into(),
             Approval::ForRun => "allowed for the rest of the run".into(),
+            Approval::KindForRun => "every one like it allowed for the rest of the run".into(),
             Approval::Deny(why) => format!("refused — {why}"),
             Approval::Unanswered(why) => format!("unanswered — {why}"),
         }
@@ -434,6 +499,11 @@ pub struct ApprovalRequest {
     pub action: String,
     /// What the call would change, when the tool can say.
     pub preview: Option<String>,
+    /// The family a front end can offer to allow wholesale — `cargo`, `src/` —
+    /// empty when this risk has none. Carried rather than recomputed, because
+    /// the risk itself does not travel to a browser and every front end has to
+    /// offer the same three answers.
+    pub kind: Vec<String>,
 }
 
 /// An approver that hands the question to whatever is driving the UI and waits
@@ -461,6 +531,7 @@ impl Approver for ChannelApprover {
             tool: tool.to_string(),
             action: risk.describe(),
             preview: preview.map(str::to_string),
+            kind: risk.kind().unwrap_or_default(),
         };
         match self.0.ask(request).await {
             Ok(approval) => approval,

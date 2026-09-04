@@ -554,6 +554,27 @@ fn cmd_doctor(workspace: &Path, json: bool) -> Result<()> {
     );
     println!();
     println!("approvals: {} mode", config.sandbox.stance.as_str());
+    // The rules themselves, not just their count: "what am I allowed to run"
+    // is the question somebody has when they are being asked about every
+    // command, and the answer was in a config file they had to go and read.
+    for (what, rules) in [
+        ("allowed without asking", &config.sandbox.allow),
+        ("always asked about", &config.sandbox.ask),
+        ("refused outright", &config.sandbox.deny),
+    ] {
+        // One a line: the shipped deny rules are regular expressions long
+        // enough that three of them on one line is a paragraph nobody reads.
+        match rules.is_empty() {
+            true => println!("  {what} — none"),
+            false => {
+                println!("  {what}:");
+                for rule in rules.iter() {
+                    println!("    {rule}");
+                }
+            }
+        }
+    }
+    println!("  in this mode, anything else is {}", asked_or_allowed(config.sandbox.stance));
     for error in &unusable {
         println!("  ✗ {error}");
     }
@@ -1892,6 +1913,17 @@ fn cmd_memory(source: &Source, cmd: MemoryCmd, at: &Path, json: bool) -> Result<
         }
     }
     Ok(())
+}
+
+/// What happens to a command no rule mentions, which is the half of the answer
+/// the rules do not give.
+fn asked_or_allowed(stance: rook_tools::policy::Stance) -> &'static str {
+    use rook_tools::policy::Stance::*;
+    match stance {
+        ReadOnly => "refused: nothing may change the machine",
+        Autonomous | Free => "allowed without asking",
+        _ => "asked about, once per command — or once per kind, if you answer `k`",
+    }
 }
 
 /// What the agent would budget against: the override if there is one, else what

@@ -2841,6 +2841,10 @@ impl<'a> AgentLoop<'a> {
                     self.policy.grant_for_run(&risk.subject());
                     None
                 }
+                rook_tools::policy::Approval::KindForRun => {
+                    self.policy.grant_kind_for_run(&risk);
+                    None
+                }
                 rook_tools::policy::Approval::Deny(why) => {
                     self.report(Reported::Decision(format!("{name}: {} — declined", risk.describe())));
                     Some(format!("refused: {why}"))

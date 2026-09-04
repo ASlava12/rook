@@ -127,6 +127,7 @@ async fn serve(
                 match decision {
                     ApprovalDecision::Once => Approval::Once,
                     ApprovalDecision::ForRun => Approval::ForRun,
+                    ApprovalDecision::KindForRun => Approval::KindForRun,
                     ApprovalDecision::Deny => Approval::declined(),
                 },
             ),
@@ -376,6 +377,7 @@ fn approver(
                 tool: request.tool,
                 action: request.action,
                 preview: request.preview,
+                kind: request.kind,
             });
             if sent.is_err() {
                 break;

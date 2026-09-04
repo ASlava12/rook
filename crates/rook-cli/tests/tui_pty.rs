@@ -258,11 +258,19 @@ fn the_tui_starts_and_draws_its_tabs() {
     let all = screen.join("\n");
 
     assert!(all.contains("Chat"), "the first tab must be drawn:\n{all}");
-    assert!(all.contains("quit"), "the footer names the keys:\n{all}");
+    // The chat's own keys, and not the browsing ones: `j`, `k`, `r` and `q` are
+    // characters in the message box here, and a footer promising them had
+    // somebody typing `jjkkk` into their next prompt trying to scroll back.
+    assert!(all.contains("scroll"), "the footer names the keys that work here:\n{all}");
+    assert!(!all.contains("j/k"), "and not the ones that type letters:\n{all}");
     assert!(
         screen.iter().filter(|line| !line.is_empty()).count() > 3,
         "a nearly blank screen means it drew into a zero-sized terminal:\n{all}"
     );
+
+    pty.send("\t");
+    let browsing = pty.screen_showing(100, 30, "j/k").join("\n");
+    assert!(browsing.contains("quit"), "where those keys do work, they are offered:\n{browsing}");
 }
 
 #[test]

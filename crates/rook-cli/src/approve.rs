@@ -12,8 +12,13 @@ pub struct Terminal;
 impl Approver for Terminal {
     async fn ask(&self, tool: &str, risk: &Risk, preview: Option<&str>) -> Approval {
         let shown = preview.map(|p| format!("\n{}\n", indented(p))).unwrap_or_default();
+        // Offered only where there is a family to name, and naming it rather
+        // than calling it "this kind": approving `cargo test -p rook-core` for
+        // the run leaves `cargo test -p rook-cli` to be answered again, and an
+        // afternoon of building is the same question with a new argument.
+        let kind = risk.kind().map(|kinds| format!(" · [k] every {}", listed(&kinds))).unwrap_or_default();
         let question = format!(
-            "\n  {tool} wants to {}\n{shown}  [y]es once · [a]lways this run · [n]o: ",
+            "\n  {tool} wants to {}\n{shown}  [y]es once · [a]lways this run{kind} · [n]o: ",
             risk.describe()
         );
         // stdin is blocking, and blocking it on the runtime's worker would stall
@@ -29,6 +34,7 @@ impl Approver for Terminal {
             match answer.trim().to_lowercase().as_str() {
                 "y" | "yes" | "" => Approval::Once,
                 "a" | "always" => Approval::ForRun,
+                "k" | "kind" => Approval::KindForRun,
                 _ => Approval::declined(),
             }
         })
@@ -46,6 +52,25 @@ impl rook_tools::ask::Asker for Terminal {
         tokio::task::spawn_blocking(move || asked.iter().map(prompt).collect())
             .await
             .unwrap_or_else(|_| questions.iter().map(unanswered).collect())
+    }
+}
+
+/// `cargo`, or `cargo and git` — what the answer would allow, in the words the
+/// person would use for it.
+pub fn listed(kinds: &[String]) -> String {
+    let mut seen: Vec<&String> = Vec::new();
+    for kind in kinds {
+        if !seen.contains(&kind) {
+            seen.push(kind);
+        }
+    }
+    match seen.split_last() {
+        None => String::new(),
+        Some((last, [])) => format!("`{last}`"),
+        Some((last, rest)) => {
+            let front: Vec<String> = rest.iter().map(|k| format!("`{k}`")).collect();
+            format!("{} and `{last}`", front.join(", "))
+        }
     }
 }
 

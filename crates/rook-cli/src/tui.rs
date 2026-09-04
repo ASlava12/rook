@@ -10,7 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
+use ratatui::crossterm::execute;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
@@ -36,7 +37,15 @@ const TICK: Duration = Duration::from_millis(60);
 pub fn run(rook: Rook, yes: bool) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let mut terminal = ratatui::init();
+    // The wheel is how a person scrolls back through what an agent said, and
+    // without capture the terminal scrolls its own buffer instead — which under
+    // the alternate screen is empty. Selecting text with the mouse needs Shift
+    // held while this is on, which is the usual bargain and is in the help.
+    let mouse = execute!(std::io::stdout(), event::EnableMouseCapture).is_ok();
     let result = App::new(Arc::new(rook), runtime, yes).run(&mut terminal);
+    if mouse {
+        let _ = execute!(std::io::stdout(), event::DisableMouseCapture);
+    }
     ratatui::restore();
     result
 }
@@ -69,7 +78,11 @@ struct Chat {
     busy: bool,
     pending: Option<ApprovalRequest>,
     asking: Option<Asking>,
+    /// Lines back from the newest, so zero is pinned to the bottom.
     scroll: u16,
+    /// Lines the pane held when it was last drawn, so a reader who has scrolled
+    /// up keeps their place as the turn writes below them.
+    drawn: u16,
     /// Input, output and cached tokens so far in this turn.
     spent: Option<(u32, u32, u32)>,
 }
@@ -150,11 +163,17 @@ impl Asking {
 }
 
 impl Chat {
-    /// Append, merging consecutive text so a streamed reply is one paragraph
-    /// rather than one line per token.
+    /// Append, merging consecutive pieces of a stream so a streamed reply is
+    /// one paragraph rather than one line per token.
+    ///
+    /// Both kinds that stream, not just the answer: reasoning arrives token by
+    /// token as well, and unmerged it rendered a word to a line with a blank
+    /// line between — a page of `I` / `'ll` / `just` / `do`, which is what a
+    /// model thinking out loud looked like in the terminal.
     fn push(&mut self, kind: &'static str, text: &str) {
+        let streams = matches!(kind, "text" | "think");
         match self.log.last_mut() {
-            Some((last, body)) if *last == kind && kind == "text" => body.push_str(text),
+            Some((last, body)) if *last == kind && streams => body.push_str(text),
             _ => self.log.push((kind, text.to_string())),
         }
         self.trim();
@@ -331,11 +350,12 @@ impl App {
             self.drain_turn_events();
             // Poll rather than block: a streaming turn has to keep redrawing
             // even while nobody is typing.
-            if event::poll(TICK)?
-                && let Event::Key(key) = event::read()?
-                && key.kind == KeyEventKind::Press
-            {
-                self.on_key(key);
+            if event::poll(TICK)? {
+                match event::read()? {
+                    Event::Key(key) if key.kind == KeyEventKind::Press => self.on_key(key),
+                    Event::Mouse(mouse) => self.on_scroll(mouse.kind),
+                    _ => {}
+                }
             }
         }
         if let Some(turn) = self.turn.take() {
@@ -435,6 +455,7 @@ impl App {
             let approval = match key.code {
                 KeyCode::Char('y') | KeyCode::Enter => Approval::Once,
                 KeyCode::Char('a') => Approval::ForRun,
+                KeyCode::Char('k') => Approval::KindForRun,
                 KeyCode::Char('n') | KeyCode::Esc => Approval::declined(),
                 _ => return,
             };
@@ -445,6 +466,9 @@ impl App {
         }
 
         match key.code {
+            // A half-typed command is what Tab is for while one is being
+            // typed; the tabs are still a Tab away from anything else.
+            KeyCode::Tab if self.chat.input.starts_with('/') => self.complete(),
             KeyCode::Tab => self.tab = (self.tab + 1) % TABS.len(),
             KeyCode::BackTab => self.tab = (self.tab + TABS.len() - 1) % TABS.len(),
             KeyCode::Esc if self.chat.input.is_empty() => self.quit = true,
@@ -457,6 +481,45 @@ impl App {
             KeyCode::PageUp => self.chat.scroll = self.chat.scroll.saturating_sub(10),
             KeyCode::PageDown => self.chat.scroll = self.chat.scroll.saturating_add(10),
             KeyCode::Char(c) => self.chat.input.push(c),
+            _ => {}
+        }
+    }
+
+    /// Finish the command being typed, as far as it is unambiguous.
+    ///
+    /// One match completes to the name and, where it takes arguments, a space
+    /// to type them after. Several complete to what they share, which is how a
+    /// person discovers `/se` is two commands rather than a typo.
+    fn complete(&mut self) {
+        let matches = crate::chat::commands_matching(&self.chat.input);
+        let Some((first, args, _)) = matches.first() else { return };
+        let common = matches.iter().skip(1).fold(first.to_string(), |common, (name, ..)| {
+            common.chars().zip(name.chars()).take_while(|(a, b)| a == b).map(|(a, _)| a).collect()
+        });
+        self.chat.input = match matches.len() {
+            1 if args.is_empty() => format!("/{first}"),
+            1 => format!("/{first} "),
+            _ => format!("/{common}"),
+        };
+    }
+
+    /// The wheel, on whichever pane the tab is showing. Three lines a notch,
+    /// which is what a terminal sends and what every other reader does with it.
+    ///
+    /// The two panes count their scroll from opposite ends: the chat is pinned
+    /// to the newest line, so its offset is lines back from there, and a
+    /// transcript is read from the top.
+    fn on_scroll(&mut self, wheel: MouseEventKind) {
+        const BY: u16 = 3;
+        match (self.tab, wheel) {
+            (0, MouseEventKind::ScrollUp) => self.chat.scroll = self.chat.scroll.saturating_add(BY),
+            (0, MouseEventKind::ScrollDown) => self.chat.scroll = self.chat.scroll.saturating_sub(BY),
+            (1, MouseEventKind::ScrollUp) => {
+                self.transcript_scroll = self.transcript_scroll.saturating_sub(BY)
+            }
+            (1, MouseEventKind::ScrollDown) => {
+                self.transcript_scroll = self.transcript_scroll.saturating_add(BY)
+            }
             _ => {}
         }
     }
@@ -689,28 +752,31 @@ impl App {
             _ => self.draw_help(f, body),
         }
 
+        // Per tab, because every key here is a character in the message box on
+        // the chat tab: the footer promised `j/k move`, somebody trying to
+        // scroll back typed `jjkkk` into their next prompt, and a hint that
+        // does nothing where it is shown reads as an application that has
+        // stopped responding.
+        let keys: Vec<(&str, &str)> = match self.tab {
+            0 => vec![("↹ ", "tab  "), ("PgUp/PgDn ", "scroll  "), ("/ ", "commands  "), ("^C ", "stop  ")],
+            _ => vec![("↹/1-5 ", "tab  "), ("j/k ", "move  "), ("r ", "reload  "), ("q ", "quit  ")],
+        };
+        let mut spans: Vec<Span> = vec![Span::raw(" ")];
+        for (key, what) in keys {
+            spans.push(Span::styled(key, Style::default().fg(Color::Cyan)));
+            spans.push(Span::raw(what));
+        }
+        spans.push(Span::styled("F2/F3 ", Style::default().fg(Color::Cyan)));
+        spans.push(Span::raw(format!(
+            "{}/{}  {}  {}",
+            self.shared.policy.stance().as_str(),
+            self.shared.effort.get().as_str(),
+            spent(self.chat.spent),
+            self.status
+        )));
+
         f.render_widget(
-            Paragraph::new(Line::from(vec![
-                // Digits type into the message box on the chat tab, so
-                // promising them there would be a false instruction.
-                Span::styled(if self.tab == 0 { " ↹ " } else { " ↹/1-5 " }, Style::default().fg(Color::Cyan)),
-                Span::raw("tab  "),
-                Span::styled("j/k ", Style::default().fg(Color::Cyan)),
-                Span::raw("move  "),
-                Span::styled("r ", Style::default().fg(Color::Cyan)),
-                Span::raw("reload  "),
-                Span::styled("q ", Style::default().fg(Color::Cyan)),
-                Span::raw("quit  "),
-                Span::styled("F2/F3 ", Style::default().fg(Color::Cyan)),
-                Span::raw(format!(
-                    "{}/{}  {}  {}",
-                    self.shared.policy.stance().as_str(),
-                    self.shared.effort.get().as_str(),
-                    spent(self.chat.spent),
-                    self.status
-                )),
-            ]))
-            .style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new(Line::from(spans)).style(Style::default().fg(Color::DarkGray)),
             footer,
         );
     }
@@ -718,9 +784,17 @@ impl App {
     fn draw_chat(&mut self, f: &mut Frame, area: Rect) {
         // Only one of the two can be up: an approval blocks the turn that would
         // have to be running for a question to arrive.
+        // What the commands are is a thing nobody could see: they are in
+        // `/help` and in the Help tab, which is where you look after giving up.
+        // Shown while one is typed, they are a menu.
+        let completing = match self.chat.input.starts_with('/') {
+            true => crate::chat::commands_matching(&self.chat.input),
+            false => Vec::new(),
+        };
         let blocking = match (&self.chat.pending, &self.chat.asking) {
             (Some(request), _) => approval_height(request, area.width, area.height),
             (_, Some(asking)) => asking.panel().len() as u16 + 2,
+            _ if !completing.is_empty() => ((completing.len() + 2) as u16).min((area.height / 2).max(3)),
             _ => 0,
         };
         let [log, ask, input] =
@@ -749,10 +823,22 @@ impl App {
             )));
         }
 
-        // Pin to the bottom while streaming: a reply that scrolls off the top as
-        // it arrives is unreadable.
+        // Pinned to the bottom while streaming, because a reply that scrolls
+        // off the top as it arrives is unreadable — but only while the reader
+        // has not scrolled up. `scroll` counts lines back from the newest, so
+        // holding a position as the turn writes means growing it by what
+        // arrived; otherwise reading back during a long turn drifts to the
+        // bottom every few hundred milliseconds.
+        let total = lines.len() as u16;
+        if self.chat.scroll > 0 {
+            self.chat.scroll = self.chat.scroll.saturating_add(total.saturating_sub(self.chat.drawn));
+        }
+        self.chat.drawn = total;
         let visible = log.height.saturating_sub(2);
-        let overflow = (lines.len() as u16).saturating_sub(visible);
+        let overflow = total.saturating_sub(visible);
+        // Not past the first line: scrolling into blank space above the
+        // conversation reads as the pane having lost it.
+        self.chat.scroll = self.chat.scroll.min(overflow);
         let scroll = overflow.saturating_sub(self.chat.scroll);
 
         f.render_widget(
@@ -787,8 +873,16 @@ impl App {
                     Line::from(Span::styled((*line).to_string(), Style::default().fg(colour)))
                 }));
             }
+            // Named rather than called "this kind": what `k` would allow is
+            // the difference between answering once and answering all
+            // afternoon, and a person will not press a key for a category they
+            // cannot see the edges of.
+            let kind = match request.kind.is_empty() {
+                true => String::new(),
+                false => format!(" · [k] every {}", crate::approve::listed(&request.kind)),
+            };
             lines.push(Line::from(Span::styled(
-                "[y]es once · [a]lways this run · [n]o",
+                format!("[y]es once · [a]lways this run{kind} · [n]o"),
                 Style::default().fg(Color::DarkGray),
             )));
             f.render_widget(
@@ -797,6 +891,18 @@ impl App {
             );
         } else if let Some(asking) = &self.chat.asking {
             f.render_widget(Paragraph::new(asking.panel()).block(bordered(&asking.title())), ask);
+        } else if !completing.is_empty() {
+            let lines: Vec<Line> = completing
+                .iter()
+                .map(|(name, args, what)| {
+                    Line::from(vec![
+                        Span::styled(format!("/{name} "), Style::default().fg(Color::Cyan)),
+                        Span::styled(format!("{args:<10} "), Style::default().fg(Color::DarkGray)),
+                        Span::styled((*what).to_string(), Style::default().fg(Color::DarkGray)),
+                    ])
+                })
+                .collect();
+            f.render_widget(Paragraph::new(lines).block(bordered(" commands · tab completes ")), ask);
         }
 
         let prompt = if self.chat.busy && self.chat.asking.is_none() { "  working… " } else { "› " };
@@ -1113,13 +1219,15 @@ impl App {
             Line::from("  Tab         switch tab          j k ↑ ↓   move"),
             Line::from("  1-5         switch tab, outside Chat where digits are text"),
             Line::from("  Space/PgDn  scroll transcript    r         reload"),
+            Line::from("  wheel       scrolls either pane; hold Shift to select text"),
             Line::from("  q / Esc     quit (Ctrl-C anywhere)"),
             Line::from(""),
             Line::from("  In Chat:    Enter sends · Esc clears, then quits"),
             Line::from("              /btw <question> asks without joining the conversation"),
             Line::from("              y / a / n answer an approval"),
             Line::from("              enter     answer a question, one at a time"),
-            Line::from("              /…        the chat takes the same commands as `rook chat`"),
+            Line::from("              /…        tab completes; the list shows as you type"),
+            Line::from("              PgUp/PgDn scroll back through the conversation"),
             Line::from("              F2 / F3   cycle approvals / reasoning effort"),
             Line::from("              ctrl-c    stops a running turn, or quits when none is"),
         ];
@@ -1187,6 +1295,7 @@ mod tests {
             tool: "run_command".into(),
             action: format!("run {command}"),
             preview: None,
+            kind: vec!["echo".into()],
         }
     }
 
@@ -1247,6 +1356,50 @@ mod tests {
 
         assert_eq!(chat.log.len(), 1, "a reply arrives in fragments and reads as one: {:?}", chat.log);
         assert_eq!(chat.log[0].1, "the sky is blue");
+    }
+
+    /// Reasoning streams the same way an answer does, and unmerged it rendered
+    /// one word per line with a blank line between: a model thinking out loud
+    /// filled the pane with `I` / `'ll` / `just` / `do` and nothing readable.
+    #[test]
+    fn streamed_reasoning_joins_the_same_way_an_answer_does() {
+        let mut chat = Chat::default();
+        for word in ["I", "'ll", " just", " do", " the", " table", " dump"] {
+            chat.push("think", word);
+        }
+
+        assert_eq!(chat.log.len(), 1, "one block, not seven: {:?}", chat.log);
+        assert_eq!(chat.log[0].1, "I'll just do the table dump");
+    }
+
+    /// Merging is per stream and not across them: an answer that follows a
+    /// thought is a different block, and so is every tool line between.
+    #[test]
+    fn a_thought_and_the_answer_after_it_stay_apart() {
+        let mut chat = Chat::default();
+        chat.push("think", "reading it");
+        chat.push("tool", "  · read_file");
+        chat.push("text", "8443");
+
+        let kinds: Vec<&str> = chat.log.iter().map(|(kind, _)| *kind).collect();
+        assert_eq!(kinds, ["think", "tool", "text"]);
+    }
+
+    /// The commands were discoverable only from `/help`, which is where you
+    /// look after giving up. Typing `/se` narrows to what could follow it.
+    #[test]
+    fn typing_a_slash_narrows_to_the_commands_that_could_follow() {
+        let all = crate::chat::commands_matching("/");
+        assert!(all.len() > 10, "everything, for a bare slash: {}", all.len());
+
+        let se: Vec<&str> = crate::chat::commands_matching("/se").iter().map(|(n, ..)| *n).collect();
+        assert_eq!(se, ["session", "search"], "two share the prefix, so both are offered");
+
+        let past = crate::chat::commands_matching("/search rook");
+        assert_eq!(past.len(), 1, "past the name it is an argument, not a prefix");
+        assert_eq!(past[0].0, "search");
+
+        assert!(crate::chat::commands_matching("/nosuch").is_empty());
     }
 
     fn asking(questions: Vec<Question>) -> Asking {
