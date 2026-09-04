@@ -1095,7 +1095,7 @@ the model wrote a skill, was told where it went, handed that path to
 `read_file` and was refused for being outside the workspace — which it is, and
 correctly so, since skills live in the agent's own directory. It spent two
 calls on the refusal and then said the agent was not installed. The result of
-a write says how to read it back now, which is `find_skill` and not a path.
+a write says how to read it back now, which is `load_skill` and not a path.
 The other three failures in that reading were the model's: `read_file` for a
 prompt that said `cat`, an edit of `9001` written twice against a file it had
 just read as `8443`, and a `lib.rs` rewritten until the claim under test came
@@ -1109,6 +1109,27 @@ told only that `rust` does not exist, asked the identical thing again and
 gave up — holding, unread, the answer it had been given two steps earlier. A
 failed install answers the search that came with it now. The other two
 failures were the model's again.
+
+The reading after *that* one caught a defect these readings had introduced.
+The sentence about how to read a skill back named `find_skill`, which searches
+the sources you could install from — where a skill just written by hand will
+never appear. The model took the advice and was told `no source offers a skill
+called "config_port"`, which is true and useless. `load_skill` reads what is
+installed, and that is what the message says; the next reading had that
+scenario passing. Two readings, two versions of one message wrong in a new
+way, which is the argument for reading them rather than rerunning them. The
+same transcript gave one more: a search with `[skill_sources]` emptied — how a
+person says do not fetch skills from anywhere — was answered "no source offers
+a skill matching …", which is a miss rather than the setting it actually is.
+
+The edit scenario has now failed the same way four readings running, and the
+last of them made the mechanism plain. The model writes `9001` for a port it
+never read, `edit_file` refuses with "read it again, it may have changed", the
+model reads the file — `8443`, right there — and writes the identical edit.
+The advice is wrong for that case, because it has read it. The nearest-line
+rule offers nothing to look at, because a bare literal shares no word with any
+line, and that is exactly the shape a model gets wrong. A refusal for a bare
+number now shows the lines that have numbers on them.
 
 **Autonomy is a task and its boundaries, and the task is what was asked.**
 The goal check ran only for a session with a goal set, so `rook run` at

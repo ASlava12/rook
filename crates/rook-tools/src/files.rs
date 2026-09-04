@@ -644,7 +644,18 @@ fn apply(text: &str, edit: &Edit) -> std::result::Result<(String, usize), String
                 "that text is not in the file as given — read it again, it may have changed. \
                  The nearest line is: {line}"
             ),
-            None => "that text is not in the file as given — read it again, it may have changed".into(),
+            // "Read it again" is the wrong advice for a model that just did:
+            // twice in two smoke runs, one asked to replace `9001` in a file it
+            // had read as `8443`, was told to read it again, read it, and wrote
+            // the identical edit. A bare token shares no word with any line, so
+            // the nearest-line rule offers nothing — but the lines of the same
+            // shape are exactly what it needed to see.
+            None => match lines_alike(text, &edit.old) {
+                Some(lines) => {
+                    format!("that text is not in the file as given. Lines of the same kind: {lines}")
+                }
+                None => "that text is not in the file as given — read it again, it may have changed".into(),
+            },
         }),
         n if n > 1 && !edit.replace_all => {
             Err(format!("that text appears {n} times; add surrounding context or set replace_all"))
@@ -670,6 +681,28 @@ fn nearest_line<'a>(text: &'a str, wanted: &str) -> Option<&'a str> {
         }
     }
     best.map(|(_, line)| line.trim())
+}
+
+/// Up to three lines holding a token of the same shape as `wanted` — a number
+/// where a number was asked for, a quoted string where a string was.
+///
+/// The word-sharing rule above finds nothing for a bare literal, because a bare
+/// literal has no words to share, and that is precisely the case a model gets
+/// wrong: it remembers a value rather than reading one.
+fn lines_alike(text: &str, wanted: &str) -> Option<String> {
+    let wanted = wanted.trim();
+    let digits = |s: &str| s.chars().any(|c| c.is_ascii_digit());
+    let alike: fn(&str) -> bool = if wanted.chars().all(|c| c.is_ascii_digit() || c == '_') && digits(wanted)
+    {
+        |line: &str| line.chars().any(|c| c.is_ascii_digit())
+    } else if wanted.starts_with('"') && wanted.ends_with('"') && wanted.len() > 1 {
+        |line: &str| line.contains('"')
+    } else {
+        return None;
+    };
+
+    let found: Vec<&str> = text.lines().map(str::trim).filter(|line| alike(line)).take(3).collect();
+    (!found.is_empty()).then(|| found.join(" · "))
 }
 
 pub struct ListDir;

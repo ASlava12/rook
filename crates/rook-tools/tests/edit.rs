@@ -382,6 +382,38 @@ async fn text_not_in_the_file_is_refused_with_the_nearest_line() {
     );
 }
 
+/// A bare literal shares no word with any line, so the nearest-line rule finds
+/// nothing and the refusal fell back to "read it again" — which is the advice
+/// a model has already taken by the time it writes the same edit a second
+/// time. Twice in two smoke runs one asked to replace `9001` in a file it had
+/// read as `8443`, was told to read it again, read it, and wrote the identical
+/// edit. What it needed was the line with a number on it.
+#[tokio::test]
+async fn a_value_that_is_not_there_is_answered_with_the_values_that_are() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("config.rs"),
+        "pub const PORT: u16 = 8443;\npub const HOST: &str = \"::1\";\n",
+    )
+    .unwrap();
+    let ctx = ToolContext::new(dir.path().to_path_buf());
+
+    let guessed = serde_json::json!({ "path": "config.rs", "edits": [{ "old": "9001", "new": "9000" }] });
+    let refused = EditFile.call(&ctx, &guessed).await.unwrap();
+
+    assert!(refused.is_error, "{}", refused.content);
+    assert!(
+        refused.content.contains("8443"),
+        "the value that is there has to be in the refusal: {}",
+        refused.content
+    );
+    assert!(
+        !refused.content.contains("read it again"),
+        "and it must not send the model back to a file it has read: {}",
+        refused.content
+    );
+}
+
 /// A model that means `src/main.rs` and writes `src` gets `Is a directory (os
 /// error 21)` from the operating system — which names no argument, suggests
 /// nothing, and reads as the tool being broken. Every tool that takes one file
