@@ -656,3 +656,43 @@ impl Drop for Daemon {
         let _ = self.0.wait();
     }
 }
+
+/// The box you type in was a `String` with `push` and `pop`: no cursor, no
+/// history, so a typo in the middle of a long prompt cost every character
+/// after it and running the last thing again meant retyping it.
+#[test]
+fn the_prompt_box_edits_and_remembers_like_a_terminal() {
+    let _one = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let mut pty = tui(home.path(), workspace.path());
+    pty.screen(100, 30);
+
+    // Typed wrong, then fixed in the middle rather than from the end.
+    pty.send("chekc the port");
+    pty.send("\u{1}"); // ctrl-a, to the start
+    pty.send("\u{1b}[C\u{1b}[C\u{1b}[C"); // right three, to after `che`
+    pty.send("\u{8}"); // ctrl-h, which is the backspace key on some terminals
+    let typed = pty.screen_showing(100, 30, "chkc the port").join("\n");
+    assert!(typed.contains("chkc the port"), "the cursor edits where it is:\n{typed}");
+
+    // Not Esc: alone it is a key, and followed immediately by text it is the
+    // start of an escape sequence — which is what a terminal has to assume.
+    pty.send("\u{1}\u{b}"); // ctrl-a then ctrl-k, clearing the line
+    // A command rather than a prompt, so no turn runs: what the box says while
+    // one does is `working…`, and this is about what comes back into the box.
+    pty.send("/session\r");
+    let sent = pty.screen_showing(100, 30, "› /session").join("\n");
+    assert!(sent.contains("› /session"), "what was sent goes into the log:\n{sent}");
+
+    pty.send("\u{1b}[A"); // up, for the last thing sent
+    // Twice on the screen: once where it was said, once back in the box. They
+    // are drawn the same, which is the point — it is there to be edited.
+    let recalled = pty.screen(100, 30);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let mut screen = recalled;
+    while screen.iter().filter(|l| l.contains("› /session")).count() < 2 {
+        assert!(std::time::Instant::now() < deadline, "never came back:\n{}", screen.join("\n"));
+        screen = pty.screen(100, 30);
+    }
+}

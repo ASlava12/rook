@@ -85,9 +85,117 @@ struct Selected {
     changes: rook_core::changes::Changes,
 }
 
+/// The message being typed, and where in it the cursor is.
+///
+/// It was a `String` with `push` and `pop`, so the cursor was always at the
+/// end: a typo in the middle of a long prompt cost everything after it, and
+/// there was no way to run the last one again. Every terminal has had this
+/// since the seventies.
+#[derive(Default)]
+struct Typing {
+    text: String,
+    /// A byte offset, always on a character boundary — the moves below are what
+    /// keeps it there, and the text is whatever somebody typed, which includes
+    /// their own language.
+    at: usize,
+}
+
+impl Typing {
+    fn insert(&mut self, c: char) {
+        self.text.insert(self.at, c);
+        self.at += c.len_utf8();
+    }
+
+    fn backspace(&mut self) {
+        if let Some(c) = self.text[..self.at].chars().next_back() {
+            self.at -= c.len_utf8();
+            self.text.remove(self.at);
+        }
+    }
+
+    fn delete(&mut self) {
+        if self.at < self.text.len() {
+            self.text.remove(self.at);
+        }
+    }
+
+    fn left(&mut self) {
+        if let Some(c) = self.text[..self.at].chars().next_back() {
+            self.at -= c.len_utf8();
+        }
+    }
+
+    fn right(&mut self) {
+        if let Some(c) = self.text[self.at..].chars().next() {
+            self.at += c.len_utf8();
+        }
+    }
+
+    fn home(&mut self) {
+        self.at = 0;
+    }
+
+    fn end(&mut self) {
+        self.at = self.text.len();
+    }
+
+    /// Back over the run of spaces before the cursor and then over the word,
+    /// which is what every shell does with ctrl-w.
+    fn kill_word(&mut self) {
+        let before = &self.text[..self.at];
+        let trimmed = before.trim_end();
+        let cut = trimmed.rfind(char::is_whitespace).map_or(0, |at| at + 1);
+        self.text.replace_range(cut..self.at, "");
+        self.at = cut;
+    }
+
+    fn kill_to_start(&mut self) {
+        self.text.replace_range(..self.at, "");
+        self.at = 0;
+    }
+
+    fn kill_to_end(&mut self) {
+        self.text.truncate(self.at);
+    }
+
+    fn set(&mut self, text: &str) {
+        self.text.clear();
+        self.text.push_str(text);
+        self.at = self.text.len();
+    }
+
+    fn clear(&mut self) {
+        self.set("");
+    }
+
+    fn take(&mut self) -> String {
+        let taken = std::mem::take(&mut self.text);
+        self.at = 0;
+        taken
+    }
+
+    fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+
+    fn as_str(&self) -> &str {
+        &self.text
+    }
+
+    /// How far along the line the cursor is drawn: characters, not bytes.
+    fn column(&self) -> u16 {
+        self.text[..self.at].chars().count() as u16
+    }
+}
+
 #[derive(Default)]
 struct Chat {
-    input: String,
+    input: Typing,
+    /// Prompts already sent, oldest first, and where in them the up-arrow has
+    /// walked. Kept here rather than in the store: it is what this window has
+    /// typed, and a session's transcript is the record.
+    history: Vec<String>,
+    recalled: Option<usize>,
     log: Vec<(&'static str, String)>,
     session: Option<u128>,
     busy: bool,
@@ -566,6 +674,22 @@ impl App {
     }
 
     fn on_chat_key(&mut self, key: crossterm::event::KeyEvent) {
+        // The line-editing keys every terminal has had for fifty years. Before
+        // the approval, because they are about the box being typed in and an
+        // approval is answered with a letter.
+        if key.modifiers == KeyModifiers::CONTROL && self.chat.pending.is_none() {
+            match key.code {
+                // Some terminals send BS for the backspace key, which arrives
+                // here as ctrl-h; unhandled it typed an `h` into the message.
+                KeyCode::Char('h') => return self.chat.input.backspace(),
+                KeyCode::Char('a') => return self.chat.input.home(),
+                KeyCode::Char('e') => return self.chat.input.end(),
+                KeyCode::Char('w') => return self.chat.input.kill_word(),
+                KeyCode::Char('u') => return self.chat.input.kill_to_start(),
+                KeyCode::Char('k') => return self.chat.input.kill_to_end(),
+                _ => {}
+            }
+        }
         // An approval blocks the turn, so it takes the keyboard until answered.
         if let Some(request) = self.chat.pending.clone() {
             let approval = match key.code {
@@ -597,20 +721,50 @@ impl App {
         match key.code {
             // A half-typed command is what Tab is for while one is being
             // typed; the tabs are still a Tab away from anything else.
-            KeyCode::Tab if self.chat.input.starts_with('/') => self.complete(),
+            KeyCode::Tab if self.chat.input.as_str().starts_with('/') => self.complete(),
             KeyCode::Tab => self.tab = (self.tab + 1) % TABS.len(),
             KeyCode::BackTab => self.tab = (self.tab + TABS.len() - 1) % TABS.len(),
             KeyCode::Esc if self.chat.input.is_empty() => self.quit = true,
             KeyCode::Esc => self.chat.input.clear(),
+            KeyCode::Left => self.chat.input.left(),
+            KeyCode::Right => self.chat.input.right(),
+            KeyCode::Home => self.chat.input.home(),
+            // With nothing typed there is no line to walk to the end of, and
+            // `End` is where a hand goes to get back to the newest message.
+            KeyCode::End if self.chat.input.is_empty() => self.chat.scroll = 0,
+            KeyCode::End => self.chat.input.end(),
+            KeyCode::Delete => self.chat.input.delete(),
+            KeyCode::Up => self.recall(-1),
+            KeyCode::Down => self.recall(1),
             KeyCode::Enter if self.chat.asking.is_some() => self.answer(),
             KeyCode::Enter => self.send(),
-            KeyCode::Backspace => {
-                self.chat.input.pop();
-            }
+            KeyCode::Backspace => self.chat.input.backspace(),
             KeyCode::PageUp => self.chat.scroll = self.chat.scroll.saturating_sub(10),
             KeyCode::PageDown => self.chat.scroll = self.chat.scroll.saturating_add(10),
-            KeyCode::Char(c) => self.chat.input.push(c),
+            KeyCode::Char(c) => self.chat.input.insert(c),
             _ => {}
+        }
+    }
+
+    /// The previous prompt, and the one before it. Walking off the end brings
+    /// back the empty line rather than sticking on the newest, which is what a
+    /// shell does and what a hand expects.
+    fn recall(&mut self, by: i32) {
+        if self.chat.history.is_empty() {
+            return;
+        }
+        let last = self.chat.history.len() - 1;
+        self.chat.recalled = match (self.chat.recalled, by) {
+            (None, -1) => Some(last),
+            (None, _) => None,
+            (Some(0), -1) => Some(0),
+            (Some(at), -1) => Some(at - 1),
+            (Some(at), _) if at >= last => None,
+            (Some(at), _) => Some(at + 1),
+        };
+        match self.chat.recalled {
+            Some(at) => self.chat.input.set(&self.chat.history[at].clone()),
+            None => self.chat.input.clear(),
         }
     }
 
@@ -676,16 +830,16 @@ impl App {
     /// to type them after. Several complete to what they share, which is how a
     /// person discovers `/se` is two commands rather than a typo.
     fn complete(&mut self) {
-        let matches = crate::chat::commands_matching(&self.chat.input);
+        let matches = crate::chat::commands_matching(self.chat.input.as_str());
         let Some((first, args, _)) = matches.first() else { return };
         let common = matches.iter().skip(1).fold(first.to_string(), |common, (name, ..)| {
             common.chars().zip(name.chars()).take_while(|(a, b)| a == b).map(|(a, _)| a).collect()
         });
-        self.chat.input = match matches.len() {
+        self.chat.input.set(&match matches.len() {
             1 if args.is_empty() => format!("/{first}"),
             1 => format!("/{first} "),
             _ => format!("/{common}"),
-        };
+        });
     }
 
     /// The wheel, on whichever pane the tab is showing. Three lines a notch,
@@ -761,7 +915,7 @@ impl App {
 
     fn answer(&mut self) {
         let Some(mut asking) = self.chat.asking.take() else { return };
-        let answer = asking.record(&std::mem::take(&mut self.chat.input));
+        let answer = asking.record(&self.chat.input.take());
         self.chat.push("stat", &format!("  {} → {}", answer.question, display(&answer.chosen)));
         match (asking.complete(), &self.chat.remote) {
             (false, _) => self.chat.asking = Some(asking),
@@ -774,10 +928,17 @@ impl App {
     }
 
     fn send(&mut self) {
-        let prompt = std::mem::take(&mut self.chat.input).trim().to_string();
+        let prompt = self.chat.input.take().trim().to_string();
         if prompt.is_empty() {
             return;
         }
+        // Kept whatever happens to it next — a refused turn is the one most
+        // worth having back — and never twice in a row, which is the only
+        // duplicate a history walk trips over.
+        if self.chat.history.last() != Some(&prompt) {
+            self.chat.history.push(prompt.clone());
+        }
+        self.chat.recalled = None;
         // Typed while a turn runs, it goes to the turn. It used to be dropped
         // where it was taken, so watching one go the wrong way left nothing to
         // do but stop it and start again.
@@ -955,7 +1116,13 @@ impl App {
         // does nothing where it is shown reads as an application that has
         // stopped responding.
         let keys: Vec<(&str, &str)> = match self.tab {
-            0 => vec![("↹ ", "tab  "), ("PgUp/PgDn ", "scroll  "), ("/ ", "commands  "), ("^C ", "stop  ")],
+            0 => vec![
+                ("↹ ", "tab  "),
+                ("↑↓ ", "history  "),
+                ("PgUp/PgDn ", "scroll  "),
+                ("/ ", "commands  "),
+                ("^C ", "stop  "),
+            ],
             _ => vec![("↹/1-5 ", "tab  "), ("j/k ", "move  "), ("r ", "reload  "), ("q ", "quit  ")],
         };
         let mut spans: Vec<Span> = vec![Span::raw(" ")];
@@ -984,8 +1151,8 @@ impl App {
         // What the commands are is a thing nobody could see: they are in
         // `/help` and in the Help tab, which is where you look after giving up.
         // Shown while one is typed, they are a menu.
-        let completing = match self.chat.input.starts_with('/') {
-            true => crate::chat::commands_matching(&self.chat.input),
+        let completing = match self.chat.input.as_str().starts_with('/') {
+            true => crate::chat::commands_matching(self.chat.input.as_str()),
             false => Vec::new(),
         };
         let blocking = match (&self.chat.pending, &self.chat.asking) {
@@ -1038,14 +1205,19 @@ impl App {
         self.chat.scroll = self.chat.scroll.min(overflow);
         let scroll = overflow.saturating_sub(self.chat.scroll);
 
+        // Scrolled up, the pane looks exactly like a pane that has stopped
+        // receiving: same border, same title, nothing moving. It says where it
+        // is and how to get back.
+        let title = match (self.chat.session, self.chat.scroll) {
+            (Some(id), 0) => format!(" {} ", rook_store::format_session_id(id)),
+            (Some(id), back) => {
+                format!(" {} — {back} lines back, End returns ", rook_store::format_session_id(id))
+            }
+            (None, 0) => " new session ".into(),
+            (None, back) => format!(" new session — {back} lines back, End returns "),
+        };
         f.render_widget(
-            Paragraph::new(lines)
-                .block(bordered(&match self.chat.session {
-                    Some(id) => format!(" {} ", rook_store::format_session_id(id)),
-                    None => " new session ".into(),
-                }))
-                .wrap(Wrap { trim: false })
-                .scroll((scroll, 0)),
+            Paragraph::new(lines).block(bordered(&title)).wrap(Wrap { trim: false }).scroll((scroll, 0)),
             log,
         );
 
@@ -1110,7 +1282,7 @@ impl App {
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(prompt.clone(), Style::default().fg(Color::DarkGray)),
-                Span::raw(self.chat.input.as_str()),
+                Span::raw(self.chat.input.as_str().to_string()),
             ]))
             .block(bordered("")),
             input,
@@ -1119,7 +1291,7 @@ impl App {
         // input line is where the answer is typed.
         if (!self.chat.busy || self.chat.asking.is_some()) && self.chat.pending.is_none() {
             f.set_cursor_position((
-                input.x + 1 + prompt.chars().count() as u16 + self.chat.input.chars().count() as u16,
+                input.x + 1 + prompt.chars().count() as u16 + self.chat.input.column(),
                 input.y + 1,
             ));
         }
@@ -1272,6 +1444,23 @@ impl App {
     fn draw_skills(&mut self, f: &mut Frame, area: Rect) {
         let [left, right] =
             Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).areas(area);
+
+        // An empty pane reads as a broken one. The Memory tab already says
+        // what an empty one means and how it fills; this said nothing at all,
+        // which on a fresh install is what everybody sees first.
+        if self.skills.is_empty() {
+            let empty = Paragraph::new(vec![
+                Line::from("no skills here yet"),
+                Line::from(""),
+                Line::from("`rook skills search <words>` looks in the configured sources,"),
+                Line::from("`rook skills install <name>` puts one in, and the agent can"),
+                Line::from("write its own — they land in the same directory either way."),
+            ])
+            .style(Style::default().fg(Color::DarkGray))
+            .block(bordered(" Skills "));
+            f.render_widget(empty, area);
+            return;
+        }
 
         let items: Vec<ListItem> = self
             .skills
@@ -1430,6 +1619,8 @@ impl App {
             Line::from("              enter     answer a question, one at a time"),
             Line::from("              /…        tab completes; the list shows as you type"),
             Line::from("              PgUp/PgDn scroll back through the conversation"),
+            Line::from("              ↑ / ↓     the prompts already sent, newest first"),
+            Line::from("              ← → home end · ctrl-a/e/w/u/k edit the line being typed"),
             Line::from("              F2 / F3   cycle approvals / reasoning effort"),
             Line::from("              ctrl-c    stops a running turn, or quits when none is"),
         ];
@@ -1585,6 +1776,48 @@ mod tests {
 
         let kinds: Vec<&str> = chat.log.iter().map(|(kind, _)| *kind).collect();
         assert_eq!(kinds, ["think", "tool", "text"]);
+    }
+
+    /// The input was a `String` with `push` and `pop`: the cursor never left
+    /// the end, so fixing a typo in the middle of a long prompt cost every
+    /// character after it.
+    #[test]
+    fn the_message_being_typed_has_a_cursor_in_it() {
+        let mut line = Typing::default();
+        for c in "cargo tets".chars() {
+            line.insert(c);
+        }
+        line.backspace();
+        line.backspace();
+        line.insert('s');
+        line.insert('t');
+        assert_eq!(line.as_str(), "cargo test");
+        assert_eq!(line.column(), 10);
+
+        line.home();
+        line.delete();
+        assert_eq!(line.as_str(), "argo test", "delete takes the character ahead of the cursor");
+
+        line.end();
+        line.kill_word();
+        assert_eq!(line.as_str(), "argo ", "ctrl-w takes the word behind it");
+        assert_eq!(line.column(), 5);
+        line.kill_word();
+        assert_eq!(line.as_str(), "", "and the spaces before that word with it");
+    }
+
+    /// Characters, not bytes: the cursor is drawn at a column, and a prompt in
+    /// any language somebody types put it in the wrong place.
+    #[test]
+    fn the_cursor_is_counted_in_characters() {
+        let mut line = Typing::default();
+        for c in "привет".chars() {
+            line.insert(c);
+        }
+        assert_eq!(line.column(), 6);
+        line.left();
+        line.backspace();
+        assert_eq!(line.as_str(), "привт", "two-byte characters step one at a time");
     }
 
     /// A turn that thinks for two minutes showed a fixed `working…` and a
