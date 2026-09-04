@@ -227,6 +227,15 @@ struct Chat {
     remote: Option<mpsc::UnboundedSender<ClientMessage>>,
 }
 
+/// Reasoning, which is read rather than glanced at.
+///
+/// It was the same `DarkGray` as the footer and the hints, and on a dark
+/// terminal a page of it is genuinely hard to read — a turn that thinks out
+/// loud fills the pane with it. Brighter than the chrome and still cooler than
+/// an answer, because it is what the model is working through and not what it
+/// is telling you.
+const THINKING: Color = Color::Rgb(150, 156, 168);
+
 /// A model's answer, styled the little that Markdown is actually used for.
 ///
 /// The same subset the browser draws — fenced code, headings, bullets, inline
@@ -1263,7 +1272,7 @@ impl App {
             let style = match *kind {
                 "you" => Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
                 "tool" => Style::default().fg(Color::Magenta),
-                "think" => Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                "think" => Style::default().fg(THINKING).add_modifier(Modifier::ITALIC),
                 "stat" => Style::default().fg(Color::DarkGray),
                 "err" => Style::default().fg(Color::Red),
                 _ => Style::default(),
@@ -1954,6 +1963,24 @@ mod tests {
         line.left();
         line.backspace();
         assert_eq!(line.as_str(), "привт", "two-byte characters step one at a time");
+    }
+
+    /// Reasoning was the same grey as the footer and the hints. A turn that
+    /// thinks out loud fills the pane with it, and a page of chrome-coloured
+    /// text is hard to read on a dark terminal — which is how it was reported.
+    #[test]
+    fn reasoning_is_brighter_than_the_chrome_around_it() {
+        let (Color::Rgb(r, g, b), Color::Rgb(dr, dg, db)) = (THINKING, Color::Rgb(80, 80, 80)) else {
+            unreachable!("both are literals")
+        };
+        let brightness = |r: u8, g: u8, b: u8| r as u32 + g as u32 + b as u32;
+        assert!(
+            brightness(r, g, b) > brightness(dr, dg, db),
+            "reasoning is read, not glanced at: {r},{g},{b}"
+        );
+        // And not so bright it competes with the answer, which is what the
+        // turn is actually telling you.
+        assert!(brightness(r, g, b) < brightness(255, 255, 255), "still quieter than white");
     }
 
     /// A turn that thinks for two minutes showed a fixed `working…` and a
