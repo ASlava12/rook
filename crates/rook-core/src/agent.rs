@@ -2473,19 +2473,23 @@ impl<'a> AgentLoop<'a> {
                     // reported as unproven whatever it said.
                     Some(verdict) if verdict != "unproven" && child.tools_called.is_empty() => (
                         format!(
-                            "checked by {id}, which reached for nothing — no command, no file, \
+                            "checked in session {id}, which reached for nothing — no command, no file, \
                              no page — so its `{verdict}` is recollection rather than a check:\n{}\n\n\
                              VERDICT: unproven — nothing was run or read to settle it",
                             without_verdict(&child.reply)
                         ),
                         Some("unproven"),
                     ),
-                    Some(verdict) => (format!("checked by {id}:\n{}", child.reply), Some(verdict)),
+                    // "checked by <ULID>" reads as a fact: ids here are the
+                    // same shape, and a model twice handed this one to `forget`
+                    // before going back to the claim. Naming what the id is
+                    // costs a word.
+                    Some(verdict) => (format!("checked in session {id}:\n{}", child.reply), Some(verdict)),
                     // Not treated as passing: a check that would not commit is
                     // the outcome this exists to make visible.
                     None => (
                         format!(
-                            "checked by {id}, and it did not answer with a verdict:\n{}\n\n\
+                            "checked in session {id}, and it did not answer with a verdict:\n{}\n\n\
                              The claim is unchecked — neither held nor failed",
                             child.reply
                         ),
@@ -3332,8 +3336,11 @@ VERDICT: holds
 VERDICT: fails
 VERDICT: unproven
 
-`unproven` is the honest answer when nothing available settles it — say what \
-would. Above that line, give the evidence: the command and its output, the lines \
+`fails` means you found the claim to be false. A command that would not run \
+tells you nothing about the claim and is not that: a missing `Cargo.toml` or an \
+argument the tool rejected is `unproven`, and the thing to say is what would \
+settle it. `unproven` is the honest answer whenever nothing available settles \
+it — say what would. Above that line, give the evidence: the command and its output, the lines \
 you read, or the quotation and where it is from. Not a summary of your \
 reasoning.";
 

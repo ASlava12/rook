@@ -3623,6 +3623,36 @@ async fn a_verdict_reached_without_touching_anything_is_not_a_check() {
     assert_eq!(outcome.delegated.len(), 1);
 }
 
+/// Ids here are all the same shape, so "checked by 01M1N5…" reads as a fact —
+/// and a model handed that id to `forget`, twice in one turn, before going
+/// back to the claim. What the id names costs a word to say.
+#[tokio::test]
+async fn a_checkers_id_says_it_is_a_session_rather_than_looking_like_a_fact() {
+    let f = fixture();
+    let session = f.rook.start_session("named").unwrap();
+
+    let script = vec![
+        call("verify", serde_json::json!({ "claim": "the file says so" })),
+        call("read_file", serde_json::json!({ "path": "notes.txt" })),
+        reply("It does.\n\nVERDICT: holds"),
+        reply("done"),
+    ];
+    std::fs::write(f.workspace.path().join("notes.txt"), "so\n").unwrap();
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
+    agent.allow_everything_not_denied();
+    agent.run("check it").await.unwrap();
+
+    let said = f
+        .rook
+        .transcript(session, 0, usize::MAX, 4096)
+        .unwrap()
+        .into_iter()
+        .rfind(|e| e.kind == "tool-result")
+        .unwrap()
+        .body;
+    assert!(said.starts_with("checked in session "), "it says what the id is: {said}");
+}
+
 /// The same verdict from a checker that did reach for something stands.
 #[tokio::test]
 async fn a_verdict_backed_by_a_command_stands() {

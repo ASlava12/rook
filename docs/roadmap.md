@@ -1129,7 +1129,18 @@ model reads the file — `8443`, right there — and writes the identical edit.
 The advice is wrong for that case, because it has read it. The nearest-line
 rule offers nothing to look at, because a bare literal shares no word with any
 line, and that is exactly the shape a model gets wrong. A refusal for a bare
-number now shows the lines that have numbers on them.
+number now shows the lines that have numbers on them. The next reading had it
+passing, and three of five with it — the best this tag has done.
+
+That reading left two failures, and one of them was ours twice over. The
+result of `verify` began `checked by 01M1N5…`, and ids here are all the same
+shape, so the model read the checker's session id as a fact and handed it to
+`forget` — twice, before going back to the claim. It says `checked in session`
+now. And the checker itself keeps answering `fails` where its own words say
+"cannot be proven": it ran `cargo run --example add` in a directory with no
+`Cargo.toml`, and reported the claim as false rather than unsettled. The
+instructions now separate the two in as many words — a command that would not
+run tells you nothing about the claim.
 
 **Autonomy is a task and its boundaries, and the task is what was asked.**
 The goal check ran only for a session with a goal set, so `rook run` at
