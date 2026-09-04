@@ -91,6 +91,52 @@ pub fn calls_in(text: &str, known: impl Fn(&str) -> bool) -> (Vec<ToolCall>, Str
     (calls, said.join("\n").trim().to_string())
 }
 
+/// Whether the reply ends inside a tool call it did not finish writing.
+///
+/// A call written as text needs the whole object to be read as one, and a reply
+/// cut mid-object is neither an answer nor a call: the loop asks such a reply
+/// to go on, but only knew to when the provider said it had hit the output
+/// limit. Ollama reports `stop` for a reply it truncated, so the tell has to be
+/// the text — an object that names an offered tool and never closes.
+pub fn cut_off_call(text: &str, known: impl Fn(&str) -> bool) -> bool {
+    // The same walk `calls_in` does, for the same reason: an object that parses
+    // is a call somebody else handles, and its innards must not be examined as
+    // if they were a half-written one.
+    let mut seen_until = 0;
+    for (at, _) in text.match_indices('{') {
+        if at < seen_until {
+            continue;
+        }
+        let mut objects = serde_json::Deserializer::from_str(&text[at..]).into_iter::<Called>();
+        if let Some(Ok(_)) = objects.next() {
+            seen_until = at + objects.byte_offset();
+            continue;
+        }
+        if named_in(&text[at..]).is_some_and(|name| known(&name)) {
+            return true;
+        }
+    }
+    false
+}
+
+/// The tool a half-written object names, by reading the one field that matters
+/// rather than the object: there is no object yet, which is the point.
+fn named_in(tail: &str) -> Option<String> {
+    for key in ["\"tool\"", "\"name\""] {
+        let Some(at) = tail.find(key) else { continue };
+        let after = tail[at + key.len()..].trim_start();
+        let Some(after) = after.strip_prefix(':') else { continue };
+        let after = after.trim_start();
+        let Some(rest) = after.strip_prefix('"') else { continue };
+        // Only a value that was finished: a name cut in half is not one to
+        // look up, and the call is cut anyway.
+        if let Some(end) = rest.find('"') {
+            return Some(rest[..end].to_string());
+        }
+    }
+    None
+}
+
 /// Move the calls the model wrote into the fields native ones would have used,
 /// so nothing above here has to know which kind of endpoint answered.
 pub fn adopt(response: &mut Response, known: impl Fn(&str) -> bool) {
@@ -193,6 +239,28 @@ mod tests {
         assert!(calls_in("I would call {tool} but the path is unclear", |_| true).0.is_empty());
         assert!(calls_in(r#"The "tool" field takes a name, e.g. { "tool": 3 }"#, |_| true).0.is_empty());
         assert!(calls_in("no braces here at all", |_| true).0.is_empty());
+    }
+
+    /// The tell has to be the text: Ollama reports `stop` for a reply it
+    /// truncated, so a call cut in half arrives looking like an answer, and the
+    /// model that wrote it goes on to repeat its previous call.
+    #[test]
+    fn a_call_the_model_did_not_finish_writing_is_recognised_as_cut_off() {
+        let known = |name: &str| name == "find_skill";
+        let cut = r#"{"name": "find_skill", "arguments": {"install":"config.rs","#;
+
+        assert!(cut_off_call(cut, known), "an object that names a tool and never closes");
+        assert!(calls_in(cut, known).0.is_empty(), "and it is not a call, because it is not whole");
+    }
+
+    #[test]
+    fn a_finished_call_and_ordinary_prose_are_not_cut_off() {
+        let known = |name: &str| name == "find_skill";
+
+        assert!(!cut_off_call(r#"{"name": "find_skill", "arguments": {}}"#, known), "whole");
+        assert!(!cut_off_call("I will use find_skill next.", known), "prose naming a tool");
+        assert!(!cut_off_call(r#"{"name": "not_a_tool", "argu"#, known), "a tool nobody offered");
+        assert!(!cut_off_call(r#"here is a map: {"a": 1,"#, known), "an object naming no tool");
     }
 
     #[test]

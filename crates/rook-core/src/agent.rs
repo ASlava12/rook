@@ -1655,7 +1655,18 @@ impl<'a> AgentLoop<'a> {
                     // and not a call — a delegation ended inside a fenced JSON
                     // object, with nothing called. Asked to go on, a call gets
                     // written whole and an answer gets finished.
-                    if response.stop_reason == rook_llm::StopReason::MaxTokens && !asked_to_go_on {
+                    //
+                    // The stop reason alone was not enough to tell: Ollama says
+                    // `stop` for a reply it truncated, so a call cut in half
+                    // arrived looking like an ordinary answer, and the model
+                    // wrote its previous call again. A half-written object
+                    // naming a tool that was offered is the same cut, read off
+                    // the text.
+                    let cut = response.stop_reason == rook_llm::StopReason::MaxTokens
+                        || rook_llm::prompted::cut_off_call(&response.message.content, |name| {
+                            self.tool_specs().iter().any(|t| t.name == name)
+                        });
+                    if cut && !asked_to_go_on {
                         asked_to_go_on = true;
                         self.rook.log(self.session, EventKind::Note, "cut off", GO_ON).ok();
                         messages.push(response.message.clone());

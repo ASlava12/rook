@@ -1151,6 +1151,17 @@ matching substrings: `port` is inside `supports`. It asks by word now, through
 the same `akin` that ranks memory — prefix matching from four characters, so
 `ports` still finds `port` and `supports` does not.
 
+The reading after that showed the search answering "no source offers a skill
+matching \"port\"" and the wander gone, and left the next shape in plain
+sight: an assistant reply of sixty bytes that stops mid-object — `{"name":
+"find_skill", "arguments": {"install":"config.rs",` — followed by the model
+writing its previous call again and then apologising that the tool kept
+returning the same thing. A reply cut at the output limit is already asked
+once to go on, but the tell was the stop reason, and Ollama sends `stop` for a
+generation it truncated. The tell is the text now: an object that names a tool
+that was offered and never closes is a call cut in half, whatever the reason
+said.
+
 **Autonomy is a task and its boundaries, and the task is what was asked.**
 The goal check ran only for a session with a goal set, so `rook run` at
 autonomous — the stance with nobody else to check — checked nothing. With no

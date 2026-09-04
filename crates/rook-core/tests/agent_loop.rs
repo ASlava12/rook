@@ -4382,6 +4382,37 @@ async fn a_reply_cut_at_the_output_limit_is_asked_once_to_go_on() {
     assert_eq!(asked, 1, "asked once");
 }
 
+/// The same reply, arriving with the stop reason of an ordinary answer, which
+/// is what Ollama sends for a generation it truncated. The tell has to be the
+/// text: without it the loop moved on, and the model — given back a reply that
+/// called nothing — wrote its previous call a second time and then apologised
+/// for the tool repeating itself.
+#[tokio::test]
+async fn a_call_cut_in_half_is_asked_to_go_on_whatever_the_stop_reason_said() {
+    let f = fixture();
+    let session = f.rook.start_session("cut-quietly").unwrap();
+    std::fs::write(f.workspace.path().join("config.rs"), "pub const PORT: u16 = 8443;\n").unwrap();
+
+    // No `stop_reason` of its own: this is the shape that arrived as `stop`.
+    let cut = reply("{\"name\": \"read_file\", \"arguments\": {\"pa");
+    assert_eq!(cut.stop_reason, StopReason::EndTurn, "the precondition is that nothing said it was cut");
+    let script = vec![cut, call("read_file", serde_json::json!({ "path": "config.rs" })), reply("8443")];
+    let provider = ScriptedProvider::new(script);
+    let seen = provider.share();
+
+    let outcome = AgentLoop::new(&f.rook, Arc::new(provider), session).run("what port?").await.unwrap();
+
+    assert_eq!(outcome.reply, "8443");
+    assert_eq!(outcome.tools_called, vec!["read_file".to_string()]);
+    let asked = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| r.messages.last().is_some_and(|m| m.content.contains("cut off at the output limit")))
+        .count();
+    assert_eq!(asked, 1, "asked once, off the text rather than off the stop reason");
+}
+
 /// Asked once. A second cut ends the turn as what it is, `max_tokens`.
 #[tokio::test]
 async fn a_reply_cut_twice_ends_as_cut() {
