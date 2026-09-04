@@ -755,11 +755,13 @@ lose people's trust:
   transcripts has found a dozen defects here that no scripted answer would have.
   What is still unwatched is long work: five short scenarios are not an
   afternoon, and nothing here has run against a hosted model at all.
-- **Some CLI writes still need the store to themselves.** Every read routes over
-  the daemon's API and prints the same thing, and so now do the four writes the
-  API serves: `session goal`, `session rewind`, `memory rm` and `store maintain`.
-  The rest — `store gc`, `store train`, `session rm`, `skills capture` and
-  `skills install` — have no endpoint and say where the lock is instead
+- **A turn needs the store to itself.** `rookd` holds the store's single write
+  lock, and every `store`, `session`, `skills`, `memory` and `checkpoint`
+  subcommand now routes over its API rather than refusing — the same call the
+  daemon makes on its own store, so there is one implementation and two ways
+  in. What cannot route is a turn: `run`, `chat` and `acp` write as they go.
+  A person who wants one while the daemon is up has the daemon's own chat,
+  which is the same engine from the other side
   ([ADR-0006](docs/adr/0006-single-writer-store.md)).
 - **Reasoning is carried across a tool call, and only for Anthropic.** It was
   not, and that was a turn Anthropic refuses outright: with extended thinking on,

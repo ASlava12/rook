@@ -795,7 +795,13 @@ async fn prune(State(s): State<Shared>, Json(body): Json<DryRun>) -> ApiResult<r
     Ok(Json(blocking(move || rook.prune(body.dry_run)).await?))
 }
 
-async fn verify(State(s): State<Shared>) -> ApiResult<serde_json::Value> {
+/// Both of these take a body they do not read. That is the point: an
+/// extractor that requires `application/json` is what makes the request
+/// preflighted, and a preflight this daemon answers no CORS header to is what
+/// stops a page the user has open from POSTing to a daemon on loopback. Every
+/// other write here is protected by the body it genuinely needs; these two
+/// needed nothing and so were reachable.
+async fn verify(State(s): State<Shared>, Json(_): Json<serde_json::Value>) -> ApiResult<serde_json::Value> {
     let rook = s.rook.clone().read_owned().await;
     let bad = blocking(move || rook.verify()).await?;
     let failed: Vec<_> =
@@ -803,7 +809,7 @@ async fn verify(State(s): State<Shared>) -> ApiResult<serde_json::Value> {
     Ok(Json(serde_json::json!({ "failed": failed })))
 }
 
-async fn train(State(s): State<Shared>) -> ApiResult<serde_json::Value> {
+async fn train(State(s): State<Shared>, Json(_): Json<serde_json::Value>) -> ApiResult<serde_json::Value> {
     let rook = s.rook.clone().read_owned().await;
     let trained = blocking(move || rook.train_dictionaries()).await?;
     Ok(Json(serde_json::json!({ "trained": trained })))
@@ -1284,6 +1290,40 @@ mod tests {
             request = request.header("origin", origin);
         }
         request.body(Body::empty()).unwrap()
+    }
+
+    /// A simple cross-origin POST — `text/plain`, no preflight — is what a
+    /// page the user has open can send to a daemon on loopback without asking
+    /// anybody. Every write here has to refuse it, and what makes them refuse
+    /// is requiring a JSON body: two of them took no body at all and so ran.
+    #[tokio::test]
+    async fn every_write_refuses_a_request_that_was_never_preflighted() {
+        let f = fixture();
+        for path in [
+            "/api/store/gc",
+            "/api/store/prune",
+            "/api/store/verify",
+            "/api/store/train",
+            "/api/maintenance",
+            "/api/memory/add",
+            "/api/skills/install",
+            "/api/skills/new",
+            "/api/checkpoints",
+        ] {
+            let simple = Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("content-type", "text/plain;charset=UTF-8")
+                .header("origin", "http://evil.example")
+                .body(Body::from("{}"))
+                .unwrap();
+            let answered = f.router.clone().oneshot(simple).await.unwrap();
+            assert_eq!(
+                answered.status(),
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "{path} accepted a request no browser had to ask permission for"
+            );
+        }
     }
 
     #[tokio::test]
