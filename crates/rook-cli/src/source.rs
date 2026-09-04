@@ -14,7 +14,9 @@ use rook_skills::{SkillCard, SkillDetail};
 use rook_store::{ObjectRow, RefRow, StoreStats};
 
 pub enum Source {
-    Local(Box<Rook>),
+    /// Shared rather than owned: the TUI hands the same engine to every turn
+    /// it runs, and a turn outlives the call that started it.
+    Local(std::sync::Arc<Rook>),
     Daemon(Daemon),
 }
 
@@ -22,10 +24,15 @@ impl Source {
     /// Local unless the store is locked and a daemon is reachable, which is the
     /// only case the fallback is for: any other failure is the user's to see.
     pub fn open(workspace: Option<std::path::PathBuf>) -> Result<Self> {
+        let here = workspace
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
         match Rook::open(workspace) {
-            Ok(rook) => Ok(Self::Local(Box::new(rook))),
+            Ok(rook) => Ok(Self::Local(std::sync::Arc::new(rook))),
             Err(e) if is_locked(&e) => match Daemon::running() {
-                Some(daemon) => {
+                Some(mut daemon) => {
+                    daemon.workspace = here;
                     // On stderr, so `--json` output stays machine-readable, and
                     // said at all because the answer may be a moment stale.
                     eprintln!("using the running rookd at {}", daemon.base);
@@ -34,6 +41,25 @@ impl Source {
                 None => Err(e.into()),
             },
             Err(e) => Err(e.into()),
+        }
+    }
+
+    /// The workspace being worked in, which both kinds know: a routed source
+    /// was opened against a path even though it does not hold the store.
+    pub fn workspace(&self) -> &std::path::Path {
+        match self {
+            Self::Local(rook) => &rook.workspace,
+            Self::Daemon(daemon) => &daemon.workspace,
+        }
+    }
+
+    /// The engine in this process, when the store is held here — and `None`
+    /// when a daemon holds it, which is what a front end has to branch on
+    /// before it can run a turn.
+    pub fn here(&self) -> Option<&std::sync::Arc<Rook>> {
+        match self {
+            Self::Local(rook) => Some(rook),
+            Self::Daemon(_) => None,
         }
     }
 
@@ -611,7 +637,11 @@ fn is_locked(e: &rook_core::CoreError) -> bool {
 }
 
 pub struct Daemon {
-    base: String,
+    pub base: String,
+    /// The project this window is about, which the daemon serves several of:
+    /// every routed read names it, and a front end asking about the daemon's
+    /// own workspace instead would be answering a different question.
+    workspace: std::path::PathBuf,
     runtime: tokio::runtime::Runtime,
     http: reqwest::Client,
 }
@@ -630,7 +660,7 @@ impl Daemon {
         // reqwest panics on build without one, even for plain HTTP to loopback.
         rook_llm::init_tls();
         let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(10)).build().ok()?;
-        let daemon = Self { base, runtime, http };
+        let daemon = Self { base, workspace: std::path::PathBuf::from("."), runtime, http };
         daemon.get::<serde_json::Value>("/api/health").ok()?;
         Some(daemon)
     }

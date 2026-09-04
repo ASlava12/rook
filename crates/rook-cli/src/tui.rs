@@ -19,7 +19,7 @@ use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, ListState, Pa
 use ratatui::{DefaultTerminal, Frame};
 
 use rook_core::agent::{AgentLoop, Progress};
-use rook_core::{Rook, SessionSummary, TranscriptEntry};
+use rook_core::{SessionSummary, TranscriptEntry};
 use rook_llm::Delta;
 use rook_skills::SkillCard;
 use rook_store::StoreStats;
@@ -34,7 +34,14 @@ const TABS: [&str; 6] = ["Chat", "Sessions", "Memory", "Skills", "Store", "Help"
 /// How often the loop wakes to drain turn events when no key is pressed.
 const TICK: Duration = Duration::from_millis(60);
 
-pub fn run(rook: Rook, yes: bool) -> Result<()> {
+/// Said where a turn would have run. A window whose store is held by `rookd`
+/// browses everything and runs nothing: the tabs read over the daemon's API,
+/// and a turn writes as it goes, which is the one thing that cannot be a
+/// request against somebody else's lock.
+const NOT_HERE: &str = "`rookd` holds the store, so this window reads rather than runs. \
+                        Its own chat runs turns, and stopping it gives this one the store.";
+
+pub fn run(source: crate::source::Source, yes: bool) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let mut terminal = ratatui::init();
     // The wheel is how a person scrolls back through what an agent said, and
@@ -42,7 +49,7 @@ pub fn run(rook: Rook, yes: bool) -> Result<()> {
     // the alternate screen is empty. Selecting text with the mouse needs Shift
     // held while this is on, which is the usual bargain and is in the help.
     let mouse = execute!(std::io::stdout(), event::EnableMouseCapture).is_ok();
-    let result = App::new(Arc::new(rook), runtime, yes).run(&mut terminal);
+    let result = App::new(source, runtime, yes).run(&mut terminal);
     if mouse {
         let _ = execute!(std::io::stdout(), event::DisableMouseCapture);
     }
@@ -195,7 +202,10 @@ impl Chat {
 const MAX_SCROLLBACK: usize = 1 << 20;
 
 struct App {
-    rook: Arc<Rook>,
+    /// Where the browsing tabs read from: this process's own store, or a
+    /// running `rookd` holding it. A second window on a second project is the
+    /// ordinary case, and it used to be an error message.
+    source: crate::source::Source,
     runtime: tokio::runtime::Runtime,
     chat: Chat,
     events: mpsc::UnboundedReceiver<TurnEvent>,
@@ -224,7 +234,7 @@ struct App {
 }
 
 impl App {
-    fn new(rook: Arc<Rook>, runtime: tokio::runtime::Runtime, yes: bool) -> Self {
+    fn new(source: crate::source::Source, runtime: tokio::runtime::Runtime, yes: bool) -> Self {
         let (to_loop, events) = mpsc::unbounded_channel();
         let (requests, mut incoming) = mpsc::unbounded_channel::<ApprovalRequest>();
 
@@ -247,12 +257,20 @@ impl App {
             }
         });
 
-        // Connected before the struct takes the runtime, since it needs both.
-        let mcp = Arc::new(runtime.block_on(rook.connect_mcp()));
-        let patience = rook.config.agent.answer_timeout();
+        // The configuration is a file, so a window with no store of its own
+        // still knows the stance, the effort and the servers it would use.
+        let config = source.here().map(|rook| rook.config.clone()).unwrap_or_default();
+        let workspace = source.workspace().to_path_buf();
+        // Connected only where turns run here: a routed window's tools are the
+        // daemon's, and spawning a second copy of every server to leave them
+        // idle is a cost with nothing on the other side of it.
+        let mcp = match source.here() {
+            Some(rook) => Arc::new(runtime.block_on(rook.connect_mcp())),
+            None => Arc::new(rook_core::McpSession::default()),
+        };
+        let patience = config.agent.answer_timeout();
 
         let mut app = Self {
-            rook: rook.clone(),
             runtime,
             chat: Chat::default(),
             events,
@@ -260,16 +278,17 @@ impl App {
             approver: Arc::new(ChannelApprover::new(requests, patience)),
             asker: Arc::new(ChannelAsker::new(questions, patience)),
             shared: crate::chat::Session {
-                policy: rook_core::agent::policy_for(&rook.config),
-                effort: std::cell::Cell::new(rook.config.agent.effort()),
-                servers: rook_core::agent::servers_for(&rook.config, &rook.workspace),
-                jobs: rook_core::agent::jobs_for(&rook.config),
+                policy: rook_core::agent::policy_for(&config),
+                effort: std::cell::Cell::new(config.agent.effort()),
+                servers: rook_core::agent::servers_for(&config, &workspace),
+                jobs: rook_core::agent::jobs_for(&config),
                 interjections: Default::default(),
                 // Connected once: every turn would otherwise spawn each server,
                 // wait out its handshake and kill it again.
                 mcp,
                 yes,
             },
+            source,
             turn: None,
             tab: 0,
             sessions: Vec::new(),
@@ -290,26 +309,22 @@ impl App {
     }
 
     fn reload(&mut self) {
-        self.sessions = self.rook.session_summaries().unwrap_or_default();
-        self.skills = self.rook.catalog();
-        let workspace = self.rook.workspace.display().to_string();
-        self.facts =
-            self.rook.memory().map(|book| book.in_scope(&workspace).cloned().collect()).unwrap_or_default();
-        self.stats = self.rook.stats().ok();
+        let workspace = self.source.workspace().to_path_buf();
+        self.sessions = self.source.sessions().unwrap_or_default();
+        self.skills = self.source.catalog(&workspace).unwrap_or_default();
+        let here = workspace.display().to_string();
+        self.facts = self
+            .source
+            .memory()
+            .map(|facts| facts.into_iter().filter(|f| f.scope.applies_in(&here)).collect())
+            .unwrap_or_default();
+        self.stats = self.source.stats().ok();
         self.objects = self
-            .rook
-            .store
-            .list_objects(None, 300)
+            .source
+            .objects(None, 300)
             .unwrap_or_default()
             .into_iter()
-            .map(|(id, m)| {
-                (
-                    id.short(),
-                    rook_store::Kind::from_u8(m.kind).as_str().to_string(),
-                    m.size_raw,
-                    m.size_stored,
-                )
-            })
+            .map(|row| (row.short, row.kind, row.size_raw, row.size_stored))
             .collect();
         if self.session_state.selected().is_none() && !self.sessions.is_empty() {
             self.session_state.select(Some(0));
@@ -334,13 +349,13 @@ impl App {
         let Some(session) = self.sessions.get(i) else { return };
         // Bounded on purpose: viewing a session with a huge tool result must not
         // itself become the memory problem.
-        self.transcript = self.rook.transcript(session.meta.id, 0, 500, 4_000).unwrap_or_default();
+        self.transcript = self.source.transcript(session.meta.id, 0, 500, 4_000).unwrap_or_default();
         self.selected = Some(Selected {
             goal: session.goal.clone(),
             forked_at: session.forked_at,
             // No diffs: the header is a summary, and a session that rewrote a
             // large file would take the pane over.
-            changes: self.rook.changes(session.meta.id, false).unwrap_or_default(),
+            changes: self.source.changes(session.meta.id, false).unwrap_or_default(),
         });
     }
 
@@ -369,10 +384,10 @@ impl App {
     /// turn is still readable — and the note says why it ends where it does.
     fn stop(&mut self, turn: tokio::task::JoinHandle<()>) {
         turn.abort();
-        if let Some(session) = self.chat.session {
-            self.rook
-                .log(session, rook_store::EventKind::Note, "interrupted", "the user stopped this turn")
-                .ok();
+        // Only where the store is here: a routed window does not run the turn
+        // it is stopping, and the daemon writes its own note.
+        if let (Some(session), Some(rook)) = (self.chat.session, self.source.here()) {
+            rook.log(session, rook_store::EventKind::Note, "interrupted", "the user stopped this turn").ok();
         }
         self.chat.push("stat", "[stopped]");
         self.chat.busy = false;
@@ -527,10 +542,13 @@ impl App {
     /// One question per Enter. The input line is the answer field, so typing
     /// past the choices works here exactly as it does in the plain CLI.
     fn command(&mut self, command: &str) {
-        let mut session =
-            self.chat.session.unwrap_or_else(|| self.rook.start_session("").unwrap_or_default());
-        let said =
-            self.runtime.block_on(crate::chat::dispatch(&self.rook, &mut session, &self.shared, command));
+        // The slash commands read and write this process's store directly, so a
+        // window reading through a daemon says so rather than half-working.
+        let Some(rook) = self.source.here().cloned() else {
+            return self.chat.push("stat", &format!("  {NOT_HERE}"));
+        };
+        let mut session = self.chat.session.unwrap_or_else(|| rook.start_session("").unwrap_or_default());
+        let said = self.runtime.block_on(crate::chat::dispatch(&rook, &mut session, &self.shared, command));
         self.chat.session = Some(session);
         match said {
             Ok(said) if said.quit => self.quit = true,
@@ -606,7 +624,10 @@ impl App {
         self.chat.busy = true;
         self.chat.scroll = 0;
 
-        let rook = self.rook.clone();
+        let Some(rook) = self.source.here().cloned() else {
+            self.chat.busy = false;
+            return self.chat.push("stat", &format!("  {NOT_HERE}"));
+        };
         let to_loop = self.to_loop.clone();
         let approver = self.approver.clone();
         let asker = self.asker.clone();
@@ -739,7 +760,7 @@ impl App {
             .block(Block::default().borders(Borders::ALL).border_type(BorderType::Rounded).title(format!(
                 " rook {} — {} ",
                 rook_core::AGENT_VERSION,
-                self.rook.workspace.display()
+                self.source.workspace().display()
             )));
         f.render_widget(tabs, header);
 
@@ -927,7 +948,7 @@ impl App {
     fn draw_sessions(&mut self, f: &mut Frame, area: Rect) {
         let [left, right] =
             Layout::horizontal([Constraint::Percentage(34), Constraint::Percentage(66)]).areas(area);
-        let here = self.rook.workspace.display().to_string();
+        let here = self.source.workspace().display().to_string();
 
         let items: Vec<ListItem> = self
             .sessions
@@ -1128,10 +1149,11 @@ impl App {
                 )));
             }
         }
-        if !self.rook.skill_errors.is_empty() {
+        let skill_errors = self.source.here().map(|rook| rook.skill_errors.clone()).unwrap_or_default();
+        if !skill_errors.is_empty() {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled("failed to load:", Style::default().fg(Color::Red))));
-            for e in &self.rook.skill_errors {
+            for e in &skill_errors {
                 lines.push(Line::from(format!("  {e}")));
             }
         }

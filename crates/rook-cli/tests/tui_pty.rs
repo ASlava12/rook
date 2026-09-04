@@ -538,3 +538,92 @@ fn the_sessions_tab_names_the_workspace_only_when_it_is_another_one() {
         "and this one's own is not repeated on every row — the title bar already says it:\n{screen}"
     );
 }
+
+/// A second window is the ordinary case — another project, or the same one
+/// beside a running daemon — and it was an error message, because opening the
+/// store is the first thing the TUI did. Reading routes over the daemon's API
+/// the way every other command's does; a turn is what still needs the lock,
+/// and the chat tab says so rather than looking broken.
+#[test]
+fn a_second_window_opens_and_browses_while_the_daemon_holds_the_store() {
+    let _one = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+
+    // Something to read: a session written before the daemon takes the store.
+    let mut seed = std::process::Command::new(env!("CARGO_BIN_EXE_rook"))
+        .args(["--workspace", workspace.path().to_str().unwrap(), "chat"])
+        .env("ROOK_HOME", home.path())
+        .env("ROOK_LOG", "error")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    seed.stdin.take().unwrap().write_all(b"/new held-open\n/quit\n").unwrap();
+    seed.wait().unwrap();
+
+    let daemon = Daemon::start(home.path(), workspace.path());
+
+    let mut pty = tui(home.path(), workspace.path());
+    pty.screen(100, 30);
+    pty.send("\t");
+    let browsing = pty.screen_showing(100, 30, "held-open").join("\n");
+    assert!(browsing.contains("held-open"), "the sessions tab reads over the daemon:\n{browsing}");
+
+    pty.send("\t\t\t\t\t");
+    pty.send("hello\r");
+    let chat = pty.screen_showing(100, 30, "holds the store").join("\n");
+    assert!(chat.contains("holds the store"), "and a turn says why it cannot run here:\n{chat}");
+    drop(daemon);
+}
+
+/// `rookd`, for the test above. Port 0 so two tests can never collide, and the
+/// address file is what says it is up.
+struct Daemon(std::process::Child);
+
+impl Daemon {
+    fn start(home: &std::path::Path, workspace: &std::path::Path) -> Self {
+        let rookd = std::path::PathBuf::from(env!("CARGO_BIN_EXE_rook")).with_file_name(if cfg!(windows) {
+            "rookd.exe"
+        } else {
+            "rookd"
+        });
+        if !rookd.exists() {
+            let built = std::process::Command::new(env!("CARGO"))
+                .args(["build", "-p", "rookd"])
+                .current_dir(env!("CARGO_MANIFEST_DIR"))
+                .status();
+            assert!(built.is_ok_and(|s| s.success()), "could not build rookd");
+        }
+        let child = std::process::Command::new(&rookd)
+            .env("ROOK_HOME", home)
+            .env("ROOK_LOG", "error")
+            .args(["--workspace", workspace.to_str().unwrap()])
+            .args(["--port", "0"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let started = Self(child);
+        let address = home.join("rookd.addr");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
+            if address.exists() {
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                return started;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        // Held in `started`, so the panic below takes the child with it.
+        panic!("rookd never published its address");
+    }
+}
+
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
