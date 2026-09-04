@@ -1101,6 +1101,15 @@ prompt that said `cat`, an edit of `9001` written twice against a file it had
 just read as `8443`, and a `lib.rs` rewritten until the claim under test came
 true.
 
+The reading after it, with the edit scenario passing for the first time in a
+while, found one more of the same kind. `find_skill` takes a query and a name
+to install in one call, and a name no source offers threw the query away with
+it: the model asked to install `rust` while searching for `config.rs`, was
+told only that `rust` does not exist, asked the identical thing again and
+gave up — holding, unread, the answer it had been given two steps earlier. A
+failed install answers the search that came with it now. The other two
+failures were the model's again.
+
 **Autonomy is a task and its boundaries, and the task is what was asked.**
 The goal check ran only for a session with a goal set, so `rook run` at
 autonomous — the stance with nobody else to check — checked nothing. With no

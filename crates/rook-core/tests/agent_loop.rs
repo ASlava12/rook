@@ -123,6 +123,49 @@ fn fixture() -> Fixture {
     Fixture { _store_dir: store_dir, _skill_dir: skill_dir, workspace, rook }
 }
 
+/// One call carries both, and a name no source offers threw the query away
+/// with it: a small model searching for `config.rs` while asking to install
+/// `rust` was told only that `rust` does not exist, asked again, and gave up —
+/// holding, unread, the answer it had already been given two steps earlier.
+#[tokio::test]
+async fn a_failed_install_still_answers_the_search_that_came_with_it() {
+    let mut f = fixture();
+    // A directory is a source, which is what makes this testable without a
+    // network: one skill in it, whose description carries the word searched for.
+    let source = tempfile::tempdir().unwrap();
+    let offered = source.path().join("port-reading");
+    std::fs::create_dir_all(&offered).unwrap();
+    std::fs::write(
+        offered.join("SKILL.md"),
+        "---\nname: port-reading\ndescription: Reading a port out of config.rs.\nversion: 1.0.0\n---\nbody\n",
+    )
+    .unwrap();
+    f.rook.config = Config { skill_sources: vec![source.path().display().to_string()], ..Default::default() };
+
+    let session = f.rook.start_session("skills").unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("find_skill", serde_json::json!({ "query": "config.rs", "install": "rust" })),
+        reply("understood"),
+    ]));
+    let mut agent = AgentLoop::new(&f.rook, provider, session);
+    agent.allow_everything_not_denied();
+    agent.run("find me something").await.unwrap();
+
+    let said = f
+        .rook
+        .transcript(session, 0, 100, 4096)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.label == "find_skill" && e.kind != "tool-call")
+        .expect("the call answered");
+    assert!(said.body.contains("could not install"), "the install still failed: {}", said.body);
+    assert!(
+        said.body.contains("port-reading"),
+        "and the search it also asked for was answered: {}",
+        said.body
+    );
+}
+
 #[tokio::test]
 async fn a_plain_turn_is_logged_end_to_end() {
     let f = fixture();

@@ -1984,19 +1984,7 @@ impl<'a> AgentLoop<'a> {
             let query = call.arguments.get("query").and_then(|q| q.as_str()).unwrap_or_default();
             let Some(name) = call.arguments.get("install").and_then(|n| n.as_str()) else {
                 // Searching reads; only installing writes.
-                let (offered, errors) = self.rook.skills_offered(query, false);
-                let listed: Vec<String> = offered
-                    .iter()
-                    .take(10)
-                    .map(|o| format!("- {}: {}", o.name, o.description.chars().take(160).collect::<String>()))
-                    .collect();
-                let text = match listed.is_empty() {
-                    true => format!("no source offers a skill matching {query:?}. {}", errors.join("; ")),
-                    false => format!(
-                        "{}\n\nInstall one by name with `install`, or write your own.",
-                        listed.join("\n")
-                    ),
-                };
+                let text = self.skills_matching(query);
                 self.rook.log(self.session, EventKind::ToolResult, FIND_SKILL, &text).ok();
                 return (text, false);
             };
@@ -2018,7 +2006,16 @@ impl<'a> AgentLoop<'a> {
                     (message, false)
                 }
                 Err(e) => {
-                    let message = format!("could not install {name:?}: {e}");
+                    // The same call usually carries the search that led to the
+                    // name, and dropping it turned a failed install into a dead
+                    // end: a small model asked to install "rust" while searching
+                    // for "config.rs", got only the refusal, asked again, and
+                    // gave up — holding, unused, the answer it had read two
+                    // steps earlier. The search it also asked for still runs.
+                    let mut message = format!("could not install {name:?}: {e}");
+                    if !query.is_empty() {
+                        message.push_str(&format!("\n\n{}", self.skills_matching(query)));
+                    }
                     self.rook.log(self.session, EventKind::Error, FIND_SKILL, &message).ok();
                     (message, true)
                 }
@@ -2739,6 +2736,25 @@ impl<'a> AgentLoop<'a> {
     /// The same decision for something the toolbox does not own. A pseudo-tool
     /// that changes the machine has to pass here too, or `readonly` means
     /// "readonly except for the tools the loop implements itself".
+    /// What the configured sources offer for a query, as the model reads it.
+    ///
+    /// One function because two callers ask the same question: a search on its
+    /// own, and a search that came alongside an install that failed.
+    fn skills_matching(&self, query: &str) -> String {
+        let (offered, errors) = self.rook.skills_offered(query, false);
+        let listed: Vec<String> = offered
+            .iter()
+            .take(10)
+            .map(|o| format!("- {}: {}", o.name, o.description.chars().take(160).collect::<String>()))
+            .collect();
+        match listed.is_empty() {
+            true => format!("no source offers a skill matching {query:?}. {}", errors.join("; ")),
+            false => {
+                format!("{}\n\nInstall one by name with `install`, or write your own.", listed.join("\n"))
+            }
+        }
+    }
+
     async fn gate_risk(
         &self,
         name: &str,
