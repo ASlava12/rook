@@ -1160,7 +1160,14 @@ returning the same thing. A reply cut at the output limit is already asked
 once to go on, but the tell was the stop reason, and Ollama sends `stop` for a
 generation it truncated. The tell is the text now: an object that names a tool
 that was offered and never closes is a call cut in half, whatever the reason
-said.
+said. The reading after it had that scenario passing and three of five again.
+
+What did not take was the wording: naming the checker's id as a session in the
+`verify` result was supposed to stop a model handing it to `forget`, and the
+next reading has it doing exactly that again. `forget` answers it now — an id
+that names no fact but does name a session is told which it is, rather than
+only that no fact matched. A message a model ignores is not a mechanism; the
+tool that receives the mistake is.
 
 **Autonomy is a task and its boundaries, and the task is what was asked.**
 The goal check ran only for a session with a goal set, so `rook run` at

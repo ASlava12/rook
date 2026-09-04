@@ -3653,6 +3653,32 @@ async fn a_checkers_id_says_it_is_a_session_rather_than_looking_like_a_fact() {
     assert!(said.starts_with("checked in session "), "it says what the id is: {said}");
 }
 
+/// Three readings running, a model read the checker's session id off the
+/// result and handed it to `forget` — twice in one of them. Naming the id as a
+/// session in the `verify` result did not stop it, so the refusal says what
+/// the id is instead of only that it names no fact.
+#[tokio::test]
+async fn forgetting_a_session_id_says_what_it_is_rather_than_no_such_fact() {
+    let f = fixture();
+    let session = f.rook.start_session("named").unwrap();
+    let id = rook_store::format_session_id(session);
+
+    let script = vec![call("forget", serde_json::json!({ "id": id })), reply("understood")];
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
+    agent.allow_everything_not_denied();
+    agent.run("forget that").await.unwrap();
+
+    let said = f
+        .rook
+        .transcript(session, 0, usize::MAX, 4096)
+        .unwrap()
+        .into_iter()
+        .rfind(|e| e.kind == "tool-result")
+        .unwrap()
+        .body;
+    assert!(said.contains("is a session, not a fact"), "it says what the id names: {said}");
+}
+
 /// The same verdict from a checker that did reach for something stands.
 #[tokio::test]
 async fn a_verdict_backed_by_a_command_stands() {

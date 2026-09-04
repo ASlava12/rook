@@ -2674,7 +2674,20 @@ impl<'a> AgentLoop<'a> {
                     outcome.facts_forgotten.push(fact.text.clone());
                     format!("forgot [{}] {}", fact.id, fact.text)
                 }
-                Ok(None) => format!("no fact {:?} to forget", string("id")),
+                // Ids here are all one shape, so a model reading "checked in
+                // session 01M1N…" off a `verify` result hands that id to this
+                // — three readings running, twice in one turn. Saying what the
+                // id actually names costs a store lookup nobody notices.
+                Ok(None) => {
+                    let id = string("id");
+                    match self.rook.session_named(&id) {
+                        Ok(_) => format!(
+                            "{id:?} is a session, not a fact — `{FORGET}` removes what was \
+                             remembered, and nothing was remembered under that id"
+                        ),
+                        Err(_) => format!("no fact {id:?} to forget"),
+                    }
+                }
                 Err(e) => format!("could not forget: {e}"),
             },
             _ => {
