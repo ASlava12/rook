@@ -1167,7 +1167,18 @@ What did not take was the wording: naming the checker's id as a session in the
 next reading has it doing exactly that again. `forget` answers it now — an id
 that names no fact but does name a session is told which it is, rather than
 only that no fact matched. A message a model ignores is not a mechanism; the
-tool that receives the mistake is.
+tool that receives the mistake is. The reading after that has the model trying
+it again and being told what the id is, which is the difference between an
+answer and a dead end.
+
+The checker's other half stays the model's, and the obvious mechanism for it
+does not work. It reports `fails` from a `cargo run --lib` that never ran,
+which is a statement about the tool rather than the claim — but "every one of
+the checker's calls failed, so the verdict is unproven" would also discount the
+checker who proves `the build is broken` by a build that fails. A command that
+returned non-zero is evidence; a command that did not run is not, and telling
+those apart is not something an exit code will do reliably. The instructions
+say it in words instead.
 
 **Autonomy is a task and its boundaries, and the task is what was asked.**
 The goal check ran only for a session with a goal set, so `rook run` at

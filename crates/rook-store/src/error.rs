@@ -21,10 +21,15 @@ pub enum StoreError {
     Encoding(String),
     #[error("store format v{found} is newer than this build supports (v{supported}); upgrade rook")]
     FormatTooNew { found: u32, supported: u32 },
+    // Names what does work beside a daemon rather than only what does not:
+    // every `store`, `session`, `skills`, `memory` and `checkpoint` command
+    // routes over its API, and `rook tui` runs its turns over its socket. What
+    // is left holding the lock is a turn started from here — `run`, `chat`,
+    // `acp` — and the answer for those is the daemon's own chat or stopping it.
     #[error(
         "the store at {path} is already open in another process (probably `rookd`).\n\
-         The index allows one writer at a time. Stop the daemon, or read through its \
-         API at http://127.0.0.1:7717 instead."
+         The index allows one writer at a time. `rook tui` works beside it, and so does \
+         its own page; a turn started here needs the store, so stop the daemon for one."
     )]
     Locked { path: PathBuf },
 }

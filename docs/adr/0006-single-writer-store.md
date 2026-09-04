@@ -15,8 +15,8 @@ the error says exactly that and points at the alternative:
 
 ```
 Error: the store at …/index.redb is already open in another process (probably `rookd`).
-The index allows one writer at a time. Stop the daemon, or read through its
-API at http://127.0.0.1:7717 instead.
+The index allows one writer at a time. `rook tui` works beside it, and so does
+its own page; a turn started here needs the store, so stop the daemon for one.
 ```
 
 ## What routes
@@ -33,9 +33,13 @@ Getting there found two commands refusing for nothing — `skills sources` and
 one real inconsistency, `store gc` assembling its own collection options and
 ignoring the configured `gc_grace_secs`.
 
-What still needs the store here is a turn: `run`, `chat` and `acp` write as
-they go and cannot be a request. A person who wants a turn while `rookd` runs
-has the daemon's own chat, which is the same engine from the other side.
+What still needs the store here is a turn started here: `run`, `chat` and
+`acp` write as they go and cannot be a request. `rook tui` is the exception,
+and shows the shape the others could follow — it holds the daemon's chat socket
+and drives a turn through it, so a second window is another client of one
+engine rather than a second engine that cannot exist. The browsing tabs read
+over the API like every other command; what stays local there is the slash
+commands, which write this process's store directly.
 
 One of them is not identical routed. `store cat` over the API gets a windowed,
 text-decoded payload, because the endpoint that serves it also serves a browser
