@@ -2391,7 +2391,9 @@ async fn a_skill_the_agent_writes_is_there_for_the_next_turn() {
     // A skill goes into the agent's own directory, which is outside the
     // workspace — so the path in the result is one the file tools refuse. A
     // small model read it back out of this message and spent two calls being
-    // told so; the message names the tool that does work.
+    // told so; the message names the tool that does work — `load_skill`, which
+    // reads what is installed, and not `find_skill`, which searches the sources
+    // you could install from and will never hold a skill just written here.
     let wrote = f
         .rook
         .transcript(session, 0, 200, 4096)
@@ -2399,7 +2401,11 @@ async fn a_skill_the_agent_writes_is_there_for_the_next_turn() {
         .into_iter()
         .find(|e| e.label == "write_skill" && e.kind == "note")
         .expect("the write is in the transcript");
-    assert!(wrote.body.contains("find_skill"), "it has to say how to read the skill back: {}", wrote.body);
+    assert!(
+        wrote.body.contains("load_skill") && !wrote.body.contains("find_skill"),
+        "it has to name the tool that reads an installed skill: {}",
+        wrote.body
+    );
 }
 
 #[tokio::test]

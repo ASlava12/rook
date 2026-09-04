@@ -2055,10 +2055,16 @@ impl<'a> AgentLoop<'a> {
                     // workspace, so a model that reads the path out of this
                     // message and hands it to `read_file` is refused for
                     // being outside — which is what happened, twice, before
-                    // the sentence was here.
+                    // the sentence was here. `load_skill` and not `find_skill`:
+                    // the first reads what is installed, which this now is, and
+                    // the second searches the sources you could install from,
+                    // where a skill just written by hand will never appear. The
+                    // wrong one of those two was named here for a day, and the
+                    // next smoke run showed a model following the advice into
+                    // "no source offers a skill called \"config_port\"".
                     let message = format!(
                         "wrote skill {name:?} to {}. It is outside the workspace, so read it \
-                         back with `{FIND_SKILL}` rather than by path.",
+                         back with `{LOAD_SKILL}` rather than by path.",
                         path.display()
                     );
                     // A note rather than a kind of its own: a new `EventKind`
