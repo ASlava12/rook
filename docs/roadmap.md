@@ -194,6 +194,16 @@ what unblocks the most.
   last. Anthropic's signed blocks are left alone; a second copy as text would
   be the same thought twice. The bound is what lets `session context` price a
   thought from its stored size without reading it. 2 tests.
+- **A workspace hidden from the commands run in it** — found by a real turn
+  against a local model: every command answered `getcwd: cannot access parent
+  directories: Operation not permitted`, and the model spent ten of its twelve
+  steps working out what it could not read — which it never could have. The
+  agent's state directory is kept out of a command's reach, on purpose; the
+  workspace was inside it, and Seatbelt takes the last matching rule, so the
+  denial covered the directory the command was standing in. The workspace and
+  scratch are read back after the denials now. Landlock was already right, for
+  its own reason: it grants rather than denies, and the workspace is granted
+  everything. 2 tests, one of them running a real `sandbox-exec`.
 - **A session that starts knowing what is in the workspace** — the first thing
   an agent does in an unfamiliar project is list the directory, then list two
   of the directories in it: three calls and three round trips, every session,

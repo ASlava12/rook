@@ -192,6 +192,43 @@ async fn a_contained_command_cannot_read_the_agents_own_store() {
     assert_eq!(code, 0, "the rest of the machine is still readable: {said}");
 }
 
+/// The same hiding, with the workspace inside what is hidden — `ROOK_HOME`
+/// pointing at a scratch tree, which is what a test and a curious person both
+/// do. Every command answered `getcwd: cannot access parent directories:
+/// Operation not permitted`, and a real turn spent ten steps working out what
+/// it could not read.
+#[tokio::test]
+async fn a_workspace_inside_the_hidden_state_directory_still_works() {
+    let Some(backend) = backend() else { return };
+    if !backend.hides_paths() {
+        eprintln!("skipped: {backend:?} restricts writing, not reading");
+        return;
+    }
+    let state = tempfile::tempdir().unwrap();
+    let workspace = state.path().join("ws");
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::write(workspace.join("app.py"), "print(1)\n").unwrap();
+    std::fs::write(state.path().join("transcript"), "another project's history\n").unwrap();
+
+    let isolation = Isolation {
+        workspace: workspace.clone(),
+        scratch: vec![],
+        network: false,
+        unreadable: vec![state.path().to_path_buf()],
+    };
+
+    let (code, said) = run("pwd && cat app.py", &workspace, Some(&isolation)).await;
+    assert_eq!(code, 0, "a command can read the directory it works in: {said}");
+    assert!(said.contains("print(1)"), "{said}");
+
+    // And the rest of the state directory is still out of reach, which is what
+    // hiding it was for.
+    let read = format!("cat '{}'", state.path().join("transcript").display());
+    let (code, said) = run(&read, &workspace, Some(&isolation)).await;
+    assert_ne!(code, 0, "the transcripts beside it are still hidden: {said}");
+    assert!(!said.contains("another project"), "{said}");
+}
+
 /// What was kept out of reach is said, and where the platform cannot keep it
 /// out of reach that is said instead — a boundary believed to hold and not
 /// holding is worse than none.

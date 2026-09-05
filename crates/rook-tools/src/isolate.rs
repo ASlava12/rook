@@ -246,8 +246,16 @@ fn profile(isolation: &Isolation) -> String {
         let real = kept.canonicalize().unwrap_or_else(|_| kept.clone());
         p.push_str(&format!("(deny file-read* (subpath \"{}\"))\n", quoted(&real)));
     }
+    // Both, and after the denials: a command must be able to read the directory
+    // it works in, and a workspace inside a hidden root — `ROOK_HOME` pointed
+    // at a scratch tree, which is what a test and a curious person both do —
+    // was hidden with it. What that looks like is a shell that cannot resolve
+    // its own cwd, and ten steps of a real turn spent guessing why. The state
+    // directory is hidden to keep other projects' transcripts out of reach;
+    // hiding the workspace serves nothing.
     for root in std::iter::once(&isolation.workspace).chain(&isolation.scratch) {
         let real = root.canonicalize().unwrap_or_else(|_| root.clone());
+        p.push_str(&format!("(allow file-read* (subpath \"{}\"))\n", quoted(&real)));
         p.push_str(&format!("(allow file-write* (subpath \"{}\"))\n", quoted(&real)));
     }
     if isolation.network {
@@ -396,6 +404,31 @@ mod tests {
     /// how [codex hardened the same
     /// profile](../../../references/PORTED.md) — and what can be checked
     /// here is that it is not written where it cannot work.
+    /// Found by a real turn: the state directory is hidden from commands, the
+    /// workspace was inside it, and every command answered `getcwd: cannot
+    /// access parent directories: Operation not permitted`. The model spent
+    /// ten steps working out what it could not read, and never could have.
+    #[test]
+    fn a_workspace_inside_a_hidden_root_is_still_readable() {
+        let state = tempfile::tempdir().unwrap();
+        let workspace = state.path().join("ws");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let real = workspace.canonicalize().unwrap();
+
+        let text = profile(&Isolation {
+            workspace,
+            scratch: vec![],
+            network: false,
+            unreadable: vec![state.path().to_path_buf()],
+        });
+
+        let denied = text.find("(deny file-read*").expect("the state directory is hidden");
+        let allowed = text
+            .find(&format!("(allow file-read* (subpath \"{}\"))", quoted(&real)))
+            .expect("and the workspace inside it is read back");
+        assert!(allowed > denied, "the last matching rule wins, so this one has to be last:\n{text}");
+    }
+
     #[test]
     fn terminal_injection_is_denied_after_the_ioctl_allowance() {
         let text = profile(&Isolation::for_workspace(std::env::temp_dir()));
