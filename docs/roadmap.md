@@ -1294,7 +1294,12 @@ same store — which is the only way to check the one claim a single turn cannot
 session for it: nothing of the first turn is replayed into the second, so the
 answer arrives through memory or not at all. It passes, which is the first
 end-to-end evidence that remembering and recalling work against a model rather
-than against a fixture.
+than against a fixture. `writes a skill and uses it later` is the same shape
+over the other claim a single turn cannot check: the agent records a procedure
+with `write_skill`, and a new session — whose catalog is built after that skill
+exists — is asked something the skill covers and answers from it. That passes
+too, so the two things this agent keeps between sessions are both checked
+against a model now.
 
 The reading after it, with the edit scenario passing for the first time in a
 while, found one more of the same kind. `find_skill` takes a query and a name

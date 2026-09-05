@@ -104,6 +104,20 @@ const SCENARIOS: &[Scenario] = &[
         },
     },
     Scenario {
+        name: "writes a skill and uses it later",
+        seed: &[],
+        prompt: "Use the write_skill tool to record this procedure as a skill named deploy-notes: \
+                 to deploy, run `make ship` and then check status.txt.",
+        // The catalog is built when a session starts, so the skill written
+        // above is offered to this one and to no earlier one — which is the
+        // whole of what writing a skill is for.
+        then: Some("How is this project deployed? Load the skill that covers it and answer from it."),
+        check: |turn, _| {
+            expect(turn.tools.iter().any(|t| t == "load_skill"), "the skill has to be the source", turn)?;
+            expect(turn.reply.contains("make ship"), "and its procedure is what comes back", turn)
+        },
+    },
+    Scenario {
         name: "remembers into the next session",
         seed: &[],
         prompt: "Remember for later that this project's staging host is stage-7.internal.",
