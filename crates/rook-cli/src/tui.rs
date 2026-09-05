@@ -1393,9 +1393,11 @@ impl App {
             .block(bordered("")),
             input,
         );
-        // Visible while a question is up, even though the turn is busy: the
-        // input line is where the answer is typed.
-        if (!self.chat.busy || self.chat.asking.is_some()) && self.chat.pending.is_none() {
+        // Wherever the box takes typing, which is everywhere but an approval:
+        // a running turn takes what is typed as an interjection, and hiding the
+        // caret there left somebody typing into a box with no sign of it. An
+        // approval is answered with a letter and has the keyboard.
+        if self.chat.pending.is_none() {
             f.set_cursor_position((
                 input.x + 1 + prompt.chars().count() as u16 + self.chat.input.column(),
                 input.y + 1,

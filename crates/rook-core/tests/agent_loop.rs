@@ -3679,6 +3679,33 @@ async fn forgetting_a_session_id_says_what_it_is_rather_than_no_such_fact() {
     assert!(said.contains("is a session, not a fact"), "it says what the id names: {said}");
 }
 
+/// A checker judges; it does not do the work again. Left at the turn's own
+/// step budget one spent twenty-six minutes on a goal check against a local
+/// model — longer than the turn it was checking — and ended with no verdict.
+#[tokio::test]
+async fn a_checker_is_bounded_more_tightly_than_the_turn_it_checks() {
+    let f = fixture();
+    let session = f.rook.start_session("bounded").unwrap();
+    // Enough replies that an unbounded checker would keep going: each is a
+    // tool call, so the loop takes another step every time.
+    let mut script = vec![call("verify", serde_json::json!({ "claim": "it holds" }))];
+    for _ in 0..40 {
+        script.push(call("read_file", serde_json::json!({ "path": "notes.txt" })));
+    }
+    script.push(reply("done"));
+    std::fs::write(f.workspace.path().join("notes.txt"), "so\n").unwrap();
+
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
+    agent.allow_everything_not_denied();
+    let outcome = agent.run("check it").await.unwrap();
+
+    let checker = outcome.delegated.first().expect("a checker ran");
+    let spent = f.rook.transcript(rook_store::parse_session_id(checker).unwrap(), 0, 500, 200).unwrap();
+    let calls = spent.iter().filter(|e| e.kind == "tool-call").count();
+    assert!(calls <= 12, "a checker gets a dozen steps, not the turn's two hundred: {calls}");
+    assert!(f.rook.config.agent.max_steps > 12, "the precondition: the turn's budget is larger");
+}
+
 /// The same verdict from a checker that did reach for something stands.
 #[tokio::test]
 async fn a_verdict_backed_by_a_command_stands() {

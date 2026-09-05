@@ -2615,6 +2615,12 @@ impl<'a> AgentLoop<'a> {
         // to get through, and a check is the judgement the parent could not make
         // for itself.
         child.effort = self.effort;
+        // Bounded, though, because a check is not the work: a checker with the
+        // whole turn's step budget spent twenty-six minutes on a goal check at
+        // `high` effort against a local model — longer than the turn it was
+        // checking — and ended on a provider timeout with no verdict at all.
+        // Enough steps to read a few files and run one command, and no more.
+        child.max_steps = self.max_steps.min(CHECKER_STEPS);
 
         let mut relay = |progress: Progress<'_>| {
             if let Progress::Delta(Delta::ToolCall(call)) = progress {
@@ -3415,6 +3421,13 @@ you found, what you did, and what is left.";
 const GO_ON: &str = "\
 Your reply was cut off at the output limit. Go on from where it stopped, briefly: a call you \
 were writing, make it whole; an answer, finish it.";
+
+/// What a checker may spend before it must answer.
+///
+/// It reads what the turn changed and perhaps runs one thing; it does not do
+/// the work again. Left at the turn's own budget it did — for longer than the
+/// turn, on a local model.
+const CHECKER_STEPS: u32 = 12;
 
 /// Compactions in one turn past which the window, not the work, is the story.
 ///

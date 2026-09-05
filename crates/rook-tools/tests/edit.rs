@@ -445,3 +445,41 @@ async fn a_directory_where_a_file_goes_is_refused_in_words() {
     }
     assert!(dir.path().join("src").is_dir(), "and none of them touched it");
 }
+
+/// A model wrote `{path, replacement: <the whole class>}` inside `edits` and
+/// was told "missing field `old`", so it wrote the same thing again — four
+/// minutes of a turn on a shape that says plainly what it meant. An entry with
+/// the new text and no `old` is a whole file, which is a different tool.
+#[tokio::test]
+async fn an_edit_that_is_really_a_whole_file_is_told_which_tool_that_is() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("f.py"), "class Mover(object):\n    pass\n").unwrap();
+    let ctx = ToolContext::new(dir.path().to_path_buf());
+    // The call as it was written: a path at the top, and inside `edits` the
+    // path again with the new text beside it.
+    let whole = serde_json::json!({
+        "path": "f.py",
+        "edits": [{ "path": "f.py", "replacement": "class Mover(object):\n    dump_dir = '/tmp'\n" }]
+    });
+
+    let refused = EditFile.call(&ctx, &whole).await.unwrap_err().to_string();
+
+    assert!(refused.contains("write_file"), "it names the tool that does this: {refused}");
+    assert!(refused.contains("replacement"), "and the field that gave it away: {refused}");
+    assert!(!refused.contains("missing field"), "rather than serde's account of it: {refused}");
+}
+
+/// An entry that has both is an edit whose `new` was spelled unusually, and
+/// that is a different thing from a file.
+#[tokio::test]
+async fn an_edit_with_an_old_is_still_an_edit() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("f.py"), "port = 8443\n").unwrap();
+    let ctx = ToolContext::new(dir.path().to_path_buf());
+    let named = serde_json::json!({ "path": "f.py", "edits": [{ "from": "8443", "to": "9000" }] });
+
+    let done = EditFile.call(&ctx, &named).await.unwrap();
+
+    assert!(!done.is_error, "{}", done.content);
+    assert_eq!(std::fs::read_to_string(dir.path().join("f.py")).unwrap(), "port = 9000\n");
+}

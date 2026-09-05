@@ -605,8 +605,20 @@ fn parse_edits(args: &serde_json::Value) -> Result<Vec<Edit>> {
     let invalid = |message: String| ToolError::Invalid { tool: "edit_file".into(), message };
 
     if let Some(edits) = args.get("edits") {
-        let edits: Vec<Edit> = serde_json::from_value(edits.clone())
-            .map_err(|e| invalid(format!("`edits` must be an array of {{old, new}}: {e}")))?;
+        let edits: Vec<Edit> = serde_json::from_value(edits.clone()).map_err(|e| {
+            // An entry carrying the new text and no `old` is not a malformed
+            // edit: it is a whole file, which is a different tool with a
+            // different risk. Named, because "missing field `old`" was answered
+            // by writing the same thing again — the whole class of retry this
+            // repository keeps meeting.
+            match whole_file_in(edits) {
+                Some(field) => invalid(format!(
+                    "an edit replaces `old` with `new`, and `{field}` with no `old` is the whole \
+                     file — that is `write_file`, with `path` and `content`"
+                )),
+                None => invalid(format!("`edits` must be an array of {{old, new}}: {e}")),
+            }
+        })?;
         if edits.is_empty() {
             return Err(invalid("`edits` is empty — there is nothing to change".into()));
         }
@@ -620,6 +632,20 @@ fn parse_edits(args: &serde_json::Value) -> Result<Vec<Edit>> {
         }]),
         _ => Err(invalid("no edits given — pass `edits: [{old, new}]`".into())),
     }
+}
+
+/// The field an entry used for the new text, when it gave no `old`.
+///
+/// A model wrote `{path, replacement: <the whole class>}` inside `edits`, which
+/// says plainly what it meant: replace the file. Only when there is no `old` —
+/// an entry with both is an edit whose `new` is spelled unusually, and
+/// `parse_edits` has aliases for that.
+fn whole_file_in(edits: &serde_json::Value) -> Option<&'static str> {
+    let entry = edits.as_array()?.first()?.as_object()?;
+    if entry.contains_key("old") || entry.contains_key("from") {
+        return None;
+    }
+    ["replacement", "content", "text", "body"].into_iter().find(|field| entry.contains_key(*field))
 }
 
 fn apply(text: &str, edit: &Edit) -> std::result::Result<(String, usize), String> {

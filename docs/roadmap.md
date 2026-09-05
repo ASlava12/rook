@@ -1382,6 +1382,20 @@ the chat socket needed. Both the handler and the hours-long timer run it on a
 blocking thread now; the test runs on a single-threaded runtime and fails
 without the change.
 
+**An hour, measured.** A one-file change took sixty-nine minutes against a
+local 27b, and the transcript says where they went. Forty percent was the model
+thinking at `high` effort — twenty-two replies, gaps of forty-five to four
+hundred and seventy-eight seconds each — and that is the model. The rest was
+ours. Ten minutes: an approval nobody was there to answer, refused at the
+ten-minute deadline. Four more: the retry after it, written as `{path,
+replacement}` inside `edits` and told "missing field `old`", which is true and
+says nothing about what the model plainly meant — an entry with the new text
+and no `old` is a whole file, which is `write_file`, and it says so now.
+Twenty-six and a half minutes: the goal check, which inherited the turn's own
+two hundred steps, ran at `high` effort, and ended on a provider timeout with
+no verdict at all. A checker judges rather than works: a dozen steps now. Half
+the hour came after the edit was already on disk.
+
 **A server we installed is not asked to prove itself.** Somebody was offered
 `pyright-langserver` every session on a machine where it was installed, and
 each yes reinstalled it. The offer was right about the question and wrong about
