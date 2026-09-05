@@ -28,6 +28,10 @@ struct Turn {
     reply: String,
     tools: Vec<String>,
     stopped: String,
+    /// What the turn reported writing. A scenario reads the workspace to see
+    /// whether the work was done; this is whether the turn said so, which is
+    /// the only thing a person watching one has to go on.
+    wrote: Vec<String>,
 }
 
 const SCENARIOS: &[Scenario] = &[
@@ -47,7 +51,11 @@ const SCENARIOS: &[Scenario] = &[
         check: |turn, workspace| {
             let after = std::fs::read_to_string(workspace.join("config.rs"))?;
             expect(after.contains("9000"), "the edit has to land", turn)?;
-            expect(after.contains("\"::1\""), "and nothing else may move", turn)
+            expect(after.contains("\"::1\""), "and nothing else may move", turn)?;
+            // What was written is the one thing a person watching a turn has
+            // to go on, and a turn that did the work and reported none of it
+            // reads exactly like one that did nothing.
+            expect(turn.wrote.iter().any(|f| f.ends_with("config.rs")), "and the turn says it wrote it", turn)
         },
     },
     Scenario {
@@ -259,6 +267,10 @@ fn turn_from(printed: &serde_json::Value) -> Result<Turn> {
             .map(|a| a.iter().filter_map(|t| t.as_str().map(str::to_string)).collect())
             .unwrap_or_default(),
         stopped: outcome["stopped"].as_str().unwrap_or_default().to_string(),
+        wrote: outcome["files_changed"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|f| f.as_str().map(str::to_string)).collect())
+            .unwrap_or_default(),
     })
 }
 
@@ -272,12 +284,18 @@ mod tests {
     fn a_turn_is_read_from_the_nested_outcome_the_cli_prints() {
         let printed = serde_json::json!({
             "session": "01ABC",
-            "outcome": { "reply": "done", "stopped": "end_turn", "tools_called": ["read_file"] },
+            "outcome": {
+                "reply": "done",
+                "stopped": "end_turn",
+                "tools_called": ["read_file"],
+                "files_changed": ["config.rs"]
+            },
             "changes": null
         });
         let turn = turn_from(&printed).unwrap();
         assert_eq!((turn.reply.as_str(), turn.stopped.as_str()), ("done", "end_turn"));
         assert_eq!(turn.tools, ["read_file"]);
+        assert_eq!(turn.wrote, ["config.rs"], "and what it says it wrote, which a scenario checks");
 
         let flat = serde_json::json!({ "reply": "done", "stopped": "end_turn", "tools_called": [] });
         assert!(

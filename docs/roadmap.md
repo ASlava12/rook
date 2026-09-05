@@ -1278,6 +1278,16 @@ prompt that said `cat`, an edit of `9001` written twice against a file it had
 just read as `8443`, and a `lib.rs` rewritten until the claim under test came
 true.
 
+Run against a larger local model — `apodex-1.1-mini` through LM Studio, which
+is what this machine has — all five pass, twice over. That measures cost and
+not correctness, which is the result and not a failure of the harness: at this
+size the scenarios no longer discriminate, and the ones that find things are
+still the small model's readings. What the run is worth is as a check on the
+mechanisms rather than on the model, so the edit scenario asserts one more
+thing now: that the turn *said* it wrote the file. A turn that does the work
+and reports none of it reads exactly like one that did nothing, which is a
+question somebody asked here about a real turn.
+
 The reading after it, with the edit scenario passing for the first time in a
 while, found one more of the same kind. `find_skill` takes a query and a name
 to install in one call, and a name no source offers threw the query away with
