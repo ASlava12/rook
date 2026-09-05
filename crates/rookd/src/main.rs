@@ -266,7 +266,14 @@ async fn main() -> Result<()> {
     println!("rook API:     http://{addr}/api/health");
 
     axum::serve(listener, app).with_graceful_shutdown(shutdown(state.clone())).await.context("serving")?;
+    // The store's lock goes before the address file does. A window reads that
+    // file as "there is a daemon"; with no file it opens the store itself, and
+    // a daemon still holding the lock meets it with the error this ordering
+    // exists to prevent — which is what a restart hit, every time, on the
+    // daemon it had just stopped.
     maintenance.abort();
+    let _ = maintenance.await;
+    drop(state);
     std::fs::remove_file(&address_file).ok();
     Ok(())
 }

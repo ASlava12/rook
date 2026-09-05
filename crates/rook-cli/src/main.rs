@@ -1048,27 +1048,45 @@ fn cmd_daemon(cmd: DaemonCmd, json: bool) -> Result<()> {
             }
         }
         (DaemonCmd::Start, Some(daemon)) => println!("already running at {}", daemon.base),
-        (DaemonCmd::Start, None) => println!("started, at {}", Source::start_a_daemon()?),
+        (DaemonCmd::Start, None) => println!("started, at {}", Source::start_a_daemon(None)?),
         (DaemonCmd::Stop { .. }, None) => println!("nothing is answering"),
         (DaemonCmd::Stop { force }, Some(daemon)) => {
             let interrupted = daemon.stop(force)?;
             println!("stopping{}", ended(interrupted));
         }
         (DaemonCmd::Restart { force }, running) => {
+            // The port it was on, so the windows already attached — which read
+            // the address once, when they attached — find the new one where
+            // they are still looking.
+            let mut was_on = None;
             if let Some(daemon) = running {
+                was_on = daemon.base.rsplit(':').next().and_then(|port| port.parse::<u16>().ok());
                 let interrupted = daemon.stop(force)?;
                 println!("stopping{}", ended(interrupted));
-                // Its address file goes as it exits, and a start before that
-                // would find the old one still answering and do nothing.
+                // The address file, not the health check: it stops answering
+                // the moment it begins shutting down and goes on holding the
+                // store for a moment after that, so a daemon started on the
+                // answer would fail on the lock rather than the port. The file
+                // is removed once the lock is released.
+                let address_file = rook_core::paths::daemon_address_file();
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-                while crate::source::Daemon::running().is_some() {
+                while address_file.exists() {
                     if std::time::Instant::now() > deadline {
-                        bail!("it is still answering ten seconds on; stop it by hand");
+                        bail!("it is still holding the store ten seconds on; stop it by hand");
                     }
                     std::thread::sleep(std::time::Duration::from_millis(100));
                 }
             }
-            println!("started, at {}", Source::start_a_daemon()?);
+            // Falling back rather than failing: the port may be taken by now,
+            // and a daemon somewhere else is better than none. It says so,
+            // because that is when a window has to be reopened.
+            match was_on.map(|port| Source::start_a_daemon(Some(port))) {
+                Some(Ok(base)) => println!("started, at {base} — the same address as before"),
+                Some(Err(_)) | None => {
+                    let base = Source::start_a_daemon(None)?;
+                    println!("started, at {base} — a new address, so reopen any window that was attached");
+                }
+            }
         }
     }
     Ok(())

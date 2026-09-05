@@ -417,6 +417,35 @@ fn the_daemon_says_what_it_is_and_stops_when_asked() {
     drop(daemon);
 }
 
+/// A restart that moves the port strands every window already attached: they
+/// read the address once, when they attached, and go on asking the old one.
+#[test]
+fn a_restart_comes_back_on_the_address_the_windows_are_holding() {
+    let rook = Rook::new();
+    let daemon = Daemon::start(&rook);
+    let address_file = rook.home.path().join("rookd.addr");
+
+    let restarted = rook.run(&["daemon", "restart"]);
+    let said = String::from_utf8_lossy(&restarted.stdout).to_string();
+    assert!(restarted.status.success(), "{}", String::from_utf8_lossy(&restarted.stderr));
+    assert!(said.contains(&daemon.address), "back where it was: {said}");
+    assert_eq!(
+        std::fs::read_to_string(&address_file).unwrap().trim(),
+        daemon.address,
+        "and the file every window reads says so too"
+    );
+
+    // Left running by this command rather than by the fixture, so it is this
+    // test's to stop.
+    let stopped = rook.run(&["daemon", "stop"]);
+    assert!(stopped.status.success(), "{}", String::from_utf8_lossy(&stopped.stderr));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while address_file.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    drop(daemon);
+}
+
 /// The writes the daemon serves. Refusing these meant stopping the daemon to
 /// set a goal or to forget a fact, which is the same store answering either
 /// way — and `store maintain` is what somebody reaches for exactly when a

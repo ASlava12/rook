@@ -127,7 +127,14 @@ what unblocks the most.
   upgrade leaves the running daemon on the old code — every window keeps
   working, at the previous version — the health it already asks for on the way
   in now says whether the `rookd` on disk has changed since that process
-  started, and a window that finds one says so in a line. 3 tests.
+  started, and a window that finds one says so in a line. A restart comes back
+  on the port it left, because every window read the address once, when it
+  attached, and a daemon that returns somewhere else has stranded all of them —
+  which needed the daemon to release the store's lock *before* removing its
+  address file. That ordering was already wrong for everyone else: the file
+  says "there is a daemon", so a window seeing none opens the store itself, and
+  a daemon still holding it met that window with the very error the file exists
+  to prevent. 5 tests.
 - **The TUI started for real** — on a pseudo-terminal, with the screen replayed
   out of the escape stream and read back a row at a time. Nothing else can see
   that it starts at all: it needs a tty to draw, so a panic on launch would

@@ -47,7 +47,7 @@ impl Source {
             });
             return Ok((Self::Daemon(daemon), note));
         }
-        let Some((mut child, started)) = start_daemon() else {
+        let Some((mut child, started)) = start_daemon(None) else {
             return Ok((Self::open(workspace)?, None));
         };
         if came_up(&mut child)
@@ -64,8 +64,12 @@ impl Source {
 
     /// Start one and wait for it, for `rook daemon start` and the restart that
     /// is a stop and this.
-    pub fn start_a_daemon() -> Result<String> {
-        let Some((mut child, beside)) = start_daemon() else {
+    ///
+    /// `on_port` is how a restart keeps the address every open window is
+    /// holding: they read it once, when they attached, and a daemon that comes
+    /// back somewhere else has stranded all of them.
+    pub fn start_a_daemon(on_port: Option<u16>) -> Result<String> {
+        let Some((mut child, beside)) = start_daemon(on_port) else {
             bail!("no `rookd` next to this binary — install the two together")
         };
         if !came_up(&mut child) {
@@ -685,7 +689,7 @@ fn asked_about(workspace: Option<std::path::PathBuf>) -> std::path::PathBuf {
 /// second `rookd` from somewhere else would open a different store. Its own
 /// output goes nowhere — it logs to `$ROOK_HOME/logs`, and a line printed into
 /// a terminal a TUI is drawing in is a line that corrupts the screen.
-fn start_daemon() -> Option<(std::process::Child, String)> {
+fn start_daemon(on_port: Option<u16>) -> Option<(std::process::Child, String)> {
     let beside =
         std::env::current_exe().ok()?.parent()?.join(if cfg!(windows) { "rookd.exe" } else { "rookd" });
     if !beside.is_file() {
@@ -696,7 +700,9 @@ fn start_daemon() -> Option<(std::process::Child, String)> {
         // A port the system picks, not the default one: the address file is how
         // anyone finds it, and a fixed port collides with whatever else is on
         // it — including a daemon somebody started for a different `ROOK_HOME`.
-        .args(["--port", "0"])
+        // Except where a caller names the one that was just released, which is
+        // what makes a restart invisible to the windows already attached.
+        .args(["--port", &on_port.unwrap_or(0).to_string()])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
