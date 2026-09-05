@@ -82,6 +82,15 @@ pub struct AgentConfig {
     /// Fraction of the model's context the agent will fill before compacting.
     pub compact_at: f32,
     pub max_steps: u32,
+    /// How much the model may write in one reply, thinking included.
+    ///
+    /// It was a constant of 4096 nobody could reach, and on a model that
+    /// reasons out loud the reasoning spends it: the reply is cut mid-way
+    /// through the tool call it was writing, the loop asks it once to go on,
+    /// it is cut again, and the turn ends having read a great deal and written
+    /// nothing. A cap only costs what the model actually produces, so this is
+    /// generous by default and worth raising for a model that thinks harder.
+    pub max_output_tokens: u32,
     /// Send skill cards rather than skill bodies, loading a body only when the
     /// model asks for it. Off means every enabled skill is always in context.
     pub lazy_skills: bool,
@@ -318,6 +327,7 @@ impl Default for AgentConfig {
             native_tools: true,
             one_script: true,
             context_window: None,
+            max_output_tokens: 8192,
             max_parallel_subagents: 4,
             max_subagents_per_turn: 16,
             server_update_after_days: 30,

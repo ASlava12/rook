@@ -4457,6 +4457,47 @@ async fn a_reply_cut_twice_ends_as_cut() {
     assert_eq!(seen.lock().unwrap().len(), 2, "the reply, the ask, and not a third");
 }
 
+/// Cut twice, the turn ends having written nothing — the call it was writing
+/// never arrived. Three hours of a real turn went that way: reading, thinking,
+/// two cut replies, and not one edit, with nothing saying which number to
+/// change. The cap the model ran out of is a setting now, and the turn names
+/// it.
+#[tokio::test]
+async fn a_turn_that_ends_on_the_output_limit_names_the_setting() {
+    let f = fixture();
+    let session = f.rook.start_session("cut").unwrap();
+    let mut first = reply("I will read the file and then");
+    first.stop_reason = StopReason::MaxTokens;
+    let mut second = reply("continue from where I");
+    second.stop_reason = StopReason::MaxTokens;
+
+    let outcome = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(vec![first, second])), session)
+        .run("change the port")
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.stopped, "max_tokens", "the precondition: it ended on the limit");
+    let said = outcome.open_questions.join("\n");
+    assert!(said.contains("max_output_tokens"), "it names the setting: {said}");
+    assert!(said.contains(&f.rook.config.agent.max_output_tokens.to_string()), "and the number: {said}");
+}
+
+/// What that cap is, because it was a constant in the library nobody could
+/// reach from a config file.
+#[tokio::test]
+async fn the_output_limit_is_what_the_config_says() {
+    let f = fixture();
+    let session = f.rook.start_session("cap").unwrap();
+    let provider = ScriptedProvider::new(vec![reply("done")]);
+    let seen = provider.share();
+
+    AgentLoop::new(&f.rook, Arc::new(provider), session).run("say something").await.unwrap();
+
+    let asked = seen.lock().unwrap()[0].max_output_tokens;
+    assert_eq!(asked, f.rook.config.agent.max_output_tokens);
+    assert!(asked >= 8192, "and generous, because a cap costs only what is produced: {asked}");
+}
+
 /// A tool that declares its paths is checkpointed and diffed exactly. A command
 /// declares none, so "what did this turn change" was answered with silence — a
 /// turn that ran `sed -i` reported no files changed at all, which is not a gap

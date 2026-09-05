@@ -1382,6 +1382,17 @@ the chat socket needed. Both the handler and the hours-long timer run it on a
 blocking thread now; the test runs on a single-threaded runtime and fails
 without the change.
 
+**A reply cut at the output limit writes nothing, and said so to nobody.** A
+turn ran for two and a half hours against a local 27b, read nine files, searched
+nine times, compacted five times — and changed not one line, which is how it was
+reported. The transcript says why in three events: the reply was cut at the
+output limit, the loop asked it once to go on, and it was cut again, so the tool
+call it was writing never arrived. That limit was a constant of 4096 in the
+library, reachable from no config file, and a model that reasons out loud spends
+it on reasoning. It is `[agent] max_output_tokens` now, 8192 by default because
+a cap costs only what is produced — and a turn that ends on it says which number
+to change, the way the compaction notice does.
+
 **A window makes sure there is a daemon.** The first fix routed a window that
 found `rookd` already running, which was not the case anybody had: two `rook
 tui` and no daemon at all. The window that takes the store serves nobody, so

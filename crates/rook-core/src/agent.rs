@@ -1538,6 +1538,7 @@ impl<'a> AgentLoop<'a> {
                 request.tools = self.tool_specs();
             }
             request.effort = Some(self.effort);
+            request.max_output_tokens = self.rook.config.agent.max_output_tokens;
             request.cache_ttl = self.rook.config.agent.cache_ttl();
             let mut stream =
                 self.provider.stream(request).await.map_err(|e| CoreError::Other(e.to_string()))?;
@@ -1726,6 +1727,19 @@ impl<'a> AgentLoop<'a> {
                         }
                     }
                     outcome.stopped = response.stop_reason.as_str().into();
+                    // Ending on the output limit is the model having no room to
+                    // finish, not a turn that finished: asked once to go on it
+                    // was cut again, and a reply cut mid-call writes nothing.
+                    // Three hours of reading and no edit was this, and nothing
+                    // said which number to change.
+                    if outcome.stopped == "max_tokens" {
+                        self.report(Reported::Open(format!(
+                            "the model's reply was cut at {} tokens twice, so what it was writing \
+                             never arrived — raise `[agent] max_output_tokens`, which a model that \
+                             reasons out loud spends on reasoning",
+                            self.rook.config.agent.max_output_tokens
+                        )));
+                    }
                     // A turn that said nothing at any step ends in silence every
                     // front end renders as a hang. Set here rather than logged:
                     // the transcript records what the model said, and it said
@@ -1831,6 +1845,7 @@ impl<'a> AgentLoop<'a> {
             self.rook.log(self.session, EventKind::Note, "out of steps", OUT_OF_STEPS).ok();
             let mut request = Request::new(messages);
             request.effort = Some(self.effort);
+            request.max_output_tokens = self.rook.config.agent.max_output_tokens;
             request.cache_ttl = self.rook.config.agent.cache_ttl();
             let mut stream =
                 self.provider.stream(request).await.map_err(|e| CoreError::Other(e.to_string()))?;
