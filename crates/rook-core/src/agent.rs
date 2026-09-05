@@ -2677,13 +2677,18 @@ impl<'a> AgentLoop<'a> {
             return "verify needs a claim to check".into();
         }
         let settles = args.get("settles").and_then(|s| s.as_str()).unwrap_or("").trim();
-        self.check(claim, settles, outcome, on_progress).await.0
+        // Named by what is being checked rather than by the claim: a window
+        // showed the first forty-eight characters of the claim beside every
+        // call the checker made, and the claim starts with the same sentence
+        // every time.
+        self.check(&format!("checking: {}", short(claim)), claim, settles, outcome, on_progress).await.0
     }
 
     /// The report and the verdict it carries. The report is what a model reads;
     /// the verdict is what the loop acts on when it asked the question itself.
     async fn check(
         &self,
+        what: &str,
         claim: &str,
         settles: &str,
         outcome: &mut TurnOutcome,
@@ -2715,14 +2720,14 @@ impl<'a> AgentLoop<'a> {
             tokio::select! {
                 biased;
                 Some((_, tool)) = steps.recv() => on_progress(Progress::Delegating {
-                    task: short(claim),
+                    task: what,
                     tool: &tool,
                 }),
                 done = &mut running => break done,
             }
         };
         while let Ok((_, tool)) = steps.try_recv() {
-            on_progress(Progress::Delegating { task: short(claim), tool: &tool });
+            on_progress(Progress::Delegating { task: what, tool: &tool });
         }
 
         match checked {
@@ -2806,7 +2811,7 @@ impl<'a> AgentLoop<'a> {
              something the person forbade was done — say which, and what would put it right. \
              Whether the task was worth doing is not one of the questions."
         );
-        self.check(&claim, "", outcome, on_progress).await
+        self.check("goal check", &claim, "", outcome, on_progress).await
     }
 
     async fn run_checker(

@@ -170,6 +170,9 @@ async fn a_binary_file_is_named_rather_than_pasted() {
     assert_eq!(out.meta["binary"], true);
 }
 
+/// Not an error, and not silence either: a model handed nothing at all for an
+/// empty `__init__.py` went and ran `find` to check the file was there. An
+/// empty answer is what a broken tool looks like.
 #[tokio::test]
 async fn an_empty_file_reads_as_empty_rather_than_as_an_error() {
     let w = Workspace::new();
@@ -178,6 +181,7 @@ async fn an_empty_file_reads_as_empty_rather_than_as_an_error() {
     let out = w.read(serde_json::json!({"path": "empty.txt"})).await;
 
     assert!(!out.is_error, "{}", out.content);
+    assert!(out.content.contains("is empty"), "and it says so in words: {:?}", out.content);
     assert_eq!(out.meta["total_lines"], 0);
 }
 

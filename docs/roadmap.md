@@ -194,6 +194,12 @@ what unblocks the most.
   last. Anthropic's signed blocks are left alone; a second copy as text would
   be the same thought twice. The bound is what lets `session context` price a
   thought from its stored size without reading it. 2 tests.
+- **Two small things a real run showed** — a window watching a goal check
+  printed the first forty-eight characters of the claim beside every call it
+  made, and every claim starts with the same sentence: it is named by what is
+  being checked now. And `read_file` on an empty file answered with nothing at
+  all, which is what a broken tool looks like — a model given it went and ran
+  `find` to check the file was there. It says the file is empty.
 - **A fetch the turn waited for and could not use** — a missing language server
   is offered once a session, and under `autonomous` it is fetched: a minute of
   npm or a release download, before the first request, for something that by

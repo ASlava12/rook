@@ -91,6 +91,15 @@ impl Tool for ReadFile {
             .with("total_lines", total_lines as u64));
         }
 
+        // An empty file answered with nothing at all, which reads as a tool
+        // that failed: a model given it went and ran `find` to check the file
+        // was there. Saying so costs a line and settles it.
+        if window.total_bytes == 0 {
+            return Ok(ToolOutcome::ok(format!("{} is empty (0 bytes)", path.display()))
+                .with("total_lines", 0)
+                .with("returned_lines", 0));
+        }
+
         // Room reserved for the "call again with offset=" line, which is added
         // after the budget is spent and would otherwise push the reply over it.
         let budget = ctx.max_output_bytes.saturating_sub(80);
