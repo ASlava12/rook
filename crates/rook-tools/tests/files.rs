@@ -185,6 +185,56 @@ async fn an_empty_file_reads_as_empty_rather_than_as_an_error() {
     assert_eq!(out.meta["total_lines"], 0);
 }
 
+/// Renaming by reading a file and writing it somewhere else retypes every
+/// line of it through the model, which is where a long file loses one — and it
+/// costs three calls for something the filesystem does in one.
+#[tokio::test]
+async fn a_file_moves_with_its_contents_exactly() {
+    let w = Workspace::new();
+    let long: String = (0..500).map(|n| format!("line {n}\n")).collect();
+    w.file("old/name.rs", &long);
+
+    let out = files::MoveFile
+        .call(&w.ctx, &serde_json::json!({ "from": "old/name.rs", "to": "new/place/name.rs" }))
+        .await
+        .unwrap();
+
+    assert!(!out.is_error, "{}", out.content);
+    assert!(out.content.contains("moved"), "{}", out.content);
+    assert_eq!(
+        std::fs::read_to_string(w.dir.path().join("new/place/name.rs")).unwrap(),
+        long,
+        "byte for byte, and the parent directory made on the way"
+    );
+    assert!(!w.dir.path().join("old/name.rs").exists(), "and it is not in both places");
+}
+
+/// A move that lands on something is a deletion nobody asked for.
+#[tokio::test]
+async fn a_move_onto_an_existing_file_is_refused() {
+    let w = Workspace::new();
+    w.file("a.txt", "first");
+    w.file("b.txt", "second");
+
+    let out =
+        files::MoveFile.call(&w.ctx, &serde_json::json!({ "from": "a.txt", "to": "b.txt" })).await.unwrap();
+
+    assert!(out.is_error, "{}", out.content);
+    assert!(out.content.contains("already there"), "it says why: {}", out.content);
+    assert_eq!(std::fs::read_to_string(w.dir.path().join("b.txt")).unwrap(), "second", "nothing was lost");
+    assert!(w.dir.path().join("a.txt").exists(), "and nothing was moved");
+}
+
+/// Both ends, or a rewind puts the file back in two places or in neither.
+#[test]
+fn a_move_names_both_ends_as_touched() {
+    let touched = rook_tools::Tool::touched_paths(
+        &files::MoveFile,
+        &serde_json::json!({ "from": "a.txt", "to": "b.txt" }),
+    );
+    assert_eq!(touched, ["a.txt", "b.txt"]);
+}
+
 #[tokio::test]
 async fn writing_creates_the_parent_directories() {
     let w = Workspace::new();

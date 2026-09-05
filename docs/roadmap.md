@@ -194,6 +194,16 @@ what unblocks the most.
   last. Anthropic's signed blocks are left alone; a second copy as text would
   be the same thought twice. The bound is what lets `session context` price a
   thought from its stored size without reading it. 2 tests.
+- **Renaming a file without retyping it** — a move was three calls: read the
+  file, write it somewhere else, delete the original — and the middle one
+  retypes every line of it through the model, which is where a long file loses
+  one. `move_file` keeps the bytes, refuses to land on something that is
+  already there (that is a deletion nobody asked for, and the tool that deletes
+  says so in its own name), makes the parent directory, and falls back to a
+  copy where `rename` cannot cross a mount. Both ends are declared as touched,
+  or a rewind would put the file back in two places or in neither. It cost the
+  advertised tool list a hundred tokens eager and eleven lazy, which the budget
+  test made a decision rather than a drift. 3 tests.
 - **Continuing a session from inside the window** — which conversation you are
   in was a choice you could only make before starting: `rook chat --session
   last`, `rook run --session <id>`. The browser has had a picker since it had a

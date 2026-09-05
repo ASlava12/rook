@@ -159,9 +159,9 @@ is the user deciding.
 ### Undoing a turn
 
 The loop checkpoints every file a tool is about to modify, so a rewind puts the
-workspace back as well as the conversation. `delete_file` exists for that reason:
-`rm` through the shell declares no path, so nothing is captured and no rewind
-brings it back — every other change a command makes leaves the content somewhere,
+workspace back as well as the conversation. `delete_file` and `move_file` exist for
+that reason: `rm` and `mv` through the shell declare no path, so nothing is
+captured and no rewind brings it back — every other change a command makes leaves the content somewhere,
 and a deletion leaves nothing — and forks rather than truncates, so
 the turns you rewound past stay readable in the parent session.
 

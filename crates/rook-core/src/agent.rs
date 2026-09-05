@@ -290,7 +290,7 @@ const CHANGES_THINGS: &[&str] =
 /// The same for the toolbox. `run_command` is deliberately absent — verifying a
 /// claim means running things — so this stops a checker editing the work it is
 /// judging, and is not a sandbox.
-const CHANGES_FILES: &[&str] = &["write_file", "edit_file", "delete_file"];
+const CHANGES_FILES: &[&str] = &["write_file", "edit_file", "delete_file", "move_file"];
 
 fn system_risk(recipe: &crate::install::Recipe) -> (serde_json::Value, rook_tools::policy::Risk) {
     let command = recipe.system_command().unwrap_or_default();

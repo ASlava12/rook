@@ -387,6 +387,83 @@ impl Tool for DeleteFile {
     }
 }
 
+pub struct MoveFile;
+
+#[async_trait]
+impl Tool for MoveFile {
+    fn name(&self) -> &str {
+        "move_file"
+    }
+
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "move_file".into(),
+            description: "Move or rename one file, contents untouched. Use this rather than \
+                          reading and rewriting it, which retypes every line."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": { "from": { "type": "string" }, "to": { "type": "string" } },
+                "required": ["from", "to"]
+            }),
+        }
+    }
+
+    async fn call(&self, ctx: &ToolContext, args: &serde_json::Value) -> Result<ToolOutcome> {
+        let from = ctx.resolve(&arg_str(args, self.name(), "from")?)?;
+        let to = ctx.resolve(&arg_str(args, self.name(), "to")?)?;
+        if let Some(refused) = not_a_file(&from, "this moves one file, so name the file to move") {
+            return Ok(refused);
+        }
+        // Refused rather than overwritten: a move that lands on something is a
+        // deletion nobody asked for, and the tool that deletes says so in its
+        // own name.
+        if to.exists() {
+            return Ok(ToolOutcome::error(format!(
+                "{} is already there — delete it first if that is what you meant, or move to a \
+                 path that is free",
+                to.display()
+            )));
+        }
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| ToolError::Io { path: parent.to_path_buf(), source: e })?;
+        }
+        // Across filesystems `rename` fails with `EXDEV`, and a workspace with
+        // a mount inside it is an ordinary thing; copying and removing is the
+        // same move, more slowly.
+        if let Err(e) = std::fs::rename(&from, &to) {
+            std::fs::copy(&from, &to).map_err(|_| ToolError::Io { path: from.clone(), source: e })?;
+            std::fs::remove_file(&from).map_err(|e| ToolError::Io { path: from.clone(), source: e })?;
+        }
+        let bytes = std::fs::metadata(&to).map(|m| m.len()).unwrap_or(0);
+        Ok(ToolOutcome::ok(format!("moved {} to {} ({bytes} bytes)", from.display(), to.display()))
+            .with("bytes", bytes))
+    }
+
+    async fn preview(&self, ctx: &ToolContext, args: &serde_json::Value) -> Option<String> {
+        let from = ctx.resolve(&arg_str(args, self.name(), "from").ok()?).ok()?;
+        let to = ctx.resolve(&arg_str(args, self.name(), "to").ok()?).ok()?;
+        let bytes = std::fs::metadata(&from).map(|m| m.len()).unwrap_or(0);
+        Some(format!("{} → {} ({bytes} bytes, contents unchanged)", from.display(), to.display()))
+    }
+
+    /// Both ends: one loses a file and the other gains one, and a rewind that
+    /// knew about only one of them would put the file back in two places or in
+    /// neither.
+    fn touched_paths(&self, args: &serde_json::Value) -> Vec<String> {
+        ["from", "to"]
+            .into_iter()
+            .filter_map(|key| args.get(key).and_then(|v| v.as_str()).map(str::to_string))
+            .collect()
+    }
+
+    /// The file leaves where it was, which is the same loss as overwriting it.
+    fn overwrites(&self) -> bool {
+        true
+    }
+}
+
 pub struct EditFile;
 
 /// The names other tools taught a model for the same two strings, accepted

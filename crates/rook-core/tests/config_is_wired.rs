@@ -239,16 +239,19 @@ fn the_whole_advertised_tool_list_stays_within_a_budget() {
     };
 
     let (full, stubs) = (priced(false), priced(true));
-    // Raised twice. From 1,800: `edit_file` grew a `files` array so a refactor
-    // across several files is one call that either lands whole or writes
-    // nothing, and the shape has to appear twice because `$ref` is not read the
-    // same way by all three dialects. From 1,900: `subagents`, which is how a
-    // parent reads and redirects children it left running — a capability with
-    // its own verbs rather than an argument on an existing one. Both times the
-    // new descriptions were cut to the bone first; what is left is the shape of
-    // the arguments, which a tool cannot be called without.
+    // Raised three times. From 1,800: `edit_file` grew a `files` array so a
+    // refactor across several files is one call that either lands whole or
+    // writes nothing, and the shape has to appear twice because `$ref` is not
+    // read the same way by all three dialects. From 1,900: `subagents`, which
+    // is how a parent reads and redirects children it left running — a
+    // capability with its own verbs rather than an argument on an existing one.
+    // From 2,050: `move_file`, because the alternative is reading a file and
+    // writing it somewhere else, which retypes every line of it through the
+    // model and is where a long one loses one. Each time the new description
+    // was cut to the bone first; what is left is the shape of the arguments,
+    // which a tool cannot be called without.
     assert!(
-        full < 2_050,
+        full < 2_150,
         "the whole list costs ~{full} tokens on every eager request; trim a description or \
          merge an argument before raising this"
     );
@@ -256,9 +259,12 @@ fn the_whole_advertised_tool_list_stays_within_a_budget() {
     // Raised from 850 for `stance`, which is how the agent asks a person for
     // more latitude — advertised only where there is more to ask for, which is
     // the default. Its first sentence and its `required` were cut first; a
-    // stub is mostly the shape of its arguments.
+    // stub is mostly the shape of its arguments. Raised from 900 for
+    // `move_file`, whose stub is eleven tokens: two argument names and a
+    // sentence that has to say the contents are kept, since that is the whole
+    // reason to call it rather than read and write.
     assert!(
-        stubs < 900,
+        stubs < 950,
         "the stubs cost ~{stubs} tokens on every request, which is what is \
          actually paid: lazy loading is the default"
     );

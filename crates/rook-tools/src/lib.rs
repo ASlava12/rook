@@ -379,6 +379,7 @@ impl ToolBox {
         tb.register(Arc::new(files::WriteFile));
         tb.register(Arc::new(files::EditFile));
         tb.register(Arc::new(files::DeleteFile));
+        tb.register(Arc::new(files::MoveFile));
         tb.register(Arc::new(files::ListDir));
         tb.register(Arc::new(search::Search));
         tb.register(Arc::new(exec::RunCommand));
