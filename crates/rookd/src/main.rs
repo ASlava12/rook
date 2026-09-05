@@ -60,6 +60,9 @@ pub struct AppState {
     /// restart, and the restart was something a person had to be told to do
     /// rather than something that happened.
     config_read: std::sync::Mutex<Option<std::time::SystemTime>>,
+    /// Resolved once, with the rest of what is read at startup: where the file
+    /// is does not change while the process runs.
+    pub config_path: std::path::PathBuf,
 }
 
 impl AppState {
@@ -76,8 +79,7 @@ impl AppState {
     /// a watcher is a thread and a dependency for a question that costs one
     /// `stat`.
     pub async fn config_if_changed(&self) -> Option<String> {
-        let path = rook_core::paths::config_file();
-        let touched = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        let touched = std::fs::metadata(&self.config_path).and_then(|m| m.modified()).ok();
         {
             let mut last = self.config_read.lock().unwrap_or_else(|e| e.into_inner());
             if *last == touched {
@@ -85,7 +87,7 @@ impl AppState {
             }
             *last = touched;
         }
-        let Ok(config) = rook_core::Config::load() else { return None };
+        let Ok(config) = rook_core::Config::load_from(self.config_path.clone()) else { return None };
         let model = config.agent.model.clone();
         let was = {
             let mut rook = self.rook.write().await;
@@ -204,6 +206,7 @@ async fn main() -> Result<()> {
         config_read: std::sync::Mutex::new(
             std::fs::metadata(rook_core::paths::config_file()).and_then(|m| m.modified()).ok(),
         ),
+        config_path: rook_core::paths::config_file(),
         started: std::time::Instant::now(),
         about,
     });

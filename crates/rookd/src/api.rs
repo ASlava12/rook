@@ -895,6 +895,7 @@ mod tests {
             started: std::time::Instant::now(),
             about,
             config_read: std::sync::Mutex::new(None),
+            config_path: home.path().join("config.toml"),
         });
         Fixture { _home: home, _workspace: workspace, router: router(state.clone()), state, session }
     }
@@ -909,10 +910,12 @@ mod tests {
         let was = f.state.rook.read().await.config.agent.model.clone();
         assert_ne!(was, "lmstudio/somebody-else", "the precondition: it is not that yet");
 
-        // Written as a person writes it, which is also what `Config::load`
-        // reads: a partial file, with the defaults behind it.
-        std::fs::write(rook_core::paths::config_file(), "[agent]\nmodel = \"lmstudio/somebody-else\"\n")
-            .unwrap();
+        // Written as a person writes it, which is also what the daemon reads:
+        // a partial file, with the defaults behind it. Named from the state
+        // rather than from `paths`, because every fixture in this file points
+        // `ROOK_HOME` at its own directory and the next one to start would
+        // otherwise decide which file this test wrote.
+        std::fs::write(&f.state.config_path, "[agent]\nmodel = \"lmstudio/somebody-else\"\n").unwrap();
 
         let said = f.state.config_if_changed().await;
 

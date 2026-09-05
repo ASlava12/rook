@@ -449,7 +449,13 @@ impl Config {
     /// A malformed config is an error, not a fallback to defaults: silently
     /// ignoring it would also silently change which model the agent talks to.
     pub fn load() -> std::result::Result<Self, ConfigError> {
-        let path = crate::paths::config_file();
+        Self::load_from(crate::paths::config_file())
+    }
+
+    /// From a path decided by the caller — a long-running process resolves it
+    /// once at start and re-reads that file, rather than asking again for a
+    /// location that has not moved.
+    pub fn load_from(path: std::path::PathBuf) -> std::result::Result<Self, ConfigError> {
         let text = match std::fs::read_to_string(&path) {
             Ok(text) => text,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),

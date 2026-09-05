@@ -231,6 +231,11 @@ struct Chat {
     /// and a stream that only moved when the model spoke, which reads as a
     /// hang — and was reported as one.
     since: Option<std::time::Instant>,
+    /// When this window last heard anything at all from the turn. Silence is
+    /// the one thing a person cannot read: a build running, a model thinking
+    /// and a wedged turn all draw the same screen, and the last of the three
+    /// was reported as a hang twice.
+    heard: Option<std::time::Instant>,
     /// Where to send what the person answers while the daemon runs the turn:
     /// approvals, answers and a cancellation. `None` when the turn is this
     /// process's own.
@@ -332,6 +337,15 @@ fn elapsed(since: std::time::Duration) -> String {
     }
 }
 
+/// What a long pause is waiting on, in the words of the log being read: the
+/// tool that is still running, or the model that has sent nothing.
+fn waiting_on(quiet: std::time::Duration, running: Option<&str>) -> String {
+    match running {
+        Some(tool) => format!(" · {tool} running {}", elapsed(quiet)),
+        None => format!(" · nothing from the model for {}", elapsed(quiet)),
+    }
+}
+
 /// Short enough for the footer, which already carries the mode, the effort and
 /// whatever the last command said.
 fn spent(totals: Option<(u32, u32, u32)>) -> String {
@@ -424,6 +438,25 @@ impl Chat {
         self.trim();
     }
 
+    /// The tool the turn is in the middle of, read from the log the person is
+    /// looking at: a call is written when it starts and gains its mark when it
+    /// ends, so the last line answers it without a second place to keep it.
+    fn running(&self) -> Option<&str> {
+        let (kind, line) = self.log.last()?;
+        let done = line.ends_with('✓') || line.ends_with('✗');
+        (*kind == "tool" && !done).then(|| line.trim().trim_start_matches("· "))
+    }
+
+    /// Silence, named — after half a minute of it, and not before, because a
+    /// pause between tokens is ordinary and a caption that cries wolf is one
+    /// more thing to ignore.
+    fn silence(&self) -> String {
+        match self.heard.map(|at| at.elapsed()).filter(|d| *d >= QUIET) {
+            Some(quiet) => waiting_on(quiet, self.running()),
+            None => String::new(),
+        }
+    }
+
     /// Scrollback, not the record: the session holds every word of this and the
     /// Sessions tab reads it back, so an afternoon of turns need not sit in
     /// memory to stay recoverable.
@@ -434,6 +467,10 @@ impl Chat {
         }
     }
 }
+
+/// Long enough that an ordinary pause between tokens says nothing, short
+/// enough to answer "has it stopped?" before anyone reaches for ctrl-c.
+const QUIET: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// About a screenful of history a thousand times over. Past this the older part
 /// is in the store and nowhere else, which is where it was going anyway.
@@ -652,6 +689,7 @@ impl App {
 
     fn drain_turn_events(&mut self) {
         while let Ok(event) = self.events.try_recv() {
+            self.chat.heard = Some(std::time::Instant::now());
             match event {
                 TurnEvent::Started(id) => self.chat.session = Some(id),
                 TurnEvent::Text(text) => self.chat.push("text", &text),
@@ -1097,6 +1135,7 @@ impl App {
         self.chat.push("you", &format!("› {prompt}"));
         self.chat.busy = true;
         self.chat.since = Some(std::time::Instant::now());
+        self.chat.heard = self.chat.since;
         self.chat.scroll = 0;
 
         let Some(rook) = self.source.here().cloned() else {
@@ -1526,7 +1565,9 @@ impl App {
         }
 
         let prompt = match (self.chat.busy && self.chat.asking.is_none(), self.chat.since) {
-            (true, Some(since)) => format!("  working… {}  ", elapsed(since.elapsed())),
+            (true, Some(since)) => {
+                format!("  working… {}{}  ", elapsed(since.elapsed()), self.chat.silence())
+            }
             (true, None) => "  working… ".to_string(),
             _ => "› ".to_string(),
         };
@@ -2165,6 +2206,28 @@ mod tests {
         assert_eq!(elapsed(std::time::Duration::from_secs(59)), "59s");
         assert_eq!(elapsed(std::time::Duration::from_secs(60)), "1m00s");
         assert_eq!(elapsed(std::time::Duration::from_secs(250)), "4m10s");
+    }
+
+    /// A minute of nothing on the screen is a build running, a model thinking,
+    /// or a turn that has died, and all three drew the same `working…`. Two of
+    /// the three can be named, which is enough to know whether to wait.
+    #[test]
+    fn a_quiet_turn_says_what_it_is_waiting_on() {
+        let a_while = std::time::Duration::from_secs(90);
+        let mut chat = Chat::default();
+        assert_eq!(waiting_on(a_while, chat.running()), " · nothing from the model for 1m30s");
+
+        chat.push("tool", "  · run_command");
+        assert_eq!(waiting_on(a_while, chat.running()), " · run_command running 1m30s");
+
+        // A call that has finished is not what the turn is waiting on.
+        chat.push("tool", "  · run_command ✓");
+        assert_eq!(waiting_on(a_while, chat.running()), " · nothing from the model for 1m30s");
+
+        let mut waiting = Chat { heard: Some(std::time::Instant::now()), ..Chat::default() };
+        assert_eq!(waiting.silence(), "", "an ordinary pause between tokens says nothing");
+        waiting.heard = None;
+        assert_eq!(waiting.silence(), "", "and neither does a turn nobody started");
     }
 
     /// The commands were discoverable only from `/help`, which is where you
