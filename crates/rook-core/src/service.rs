@@ -1006,6 +1006,56 @@ impl Rook {
     /// The second half of the answer is whether the walk finished. A list that
     /// stopped at its ceiling and did not say so is the wrong answer told
     /// confidently, which is the failure this exists to prevent.
+    /// What the workspace looks like from the top, for a model that has just
+    /// arrived.
+    ///
+    /// The first thing an agent does in an unfamiliar project is list the
+    /// directory, then list two of the directories in it — three calls and
+    /// three round trips for an answer that is the same every session and
+    /// costs a walk here. Two levels deep, `.gitignore` respected and dotted
+    /// entries left out, because `target/` is forty thousand entries of
+    /// nothing worth reading.
+    ///
+    /// `None` for a workspace with nothing in it, which says nothing worth a
+    /// paragraph.
+    pub fn sketch(&self, most: usize) -> Option<String> {
+        let mut entries: Vec<String> = ignore::WalkBuilder::new(&self.workspace)
+            .max_depth(Some(2))
+            .hidden(true)
+            .git_ignore(true)
+            // Honoured outside a repository too: the crate asks for a `.git`
+            // before it trusts a `.gitignore`, and a workspace that is a
+            // subdirectory of one, or not versioned at all, still means what
+            // its ignore file says.
+            .require_git(false)
+            .git_global(false)
+            .build()
+            .flatten()
+            .filter_map(|entry| {
+                let relative = entry.path().strip_prefix(&self.workspace).ok()?;
+                let shown = relative.to_string_lossy().replace('\\', "/");
+                if shown.is_empty() {
+                    return None;
+                }
+                Some(match entry.file_type().is_some_and(|t| t.is_dir()) {
+                    true => format!("{shown}/"),
+                    false => shown,
+                })
+            })
+            .collect();
+        if entries.is_empty() {
+            return None;
+        }
+        entries.sort();
+        let more = entries.len().saturating_sub(most);
+        entries.truncate(most);
+        let mut sketch = format!("What is in the workspace, two levels down:\n{}", entries.join("\n"));
+        if more > 0 {
+            sketch.push_str(&format!("\n[{more} more not shown — `list_dir` for the rest]"));
+        }
+        Some(sketch)
+    }
+
     pub fn written_since(&self, since: std::time::SystemTime, limits: &CaptureLimits) -> (Vec<String>, bool) {
         let mut walker = ignore::WalkBuilder::new(&self.workspace);
         walker.hidden(false).git_ignore(limits.respect_ignore_files).git_global(false);

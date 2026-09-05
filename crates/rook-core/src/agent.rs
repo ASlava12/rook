@@ -472,6 +472,11 @@ fn canonical(path: &std::path::Path) -> std::path::PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// How much of the workspace a session's first turn is shown. Sixty lines is
+/// a page: enough to see the shape of a project, and not so much that a large
+/// one spends a thousand tokens on directory names.
+const SKETCH_ENTRIES: usize = 60;
+
 /// How long a check made on the model's behalf waits for a server to answer.
 /// A question somebody asked is worth the configured three seconds; this is
 /// paid on every write, and what is not ready by then is simply not reported.
@@ -1468,6 +1473,15 @@ impl<'a> AgentLoop<'a> {
                 _ => volatile
                     .push_str("\n\nYou have no plan for this task yet. Write one with `plan` before acting."),
             }
+        }
+        // Only at the start of a session: what the workspace holds is what a
+        // model spends its first calls finding out, and by the second turn it
+        // has read more of it than this would say. Beside the newest message
+        // rather than in the system block for the same reason the date is.
+        if messages.iter().filter(|m| m.role == Role::User).count() <= 1
+            && let Some(sketch) = self.rook.sketch(SKETCH_ENTRIES)
+        {
+            volatile.push_str(&format!("\n\n{sketch}"));
         }
         messages.insert(messages.len().saturating_sub(1), Message::user(volatile));
         Ok(messages)

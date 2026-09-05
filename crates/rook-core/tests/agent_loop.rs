@@ -123,6 +123,41 @@ fn fixture() -> Fixture {
     Fixture { _store_dir: store_dir, _skill_dir: skill_dir, workspace, rook }
 }
 
+/// The first thing an agent does in an unfamiliar project is list the
+/// directory, then list two of the directories in it: three calls and three
+/// round trips for an answer that is the same every session.
+#[tokio::test]
+async fn a_session_starts_knowing_what_is_in_the_workspace() {
+    let f = fixture();
+    std::fs::create_dir_all(f.workspace.path().join("src/deep")).unwrap();
+    std::fs::create_dir_all(f.workspace.path().join("target/debug/deps")).unwrap();
+    std::fs::write(f.workspace.path().join(".gitignore"), "target\n").unwrap();
+    std::fs::write(f.workspace.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(f.workspace.path().join("target/debug/deps/big.o"), "x").unwrap();
+
+    let session = f.rook.start_session("fresh").unwrap();
+    let first = ScriptedProvider::new(vec![reply("ok")]);
+    let seen = first.share();
+    AgentLoop::new(&f.rook, Arc::new(first), session).run("what is this?").await.unwrap();
+
+    let sent: String =
+        seen.lock().unwrap().last().cloned().unwrap().messages.iter().map(|m| m.content.clone()).collect();
+    assert!(sent.contains("src/main.rs"), "the shape of the project is in front of it:\n{sent}");
+    assert!(sent.contains("src/deep/"), "two levels, directories marked as such:\n{sent}");
+    assert!(!sent.contains("target/debug"), "and not what .gitignore excludes:\n{sent}");
+
+    // And not again. It is context for the request rather than something that
+    // was said, so it is never logged — by the second turn the model has read
+    // more of the workspace than this would tell it anyway.
+    let second = ScriptedProvider::new(vec![reply("still ok")]);
+    let seen = second.share();
+    AgentLoop::new(&f.rook, Arc::new(second), session).run("and now?").await.unwrap();
+
+    let sent: String =
+        seen.lock().unwrap().last().cloned().unwrap().messages.iter().map(|m| m.content.clone()).collect();
+    assert!(!sent.contains("What is in the workspace"), "only the first turn carries it:\n{sent}");
+}
+
 /// "Как будто не пишет на диск агент" — asked two and a half hours into a
 /// turn that had indeed written nothing. What a turn wrote is the one thing
 /// that tells a working turn from a stuck one, and it was nowhere in what a

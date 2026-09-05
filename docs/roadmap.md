@@ -194,6 +194,15 @@ what unblocks the most.
   last. Anthropic's signed blocks are left alone; a second copy as text would
   be the same thought twice. The bound is what lets `session context` price a
   thought from its stored size without reading it. 2 tests.
+- **A session that starts knowing what is in the workspace** — the first thing
+  an agent does in an unfamiliar project is list the directory, then list two
+  of the directories in it: three calls and three round trips, every session,
+  for an answer that costs one walk here. The first turn of a session now
+  carries two levels of the workspace beside the newest message — where the
+  date goes, never in the system block, which must not vary — with
+  `.gitignore` respected and dotted entries left out, bounded to sixty lines.
+  Not logged, so the second turn does not carry it: by then the model has read
+  more of the workspace than it would say. 1 test.
 - **Which step of the budget, and why it stopped** — a window watching a turn
   said how long it had been going and, since a turn ago, what it was waiting
   on; it could not say how much room was left. A turn at step 190 of 200 is
