@@ -1382,6 +1382,14 @@ the chat socket needed. Both the handler and the hours-long timer run it on a
 blocking thread now; the test runs on a single-threaded runtime and fails
 without the change.
 
+**A setting changed while the daemon runs takes effect at the next turn.** It
+read `config.toml` once at start, so changing `[agent] model` — the setting
+people change most — took a restart, and the restart was something a person had
+to be told to do rather than something that happened. I told somebody exactly
+that an hour after making every window share one daemon. The file's timestamp
+is asked once per turn, which costs a `stat` and needs no watcher thread, and
+the answer is said in the conversation when the model is not the one it was.
+
 **What `effort` actually reaches.** Measured against the machine that reported
 the slow turn, because the advice given there was wrong: the reasoning effort
 is sent only to the families documented to take it — gpt-5, o1, o3, o4 — and

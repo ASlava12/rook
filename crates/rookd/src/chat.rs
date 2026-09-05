@@ -39,7 +39,7 @@ pub async fn upgrade(
         Err(why) => return (axum::http::StatusCode::BAD_REQUEST, why).into_response(),
     };
     let equipment = state.equipment_for(&engine).await;
-    ws.on_upgrade(move |socket| serve(socket, engine, equipment))
+    ws.on_upgrade(move |socket| serve(socket, engine, equipment, state))
 }
 
 /// Refuses the upgrade before anything else looks at the request.
@@ -89,6 +89,7 @@ async fn serve(
     socket: WebSocket,
     engine: Arc<tokio::sync::RwLock<rook_core::Rook>>,
     shared: Arc<tokio::sync::OnceCell<Shared>>,
+    state: Arc<AppState>,
 ) {
     let (mut sink, mut stream) = socket.split();
     let (outbound, mut queued) = mpsc::unbounded_channel::<ChatEvent>();
@@ -154,6 +155,12 @@ async fn serve(
                     interjections.say(&text);
                     let _ = outbound.send(ChatEvent::Interjected { text });
                     continue;
+                }
+                // Before the turn, because a setting changed while the daemon
+                // ran took a restart — and the restart was something a person
+                // had to be told to do.
+                if let Some(said) = state.config_if_changed().await {
+                    let _ = outbound.send(ChatEvent::Text { text: format!("({said})\n") });
                 }
                 running = Some(tokio::spawn(turn(
                     engine.clone(),

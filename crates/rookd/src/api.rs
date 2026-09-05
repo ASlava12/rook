@@ -894,8 +894,35 @@ mod tests {
             max_projects: 3,
             started: std::time::Instant::now(),
             about,
+            config_read: std::sync::Mutex::new(None),
         });
         Fixture { _home: home, _workspace: workspace, router: router(state.clone()), state, session }
+    }
+
+    /// The daemon read its configuration once at start, so changing
+    /// `[agent] model` — the setting people change most — took a restart, and
+    /// the restart was something a person had to be told to do rather than
+    /// something that happened.
+    #[tokio::test]
+    async fn a_changed_configuration_is_read_before_the_next_turn() {
+        let f = fixture();
+        let was = f.state.rook.read().await.config.agent.model.clone();
+        assert_ne!(was, "lmstudio/somebody-else", "the precondition: it is not that yet");
+
+        // Written as a person writes it, which is also what `Config::load`
+        // reads: a partial file, with the defaults behind it.
+        std::fs::write(rook_core::paths::config_file(), "[agent]\nmodel = \"lmstudio/somebody-else\"\n")
+            .unwrap();
+
+        let said = f.state.config_if_changed().await;
+
+        assert!(said.is_some_and(|s| s.contains("somebody-else")), "it says what changed");
+        assert_eq!(
+            f.state.rook.read().await.config.agent.model,
+            "lmstudio/somebody-else",
+            "and the next turn is asked of the model that is configured now"
+        );
+        assert!(f.state.config_if_changed().await.is_none(), "and an unchanged file costs nothing");
     }
 
     /// The CLI and the TUI have had `/jobs` since they had jobs. A browser

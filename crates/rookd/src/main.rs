@@ -55,6 +55,11 @@ pub struct AppState {
     pub about: About,
     /// The ceiling on `elsewhere`, from `[server] max_projects`.
     pub max_projects: usize,
+    /// When `config.toml` was last read. The daemon read it once at start, so
+    /// changing `[agent] model` — the setting people change most — took a
+    /// restart, and the restart was something a person had to be told to do
+    /// rather than something that happened.
+    config_read: std::sync::Mutex<Option<std::time::SystemTime>>,
 }
 
 impl AppState {
@@ -64,6 +69,37 @@ impl AppState {
     /// gets. A path that is not a directory is refused rather than created: the
     /// name arrives from a request, and a typo should not quietly become an
     /// empty project.
+    /// Re-read the configuration if the file has changed, before a turn uses
+    /// it. Says what changed, or nothing when nothing did.
+    ///
+    /// Asked once per turn rather than watched: a turn is when it matters, and
+    /// a watcher is a thread and a dependency for a question that costs one
+    /// `stat`.
+    pub async fn config_if_changed(&self) -> Option<String> {
+        let path = rook_core::paths::config_file();
+        let touched = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        {
+            let mut last = self.config_read.lock().unwrap_or_else(|e| e.into_inner());
+            if *last == touched {
+                return None;
+            }
+            *last = touched;
+        }
+        let Ok(config) = rook_core::Config::load() else { return None };
+        let model = config.agent.model.clone();
+        let was = {
+            let mut rook = self.rook.write().await;
+            let was = rook.config.agent.model.clone();
+            rook.config = config.clone();
+            was
+        };
+        // Every project, because they share the file as they share the store.
+        for project in self.elsewhere.write().await.values() {
+            project.engine.write().await.config = config.clone();
+        }
+        (was != model).then(|| format!("the model is `{model}` now, from config.toml"))
+    }
+
     pub async fn engine_for(
         &self,
         workspace: Option<&std::path::Path>,
@@ -163,6 +199,11 @@ async fn main() -> Result<()> {
         elsewhere: RwLock::new(std::collections::HashMap::new()),
         equipment: RwLock::new(std::collections::HashMap::new()),
         max_projects: config.server.max_projects.max(1),
+        // Read at start, so the first turn compares against this rather than
+        // reloading a file nothing has touched.
+        config_read: std::sync::Mutex::new(
+            std::fs::metadata(rook_core::paths::config_file()).and_then(|m| m.modified()).ok(),
+        ),
         started: std::time::Instant::now(),
         about,
     });
