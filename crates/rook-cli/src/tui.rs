@@ -1099,8 +1099,15 @@ impl App {
         let Some(rook) = self.source.here().cloned() else {
             return self.chat.push("stat", &format!("  {NOT_HERE}"));
         };
-        let mut session = self.chat.session.unwrap_or_else(|| rook.start_session("").unwrap_or_default());
+        let was = self.chat.session;
+        let mut session = was.unwrap_or_else(|| rook.start_session("").unwrap_or_default());
         let said = self.runtime.block_on(crate::chat::dispatch(&rook, &mut session, &self.shared, command));
+        // A command that moved this window to another session — `/session
+        // <id>`, `/new` — takes the pane with it. Continuing a conversation in
+        // a window showing somebody else's is continuing it blind.
+        if was.is_some_and(|before| before != session) {
+            self.recall_conversation(session);
+        }
         self.chat.session = Some(session);
         match said {
             Ok(said) if said.quit => self.quit = true,
@@ -1111,6 +1118,36 @@ impl App {
                 self.reload();
             }
             Err(e) => self.chat.push("err", &format!("{e}")),
+        }
+    }
+
+    /// The tail of a session's transcript, in the chat pane, as the window
+    /// would have shown it had it been here.
+    ///
+    /// The tail because that is where a conversation is picked up, and bounded
+    /// for the reason the scrollback is: the store holds all of it and the
+    /// Sessions tab reads it back.
+    fn recall_conversation(&mut self, session: u128) {
+        const RECALLED: usize = 60;
+        self.chat.log.clear();
+        self.chat.scroll = 0;
+        let events = self
+            .sessions
+            .iter()
+            .find(|s| s.meta.id == session)
+            .map(|s| s.meta.event_count)
+            .unwrap_or_default();
+        let from = events.saturating_sub(RECALLED as u64);
+        for entry in self.source.transcript(session, from, RECALLED, 4_000).unwrap_or_default() {
+            match entry.kind.as_str() {
+                "user" => self.chat.push("you", &format!("› {}", entry.body)),
+                "assistant" => self.chat.push("text", &entry.body),
+                "tool-call" => self.chat.push("tool", &format!("  · {}", entry.label)),
+                _ => {}
+            }
+        }
+        if self.chat.log.is_empty() {
+            self.chat.push("stat", "  (nothing said in this session yet)");
         }
     }
 

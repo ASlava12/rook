@@ -194,6 +194,17 @@ what unblocks the most.
   last. Anthropic's signed blocks are left alone; a second copy as text would
   be the same thought twice. The bound is what lets `session context` price a
   thought from its stored size without reading it. 2 tests.
+- **Continuing a session from inside the window** — which conversation you are
+  in was a choice you could only make before starting: `rook chat --session
+  last`, `rook run --session <id>`. The browser has had a picker since it had a
+  chat, so a session found in the TUI's Sessions tab could be read there and
+  continued only by quitting and starting again with its id. `/session <id|last>`
+  moves the window, in the shared dispatch so the plain chat has it too, and
+  the pane is refilled with the tail of that conversation — continuing one in a
+  window showing somebody else's is continuing it blind. Writing the test found
+  what `last` had come to mean: a window that ran a slash command left an empty
+  session behind, and `last` meant *that*, which is the one thing nobody could
+  have meant by it. It is the last session with anything in it now. 1 test.
 - **A window that opens knowing what was typed in the last one** — the plain
   chat has kept its prompt history in `~/.rook/history` since it had one; the
   TUI kept its own in memory and dropped it on exit, so closing a window forgot

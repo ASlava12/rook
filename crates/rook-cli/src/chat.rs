@@ -21,7 +21,7 @@ use crate::fmt;
 pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("context", "[window]", "what this conversation costs, and of what"),
     ("skills", "[name]", "skills that apply here, or one skill's body"),
-    ("session", "", "id, size and token totals"),
+    ("session", "[id|last]", "this one's totals, or continue another"),
     ("goal", "[text]", "what this session is for; the agent is told"),
     ("stance", "[name]", "how much latitude: readonly, assist or autonomous"),
     ("effort", "[name]", "how much the model may think: low … max"),
@@ -431,6 +431,26 @@ pub async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command
                 let pin = if fact.pinned { "* " } else { "  " };
                 say!("{pin}[{}] {}", fact.id, fact.text);
             }
+        }
+
+        // Continuing an older conversation was a thing you could only choose
+        // before starting: `rook chat --session last`. The browser has had a
+        // picker since it had a chat, so a session found in the Sessions tab
+        // could be read there and continued only by quitting and starting
+        // again with its id.
+        "session" if !rest.is_empty() => {
+            let found = rook.session_named(rest)?;
+            let meta = rook.store.get_session(found)?.context("no session there")?;
+            *session = found;
+            say!(
+                "continuing {} — {} · {} events",
+                rook_store::format_session_id(found),
+                match meta.title.trim() {
+                    "" => "(untitled)",
+                    title => title,
+                },
+                meta.event_count
+            );
         }
 
         "session" => {

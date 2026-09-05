@@ -784,6 +784,32 @@ impl Drop for Daemon {
     }
 }
 
+/// Continuing an older conversation was a choice you could only make before
+/// starting — `rook chat --session last` — so a session found in the Sessions
+/// tab could be read there and continued only by quitting and starting again
+/// with its id. The browser has had a picker since it had a chat.
+#[test]
+fn a_window_can_continue_a_session_it_finds() {
+    let _one = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    // A run with no model to answer it still leaves the session behind, named
+    // by what it was asked.
+    let _ = std::process::Command::new(env!("CARGO_BIN_EXE_rook"))
+        .env("ROOK_HOME", home.path())
+        .env("ROOK_LOG", "error")
+        .args(["--workspace", workspace.path().to_str().unwrap()])
+        .args(["run", "the earlier conversation"])
+        .output();
+
+    let mut pty = tui(home.path(), workspace.path());
+    pty.screen(100, 30);
+    pty.send("/session last\r");
+
+    let screen = pty.screen_showing(100, 30, "continuing").join("\n");
+    assert!(screen.contains("earlier conversation"), "named by what it was about:\n{screen}");
+}
+
 /// The plain chat has kept its history in `~/.rook/history` since it had one;
 /// the window did not, so closing it forgot everything typed in it — and the
 /// two are one person on one machine.

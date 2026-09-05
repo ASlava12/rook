@@ -1729,9 +1729,15 @@ pub fn session_named(spec: &str, workspace: &Path, sessions: &[SessionSummary]) 
             .ok_or_else(|| CoreError::Other(format!("{spec:?} is neither a session id nor `last`")));
     }
     let here = workspace.display().to_string();
-    sessions
-        .iter()
-        .find(|s| s.meta.workspace == here)
+    let mine = || sessions.iter().filter(|s| s.meta.workspace == here);
+    // The last conversation, which is not the same as the last session: a
+    // window that opened and ran a slash command left an empty one behind, and
+    // `last` then meant that — the one thing nobody could have meant by it.
+    // An empty store still answers with the newest, so the message about
+    // finding nothing is about the workspace and not about this rule.
+    mine()
+        .find(|s| s.meta.event_count > 0)
+        .or_else(|| mine().next())
         .map(|s| s.meta.id)
         .ok_or_else(|| CoreError::Other(format!("no session has been started in {here} yet")))
 }
