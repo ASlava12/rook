@@ -747,13 +747,13 @@ fn probe_provider(config: &rook_core::Config) -> Result<String> {
 /// refused for it spends the memory and the time both, and the refusal is more
 /// useful than a truncation nobody was told about.
 fn with_piped_input(asked: &str, window: usize) -> Result<String> {
-    use std::io::{IsTerminal, Read};
+    use std::io::IsTerminal;
 
     let mut piped = String::new();
     if !std::io::stdin().is_terminal() {
         // One byte past the cap, so a pipe exactly at it is not called too big.
         let limit = window.saturating_mul(4);
-        std::io::stdin().take(limit as u64 + 1).read_to_string(&mut piped)?;
+        piped = read_piped(limit)?;
         if piped.len() > limit {
             bail!(
                 "the piped input is larger than the model's {window}-token window. \
@@ -767,6 +767,37 @@ fn with_piped_input(asked: &str, window: usize) -> Result<String> {
         ("", text) => Ok(text.to_string()),
         (asked, "") => Ok(asked.to_string()),
         (asked, text) => Ok(format!("{asked}\n\n## Piped in\n{text}")),
+    }
+}
+
+/// Everything on stdin, and a word about it if it takes a moment.
+///
+/// Reading to end of file is the point — `slow_build | rook run "why?"` has to
+/// wait for the build — but an idle pipe never ends, and every supervisor
+/// hands a process one: `nohup`, a CI step, a cron wrapper, a shell that
+/// backgrounded the command. Then the turn never starts and nothing is
+/// printed, ever. Three and a half hours of exactly that on this machine is
+/// what this line is for.
+fn read_piped(limit: usize) -> Result<String> {
+    use std::io::Read;
+    /// Long enough that a pipe with something in it never says anything.
+    const GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+    let (say, heard) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut text = String::new();
+        let read = std::io::stdin().take(limit as u64 + 1).read_to_string(&mut text);
+        let _ = say.send(read.map(|_| text));
+    });
+    match heard.recv_timeout(GRACE) {
+        Ok(read) => Ok(read?),
+        Err(_) => {
+            eprintln!(
+                "waiting for input on stdin — close it (ctrl-d), or pass `< /dev/null` if \
+                 nothing is coming"
+            );
+            Ok(heard.recv().context("reading stdin")??)
+        }
     }
 }
 

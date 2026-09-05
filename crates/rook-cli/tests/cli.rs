@@ -389,6 +389,53 @@ fn a_read_routes_through_the_daemon_and_answers_the_same() {
     drop(daemon);
 }
 
+/// Reading stdin to the end is the point — `slow_build | rook run "why?"` has
+/// to wait for the build — but an idle pipe never ends, and every supervisor
+/// hands a process one. Three and a half hours of a run that printed nothing
+/// at all is what this is about.
+#[test]
+fn a_run_waiting_on_an_idle_pipe_says_so_rather_than_going_quiet() {
+    use std::io::BufRead;
+    let rook = Rook::new();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rook"))
+        .env("ROOK_HOME", rook.home.path())
+        .args(["--workspace", rook.workspace.path().to_str().unwrap()])
+        .args(["run", "anything"])
+        // Open and silent, which is what a backgrounded shell, `nohup` and a
+        // CI step all hand it.
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    // Line by line rather than to the end: the end is when the child exits,
+    // and what is being asserted is that it speaks while it is still waiting.
+    let stderr = child.stderr.take().unwrap();
+    let (say, heard) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stderr).lines().map_while(Result::ok) {
+            if say.send(line).is_err() {
+                return;
+            }
+        }
+    });
+
+    // Generous: this is about telling a wait from a hang, not about how long
+    // the wait is. The grace inside is two seconds.
+    let said = match heard.recv_timeout(std::time::Duration::from_secs(60)) {
+        Ok(said) => said,
+        Err(_) => {
+            let _ = child.kill();
+            panic!("it said nothing at all, which is the failure");
+        }
+    };
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(said.contains("waiting for input on stdin"), "it says what it is waiting for: {said}");
+    assert!(said.contains("/dev/null"), "and what to do about it: {said}");
+}
+
 /// Stopping the daemon meant finding its process id first — `pgrep`, then
 /// `kill`, for a program a window had started on its own.
 #[test]

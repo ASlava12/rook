@@ -194,6 +194,15 @@ what unblocks the most.
   last. Anthropic's signed blocks are left alone; a second copy as text would
   be the same thought twice. The bound is what lets `session context` price a
   thought from its stored size without reading it. 2 tests.
+- **A run that waits on an idle pipe says so** — `rook run` reads stdin to the
+  end, which is the point: `slow_build | rook run "why?"` has to wait for the
+  build. But an idle pipe never ends, and every supervisor hands a process one
+  — `nohup`, a CI step, a shell that backgrounded the command — and then the
+  turn never starts and nothing is printed at all. Three and a half hours of
+  exactly that, here, while a confirming run looked like a hung agent. Two
+  seconds in, it now says what it is waiting for and how to get past it. 1 test,
+  which spawns the binary with an open pipe and reads its stderr line by line —
+  to the end would be to wait for the exit that is the failure.
 - **A workspace hidden from the commands run in it** — found by a real turn
   against a local model: every command answered `getcwd: cannot access parent
   directories: Operation not permitted`, and the model spent ten of its twelve
