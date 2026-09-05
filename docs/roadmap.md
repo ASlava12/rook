@@ -194,6 +194,18 @@ what unblocks the most.
   last. Anthropic's signed blocks are left alone; a second copy as text would
   be the same thought twice. The bound is what lets `session context` price a
   thought from its stored size without reading it. 2 tests.
+- **A write answered with what it broke** — a model has to think to ask
+  `diagnostics`; it never has to think to read the answer to the call it just
+  made. A real turn broke an indent with `sed -i` and spent three steps, and
+  three identical `py_compile` runs, finding out — with a language server
+  running beside it that knew at once. A call that writes now carries the
+  errors the server reports afterwards, minus the ones the file already had,
+  which are somebody else's news and on every write are noise. It never starts
+  a server: a cold `rust-analyzer` is tens of seconds of indexing and nobody
+  asked it anything, so the write that finds one cold warms it in the
+  background and the writes after that are answered. Bounded to three files and
+  five problems, because a refactor across forty files must not answer with
+  forty analyses. 1 test, against a mock server driven by the text it is given.
 - **Arguments read as what they plainly are** — a real turn spent four steps
   on one call: `edit_file` handed `edits` as a *string* of JSON, and inside it
   the `files` shape rather than a list of edits. Both are now read — a field

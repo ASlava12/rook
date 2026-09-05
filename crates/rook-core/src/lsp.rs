@@ -311,6 +311,63 @@ impl Servers {
     }
 }
 
+impl Servers {
+    /// What the servers make of these files, as lines a model can read.
+    ///
+    /// `None` when no server serves the path — which is not the same as a
+    /// clean file, and the caller has to tell them apart to know whether it
+    /// learnt anything.
+    ///
+    /// Errors only. A warning that was already there is noise on every write,
+    /// and the question this answers is what a write has just broken.
+    pub async fn errors_in(self: &Arc<Self>, path: &Path, wait: std::time::Duration) -> Option<Vec<String>> {
+        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let Some((server, language_id)) = self.already_running(&path).await else {
+            // Started behind this call rather than in front of it. A cold
+            // `rust-analyzer` is tens of seconds of indexing, and nobody asked
+            // the language server anything — they made an edit. The write that
+            // finds it cold warms it; the ones after that are answered.
+            self.warm(&path);
+            return None;
+        };
+        server.sync(&path, &language_id).await.ok()?;
+        let found = server.diagnostics_within(&path, wait).await;
+        Some(found.iter().filter(|d| d.severity_name() == "error").map(|d| self.line_for(&path, d)).collect())
+    }
+
+    /// The server for this file, only if it is already running.
+    async fn already_running(&self, path: &Path) -> Option<(Arc<Server>, String)> {
+        let config = self.configs.iter().find(|c| c.handles(path))?;
+        let server = self.running.lock().await.get(&config.language)?.clone();
+        Some((server, config.language_id.clone().unwrap_or_else(|| config.language.clone())))
+    }
+
+    /// Start the server for this file, without waiting for it.
+    fn warm(self: &Arc<Self>, path: &Path) {
+        if !self.configs.iter().any(|c| c.handles(path)) {
+            return;
+        }
+        let servers = self.clone();
+        let path = path.to_path_buf();
+        tokio::spawn(async move {
+            let _ = servers.for_path(&path).await;
+        });
+    }
+
+    /// One rendering, so what the `diagnostics` tool prints and what a write
+    /// is answered with are the same sentence about the same problem.
+    pub fn line_for(&self, path: &Path, d: &rook_lsp::Diagnostic) -> String {
+        format!(
+            "{}:{}:{}: {}: {}",
+            self.shorten(&path.display().to_string()),
+            d.range.start.line + 1,
+            d.range.start.character + 1,
+            d.severity_name(),
+            d.message
+        )
+    }
+}
+
 pub struct Opened {
     pub server: Arc<Server>,
     pub text: String,
@@ -368,19 +425,7 @@ impl Tool for Diagnostics {
                 self.0.shorten(&opened.path.display().to_string())
             )));
         }
-        let lines: Vec<String> = found
-            .iter()
-            .map(|d| {
-                format!(
-                    "{}:{}:{}: {}: {}",
-                    self.0.shorten(&opened.path.display().to_string()),
-                    d.range.start.line + 1,
-                    d.range.start.character + 1,
-                    d.severity_name(),
-                    d.message
-                )
-            })
-            .collect();
+        let lines: Vec<String> = found.iter().map(|d| self.0.line_for(&opened.path, d)).collect();
         Ok(ToolOutcome::ok(lines.join("\n")).with("count", found.len() as u64))
     }
 }

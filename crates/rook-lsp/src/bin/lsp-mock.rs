@@ -10,6 +10,12 @@ fn main() {
     let mut stdin = std::io::BufReader::new(std::io::stdin());
     let mut out = std::io::stdout();
     let mut analyses = 0u32;
+    // What a real server does: report what is wrong with the text it was
+    // given, in words that do not change while the problem does not. The
+    // default answer below changes with every analysis, which is what the
+    // client's tests are about — and no use to a test about noticing that a
+    // write introduced something new.
+    let from_the_text = std::env::args().any(|arg| arg == "--broken-lines");
 
     while let Some(length) = read_content_length(&mut stdin) {
         let mut body = vec![0u8; length];
@@ -32,6 +38,36 @@ fn main() {
                 .unwrap_or("")
                 .lines()
                 .count();
+            if from_the_text {
+                let text = message
+                    .pointer("/params/textDocument/text")
+                    .or_else(|| message.pointer("/params/contentChanges/0/text"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("");
+                let found: Vec<serde_json::Value> = text
+                    .lines()
+                    .enumerate()
+                    .filter(|(_, line)| line.contains("BROKEN"))
+                    .map(|(at, _)| {
+                        serde_json::json!({
+                            "range": { "start": { "line": at, "character": 0 },
+                                       "end": { "line": at, "character": 6 } },
+                            "severity": 1,
+                            "source": "mock",
+                            "message": "this line is broken"
+                        })
+                    })
+                    .collect();
+                send(
+                    &mut out,
+                    &serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": "textDocument/publishDiagnostics",
+                        "params": { "uri": uri, "diagnostics": found }
+                    }),
+                );
+                continue;
+            }
             send(
                 &mut out,
                 &serde_json::json!({

@@ -123,6 +123,103 @@ fn fixture() -> Fixture {
     Fixture { _store_dir: store_dir, _skill_dir: skill_dir, workspace, rook }
 }
 
+/// The mock language server from `rook-lsp`, which no other crate can name
+/// through `CARGO_BIN_EXE_`: found beside this test binary, and built here.
+///
+/// Built every run rather than only when missing. Nothing in this crate's
+/// build touches it, so a change to the mock would otherwise be tested
+/// against the copy the last full build left — which is the same trap the
+/// daemon tests document, and it caught this test on its first run.
+fn lsp_mock() -> PathBuf {
+    static BUILT: std::sync::Once = std::sync::Once::new();
+    let path = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .and_then(|deps| deps.parent())
+        .unwrap()
+        .join(if cfg!(windows) { "lsp-mock.exe" } else { "lsp-mock" });
+    BUILT.call_once(|| {
+        let built = std::process::Command::new(env!("CARGO"))
+            .args(["build", "-p", "rook-lsp", "--bin", "lsp-mock"])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .status();
+        assert!(built.is_ok_and(|s| s.success()), "could not build lsp-mock");
+    });
+    assert!(path.exists(), "{} is still not there after building it", path.display());
+    path
+}
+
+/// A model has to think to ask `diagnostics`; it never has to think to read
+/// the answer to the call it just made. The turn that asked for this broke an
+/// indent with `sed -i` and then spent three steps, and three identical
+/// `py_compile` runs, finding out — with a server running beside it that knew
+/// at once.
+#[tokio::test]
+async fn a_write_is_answered_with_what_it_broke() {
+    let f = fixture();
+    let servers = rook_core::lsp::Servers::new(
+        vec![rook_lsp::ServerConfig {
+            language: "mock".into(),
+            command: lsp_mock().display().to_string(),
+            args: vec!["--broken-lines".into()],
+            extensions: vec!["rs".into()],
+            diagnostics_wait_ms: 2_000,
+            ..Default::default()
+        }],
+        f.workspace.path(),
+    );
+    std::fs::write(f.workspace.path().join("f.rs"), "fine\nalso fine\n").unwrap();
+    // Running before the turn starts, which is the precondition: a write is
+    // never what waits for a language server to come up.
+    servers.any().await.expect("the mock starts");
+
+    let session = f.rook.start_session("edits").unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call(
+            "edit_file",
+            serde_json::json!({ "path": "f.rs", "edits": [{ "old": "also fine", "new": "BROKEN now" }] }),
+        ),
+        reply("done"),
+    ]));
+    let mut agent = AgentLoop::new(&f.rook, provider, session);
+    agent.servers = servers.clone();
+    agent.allow_everything_not_denied();
+    agent.run("break it").await.unwrap();
+
+    let said = f.rook.transcript(session, 0, usize::MAX, 8_000).unwrap();
+    let result = said.iter().find(|e| e.kind == "tool-result").expect("the edit answered");
+    assert!(
+        result.body.contains("this line is broken"),
+        "the edit is answered with what it broke:\n{}",
+        result.body
+    );
+    assert!(result.body.contains("f.rs:2"), "naming the line: {}", result.body);
+
+    // And a problem the file already had is not this call's news: the same
+    // file, edited again somewhere else, says nothing about the broken line
+    // that is still there.
+    let session = f.rook.start_session("edits again").unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call(
+            "edit_file",
+            serde_json::json!({ "path": "f.rs", "edits": [{ "old": "fine", "new": "still fine" }] }),
+        ),
+        reply("done"),
+    ]));
+    let mut agent = AgentLoop::new(&f.rook, provider, session);
+    agent.servers = servers;
+    agent.allow_everything_not_denied();
+    agent.run("edit it again").await.unwrap();
+
+    let said = f.rook.transcript(session, 0, usize::MAX, 8_000).unwrap();
+    let result = said.iter().find(|e| e.kind == "tool-result").expect("the second edit answered");
+    assert!(
+        !result.body.contains("this line is broken"),
+        "what was already wrong is not what this call did:\n{}",
+        result.body
+    );
+}
+
 /// One call carries both, and a name no source offers threw the query away
 /// with it: a small model searching for `config.rs` while asking to install
 /// `rust` was told only that `rust` does not exist, asked again, and gave up —

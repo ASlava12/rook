@@ -313,8 +313,15 @@ impl Server {
 
     /// Diagnostics for a file, after giving the server time to produce them.
     pub async fn diagnostics(&self, path: &Path) -> Vec<Diagnostic> {
+        self.diagnostics_within(path, self.diagnostics_wait).await
+    }
+
+    /// The same, on the caller's deadline. A question somebody asked is worth
+    /// the configured wait; a check made on their behalf after every write is
+    /// worth a moment, and what is not ready by then is simply not reported.
+    pub async fn diagnostics_within(&self, path: &Path, wait: Duration) -> Vec<Diagnostic> {
         let uri = protocol::to_uri(path);
-        let deadline = std::time::Instant::now() + self.diagnostics_wait;
+        let deadline = std::time::Instant::now() + wait;
         loop {
             if let Some(found) = self.diagnostics.lock().await.get(&uri)
                 && (!found.is_empty() || std::time::Instant::now() >= deadline)

@@ -421,6 +421,21 @@ fn close_open_call(messages: &mut Vec<Message>, open: &mut Option<String>) {
     }
 }
 
+fn canonical(path: &std::path::Path) -> std::path::PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// How long a check made on the model's behalf waits for a server to answer.
+/// A question somebody asked is worth the configured three seconds; this is
+/// paid on every write, and what is not ready by then is simply not reported.
+const CHECK_WAIT: std::time::Duration = std::time::Duration::from_millis(1_200);
+
+/// How many of a call's files are checked, and how many problems are named.
+/// Both bounded because this is appended to a tool result: a refactor across
+/// forty files must not answer with forty analyses.
+const FILES_CHECKED: usize = 3;
+const PROBLEMS_REPORTED: usize = 5;
+
 /// The fewest steps a sub-task is given whatever the model asked for: a call,
 /// a look at what came back, and an answer.
 const SUBTASK_STEPS_FLOOR: u32 = 3;
@@ -503,6 +518,11 @@ pub struct AgentLoop<'a> {
     pub servers: std::sync::Arc<crate::lsp::Servers>,
     /// What the `session_start` hooks contributed, computed once.
     session_context: std::sync::Mutex<Option<String>>,
+    /// What a language server said about a file before this turn last wrote
+    /// to it. A write is answered with what it broke; everything already wrong
+    /// in somebody's file is not this call's news, and on every write it is
+    /// noise.
+    problems_before: std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, Vec<String>>>,
     /// Collected where refusals happen, which has no `outcome` in hand, and
     /// moved into it when the turn ends.
     reported: std::sync::Mutex<Vec<Reported>>,
@@ -581,6 +601,7 @@ impl<'a> AgentLoop<'a> {
             hooks: std::sync::Arc::new(hooks),
             servers,
             session_context: std::sync::Mutex::new(None),
+            problems_before: Default::default(),
             reported: Default::default(),
             asker: None,
             approver: std::sync::Arc::new(Unattended),
@@ -2217,13 +2238,22 @@ impl<'a> AgentLoop<'a> {
         // can be put back. What can be had is the list of what it wrote, and
         // without it a turn that ran `sed -i` reports no files changed at all.
         let watching = self.watching_a_command(call).then(std::time::SystemTime::now);
+        // What the files this call names are like before it writes them. The
+        // answer is discarded: it is the baseline, and what it is worth is the
+        // difference from it afterwards.
+        let will_write = self.will_write(call);
+        let unseen: Vec<_> = will_write.iter().filter(|p| self.unseen(p)).cloned().collect();
+        let _ = self.what_this_broke(&unseen).await;
         let outcome = match self.tools.call(&self.tool_ctx, &call.name, &call.arguments).await {
             Ok(o) => o,
             Err(e) => rook_tools::ToolOutcome::error(format!("tool error: {e}")),
         };
-        if let Some(since) = watching {
-            self.note_what_was_written(since);
-        }
+        // A command names no paths, so what it wrote is discovered rather than
+        // declared — and is checked the same way.
+        let wrote = match watching {
+            Some(since) => self.note_what_was_written(since),
+            None => will_write,
+        };
         // A checker's reading is not recorded. The registry holds one holder
         // per path, so a look from any session makes every other session's
         // overwrite stale until it looks again — right for a sub-task, which
@@ -2247,6 +2277,11 @@ impl<'a> AgentLoop<'a> {
         };
         if let Some(note) = unprotected {
             text.push_str(&format!("\n\n{note}"));
+        }
+        if !outcome.is_error
+            && let Some(broken) = self.what_this_broke(&wrote).await
+        {
+            text.push_str(&format!("\n\n{broken}"));
         }
         self.rook.log(self.session, EventKind::ToolResult, &call.name, &text).ok();
         (text, outcome.is_error)
@@ -3084,13 +3119,82 @@ impl<'a> AgentLoop<'a> {
 
     /// Record what the command wrote, or that the workspace was too large to
     /// tell. Both belong in the log: the second is why the first is empty.
-    fn note_what_was_written(&self, since: std::time::SystemTime) {
+    fn note_what_was_written(&self, since: std::time::SystemTime) -> Vec<std::path::PathBuf> {
         let (written, whole) = self.rook.written_since(since, &crate::CaptureLimits::for_skill());
         if written.is_empty() && whole {
-            return;
+            return Vec::new();
         }
         let note = serde_json::json!({ "paths": written, "complete": whole });
         self.rook.log(self.session, EventKind::Note, WROTE, &note.to_string()).ok();
+        written.iter().filter_map(|p| self.tool_ctx.resolve(p).ok()).collect()
+    }
+
+    /// What a language server makes of the files a call just wrote, minus what
+    /// it already made of them.
+    ///
+    /// A model has to think to ask `diagnostics`; it never has to think to
+    /// read the answer to the call it just made. The turn that asked for this
+    /// broke an indent with `sed -i` and then spent three steps and three
+    /// identical `py_compile` runs finding out, with a server running beside
+    /// it that knew at once.
+    ///
+    /// Errors the file already had are not reported: they are somebody else's
+    /// news, and on every write they are noise.
+    async fn what_this_broke(&self, paths: &[std::path::PathBuf]) -> Option<String> {
+        if self.servers.is_empty() {
+            return None;
+        }
+        let mut new_lines: Vec<String> = Vec::new();
+        for path in paths.iter().take(FILES_CHECKED) {
+            let Some(now) = self.servers.errors_in(path, CHECK_WAIT).await else { continue };
+            let before = self.remember_problems(path, &now);
+            new_lines.extend(now.iter().filter(|line| !before.contains(line)).cloned());
+        }
+        if new_lines.is_empty() {
+            return None;
+        }
+        let more = new_lines.len().saturating_sub(PROBLEMS_REPORTED);
+        new_lines.truncate(PROBLEMS_REPORTED);
+        Some(format!(
+            "the language server reports {} not there before this call:\n{}{}",
+            match new_lines.len() + more {
+                1 => "a problem".to_string(),
+                n => format!("{n} problems"),
+            },
+            new_lines.join("\n"),
+            match more {
+                0 => String::new(),
+                n => format!("\n… and {n} more"),
+            }
+        ))
+    }
+
+    /// The problems this file had last time, replaced by the ones it has now.
+    /// An unseen file counts as having had all of them, so the first write to
+    /// somebody's file reports nothing and the next one reports what changed.
+    fn remember_problems(&self, path: &std::path::Path, now: &[String]) -> Vec<String> {
+        let mut seen = self.problems_before.lock().unwrap_or_else(|e| e.into_inner());
+        // Canonical, because the two routes here spell a path differently — a
+        // tool's declared argument and a walk of what a command wrote — and two
+        // keys for one file would make its own history look like new problems.
+        match seen.insert(canonical(path), now.to_vec()) {
+            Some(before) => before,
+            None => now.to_vec(),
+        }
+    }
+
+    /// Whether this turn has yet to look at a file, and so needs the reading
+    /// before the write: where it has one, that is the baseline, and reading
+    /// again before every write is a second wait for what is already known.
+    fn unseen(&self, path: &std::path::Path) -> bool {
+        !self.problems_before.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&canonical(path))
+    }
+
+    /// The files a call declares it will write, resolved. A command declares
+    /// none — what it wrote is discovered afterwards instead.
+    fn will_write(&self, call: &rook_llm::ToolCall) -> Vec<std::path::PathBuf> {
+        let Some(tool) = self.tools.get(&call.name) else { return Vec::new() };
+        tool.touched_paths(&call.arguments).iter().filter_map(|p| self.tool_ctx.resolve(p).ok()).collect()
     }
 
     fn checkpoint_before(&self, call: &rook_llm::ToolCall) -> ClaimedResult<'_> {
