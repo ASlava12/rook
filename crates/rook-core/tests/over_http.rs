@@ -26,7 +26,16 @@ async fn serve(replies: Vec<serde_json::Value>) -> (String, Seen) {
     let recorded = seen.clone();
 
     tokio::spawn(async move {
-        for reply in replies {
+        // The replies are for the turn's requests. A model listing is not one
+        // of them and takes none: the agent asks what window this endpoint
+        // holds before summarising to fit a guess, and a fixture that spent a
+        // scripted reply on that question would answer the next one wrongly.
+        let mut replies = replies.into_iter();
+        let mut reply = match replies.next() {
+            Some(first) => first,
+            None => return,
+        };
+        'connections: loop {
             let Ok((mut socket, _)) = listener.accept().await else { return };
             let mut raw = Vec::new();
             let mut scratch = [0u8; 16384];
@@ -47,6 +56,24 @@ async fn serve(replies: Vec<serde_json::Value>) -> (String, Seen) {
                         .and_then(|v| v.trim().parse().ok())
                         .unwrap_or(0);
                     if body.len() >= length {
+                        // A model listing has no body and is not a turn asking
+                        // anything: the agent asks what window this endpoint
+                        // holds before it summarises to fit a guess, and a
+                        // fixture that recorded that as a request would be
+                        // counting the question rather than the work.
+                        if head.starts_with("GET") {
+                            let body = r#"{"object":"list","data":[]}"#;
+                            let _ = socket
+                                .write_all(
+                                    format!(
+                                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                        body.len()
+                                    )
+                                    .as_bytes(),
+                                )
+                                .await;
+                            continue 'connections;
+                        }
                         recorded.lock().unwrap().push(serde_json::from_str(body).unwrap());
                         break;
                     }
@@ -59,6 +86,10 @@ async fn serve(replies: Vec<serde_json::Value>) -> (String, Seen) {
                 .await;
             let _ = socket.write_all(format!("data: {reply}\n\ndata: [DONE]\n\n").as_bytes()).await;
             let _ = socket.flush().await;
+            reply = match replies.next() {
+                Some(next) => next,
+                None => return,
+            };
         }
     });
     (format!("http://{addr}/v1"), seen)

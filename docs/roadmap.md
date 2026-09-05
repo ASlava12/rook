@@ -1382,6 +1382,18 @@ the chat socket needed. Both the handler and the hours-long timer run it on a
 blocking thread now; the test runs on a single-threaded runtime and fails
 without the change.
 
+**The window is asked for when it is about to matter, and believed when the
+endpoint disagrees.** Three things, one question: a turn compacted five times
+to fit 32768 on a machine serving 262144. The number is now asked of the
+endpoint — but at the first compaction rather than at the start of every turn,
+because that is the only moment it changes anything and a probe on every turn
+changed the shape of every conversation three test fixtures had to answer,
+which is how the cost became visible. A window the endpoint then refuses as too
+long is not fatal either: the refusal is a fact where the setting was a guess,
+so the turn believes it, budgets against it, summarises to fit and carries on —
+and the smaller number is kept on the engine, which outlives the turn, so a
+refusal is paid once rather than every turn.
+
 **A window nobody could see was a quarter of what the machine had.** The
 context length is guesswork for anything self-hosted — 32768 assumed for
 Ollama and LM Studio — and `[agent] context_window` exists to correct it, but

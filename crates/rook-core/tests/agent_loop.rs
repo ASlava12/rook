@@ -4500,6 +4500,75 @@ async fn the_reply_may_use_what_is_left_of_the_window() {
     assert!(asked <= f.rook.config.agent.context_window.unwrap_or(usize::MAX), "and inside the window");
 }
 
+/// A provider that refuses the length once, then answers. What it refuses is
+/// the assumption, and believing it costs a summarisation; not believing it
+/// ends a turn on a number nobody chose.
+struct RefusesOnce {
+    refused: Mutex<bool>,
+    seen: Arc<Mutex<Vec<Request>>>,
+}
+
+#[async_trait]
+impl Provider for RefusesOnce {
+    fn id(&self) -> &str {
+        "refuses/test"
+    }
+    fn context_window(&self) -> usize {
+        200_000
+    }
+    async fn complete(&self, request: Request) -> rook_llm::Result<Response> {
+        self.seen.lock().unwrap().push(request);
+        let mut refused = self.refused.lock().unwrap();
+        if !*refused {
+            *refused = true;
+            return Err(LlmError::Status {
+                status: 400,
+                retry_after: None,
+                body: "This model's maximum context length is 8192 tokens".into(),
+            });
+        }
+        Ok(reply("done"))
+    }
+}
+
+/// The window is a guess for anything self-hosted, and a wrong one used to end
+/// the turn: the endpoint refuses, the loop reports a provider error, and an
+/// hour of conversation is gone. The refusal is a fact — believed, budgeted
+/// against, and summarised to fit.
+#[tokio::test]
+async fn a_window_the_endpoint_refuses_is_summarised_to_fit_rather_than_fatal() {
+    let f = fixture();
+    let session = f.rook.start_session("window").unwrap();
+    let provider = Arc::new(RefusesOnce { refused: Mutex::new(false), seen: Default::default() });
+    let seen = provider.seen.clone();
+
+    let outcome = AgentLoop::new(&f.rook, provider, session).run("do the thing").await.unwrap();
+
+    assert_eq!(outcome.reply, "done", "the turn survives the refusal");
+    assert_eq!(seen.lock().unwrap().len(), 2, "refused once, asked again: {}", seen.lock().unwrap().len());
+    assert!(outcome.compactions >= 1, "and summarised to fit rather than sending the same thing");
+    let said = outcome.open_questions.join("\n");
+    assert!(said.contains("context_window"), "it says what to set: {said}");
+}
+
+/// And the smaller window is the engine's, not the turn's: a loop is built per
+/// turn, so learning it and forgetting it is a refusal paid for every turn.
+#[tokio::test]
+async fn what_the_endpoint_refused_is_remembered_for_the_next_turn() {
+    let f = fixture();
+    let session = f.rook.start_session("window").unwrap();
+    let provider = Arc::new(RefusesOnce { refused: Mutex::new(false), seen: Default::default() });
+    AgentLoop::new(&f.rook, provider, session).run("first").await.unwrap();
+
+    let next = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(vec![reply("ok")])), session);
+
+    assert!(
+        f.rook.window_to_budget(200_000) < 200_000,
+        "the next turn budgets against what was learned, not the assumption"
+    );
+    drop(next);
+}
+
 /// A number set by hand is the number sent: somebody capping a model for their
 /// own reasons is not being second-guessed by the window.
 #[tokio::test]

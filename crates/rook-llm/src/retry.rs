@@ -53,6 +53,22 @@ fn names_the_effort(error: &LlmError) -> bool {
     *status == 400 && ["reasoning", "thinking", "effort"].iter().any(|word| said.contains(word))
 }
 
+/// Whether a refusal is the prompt being longer than the model will take.
+///
+/// Every dialect words it differently — "context length exceeded", "maximum
+/// context length is 8192 tokens", "prompt is too long", "input length exceeds"
+/// — so the words are matched rather than a shape. Public because the answer
+/// to this refusal is not another request: it is summarising the conversation,
+/// which only the loop can do.
+pub fn names_the_context(error: &LlmError) -> bool {
+    let LlmError::Status { status, body, .. } = error else { return false };
+    let said = body.to_ascii_lowercase();
+    (*status == 400 || *status == 413)
+        && ["context length", "context_length", "too long", "input length", "maximum context"]
+            .iter()
+            .any(|word| said.contains(word))
+}
+
 /// Never asked for less than this, whatever an endpoint says: a reply with no
 /// room to write a tool call is the failure this is here to avoid, and an
 /// endpoint refusing a thousand tokens is one nothing can be run against.

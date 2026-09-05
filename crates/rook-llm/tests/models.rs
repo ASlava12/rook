@@ -30,6 +30,12 @@ fn provider(url: String) -> OpenAiCompatible {
     OpenAiCompatible::new("test/model", "model", Config::new(url, None, 8192)).unwrap()
 }
 
+/// The window LM Studio keeps on its own endpoint is asked for only where that
+/// endpoint is, so nothing else pays a 404 for it.
+fn lm_studio(url: String) -> OpenAiCompatible {
+    OpenAiCompatible::new("lmstudio/model", "qwen/qwen3.8-27b", Config::new(url, None, 8192)).unwrap()
+}
+
 /// Two requests, in order, so a test can answer `/v1/models` one way and the
 /// server's own listing another.
 async fn serving(answers: Vec<(&'static str, &'static str)>) -> String {
@@ -64,7 +70,7 @@ async fn a_window_the_compatible_listing_omits_is_asked_for_where_it_is_kept() {
     ])
     .await;
 
-    let models = provider(url).models().await.unwrap();
+    let models = lm_studio(url).models().await.unwrap();
 
     assert_eq!(models.len(), 1);
     assert_eq!(

@@ -46,6 +46,14 @@ pub struct Rook {
     /// mutably.
     skills: std::sync::RwLock<SkillIndex>,
     pub workspace: PathBuf,
+    /// What the endpoint has told us its context window is — by reporting it,
+    /// or by refusing a request as too long. Zero until it has said either.
+    ///
+    /// On the engine rather than in the loop, because a loop is built per turn:
+    /// learned in one turn and forgotten by the next is a refusal paid for
+    /// every turn. Not written when `[agent] context_window` is set — a number
+    /// somebody chose is not a guess to improve on.
+    window_learned: std::sync::atomic::AtomicUsize,
     /// Skills and plugins that failed to load, kept so the UIs can show them
     /// instead of silently presenting a shorter catalog.
     pub skill_errors: Vec<String>,
@@ -109,6 +117,31 @@ impl Drop for Writing<'_> {
 }
 
 impl Rook {
+    /// The window to budget a turn against: what somebody set, else what the
+    /// endpoint has told us, else the dialect's assumption.
+    ///
+    /// The assumption is 32768 for anything self-hosted, which is guesswork —
+    /// a local model may serve 8k or a million, and the machine this was found
+    /// on served 262144 while compacting five times to fit a quarter of it.
+    pub fn window_to_budget(&self, assumed: usize) -> usize {
+        if self.config.agent.context_window.is_some() {
+            return assumed;
+        }
+        match self.window_learned.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => assumed,
+            learned => learned,
+        }
+    }
+
+    /// What the endpoint said, by reporting it or by refusing a request as too
+    /// long. Ignored where somebody has set a number: theirs is a decision, and
+    /// this is a guess being improved.
+    pub fn learn_window(&self, window: usize) {
+        if self.config.agent.context_window.is_none() && window > 0 {
+            self.window_learned.store(window, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     /// The environment skills are resolved against.
     pub fn env(&self) -> &Environment {
         self.env.get_or_init(|| Environment::detect(AGENT_VERSION))
@@ -130,6 +163,7 @@ impl Rook {
             env: OnceLock::new(),
             skills: skills.into(),
             workspace,
+            window_learned: Default::default(),
             skill_errors,
             plugins,
             output_dir: paths::output_dir(),
@@ -158,6 +192,7 @@ impl Rook {
             env: OnceLock::from(env),
             skills: skills.into(),
             workspace,
+            window_learned: Default::default(),
             skill_errors: Vec::new(),
             plugins: Vec::new(),
             // Beside the scratch store rather than in the user's home, for the
@@ -187,6 +222,7 @@ impl Rook {
             },
             skills: skills.into(),
             workspace,
+            window_learned: Default::default(),
             skill_errors,
             plugins,
             output_dir: self.output_dir.clone(),
@@ -1828,6 +1864,7 @@ mod tests {
             env: OnceLock::new(),
             skills: skills.into(),
             workspace: dir.to_path_buf(),
+            window_learned: Default::default(),
             skill_errors: Vec::new(),
             plugins: Vec::new(),
             output_dir: dir.join("output"),

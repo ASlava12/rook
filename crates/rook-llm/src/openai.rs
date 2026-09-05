@@ -177,7 +177,10 @@ impl Provider for OpenAiCompatible {
         // which is a quarter of the reading it could have held. Asked only when
         // the compatible listing said nothing, so a server that does answer
         // properly pays no second round trip.
-        if models.iter().all(|m| m.context_window.is_none()) {
+        // Only where that endpoint exists. Everywhere else it is a 404 paid
+        // for on every process, and a fixture that answers `/models` twice is
+        // a server nothing resembles — which is how this was found.
+        if self.id.starts_with("lmstudio") && models.iter().all(|m| m.context_window.is_none()) {
             for (id, window) in self.windows_lm_studio_reports().await {
                 if let Some(model) = models.iter_mut().find(|m| m.id == id) {
                     model.context_window = Some(window);

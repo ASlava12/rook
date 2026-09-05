@@ -557,7 +557,8 @@ impl<'a> AgentLoop<'a> {
             tracing::warn!("ignoring unusable hook matcher: {error}");
         }
 
-        let budget = ContextBudget::new(provider.context_window(), rook.config.agent.compact_at);
+        let window = rook.window_to_budget(provider.context_window());
+        let budget = ContextBudget::new(window, rook.config.agent.compact_at);
         Self {
             rook,
             provider,
@@ -1471,6 +1472,10 @@ impl<'a> AgentLoop<'a> {
             std::collections::BTreeMap::new();
         let mut checked_goal = false;
         let mut worth_compacting = true;
+        // Once per turn: an endpoint that refuses the length twice is not
+        // refusing an assumption, and summarising again would spend a call to
+        // meet the same wall.
+        let mut shrunk = false;
         // What the provider last said the request cost, and how many messages
         // that covered. See `measured`.
         let mut anchor: Option<(usize, usize)> = None;
@@ -1489,6 +1494,15 @@ impl<'a> AgentLoop<'a> {
             // summarise leaves the context where it was, so the next step would
             // ask again, and the step after that — spending a summarisation
             // call each time to stay exactly as full as it already is.
+            if worth_compacting && self.budget.needs_compaction(measured(&messages, anchor)) {
+                // Before summarising anything: the window is a guess for
+                // anything self-hosted, and this is the first moment it
+                // matters. Asked here rather than at the start of every turn,
+                // where it is a round trip most turns never need — and where
+                // it changed the shape of every conversation a fixture had to
+                // answer, which is how the cost became visible.
+                self.ask_the_window().await;
+            }
             if worth_compacting && self.budget.needs_compaction(measured(&messages, anchor)) {
                 let before = measured(&messages, anchor);
                 outcome.compactions += 1;
@@ -1540,8 +1554,34 @@ impl<'a> AgentLoop<'a> {
             request.effort = Some(self.effort);
             request.max_output_tokens = self.room_for_output(used);
             request.cache_ttl = self.rook.config.agent.cache_ttl();
-            let mut stream =
-                self.provider.stream(request).await.map_err(|e| CoreError::Other(e.to_string()))?;
+            let asked = match self.provider.stream(request.clone()).await {
+                Ok(stream) => Ok(stream),
+                // The window was an assumption and the endpoint has just
+                // disagreed with it. Believing the refusal costs a
+                // summarisation; not believing it ends the turn on a number
+                // nobody chose, which is what a wrong guess used to do.
+                Err(e) if rook_llm::retry::names_the_context(&e) && !shrunk => {
+                    shrunk = true;
+                    let assumed = self.budget.window;
+                    let smaller = (used * 3 / 4).max(4096);
+                    self.rook.learn_window(smaller);
+                    self.budget = ContextBudget::new(smaller, self.rook.config.agent.compact_at);
+                    let said = format!(
+                        "the endpoint refused {used} tokens as too long, so its window is smaller \
+                         than the {assumed} assumed — budgeting {smaller} and summarising to fit. \
+                         `[agent] context_window` sets it outright."
+                    );
+                    self.rook.log(self.session, EventKind::Note, "window", &said).ok();
+                    self.report(Reported::Open(said));
+                    outcome.compactions += 1;
+                    self.compact().await;
+                    messages = self.request_messages(prompt)?;
+                    anchor = None;
+                    continue;
+                }
+                Err(e) => Err(CoreError::Other(e.to_string())),
+            };
+            let mut stream = asked?;
             let mut assembler = Assembler::default();
             // The model call is the long wait in a step, so it is where started
             // sub-agents get to run. Without this they would only advance while
@@ -2817,6 +2857,35 @@ impl<'a> AgentLoop<'a> {
             true => format!("no source offers a skill matching {query:?}."),
             false => format!("no source offers a skill matching {query:?}. {}", errors.join("; ")),
         }
+    }
+
+    /// What the endpoint says it will hold, asked once for the life of the
+    /// process, only when nobody has set a number, and only when a turn is
+    /// about to summarise itself to fit the guess.
+    ///
+    /// The assumption for anything self-hosted is 32768, and the machine this
+    /// was written for serves 262144 — so a turn compacted five times to fit a
+    /// quarter of what was there. Failures are silence: a provider that lists
+    /// no models, or lists no window, leaves the assumption where it was, and
+    /// an assumption that turns out too large is answered by the refusal.
+    async fn ask_the_window(&mut self) {
+        if self.rook.config.agent.context_window.is_some()
+            || self.rook.window_to_budget(0) > 0
+            || self.depth > 0
+        {
+            return;
+        }
+        let (_, wanted) = rook_llm::split_spec(&self.rook.config.agent.model);
+        let Ok(models) = self.provider.models().await else { return };
+        let Some(window) = models.iter().find(|m| m.id == wanted).and_then(|m| m.context_window) else {
+            return;
+        };
+        if window <= self.budget.window {
+            return;
+        }
+        tracing::info!("the endpoint holds {window} tokens, not the {} assumed", self.budget.window);
+        self.rook.learn_window(window);
+        self.budget = ContextBudget::new(window, self.rook.config.agent.compact_at);
     }
 
     /// How much the reply may be, when nobody has set a number.
