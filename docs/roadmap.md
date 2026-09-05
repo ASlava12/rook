@@ -194,6 +194,17 @@ what unblocks the most.
   last. Anthropic's signed blocks are left alone; a second copy as text would
   be the same thought twice. The bound is what lets `session context` price a
   thought from its stored size without reading it. 2 tests.
+- **A checker that could not see what the turn had changed** — read from a real
+  check, against a local model, of a turn that had just fixed a syntax error:
+  "The file compiles and runs… the claim that it does not compile is false, so
+  there was nothing to fix. VERDICT: fails". The checker looks at the workspace
+  *after* the turn and cannot see what it was like before, so it settled the
+  one question nobody had asked — whether the work had been worth doing — and
+  the turn spent its last steps arguing with the verdict. It is now told that
+  it is looking at the workspace after the turn, which files that turn wrote —
+  the list is the filesystem's, so it is evidence of the same kind as the files
+  — and that whether the task was worth doing is not one of its questions.
+  1 test, which bites: without the list nothing answers the checker.
 - **A run that waits on an idle pipe says so** — `rook run` reads stdin to the
   end, which is the point: `slow_build | rook run "why?"` has to wait for the
   build. But an idle pipe never ends, and every supervisor hands a process one

@@ -634,6 +634,46 @@ async fn an_autonomous_turn_is_checked_against_its_goal_before_it_may_end() {
     assert!(notes[0].contains("fails"), "{notes:?}");
 }
 
+/// Read from a real check, against a local model, of a turn that had just
+/// fixed a syntax error: "The file compiles and runs… the claim that it does
+/// not compile is false, so there was nothing to fix. VERDICT: fails". A
+/// checker sees the workspace after the turn and cannot see what it was like
+/// before, so it settled the one question that was nobody's to reopen —
+/// whether the work had been worth doing.
+#[tokio::test]
+async fn the_checker_is_told_what_the_turn_wrote() {
+    let f = fixture();
+    let session = f.rook.start_session("s").unwrap();
+    f.rook.set_goal(session, "notes.txt must say done").unwrap();
+
+    // The first rule is the assertion: without the list in the claim, nothing
+    // answers the checker and the turn fails with "nothing to say to …".
+    let provider = Arc::new(ByPrompt(vec![
+        ("It wrote: notes.txt", reply("VERDICT: holds")),
+        ("created", reply("done")),
+        (
+            "make it say done",
+            call("write_file", serde_json::json!({ "path": "notes.txt", "content": "done" })),
+        ),
+    ]));
+
+    let mut agent = AgentLoop::new(&f.rook, provider, session);
+    agent.allow_everything_not_denied();
+    let outcome = agent.run("make it say done").await.unwrap();
+
+    assert_eq!(outcome.reply, "done");
+    let notes: Vec<String> = f
+        .rook
+        .transcript(session, 0, 200, 512)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == "note" && e.label == "goal check")
+        .map(|e| e.body)
+        .collect();
+    assert_eq!(notes.len(), 1, "the check is on the record: {notes:?}");
+    assert!(notes[0].contains("holds"), "and it settled the right question: {notes:?}");
+}
+
 /// Somebody answering the approval prompt, one way or the other.
 struct Answers(rook_tools::policy::Approval);
 

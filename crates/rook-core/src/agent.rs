@@ -472,6 +472,10 @@ fn canonical(path: &std::path::Path) -> std::path::PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// How many of a turn's files the checker is told about by name. Enough to
+/// know where to look, and not the forty a refactor touched.
+const FILES_NAMED_TO_CHECKER: usize = 10;
+
 /// How much of the workspace a session's first turn is shown. Sixty lines is
 /// a page: enough to see the shape of a project, and not so much that a large
 /// one spends a thousand tokens on directory names.
@@ -2744,13 +2748,32 @@ impl<'a> AgentLoop<'a> {
         outcome: &mut TurnOutcome,
         on_progress: &mut impl FnMut(Progress<'_>),
     ) -> (String, Option<&'static str>) {
+        // What it wrote, because a checker looks at the workspace *after* the
+        // turn and cannot see what it was like before. One judged a file that
+        // now compiles and answered `fails`: the file was fine, so "there was
+        // nothing to fix" — the question it settled was whether the task had
+        // been worth doing, which is nobody's to reopen. The list is the
+        // filesystem's, not the agent's account of itself, so it is evidence
+        // of the same kind as the files.
+        let wrote =
+            self.wrote_paths.lock().map(|w| w.iter().cloned().collect::<Vec<_>>()).unwrap_or_default();
+        let written = match wrote.len() {
+            0 => "It wrote nothing.".to_string(),
+            _ => format!(
+                "It wrote: {}. That list is the filesystem's rather than the agent's account of \
+                 itself — read the files.",
+                wrote.iter().take(FILES_NAMED_TO_CHECKER).cloned().collect::<Vec<_>>().join(", ")
+            ),
+        };
         let claim = format!(
             "The person set this goal for the session, and the agent has just finished a turn \
-             towards it:\n\n{goal}\n\nTwo questions, both answered from what is on disk and what \
-             runs rather than from the agent's own account: has the goal been met, and was anything \
-             the person asked not to do done anyway? `holds` means both are as they should be. \
-             `fails` means the goal is not met, or something the person forbade was done — say \
-             which, and what would put it right."
+             towards it:\n\n{goal}\n\nYou are looking at the workspace as it stands after that \
+             turn, so what it put right is already in place. {written}\n\nTwo questions, both \
+             answered from what is on disk and what runs rather than from the agent's own account: \
+             is the goal met now, and was anything the person asked not to do done anyway? \
+             `holds` means both are as they should be. `fails` means the goal is not met, or \
+             something the person forbade was done — say which, and what would put it right. \
+             Whether the task was worth doing is not one of the questions."
         );
         self.check(&claim, "", outcome, on_progress).await
     }
