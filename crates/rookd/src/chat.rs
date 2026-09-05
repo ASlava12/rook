@@ -260,6 +260,7 @@ async fn turn(
                     ChatEvent::Reasoning { text: format!("\n    {task}: {tool}") }
                 }
                 Progress::ToolDone { name, failed } => ChatEvent::ToolDone { name: name.to_string(), failed },
+                Progress::Step { at, of } => ChatEvent::Step { at, of },
                 Progress::Spent { input, output, cached } => {
                     ChatEvent::Spent { input_tokens: input, output_tokens: output, cached_tokens: cached }
                 }
@@ -286,6 +287,7 @@ async fn turn(
                 decisions: outcome.decisions,
                 open_questions: outcome.open_questions,
                 files_changed: outcome.files_changed,
+                stopped: outcome.stopped,
             });
         }
         Err(e) => report(&outbound, e.to_string()),

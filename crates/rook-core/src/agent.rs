@@ -154,8 +154,24 @@ impl Interjections {
 /// `max_steps` and `max_tokens` are a turn that stopped, not one that finished,
 /// and the difference is the whole of what a parent needs to know about a
 /// sub-task it did not watch.
-fn finished(stopped: &str) -> bool {
+pub fn finished(stopped: &str) -> bool {
     matches!(stopped, "end_turn" | "stop")
+}
+
+/// What to tell a person about a turn that stopped rather than finished, and
+/// nothing when it finished.
+///
+/// One sentence for every front end: `rook run` said it and the windows said
+/// only how many steps had run, which reads exactly like a turn that decided
+/// it was done.
+pub fn why_it_stopped(stopped: &str) -> Option<String> {
+    if finished(stopped) {
+        return None;
+    }
+    Some(match stopped {
+        "max_steps" => "stopped at the step limit — raise `[agent] max_steps` or narrow the task".to_string(),
+        other => format!("the turn ended as {other:?} rather than finishing"),
+    })
 }
 
 /// What to show whoever is asked to approve a call.
@@ -357,6 +373,14 @@ pub enum Progress<'a> {
     Delegating {
         task: &'a str,
         tool: &'a str,
+    },
+    /// A step of the turn, as it begins. What a person watching wants to know
+    /// is not only that it is still going but how much of the budget is left:
+    /// a turn at step 190 of 200 is about to stop whatever it is in the middle
+    /// of, and that is worth knowing before it does.
+    Step {
+        at: u32,
+        of: u32,
     },
     /// What the turn has spent, after each reply from the model. A turn that
     /// runs for minutes across a dozen steps otherwise shows no cost at all
@@ -1561,6 +1585,7 @@ impl<'a> AgentLoop<'a> {
         let mut anchor: Option<(usize, usize)> = None;
         while outcome.steps < self.max_steps {
             outcome.steps += 1;
+            on_progress(Progress::Step { at: outcome.steps, of: self.max_steps });
 
             // Before the request rather than after the tool results: this is the
             // one place a user message may go, and it is what makes a turn

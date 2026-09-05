@@ -387,7 +387,11 @@ async fn prompt(
                 // one as a thought would put accounting in the transcript.
                 // Nothing to show: the block is the wire's copy of what
                 // `Reasoning` already streamed to the person.
-                Progress::Spent { .. } | Progress::Delta(Delta::Done { .. } | Delta::ReasoningDone(_)) => {
+                // A step counter has no slot either: the editor draws its
+                // progress from the tool calls it is shown.
+                Progress::Spent { .. }
+                | Progress::Step { .. }
+                | Progress::Delta(Delta::Done { .. } | Delta::ReasoningDone(_)) => {
                     return;
                 }
             };

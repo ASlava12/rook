@@ -512,6 +512,23 @@ fn an_approval_shows_the_whole_command_it_is_asking_about() {
 
 /// The chat REPL and the browser could both stop a turn; the TUI could only be
 /// killed, taking the browsing state and any approval granted for the run.
+/// A window showing only that something is happening cannot say how much room
+/// is left, and a turn at step 190 of 200 is about to stop mid-task.
+#[test]
+fn a_running_turn_says_which_step_of_its_budget_it_is_on() {
+    let _one = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    a_model_that_never_answers(home.path());
+
+    let mut pty = tui(home.path(), workspace.path());
+    pty.screen(100, 30);
+    pty.send("hello\r");
+
+    let screen = pty.screen_showing(100, 30, "step 1/").join("\n");
+    assert!(screen.contains("working…"), "beside how long it has been going: {screen}");
+}
+
 #[test]
 fn ctrl_c_stops_a_running_turn_rather_than_the_whole_ui() {
     let _one = one_at_a_time();

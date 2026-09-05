@@ -854,7 +854,7 @@ fn cmd_run(
         // A script that pipes this into something else has to be able to tell a
         // finished turn from one that ran out of steps or was refused, and both
         // of those come back as Ok with the work half done.
-        let finished = outcome.stopped == "end_turn";
+        let finished = rook_core::agent::finished(&outcome.stopped);
         if json {
             println!(
                 "{}",
@@ -918,14 +918,9 @@ fn unfinished(finished: bool, stopped: &str) -> bool {
     if finished {
         return false;
     }
-    eprintln!(
-        "{}",
-        match stopped {
-            "max_steps" =>
-                "stopped at the step limit — raise `[agent] max_steps` or narrow the task".to_string(),
-            other => format!("the turn ended as {other:?} rather than finishing"),
-        }
-    );
+    if let Some(why) = rook_core::agent::why_it_stopped(stopped) {
+        eprintln!("{why}");
+    }
     true
 }
 

@@ -194,6 +194,15 @@ what unblocks the most.
   last. Anthropic's signed blocks are left alone; a second copy as text would
   be the same thought twice. The bound is what lets `session context` price a
   thought from its stored size without reading it. 2 tests.
+- **Which step of the budget, and why it stopped** — a window watching a turn
+  said how long it had been going and, since a turn ago, what it was waiting
+  on; it could not say how much room was left. A turn at step 190 of 200 is
+  about to stop in the middle of whatever it is doing, which is worth knowing
+  before it does: the working line carries `step 14/200` now, and the browser's
+  send button counts. And a turn that ran out of steps read exactly like one
+  that decided it was done — `rook run` said so and the windows said only how
+  many steps had run. One sentence for all of them, from one function. 1 test,
+  on a pty.
 - **An edit answers with what the file now says** — `edit_file` answered "1
   edit(s), 1 replacement(s)", so a model with any doubt read the whole file
   back to see it: twice in one turn on this machine, and a file is many times

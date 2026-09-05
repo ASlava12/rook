@@ -79,7 +79,22 @@ export function connect() {
       case 'interjected': say('you', `› ${e.text}`); say('stat', '(the turn will see this at its next step)'); break;
       case 'approval': askApproval(e); break;
       case 'ask': askUser(e); break;
+      // Which step of the budget it is on, where the button already says it
+      // is busy: `…` says something is happening and not how much room is
+      // left, and a turn at 190 of 200 is about to stop mid-task.
+      case 'step': {
+        const send = $('#send');
+        if (send && state.chat.busy) send.textContent = `${e.at}/${e.of}`;
+        break;
+      }
       case 'done': {
+        // A turn that ran out of steps and one that finished read the same
+        // without this, and they are not the same thing to whoever asked.
+        if (e.stopped && e.stopped !== 'end_turn' && e.stopped !== 'stop') {
+          say('stat', e.stopped === 'max_steps'
+            ? 'stopped at the step limit — raise [agent] max_steps or narrow the task'
+            : `the turn ended as "${e.stopped}" rather than finishing`);
+        }
         // What it wrote, before what it cost: a turn that says it did the work
         // and one that did it read the same from the outside.
         const wrote = e.files_changed || [];

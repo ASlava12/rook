@@ -229,6 +229,13 @@ pub enum ChatEvent {
     /// The turn was stopped before it finished. Sent instead of `Done`, so a
     /// client waiting on one of them is never left waiting.
     Cancelled,
+    /// A step of the turn, as it begins: a window showing only that something
+    /// is happening cannot say how much of the budget is left, and a turn at
+    /// step 190 of 200 is about to stop whatever it is in the middle of.
+    Step {
+        at: u32,
+        of: u32,
+    },
     Done {
         steps: u32,
         input_tokens: u32,
@@ -243,6 +250,11 @@ pub enum ChatEvent {
         /// done the work and one that has done it read the same from outside.
         #[serde(default)]
         files_changed: Vec<String>,
+        /// Why it ended. A turn that ran out of steps and one that finished
+        /// read the same without it, and they are not the same thing to
+        /// whoever asked for the work.
+        #[serde(default)]
+        stopped: String,
     },
     Error {
         message: String,

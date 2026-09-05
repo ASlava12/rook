@@ -78,6 +78,8 @@ enum TurnEvent {
     /// happening in another agent is not the model thinking out loud, and it
     /// was drawn in the same grey as the thoughts it was buried in.
     Agent(String),
+    /// Which step of the budget the turn is on.
+    Step(u32, u32),
     Spent {
         input: u32,
         output: u32,
@@ -231,6 +233,10 @@ struct Chat {
     drawn: u16,
     /// Input, output and cached tokens so far in this turn.
     spent: Option<(u32, u32, u32)>,
+    /// Which step of its budget the turn in flight is on. A window showing
+    /// only that something is happening cannot say how much room is left, and
+    /// a turn at step 190 of 200 is about to stop mid-task.
+    step: Option<(u32, u32)>,
     /// When the turn in flight started. A long turn showed a fixed `working…`
     /// and a stream that only moved when the model spoke, which reads as a
     /// hang — and was reported as one.
@@ -700,6 +706,7 @@ impl App {
                 TurnEvent::Reasoning(text) => self.chat.push("think", &text),
                 TurnEvent::Tool(name) => self.chat.push("tool", &format!("  · {name}")),
                 TurnEvent::Agent(line) => self.chat.push("agent", &line),
+                TurnEvent::Step(at, of) => self.chat.step = Some((at, of)),
                 TurnEvent::ToolDone(name, failed) => {
                     self.chat.push("tool", &format!("  · {name} {}", if failed { "✗" } else { "✓" }))
                 }
@@ -743,6 +750,7 @@ impl App {
             ChatEvent::ToolDone { name, failed } => {
                 self.chat.push("tool", &format!("  · {name} {}", if failed { "✗" } else { "✓" }))
             }
+            ChatEvent::Step { at, of } => self.chat.step = Some((at, of)),
             ChatEvent::Remembered { text } => self.chat.push("stat", &format!("  remembered: {text}")),
             ChatEvent::Forgot { text } => self.chat.push("stat", &format!("  forgot: {text}")),
             ChatEvent::Spent { input_tokens, output_tokens, cached_tokens } => {
@@ -785,7 +793,10 @@ impl App {
                 self.chat.push("stat", "[stopped]");
                 self.finished();
             }
-            ChatEvent::Done { steps, input_tokens, output_tokens, files_changed, .. } => {
+            ChatEvent::Done { steps, input_tokens, output_tokens, files_changed, stopped, .. } => {
+                if let Some(why) = rook_core::agent::why_it_stopped(&stopped) {
+                    self.chat.push("stat", &format!("  {why}"));
+                }
                 if let Some(note) = rook_core::agent::changed_note(&files_changed) {
                     self.chat.push("stat", &format!("  {note}"));
                 }
@@ -1143,6 +1154,7 @@ impl App {
         self.chat.push("you", &format!("› {prompt}"));
         self.chat.busy = true;
         self.chat.since = Some(std::time::Instant::now());
+        self.chat.step = None;
         self.chat.heard = self.chat.since;
         self.chat.scroll = 0;
 
@@ -1222,6 +1234,7 @@ impl App {
                         Progress::Delegating { task, tool } => {
                             TurnEvent::Agent(format!("    {task}: {tool}"))
                         }
+                        Progress::Step { at, of } => TurnEvent::Step(at, of),
                         Progress::ToolDone { name, failed } => TurnEvent::ToolDone(name.to_string(), failed),
                         Progress::Spent { input, output, cached } => {
                             TurnEvent::Spent { input, output, cached }
@@ -1234,7 +1247,10 @@ impl App {
 
             let _ = match result {
                 Ok(outcome) => to_loop.send(TurnEvent::Done(format!(
-                    "{}{}[{} steps · {} in / {} out{}]",
+                    "{}{}{}[{} steps · {} in / {} out{}]",
+                    rook_core::agent::why_it_stopped(&outcome.stopped)
+                        .map(|why| format!("  {why}\n"))
+                        .unwrap_or_default(),
                     outcome.changed_note().map(|n| format!("  {n}\n")).unwrap_or_default(),
                     outcome.memory_note().map(|n| format!("{n}\n")).unwrap_or_default(),
                     outcome.steps,
@@ -1575,9 +1591,15 @@ impl App {
         }
 
         let prompt = match (self.chat.busy && self.chat.asking.is_none(), self.chat.since) {
-            (true, Some(since)) => {
-                format!("  working… {}{}  ", elapsed(since.elapsed()), self.chat.silence())
-            }
+            (true, Some(since)) => format!(
+                "  working… {}{}{}  ",
+                elapsed(since.elapsed()),
+                match self.chat.step {
+                    Some((at, of)) => format!(" · step {at}/{of}"),
+                    None => String::new(),
+                },
+                self.chat.silence()
+            ),
             (true, None) => "  working… ".to_string(),
             _ => "› ".to_string(),
         };
