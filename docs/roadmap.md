@@ -194,6 +194,12 @@ what unblocks the most.
   last. Anthropic's signed blocks are left alone; a second copy as text would
   be the same thought twice. The bound is what lets `session context` price a
   thought from its stored size without reading it. 2 tests.
+- **A key over plain http to another machine** — traced from goose's "require
+  HTTPS for Snowflake" in a reference pass. Every base URL here can be pointed
+  elsewhere, so an API key set beside an `http://` gateway on another machine
+  crossed the network in clear text — on the first request, where saying so
+  afterwards is too late. Refused at startup now, with loopback exempt, because
+  `http://127.0.0.1` is how every local runtime is reached. 1 test.
 - **`rook doctor` says what the daemon is running** — the place a person looks
   when something is odd, and "the daemon is older than the binary you just
   installed" is exactly the kind of odd that reads as a fix that did not take.

@@ -1312,3 +1312,29 @@ The rest is product surface this does not have: Slack, Discord, WhatsApp and
 webchat channels, Android, the cloud gateway and its workers, the plugin SDK,
 the control UI and its locales, media generation, voice calls, appcast
 releases, and about thirty test-fixture consolidations.
+
+## goose c59e45d0e → 5e9092596, 2026-09-06
+
+Eight commits, one ported.
+
+`fix(security): require HTTPS for Snowflake` refuses to send a credential to a
+provider over plain http. Every base URL here can be pointed elsewhere —
+`OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, `ROOK_LLM_BASE_URL` — so the same
+thing was possible here and quiet: an API key set beside an `http://` gateway
+on another machine went over the network in clear text, on the first request,
+where saying so afterwards is too late. It is refused at startup now, with
+loopback exempt because that is what every local runtime is — `http://127.0.0.1`
+is how LM Studio and Ollama are reached, and a gateway on this machine is an
+ordinary thing to run.
+
+`prefer latest MCP version` negotiates the newest protocol version a server
+offers rather than the one the client was built with; ours sends its own
+version and takes what the server answers with, which is the same negotiation
+from the other side, and no server has yet refused it. `Support GPT-6 Astra
+models` is a model list: windows and ceilings here are learnt from refusals
+rather than tabulated, and an effort a model will not take is dropped after the
+endpoint says so once — the case their table exists to cover.
+
+The rest is theirs: `use release-plz to prepare GDK releases`, the Kotlin
+example fix, `remove keyring timeout`, publishing the ACP client as npm
+packages, and counting durable background turns in their `summon` surface.

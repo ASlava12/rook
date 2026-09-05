@@ -305,6 +305,40 @@ pub fn from_spec_with(
     Ok(Box::new(retry::Retrying::new(build(spec, stream_idle, context_window)?)))
 }
 
+/// A key sent over plain http to another machine is a key on the wire.
+///
+/// Every base here can be pointed elsewhere — `OPENAI_BASE_URL`,
+/// `ANTHROPIC_BASE_URL`, `ROOK_LLM_BASE_URL` — and a gateway on plain http is
+/// an ordinary thing to run on this machine and not an ordinary thing to send
+/// a bearer token to across a network. Loopback is exempt, because that is
+/// what every local runtime is; anything else with a key set is refused at
+/// startup rather than on the first request, where the key has already gone.
+///
+/// Traced from goose's "require HTTPS for Snowflake" — see
+/// [references/PORTED.md](../../../references/PORTED.md).
+fn in_the_clear(base: &str, key: Option<&str>) -> Result<()> {
+    if key.is_none() || !base.trim().to_ascii_lowercase().starts_with("http://") {
+        return Ok(());
+    }
+    let host = reqwest::Url::parse(base.trim())
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+        .unwrap_or_default();
+    // The brackets an IPv6 host is written in are not part of the address, and
+    // `[::1]` parses as nothing at all with them left on.
+    let address = host.trim_matches(['[', ']']);
+    let local = host == "localhost"
+        || address.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
+        || host.is_empty();
+    if local {
+        return Ok(());
+    }
+    Err(LlmError::Other(format!(
+        "{base} is http and an API key is set, so the key would cross the network in clear text. \
+         Use https, or unset the key if {host} does not need one."
+    )))
+}
+
 fn build(
     spec: &str,
     stream_idle: std::time::Duration,
@@ -321,6 +355,7 @@ fn build(
         "anthropic" | "claude" => {
             let key = required_key(&["ANTHROPIC_API_KEY"])?;
             let base = env_or("ANTHROPIC_BASE_URL", "https://api.anthropic.com");
+            in_the_clear(&base, Some(&key))?;
             let mut config = anthropic::Config::new(base, key, model);
             config.stream_idle_timeout = stream_idle;
             if let Some(window) = context_window {
@@ -331,6 +366,7 @@ fn build(
         "google" | "gemini" => {
             let key = required_key(&["GEMINI_API_KEY", "GOOGLE_API_KEY"])?;
             let base = env_or("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta");
+            in_the_clear(&base, Some(&key))?;
             let mut config = google::Config::new(base, key, model);
             config.stream_idle_timeout = stream_idle;
             if let Some(window) = context_window {
@@ -338,22 +374,26 @@ fn build(
             }
             return Ok(Box::new(google::Google::new(spec, model, config)?));
         }
-        "openai" => openai::Config::new(
-            env_or("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-            std::env::var("OPENAI_API_KEY").ok(),
-            128_000,
-        ),
-        "openai-compatible" => openai::Config::new(
-            std::env::var("ROOK_LLM_BASE_URL").ok().filter(|u| !u.trim().is_empty()).ok_or_else(|| {
-                LlmError::Other(
-                    "ROOK_LLM_BASE_URL is not set, and `openai-compatible` has no default \
+        "openai" => {
+            let base = env_or("OPENAI_BASE_URL", "https://api.openai.com/v1");
+            let key = std::env::var("OPENAI_API_KEY").ok();
+            in_the_clear(&base, key.as_deref())?;
+            openai::Config::new(base, key, 128_000)
+        }
+        "openai-compatible" => {
+            let base = std::env::var("ROOK_LLM_BASE_URL").ok().filter(|u| !u.trim().is_empty()).ok_or_else(
+                || {
+                    LlmError::Other(
+                        "ROOK_LLM_BASE_URL is not set, and `openai-compatible` has no default \
                          endpoint to fall back to."
-                        .into(),
-                )
-            })?,
-            std::env::var("ROOK_LLM_API_KEY").ok(),
-            32_768,
-        ),
+                            .into(),
+                    )
+                },
+            )?;
+            let key = std::env::var("ROOK_LLM_API_KEY").ok();
+            in_the_clear(&base, key.as_deref())?;
+            openai::Config::new(base, key, 32_768)
+        }
         other => return Err(LlmError::UnknownProvider { name: other.to_string() }),
     };
     cfg.stream_idle_timeout = stream_idle;
@@ -378,6 +418,23 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    /// A gateway on plain http is an ordinary thing to run on this machine.
+    /// Sending it a bearer token across a network is not, and the first
+    /// request is too late to say so — by then the key has gone.
+    #[test]
+    fn a_key_is_refused_over_plain_http_to_another_machine() {
+        assert!(in_the_clear("http://127.0.0.1:1234/v1", Some("sk-x")).is_ok(), "loopback is the local case");
+        assert!(in_the_clear("http://localhost:8080/v1", Some("sk-x")).is_ok(), "by name as well");
+        assert!(in_the_clear("http://[::1]:8080/v1", Some("sk-x")).is_ok(), "and in the other family");
+        assert!(in_the_clear("https://gateway.example/v1", Some("sk-x")).is_ok(), "https is what to do");
+        assert!(in_the_clear("http://gateway.example/v1", None).is_ok(), "no key, nothing to leak");
+
+        let refused = in_the_clear("http://gateway.example/v1", Some("sk-x")).unwrap_err().to_string();
+        assert!(refused.contains("clear text"), "it says what would happen: {refused}");
+        assert!(refused.contains("https"), "and what to do instead: {refused}");
+        assert!(refused.contains("gateway.example"), "and to whom: {refused}");
+    }
 
     fn headers(pairs: &[(&str, &str)]) -> reqwest::header::HeaderMap {
         let mut map = reqwest::header::HeaderMap::new();
