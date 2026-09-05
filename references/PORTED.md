@@ -1338,3 +1338,41 @@ endpoint says so once — the case their table exists to cover.
 The rest is theirs: `use release-plz to prepare GDK releases`, the Kotlin
 example fix, `remove keyring timeout`, publishing the ACP client as npm
 packages, and counting durable background turns in their `summon` surface.
+
+## codex 0305dde92 → a31c18ab7, 2026-09-06
+
+Eighty-three commits, one ported and two worth writing down.
+
+`Keep TUI prompt history tied to local settings` is about which history log
+their TUI advertises when the server's settings and the client's differ, which
+is a split this does not have — but its premise is the port: prompt history is
+the client's, and it outlives a window. Here the plain chat has kept one in
+`~/.rook/history` since it had a history at all, and the TUI kept its own in
+memory and dropped it on exit. Same person, same machine, same file now, with
+a ceiling on it.
+
+`Allow trusted symlinks beneath CODEX_HOME on macOS` adds an opt-in to their
+rule that a writable root reached through a symlink is refused — the target
+can be repointed between commands. The rule is right and the exposure is not
+here: the Seatbelt profile names resolved paths and Seatbelt matches after
+resolving symlinks, so a link inside the workspace pointing out of it is
+matched against where it points and falls outside the allowance; landlock
+grants on the directories themselves, which is the same answer. Nothing to
+port, and a good thing to have checked.
+
+`Preserve SystemRoot for Windows sandbox wrapper setup` is a wrapper that
+built a fresh environment and lost the one variable Windows cannot run
+without. `run_command` here adds to the inherited environment rather than
+replacing it, so there is nothing to lose.
+
+Not ported, and named because it is a shape rather than a fix: four commits
+build asynchronous questions into their TUI — a question the agent asks that
+does not stop the turn, answered later from a queue. Here `ask` blocks the
+turn until it is answered or `answer_timeout_secs` runs out, which is the
+simpler thing and the reason a turn that asks is a turn that waits.
+
+The rest is theirs: a voice host and its WebRTC, Opus and Bazel work (ten
+commits), the Guardian review service and its tickets, timing metrics and
+context retention (fifteen), model-picker and guidance entries for a model
+that does not exist here, managed worktrees, jemalloc for musl, their app
+server's managed policies, and a long tail of test-fixture stabilisation.

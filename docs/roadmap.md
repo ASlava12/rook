@@ -194,6 +194,14 @@ what unblocks the most.
   last. Anthropic's signed blocks are left alone; a second copy as text would
   be the same thought twice. The bound is what lets `session context` price a
   thought from its stored size without reading it. 2 tests.
+- **A window that opens knowing what was typed in the last one** — the plain
+  chat has kept its prompt history in `~/.rook/history` since it had one; the
+  TUI kept its own in memory and dropped it on exit, so closing a window forgot
+  every prompt typed in it. It is the same file now — one person, one machine,
+  one up-arrow — appended as each prompt is sent, because a window that is
+  killed rather than closed still typed it, and trimmed where it is read. From
+  a codex pass: prompt history is the client's, and it outlives a window.
+  1 test, on a pty, seeded by the file the plain chat would have left.
 - **A key over plain http to another machine** — traced from goose's "require
   HTTPS for Snowflake" in a reference pass. Every base URL here can be pointed
   elsewhere, so an API key set beside an `http://` gateway on another machine

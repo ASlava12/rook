@@ -478,6 +478,40 @@ impl Chat {
     }
 }
 
+/// How many typed prompts are kept between windows. The plain chat keeps its
+/// own with rustyline in the same file; this is the ceiling either way, and
+/// what accumulates without one is a file that grows a line per prompt for as
+/// long as the agent is used.
+const PROMPTS_KEPT: usize = 200;
+
+/// What was typed in earlier windows, oldest first.
+///
+/// The same file the plain chat's history goes in: it is one person on one
+/// machine, and an up-arrow that knows what they typed in `rook chat` and not
+/// what they typed in `rook tui` is two histories of one conversation.
+fn remembered_prompts() -> Vec<String> {
+    let path = rook_core::paths::home().join("history");
+    let Ok(text) = std::fs::read_to_string(&path) else { return Vec::new() };
+    let all: Vec<&str> = text.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
+    let kept: Vec<String> = all.iter().rev().take(PROMPTS_KEPT).rev().map(|l| l.to_string()).collect();
+    // Trimmed where it is read rather than where it is written: appending is
+    // one line and rewriting the file is not something to do per prompt.
+    if all.len() > PROMPTS_KEPT * 2 {
+        let _ = std::fs::write(&path, kept.join("\n") + "\n");
+    }
+    kept
+}
+
+/// One more line in that file. Appended as it is typed, because a window that
+/// is killed rather than closed still typed it.
+fn remember_prompt(prompt: &str) {
+    use std::io::Write;
+    let path = rook_core::paths::home().join("history");
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{prompt}");
+    }
+}
+
 /// Long enough that an ordinary pause between tokens says nothing, short
 /// enough to answer "has it stopped?" before anyone reaches for ctrl-c.
 const QUIET: std::time::Duration = std::time::Duration::from_secs(30);
@@ -566,7 +600,7 @@ impl App {
 
         let mut app = Self {
             runtime,
-            chat: Chat::default(),
+            chat: Chat { history: remembered_prompts(), ..Chat::default() },
             events,
             to_loop,
             approver: Arc::new(ChannelApprover::new(requests, patience)),
@@ -1131,6 +1165,7 @@ impl App {
         // duplicate a history walk trips over.
         if self.chat.history.last() != Some(&prompt) {
             self.chat.history.push(prompt.clone());
+            remember_prompt(&prompt);
         }
         self.chat.recalled = None;
         // Typed while a turn runs, it goes to the turn. It used to be dropped

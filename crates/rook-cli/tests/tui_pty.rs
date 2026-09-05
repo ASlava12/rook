@@ -784,6 +784,29 @@ impl Drop for Daemon {
     }
 }
 
+/// The plain chat has kept its history in `~/.rook/history` since it had one;
+/// the window did not, so closing it forgot everything typed in it — and the
+/// two are one person on one machine.
+#[test]
+fn a_window_opens_knowing_what_was_typed_in_the_last_one() {
+    let _one = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    // As the plain chat leaves it: one prompt a line, oldest first.
+    std::fs::write(home.path().join("history"), "look at the parser\nrun the tests\n").unwrap();
+
+    let mut pty = tui(home.path(), workspace.path());
+    pty.screen(100, 30);
+    pty.send("\u{1b}[A"); // up, for the last thing typed — in another window
+
+    let screen = pty.screen_showing(100, 30, "run the tests").join("\n");
+    assert!(screen.contains("run the tests"), "the newest comes back first:\n{screen}");
+
+    pty.send("\u{1b}[A");
+    let older = pty.screen_showing(100, 30, "look at the parser").join("\n");
+    assert!(older.contains("look at the parser"), "and the one before it:\n{older}");
+}
+
 /// The box you type in was a `String` with `push` and `pop`: no cursor, no
 /// history, so a typo in the middle of a long prompt cost every character
 /// after it and running the last thing again meant retyping it.
