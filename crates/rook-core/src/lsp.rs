@@ -61,10 +61,17 @@ pub fn detected() -> Vec<ServerConfig> {
         .iter()
         .filter_map(|(language, command, args, extensions)| {
             // What `rook lsp install` fetched wins over PATH: it is the one the
-            // user asked for by name, and it has a digest on record.
-            let command = installed(command)
-                .or_else(|| on_path(command).then(|| (*command).to_string()))
-                .filter(|command| starts(command))?;
+            // user asked for by name, and it has a digest on record — which is
+            // also why it is not asked to prove itself. The `--version` probe
+            // exists for PATH, where rustup leaves a `rust-analyzer` shim that
+            // is not one; asked of our own file it threw away a working server,
+            // because `pyright-langserver --version` refuses to run without
+            // `--stdio` and answers with an error. Installed, and then offered
+            // to be installed again every session.
+            let command = match installed(command) {
+                Some(ours) => ours,
+                None => on_path(command).then(|| (*command).to_string()).filter(|c| starts(c))?,
+            };
             Some((language, command, args, extensions))
         })
         .map(|(language, command, args, extensions)| ServerConfig {

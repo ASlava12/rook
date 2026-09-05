@@ -106,3 +106,44 @@ fn go() -> ServerConfig {
         ..Default::default()
     }
 }
+
+/// A server this agent installed is trusted without being asked to prove it.
+///
+/// The `--version` probe exists for `PATH`, where rustup leaves a
+/// `rust-analyzer` shim that is not a server. Asked of our own file it threw a
+/// working one away: `pyright-langserver --version` refuses to run without
+/// `--stdio` and answers with an error, so Python was reported missing on a
+/// machine where it was installed — and the agent offered to install it again,
+/// every session, for ever.
+#[test]
+fn a_server_we_installed_is_not_asked_to_prove_itself() {
+    let home = tempfile::tempdir().unwrap();
+    // Every process here shares one environment, so this test owns it.
+    static ALONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one = ALONE.lock().unwrap_or_else(|e| e.into_inner());
+    let previous = std::env::var_os("ROOK_HOME");
+    unsafe { std::env::set_var("ROOK_HOME", home.path()) };
+
+    let into = home.path().join("servers/pyright-langserver/current/node_modules/.bin");
+    std::fs::create_dir_all(&into).unwrap();
+    let binary = into.join("pyright-langserver");
+    // Answers `--version` the way pyright does: badly.
+    std::fs::write(&binary, "#!/bin/sh\necho 'Error: Connection input stream is not set' >&2\nexit 1\n")
+        .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let found = rook_core::lsp::detected();
+
+    let python = found.iter().find(|c| c.language == "python");
+    assert!(python.is_some(), "an installed server is offered whatever it says to --version: {found:?}");
+    assert_eq!(python.unwrap().command, binary.to_string_lossy());
+
+    match previous {
+        Some(was) => unsafe { std::env::set_var("ROOK_HOME", was) },
+        None => unsafe { std::env::remove_var("ROOK_HOME") },
+    }
+}

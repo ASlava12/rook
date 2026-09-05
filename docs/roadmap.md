@@ -1382,6 +1382,18 @@ the chat socket needed. Both the handler and the hours-long timer run it on a
 blocking thread now; the test runs on a single-threaded runtime and fails
 without the change.
 
+**A server we installed is not asked to prove itself.** Somebody was offered
+`pyright-langserver` every session on a machine where it was installed, and
+each yes reinstalled it. The offer was right about the question and wrong about
+the answer: servers are probed with `--version` before being believed — which
+exists because rustup leaves a `rust-analyzer` shim on `PATH` that is not a
+server — and `pyright-langserver --version` refuses to run without `--stdio`
+and answers with an error. The probe is for `PATH`; what `rook lsp install`
+fetched has a digest on record and is taken as it is. The same reading found
+its neighbour: `typescript` was installed unpinned, npm gave TypeScript 7 — the
+native rewrite, with no `lib/tsserver.js` — and the server could not start.
+Pinned to 5, with the pin respected rather than turned into `typescript@5@latest`.
+
 **The window is asked for when it is about to matter, and believed when the
 endpoint disagrees.** Three things, one question: a turn compacted five times
 to fit 32768 on a machine serving 262144. The number is now asked of the

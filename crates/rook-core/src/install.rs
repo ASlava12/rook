@@ -45,7 +45,12 @@ pub const CLANGD: Recipe =
     Recipe { command: "clangd", source: Source::Github { repo: "clangd/clangd", strip_top: true } };
 pub const TYPESCRIPT: Recipe = Recipe {
     command: "typescript-language-server",
-    source: Source::Npm { packages: &["typescript-language-server", "typescript"] },
+    // Pinned, and it has to be: npm gives the newest, and TypeScript 7 is the
+    // native rewrite with a different package layout — no `lib/tsserver.js`,
+    // which is the file this server looks for. Unpinned, `rook lsp install
+    // typescript` installed a server that could not start, and said so only
+    // when a turn tried to use it. Remove the pin when the server speaks to 7.
+    source: Source::Npm { packages: &["typescript-language-server", "typescript@5"] },
 };
 pub const PYRIGHT: Recipe =
     Recipe { command: "pyright-langserver", source: Source::Npm { packages: &["pyright"] } };
@@ -100,7 +105,7 @@ impl Recipe {
                 format!(
                     "npm install --ignore-scripts --no-audit --no-fund --prefix \"{}\" {}",
                     dir.display(),
-                    packages.iter().map(|p| format!("{p}@latest")).collect::<Vec<_>>().join(" ")
+                    packages.iter().map(|p| pinned(p)).collect::<Vec<_>>().join(" ")
                 ),
                 Vec::new(),
             )),
@@ -264,6 +269,20 @@ const MOST_UNPACKED_BYTES: u64 = 512 << 20;
 /// The API answer is a few kilobytes; a megabyte of it is a different server.
 const MOST_API_BYTES: usize = 4 << 20;
 const MOST_HOPS: usize = 4;
+
+/// A package as npm should be asked for it: the newest, unless the recipe
+/// already says which.
+///
+/// A recipe that pins says so for a reason — `typescript@5` because 7 moved the
+/// file the language server looks for — and appending `@latest` to that asks
+/// for `typescript@5@latest`, which is not a version anyone has. The `@` of a
+/// scoped name is at the front and is not a version.
+fn pinned(package: &str) -> String {
+    match package.rfind('@') {
+        Some(at) if at > 0 => package.to_string(),
+        _ => format!("{package}@latest"),
+    }
+}
 
 /// The binary `rook lsp install` put in place for `command`, whether or not
 /// there is one — asked of the recipe, which knows where inside `current` it
@@ -718,10 +737,7 @@ mod tests {
         let (cmd, env) = TYPESCRIPT.command_into(Path::new("/srv/ts")).unwrap();
         assert!(cmd.contains("--ignore-scripts"), "no package script runs at install: {cmd}");
         assert!(cmd.contains("--prefix \"/srv/ts\""), "and it goes where it was told: {cmd}");
-        assert!(
-            cmd.contains("typescript-language-server@latest") && cmd.contains(" typescript@latest"),
-            "{cmd}"
-        );
+        assert!(cmd.contains("typescript-language-server@latest"), "the newest, where nothing pins: {cmd}");
         assert!(env.is_empty());
         let (cmd, env) = GOPLS.command_into(Path::new("/srv/go")).unwrap();
         assert_eq!(cmd, "go install golang.org/x/tools/gopls@latest");
@@ -733,6 +749,13 @@ mod tests {
         assert!(RUST_ANALYZER.command_into(Path::new("/srv")).is_none(), "fetched, not run");
 
         assert_eq!(TYPESCRIPT.needs(), Some("npm"));
+        // Pinned deliberately: npm gives the newest, and TypeScript 7 moved
+        // the file this server looks for. An unpinned recipe installed a
+        // server that could not start.
+        let (command, _) = TYPESCRIPT.command_into(Path::new("/srv/ts")).unwrap();
+        assert!(command.ends_with("typescript@5"), "the pin is asked for as written: {command}");
+        assert!(!command.contains("typescript@5@"), "and not with a version appended: {command}");
+        assert!(command.contains("typescript-language-server@latest"), "the rest take the newest");
         assert_eq!(GOPLS.needs(), Some("go"));
         assert_eq!(RUST_ANALYZER.needs(), None);
 
