@@ -74,6 +74,10 @@ enum TurnEvent {
     Reasoning(String),
     Tool(String),
     ToolDone(String, bool),
+    /// A sub-agent's progress. Its own kind rather than more reasoning: work
+    /// happening in another agent is not the model thinking out loud, and it
+    /// was drawn in the same grey as the thoughts it was buried in.
+    Agent(String),
     Spent {
         input: u32,
         output: u32,
@@ -695,6 +699,7 @@ impl App {
                 TurnEvent::Text(text) => self.chat.push("text", &text),
                 TurnEvent::Reasoning(text) => self.chat.push("think", &text),
                 TurnEvent::Tool(name) => self.chat.push("tool", &format!("  · {name}")),
+                TurnEvent::Agent(line) => self.chat.push("agent", &line),
                 TurnEvent::ToolDone(name, failed) => {
                     self.chat.push("tool", &format!("  · {name} {}", if failed { "✗" } else { "✓" }))
                 }
@@ -1209,10 +1214,10 @@ impl App {
                         Progress::Delta(Delta::Reasoning(text)) => TurnEvent::Reasoning(text.clone()),
                         Progress::Delta(Delta::ToolCall(call)) => TurnEvent::Tool(call.name.clone()),
                         Progress::Delegated { task, done, total } => {
-                            TurnEvent::Reasoning(format!("\n  [{done}/{total}] {task}"))
+                            TurnEvent::Agent(format!("  [{done}/{total}] {task}"))
                         }
                         Progress::Delegating { task, tool } => {
-                            TurnEvent::Reasoning(format!("\n    {task}: {tool}"))
+                            TurnEvent::Agent(format!("    {task}: {tool}"))
                         }
                         Progress::ToolDone { name, failed } => TurnEvent::ToolDone(name.to_string(), failed),
                         Progress::Spent { input, output, cached } => {
@@ -1456,6 +1461,7 @@ impl App {
             let style = match *kind {
                 "you" => Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
                 "tool" => Style::default().fg(Color::Magenta),
+                "agent" => Style::default().fg(Color::LightBlue),
                 "think" => Style::default().fg(THINKING).add_modifier(Modifier::ITALIC),
                 "stat" => Style::default().fg(Color::DarkGray),
                 "err" => Style::default().fg(Color::Red),
@@ -1707,36 +1713,54 @@ impl App {
         let typing = if self.adding.is_some() { 3 } else { 0 };
         let [list, entry] = Layout::vertical([Constraint::Min(3), Constraint::Length(typing)]).areas(area);
 
-        let rows: Vec<Vec<String>> = self
-            .facts
-            .iter()
-            .map(|fact| {
-                vec![
-                    fact.id.clone(),
-                    if fact.pinned { "pin".into() } else { String::new() },
-                    fact.scope.label().rsplit('/').next().unwrap_or("global").to_string(),
-                    fact.text.chars().take(70).collect(),
-                    fact.tags.join(" "),
-                ]
-            })
-            .collect();
+        let dim = Style::default().fg(Color::DarkGray);
+        let scope_of = |fact: &rook_core::Fact| match fact.scope {
+            rook_core::Scope::Global => "everywhere".to_string(),
+            rook_core::Scope::Project(_) => {
+                fact.scope.label().rsplit('/').next().unwrap_or("here").to_string()
+            }
+        };
+        let widest = self.facts.iter().map(|f| scope_of(f).chars().count()).max().unwrap_or(5).clamp(5, 20);
 
         let mut lines: Vec<Line> = Vec::new();
-        if rows.is_empty() {
+        if self.facts.is_empty() {
             lines.push(Line::from(Span::styled(
                 "nothing remembered yet — the agent writes here as it learns, and `a` adds a fact",
-                Style::default().fg(Color::DarkGray),
+                dim,
+            )));
+        } else {
+            lines.push(Line::from(Span::styled(
+                format!("{:<10}{:<4}{:<width$}  fact", "id", "", "scope", width = widest),
+                dim,
             )));
         }
-        // Two lines of header stand before the first row, which is what puts
-        // the highlight on the fact `d` would forget.
-        let chosen = self.fact_state.selected().map(|at| at + 2);
-        for (at, row) in fmt::table(&["id", "", "scope", "fact", "tags"], &rows).lines().enumerate() {
-            let style = match Some(at) == chosen {
-                true => Style::default().bg(Color::Rgb(40, 44, 52)),
-                false => Style::default(),
-            };
-            lines.push(Line::from(Span::styled(row.to_string(), style)));
+        let chosen = self.fact_state.selected();
+        for (at, fact) in self.facts.iter().enumerate() {
+            let line = Line::from(vec![
+                Span::styled(format!("{:<10}", fact.id), dim),
+                // A pinned fact is in every request whatever else is relevant,
+                // which is worth seeing from across the pane.
+                Span::styled(if fact.pinned { "pin " } else { "    " }, Style::default().fg(Color::Yellow)),
+                Span::styled(
+                    format!("{:<width$}  ", scope_of(fact), width = widest),
+                    Style::default().fg(match fact.scope {
+                        rook_core::Scope::Global => Color::Magenta,
+                        rook_core::Scope::Project(_) => Color::Cyan,
+                    }),
+                ),
+                Span::raw(fact.text.chars().take(70).collect::<String>()),
+                Span::styled(
+                    match fact.tags.is_empty() {
+                        true => String::new(),
+                        false => format!("  {}", fact.tags.join(" ")),
+                    },
+                    dim,
+                ),
+            ]);
+            lines.push(match Some(at) == chosen {
+                true => line.style(Style::default().bg(Color::Rgb(40, 44, 52))),
+                false => line,
+            });
         }
         let title = match self.fact_note.is_empty() {
             true => format!(" Memory ({}) ", self.facts.len()),
@@ -1907,42 +1931,55 @@ impl App {
     }
 
     fn draw_help(&mut self, f: &mut Frame, area: Rect) {
+        // Two columns, coloured by which they are: a page of one grey is read
+        // by nobody, and what is being offered here is the left column.
+        let two = |line: &str, at: usize, left: Color| {
+            // Characters, not bytes: these lines carry arrows and middots, and
+            // a split inside one of those is a panic rather than a colour.
+            let at = line.char_indices().nth(at).map_or(line.len(), |(at, _)| at);
+            Line::from(vec![
+                Span::styled(line[..at].to_string(), Style::default().fg(left)),
+                Span::styled(line[at..].to_string(), Style::default().fg(Color::DarkGray)),
+            ])
+        };
+        let command = |line: &str| two(line, 33, Color::Cyan);
+        let key = |line: &str| two(line, 14, Color::Cyan);
         let text = vec![
             Line::from(Span::styled("rook", Style::default().add_modifier(Modifier::BOLD))),
             Line::from(""),
             Line::from("The Chat tab runs turns; the rest browse what is stored."),
             Line::from("Everything here is also on the command line, as tables or --json:"),
             Line::from(""),
-            Line::from("  rook store stat                what memory costs, per kind"),
-            Line::from("  rook store ls / cat <id>       list and print raw objects"),
-            Line::from("  rook store gc --dry-run        what would be collected"),
-            Line::from("  rook session ls / show <id>    transcripts by sequence number"),
-            Line::from("  rook skills ls / why <name>    what applies here, and why not"),
-            Line::from("  rook skills history <name>     every captured version"),
-            Line::from("  rook skills rollback <n> <id>  restore one, undoably"),
-            Line::from("  rook checkpoint create <name>  snapshot part of the workspace"),
-            Line::from("  rook doctor                    detected toolchains and platform"),
+            command("  rook store stat                what memory costs, per kind"),
+            command("  rook store ls / cat <id>       list and print raw objects"),
+            command("  rook store gc --dry-run        what would be collected"),
+            command("  rook session ls / show <id>    transcripts by sequence number"),
+            command("  rook skills ls / why <name>    what applies here, and why not"),
+            command("  rook skills history <name>     every captured version"),
+            command("  rook skills rollback <n> <id>  restore one, undoably"),
+            command("  rook checkpoint create <name>  snapshot part of the workspace"),
+            command("  rook doctor                    detected toolchains and platform"),
             Line::from(""),
             Line::from(Span::styled("keys", Style::default().add_modifier(Modifier::BOLD))),
-            Line::from("  Tab         switch tab          j k ↑ ↓   move"),
-            Line::from("  1-6         switch tab, outside Chat where digits are text"),
-            Line::from("  Space/PgDn  scroll transcript    r         reload"),
-            Line::from("  wheel       scrolls either pane; hold Shift to select text"),
-            Line::from("  q / Esc     quit (Ctrl-C anywhere)"),
+            key("  Tab         switch tab          j k ↑ ↓   move"),
+            key("  1-6         switch tab, outside Chat where digits are text"),
+            key("  Space/PgDn  scroll transcript    r         reload"),
+            key("  wheel       scrolls either pane; hold Shift to select text"),
+            key("  q / Esc     quit (Ctrl-C anywhere)"),
             Line::from(""),
-            Line::from("  In Memory:  a adds a fact here · A adds it everywhere"),
-            Line::from("              d forgets the selected one · u puts it back"),
+            key("  In Memory:  a adds a fact here · A adds it everywhere"),
+            key("              d forgets the selected one · u puts it back"),
             Line::from(""),
-            Line::from("  In Chat:    Enter sends · Esc clears, then quits"),
-            Line::from("              /btw <question> asks without joining the conversation"),
-            Line::from("              y / a / n answer an approval"),
-            Line::from("              enter     answer a question, one at a time"),
-            Line::from("              /…        tab completes; the list shows as you type"),
-            Line::from("              PgUp/PgDn scroll back through the conversation"),
-            Line::from("              ↑ / ↓     the prompts already sent, newest first"),
-            Line::from("              ← → home end · ctrl-a/e/w/u/k edit the line being typed"),
-            Line::from("              F2 / F3   cycle approvals / reasoning effort"),
-            Line::from("              ctrl-c    stops a running turn, or quits when none is"),
+            key("  In Chat:    Enter sends · Esc clears, then quits"),
+            key("              /btw <question> asks without joining the conversation"),
+            key("              y / a / n answer an approval"),
+            key("              enter     answer a question, one at a time"),
+            key("              /…        tab completes; the list shows as you type"),
+            key("              PgUp/PgDn scroll back through the conversation"),
+            key("              ↑ / ↓     the prompts already sent, newest first"),
+            key("              ← → home end · ctrl-a/e/w/u/k edit the line being typed"),
+            key("              F2 / F3   cycle approvals / reasoning effort"),
+            key("              ctrl-c    stops a running turn, or quits when none is"),
         ];
         f.render_widget(Paragraph::new(text).block(bordered(" Help ")), area);
     }

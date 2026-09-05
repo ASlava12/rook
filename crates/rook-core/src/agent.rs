@@ -1608,15 +1608,21 @@ impl<'a> AgentLoop<'a> {
             for text in carried {
                 self.interjections.say(&text);
             }
-            if !assembler.reasoning().is_empty() {
-                self.rook.log(self.session, EventKind::Reasoning, "", assembler.reasoning()).ok();
+            let thinking = assembler.reasoning().to_string();
+            if !thinking.is_empty() {
+                self.rook.log(self.session, EventKind::Reasoning, "", &thinking).ok();
             }
             let mut response = assembler.finish();
             // Read back either way. Without native tools the object is the
             // only way a call arrives; with them, a small model still writes
             // one as text some of the time, and the turn ended with nothing
             // called. Only a tool that was offered is taken as called.
-            rook_llm::prompted::adopt(&mut response, |name| self.tool_specs().iter().any(|t| t.name == name));
+            let offered = |name: &str| self.tool_specs().iter().any(|t| t.name == name);
+            rook_llm::prompted::adopt(&mut response, offered);
+            // And in the thinking, where one arrived: a model that writes its
+            // call in `reasoning_content` and nothing in `content` ended the
+            // turn mid-task, with the call written out in the transcript.
+            rook_llm::prompted::adopt_thought(&mut response, &thinking, offered);
 
             // Only when it is at least what the text plainly weighs. A provider
             // reporting less than that is not counting what this needs counted —
