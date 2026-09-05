@@ -673,6 +673,13 @@ fn a_second_window_runs_its_turn_through_the_daemon() {
 
     assert!(asked.contains("approval"), "the daemon's approval arrives here:\n{asked}");
     assert!(asked.contains("the-very-end"), "with the command whole:\n{asked}");
+    // The connection reports its settings when it opens and again for each one
+    // this window sets, and printing each put `stance: assist · effort: high`
+    // three times above a turn that had not started.
+    assert!(
+        asked.matches("effort:").count() <= 1,
+        "the settings handshake is not three lines of log:\n{asked}"
+    );
     // Answered from this window, which is the other half of the path.
     pty.send("y");
     let ran = pty.screen_showing(100, 30, "run_command").join("\n");

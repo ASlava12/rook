@@ -1382,6 +1382,17 @@ the chat socket needed. Both the handler and the hours-long timer run it on a
 blocking thread now; the test runs on a single-threaded runtime and fails
 without the change.
 
+**What `effort` actually reaches.** Measured against the machine that reported
+the slow turn, because the advice given there was wrong: the reasoning effort
+is sent only to the families documented to take it — gpt-5, o1, o3, o4 — and
+Anthropic's current models are asked for adaptive thinking instead. For a local
+`qwen3.8-27b` on LM Studio, nothing is sent at all, so the `high` in the footer
+changed nothing and the minutes of thinking were the model's own. Asked
+directly, that endpoint accepts `reasoning_effort` and ignores it: `high` and
+`minimal` produced 179 and 195 reasoning tokens for the same three-word answer,
+and `enable_thinking: false` only brought it to 144. An `adaptive` rung of our
+own would be a fourth thing that does not reach this model.
+
 **An hour, measured.** A one-file change took sixty-nine minutes against a
 local 27b, and the transcript says where they went. Forty percent was the model
 thinking at `high` effort — twenty-two replies, gaps of forty-five to four

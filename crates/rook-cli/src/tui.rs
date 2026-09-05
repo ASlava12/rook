@@ -696,8 +696,19 @@ impl App {
                     chosen: Vec::new(),
                 })
             }
+            // Said only when it disagrees. A connection reports its settings
+            // when it opens and again for each one this window sets, so the
+            // handshake printed `stance: assist · effort: high` three times
+            // before the turn had started — noise where a difference would
+            // have been news.
             ChatEvent::Settings { mode, effort, .. } => {
-                self.chat.push("stat", &format!("  stance: {mode} · effort: {effort}"))
+                let ours = (self.shared.policy.stance().as_str(), self.shared.effort.get().as_str());
+                if (mode.as_str(), effort.as_str()) != ours {
+                    self.chat.push(
+                        "stat",
+                        &format!("  the daemon is running at {mode} · {effort}, not {} · {}", ours.0, ours.1),
+                    );
+                }
             }
             ChatEvent::Cancelled => {
                 self.chat.push("stat", "[stopped]");
