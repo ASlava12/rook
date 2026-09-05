@@ -14,13 +14,25 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 /// Answers like GitHub: the release API with one asset, and the asset itself.
 /// `digest` is what the API claims, which need not be what is served.
 async fn github(asset_name: &'static str, bytes: Arc<Vec<u8>>, digest: String) -> String {
+    github_holding(asset_name, bytes, digest, None).await
+}
+
+/// The same, with the download held until the test lets it go — which is how
+/// "the turn did not wait for this" is asserted without a timing constant: if
+/// it waited, the turn never reaches the model at all.
+async fn github_holding(
+    asset_name: &'static str,
+    bytes: Arc<Vec<u8>>,
+    digest: String,
+    hold: Option<Arc<tokio::sync::Notify>>,
+) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let base = format!("http://{addr}");
     let at = base.clone();
     tokio::spawn(async move {
         while let Ok((mut socket, _)) = listener.accept().await {
-            let (bytes, digest, at) = (bytes.clone(), digest.clone(), at.clone());
+            let (bytes, digest, at, hold) = (bytes.clone(), digest.clone(), at.clone(), hold.clone());
             tokio::spawn(async move {
                 let mut scratch = [0u8; 8192];
                 let n = socket.read(&mut scratch).await.unwrap_or(0);
@@ -40,6 +52,9 @@ async fn github(asset_name: &'static str, bytes: Arc<Vec<u8>>, digest: String) -
                     let json = serde_json::json!({ "tag_name": "2026-01-01", "assets": [entry] });
                     ("200 OK", "application/json", json.to_string().into_bytes())
                 } else if path.starts_with("/download/") {
+                    if let Some(hold) = &hold {
+                        hold.notified().await;
+                    }
                     ("200 OK", "application/octet-stream", (*bytes).clone())
                 } else {
                     ("404 Not Found", "text/plain", b"no".to_vec())
@@ -281,6 +296,84 @@ async fn an_autonomous_turn_fetches_the_missing_server_into_the_state_directory(
     let installed = rook_core::install::current("rust-analyzer");
     assert!(installed.starts_with(home.path()), "under the state directory: {}", installed.display());
     assert_eq!(std::fs::read(&installed).unwrap(), payload, "in place: {}", installed.display());
+}
+
+/// Says what it was told, and signals that it was asked at all.
+struct SaysAndSignals(&'static str, Arc<tokio::sync::Notify>);
+
+#[async_trait::async_trait]
+impl Provider for SaysAndSignals {
+    fn id(&self) -> &str {
+        "scripted/says-and-signals"
+    }
+    fn context_window(&self) -> usize {
+        16_000
+    }
+    async fn complete(&self, request: Request) -> rook_llm::Result<Response> {
+        self.1.notify_one();
+        Says(self.0).complete(request).await
+    }
+}
+
+/// What is fetched serves the next session — the pool of servers is built by
+/// the front end before the first turn — so the turn that pays for it gets
+/// nothing back. Paid before the first request, it was a person's first minute
+/// in a new project spent watching nothing happen.
+///
+/// No timing constant: the download is held open until this test releases it,
+/// so a turn that waits for the fetch never reaches the model at all.
+#[tokio::test]
+async fn the_turn_does_not_wait_for_the_server_it_is_fetching() {
+    let _one = one_at_a_time().await;
+    let payload = b"#!/bin/sh\necho rust-analyzer\n".to_vec();
+    let gz = Arc::new(gzipped(&payload));
+    let hold = Arc::new(tokio::sync::Notify::new());
+    let api = github_holding(
+        "rust-analyzer-x86_64-unknown-linux-gnu.gz",
+        gz.clone(),
+        sha256_of(&gz),
+        Some(hold.clone()),
+    )
+    .await;
+    unsafe { std::env::set_var("ROOK_RELEASE_API", &api) };
+
+    let home = tempfile::tempdir().unwrap();
+    let (_workspace, rook) = a_rust_workspace(home.path());
+    let session = rook.start_session("s").unwrap();
+    let asked = Arc::new(tokio::sync::Notify::new());
+    let waiting = asked.notified();
+
+    let mut agent = AgentLoop::new(&rook, Arc::new(SaysAndSignals("ok", asked.clone())), session);
+    agent.allow_everything_not_denied();
+    let running = agent.run("hello");
+    tokio::pin!(running);
+
+    // Generous, because what it separates is a wait from a hang: if the fetch
+    // is in front of the turn, this never arrives.
+    let reached_the_model = tokio::select! {
+        _ = &mut running => panic!("the turn ended without collecting the fetch it started"),
+        reached = tokio::time::timeout(std::time::Duration::from_secs(30), waiting) => reached,
+    };
+    assert!(reached_the_model.is_ok(), "the turn asked the model while the fetch was still held");
+
+    // `notify_one`, not `notify_waiters`: the download may not have asked yet
+    // — the release listing comes first — and a permit waits for it, where a
+    // broadcast to nobody would be lost and the fetch would hang to its
+    // timeout.
+    hold.notify_one();
+    let outcome = running.await.unwrap();
+    unsafe { std::env::remove_var("ROOK_RELEASE_API") };
+
+    assert_eq!(
+        outcome.decisions.len(),
+        1,
+        "and the fetch is still reported: {:?} / open: {:?}",
+        outcome.decisions,
+        outcome.open_questions
+    );
+    assert!(outcome.decisions[0].contains("next session"), "{:?}", outcome.decisions);
+    let installed = rook_core::install::current("rust-analyzer");
+    assert_eq!(std::fs::read(&installed).unwrap(), payload, "in place by the end: {}", installed.display());
 }
 
 /// A directory of stand-ins first on PATH: an `npm` that creates the shim

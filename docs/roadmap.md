@@ -194,6 +194,18 @@ what unblocks the most.
   last. Anthropic's signed blocks are left alone; a second copy as text would
   be the same thought twice. The bound is what lets `session context` price a
   thought from its stored size without reading it. 2 tests.
+- **A fetch the turn waited for and could not use** — a missing language server
+  is offered once a session, and under `autonomous` it is fetched: a minute of
+  npm or a release download, before the first request, for something that by
+  its own report "serves from the next session on" — the pool is built by the
+  front end before the turn. So a person's first minute in a new project was
+  spent watching nothing happen, for nothing this turn could use. It is started
+  now and collected at the end of the turn, where its report belongs anyway,
+  and the model is asked while it downloads. The test holds the download open
+  until it has seen the model asked, so what it proves needs no timing
+  constant: a turn that waited would never reach the model at all. It also
+  found that the report was being written after the reports were settled, which
+  is a line nobody reads. 1 test.
 - **A checker that could not see what the turn had changed** — read from a real
   check, against a local model, of a turn that had just fixed a syntax error:
   "The file compiles and runs… the claim that it does not compile is false, so

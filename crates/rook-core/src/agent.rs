@@ -555,6 +555,12 @@ pub struct TurnOutcome {
     pub open_questions: Vec<String>,
 }
 
+/// A fetch under way, and what it is for, so its report names it.
+type Fetching = (
+    &'static crate::install::Recipe,
+    tokio::task::JoinHandle<std::result::Result<crate::install::Installed, String>>,
+);
+
 /// Where a language server goes when the agent installs one.
 enum How {
     System,
@@ -580,6 +586,12 @@ pub struct AgentLoop<'a> {
     pub servers: std::sync::Arc<crate::lsp::Servers>,
     /// What the `session_start` hooks contributed, computed once.
     session_context: std::sync::Mutex<Option<String>>,
+    /// A language server being fetched while the turn runs. It is a minute of
+    /// npm or a release download, it serves from the next session on, and it
+    /// used to be paid for before the first request — a person's first turn in
+    /// a new project sat silent while it downloaded something that turn could
+    /// not use.
+    installing: std::sync::Mutex<Option<Fetching>>,
     /// Every file this turn has written, workspace-relative. Collected here
     /// because the writing happens inside a call whose only answer is the
     /// text the model sees.
@@ -668,6 +680,7 @@ impl<'a> AgentLoop<'a> {
             servers,
             session_context: std::sync::Mutex::new(None),
             problems_before: Default::default(),
+            installing: Default::default(),
             wrote_paths: Default::default(),
             reported: Default::default(),
             asker: None,
@@ -772,6 +785,26 @@ impl<'a> AgentLoop<'a> {
             },
         };
 
+        // Started rather than waited for. What it fetches serves the next
+        // session, so the turn that pays for it gets nothing back — and it was
+        // paid before the first request, which is a person's first minute in a
+        // new project spent watching nothing happen. It is collected at the end
+        // of the turn, where its report belongs anyway.
+        if matches!(how, How::Fetch) {
+            let (args, risk) = self.fetch_risk(recipe);
+            if let Some(refusal) = self.gate_risk("lsp install", &args, risk, Shown::Nothing).await {
+                self.report(Reported::Open(refusal));
+                return;
+            }
+            let env = self.rook.env().clone();
+            let fetching = tokio::spawn(async move {
+                crate::install::Installer::new(crate::paths::servers_dir())?.install(recipe, &env).await
+            });
+            if let Ok(mut slot) = self.installing.lock() {
+                *slot = Some((recipe, fetching));
+            }
+            return;
+        }
         let done = match how {
             How::System => match self.install_with_system(recipe).await {
                 Ok(said) => Ok(said),
@@ -1940,8 +1973,7 @@ impl<'a> AgentLoop<'a> {
                             outcome.stopped
                         );
                     }
-                    self.settle_reports(&mut outcome);
-                    self.finish(&outcome).await;
+                    self.end_of_turn(&mut outcome).await;
                     return Ok(outcome);
                 }
                 messages.push(carried.clone());
@@ -2072,8 +2104,7 @@ impl<'a> AgentLoop<'a> {
             outcome.reply =
                 format!("(the model ended the turn without saying anything — {})", outcome.stopped);
         }
-        self.settle_reports(&mut outcome);
-        self.finish(&outcome).await;
+        self.end_of_turn(&mut outcome).await;
         Ok(outcome)
     }
 
@@ -2983,6 +3014,40 @@ impl<'a> AgentLoop<'a> {
         if let Ok(mut slot) = self.session_context.lock() {
             *slot = Some(outcome.context().unwrap_or_default());
         }
+    }
+
+    /// What the fetch started at the beginning of the turn came to, said
+    /// where every other decision of the turn is said.
+    async fn collect_install(&self) {
+        let Some((recipe, fetching)) = self.installing.lock().ok().and_then(|mut slot| slot.take()) else {
+            return;
+        };
+        let done = match fetching.await {
+            Ok(done) => done.map(|done| done.describe()),
+            Err(e) => Err(format!("the fetch did not finish: {e}")),
+        };
+        let said = match done {
+            Ok(said) => format!("{said} — it serves from the next session on"),
+            Err(why) => format!(
+                "could not install {}: {why} — `rook lsp install {}` by hand, or say how",
+                recipe.command, recipe.command
+            ),
+        };
+        self.rook.log(self.session, EventKind::Note, "lsp install", &said).ok();
+        match said.starts_with("could not") {
+            true => self.report(Reported::Open(said)),
+            false => self.report(Reported::Decision(said)),
+        }
+    }
+
+    /// Everything that happens once the turn is over, in the order it has to
+    /// happen in: what was fetched while it ran is collected first, because
+    /// settling the reports is what copies them into the outcome and a line
+    /// written after that is a line nobody reads.
+    async fn end_of_turn(&self, outcome: &mut TurnOutcome) {
+        self.collect_install().await;
+        self.settle_reports(outcome);
+        self.finish(outcome).await;
     }
 
     async fn finish(&self, outcome: &TurnOutcome) {
