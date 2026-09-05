@@ -82,6 +82,8 @@ rook --json run "..." | jq .outcome.reply  # one object: reply, tokens, changes
                                            # exit 2 if the turn did not finish
 rook tui                                   # full terminal UI: chat plus a store browser
 rookd                                      # http://127.0.0.1:7717 — web UI + API
+rook daemon status                         # where it is, and whether it is this build
+rook daemon restart                        # after an upgrade; names any turn it ends
 ```
 
 The browser is a front end, not a viewer: the chat resumes any session, stops a

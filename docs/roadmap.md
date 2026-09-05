@@ -117,6 +117,17 @@ what unblocks the most.
   work out, scoped by `requires` to where it actually holds, validated by reading
   it back, and captured as a version so a rewrite keeps the old one. The index
   reloads in place, so the next turn's catalog has it without a restart. 7 tests.
+- **A daemon that can be looked at and stopped** — `rookd` is started by opening
+  a window, and stopping it meant `pgrep` and `kill`: a process id to find for a
+  program nothing had told you about. `rook daemon status` says where it is
+  answering, how long it has been up and how many turns it is running; `stop`
+  names the turns it would interrupt rather than dropping them, and takes
+  `--force` for the decision made with that number in front of you; `restart`
+  waits for the address file to go before starting the next one. And because an
+  upgrade leaves the running daemon on the old code — every window keeps
+  working, at the previous version — the health it already asks for on the way
+  in now says whether the `rookd` on disk has changed since that process
+  started, and a window that finds one says so in a line. 3 tests.
 - **The TUI started for real** — on a pseudo-terminal, with the screen replayed
   out of the escape stream and read back a row at a time. Nothing else can see
   that it starts at all: it needs a tty to draw, so a panic on launch would

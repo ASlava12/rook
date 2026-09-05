@@ -81,6 +81,9 @@ enum Command {
         #[arg(long)]
         port: Option<u16>,
     },
+    /// Look after the `rookd` that holds the store for every window.
+    #[command(subcommand)]
+    Daemon(DaemonCmd),
     /// Inspect and maintain the object store.
     #[command(subcommand)]
     Store(StoreCmd),
@@ -113,6 +116,27 @@ enum Command {
         conversation: bool,
         #[arg(long, default_value_t = 40)]
         limit: usize,
+    },
+}
+
+#[derive(Subcommand)]
+enum DaemonCmd {
+    /// Where it is, how long it has been up, and whether it is the build that
+    /// is installed.
+    Status,
+    /// Start one, if none is answering.
+    Start,
+    /// Stop it. A turn in flight is named rather than dropped.
+    Stop {
+        /// End the turns that are running.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Stop it and start the installed build in its place.
+    Restart {
+        /// End the turns that are running.
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -379,6 +403,7 @@ fn main() -> Result<()> {
         Some(Command::Models) => cmd_models(cli.workspace, cli.json),
         Some(Command::Acp) => cmd_acp(cli.workspace),
         Some(Command::Serve { port }) => cmd_serve(port),
+        Some(Command::Daemon(c)) => cmd_daemon(c, cli.json),
         Some(Command::Store(c)) => cmd_store(&Source::open(cli.workspace)?, c, cli.json),
         Some(Command::Session(c)) => {
             let here = workspace_of(&cli.workspace);
@@ -980,6 +1005,80 @@ fn cmd_serve(port: Option<u16>) -> Result<()> {
          without pulling in the TUI.",
         config.server.port
     )
+}
+
+/// The daemon is started by opening a window and stopped by killing a process
+/// somebody had to go and find. Both halves belong to the program that starts
+/// it.
+fn cmd_daemon(cmd: DaemonCmd, json: bool) -> Result<()> {
+    let running = crate::source::Daemon::running();
+    match (cmd, running) {
+        (DaemonCmd::Status, None) => {
+            if json {
+                println!("{}", serde_json::json!({ "running": false }));
+            } else {
+                println!("nothing is answering — `rook daemon start`, or open `rook tui`");
+            }
+        }
+        (DaemonCmd::Status, Some(daemon)) => {
+            let health = daemon.health()?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &serde_json::json!({ "running": true, "base": daemon.base, "health": health })
+                    )?
+                );
+                return Ok(());
+            }
+            println!("running at {}", daemon.base);
+            println!(
+                "rook {} · api {} · started {}",
+                health.version,
+                health.api_version,
+                fmt::ago(rook_store::now_unix() - health.uptime_secs as i64)
+            );
+            println!("store      {}", health.store_root);
+            println!("turns      {}", health.turns_running);
+            if health.binary_replaced {
+                println!(
+                    "\nthe `rookd` on disk has changed since this one started: it is running the \n\
+                     previous build. `rook daemon restart` picks up the installed one."
+                );
+            }
+        }
+        (DaemonCmd::Start, Some(daemon)) => println!("already running at {}", daemon.base),
+        (DaemonCmd::Start, None) => println!("started, at {}", Source::start_a_daemon()?),
+        (DaemonCmd::Stop { .. }, None) => println!("nothing is answering"),
+        (DaemonCmd::Stop { force }, Some(daemon)) => {
+            let interrupted = daemon.stop(force)?;
+            println!("stopping{}", ended(interrupted));
+        }
+        (DaemonCmd::Restart { force }, running) => {
+            if let Some(daemon) = running {
+                let interrupted = daemon.stop(force)?;
+                println!("stopping{}", ended(interrupted));
+                // Its address file goes as it exits, and a start before that
+                // would find the old one still answering and do nothing.
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                while crate::source::Daemon::running().is_some() {
+                    if std::time::Instant::now() > deadline {
+                        bail!("it is still answering ten seconds on; stop it by hand");
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            }
+            println!("started, at {}", Source::start_a_daemon()?);
+        }
+    }
+    Ok(())
+}
+
+fn ended(turns: u32) -> String {
+    match turns {
+        0 => String::new(),
+        n => format!(" — {n} turn(s) ended where they were"),
+    }
 }
 
 fn show_stats(s: &StoreStats, json: bool) -> Result<()> {

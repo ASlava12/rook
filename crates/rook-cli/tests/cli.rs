@@ -389,6 +389,34 @@ fn a_read_routes_through_the_daemon_and_answers_the_same() {
     drop(daemon);
 }
 
+/// Stopping the daemon meant finding its process id first — `pgrep`, then
+/// `kill`, for a program a window had started on its own.
+#[test]
+fn the_daemon_says_what_it_is_and_stops_when_asked() {
+    let rook = Rook::new();
+    let daemon = Daemon::start(&rook);
+
+    let said = String::from_utf8_lossy(&rook.run(&["daemon", "status"]).stdout).to_string();
+    assert!(said.contains(&daemon.address), "it says where it is answering: {said}");
+    assert!(said.contains("turns"), "and what it is doing: {said}");
+
+    let stopped = rook.run(&["daemon", "stop"]);
+    assert!(stopped.status.success(), "{}", String::from_utf8_lossy(&stopped.stderr));
+
+    // Its address file is how every other window finds it, and it goes on the
+    // way out — so this is also the wait for the process to be gone.
+    let address_file = rook.home.path().join("rookd.addr");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while address_file.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(!address_file.exists(), "stopping takes the address file with it");
+
+    let after = String::from_utf8_lossy(&rook.run(&["daemon", "status"]).stdout).to_string();
+    assert!(after.contains("nothing is answering"), "and then there is nothing to talk to: {after}");
+    drop(daemon);
+}
+
 /// The writes the daemon serves. Refusing these meant stopping the daemon to
 /// set a goal or to forget a fact, which is the same store answering either
 /// way — and `store maintain` is what somebody reaches for exactly when a

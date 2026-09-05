@@ -162,7 +162,10 @@ async fn serve(
                 if let Some(said) = state.config_if_changed().await {
                     let _ = outbound.send(ChatEvent::Text { text: format!("({said})\n") });
                 }
-                running = Some(tokio::spawn(turn(
+                // Counted while it runs: a daemon asked to stop should say
+                // what stopping would interrupt rather than find out after.
+                let counted = state.turn_started();
+                let running_turn = turn(
                     engine.clone(),
                     Connection {
                         approver: approver.clone(),
@@ -174,7 +177,13 @@ async fn serve(
                     outbound.clone(),
                     session,
                     text,
-                )));
+                );
+                running = Some(tokio::spawn(async move {
+                    // Dropped with the future, so a cancelled turn stops being
+                    // counted where it stops running.
+                    let _counted = counted;
+                    running_turn.await;
+                }));
             }
         }
     }

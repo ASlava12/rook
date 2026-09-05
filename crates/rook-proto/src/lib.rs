@@ -51,6 +51,16 @@ pub struct Health {
     pub os: String,
     pub arch: String,
     pub uptime_secs: u64,
+    /// How many turns this daemon is running right now, so a client asking it
+    /// to stop can say what stopping would interrupt.
+    #[serde(default)]
+    pub turns_running: u32,
+    /// Whether the `rookd` on disk has changed since this process started it.
+    /// An upgrade leaves the running daemon on the old code — the store, the
+    /// API and the web UI all keep working, at the previous version — and
+    /// nothing said so.
+    #[serde(default)]
+    pub binary_replaced: bool,
 }
 
 /// One page of results. Cursor rather than offset: an append-only log grows

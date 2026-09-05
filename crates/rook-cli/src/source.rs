@@ -35,31 +35,44 @@ impl Source {
     pub fn shared(workspace: Option<std::path::PathBuf>) -> Result<(Self, Option<String>)> {
         if let Some(mut daemon) = Daemon::running() {
             daemon.workspace = asked_about(workspace.clone());
-            return Ok((Self::Daemon(daemon), None));
+            // An upgrade leaves the running daemon on the old code, and every
+            // window keeps working — at the previous version. Said on the way
+            // in, because the alternative is finding out from a fix that did
+            // not take.
+            let note = daemon.replaced.then(|| {
+                format!(
+                    "the rookd at {} started before this build was installed —                      `rook daemon restart` runs the new one",
+                    daemon.base
+                )
+            });
+            return Ok((Self::Daemon(daemon), note));
         }
         let Some((mut child, started)) = start_daemon() else {
             return Ok((Self::open(workspace)?, None));
         };
-        // Its own address file is the only "it is up" there is, and it writes
-        // one after opening the store, discovering skills and binding a port.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while std::time::Instant::now() < deadline {
-            if let Some(mut daemon) = Daemon::running() {
-                daemon.workspace = asked_about(workspace.clone());
-                return Ok((Self::Daemon(daemon), Some(started)));
-            }
-            // Watched rather than waited out: a daemon that cannot start says
-            // so in a moment, and thirty seconds of nothing before a window
-            // opens is indistinguishable from a hang.
-            if matches!(child.try_wait(), Ok(Some(_)) | Err(_)) {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
+        if came_up(&mut child)
+            && let Some(mut daemon) = Daemon::running()
+        {
+            daemon.workspace = asked_about(workspace.clone());
+            return Ok((Self::Daemon(daemon), Some(started)));
         }
         let _ = child.kill();
         // It did not come up. The direct path says what is actually wrong, and
         // a window that opens is better than a window that explains.
         Ok((Self::open(workspace)?, None))
+    }
+
+    /// Start one and wait for it, for `rook daemon start` and the restart that
+    /// is a stop and this.
+    pub fn start_a_daemon() -> Result<String> {
+        let Some((mut child, beside)) = start_daemon() else {
+            bail!("no `rookd` next to this binary — install the two together")
+        };
+        if !came_up(&mut child) {
+            let _ = child.kill();
+            bail!("`{beside}` did not come up; what it says is in {}", paths::logs_dir().display());
+        }
+        Daemon::running().map(|d| d.base).context("it answered and then stopped")
     }
 
     /// Local unless the store is locked and a daemon is reachable, which is the
@@ -697,6 +710,26 @@ fn start_daemon() -> Option<(std::process::Child, String)> {
     Some((command.spawn().ok()?, beside.display().to_string()))
 }
 
+/// Its own address file is the only "it is up" there is, and it writes one
+/// after opening the store, discovering skills and binding a port.
+///
+/// Watched rather than waited out: a daemon that cannot start says so in a
+/// moment, and thirty seconds of nothing before a window opens is
+/// indistinguishable from a hang.
+fn came_up(child: &mut std::process::Child) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        if Daemon::running().is_some() {
+            return true;
+        }
+        if matches!(child.try_wait(), Ok(Some(_)) | Err(_)) {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    false
+}
+
 /// The project being asked about, as a query value.
 fn here(workspace: &std::path::Path) -> String {
     escaped(&workspace.display().to_string())
@@ -721,6 +754,9 @@ fn is_locked(e: &rook_core::CoreError) -> bool {
 
 pub struct Daemon {
     pub base: String,
+    /// From the health check that proved it was answering: whether the `rookd`
+    /// on disk has changed since that process started.
+    pub replaced: bool,
     /// The project this window is about, which the daemon serves several of:
     /// every routed read names it, and a front end asking about the daemon's
     /// own workspace instead would be answering a different question.
@@ -743,9 +779,23 @@ impl Daemon {
         // reqwest panics on build without one, even for plain HTTP to loopback.
         rook_llm::init_tls();
         let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(10)).build().ok()?;
-        let daemon = Self { base, workspace: std::path::PathBuf::from("."), runtime, http };
-        daemon.get::<serde_json::Value>("/api/health").ok()?;
+        let mut daemon =
+            Self { base, replaced: false, workspace: std::path::PathBuf::from("."), runtime, http };
+        // The same request that proves it is alive answers what it is running,
+        // so knowing costs nothing beyond what was already asked.
+        daemon.replaced = daemon.health().ok()?.binary_replaced;
         Some(daemon)
+    }
+
+    pub fn health(&self) -> Result<rook_proto::Health> {
+        self.get("/api/health")
+    }
+
+    /// Ask it to stop. It refuses while a turn is running unless told to end
+    /// them, which is a decision to make with the number in front of you.
+    pub fn stop(&self, force: bool) -> Result<u32> {
+        let said: serde_json::Value = self.post("/api/shutdown", &serde_json::json!({ "force": force }))?;
+        Ok(said["turns_interrupted"].as_u64().unwrap_or(0) as u32)
     }
 
     fn post<T: DeserializeOwned>(&self, path: &str, body: &serde_json::Value) -> Result<T> {

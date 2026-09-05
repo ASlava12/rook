@@ -63,6 +63,27 @@ pub struct AppState {
     /// Resolved once, with the rest of what is read at startup: where the file
     /// is does not change while the process runs.
     pub config_path: std::path::PathBuf,
+    /// When this process started, against which the binary's own timestamp is
+    /// read: an upgrade leaves the running daemon on the old code, and until
+    /// something says so the only symptom is a fix that did not take.
+    pub started_at: std::time::SystemTime,
+    /// Turns in flight, so stopping can say what it would interrupt.
+    turns: std::sync::atomic::AtomicU32,
+    /// Asked to stop over the API rather than by a signal. Stopping a daemon
+    /// meant finding its process id, which is not something a person should
+    /// have to do to a program they started by opening a window.
+    pub stopping: tokio::sync::Notify,
+}
+
+/// A turn in flight. Counted for as long as this lives, which is the turn's
+/// task — so a cancelled turn stops counting when its future is dropped,
+/// rather than leaving a daemon that believes it is forever busy.
+pub struct Running(Arc<AppState>);
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.0.turns.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 impl AppState {
@@ -78,6 +99,22 @@ impl AppState {
     /// Asked once per turn rather than watched: a turn is when it matters, and
     /// a watcher is a thread and a dependency for a question that costs one
     /// `stat`.
+    pub fn turn_started(self: &Arc<Self>) -> Running {
+        self.turns.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Running(self.clone())
+    }
+
+    pub fn turns_running(&self) -> u32 {
+        self.turns.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Whether the `rookd` on disk is not the one this process is running.
+    /// Read at the question rather than at startup: the replacement happens
+    /// while it runs, which is the whole point of asking.
+    pub fn binary_replaced(&self) -> bool {
+        replaced_since(self.started_at)
+    }
+
     pub async fn config_if_changed(&self) -> Option<String> {
         let touched = std::fs::metadata(&self.config_path).and_then(|m| m.modified()).ok();
         {
@@ -207,6 +244,9 @@ async fn main() -> Result<()> {
             std::fs::metadata(rook_core::paths::config_file()).and_then(|m| m.modified()).ok(),
         ),
         config_path: rook_core::paths::config_file(),
+        started_at: std::time::SystemTime::now(),
+        turns: std::sync::atomic::AtomicU32::new(0),
+        stopping: tokio::sync::Notify::new(),
         started: std::time::Instant::now(),
         about,
     });
@@ -225,7 +265,7 @@ async fn main() -> Result<()> {
     println!("rook web UI:  http://{addr}");
     println!("rook API:     http://{addr}/api/health");
 
-    axum::serve(listener, app).with_graceful_shutdown(shutdown()).await.context("serving")?;
+    axum::serve(listener, app).with_graceful_shutdown(shutdown(state.clone())).await.context("serving")?;
     maintenance.abort();
     std::fs::remove_file(&address_file).ok();
     Ok(())
@@ -269,18 +309,41 @@ async fn maintain(state: Arc<AppState>, every_hours: u32) {
     }
 }
 
+/// Whether the binary running this process has been written since `started`.
+pub fn replaced_since(started: std::time::SystemTime) -> bool {
+    let Ok(exe) = std::env::current_exe() else { return false };
+    std::fs::metadata(exe).and_then(|m| m.modified()).is_ok_and(|built| built > started)
+}
+
 /// Both signals, because the address file and the store lock are released on
-/// the way out and a service manager sends SIGTERM, not SIGINT.
-async fn shutdown() {
+/// the way out and a service manager sends SIGTERM, not SIGINT — and the API,
+/// because `rook daemon stop` should not mean going to find a process id.
+async fn shutdown(state: Arc<AppState>) {
+    let asked = async { state.stopping.notified().await };
     #[cfg(unix)]
     {
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {}
             _ = term.recv() => {}
+            _ = asked => {}
         }
     }
     #[cfg(not(unix))]
-    let _ = tokio::signal::ctrl_c().await;
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = asked => {}
+    }
     tracing::info!("shutting down");
+    // A turn holds its websocket open and a graceful shutdown waits for every
+    // connection, so a stop that was asked for while one runs would hang
+    // instead of stopping. Whoever asked was told what was running and said so
+    // anyway; the store is crash-safe by design, and the address file is the
+    // one thing that would be left behind.
+    tokio::spawn(async {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        tracing::warn!("a connection is still open five seconds on; exiting anyway");
+        std::fs::remove_file(rook_core::paths::daemon_address_file()).ok();
+        std::process::exit(0);
+    });
 }

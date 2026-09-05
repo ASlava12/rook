@@ -50,6 +50,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/checkpoints/restore", post(restore_checkpoint))
         .route("/api/writing", get(writing))
         .route("/api/maintenance", post(maintenance))
+        .route("/api/shutdown", post(stop))
         .route("/api/store/gc", post(gc))
         .route("/api/store/prune", post(prune))
         .route("/api/store/verify", post(verify))
@@ -125,6 +126,8 @@ async fn health(State(s): State<Shared>) -> ApiResult<Health> {
         os: s.about.os.clone(),
         arch: s.about.arch.clone(),
         uptime_secs: s.started.elapsed().as_secs(),
+        turns_running: s.turns_running(),
+        binary_replaced: s.binary_replaced(),
     }))
 }
 
@@ -733,6 +736,30 @@ fn yes() -> bool {
 
 /// Prune and collect. Defaults to a dry run: a destructive default behind a
 /// single button click is how a UI eats someone's history.
+#[derive(Deserialize)]
+struct Stop {
+    /// Stop even though a turn is running. Without it a busy daemon says what
+    /// it is doing instead: a turn taken out from under someone keeps whatever
+    /// it had already written and loses the rest, and that is a decision to be
+    /// made with the number in front of you.
+    #[serde(default)]
+    force: bool,
+}
+
+/// Stop the daemon, which otherwise meant finding its process id.
+async fn stop(State(s): State<Shared>, Json(body): Json<Stop>) -> ApiResult<serde_json::Value> {
+    let running = s.turns_running();
+    if running > 0 && !body.force {
+        return Err(Fail(
+            StatusCode::CONFLICT,
+            ApiError::new("busy", format!("{running} turn(s) still running"))
+                .with_hint("stop them, or ask again with force to end them where they are"),
+        ));
+    }
+    s.stopping.notify_one();
+    Ok(Json(serde_json::json!({ "stopping": true, "turns_interrupted": running })))
+}
+
 /// What is being written right now, and by whom.
 ///
 /// A lock nobody can look at is one that cannot be debugged when it wedges,
@@ -896,6 +923,9 @@ mod tests {
             about,
             config_read: std::sync::Mutex::new(None),
             config_path: home.path().join("config.toml"),
+            started_at: std::time::SystemTime::now(),
+            turns: std::sync::atomic::AtomicU32::new(0),
+            stopping: tokio::sync::Notify::new(),
         });
         Fixture { _home: home, _workspace: workspace, router: router(state.clone()), state, session }
     }
@@ -926,6 +956,43 @@ mod tests {
             "and the next turn is asked of the model that is configured now"
         );
         assert!(f.state.config_if_changed().await.is_none(), "and an unchanged file costs nothing");
+    }
+
+    /// Stopping the daemon meant finding a process id, and stopping one that
+    /// was in the middle of a turn meant finding out afterwards.
+    #[tokio::test]
+    async fn a_stop_names_the_turns_it_would_interrupt_rather_than_dropping_them() {
+        let f = fixture();
+        let turn = f.state.turn_started();
+
+        let (status, body) = post(&f, "/api/shutdown", serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::CONFLICT, "a running turn is not dropped for the asking: {body}");
+        assert_eq!(body["kind"], "busy");
+        assert!(body["error"].as_str().is_some_and(|e| e.contains('1')), "it says how many: {body}");
+
+        let (status, body) = post(&f, "/api/shutdown", serde_json::json!({ "force": true })).await;
+        assert_eq!(status, StatusCode::OK, "asked again, it goes: {body}");
+        assert_eq!(body["turns_interrupted"], 1, "and says what it ended: {body}");
+
+        drop(turn);
+        let (status, body) = post(&f, "/api/shutdown", serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::OK, "with nothing running there is nothing to weigh: {body}");
+        assert_eq!(body["turns_interrupted"], 0);
+    }
+
+    /// An upgrade leaves the running daemon on the old code: the store, the
+    /// API and the web UI all keep working, at the previous version, and the
+    /// only symptom is a fix that did not take.
+    #[test]
+    fn a_daemon_whose_binary_has_been_replaced_says_so() {
+        assert!(
+            crate::replaced_since(std::time::SystemTime::UNIX_EPOCH),
+            "this binary was written after 1970, so a process started then is running an old one"
+        );
+        assert!(
+            !crate::replaced_since(std::time::SystemTime::now()),
+            "and nothing has been written since this instant"
+        );
     }
 
     /// The CLI and the TUI have had `/jobs` since they had jobs. A browser
@@ -1335,6 +1402,7 @@ mod tests {
             "/api/store/verify",
             "/api/store/train",
             "/api/maintenance",
+            "/api/shutdown",
             "/api/memory/add",
             "/api/skills/install",
             "/api/skills/new",
