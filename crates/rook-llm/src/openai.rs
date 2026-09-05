@@ -165,11 +165,26 @@ impl Provider for OpenAiCompatible {
         let text = crate::whole_text(response, &self.config.base_url).await?;
         let listing: Listing = serde_json::from_str(&text)
             .map_err(|e| LlmError::Decode(format!("{e}: {}", truncate(&text, 300))))?;
-        Ok(listing
+        let mut models: Vec<crate::ModelInfo> = listing
             .data
             .into_iter()
             .map(|e| crate::ModelInfo { id: e.id, owned_by: e.owned_by, context_window: e.context_window })
-            .collect())
+            .collect();
+        // The OpenAI shape has no context length, and only some servers add
+        // one. LM Studio is not among them — it answers that on an endpoint of
+        // its own, and the number matters: a model that serves 262144 was being
+        // budgeted at the 32768 this crate assumes for anything self-hosted,
+        // which is a quarter of the reading it could have held. Asked only when
+        // the compatible listing said nothing, so a server that does answer
+        // properly pays no second round trip.
+        if models.iter().all(|m| m.context_window.is_none()) {
+            for (id, window) in self.windows_lm_studio_reports().await {
+                if let Some(model) = models.iter_mut().find(|m| m.id == id) {
+                    model.context_window = Some(window);
+                }
+            }
+        }
+        Ok(models)
     }
 
     async fn stream(&self, request: Request) -> Result<ResponseStream> {
@@ -273,6 +288,49 @@ impl Provider for OpenAiCompatible {
 }
 
 impl OpenAiCompatible {
+    /// What LM Studio says each model will hold, by its own API rather than the
+    /// compatible one.
+    ///
+    /// `loaded_context_length` first: a model that supports 262144 may have
+    /// been loaded with 8192, and the number worth budgeting against is the one
+    /// it will actually serve. Failures are silence — this is a guess being
+    /// improved, and a server that is not LM Studio simply answers 404.
+    async fn windows_lm_studio_reports(&self) -> Vec<(String, usize)> {
+        #[derive(serde::Deserialize)]
+        struct Listing {
+            #[serde(default)]
+            data: Vec<Entry>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Entry {
+            id: String,
+            #[serde(default)]
+            loaded_context_length: Option<usize>,
+            #[serde(default)]
+            max_context_length: Option<usize>,
+        }
+
+        let root = self.config.base_url.trim_end_matches('/').trim_end_matches("/v1");
+        let Ok(response) = self
+            .http
+            .get(format!("{root}/api/v0/models"))
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+        else {
+            return Vec::new();
+        };
+        if !response.status().is_success() {
+            return Vec::new();
+        }
+        let Ok(listing) = response.json::<Listing>().await else { return Vec::new() };
+        listing
+            .data
+            .into_iter()
+            .filter_map(|e| Some((e.id, e.loaded_context_length.or(e.max_context_length)?)))
+            .collect()
+    }
+
     /// A 404 from a server that is otherwise answering means the model is not
     /// there — the common first-run failure, because the default spec names a
     /// model nobody has pulled yet. The server knows which it does have.

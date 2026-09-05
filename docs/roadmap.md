@@ -1382,6 +1382,17 @@ the chat socket needed. Both the handler and the hours-long timer run it on a
 blocking thread now; the test runs on a single-threaded runtime and fails
 without the change.
 
+**A window nobody could see was a quarter of what the machine had.** The
+context length is guesswork for anything self-hosted — 32768 assumed for
+Ollama and LM Studio — and `[agent] context_window` exists to correct it, but
+`doctor`'s offer to name the right number never fired: it compares the
+assumption against what the endpoint reports, and LM Studio's compatible
+listing reports nothing. Its own does, and the model on the machine this was
+found on serves 262144 — eight times what was assumed, on a turn that compacted
+five times. Asked for now, when the compatible listing says nothing, and the
+loaded length is preferred over the model's maximum because that is what will
+actually be served.
+
 **A reply cut at the output limit writes nothing, and said so to nobody.** A
 turn ran for two and a half hours against a local 27b, read nine files, searched
 nine times, compacted five times — and changed not one line, which is how it was

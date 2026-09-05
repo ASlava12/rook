@@ -30,6 +30,78 @@ fn provider(url: String) -> OpenAiCompatible {
     OpenAiCompatible::new("test/model", "model", Config::new(url, None, 8192)).unwrap()
 }
 
+/// Two requests, in order, so a test can answer `/v1/models` one way and the
+/// server's own listing another.
+async fn serving(answers: Vec<(&'static str, &'static str)>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        for (status, body) in answers {
+            let Ok((mut socket, _)) = listener.accept().await else { return };
+            let mut scratch = [0u8; 8192];
+            let _ = socket.read(&mut scratch).await;
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+        }
+    });
+    format!("http://{addr}/v1")
+}
+
+/// LM Studio's compatible listing carries no context length, and its own does.
+/// The number is worth asking for: a model serving 262144 was budgeted at the
+/// 32768 this crate assumes for anything self-hosted, and nothing said so.
+#[tokio::test]
+async fn a_window_the_compatible_listing_omits_is_asked_for_where_it_is_kept() {
+    let url = serving(vec![
+        ("200 OK", r#"{"object":"list","data":[{"id":"qwen/qwen3.8-27b"}]}"#),
+        (
+            "200 OK",
+            r#"{"data":[{"id":"qwen/qwen3.8-27b","max_context_length":262144,"loaded_context_length":32768}]}"#,
+        ),
+    ])
+    .await;
+
+    let models = provider(url).models().await.unwrap();
+
+    assert_eq!(models.len(), 1);
+    assert_eq!(
+        models[0].context_window,
+        Some(32768),
+        "what it is loaded with, not what it could hold: that is what it will serve"
+    );
+}
+
+/// Not asked when the compatible listing already answered: a server that says
+/// it properly pays no second round trip.
+#[tokio::test]
+async fn a_listing_that_carries_the_window_is_not_asked_twice() {
+    let url = serving(vec![
+        ("200 OK", r#"{"object":"list","data":[{"id":"m","context_length":128000}]}"#),
+        ("500 Server Error", r#"{"error":"this must not be reached"}"#),
+    ])
+    .await;
+
+    let models = provider(url).models().await.unwrap();
+
+    assert_eq!(models[0].context_window, Some(128000));
+}
+
+/// And a server that is not LM Studio answers 404 there, which is silence: the
+/// listing is what it was, and the assumed window stands.
+#[tokio::test]
+async fn a_server_without_that_endpoint_is_no_worse_off() {
+    let url =
+        serving(vec![("200 OK", r#"{"object":"list","data":[{"id":"m"}]}"#), ("404 Not Found", "{}")]).await;
+
+    let models = provider(url).models().await.unwrap();
+
+    assert_eq!(models[0].context_window, None);
+    assert_eq!(models[0].id, "m", "and the listing itself is untouched");
+}
+
 #[tokio::test]
 async fn the_openai_shape_is_parsed() {
     let url =
