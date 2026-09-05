@@ -403,6 +403,18 @@ async fn drain_uncollected(nursery: &mut Nursery<'_>, outcome: &mut TurnOutcome)
         .then(|| format!("(sub-agents this turn started and did not collect)\n\n{}", left.join("\n\n")))
 }
 
+/// A thought and what it led to, in one assistant message.
+///
+/// Marked, because the model is reading its own working and not its own
+/// answer, and the two mean different things to it.
+fn with_thinking(thought: Option<String>, said: &str) -> String {
+    match thought {
+        None => said.to_string(),
+        Some(thought) if said.is_empty() => format!("[thinking]\n{thought}\n[/thinking]"),
+        Some(thought) => format!("[thinking]\n{thought}\n[/thinking]\n\n{said}"),
+    }
+}
+
 fn close_open_call(messages: &mut Vec<Message>, open: &mut Option<String>) {
     if let Some(id) = open.take() {
         messages.push(Message::tool_result(id, "no result was recorded: the turn did not finish"));
@@ -1024,6 +1036,11 @@ impl<'a> AgentLoop<'a> {
             )));
         }
         let mut open_call: Option<String> = None;
+        // What the model was working out, carried into the message it led to
+        // rather than as one of its own: two assistant messages in a row are
+        // not a conversation any dialect accepts.
+        let mut thought: Option<String> = None;
+        let thinking_budget = self.rook.config.agent.max_reasoning_tokens;
         // A replayed conversation reads as continuous however long the gaps
         // were, so a session picked up a week later looks like one paused for a
         // moment — and "did you already run the tests?" has a different answer
@@ -1047,9 +1064,13 @@ impl<'a> AgentLoop<'a> {
                     close_open_call(&mut messages, &mut open_call);
                     messages.push(Message::user(body))
                 }
+                EventKind::Reasoning => {
+                    let kept = crate::context::shorten_thinking(&body, thinking_budget);
+                    thought = (!kept.is_empty()).then_some(kept);
+                }
                 EventKind::AssistantMessage => {
                     close_open_call(&mut messages, &mut open_call);
-                    messages.push(Message::assistant(body))
+                    messages.push(Message::assistant(with_thinking(thought.take(), &body)))
                 }
                 EventKind::SkillLoaded => {
                     messages.push(Message::user(format!("[skill {} loaded]\n{body}", event.record.label)))
@@ -1059,7 +1080,10 @@ impl<'a> AgentLoop<'a> {
                     let id = format!("call_{}", event.seq);
                     messages.push(Message {
                         role: Role::Assistant,
-                        content: String::new(),
+                        // The thinking that led to this call, shortened, on the
+                        // message that carries it: a model that cannot see what
+                        // it worked out two steps ago works it out again.
+                        content: with_thinking(thought.take(), ""),
                         tool_calls: vec![rook_llm::ToolCall {
                             id: id.clone(),
                             name: event.record.label.clone(),
@@ -1067,8 +1091,8 @@ impl<'a> AgentLoop<'a> {
                         }],
                         tool_call_id: None,
                         cache: false,
-                        // A replayed call is a turn that ended: the thinking
-                        // that led to it is not wanted back, and is not kept.
+                        // Not as blocks: a provider that signs them refuses one
+                        // it did not sign, and these are text from the log.
                         reasoning: Vec::new(),
                     });
                     open_call = Some(id);
@@ -1656,6 +1680,27 @@ impl<'a> AgentLoop<'a> {
                 outcome.reply = response.message.content.clone();
             }
 
+            // What goes back to the model at the next step, thinking and all.
+            // A provider with a place of its own for it — Anthropic signs
+            // blocks and they ride on the message already — needs no second
+            // copy as text; every other one hands the model back its answer
+            // and its calls and nothing it worked out, so it works it out
+            // again, every step.
+            let carried = match response.message.reasoning.is_empty() {
+                false => response.message.clone(),
+                true => Message {
+                    content: with_thinking(
+                        Some(crate::context::shorten_thinking(
+                            &thinking,
+                            self.rook.config.agent.max_reasoning_tokens,
+                        ))
+                        .filter(|kept| !kept.is_empty()),
+                        &response.message.content,
+                    ),
+                    ..response.message.clone()
+                },
+            };
+
             // What the message carries decides, not what the provider said
             // about it: a dialect that reported `stop` beside two calls had
             // them logged as text and never run.
@@ -1676,7 +1721,7 @@ impl<'a> AgentLoop<'a> {
                         if !handed_left {
                             handed_left = true;
                             self.rook.log(self.session, EventKind::Note, "sub-agents", &left).ok();
-                            messages.push(response.message.clone());
+                            messages.push(carried.clone());
                             messages.push(Message::user(&left));
                             continue;
                         }
@@ -1693,7 +1738,7 @@ impl<'a> AgentLoop<'a> {
                             asked_for_one_script = true;
                             let note = crate::script::say_again(slip, &known);
                             self.rook.log(self.session, EventKind::Note, "one script", &note).ok();
-                            messages.push(response.message.clone());
+                            messages.push(carried.clone());
                             messages.push(Message::user(&note));
                             continue;
                         }
@@ -1716,7 +1761,7 @@ impl<'a> AgentLoop<'a> {
                     if cut && !asked_to_go_on {
                         asked_to_go_on = true;
                         self.rook.log(self.session, EventKind::Note, "cut off", GO_ON).ok();
-                        messages.push(response.message.clone());
+                        messages.push(carried.clone());
                         messages.push(Message::user(GO_ON));
                         continue;
                     }
@@ -1728,7 +1773,7 @@ impl<'a> AgentLoop<'a> {
                     if did_something && response.message.content.trim().is_empty() && !asked_to_say {
                         asked_to_say = true;
                         self.rook.log(self.session, EventKind::Note, "say it", SAY_IT).ok();
-                        messages.push(response.message.clone());
+                        messages.push(carried.clone());
                         messages.push(Message::user(SAY_IT));
                         continue;
                     }
@@ -1760,7 +1805,7 @@ impl<'a> AgentLoop<'a> {
                                     "Checked against the goal before finishing, and the check \
                                      fails:\n\n{report}\n\nPut it right, and say what was wrong."
                                 );
-                                messages.push(response.message.clone());
+                                messages.push(carried.clone());
                                 messages.push(Message::user(&told));
                                 continue;
                             }
@@ -1800,7 +1845,7 @@ impl<'a> AgentLoop<'a> {
                     self.finish(&outcome).await;
                     return Ok(outcome);
                 }
-                messages.push(response.message.clone());
+                messages.push(carried.clone());
                 for text in said {
                     self.rook.log(self.session, EventKind::UserMessage, "while running", &text).ok();
                     messages.push(Message::user(&text));
@@ -1812,7 +1857,7 @@ impl<'a> AgentLoop<'a> {
             // it, which every dialect rejects — so the model's mistake would
             // come back as an opaque error from the provider, after the work had
             // been done twice.
-            let mut asked = response.message.clone();
+            let mut asked = carried.clone();
             let mut dropped: Vec<(String, String)> = Vec::new();
             let mut seen = std::collections::BTreeSet::new();
             asked.tool_calls.retain(|call| {

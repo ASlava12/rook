@@ -794,7 +794,11 @@ impl Rook {
                 continue;
             }
             let bytes = self.store.stat_object(&event.record.body)?.map(|m| m.size_raw as usize).unwrap_or(0);
-            live += bytes.div_ceil(4);
+            live += crate::context::tokens_in_request(
+                event.record.kind,
+                bytes,
+                self.config.agent.max_reasoning_tokens,
+            );
         }
 
         Ok(ContextUsage {

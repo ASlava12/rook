@@ -104,7 +104,61 @@ pub fn estimate_tokens(text: &str) -> usize {
 /// before this existed.
 pub fn reaches_the_model(kind: rook_store::EventKind) -> bool {
     use rook_store::EventKind::*;
-    matches!(kind, UserMessage | AssistantMessage | ToolCall | ToolResult | SkillLoaded)
+    matches!(kind, UserMessage | AssistantMessage | ToolCall | ToolResult | SkillLoaded | Reasoning)
+}
+
+/// How much of a thought is carried into the next request.
+///
+/// Head and tail, because a thought's subject is its first lines and its
+/// conclusion is its last, and what goes is the working in between — the part
+/// the conclusion already stands for. The marker says how much went, so a
+/// model reading its own shortened thinking is not left thinking it wrote
+/// that little.
+///
+/// The result is never longer than the budget, which is what lets
+/// [`thinking_tokens`] price a thought from its size alone.
+pub fn shorten_thinking(text: &str, budget_tokens: usize) -> String {
+    let text = text.trim();
+    if budget_tokens == 0 || text.is_empty() {
+        return String::new();
+    }
+    if estimate_tokens(text) <= budget_tokens {
+        return text.to_string();
+    }
+    let dropped = estimate_tokens(text) - budget_tokens;
+    let marker = format!("\n\n[… {dropped} tokens of working elided …]\n\n");
+    // A budget too small to hold even the marker carries nothing rather than
+    // carrying a note about what it could not carry.
+    let Some(room) = budget_tokens.checked_sub(estimate_tokens(&marker)).map(|left| left * 4) else {
+        return String::new();
+    };
+    let head = at_boundary(text, room * 2 / 3);
+    let tail = from_end(text, room - room * 2 / 3);
+    format!("{}{marker}{}", &text[..head], &text[tail..])
+}
+
+/// The largest offset no further than `bytes` into `text` that is a character
+/// boundary — thinking is prose in whatever language the model thinks in.
+fn at_boundary(text: &str, bytes: usize) -> usize {
+    let bytes = bytes.min(text.len());
+    (0..=bytes).rev().find(|at| text.is_char_boundary(*at)).unwrap_or(0)
+}
+
+/// The same, measured from the end: the first boundary at or after the last
+/// `bytes` bytes begin.
+fn from_end(text: &str, bytes: usize) -> usize {
+    let from = text.len().saturating_sub(bytes);
+    (from..=text.len()).find(|at| text.is_char_boundary(*at)).unwrap_or(text.len())
+}
+
+/// What an event costs the next request, from its stored size — which is all
+/// `session context` has, and all it needs: a thought is carried whole or
+/// shortened to the budget, so its cost is the smaller of the two.
+pub fn tokens_in_request(kind: rook_store::EventKind, bytes: usize, reasoning_budget: usize) -> usize {
+    match kind {
+        rook_store::EventKind::Reasoning => bytes.div_ceil(4).min(reasoning_budget),
+        _ => bytes.div_ceil(4),
+    }
 }
 
 /// The same question asked of a kind's printed name, which is what a transcript
@@ -119,6 +173,32 @@ pub fn kind_reaches_the_model(kind: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::ContextBudget;
+
+    /// The bound is what lets `session context` price a thought from its
+    /// stored size without reading it back, so it has to hold for every
+    /// budget — including one too small to say anything in.
+    #[test]
+    fn a_thought_carried_into_the_next_request_never_exceeds_its_budget() {
+        // In a language whose characters are not bytes, which is what a model
+        // thinking out loud in Russian writes.
+        let long = "думает вслух, подробно. ".repeat(1_000);
+        for budget in [0, 1, 20, 800, 5_000] {
+            let kept = super::shorten_thinking(&long, budget);
+            assert!(
+                super::estimate_tokens(&kept) <= budget,
+                "budget {budget} carried {} tokens",
+                super::estimate_tokens(&kept)
+            );
+            assert!(
+                super::tokens_in_request(rook_store::EventKind::Reasoning, long.len(), budget)
+                    >= super::estimate_tokens(&kept),
+                "and what the report prices it at is never less than what is carried"
+            );
+        }
+
+        assert_eq!(super::shorten_thinking("worked it out", 800), "worked it out", "short enough is kept");
+        assert_eq!(super::shorten_thinking(&long, 0), "", "and none means none");
+    }
 
     /// A fraction is config, and config is written by hand: `compact_at = 1.0`
     /// leaves the turn that trips the threshold no room to receive anything,

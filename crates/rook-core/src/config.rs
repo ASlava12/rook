@@ -155,6 +155,13 @@ pub struct AgentConfig {
     /// terminal would otherwise hold the turn, and the store's write lock with
     /// it, for as long as the process lives.
     pub answer_timeout_secs: u64,
+    /// How much of what the model was thinking is carried into the next
+    /// request, per thought. A model handed back its answer and its calls but
+    /// never its reasoning works the same thing out again every step; handed
+    /// all of it, a page of thinking per step fills the window faster than the
+    /// work does. Past this the middle is elided and the marker says how much
+    /// went. 0 carries none, which is what it did before.
+    pub max_reasoning_tokens: usize,
     /// Ceiling on how much of an `AGENTS.md` reaches the model, per file. It is
     /// paid for on every request and is written by whoever sends the pull
     /// request, so a repository cannot spend the context window by committing a
@@ -343,6 +350,7 @@ impl Default for AgentConfig {
             max_skill_cards: 50,
             stream_idle_timeout_secs: 90,
             answer_timeout_secs: 600,
+            max_reasoning_tokens: 800,
             max_instructions_bytes: 32 * 1024,
             prompt_cache_ttl: "5m".into(),
         }

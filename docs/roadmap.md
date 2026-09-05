@@ -176,6 +176,17 @@ what unblocks the most.
   reported as it lands, counted, and named, in all five front ends. The report
   still comes back in the order the tasks were asked for rather than the order
   they finished. 2 tests.
+- **What the model worked out, carried back to it** — reasoning was logged and
+  never replayed: the model was handed its own answers and its own calls and
+  nothing it had worked out, so it worked it out again at every step, and a
+  turn resumed tomorrow began from a blank mind. It is carried now, on the
+  message it led to — two assistant messages in a row are not a conversation
+  any dialect accepts — and bounded by `[agent] max_reasoning_tokens`, 800 by
+  default: past that the middle goes and the marker says how many tokens went,
+  because a thought's subject is its first lines and its conclusion is its
+  last. Anthropic's signed blocks are left alone; a second copy as text would
+  be the same thought twice. The bound is what lets `session context` price a
+  thought from its stored size without reading it. 2 tests.
 - **A context figure that matches the request** — `session context` counted
   every event but checkpoints as live, so asides, errors and reasoning inflated
   the number the command exists to explain, and could report a session over the

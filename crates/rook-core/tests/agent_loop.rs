@@ -3145,6 +3145,79 @@ async fn a_compaction_whose_summary_failed_still_moves_the_session_on() {
     assert!(!carried.contains("question 0"), "the span is not carried: {carried}");
 }
 
+/// Thinks at length before every step, which is what a reasoning model does.
+struct ThinksAtLength(ScriptedProvider, String);
+
+#[async_trait]
+impl Provider for ThinksAtLength {
+    fn id(&self) -> &str {
+        "scripted/thinks-at-length"
+    }
+    fn context_window(&self) -> usize {
+        200_000
+    }
+    async fn complete(&self, request: Request) -> rook_llm::Result<Response> {
+        self.0.complete(request).await
+    }
+    async fn stream(&self, request: Request) -> rook_llm::Result<rook_llm::ResponseStream> {
+        use futures_util::StreamExt;
+        let thought = rook_llm::Delta::Reasoning(self.1.clone());
+        Ok(Box::pin(futures_util::stream::iter(vec![Ok(thought)]).chain(self.0.stream(request).await?)))
+    }
+}
+
+/// A model handed back its answer and its calls but never what it worked out
+/// works it out again at every step; handed all of it, a page of thinking per
+/// step fills the window before the work does.
+#[tokio::test]
+async fn what_the_model_worked_out_is_carried_back_to_it_shortened() {
+    let f = fixture();
+    std::fs::write(f.workspace.path().join("p.txt"), "payload").unwrap();
+    let session = f.rook.start_session("thinking").unwrap();
+    let thought = format!("FIRST LINE\n{}\nLAST LINE", "working it out, at length. ".repeat(2_000));
+    assert!(
+        rook_core::context::estimate_tokens(&thought) > 10_000,
+        "the precondition: a thought far past the 800-token budget"
+    );
+
+    let script = ScriptedProvider::new(vec![
+        call("read_file", serde_json::json!({ "path": "p.txt" })),
+        reply("read it"),
+    ]);
+    let provider = ThinksAtLength(script, thought.clone());
+    let seen = provider.0.share();
+    AgentLoop::new(&f.rook, Arc::new(provider), session).run("what is in p.txt?").await.unwrap();
+
+    // The second step of the same turn: the model is looking at what it was
+    // thinking when it made the call it is now reading the result of.
+    let within = seen.lock().unwrap().last().cloned().unwrap();
+    let carried: String = within.messages.iter().map(|m| m.content.clone()).collect();
+    assert!(carried.contains("[thinking]"), "the thought is carried, marked as one:\n{carried}");
+    assert!(carried.contains("FIRST LINE") && carried.contains("LAST LINE"), "head and tail: {carried}");
+    assert!(carried.contains("tokens of working elided"), "and it says how much went: {carried}");
+    assert!(
+        rook_core::context::estimate_tokens(&carried) < 2_000,
+        "a 10,000-token thought must not arrive whole: {} tokens",
+        rook_core::context::estimate_tokens(&carried)
+    );
+
+    // And the next turn, which builds its history from the log rather than
+    // from what it has in hand.
+    let next = ScriptedProvider::new(vec![reply("still here")]);
+    let seen = next.share();
+    AgentLoop::new(&f.rook, Arc::new(next), session).run("and now?").await.unwrap();
+
+    let replayed: String =
+        seen.lock().unwrap().last().cloned().unwrap().messages.iter().map(|m| m.content.clone()).collect();
+    assert!(replayed.contains("[thinking]"), "replayed too:\n{replayed}");
+    assert!(replayed.contains("tokens of working elided"), "and shortened the same way: {replayed}");
+    assert!(
+        rook_core::context::estimate_tokens(&replayed) < 3_000,
+        "and not twice over: {} tokens",
+        rook_core::context::estimate_tokens(&replayed)
+    );
+}
+
 /// Answers the summarisation with the summary in its reasoning channel and
 /// nothing in `content`, which is what a reasoning model does when the whole
 /// answer is short enough to be one thought.
