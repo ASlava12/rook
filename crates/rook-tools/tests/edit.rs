@@ -30,6 +30,43 @@ impl File {
     }
 }
 
+/// A model that could not see the result of its edit read the whole file back
+/// to check it — twice in one turn on this machine, and a file is many times
+/// the size of the lines around what moved.
+#[tokio::test]
+async fn an_edit_answers_with_what_the_file_now_says_where_it_changed() {
+    let f = File::with("one\ntwo\nthree\nfour\nfive\n");
+
+    let done = f.edit(serde_json::json!({ "edits": [{ "old": "three", "new": "THREE" }] })).await;
+
+    assert!(done.content.contains("1 edit(s)"), "{}", done.content);
+    assert!(done.content.contains("-three"), "the line that went: {}", done.content);
+    assert!(done.content.contains("+THREE"), "and the one that arrived: {}", done.content);
+    assert!(done.content.contains("two"), "with a line of context: {}", done.content);
+    assert!(!done.content.contains("five"), "and not the whole file: {}", done.content);
+}
+
+/// Paid for on every edit, so an edit that rewrites every line of a large file
+/// must not answer with the file twice over.
+#[tokio::test]
+async fn the_answer_to_an_edit_that_changes_everything_is_bounded() {
+    let big: String = (0..4_000).map(|n| format!("line {n}\n")).collect();
+    let f = File::with(&big);
+
+    let done = f
+        .edit(serde_json::json!({
+            "edits": [{ "old": "line", "new": "row", "replace_all": true }]
+        }))
+        .await;
+
+    // The precondition: the whole diff really is enormous — eight thousand
+    // changed lines — so the bound below is one that had to be applied.
+    assert!(big.len() * 2 > 64_000, "the file is large enough for this to mean something");
+    assert!(done.content.len() < 4_096, "{} bytes of answer", done.content.len());
+    assert!(done.content.contains("elided from the middle"), "and it says so: {}", done.content);
+    assert!(done.content.contains("-line 0"), "and still shows what changed: {}", done.content);
+}
+
 /// Verbatim from a real turn, both slips at once: the arguments doubly
 /// encoded, and the `files` shape written into `edits`. It was refused, and
 /// the model answered the refusal by sending it again — four steps for a call

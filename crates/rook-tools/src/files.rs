@@ -436,7 +436,8 @@ impl Tool for EditFile {
             if let Some(refused) = not_a_file(&path, "name the file to edit inside it. Nothing was written") {
                 return Ok(refused);
             }
-            let mut text = ctx.read_text(&path).await?;
+            let before = ctx.read_text(&path).await?;
+            let mut text = before.clone();
             for (i, edit) in target.edits.iter().enumerate() {
                 match apply(&text, edit) {
                     Ok((updated, count)) => {
@@ -456,11 +457,11 @@ impl Tool for EditFile {
                 }
             }
             edits += target.edits.len();
-            edited.push((path, text));
+            edited.push((path, text, before));
         }
 
-        let names: Vec<String> = edited.iter().map(|(p, _)| p.display().to_string()).collect();
-        for (i, (path, text)) in edited.iter().enumerate() {
+        let names: Vec<String> = edited.iter().map(|(p, ..)| p.display().to_string()).collect();
+        for (i, (path, text, _)) in edited.iter().enumerate() {
             // Everything that can be decided was decided above, so a failure
             // here is the filesystem refusing — and by then the files before it
             // are written. Saying which is the difference between a half-done
@@ -478,8 +479,15 @@ impl Tool for EditFile {
                 },
             })?;
         }
-        Ok(ToolOutcome::ok(format!("{edits} edit(s), {replaced} replacement(s) in {}", names.join(", ")))
-            .with("occurrences", replaced as u64))
+        // What it now says, where it changed. A model that could not see the
+        // result of its edit read the whole file back to check it — twice, in
+        // one turn on this machine — and a file is many times the size of the
+        // three lines around what moved.
+        let mut said = format!("{edits} edit(s), {replaced} replacement(s) in {}", names.join(", "));
+        for (path, text, before) in edited.iter().take(HUNKS_SHOWN) {
+            said.push_str(&format!("\n\n{}", hunks(path, before, text)));
+        }
+        Ok(ToolOutcome::ok(said).with("occurrences", replaced as u64))
     }
 
     async fn preview(&self, ctx: &ToolContext, args: &serde_json::Value) -> Option<String> {
@@ -595,13 +603,32 @@ fn diff(path: &std::path::Path, before: &str, after: &str) -> String {
     if before == after {
         return format!("{} would be written unchanged", path.display());
     }
-    let text = similar::TextDiff::from_lines(before, after)
-        .unified_diff()
-        .context_radius(3)
-        .header("before", "after")
-        .to_string();
-    crate::elide_middle(&text, MOST)
+    crate::elide_middle(&unified(before, after, 3), MOST)
 }
+
+/// The same change as an answer rather than a question: one line of context
+/// either side and a tighter bound, because this is paid for on every edit and
+/// what it has to say is "here is what it now says, where you changed it".
+fn hunks(path: &std::path::Path, before: &str, after: &str) -> String {
+    const MOST: usize = 2 * 1024;
+    if before == after {
+        return format!("{} is unchanged", path.display());
+    }
+    crate::elide_middle(&unified(before, after, 1), MOST)
+}
+
+fn unified(before: &str, after: &str, context: usize) -> String {
+    similar::TextDiff::from_lines(before, after)
+        .unified_diff()
+        .context_radius(context)
+        .header("before", "after")
+        .to_string()
+}
+
+/// How many files of a refactor answer with their diff. The rest are named in
+/// the line above it, and a refactor across forty files must not answer with
+/// forty diffs.
+const HUNKS_SHOWN: usize = 3;
 
 /// Accepts a bare `{old, new}` alongside `edits`, so a model that learnt the
 /// single-edit shape elsewhere is not refused over a detail of framing.

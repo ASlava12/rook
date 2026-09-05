@@ -194,6 +194,14 @@ what unblocks the most.
   last. Anthropic's signed blocks are left alone; a second copy as text would
   be the same thought twice. The bound is what lets `session context` price a
   thought from its stored size without reading it. 2 tests.
+- **An edit answers with what the file now says** — `edit_file` answered "1
+  edit(s), 1 replacement(s)", so a model with any doubt read the whole file
+  back to see it: twice in one turn on this machine, and a file is many times
+  the size of the lines around what moved. The result now carries the change
+  as a unified diff with a line of context either side, bounded to 2 KiB a file
+  and three files — an answer paid for on every edit, unlike the approval
+  preview beside it, which is a question and gets three lines of context and
+  8 KiB. 2 tests, one of them for the bound with a diff that reaches it.
 - **A turn says what it wrote** — "как будто не пишет на диск агент", asked two
   and a half hours into a turn that had indeed written nothing. What a turn
   changed on disk is the one thing that tells a working turn from a stuck one,
