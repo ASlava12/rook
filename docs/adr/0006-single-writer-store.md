@@ -25,9 +25,12 @@ first and every window works beside it, the browser included. A `rook tui`,
 All of it. Every `store`, `session`, `skills`, `memory` and `checkpoint`
 subcommand goes over the API when the store is held, and each is the same call
 the daemon makes on its own store — one implementation and two ways in, which
-is what keeps the paths from drifting. `rook doctor` and `rook models` do not
-route because they no longer need to: the configuration is a file and the
-environment is the machine, so neither opens a store at all.
+is what keeps the paths from drifting. `rook doctor`, `rook models` and `rook lsp` do not
+route because they no longer need to: the configuration is a file, a language
+server is a file under the state directory, and the environment is the
+machine — none of them opens a store at all. `lsp install` mattered: it refused
+while `rookd` was up, which is exactly when somebody working notices a server
+missing.
 
 Getting there found two commands refusing for nothing — `skills sources` and
 `skills search` read no store and had only been sitting behind the check — and

@@ -1750,11 +1750,17 @@ fn cmd_search(
 fn cmd_lsp(workspace: Option<PathBuf>, cmd: LspCmd, json: bool) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     runtime.block_on(async move {
-        let rook = Rook::open(workspace)?;
+        // No store: a language server is a file under the state directory and
+        // the configuration is a file too. Opening one meant `rook lsp install`
+        // refused while `rookd` was up — which is when somebody is working and
+        // notices a server missing.
+        let here = workspace_of(&workspace);
+        let config = rook_core::Config::load()?;
+        let env = rook_skills::Environment::detect(AGENT_VERSION);
         if let LspCmd::Update = &cmd {
             let into = rook_core::paths::servers_dir();
             let installer = rook_core::install::Installer::new(into).map_err(anyhow::Error::msg)?;
-            let report = installer.update(rook.env()).await;
+            let report = installer.update(&env).await;
             if report.is_empty() {
                 println!("nothing installed under {}", rook_core::paths::servers_dir().display());
             }
@@ -1776,7 +1782,7 @@ fn cmd_lsp(workspace: Option<PathBuf>, cmd: LspCmd, json: bool) -> Result<()> {
             };
             let into = rook_core::paths::servers_dir();
             let installer = rook_core::install::Installer::new(into).map_err(anyhow::Error::msg)?;
-            let done = installer.install(recipe, rook.env()).await.map_err(anyhow::Error::msg)?;
+            let done = installer.install(recipe, &env).await.map_err(anyhow::Error::msg)?;
             println!("installed {} {} at {}", done.command, done.tag, done.path.display());
             println!("verified:     {}", done.verified);
             println!("not verified: {}", done.unverified);
@@ -1785,21 +1791,21 @@ fn cmd_lsp(workspace: Option<PathBuf>, cmd: LspCmd, json: bool) -> Result<()> {
         // What the agent would have, not what is installed: the comment below
         // claims this cannot drift from a turn, and a copy of the expression it
         // was built from is how it did.
-        let configs = rook_core::lsp::for_workspace(&rook.config, &rook.workspace);
+        let configs = rook_core::lsp::for_workspace(&config, &here);
         if configs.is_empty() {
             bail!(
                 "no language server applies here — none is configured under [[lsp]], or none of \
                  the ones on PATH handles a file in {}",
-                rook.workspace.display()
+                here.display()
             );
         }
-        let servers = rook_core::lsp::Servers::new(configs, &rook.workspace);
+        let servers = rook_core::lsp::Servers::new(configs, &here);
 
         // The tools are the same ones the agent calls, so this cannot drift
         // from what a turn would see.
         let mut tools = rook_tools::ToolBox::default();
         rook_core::lsp::register(&mut tools, servers.clone());
-        let ctx = rook_tools::ToolContext::new(rook.workspace.clone());
+        let ctx = rook_tools::ToolContext::new(here.clone());
 
         let (tool, args) = match &cmd {
             LspCmd::Servers => {
