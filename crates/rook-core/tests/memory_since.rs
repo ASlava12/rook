@@ -86,12 +86,25 @@ fn a_turn_says_what_it_changed_about_what_it_believes() {
         skills_written: Vec::new(),
         facts_learned: Vec::new(),
         facts_forgotten: Vec::new(),
+        files_changed: Vec::new(),
         delegated: Vec::new(),
         compactions: 0,
         decisions: Vec::new(),
         open_questions: Vec::new(),
     };
     assert!(quiet.memory_note().is_none(), "a turn that changed nothing says nothing");
+    assert!(quiet.changed_note().is_none(), "and a turn that wrote nothing says that too");
+
+    // The question a person asked here, two and a half hours into a turn that
+    // had written nothing: is it doing anything at all?
+    let wrote = TurnOutcome { files_changed: vec!["src/main.rs".into()], ..quiet.clone() };
+    assert_eq!(wrote.changed_note().as_deref(), Some("wrote src/main.rs"));
+
+    let many =
+        TurnOutcome { files_changed: (1..=8).map(|n| format!("src/f{n}.rs")).collect(), ..quiet.clone() };
+    let note = many.changed_note().expect("eight files are worth a line");
+    assert!(note.starts_with("wrote 8 files: src/f1.rs"), "{note}");
+    assert!(note.ends_with("and 3 more"), "named to a bound, counted in full: {note}");
 
     let busy = TurnOutcome {
         facts_learned: vec!["deploys happen on fridays".into()],

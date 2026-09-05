@@ -239,6 +239,10 @@ pub enum ChatEvent {
         decisions: Vec<String>,
         #[serde(default)]
         open_questions: Vec<String>,
+        /// What the turn wrote, workspace-relative. A turn that says it has
+        /// done the work and one that has done it read the same from outside.
+        #[serde(default)]
+        files_changed: Vec<String>,
     },
     Error {
         message: String,

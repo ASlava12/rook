@@ -285,6 +285,7 @@ async fn turn(
                 compactions: outcome.compactions,
                 decisions: outcome.decisions,
                 open_questions: outcome.open_questions,
+                files_changed: outcome.files_changed,
             });
         }
         Err(e) => report(&outbound, e.to_string()),

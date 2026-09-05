@@ -399,6 +399,9 @@ async fn prompt(
     // they are for the person, so they go out as the last thing said.
     if let Ok(outcome) = &result {
         let mut said = String::new();
+        if let Some(note) = outcome.changed_note() {
+            said.push_str(&format!("\n\n{note}"));
+        }
         for text in &outcome.decisions {
             said.push_str(&format!("\n\nDecided: {text}"));
         }

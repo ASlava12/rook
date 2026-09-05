@@ -785,7 +785,10 @@ impl App {
                 self.chat.push("stat", "[stopped]");
                 self.finished();
             }
-            ChatEvent::Done { steps, input_tokens, output_tokens, .. } => {
+            ChatEvent::Done { steps, input_tokens, output_tokens, files_changed, .. } => {
+                if let Some(note) = rook_core::agent::changed_note(&files_changed) {
+                    self.chat.push("stat", &format!("  {note}"));
+                }
                 self.chat
                     .push("stat", &format!("  {steps} step(s), {input_tokens} in / {output_tokens} out"));
                 self.finished();
@@ -1231,7 +1234,8 @@ impl App {
 
             let _ = match result {
                 Ok(outcome) => to_loop.send(TurnEvent::Done(format!(
-                    "{}[{} steps · {} in / {} out{}]",
+                    "{}{}[{} steps · {} in / {} out{}]",
+                    outcome.changed_note().map(|n| format!("  {n}\n")).unwrap_or_default(),
                     outcome.memory_note().map(|n| format!("{n}\n")).unwrap_or_default(),
                     outcome.steps,
                     outcome.input_tokens,

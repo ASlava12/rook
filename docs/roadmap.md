@@ -194,6 +194,14 @@ what unblocks the most.
   last. Anthropic's signed blocks are left alone; a second copy as text would
   be the same thought twice. The bound is what lets `session context` price a
   thought from its stored size without reading it. 2 tests.
+- **A turn says what it wrote** — "как будто не пишет на диск агент", asked two
+  and a half hours into a turn that had indeed written nothing. What a turn
+  changed on disk is the one thing that tells a working turn from a stuck one,
+  and it was in none of what a turn reported: the CLI, the TUI, the browser and
+  an editor over ACP all said steps and tokens. `files_changed` is collected
+  where the writing happens — a tool that declares its paths and a command
+  whose writes are discovered afterwards both land in one place — and named in
+  all four, to a bound: five files by name, the rest counted.
 - **A write answered with what it broke** — a model has to think to ask
   `diagnostics`; it never has to think to read the answer to the call it just
   made. A real turn broke an indent with `sed -i` and spent three steps, and

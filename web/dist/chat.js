@@ -80,6 +80,14 @@ export function connect() {
       case 'approval': askApproval(e); break;
       case 'ask': askUser(e); break;
       case 'done': {
+        // What it wrote, before what it cost: a turn that says it did the work
+        // and one that did it read the same from the outside.
+        const wrote = e.files_changed || [];
+        if (wrote.length) {
+          say('stat', wrote.length === 1 ? `wrote ${wrote[0]}`
+            : `wrote ${wrote.length} files: ${wrote.slice(0, 5).join(', ')}` +
+              (wrote.length > 5 ? `, and ${wrote.length - 5} more` : ''));
+        }
         say('stat', `[${e.steps} steps · ${e.input_tokens} in / ${e.output_tokens} out` +
           (e.compactions ? ` · ${e.compactions} compactions` : '') +
           (e.delegated.length ? ` · ${e.delegated.length} sub-agent(s)` : '') + ']');

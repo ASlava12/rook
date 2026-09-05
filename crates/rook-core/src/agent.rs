@@ -235,6 +235,29 @@ impl TurnOutcome {
         }
         (!said.is_empty()).then(|| said.join("\n"))
     }
+
+    pub fn changed_note(&self) -> Option<String> {
+        changed_note(&self.files_changed)
+    }
+}
+
+/// What was written, for a person reading the end of a turn.
+///
+/// Bounded in the saying, not in the record: a refactor across forty files has
+/// forty of them in `files_changed`, and one line about it here. A free
+/// function as well as a method because a window watching a turn the daemon is
+/// running has the list and not the outcome, and two renderings of one thing
+/// are two answers waiting to differ.
+pub fn changed_note(files: &[String]) -> Option<String> {
+    const NAMED: usize = 5;
+    let named: Vec<&str> = files.iter().take(NAMED).map(String::as_str).collect();
+    let more = files.len().saturating_sub(NAMED);
+    match (files.len(), more) {
+        (0, _) => None,
+        (1, _) => Some(format!("wrote {}", named[0])),
+        (n, 0) => Some(format!("wrote {n} files: {}", named.join(", "))),
+        (n, more) => Some(format!("wrote {n} files: {}, and {more} more", named.join(", "))),
+    }
 }
 
 /// What [`AgentLoop::checkpoint_before`] hands back: the claim to hold for the
@@ -480,6 +503,12 @@ pub struct TurnOutcome {
     /// agent quietly removing what it was told to remember is the same failure
     /// as one quietly remembering something nobody can see.
     pub facts_forgotten: Vec<String>,
+    /// What this turn wrote, as workspace-relative paths. A turn that says it
+    /// has done the work and a turn that has done it read the same from the
+    /// outside — which is a question a person asked here, two and a half hours
+    /// into one that had written nothing.
+    #[serde(default)]
+    pub files_changed: Vec<String>,
     /// Sessions of sub-agents this turn ran, for reading their detail later.
     pub delegated: Vec<String>,
     pub compactions: u32,
@@ -518,6 +547,10 @@ pub struct AgentLoop<'a> {
     pub servers: std::sync::Arc<crate::lsp::Servers>,
     /// What the `session_start` hooks contributed, computed once.
     session_context: std::sync::Mutex<Option<String>>,
+    /// Every file this turn has written, workspace-relative. Collected here
+    /// because the writing happens inside a call whose only answer is the
+    /// text the model sees.
+    wrote_paths: std::sync::Mutex<std::collections::BTreeSet<String>>,
     /// What a language server said about a file before this turn last wrote
     /// to it. A write is answered with what it broke; everything already wrong
     /// in somebody's file is not this call's news, and on every write it is
@@ -602,6 +635,7 @@ impl<'a> AgentLoop<'a> {
             servers,
             session_context: std::sync::Mutex::new(None),
             problems_before: Default::default(),
+            wrote_paths: Default::default(),
             reported: Default::default(),
             asker: None,
             approver: std::sync::Arc::new(Unattended),
@@ -1496,6 +1530,7 @@ impl<'a> AgentLoop<'a> {
             skills_written: Vec::new(),
             facts_learned: Vec::new(),
             facts_forgotten: Vec::new(),
+            files_changed: Vec::new(),
             delegated: Vec::new(),
             compactions: 0,
             decisions: Vec::new(),
@@ -2254,6 +2289,9 @@ impl<'a> AgentLoop<'a> {
             Some(since) => self.note_what_was_written(since),
             None => will_write,
         };
+        if !outcome.is_error {
+            self.note_paths(&wrote);
+        }
         // A checker's reading is not recorded. The registry holds one holder
         // per path, so a look from any session makes every other session's
         // overwrite stale until it looks again — right for a sub-task, which
@@ -3061,6 +3099,9 @@ impl<'a> AgentLoop<'a> {
 
     /// Into the outcome, which is what every front end reads at the end.
     fn settle_reports(&self, outcome: &mut TurnOutcome) {
+        if let Ok(mut wrote) = self.wrote_paths.lock() {
+            outcome.files_changed = std::mem::take(&mut *wrote).into_iter().collect();
+        }
         let Ok(mut list) = self.reported.lock() else { return };
         for what in list.drain(..) {
             match what {
@@ -3180,6 +3221,27 @@ impl<'a> AgentLoop<'a> {
         match seen.insert(canonical(path), now.to_vec()) {
             Some(before) => before,
             None => now.to_vec(),
+        }
+    }
+
+    /// Kept as the model asked for them — relative to the workspace, which is
+    /// how they will be read back — and bounded, because everything that
+    /// accumulates here is.
+    fn note_paths(&self, paths: &[std::path::PathBuf]) {
+        const MOST: usize = 200;
+        let mut wrote = self.wrote_paths.lock().unwrap_or_else(|e| e.into_inner());
+        // Both spellings of the workspace, because one route here canonicalises
+        // and the other does not: on macOS `/var` and `/private/var` are the
+        // same directory, and a path stripped against the wrong one is reported
+        // to the model in full, from the root.
+        let root = canonical(&self.rook.workspace);
+        for path in paths {
+            if wrote.len() >= MOST {
+                return;
+            }
+            let shown =
+                path.strip_prefix(&root).or_else(|_| path.strip_prefix(&self.rook.workspace)).unwrap_or(path);
+            wrote.insert(shown.display().to_string());
         }
     }
 

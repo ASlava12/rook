@@ -123,6 +123,37 @@ fn fixture() -> Fixture {
     Fixture { _store_dir: store_dir, _skill_dir: skill_dir, workspace, rook }
 }
 
+/// "Как будто не пишет на диск агент" — asked two and a half hours into a
+/// turn that had indeed written nothing. What a turn wrote is the one thing
+/// that tells a working turn from a stuck one, and it was nowhere in what a
+/// turn reported.
+#[tokio::test]
+async fn a_turn_reports_what_it_wrote() {
+    let f = fixture();
+    let session = f.rook.start_session("writing").unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("write_file", serde_json::json!({ "path": "notes.md", "content": "hello\n" })),
+        call("run_command", serde_json::json!({ "command": "echo second > from-a-command.txt" })),
+        reply("done"),
+    ]));
+    let mut agent = AgentLoop::new(&f.rook, provider, session);
+    agent.allow_everything_not_denied();
+    let outcome = agent.run("write two files").await.unwrap();
+
+    assert!(
+        outcome.files_changed.contains(&"notes.md".to_string()),
+        "a tool that names its paths: {:?}",
+        outcome.files_changed
+    );
+    assert!(
+        outcome.files_changed.contains(&"from-a-command.txt".to_string()),
+        "and a command, which names none — what it wrote is discovered: {:?}",
+        outcome.files_changed
+    );
+    let note = outcome.changed_note().expect("something to say");
+    assert!(note.starts_with("wrote 2 files:"), "{note}");
+}
+
 /// The mock language server from `rook-lsp`, which no other crate can name
 /// through `CARGO_BIN_EXE_`: found beside this test binary, and built here.
 ///
