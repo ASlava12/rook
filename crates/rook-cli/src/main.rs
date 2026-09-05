@@ -493,6 +493,34 @@ fn cmd_doctor(workspace: &Path, json: bool) -> Result<()> {
     }
 
     println!();
+    println!("daemon:");
+    // Where a person looks when something is odd, and "the daemon is older
+    // than the binary you just installed" is exactly the kind of odd that
+    // looks like a fix that did not take.
+    match crate::source::Daemon::running() {
+        None => println!("  none running — a window starts one when it needs one"),
+        Some(daemon) => match daemon.health() {
+            Ok(health) => {
+                println!(
+                    "  {} — rook {}, started {}, {} turn(s) running",
+                    daemon.base,
+                    health.version,
+                    fmt::ago(rook_store::now_unix() - health.uptime_secs as i64),
+                    health.turns_running
+                );
+                if daemon.replaced {
+                    println!(
+                        "  the `rookd` on disk was installed after this one started: it is running \n  \
+                         the previous build. `rook daemon restart` picks up the installed one, on \n  \
+                         the same port, so an open window keeps working."
+                    );
+                }
+            }
+            Err(e) => println!("  {} — but it did not answer: {e}", daemon.base),
+        },
+    }
+
+    println!();
     println!("commands:");
     // Asked of the same context a turn runs with, so what doctor says is
     // what a command gets — and what its result would say it got.
@@ -1069,10 +1097,11 @@ fn cmd_daemon(cmd: DaemonCmd, json: bool) -> Result<()> {
             );
             println!("store      {}", health.store_root);
             println!("turns      {}", health.turns_running);
-            if health.binary_replaced {
+            if daemon.replaced {
                 println!(
-                    "\nthe `rookd` on disk has changed since this one started: it is running the \n\
-                     previous build. `rook daemon restart` picks up the installed one."
+                    "\nthe `rookd` on disk was installed after this one started: it is running the \n\
+                     previous build. `rook daemon restart` picks up the installed one, on the same \n\
+                     port, so an open window keeps working."
                 );
             }
         }

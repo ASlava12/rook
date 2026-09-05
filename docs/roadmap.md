@@ -194,6 +194,17 @@ what unblocks the most.
   last. Anthropic's signed blocks are left alone; a second copy as text would
   be the same thought twice. The bound is what lets `session context` price a
   thought from its stored size without reading it. 2 tests.
+- **`rook doctor` says what the daemon is running** — the place a person looks
+  when something is odd, and "the daemon is older than the binary you just
+  installed" is exactly the kind of odd that reads as a fix that did not take.
+  It names where the daemon answers, how long it has been up and how many turns
+  it is running — and whether the `rookd` on disk was installed after it
+  started. That last one is asked two ways, because the daemon's own answer
+  only works on a daemon new enough to give it: one from before that field
+  existed says no to everything, and it is the likeliest of all to be stale. So
+  this side compares the installed binary against how long the one answering
+  says it has been up — which is what caught a seven-hour-old daemon here. 2
+  tests.
 - **Two small things a real run showed** — a window watching a goal check
   printed the first forty-eight characters of the claim beside every call it
   made, and every claim starts with the same sentence: it is named by what is

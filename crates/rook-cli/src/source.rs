@@ -690,11 +690,7 @@ fn asked_about(workspace: Option<std::path::PathBuf>) -> std::path::PathBuf {
 /// output goes nowhere — it logs to `$ROOK_HOME/logs`, and a line printed into
 /// a terminal a TUI is drawing in is a line that corrupts the screen.
 fn start_daemon(on_port: Option<u16>) -> Option<(std::process::Child, String)> {
-    let beside =
-        std::env::current_exe().ok()?.parent()?.join(if cfg!(windows) { "rookd.exe" } else { "rookd" });
-    if !beside.is_file() {
-        return None;
-    }
+    let beside = rookd_beside_us()?;
     let mut command = std::process::Command::new(&beside);
     command
         // A port the system picks, not the default one: the address file is how
@@ -714,6 +710,36 @@ fn start_daemon(on_port: Option<u16>) -> Option<(std::process::Child, String)> {
         command.process_group(0);
     }
     Some((command.spawn().ok()?, beside.display().to_string()))
+}
+
+/// The `rookd` installed beside this binary, which is the one a window starts
+/// and the one an upgrade replaces.
+fn rookd_beside_us() -> Option<std::path::PathBuf> {
+    let beside =
+        std::env::current_exe().ok()?.parent()?.join(if cfg!(windows) { "rookd.exe" } else { "rookd" });
+    beside.is_file().then_some(beside)
+}
+
+/// Whether the `rookd` on disk was installed after the daemon that is running
+/// started.
+///
+/// This side's question, because the daemon's own answer only works on a
+/// daemon new enough to give it: one from before that field existed says
+/// `false` to everything, and that is exactly the daemon most likely to be
+/// running yesterday's code.
+fn installed_since(uptime_secs: u64) -> bool {
+    rookd_beside_us().is_some_and(|beside| written_since(&beside, uptime_secs))
+}
+
+/// Whether `binary` was written after something that has been up for
+/// `uptime_secs` started.
+fn written_since(binary: &std::path::Path, uptime_secs: u64) -> bool {
+    let Ok(built) = std::fs::metadata(binary).and_then(|m| m.modified()) else { return false };
+    let Some(started) = std::time::SystemTime::now().checked_sub(std::time::Duration::from_secs(uptime_secs))
+    else {
+        return false;
+    };
+    built > started
 }
 
 /// Its own address file is the only "it is up" there is, and it writes one
@@ -788,8 +814,11 @@ impl Daemon {
         let mut daemon =
             Self { base, replaced: false, workspace: std::path::PathBuf::from("."), runtime, http };
         // The same request that proves it is alive answers what it is running,
-        // so knowing costs nothing beyond what was already asked.
-        daemon.replaced = daemon.health().ok()?.binary_replaced;
+        // so knowing costs nothing beyond what was already asked — and where
+        // it is too old to answer, this side works it out from how long it
+        // says it has been up.
+        let health = daemon.health().ok()?;
+        daemon.replaced = health.binary_replaced || installed_since(health.uptime_secs);
         Some(daemon)
     }
 
@@ -848,6 +877,21 @@ impl Daemon {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The daemon most likely to be running yesterday's code is the one too
+    /// old to say so — the field it would answer with did not exist then — so
+    /// this side works it out from what is on disk and how long the one
+    /// answering says it has been up.
+    #[test]
+    fn a_binary_written_after_the_daemon_started_is_newer_than_what_it_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("rookd");
+        std::fs::write(&binary, b"pretend").unwrap();
+
+        assert!(written_since(&binary, 3_600), "written now, and it has been up an hour");
+        assert!(!written_since(&binary, 0), "and not for one that started this instant");
+        assert!(!written_since(&dir.path().join("nothing"), 3_600), "nothing there says nothing");
+    }
 
     fn address_file(dir: &tempfile::TempDir, contents: Option<&str>) -> std::path::PathBuf {
         let path = dir.path().join("rookd.addr");

@@ -620,6 +620,10 @@ fn doctor_answers_with_the_daemon_up() {
         alone.lines().find(|l| l.starts_with("store")),
         "including where the store is, which it names without opening"
     );
+    // And the daemon itself, which is what somebody running this wants to
+    // know about: with none up it says so, and with one up it says where.
+    assert!(alone.contains("none running"), "with nothing up: {alone}");
+    assert!(said.contains(&daemon.address), "and where it is answering: {said}");
     drop(daemon);
 }
 
