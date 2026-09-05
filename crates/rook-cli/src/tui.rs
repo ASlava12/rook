@@ -886,6 +886,10 @@ impl App {
             return;
         }
         match key.code {
+            // The session under the cursor, taken up in the chat — which is
+            // what the Sessions tab is for. `/session <id>` does the same from
+            // the chat, and needs the id typed; here it is the row being read.
+            KeyCode::Enter if self.tab == 1 => self.continue_selected(),
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
             KeyCode::Tab | KeyCode::Right => self.tab = (self.tab + 1) % TABS.len(),
             KeyCode::BackTab | KeyCode::Left => self.tab = (self.tab + TABS.len() - 1) % TABS.len(),
@@ -1119,6 +1123,37 @@ impl App {
             }
             Err(e) => self.chat.push("err", &format!("{e}")),
         }
+    }
+
+    /// Continue the selected session in the chat tab.
+    ///
+    /// Works in a window that reads through a daemon as well, where the slash
+    /// command cannot: switching is this window's own state and the transcript
+    /// is a routed read, so neither needs the store to be here.
+    fn continue_selected(&mut self) {
+        if self.chat.busy {
+            self.chat.push("stat", "  a turn is running here — stop it or let it finish first");
+            self.tab = 0;
+            return;
+        }
+        let Some(session) = self.session_state.selected().and_then(|at| self.sessions.get(at)) else {
+            return;
+        };
+        let (id, title) = (session.meta.id, session.meta.title.clone());
+        self.chat.session = Some(id);
+        self.recall_conversation(id);
+        self.chat.push(
+            "stat",
+            &format!(
+                "  continuing {} — {}",
+                rook_store::format_session_id(id),
+                match title.trim() {
+                    "" => "(untitled)",
+                    named => named,
+                }
+            ),
+        );
+        self.tab = 0;
     }
 
     /// The tail of a session's transcript, in the chat pane, as the window
@@ -1505,6 +1540,13 @@ impl App {
                 ("A ", "global  "),
                 ("d ", "forget  "),
                 ("u ", "undo  "),
+            ],
+            1 => vec![
+                ("↹ ", "tab  "),
+                ("j/k ", "move  "),
+                ("⏎ ", "continue  "),
+                ("r ", "reload  "),
+                ("q ", "quit  "),
             ],
             _ => vec![("↹/1-6 ", "tab  "), ("j/k ", "move  "), ("r ", "reload  "), ("q ", "quit  ")],
         };
@@ -2064,6 +2106,8 @@ impl App {
             key("  Space/PgDn  scroll transcript    r         reload"),
             key("  wheel       scrolls either pane; hold Shift to select text"),
             key("  q / Esc     quit (Ctrl-C anywhere)"),
+            Line::from(""),
+            key("  In Sessions: ⏎ continues the one under the cursor, in the chat"),
             Line::from(""),
             key("  In Memory:  a adds a fact here · A adds it everywhere"),
             key("              d forgets the selected one · u puts it back"),

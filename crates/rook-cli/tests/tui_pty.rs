@@ -784,6 +784,31 @@ impl Drop for Daemon {
     }
 }
 
+/// The Sessions tab is where a session is found, and the id was the only way
+/// to take it up: read it there, then type it into the chat.
+#[test]
+fn the_session_under_the_cursor_can_be_taken_up_where_it_is() {
+    let _one = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let _ = std::process::Command::new(env!("CARGO_BIN_EXE_rook"))
+        .env("ROOK_HOME", home.path())
+        .env("ROOK_LOG", "error")
+        .args(["--workspace", workspace.path().to_str().unwrap()])
+        .args(["run", "yesterday's question"])
+        .output();
+
+    let mut pty = tui(home.path(), workspace.path());
+    pty.screen(100, 30);
+    pty.send("\t"); // to the Sessions tab, where the cursor is on the newest
+    pty.screen_showing(100, 30, "continue");
+    pty.send("\r");
+
+    let screen = pty.screen_showing(100, 30, "continuing").join("\n");
+    assert!(screen.contains("Ask it something") || screen.contains("›"), "back in the chat:\n{screen}");
+    assert!(screen.contains("yesterday's question"), "with what was said in it:\n{screen}");
+}
+
 /// Continuing an older conversation was a choice you could only make before
 /// starting — `rook chat --session last` — so a session found in the Sessions
 /// tab could be read there and continued only by quitting and starting again

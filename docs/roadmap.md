@@ -198,13 +198,17 @@ what unblocks the most.
   in was a choice you could only make before starting: `rook chat --session
   last`, `rook run --session <id>`. The browser has had a picker since it had a
   chat, so a session found in the TUI's Sessions tab could be read there and
-  continued only by quitting and starting again with its id. `/session <id|last>`
-  moves the window, in the shared dispatch so the plain chat has it too, and
-  the pane is refilled with the tail of that conversation — continuing one in a
-  window showing somebody else's is continuing it blind. Writing the test found
-  what `last` had come to mean: a window that ran a slash command left an empty
-  session behind, and `last` meant *that*, which is the one thing nobody could
-  have meant by it. It is the last session with anything in it now. 1 test.
+  continued only by quitting and starting again with its id. Enter on the row
+  takes it up now, which is what that tab is for — and it works in a window
+  reading through a daemon as well, where a slash command cannot, because
+  switching is the window's own state and a transcript is a routed read.
+  `/session <id|last>` does the same from the chat, in the shared dispatch so
+  the plain chat has it too. Either way the pane is refilled with the tail of
+  that conversation: continuing one in a window showing somebody else's is
+  continuing it blind. Writing the test found what `last` had come to mean — a
+  window that ran a slash command left an empty session behind, and `last`
+  meant *that*, which is the one thing nobody could have meant by it. It is the
+  last session with anything in it now. 2 tests.
 - **A window that opens knowing what was typed in the last one** — the plain
   chat has kept its prompt history in `~/.rook/history` since it had one; the
   TUI kept its own in memory and dropped it on exit, so closing a window forgot
