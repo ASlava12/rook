@@ -84,12 +84,20 @@ pub struct AgentConfig {
     pub max_steps: u32,
     /// How much the model may write in one reply, thinking included.
     ///
+    /// Zero — the default — means what is left of the window after the prompt,
+    /// which is the most that could arrive anyway: no API says what a model's
+    /// ceiling is, and the window is the number that is actually known. An
+    /// endpoint with a lower ceiling of its own refuses with a 400 that names
+    /// it, and that refusal is answered by asking for less rather than by a
+    /// table of models to keep current.
+    ///
     /// It was a constant of 4096 nobody could reach, and on a model that
     /// reasons out loud the reasoning spends it: the reply is cut mid-way
     /// through the tool call it was writing, the loop asks it once to go on,
     /// it is cut again, and the turn ends having read a great deal and written
-    /// nothing. A cap only costs what the model actually produces, so this is
-    /// generous by default and worth raising for a model that thinks harder.
+    /// nothing. A cap costs only what the model produces, so the number to set
+    /// here is a ceiling somebody wants for their own reasons, not a guess at
+    /// what will fit.
     pub max_output_tokens: u32,
     /// Send skill cards rather than skill bodies, loading a body only when the
     /// model asks for it. Off means every enabled skill is always in context.
@@ -327,7 +335,7 @@ impl Default for AgentConfig {
             native_tools: true,
             one_script: true,
             context_window: None,
-            max_output_tokens: 8192,
+            max_output_tokens: 0,
             max_parallel_subagents: 4,
             max_subagents_per_turn: 16,
             server_update_after_days: 30,

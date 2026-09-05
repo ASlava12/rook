@@ -1389,9 +1389,14 @@ reported. The transcript says why in three events: the reply was cut at the
 output limit, the loop asked it once to go on, and it was cut again, so the tool
 call it was writing never arrived. That limit was a constant of 4096 in the
 library, reachable from no config file, and a model that reasons out loud spends
-it on reasoning. It is `[agent] max_output_tokens` now, 8192 by default because
-a cap costs only what is produced — and a turn that ends on it says which number
-to change, the way the compaction notice does.
+it on reasoning. It is `[agent] max_output_tokens` now, and by
+default it is the room left in the window after the prompt — the most that
+could arrive anyway. What a model's own ceiling is appears in no API and
+differs per model, so an endpoint that refuses a reply for being too large is
+answered by asking for half and remembering what it accepted, the same way a
+refused reasoning effort already is: learned from the endpoint rather than kept
+in a table that rots. A turn that still ends on the limit says which number to
+change, the way the compaction notice does.
 
 **A window makes sure there is a daemon.** The first fix routed a window that
 found `rookd` already running, which was not the case anybody had: two `rook

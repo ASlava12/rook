@@ -4482,20 +4482,39 @@ async fn a_turn_that_ends_on_the_output_limit_names_the_setting() {
     assert!(said.contains(&f.rook.config.agent.max_output_tokens.to_string()), "and the number: {said}");
 }
 
-/// What that cap is, because it was a constant in the library nobody could
-/// reach from a config file.
+/// What that cap is: by default, the room left in the window, which is the
+/// most that could arrive anyway. It was a constant of 4096 in the library
+/// that no config file could reach, on a window many times that size.
 #[tokio::test]
-async fn the_output_limit_is_what_the_config_says() {
+async fn the_reply_may_use_what_is_left_of_the_window() {
     let f = fixture();
+    let session = f.rook.start_session("cap").unwrap();
+    assert_eq!(f.rook.config.agent.max_output_tokens, 0, "the precondition: nobody set a number");
+    let provider = ScriptedProvider::new(vec![reply("done")]);
+    let seen = provider.share();
+
+    AgentLoop::new(&f.rook, Arc::new(provider), session).run("say something").await.unwrap();
+
+    let asked = seen.lock().unwrap()[0].max_output_tokens as usize;
+    assert!(asked > 4096, "more than the constant it replaced: {asked}");
+    assert!(asked <= f.rook.config.agent.context_window.unwrap_or(usize::MAX), "and inside the window");
+}
+
+/// A number set by hand is the number sent: somebody capping a model for their
+/// own reasons is not being second-guessed by the window.
+#[tokio::test]
+async fn a_cap_set_by_hand_is_the_one_asked_for() {
+    let mut f = fixture();
+    let mut config = Config::default();
+    config.agent.max_output_tokens = 2048;
+    f.rook.config = config;
     let session = f.rook.start_session("cap").unwrap();
     let provider = ScriptedProvider::new(vec![reply("done")]);
     let seen = provider.share();
 
     AgentLoop::new(&f.rook, Arc::new(provider), session).run("say something").await.unwrap();
 
-    let asked = seen.lock().unwrap()[0].max_output_tokens;
-    assert_eq!(asked, f.rook.config.agent.max_output_tokens);
-    assert!(asked >= 8192, "and generous, because a cap costs only what is produced: {asked}");
+    assert_eq!(seen.lock().unwrap()[0].max_output_tokens, 2048);
 }
 
 /// A tool that declares its paths is checkpointed and diffed exactly. A command

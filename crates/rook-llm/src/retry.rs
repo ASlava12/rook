@@ -53,6 +53,24 @@ fn names_the_effort(error: &LlmError) -> bool {
     *status == 400 && ["reasoning", "thinking", "effort"].iter().any(|word| said.contains(word))
 }
 
+/// Never asked for less than this, whatever an endpoint says: a reply with no
+/// room to write a tool call is the failure this is here to avoid, and an
+/// endpoint refusing a thousand tokens is one nothing can be run against.
+const LEAST_OUTPUT: u32 = 1024;
+
+/// Whether a refusal is about how much output was asked for.
+///
+/// The ceiling on a reply is in no API: Anthropic refuses a `max_tokens` above
+/// the model's own limit with a 400 that names it, and the number differs by
+/// model and changes with each one. So it is learned from the refusal rather
+/// than guessed from a name, which is the same reason the effort is.
+fn names_the_output(error: &LlmError) -> bool {
+    let LlmError::Status { status, body, .. } = error else { return false };
+    let said = body.to_ascii_lowercase();
+    *status == 400
+        && ["max_tokens", "max_output_tokens", "maxtokens", "max output"].iter().any(|w| said.contains(w))
+}
+
 pub struct Retrying {
     inner: Box<dyn Provider>,
     /// Set by the first refusal. A model name is what decides whether the field
@@ -60,11 +78,20 @@ pub struct Retrying {
     /// where that guess is wrong — so the endpoint's own answer overrides it,
     /// once per process rather than once per step.
     effort_refused: std::sync::atomic::AtomicBool,
+    /// The largest reply this endpoint has accepted, once one has been refused
+    /// for being too large. Zero until then, and once set it holds for the life
+    /// of the process — asking the same refusal every step is a step spent
+    /// finding out what was already found out.
+    output_ceiling: std::sync::atomic::AtomicU32,
 }
 
 impl Retrying {
     pub fn new(inner: Box<dyn Provider>) -> Self {
-        Self { inner, effort_refused: std::sync::atomic::AtomicBool::new(false) }
+        Self {
+            inner,
+            effort_refused: std::sync::atomic::AtomicBool::new(false),
+            output_ceiling: std::sync::atomic::AtomicU32::new(0),
+        }
     }
 
     /// The request as this endpoint has already said it will take it.
@@ -72,7 +99,30 @@ impl Retrying {
         if self.effort_refused.load(std::sync::atomic::Ordering::Relaxed) {
             request.effort = None;
         }
+        let ceiling = self.output_ceiling.load(std::sync::atomic::Ordering::Relaxed);
+        if ceiling > 0 {
+            request.max_output_tokens = request.max_output_tokens.min(ceiling);
+        }
         request
+    }
+
+    /// Whether this refusal is one to answer by asking for less and trying
+    /// again. Halved rather than set to a guess: the endpoint says the number
+    /// is too big and not what would fit, and halving finds a number that does
+    /// in a few tries without a table of models to keep current.
+    fn ask_for_less_output(&self, error: &LlmError, request: &mut Request) -> bool {
+        if request.max_output_tokens <= LEAST_OUTPUT || !names_the_output(error) {
+            return false;
+        }
+        let smaller = (request.max_output_tokens / 2).max(LEAST_OUTPUT);
+        tracing::info!(
+            provider = self.inner.id(),
+            "the endpoint refused {} output tokens ({error}); asking for {smaller}",
+            request.max_output_tokens
+        );
+        self.output_ceiling.store(smaller, std::sync::atomic::Ordering::Relaxed);
+        request.max_output_tokens = smaller;
+        true
     }
 
     /// Whether this refusal is one to answer by dropping the effort and asking
@@ -144,6 +194,7 @@ impl Provider for Retrying {
             match self.inner.complete(request.clone()).await {
                 Err(e) if worth_asking_again(&e) && self.wait_before(attempt, &e).await => attempt += 1,
                 Err(e) if self.drop_the_effort(&e, &mut request) => continue,
+                Err(e) if self.ask_for_less_output(&e, &mut request) => continue,
                 answer => return answer,
             }
         }
@@ -156,6 +207,7 @@ impl Provider for Retrying {
             match self.inner.stream(request.clone()).await {
                 Err(e) if worth_asking_again(&e) && self.wait_before(attempt, &e).await => attempt += 1,
                 Err(e) if self.drop_the_effort(&e, &mut request) => continue,
+                Err(e) if self.ask_for_less_output(&e, &mut request) => continue,
                 answer => return answer,
             }
         }

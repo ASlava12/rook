@@ -185,6 +185,32 @@ async fn an_endpoint_that_refused_the_effort_is_not_asked_with_it_again() {
     assert!(!sent[2].contains("reasoning_effort"), "the later turn pays nothing for it: {}", sent[2]);
 }
 
+/// Asking for the room the window leaves is the default, and an endpoint with
+/// a ceiling of its own refuses it. What that ceiling is appears in no API and
+/// differs per model, so it is learned from the refusal: asked for half, and
+/// remembered, rather than guessed from a name or kept in a table.
+#[tokio::test]
+async fn a_reply_too_large_for_the_endpoint_is_asked_for_smaller() {
+    let (url, sent) = recording(vec![(
+        "400 Bad Request",
+        r#"{"error":{"message":"max_tokens: 20000 > 8192, which is the maximum for this model"}}"#,
+    )])
+    .await;
+    let provider = provider(url);
+    let mut asking = Request::new(Vec::new());
+    asking.max_output_tokens = 20_000;
+
+    provider.complete(asking.clone()).await.expect("the smaller request answers");
+    provider.complete(asking).await.expect("and so does the next turn");
+
+    let sent = sent.lock().unwrap();
+    assert_eq!(sent.len(), 3, "the refusal, its retry, and a later turn: {}", sent.len());
+    assert!(sent[0].contains("20000"), "the precondition: it asked for the room it had");
+    assert!(sent[1].contains("10000"), "halved, because the endpoint said too big and not what fits");
+    // One refusal per process: a later turn pays nothing to find out again.
+    assert!(!sent[2].contains("20000"), "the ceiling is remembered: {}", sent[2]);
+}
+
 /// A 400 about anything else is still a refusal that will not change, and one
 /// naming the effort on a request that never had one cannot loop.
 #[tokio::test]

@@ -1538,7 +1538,7 @@ impl<'a> AgentLoop<'a> {
                 request.tools = self.tool_specs();
             }
             request.effort = Some(self.effort);
-            request.max_output_tokens = self.rook.config.agent.max_output_tokens;
+            request.max_output_tokens = self.room_for_output(used);
             request.cache_ttl = self.rook.config.agent.cache_ttl();
             let mut stream =
                 self.provider.stream(request).await.map_err(|e| CoreError::Other(e.to_string()))?;
@@ -1843,9 +1843,10 @@ impl<'a> AgentLoop<'a> {
             }
             messages.push(Message::user(OUT_OF_STEPS));
             self.rook.log(self.session, EventKind::Note, "out of steps", OUT_OF_STEPS).ok();
+            let used = measured(&messages, anchor);
             let mut request = Request::new(messages);
             request.effort = Some(self.effort);
-            request.max_output_tokens = self.rook.config.agent.max_output_tokens;
+            request.max_output_tokens = self.room_for_output(used);
             request.cache_ttl = self.rook.config.agent.cache_ttl();
             let mut stream =
                 self.provider.stream(request).await.map_err(|e| CoreError::Other(e.to_string()))?;
@@ -2816,6 +2817,22 @@ impl<'a> AgentLoop<'a> {
             true => format!("no source offers a skill matching {query:?}."),
             false => format!("no source offers a skill matching {query:?}. {}", errors.join("; ")),
         }
+    }
+
+    /// How much the reply may be, when nobody has set a number.
+    ///
+    /// What is left of the window after this prompt, which is the most that
+    /// could arrive anyway: no API says what a model's own ceiling is, and an
+    /// endpoint with a lower one refuses and is asked for less. Never below
+    /// what the budget reserves — that is the room the rest of the loop plans
+    /// around, and a reply with less than it has nowhere to write a call.
+    fn room_for_output(&self, used: usize) -> u32 {
+        let asked = self.rook.config.agent.max_output_tokens;
+        if asked > 0 {
+            return asked;
+        }
+        let left = self.budget.usable().saturating_sub(used).max(self.budget.reserve_output);
+        left.min(u32::MAX as usize) as u32
     }
 
     async fn gate_risk(
