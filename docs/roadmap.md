@@ -1288,6 +1288,14 @@ thing now: that the turn *said* it wrote the file. A turn that does the work
 and reports none of it reads exactly like one that did nothing, which is a
 question somebody asked here about a real turn.
 
+And a scenario can have a second turn now, asked in a new session against the
+same store — which is the only way to check the one claim a single turn cannot.
+`remembers into the next session` tells the agent something, then asks a fresh
+session for it: nothing of the first turn is replayed into the second, so the
+answer arrives through memory or not at all. It passes, which is the first
+end-to-end evidence that remembering and recalling work against a model rather
+than against a fixture.
+
 The reading after it, with the edit scenario passing for the first time in a
 while, found one more of the same kind. `find_skill` takes a query and a name
 to install in one call, and a name no source offers threw the query away with

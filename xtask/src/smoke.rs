@@ -20,6 +20,10 @@ struct Scenario {
     /// Files the workspace starts with.
     seed: &'static [(&'static str, &'static str)],
     prompt: &'static str,
+    /// A second turn, asked in a new session against the same store. What the
+    /// first one learnt has to reach it through memory or not at all — which
+    /// is the one claim here that a single turn cannot check.
+    then: Option<&'static str>,
     /// Why this is not something a model can answer from memory.
     check: fn(&Turn, &Path) -> Result<()>,
 }
@@ -39,6 +43,7 @@ const SCENARIOS: &[Scenario] = &[
         name: "reads before answering",
         seed: &[("config.rs", "pub const PORT: u16 = 8443;\npub const HOST: &str = \"::1\";\n")],
         prompt: "What port does config.rs use? Answer with the number.",
+        then: None,
         check: |turn, _| {
             expect(turn.reply.contains("8443"), "the answer is in the file, not in the model", turn)?;
             expect(turn.tools.iter().any(|t| t == "read_file"), "and it had to be read", turn)
@@ -48,6 +53,7 @@ const SCENARIOS: &[Scenario] = &[
         name: "edits what it was asked to",
         seed: &[("config.rs", "pub const PORT: u16 = 8443;\npub const HOST: &str = \"::1\";\n")],
         prompt: "Change the port in config.rs to 9000. Change nothing else.",
+        then: None,
         check: |turn, workspace| {
             let after = std::fs::read_to_string(workspace.join("config.rs"))?;
             expect(after.contains("9000"), "the edit has to land", turn)?;
@@ -62,6 +68,7 @@ const SCENARIOS: &[Scenario] = &[
         name: "uses what a command printed",
         seed: &[("token.txt", "quiet-heron-4417\n")],
         prompt: "Run `cat token.txt` and tell me exactly what it printed.",
+        then: None,
         check: |turn, _| {
             expect(turn.reply.contains("quiet-heron-4417"), "the token is only on disk", turn)?;
             expect(turn.tools.iter().any(|t| t == "run_command"), "and only a command reaches it", turn)
@@ -72,6 +79,7 @@ const SCENARIOS: &[Scenario] = &[
         seed: &[("notes/port.txt", "the service listens on 7331\n")],
         prompt: "Use the delegate tool to have a sub-agent read notes/port.txt and report the port \
                  it names; then answer with that number only.",
+        then: None,
         check: |turn, _| {
             expect(turn.tools.iter().any(|t| t == "delegate"), "the tool has to be the one used", turn)?;
             expect(turn.reply.contains("7331"), "the number came back through a sub-agent", turn)
@@ -82,6 +90,7 @@ const SCENARIOS: &[Scenario] = &[
         seed: &[("lib.rs", "pub fn add(a: i32, b: i32) -> i32 { a - b }\n")],
         prompt: "Use the verify tool to check this claim: `add` in lib.rs returns the sum of its \
                  arguments.",
+        then: None,
         check: |turn, _| {
             expect(turn.tools.iter().any(|t| t == "verify"), "the tool has to be the one used", turn)?;
             let settled = turn.reply.to_lowercase();
@@ -92,6 +101,18 @@ const SCENARIOS: &[Scenario] = &[
                 "the claim is false and the file says so",
                 turn,
             )
+        },
+    },
+    Scenario {
+        name: "remembers into the next session",
+        seed: &[],
+        prompt: "Remember for later that this project's staging host is stage-7.internal.",
+        // A new session against the same store: nothing of the first turn is
+        // replayed into it, so the host reaches this one through memory or it
+        // does not reach it at all.
+        then: Some("What is this project's staging host? Answer with the host name and nothing else."),
+        check: |turn, _| {
+            expect(turn.reply.contains("stage-7.internal"), "it is not in the workspace or the model", turn)
         },
     },
 ];
@@ -164,7 +185,13 @@ pub fn smoke(model: Option<String>) -> Result<()> {
             std::fs::write(path, body)?;
         }
 
-        let outcome = run(&rook, home.path(), workspace.path(), scenario.prompt);
+        let outcome = run(&rook, home.path(), workspace.path(), scenario.prompt).and_then(|first| {
+            // The first turn is the setup where there is a second: what it
+            // said is not what is being judged, only that it got that far.
+            let Some(next) = scenario.then else { return Ok(first) };
+            expect(first.stopped != "max_steps", "the first turn ran out of steps", &first)?;
+            run(&rook, home.path(), workspace.path(), next)
+        });
         let verdict = outcome.and_then(|turn| {
             // Before what it said: a model that flailed to the step limit and
             // happened to mention the right word has not done the task.
