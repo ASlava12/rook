@@ -516,7 +516,11 @@ struct Target {
 /// and a one-line fix are the same tool.
 fn parse_targets(args: &serde_json::Value) -> Result<Vec<Target>> {
     let invalid = |message: String| ToolError::Invalid { tool: "edit_file".into(), message };
-    let Some(files) = args.get("files") else {
+    // The `files` shape written into `edits` says plainly what it meant: these
+    // edits, in these files. A model wrote exactly that, doubly encoded, and
+    // spent the next four steps being told `edits` was not an array of edits.
+    let files = args.get("files").or_else(|| args.get("edits").filter(|e| is_files_shaped(e)));
+    let Some(files) = files else {
         return Ok(vec![Target { path: arg_str(args, "edit_file", "path")?, edits: parse_edits(args)? }]);
     };
     let files = files.as_array().filter(|f| !f.is_empty()).ok_or_else(|| {
@@ -632,6 +636,14 @@ fn parse_edits(args: &serde_json::Value) -> Result<Vec<Edit>> {
         }]),
         _ => Err(invalid("no edits given — pass `edits: [{old, new}]`".into())),
     }
+}
+
+/// Whether this is a list of files with their edits rather than a list of
+/// edits: every entry an object carrying both, which no edit does.
+fn is_files_shaped(value: &serde_json::Value) -> bool {
+    value.as_array().is_some_and(|entries| {
+        !entries.is_empty() && entries.iter().all(|e| e.get("path").is_some() && e.get("edits").is_some())
+    })
 }
 
 /// The field an entry used for the new text, when it gave no `old`.

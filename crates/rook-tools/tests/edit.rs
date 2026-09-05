@@ -30,6 +30,43 @@ impl File {
     }
 }
 
+/// Verbatim from a real turn, both slips at once: the arguments doubly
+/// encoded, and the `files` shape written into `edits`. It was refused, and
+/// the model answered the refusal by sending it again — four steps for a call
+/// that says plainly what it meant.
+#[tokio::test]
+async fn a_call_written_as_a_string_of_json_is_read_as_the_json_it_is() {
+    let f = File::with("let a = 1;\nlet b = 2;\n");
+    let path = f.dir.path().join("f.rs").display().to_string();
+    let edits =
+        serde_json::json!([{ "path": path, "edits": [{ "old": "let b = 2;", "new": "let b = 3;" }] }]);
+    let args = serde_json::json!({ "edits": serde_json::to_string(&edits).unwrap() });
+
+    let box_of_tools = rook_tools::ToolBox::standard();
+    let done = box_of_tools.call(&f.ctx, "edit_file", &args).await.expect("the call is a call");
+
+    assert!(done.content.contains("1 edit"), "{}", done.content);
+    assert_eq!(f.contents(), "let a = 1;\nlet b = 3;\n");
+}
+
+/// And never against a schema that asked for a string: a JSON document on its
+/// way to disk is the text it is.
+#[tokio::test]
+async fn a_file_whose_contents_are_json_is_written_as_written() {
+    let f = File::with("");
+    let document = "{\"name\": \"rook\", \"deps\": [1, 2]}";
+    let args = serde_json::json!({ "path": "package.json", "content": document });
+
+    let box_of_tools = rook_tools::ToolBox::standard();
+    box_of_tools.call(&f.ctx, "write_file", &args).await.expect("written");
+
+    assert_eq!(
+        std::fs::read_to_string(f.dir.path().join("package.json")).unwrap(),
+        document,
+        "the file holds what was passed, not a re-serialisation of it"
+    );
+}
+
 /// Approving a write shown only a path is approving something you cannot see,
 /// which is most of the value of being asked.
 #[tokio::test]

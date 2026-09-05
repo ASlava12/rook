@@ -426,7 +426,8 @@ impl ToolBox {
         if let Some(unusable) = unusable_arguments(name, args) {
             return Err(unusable);
         }
-        tool.call(ctx, args).await
+        let read_again = as_the_schema_reads_them(&tool.spec().parameters, args);
+        tool.call(ctx, read_again.as_ref().unwrap_or(args)).await
     }
 
     /// A model that typed `read_fil` has already spent a step, and "unknown
@@ -487,6 +488,42 @@ pub fn unusable_arguments(tool: &str, args: &serde_json::Value) -> Option<ToolEr
                   JSON object"
             .into(),
     })
+}
+
+/// Arguments a model wrote as a string of JSON, read as the JSON they are.
+///
+/// `{"edits": "[{\"old\": …}]"}` — the field is a string and inside it is
+/// exactly the array the tool asked for. Deserializing refuses it, and a
+/// refusal is answered by writing the same thing again, which is the whole
+/// class of retry this repository keeps meeting. It cost four steps of a real
+/// turn.
+///
+/// Against the tool's own schema, never blindly: `write_file` takes a file's
+/// contents as a string, and a JSON document on its way to disk must arrive as
+/// the text it is.
+///
+/// `None` when nothing needed re-reading, so the ordinary call is not copied.
+pub fn as_the_schema_reads_them(
+    schema: &serde_json::Value,
+    args: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let properties = schema.get("properties")?.as_object()?;
+    let given = args.as_object()?;
+    let mut read_again = given.clone();
+    let mut changed = false;
+    for (key, value) in given {
+        let (Some(text), Some(wanted)) =
+            (value.as_str(), properties.get(key).and_then(|p| p.get("type")).and_then(|t| t.as_str()))
+        else {
+            continue;
+        };
+        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(text.trim()) else { continue };
+        if (wanted == "array" && parsed.is_array()) || (wanted == "object" && parsed.is_object()) {
+            read_again.insert(key.clone(), parsed);
+            changed = true;
+        }
+    }
+    changed.then_some(serde_json::Value::Object(read_again))
 }
 
 pub(crate) fn arg_str(args: &serde_json::Value, tool: &str, key: &str) -> Result<String> {

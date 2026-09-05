@@ -194,6 +194,14 @@ what unblocks the most.
   last. Anthropic's signed blocks are left alone; a second copy as text would
   be the same thought twice. The bound is what lets `session context` price a
   thought from its stored size without reading it. 2 tests.
+- **Arguments read as what they plainly are** — a real turn spent four steps
+  on one call: `edit_file` handed `edits` as a *string* of JSON, and inside it
+  the `files` shape rather than a list of edits. Both are now read — a field
+  the tool's own schema declares an array or an object, arriving as a string
+  that parses to one, is the value it parses to; and a list of `{path, edits}`
+  wherever it turns up is a list of files with their edits. Against the schema
+  and never blindly: `write_file` takes a file's contents as a string, and a
+  JSON document on its way to disk arrives as the text it is. 2 tests.
 - **A context figure that matches the request** — `session context` counted
   every event but checkpoints as live, so asides, errors and reasoning inflated
   the number the command exists to explain, and could report a session over the
