@@ -51,6 +51,19 @@ export async function renderMemory() {
     }
   };
 
+  const typed = el('input', { placeholder: 'Something the agent should know…' });
+  const everywhere = el('input', { type: 'checkbox' });
+  const add = async () => {
+    const text = typed.value.trim();
+    if (!text) return;
+    try {
+      await api('/api/memory/add', { text, global: everywhere.checked });
+      renderMemory();
+    } catch (e) {
+      alert(e.error || e);
+    }
+  };
+
   const rows = items.map(f => el('tr', {},
     el('td', { class: 't' }, f.id),
     el('td', {}, f.pinned ? 'pinned' : ''),
@@ -66,6 +79,13 @@ export async function renderMemory() {
         el('input', { type: 'checkbox', checked: all,
           onchange: (e) => { state.memoryAll = e.target.checked; renderMemory(); } }),
         ' every workspace')),
+    // Adding, not only forgetting: what the agent believes is corrected where
+    // it is read, and a fact only the command line could write was one more
+    // window to go and find.
+    el('form', { class: 'ask', onsubmit: (e) => { e.preventDefault(); add(); } },
+      typed,
+      el('label', {}, everywhere, ' everywhere'),
+      el('button', {}, 'Remember')),
     items.length
       ? el('table', {}, el('tr', {}, ['id', '', 'scope', 'fact', 'tags', ''].map(h => el('th', {}, h))), rows)
       : el('p', { class: 'empty' }, 'nothing remembered yet')));

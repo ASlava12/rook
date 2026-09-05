@@ -335,6 +335,37 @@ fn the_memory_tab_shows_what_the_agent_remembers() {
     assert!(screen.contains("style"), "with its tags:\n{screen}");
 }
 
+/// Reading memory without being able to correct it sent people to another
+/// window for `rook memory add`, which is the thing the tab is for.
+#[test]
+fn the_memory_tab_adds_and_forgets_what_it_lists() {
+    let _one = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let mut pty = tui(home.path(), workspace.path());
+    pty.screen(100, 30);
+    pty.send("\t\t");
+    pty.screen_showing(100, 30, "Memory");
+
+    pty.send("a");
+    pty.screen_showing(100, 30, "enter saves");
+    pty.send("the deploy key lives in 1password\r");
+    let added = pty.screen_showing(100, 30, "remembered as").join("\n");
+    assert!(added.contains("the deploy key lives in 1password"), "and it is listed:\n{added}");
+
+    pty.send("d");
+    // The fact is named in the pane's title while it can still be put back, so
+    // what says it is gone is the count and the empty list, not its absence.
+    let gone = pty.screen_showing(100, 30, "puts it back").join("\n");
+    assert!(gone.contains("Memory (0)"), "forgetting removes the row it was on:\n{gone}");
+    assert!(gone.contains("nothing remembered yet"), "and the pane says so:\n{gone}");
+
+    // Undo, because the row `d` lands on is the one a wrong keystroke costs.
+    pty.send("u");
+    let back = pty.screen_showing(100, 30, "is back").join("\n");
+    assert!(back.contains("the deploy key lives in 1password"), "and it is listed again:\n{back}");
+}
+
 #[test]
 fn the_tui_chat_answers_the_same_slash_commands_as_the_plain_cli() {
     let _one = one_at_a_time();

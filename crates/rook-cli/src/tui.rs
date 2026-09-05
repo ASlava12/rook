@@ -197,6 +197,16 @@ impl Typing {
     }
 }
 
+/// A fact being typed on the Memory tab, and how far it will reach. Scope is
+/// chosen by the key that starts the line — `a` files it against this
+/// workspace, `A` everywhere — because it is the part a person gets wrong once
+/// and then lives with.
+#[derive(Default)]
+struct Adding {
+    text: Typing,
+    global: bool,
+}
+
 #[derive(Default)]
 struct Chat {
     input: Typing,
@@ -453,6 +463,15 @@ struct App {
     selected: Option<Selected>,
     transcript_scroll: u16,
     facts: Vec<rook_core::Fact>,
+    fact_state: ListState,
+    adding: Option<Adding>,
+    /// The last fact forgotten here, so `u` puts it back: a `d` on the wrong
+    /// row is otherwise a version of memory nobody meant to write.
+    forgotten: Option<rook_core::Fact>,
+    /// What the last write did, said on the pane it changed. The footer is
+    /// twenty-odd columns by the time the keys and the settings have had
+    /// theirs, which is not enough to name a fact.
+    fact_note: String,
     skills: Vec<SkillCard>,
     skill_state: ListState,
     objects: Vec<(String, String, u64, u64)>,
@@ -525,6 +544,10 @@ impl App {
             selected: None,
             transcript_scroll: 0,
             facts: Vec::new(),
+            fact_state: ListState::default(),
+            adding: None,
+            forgotten: None,
+            fact_note: String::new(),
             skills: Vec::new(),
             skill_state: ListState::default(),
             objects: Vec::new(),
@@ -554,6 +577,11 @@ impl App {
             .into_iter()
             .map(|row| (row.short, row.kind, row.size_raw, row.size_stored))
             .collect();
+        // Clamped rather than kept: forgetting the last fact leaves the
+        // selection past the end, and the next `d` would find nothing there.
+        let last = self.facts.len().saturating_sub(1);
+        self.fact_state
+            .select((!self.facts.is_empty()).then(|| self.fact_state.selected().unwrap_or(0).min(last)));
         if self.session_state.selected().is_none() && !self.sessions.is_empty() {
             self.session_state.select(Some(0));
         }
@@ -761,6 +789,9 @@ impl App {
         }
         if self.tab == 0 {
             self.on_chat_key(key);
+            return;
+        }
+        if self.tab == 2 && self.on_memory_key(key) {
             return;
         }
         match key.code {
@@ -1172,9 +1203,104 @@ impl App {
         }));
     }
 
+    /// The Memory tab writes as well as reads. The browser can already forget
+    /// and the command line can do both, and what the agent believes is the
+    /// one thing a person most needs to correct where they are reading it.
+    ///
+    /// Returns whether the key was this tab's — while a fact is being typed
+    /// every key is, `j` and `q` included.
+    fn on_memory_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        match (self.adding.is_some(), key.code) {
+            (false, KeyCode::Char('a')) => self.adding = Some(Adding::default()),
+            (false, KeyCode::Char('A')) => self.adding = Some(Adding { global: true, ..Adding::default() }),
+            (false, KeyCode::Char('d')) => self.forget_selected(),
+            (false, KeyCode::Char('u')) => self.restore_forgotten(),
+            (false, _) => return false,
+            (true, KeyCode::Enter) => self.remember_typed(),
+            (true, KeyCode::Esc) => self.adding = None,
+            (true, code) => {
+                if let Some(adding) = &mut self.adding {
+                    match code {
+                        KeyCode::Backspace => adding.text.backspace(),
+                        KeyCode::Delete => adding.text.delete(),
+                        KeyCode::Left => adding.text.left(),
+                        KeyCode::Right => adding.text.right(),
+                        KeyCode::Home => adding.text.home(),
+                        KeyCode::End => adding.text.end(),
+                        KeyCode::Char(c) => adding.text.insert(c),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    fn remember_typed(&mut self) {
+        let Some(adding) = self.adding.take() else { return };
+        let text = adding.text.as_str().trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        let workspace = self.source.workspace().to_path_buf();
+        let scope = match adding.global {
+            true => rook_core::Scope::Global,
+            false => rook_core::Scope::Project(workspace.display().to_string()),
+        };
+        let fact = rook_core::Fact::new(text, scope);
+        let id = fact.id.clone();
+        use rook_core::memory::Learned;
+        let said = match self.source.remember(fact, &workspace) {
+            Ok(Learned::Unchanged) => format!("already remembered as [{id}]"),
+            Ok(Learned::ScopedElsewhere(scope)) => {
+                format!("[{id}] stays scoped to {}; A adds it globally", scope.label())
+            }
+            Ok(_) => format!("remembered as [{id}]"),
+            Err(e) => e.to_string(),
+        };
+        self.note(said);
+    }
+
+    fn forget_selected(&mut self) {
+        let Some(fact) = self.fact_state.selected().and_then(|at| self.facts.get(at)).cloned() else {
+            return;
+        };
+        let said = match self.source.forget(&fact.id) {
+            Ok(Some(gone)) => {
+                let text = gone.text.chars().take(40).collect::<String>();
+                self.forgotten = Some(gone);
+                format!("forgot {text:?}; u puts it back")
+            }
+            Ok(None) => format!("no fact [{}]", fact.id),
+            Err(e) => e.to_string(),
+        };
+        self.note(said);
+    }
+
+    /// Back with its tags and its pinning, because it goes back as the fact it
+    /// was rather than as one typed again from what the screen showed.
+    fn restore_forgotten(&mut self) {
+        let Some(fact) = self.forgotten.take() else {
+            return self.note("nothing forgotten here to put back".into());
+        };
+        let workspace = self.source.workspace().to_path_buf();
+        let id = fact.id.clone();
+        let said = match self.source.remember(fact, &workspace) {
+            Ok(_) => format!("[{id}] is back"),
+            Err(e) => e.to_string(),
+        };
+        self.note(said);
+    }
+
+    fn note(&mut self, said: String) {
+        self.fact_note = said;
+        self.reload();
+    }
+
     fn move_selection(&mut self, delta: isize) {
         let (state, len) = match self.tab {
             1 => (&mut self.session_state, self.sessions.len()),
+            2 => (&mut self.fact_state, self.facts.len()),
             3 => (&mut self.skill_state, self.skills.len()),
             _ => {
                 self.transcript_scroll = self.transcript_scroll.saturating_add_signed(delta as i16 * 3);
@@ -1236,7 +1362,15 @@ impl App {
                 ("/ ", "commands  "),
                 ("^C ", "stop  "),
             ],
-            _ => vec![("↹/1-5 ", "tab  "), ("j/k ", "move  "), ("r ", "reload  "), ("q ", "quit  ")],
+            2 => vec![
+                ("↹ ", "tab  "),
+                ("j/k ", "move  "),
+                ("a ", "add  "),
+                ("A ", "global  "),
+                ("d ", "forget  "),
+                ("u ", "undo  "),
+            ],
+            _ => vec![("↹/1-6 ", "tab  "), ("j/k ", "move  "), ("r ", "reload  "), ("q ", "quit  ")],
         };
         let mut spans: Vec<Span> = vec![Span::raw(" ")];
         for (key, what) in keys {
@@ -1529,6 +1663,9 @@ impl App {
     }
 
     fn draw_memory(&mut self, f: &mut Frame, area: Rect) {
+        let typing = if self.adding.is_some() { 3 } else { 0 };
+        let [list, entry] = Layout::vertical([Constraint::Min(3), Constraint::Length(typing)]).areas(area);
+
         let rows: Vec<Vec<String>> = self
             .facts
             .iter()
@@ -1546,18 +1683,38 @@ impl App {
         let mut lines: Vec<Line> = Vec::new();
         if rows.is_empty() {
             lines.push(Line::from(Span::styled(
-                "nothing remembered yet — the agent writes here as it learns, and \
-                 `rook memory rm <id>` corrects it",
+                "nothing remembered yet — the agent writes here as it learns, and `a` adds a fact",
                 Style::default().fg(Color::DarkGray),
             )));
         }
-        for row in fmt::table(&["id", "", "scope", "fact", "tags"], &rows).lines() {
-            lines.push(Line::from(Span::raw(row.to_string())));
+        // Two lines of header stand before the first row, which is what puts
+        // the highlight on the fact `d` would forget.
+        let chosen = self.fact_state.selected().map(|at| at + 2);
+        for (at, row) in fmt::table(&["id", "", "scope", "fact", "tags"], &rows).lines().enumerate() {
+            let style = match Some(at) == chosen {
+                true => Style::default().bg(Color::Rgb(40, 44, 52)),
+                false => Style::default(),
+            };
+            lines.push(Line::from(Span::styled(row.to_string(), style)));
         }
-        f.render_widget(
-            Paragraph::new(lines).block(bordered(&format!(" Memory ({}) ", self.facts.len()))),
-            area,
-        );
+        let title = match self.fact_note.is_empty() {
+            true => format!(" Memory ({}) ", self.facts.len()),
+            false => format!(" Memory ({}) — {} ", self.facts.len(), self.fact_note),
+        };
+        f.render_widget(Paragraph::new(lines).block(bordered(&title)), list);
+
+        if let Some(adding) = &self.adding {
+            let reach = if adding.global { "everywhere" } else { "in this workspace" };
+            f.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled("› ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(adding.text.as_str().to_string()),
+                ]))
+                .block(bordered(&format!(" remember {reach} — enter saves, esc cancels "))),
+                entry,
+            );
+            f.set_cursor_position((entry.x + 3 + adding.text.column(), entry.y + 1));
+        }
     }
 
     fn draw_skills(&mut self, f: &mut Frame, area: Rect) {
@@ -1727,10 +1884,13 @@ impl App {
             Line::from(""),
             Line::from(Span::styled("keys", Style::default().add_modifier(Modifier::BOLD))),
             Line::from("  Tab         switch tab          j k ↑ ↓   move"),
-            Line::from("  1-5         switch tab, outside Chat where digits are text"),
+            Line::from("  1-6         switch tab, outside Chat where digits are text"),
             Line::from("  Space/PgDn  scroll transcript    r         reload"),
             Line::from("  wheel       scrolls either pane; hold Shift to select text"),
             Line::from("  q / Esc     quit (Ctrl-C anywhere)"),
+            Line::from(""),
+            Line::from("  In Memory:  a adds a fact here · A adds it everywhere"),
+            Line::from("              d forgets the selected one · u puts it back"),
             Line::from(""),
             Line::from("  In Chat:    Enter sends · Esc clears, then quits"),
             Line::from("              /btw <question> asks without joining the conversation"),

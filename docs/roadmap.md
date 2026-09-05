@@ -187,6 +187,12 @@ what unblocks the most.
   `rook memory`. Both the TUI and the browser now have a Memory view over a new
   `/api/memory`, and the browser can forget a fact: one nobody can remove is one
   that quietly steers everything. 4 tests, including the tab drawn on a pty.
+  Writing followed reading: the tab that lists what the agent believes now
+  corrects it where it is read — `a` adds a fact here, `A` everywhere, `d`
+  forgets the selected one and `u` puts it back with its tags and its pinning,
+  because the row a keystroke lands on is not always the one that was meant.
+  The browser gained the same add, so all three front ends now do what the
+  command line always could. 5 tests.
 - **Fetching a language server this machine does not have** — `rook lsp install
   rust-analyzer` takes the latest release, checks the bytes as they arrive
   against the digest the release API lists for that asset, unpacks the one
