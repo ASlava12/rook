@@ -84,7 +84,7 @@ pub(crate) fn floor_char_boundary(data: &[u8], mut i: usize) -> usize {
     i
 }
 
-fn ceil_char_boundary(data: &[u8], mut i: usize) -> usize {
+pub(crate) fn ceil_char_boundary(data: &[u8], mut i: usize) -> usize {
     while i < data.len() && (data[i] & 0xC0) == 0x80 {
         i += 1;
     }

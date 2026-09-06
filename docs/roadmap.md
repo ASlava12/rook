@@ -194,6 +194,16 @@ what unblocks the most.
   last. Anthropic's signed blocks are left alone; a second copy as text would
   be the same thought twice. The bound is what lets `session context` price a
   thought from its stored size without reading it. 2 tests.
+- **Both ends of a conventions file** — `AGENTS.md` past `[agent]
+  max_instructions_bytes` was cut at the ceiling and the rest dropped, which
+  means the bottom of the file: a conventions file puts its subject at the top
+  and its sharpest rules at the bottom, and "never commit the key" is written
+  at the end. It keeps both ends now, with the count of what went between them
+  — the rule command output has followed here since it had a cap — and the tail
+  is seeked to rather than read up to, because the point of the ceiling is that
+  a file somebody else wrote is never held whole. From a hermes pass, where the
+  same file and the same ceiling had the same half missing. 1 test, rewritten:
+  the old one asserted that the end of the file was *not* carried.
 - **A model family recognised by its shape** — `reasoning_effort` was sent to a
   list of names: `gpt-5`, `o1`, `o3`, `o4`. A list ages the moment a family
   gains a version, and three references in one day were maintaining one — a

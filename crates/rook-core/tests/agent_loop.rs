@@ -2031,7 +2031,7 @@ async fn a_projects_own_instructions_reach_the_model_under_both_names() {
 async fn instructions_a_repository_committed_cannot_spend_the_context_window() {
     let mut f = fixture();
     f.rook.config.agent.max_instructions_bytes = 64;
-    let huge = format!("{}\nthe part past the limit\n", "x".repeat(4096));
+    let huge = format!("what this project is\n{}\nnever commit the key\n", "x".repeat(4096));
     std::fs::write(f.workspace.path().join("AGENTS.md"), &huge).unwrap();
     assert!(huge.len() > f.rook.config.agent.max_instructions_bytes, "the file has to exceed the limit");
 
@@ -2039,11 +2039,15 @@ async fn instructions_a_repository_committed_cannot_spend_the_context_window() {
     let provider = Arc::new(ScriptedProvider::new(vec![reply("ok")]));
     let prompt = AgentLoop::new(&f.rook, provider, session).system_prompt();
 
-    assert!(!prompt.contains("the part past the limit"), "what was cut must not be there: {prompt}");
-    assert!(prompt.contains("max_instructions_bytes"), "and the cut must be named: {prompt}");
-    // Counted from the file's length: past the cap the rest is never read.
-    let past = huge.len() - f.rook.config.agent.max_instructions_bytes;
-    assert!(prompt.contains(&format!("{past} more bytes")), "and counted from the whole: {prompt}");
+    assert!(prompt.len() < huge.len() / 4, "most of it is not carried: {} bytes", prompt.len());
+    assert!(!prompt.contains(&"x".repeat(64)), "and the middle is what went: {prompt}");
+    // Both ends. A conventions file is written like one — the subject at the
+    // top and the sharpest rule at the bottom — and cutting at the ceiling
+    // dropped the second silently.
+    assert!(prompt.contains("what this project is"), "the top is carried: {prompt}");
+    assert!(prompt.contains("never commit the key"), "and so is the bottom: {prompt}");
+    assert!(prompt.contains("max_instructions_bytes"), "and the cut is named: {prompt}");
+    assert!(prompt.contains("bytes from the middle not read"), "where it was made: {prompt}");
 
     // A byte that is not text is not a reason to follow nothing and say nothing
     // about why.

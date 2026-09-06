@@ -1059,15 +1059,12 @@ impl<'a> AgentLoop<'a> {
             &self.rook.workspace,
             self.rook.config.agent.max_instructions_bytes,
         ) {
+            // What was left out is said where it was left out: the text
+            // carries its own marker between the head and the tail, because
+            // instructions that stop mid-sentence read as instructions that
+            // end there — and a note after the end says nothing about which
+            // end went.
             s.push_str(&format!("\n## {}\n{}\n", standing.from.display(), standing.text.trim_end()));
-            // Said rather than silently cut: instructions that stop mid-sentence
-            // read as instructions that end there.
-            if standing.elided > 0 {
-                s.push_str(&format!(
-                    "[{} more bytes not shown — past `[agent] max_instructions_bytes`]\n",
-                    standing.elided
-                ));
-            }
         }
 
         if let Ok(extra) = self.session_context.lock()

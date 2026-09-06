@@ -1430,3 +1430,32 @@ is silent, and the model reasons at whatever the endpoint defaults to forever.
 
 The rest is their console, their hosted model catalogue, documentation in three
 languages, release syncing, and a Copilot header.
+
+## hermes 63279301b → 245e48008, 2026-09-06
+
+Two hundred and two commits, one ported.
+
+`fix(context): subdirectory AGENTS.md hints keep head+tail and warn when over
+the ceiling` is the same file this reads and the same ceiling — and here it was
+a head and nothing else. A conventions file is written like one: the subject at
+the top, the sharpest rules at the bottom, which is where "never commit the
+key" lives. Past `[agent] max_instructions_bytes` that half was dropped in
+silence. It keeps both ends now, with the count of what went between them,
+which is the rule command output has followed here since it had a cap. The tail
+is seeked to rather than read up to, because the point of the ceiling is that a
+file somebody else wrote is never held whole.
+
+`fix(tools): a sandbox that cannot run commands is 'environment unavailable',
+not 'File not found'` is a failure blamed on the wrong thing, which cost a real
+turn ten steps here yesterday in its Seatbelt form. Their shape is not
+reachable in this design: the file tools read the host filesystem directly
+rather than through the sandbox, so a sandbox that will not start refuses the
+command that would use it and says so, and a read is unaffected.
+
+The rest is theirs, and the size of it is the point of the pass rather than an
+argument against it: a desktop application and its window management, tabs,
+skins and tooltips (about forty commits), a voice and browser stack, Slack and
+Discord surfaces, a gateway with kanban boards and media delivery, systemd and
+launchd fleet updates, a plugin compatibility campaign, contributor email
+mapping, and a −34% whole-codebase refactor that is documentation of their
+layout, not of ours.
