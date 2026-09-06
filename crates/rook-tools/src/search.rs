@@ -11,6 +11,44 @@ use crate::{MAX_LINE, Result, Tool, ToolContext, ToolError, ToolOutcome, arg_str
 
 pub struct Search;
 
+/// Which files a search looks at.
+///
+/// A glob that looks like one is matched as one, and anything else stays the
+/// substring the argument used to be: `src/` is a reasonable thing to type and
+/// so is `*.py`, and only one of the two ever worked. `*.py` is what every
+/// search tool takes — ripgrep's `-g` included, where a pattern without a
+/// slash matches a name at any depth — and as a substring it matches no path
+/// on any machine, which a model read as "there is nothing there".
+enum Only {
+    Everything,
+    Containing(String),
+    Matching(Box<globset::GlobMatcher>),
+}
+
+impl Only {
+    fn of(glob: &str) -> std::result::Result<Self, String> {
+        if !glob.contains(['*', '?', '[']) {
+            return Ok(Self::Containing(glob.to_string()));
+        }
+        // `literal_separator(false)`, so `*.py` reaches into directories the
+        // way it does in every other search tool; a glob with its own `/` is
+        // still anchored by the separators it spells out.
+        let built = globset::GlobBuilder::new(glob)
+            .literal_separator(false)
+            .build()
+            .map_err(|e| format!("bad glob {glob:?}: {e}"))?;
+        Ok(Self::Matching(Box::new(built.compile_matcher())))
+    }
+
+    fn matches(&self, relative: &std::path::Path) -> bool {
+        match self {
+            Self::Everything => true,
+            Self::Containing(text) => relative.to_string_lossy().contains(text.as_str()),
+            Self::Matching(glob) => glob.is_match(relative),
+        }
+    }
+}
+
 #[async_trait]
 impl Tool for Search {
     fn name(&self) -> &str {
@@ -28,7 +66,7 @@ impl Tool for Search {
                 "properties": {
                     "pattern": { "type": "string", "description": "Rust regex syntax." },
                     "path": { "type": "string", "default": "." },
-                    "glob": { "type": "string", "description": "Only search paths containing this substring." },
+                    "glob": { "type": "string", "description": "Only files matching this: a pattern like `*.py`, or a plain substring of the path." },
                     "limit": { "type": "integer", "default": 200 }
                 },
                 "required": ["pattern"]
@@ -40,6 +78,11 @@ impl Tool for Search {
         let pattern = arg_str(args, self.name(), "pattern")?;
         let root = ctx.resolve(args.get("path").and_then(|v| v.as_str()).unwrap_or("."))?;
         let glob = args.get("glob").and_then(|v| v.as_str()).map(str::to_string);
+        let only = match &glob {
+            None => Only::Everything,
+            Some(g) => Only::of(g)
+                .map_err(|message| ToolError::Invalid { tool: self.name().to_string(), message })?,
+        };
         let limit = arg_usize(args, "limit", 200);
         let most_files = ctx.max_files_searched;
 
@@ -49,6 +92,7 @@ impl Tool for Search {
         })?;
 
         // The walk is blocking; keep it off the async runtime's worker threads.
+        let shown_root = root.clone();
         let result = tokio::task::spawn_blocking(move || {
             let mut hits = Vec::new();
             let mut total = 0usize;
@@ -65,9 +109,7 @@ impl Tool for Search {
                     continue;
                 }
                 let path = entry.path();
-                if let Some(g) = &glob
-                    && !path.to_string_lossy().contains(g.as_str())
-                {
+                if !only.matches(path.strip_prefix(&root).unwrap_or(path)) {
                     continue;
                 }
                 // A scan with no end is a hang, and the walk has no idea how
@@ -131,11 +173,21 @@ impl Tool for Search {
         .map_err(|e| ToolError::Invalid { tool: "search".into(), message: e.to_string() })?;
 
         let (hits, total, files_scanned, gave_up) = result;
+        let looked_in = shown_root.display().to_string();
         let truncated = total > hits.len() || gave_up;
-        let mut body = if hits.is_empty() {
-            format!("no matches for {pattern:?} in {files_scanned} files")
-        } else {
-            hits.join("\n")
+        let mut body = match (hits.is_empty(), files_scanned) {
+            (false, _) => hits.join("\n"),
+            // A filter that let nothing through has not answered the question,
+            // and "no matches" is how it was read: a rename was reported
+            // complete on the strength of a `glob` of `*.py` that matched no
+            // path at all, with a file still holding the old name.
+            (true, 0) => match &glob {
+                Some(g) => {
+                    format!("nothing was searched: no file under {looked_in} matches the glob {g:?}")
+                }
+                None => format!("nothing was searched: no files under {looked_in}"),
+            },
+            (true, scanned) => format!("no matches for {pattern:?} in {scanned} files"),
         };
         if total > hits.len() {
             body.push_str(&format!(

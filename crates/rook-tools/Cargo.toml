@@ -10,6 +10,7 @@ authors.workspace = true
 [dependencies]
 async-trait = "0.1.92"
 ignore = "0.4.33"
+globset = "0.4"
 regex = "1.13.1"
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "charset", "http2", "gzip"] }
 rook-llm.workspace = true

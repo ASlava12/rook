@@ -17,6 +17,41 @@ async fn a_match_is_reported_with_its_path_and_line() {
     assert!(found.contains("a.rs:2:fn two() {}"), "{found}");
 }
 
+/// Read from a real turn: a model checked its rename with `glob: "*.py"`,
+/// which as a substring matches no path on any machine. The search answered
+/// "no matches", the model read that as "the old name is gone everywhere", and
+/// said so — with a file still holding it.
+#[tokio::test]
+async fn a_glob_that_looks_like_one_is_matched_as_one() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("shop")).unwrap();
+    std::fs::write(dir.path().join("shop/cart.py"), "def total(rows):\n    pass\n").unwrap();
+    std::fs::write(dir.path().join("notes.md"), "total is the old name\n").unwrap();
+
+    // Every search tool takes this and reaches into directories with it.
+    let found = find(dir.path(), serde_json::json!({ "pattern": "total", "glob": "*.py" })).await;
+    assert!(found.contains("shop/cart.py:1"), "the file under a directory is searched: {found}");
+    assert!(!found.contains("notes.md"), "and the glob still excludes what it excludes: {found}");
+
+    // A plain substring is what the argument used to be, and still is.
+    let found = find(dir.path(), serde_json::json!({ "pattern": "total", "glob": "shop/" })).await;
+    assert!(found.contains("shop/cart.py:1"), "{found}");
+    assert!(!found.contains("notes.md"), "{found}");
+}
+
+/// A filter that let nothing through has not answered the question, and "no
+/// matches" is how it was read.
+#[tokio::test]
+async fn a_search_that_looked_at_nothing_says_so_rather_than_no_matches() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.rs"), "fn one() {}\n").unwrap();
+
+    let found = find(dir.path(), serde_json::json!({ "pattern": "one", "glob": "*.py" })).await;
+    assert!(found.contains("nothing was searched"), "{found}");
+    assert!(found.contains("*.py"), "and which filter left nothing: {found}");
+    assert!(!found.contains("no matches"), "which is a different answer: {found}");
+}
+
 #[tokio::test]
 async fn a_binary_file_is_passed_over_rather_than_searched() {
     let dir = tempfile::tempdir().unwrap();

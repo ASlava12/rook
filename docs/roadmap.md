@@ -194,6 +194,17 @@ what unblocks the most.
   last. Anthropic's signed blocks are left alone; a second copy as text would
   be the same thought twice. The bound is what lets `session context` price a
   thought from its stored size without reading it. 2 tests.
+- **A search that looked at nothing said "no matches"** — read from a real
+  turn: a model finished a rename across four files, checked itself with
+  `search` under `glob: "*.py"`, was told "no matches", and reported the old
+  name gone everywhere. The glob was a substring match — documented as one —
+  and `*.py` is a substring of no path on any machine, so nothing was searched
+  at all. Two answers to that. A glob that looks like one is matched as one
+  now, reaching into directories the way `rg -g '*.py'` does, and a plain
+  substring is still a substring, because `src/` is a reasonable thing to type
+  too. And a filter that let nothing through says so — "nothing was searched:
+  no file under … matches the glob" — which is a different answer from "no
+  matches" and the difference a conclusion was drawn across. 2 tests.
 - **Checkpoints where the workspace is** — taking a snapshot and putting one
   back were `rook checkpoint create` and `rook checkpoint restore <object> --to
   <dir>`, with the id read off a third command. The TUI has a Checkpoints tab

@@ -2471,6 +2471,7 @@ name = "rook-tools"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "globset",
  "ignore",
  "landlock",
  "libc",
