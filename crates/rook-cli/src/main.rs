@@ -735,6 +735,24 @@ fn probe_servers(
     })
 }
 
+/// The offered model a configuration names, and whether it named it exactly.
+///
+/// Case first, because two models that differ only by case are two models — a
+/// catalogue that has both is the reason to be strict. Then without it,
+/// because an endpoint that answers in a spelling of its own is the ordinary
+/// case: LM Studio lowercases what it serves, so a model configured as its
+/// publisher writes it works on every request and was reported here as one the
+/// endpoint does not have.
+fn offered<'a>(
+    models: &'a [rook_llm::ModelInfo],
+    configured: &str,
+) -> Option<(&'a rook_llm::ModelInfo, bool)> {
+    if let Some(exact) = models.iter().find(|m| m.id == configured) {
+        return Some((exact, true));
+    }
+    models.iter().find(|m| m.id.eq_ignore_ascii_case(configured)).map(|near| (near, false))
+}
+
 fn probe_provider(config: &rook_core::Config) -> Result<String> {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     let (_, configured) = rook_llm::split_spec(&config.agent.model);
@@ -743,19 +761,22 @@ fn probe_provider(config: &rook_core::Config) -> Result<String> {
 
     let spec = &config.agent.model;
     let window = provider.context_window();
-    let reported = models.iter().find(|m| m.id == configured).and_then(|m| m.context_window);
 
     if models.is_empty() {
         return Ok(format!("{spec} — reachable, {window} token window assumed"));
     }
-    if !models.iter().any(|m| m.id == configured) {
+    let Some((serving, exactly)) = offered(&models, configured) else {
         return Ok(format!(
             "{spec} — reachable, but {configured:?} is not among the {} it offers (`rook models`)",
             models.len()
         ));
-    }
+    };
+    let reported = serving.context_window;
 
     let mut note = format!("{spec} — reachable, {} model(s) offered, {window} token window", models.len());
+    if !exactly {
+        note.push_str(&format!("\n  the endpoint spells it {:?}, differing only in case", serving.id));
+    }
     // The endpoint knowing better than our default is common for self-hosted
     // models, and silently budgeting against the wrong number wastes most of
     // the window or overruns it.
@@ -1017,7 +1038,7 @@ fn cmd_models(workspace: Option<PathBuf>, json: bool) -> Result<()> {
             .iter()
             .map(|m| {
                 vec![
-                    if m.id == configured { "▸".into() } else { " ".into() },
+                    if m.id.eq_ignore_ascii_case(configured) { "▸".into() } else { " ".into() },
                     m.id.clone(),
                     m.context_window.map(|w| format!("{w}")).unwrap_or_default(),
                     m.owned_by.clone().unwrap_or_default(),
@@ -1025,7 +1046,7 @@ fn cmd_models(workspace: Option<PathBuf>, json: bool) -> Result<()> {
             })
             .collect();
         print!("{}", fmt::table(&["", "model", "context", "owner"], &rows));
-        if !models.iter().any(|m| m.id == configured) {
+        if offered(&models, configured).is_none() {
             println!("\n{configured:?} is configured but not offered here");
         }
         anyhow::Ok(())
@@ -2261,4 +2282,40 @@ fn cmd_checkpoint(source: &Source, cmd: CheckpointCmd, json: bool) -> Result<()>
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::offered;
+
+    fn model(id: &str) -> rook_llm::ModelInfo {
+        rook_llm::ModelInfo { id: id.into(), owned_by: None, context_window: Some(262_144) }
+    }
+
+    /// An endpoint that answers in a spelling of its own is the ordinary case
+    /// — LM Studio lowercases what it serves — so a model configured the way
+    /// its publisher writes it worked on every request and was reported by
+    /// `doctor` and `models` as one the endpoint does not have.
+    #[test]
+    fn a_model_the_endpoint_spells_differently_is_still_the_one_configured() {
+        let serving = [model("qwen/qwen3.8-27b"), model("google/gemma-4-31b-qat")];
+
+        let (found, exactly) = offered(&serving, "qwen/qwen3.8-27b").expect("named exactly");
+        assert_eq!((found.id.as_str(), exactly), ("qwen/qwen3.8-27b", true));
+
+        let (found, exactly) = offered(&serving, "Qwen/Qwen3.8-27B").expect("and by case alone");
+        assert_eq!((found.id.as_str(), exactly), ("qwen/qwen3.8-27b", false), "which is worth saying");
+
+        assert!(offered(&serving, "somebody/else").is_none(), "and a name it does not serve is not a match");
+    }
+
+    /// Two models that differ only by case are two models, so the one asked
+    /// for wins over the one that merely matches loosely.
+    #[test]
+    fn an_exact_name_wins_over_one_that_differs_by_case() {
+        let serving = [model("Mixtral-8x7B"), model("mixtral-8x7b")];
+
+        let (found, exactly) = offered(&serving, "mixtral-8x7b").expect("both are there");
+        assert_eq!((found.id.as_str(), exactly), ("mixtral-8x7b", true));
+    }
 }

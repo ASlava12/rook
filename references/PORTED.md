@@ -1459,3 +1459,24 @@ Discord surfaces, a gateway with kanban boards and media delivery, systemd and
 launchd fleet updates, a plugin compatibility campaign, contributor email
 mapping, and a −34% whole-codebase refactor that is documentation of their
 layout, not of ours.
+
+## openclaw d2f262ac2 → b8731bc88, 2026-09-06
+
+Two hundred commits, one ported, and it is the smallest kind of fix with the
+most annoying failure. `fix(models): keep models that differ by case separate`
+is the strict half of a question this answered too strictly in the other
+direction: `doctor` and `models` compared the configured name to the endpoint's
+listing exactly, and an endpoint that answers in a spelling of its own is the
+ordinary case — LM Studio lowercases what it serves. A model configured the way
+its publisher writes it worked on every request and was reported here as one
+the endpoint does not have, which is the worst thing a diagnostic can say.
+Exact first, since two models differing only by case are two models, then
+without it, and the difference is named where it is found.
+
+The rest is theirs, and the shape of the list says why: about a hundred and
+twenty are a desktop, an Android client, channels for Slack, Discord, iMessage
+and WhatsApp, a gateway with workers and a workboard, and their plugin system.
+Of what remains, several are the same questions this repository has already
+answered its own way — waiting out temporary rate limits, keeping tool-schema
+references through a dialect, bounding the encoding of output tails — and the
+rest is Bun compatibility for their test suite.

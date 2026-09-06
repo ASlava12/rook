@@ -194,6 +194,15 @@ what unblocks the most.
   last. Anthropic's signed blocks are left alone; a second copy as text would
   be the same thought twice. The bound is what lets `session context` price a
   thought from its stored size without reading it. 2 tests.
+- **A model the endpoint spells differently** — `doctor` and `models` compared
+  the configured name to the endpoint's listing exactly, so a model configured
+  the way its publisher writes it — `Qwen/Qwen3.8-27B` — was reported as one
+  the endpoint does not have, while every request using it worked: LM Studio
+  lowercases what it serves. A diagnostic that says a working setup is broken
+  is worse than one that says nothing. Exact first, because two models
+  differing only by case are two models, then without it, and the difference is
+  named where it is found. From an openclaw pass, where the same question was
+  being answered from the other side. 2 tests.
 - **Both ends of a conventions file** — `AGENTS.md` past `[agent]
   max_instructions_bytes` was cut at the ceiling and the rest dropped, which
   means the bottom of the file: a conventions file puts its subject at the top
