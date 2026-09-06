@@ -3500,6 +3500,31 @@ async fn what_the_model_worked_out_is_carried_back_to_it_shortened() {
     );
 }
 
+/// Condensing a span reads a transcript and writes a paragraph: mechanical
+/// work, done until now by whichever model was chosen for judgement — and
+/// charged at that model's rate, on the step where the turn is already
+/// paying for a compaction.
+#[tokio::test]
+async fn a_cheaper_model_can_be_the_one_that_condenses_a_span() {
+    let f = fixture();
+    let session = long_session(&f, 40);
+
+    let cheap = ScriptedProvider::new(vec![reply("they asked about the parser, forty times")]);
+    let asked = cheap.share();
+    let provider = Arc::new(ScriptedProvider::new(vec![reply("carrying on")]));
+    let mut agent = AgentLoop::new(&f.rook, provider, session);
+    agent.summariser = Some(Arc::new(cheap));
+    agent.set_window_for_test(4_000);
+    agent.run("and now?").await.unwrap();
+
+    assert_eq!(asked.lock().unwrap().len(), 1, "the other model was asked, once");
+    let (_, summary) = f.rook.last_compaction(session).unwrap();
+    assert!(
+        summary.expect("a summary stands in for the span").contains("forty times"),
+        "and its answer is what stands in for the span"
+    );
+}
+
 /// Answers the summarisation with the summary in its reasoning channel and
 /// nothing in `content`, which is what a reasoning model does when the whole
 /// answer is short enough to be one thought.

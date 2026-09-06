@@ -584,6 +584,10 @@ pub struct AgentLoop<'a> {
     pub policy: std::sync::Arc<Policy>,
     pub hooks: std::sync::Arc<Hooks>,
     pub servers: std::sync::Arc<crate::lsp::Servers>,
+    /// Who condenses a span when the context fills. `None` builds it from
+    /// `[agent] compaction_model`, or uses the provider doing the work when
+    /// that is empty — a front end or a test can hand one in instead.
+    pub summariser: Option<std::sync::Arc<dyn Provider>>,
     /// What the `session_start` hooks contributed, computed once.
     session_context: std::sync::Mutex<Option<String>>,
     /// A language server being fetched while the turn runs. It is a minute of
@@ -678,6 +682,7 @@ impl<'a> AgentLoop<'a> {
             policy: policy_for(&rook.config),
             hooks: std::sync::Arc::new(hooks),
             servers,
+            summariser: None,
             session_context: std::sync::Mutex::new(None),
             problems_before: Default::default(),
             installing: Default::default(),
@@ -3565,13 +3570,44 @@ impl AgentLoop<'_> {
 }
 
 impl AgentLoop<'_> {
+    /// The model to condense a span with.
+    ///
+    /// Built here rather than by the front end, unlike the servers and the
+    /// tool session: those are rebuilt every turn and torn down with it, and
+    /// this is asked for at most once per compaction — which is rare, and
+    /// already the expensive thing on the step it happens.
+    ///
+    /// A configured model that cannot be built is not a reason to fail the
+    /// compaction: the turn goes on with the model it has, and says so once.
+    fn summariser(&self) -> std::sync::Arc<dyn Provider> {
+        if let Some(chosen) = &self.summariser {
+            return chosen.clone();
+        }
+        let config = &self.rook.config.agent;
+        let spec = config.compaction_model.trim();
+        if spec.is_empty() || spec == config.model {
+            return self.provider.clone();
+        }
+        match rook_llm::from_spec_with(spec, config.stream_idle(), config.context_window) {
+            Ok(provider) => std::sync::Arc::from(provider),
+            Err(e) => {
+                tracing::warn!(
+                    "`[agent] compaction_model` {spec:?} could not be built ({e}); using {}",
+                    config.model
+                );
+                self.provider.clone()
+            }
+        }
+    }
+
     async fn ask_for_summary(&self, material: String) -> Result<String> {
         let mut request = Request::new(vec![Message::system(SUMMARY_INSTRUCTIONS), Message::user(material)]);
         // The same reason a sub-agent runs low: condensing a transcript is
         // mechanical, and a turn configured to think hard would otherwise spend
         // that thinking on writing its own summary.
         request.effort = Some(rook_llm::Effort::Low);
-        let mut stream = self.provider.stream(request).await.map_err(|e| CoreError::Other(e.to_string()))?;
+        let asked = self.summariser();
+        let mut stream = asked.stream(request).await.map_err(|e| CoreError::Other(e.to_string()))?;
         let mut assembler = Assembler::default();
         while let Some(delta) = stream.next().await {
             assembler

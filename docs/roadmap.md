@@ -1783,6 +1783,47 @@ streamed one word to a line, no wheel scrolling, a footer promising `j/k` where
 like it, and a two-minute turn that showed a fixed `working…` and read as a
 hang.
 
+**A cheaper model for the work that is not judgement.** Asked for, and half
+taken. Four things a turn does are mechanical rather than judged: condensing a
+span when the context fills, running an errand a parent has already scoped
+(`delegate`), checking a goal against what is on disk, and — the version of
+this that gets suggested most — rewriting or summarising a request before the
+expensive model sees it. They are not equally safe to hand to a smaller model,
+and the difference is what the answer turns on.
+
+Compaction is the one where what is being asked for is plainly not judgement:
+read a transcript, write a paragraph. It has a knob now — `[agent]
+compaction_model`, empty meaning the model doing the work — and a summariser
+the loop builds at most once per compaction, falling back with a warning when
+the configured one cannot be built, because a model that will not start is not
+a reason to fail a compaction. What it saves is the expensive model's rate on
+the step where a turn is already paying for one, and it is measurable per turn
+in `session context`.
+
+The errand and the goal check are the next two, and they need numbers rather
+than argument: a sub-agent already runs at lower effort than its parent, and
+whether it can also run at a lower *model* without the parent having to redo
+its work is exactly what `cargo xtask bench` measures — arms that differ by one
+variable, scored from the workspace, cost beside the pass. ADR-0010 declined a
+planning tool on numbers like those, and this deserves the same treatment
+rather than a plausible story.
+
+Compressing the request itself is the one to be most careful with. A small
+model in front of the expensive one is a lossy filter whose losses are
+invisible: what it drops does not appear anywhere, and the failure is a turn
+that reasons well about the wrong thing. Everything this repository already
+does to the context — head-and-tail elision, the reasoning budget, compaction —
+says how much went and where, in the text, so that what is missing is legible.
+A rewrite by another model cannot say that about itself. If it is tried, it is
+tried as an arm of the bench with the elisions marked, and it has to beat
+carrying less rather than carrying a paraphrase.
+
+Choosing the model per task — a router in front of the turn — is the same
+question one level up, and the classifier is itself a model call that can be
+wrong. The cheapest honest version of it already exists and is a person: the
+model is one line of `config.toml`, hot-reloaded, and `/model` in three front
+ends.
+
 ## After that
 
 **One live Anthropic turn, when there is a key.** The thinking round trip is

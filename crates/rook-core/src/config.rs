@@ -155,6 +155,17 @@ pub struct AgentConfig {
     /// terminal would otherwise hold the turn, and the store's write lock with
     /// it, for as long as the process lives.
     pub answer_timeout_secs: u64,
+    /// The model that condenses a span when the context fills, where it should
+    /// not be the one doing the work. Summarising is mechanical: it reads a
+    /// transcript and writes a paragraph, and a model chosen for judgement
+    /// spends judgement money on it. Empty means the one in `model`.
+    ///
+    /// It is one lever of several the same shape — a smaller model for
+    /// errands, for goal checks, for classifying a task before it is started —
+    /// and the only one taken so far, because it is the only one where what is
+    /// being asked for is plainly not judgement. The rest wait for numbers;
+    /// `cargo xtask bench` is where they come from.
+    pub compaction_model: String,
     /// How much of what the model was thinking is carried into the next
     /// request, per thought. A model handed back its answer and its calls but
     /// never its reasoning works the same thing out again every step; handed
@@ -350,6 +361,7 @@ impl Default for AgentConfig {
             max_skill_cards: 50,
             stream_idle_timeout_secs: 90,
             answer_timeout_secs: 600,
+            compaction_model: String::new(),
             max_reasoning_tokens: 800,
             max_instructions_bytes: 32 * 1024,
             prompt_cache_ttl: "5m".into(),

@@ -438,6 +438,7 @@ The `provider/model` in `config.toml` picks the wire dialect:
 model  = "anthropic/claude-opus-5"  # ANTHROPIC_API_KEY
 effort = "high"                     # low | medium | high | xhigh | max
 prompt_cache_ttl = "5m"             # 5m | 1h — see below
+# compaction_model = "ollama/qwen3:8b"   # condensing a span is not judgement
 # model = "ollama/qwen3-coder:30b"  # a local endpoint, no key
 # model = "openai/gpt-5.5"          # OPENAI_API_KEY
 # model = "google/gemini-2.5-pro"   # GEMINI_API_KEY, or GOOGLE_API_KEY
