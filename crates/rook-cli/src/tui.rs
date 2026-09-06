@@ -30,7 +30,7 @@ use tokio::sync::mpsc;
 
 use crate::fmt;
 
-const TABS: [&str; 6] = ["Chat", "Sessions", "Memory", "Skills", "Store", "Help"];
+const TABS: [&str; 7] = ["Chat", "Sessions", "Memory", "Skills", "Store", "Checkpoints", "Help"];
 
 /// How often the loop wakes to drain turn events when no key is pressed.
 const TICK: Duration = Duration::from_millis(60);
@@ -561,6 +561,16 @@ struct App {
     skill_versions: Vec<rook_core::SkillVersionRecord>,
     /// What the last skill action did, said on the pane it changed.
     skill_note: String,
+    /// Named snapshots of the workspace: what `checkpoint create` takes and
+    /// what `checkpoint restore` puts back, which were a terminal away.
+    checkpoints: Vec<(String, String)>,
+    checkpoint_state: ListState,
+    /// A checkpoint being named, when one is.
+    naming: Option<Typing>,
+    /// A restore waiting for a yes. It writes over the workspace, which is the
+    /// one thing here worth asking about twice.
+    restoring: Option<(String, String)>,
+    checkpoint_note: String,
     objects: Vec<(String, String, u64, u64)>,
     stats: Option<StoreStats>,
     status: String,
@@ -639,6 +649,11 @@ impl App {
             skill_state: ListState::default(),
             skill_versions: Vec::new(),
             skill_note: String::new(),
+            checkpoints: Vec::new(),
+            checkpoint_state: ListState::default(),
+            naming: None,
+            restoring: None,
+            checkpoint_note: String::new(),
             objects: Vec::new(),
             stats: None,
             status: String::new(),
@@ -659,6 +674,11 @@ impl App {
             .map(|facts| facts.into_iter().filter(|f| f.scope.applies_in(&here)).collect())
             .unwrap_or_default();
         self.stats = self.source.stats().ok();
+        self.checkpoints = self.source.checkpoints().unwrap_or_default();
+        let last = self.checkpoints.len().saturating_sub(1);
+        self.checkpoint_state.select(
+            (!self.checkpoints.is_empty()).then(|| self.checkpoint_state.selected().unwrap_or(0).min(last)),
+        );
         self.objects = self
             .source
             .objects(None, 300)
@@ -908,6 +928,9 @@ impl App {
         if self.tab == 3 && self.on_skill_key(key) {
             return;
         }
+        if self.tab == 5 && self.on_checkpoint_key(key) {
+            return;
+        }
         match key.code {
             // The session under the cursor, taken up in the chat — which is
             // what the Sessions tab is for. `/session <id>` does the same from
@@ -916,7 +939,7 @@ impl App {
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
             KeyCode::Tab | KeyCode::Right => self.tab = (self.tab + 1) % TABS.len(),
             KeyCode::BackTab | KeyCode::Left => self.tab = (self.tab + TABS.len() - 1) % TABS.len(),
-            KeyCode::Char(c @ '1'..='6') => self.tab = c as usize - '1' as usize,
+            KeyCode::Char(c @ '1'..='7') => self.tab = c as usize - '1' as usize,
             KeyCode::Char('r') => self.reload(),
             KeyCode::Char('j') | KeyCode::Down => self.move_selection(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_selection(-1),
@@ -1550,6 +1573,7 @@ impl App {
         let (state, len) = match self.tab {
             1 => (&mut self.session_state, self.sessions.len()),
             2 => (&mut self.fact_state, self.facts.len()),
+            5 => (&mut self.checkpoint_state, self.checkpoints.len()),
             3 => (&mut self.skill_state, self.skills.len()),
             _ => {
                 self.transcript_scroll = self.transcript_scroll.saturating_add_signed(delta as i16 * 3);
@@ -1597,6 +1621,7 @@ impl App {
             2 => self.draw_memory(f, body),
             3 => self.draw_skills(f, body),
             4 => self.draw_store(f, body),
+            5 => self.draw_checkpoints(f, body),
             _ => self.draw_help(f, body),
         }
 
@@ -1636,7 +1661,14 @@ impl App {
                 ("r ", "reload  "),
                 ("q ", "quit  "),
             ],
-            _ => vec![("↹/1-6 ", "tab  "), ("j/k ", "move  "), ("r ", "reload  "), ("q ", "quit  ")],
+            5 => vec![
+                ("↹ ", "tab  "),
+                ("j/k ", "move  "),
+                ("c ", "take one  "),
+                ("R ", "restore  "),
+                ("q ", "quit  "),
+            ],
+            _ => vec![("↹/1-7 ", "tab  "), ("j/k ", "move  "), ("r ", "reload  "), ("q ", "quit  ")],
         };
         let mut spans: Vec<Span> = vec![Span::raw(" ")];
         for (key, what) in keys {
@@ -2195,6 +2227,151 @@ impl App {
         f.render_widget(List::new(items).block(bordered(" Objects (newest 300) ")), bottom);
     }
 
+    /// Named snapshots of the workspace, and the two things anybody does with
+    /// them: take one, and put one back.
+    fn draw_checkpoints(&mut self, f: &mut Frame, area: Rect) {
+        let asking = self.naming.is_some() || self.restoring.is_some();
+        let [list, entry] =
+            Layout::vertical([Constraint::Min(3), Constraint::Length(if asking { 3 } else { 0 })])
+                .areas(area);
+
+        let items: Vec<ListItem> = self
+            .checkpoints
+            .iter()
+            .map(|(reference, object)| {
+                ListItem::new(Line::from(vec![
+                    Span::raw(format!("{:<40}", named(reference))),
+                    Span::styled(
+                        object.chars().take(12).collect::<String>(),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]))
+            })
+            .collect();
+
+        let title = match self.checkpoint_note.is_empty() {
+            true => format!(" Checkpoints ({}) ", self.checkpoints.len()),
+            false => format!(" Checkpoints ({}) — {} ", self.checkpoints.len(), self.checkpoint_note),
+        };
+        match self.checkpoints.is_empty() {
+            true => f.render_widget(
+                Paragraph::new(vec![
+                    Line::from("nothing snapshotted yet"),
+                    Line::from(""),
+                    Line::from("`c` takes one of the whole workspace, under a name you give it."),
+                    Line::from("The agent takes its own before every write, and those are what"),
+                    Line::from("`/undo` and `session rewind` put back — these are yours."),
+                ])
+                .style(Style::default().fg(Color::DarkGray))
+                .block(bordered(&title)),
+                list,
+            ),
+            false => f.render_stateful_widget(
+                List::new(items)
+                    .block(bordered(&title))
+                    .highlight_style(Style::default().bg(Color::Rgb(40, 44, 52)))
+                    .highlight_symbol("▌"),
+                list,
+                &mut self.checkpoint_state,
+            ),
+        }
+
+        if let Some(naming) = &self.naming {
+            f.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled("› ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(naming.as_str().to_string()),
+                ]))
+                .block(bordered(" name this checkpoint — enter takes it, esc cancels ")),
+                entry,
+            );
+            f.set_cursor_position((entry.x + 3 + naming.column(), entry.y + 1));
+        } else if let Some((name, _)) = &self.restoring {
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    // The workspace is in the window's own title bar; a line
+                    // that names it again is a line too long to read the
+                    // question at the end of.
+                    format!("  restore {:?} over the workspace?   y / n", named(name)),
+                    Style::default().fg(Color::Yellow),
+                )))
+                .block(bordered(" this writes over the workspace ")),
+                entry,
+            );
+        }
+    }
+
+    /// The two things a checkpoint is for, where they are listed. Returns
+    /// whether the key was this tab's — while a name is being typed, or an
+    /// answer waited for, every key is.
+    fn on_checkpoint_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        if self.restoring.is_some() {
+            match key.code {
+                KeyCode::Char('y') => self.restore_selected_checkpoint(),
+                _ => {
+                    self.restoring = None;
+                    self.checkpoint_note = "not restored".into();
+                }
+            }
+            return true;
+        }
+        match (self.naming.is_some(), key.code) {
+            (false, KeyCode::Char('c')) => self.naming = Some(Typing::default()),
+            (false, KeyCode::Char('R')) => {
+                self.restoring =
+                    self.checkpoint_state.selected().and_then(|at| self.checkpoints.get(at)).cloned();
+            }
+            (false, _) => return false,
+            (true, KeyCode::Enter) => self.take_checkpoint(),
+            (true, KeyCode::Esc) => self.naming = None,
+            (true, code) => {
+                if let Some(naming) = &mut self.naming {
+                    match code {
+                        KeyCode::Backspace => naming.backspace(),
+                        KeyCode::Delete => naming.delete(),
+                        KeyCode::Left => naming.left(),
+                        KeyCode::Right => naming.right(),
+                        KeyCode::Home => naming.home(),
+                        KeyCode::End => naming.end(),
+                        KeyCode::Char(c) => naming.insert(c),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    fn take_checkpoint(&mut self) {
+        let Some(naming) = self.naming.take() else { return };
+        let name = naming.as_str().trim().to_string();
+        if name.is_empty() {
+            return;
+        }
+        let said = match self.source.checkpoint(&name, None) {
+            Ok((set, object)) => {
+                format!("took {name:?} as {} — {} file(s)", &object[..12.min(object.len())], set.files.len())
+            }
+            Err(e) => e.to_string(),
+        };
+        self.checkpoint_note = said;
+        self.reload();
+    }
+
+    /// Into the workspace, which is where it was taken from. The CLI asks for
+    /// `--to` because it can be anywhere; here the answer is the directory
+    /// this window is about, and the question is whether to write over it.
+    fn restore_selected_checkpoint(&mut self) {
+        let Some((name, object)) = self.restoring.take() else { return };
+        let into = self.source.workspace().to_path_buf();
+        let said = match self.source.restore_checkpoint(&object, &into) {
+            Ok(files) => format!("restored {:?} — {files} file(s) written", named(&name)),
+            Err(e) => e.to_string(),
+        };
+        self.checkpoint_note = said;
+        self.reload();
+    }
+
     fn draw_help(&mut self, f: &mut Frame, area: Rect) {
         // Two columns, coloured by which they are: a page of one grey is read
         // by nobody, and what is being offered here is the left column.
@@ -2227,12 +2404,14 @@ impl App {
             Line::from(""),
             Line::from(Span::styled("keys", Style::default().add_modifier(Modifier::BOLD))),
             key("  Tab         switch tab          j k ↑ ↓   move"),
-            key("  1-6         switch tab, outside Chat where digits are text"),
+            key("  1-7         switch tab, outside Chat where digits are text"),
             key("  Space/PgDn  scroll transcript    r         reload"),
             key("  wheel       scrolls either pane; hold Shift to select text"),
             key("  q / Esc     quit (Ctrl-C anywhere)"),
             Line::from(""),
             key("  In Sessions: ⏎ continues the one under the cursor, in the chat"),
+            Line::from(""),
+            key("  In Checkpoints: c takes one of the workspace · R restores one over it"),
             Line::from(""),
             key("  In Skills:  c captures a version of the one under the cursor"),
             key("              u rolls it back to the newest capture, undoably"),
@@ -2279,6 +2458,17 @@ fn approval_height(request: &ApprovalRequest, width: u16, room: u16) -> u16 {
     // The header, as much preview as there is, the key line, and two borders.
     let wanted = wrapped + preview + 3;
     (wanted as u16).clamp(4, (room / 2).max(4))
+}
+
+/// The name somebody gave a checkpoint, out of the reference it is stored
+/// under: `checkpoint/<name>/<id>`. The whole reference is what the store
+/// answers with and what `checkpoint ls` prints; it is not what anybody typed.
+fn named(reference: &str) -> String {
+    reference
+        .strip_prefix("checkpoint/")
+        .and_then(|rest| rest.rsplit_once('/'))
+        .map(|(name, _)| name.to_string())
+        .unwrap_or_else(|| reference.to_string())
 }
 
 fn bordered(title: &str) -> Block<'_> {

@@ -623,7 +623,10 @@ fn a_second_window_opens_and_browses_while_the_daemon_holds_the_store() {
     let browsing = pty.screen_showing(100, 30, "held-open").join("\n");
     assert!(browsing.contains("held-open"), "the sessions tab reads over the daemon:\n{browsing}");
 
-    pty.send("\t\t\t\t\t");
+    // Back to the chat by number rather than by wrapping around: a count of
+    // tabs is a number that changes when a tab is added, and this test then
+    // types a slash command into whatever tab it happened to land on.
+    pty.send("1");
     pty.send("/context\r");
     let chat = pty.screen_showing(100, 30, "holds the store").join("\n");
     assert!(chat.contains("holds the store"), "a slash command says why it cannot run here:\n{chat}");
@@ -782,6 +785,37 @@ impl Drop for Daemon {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
+}
+
+/// Taking a snapshot of the workspace and putting one back were `rook
+/// checkpoint create` and `rook checkpoint restore <object> --to <dir>` in
+/// another terminal, with the object id read off a third command.
+#[test]
+fn a_checkpoint_can_be_taken_and_put_back_from_the_window() {
+    let _one = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("notes.txt"), "as it was\n").unwrap();
+
+    let mut pty = tui(home.path(), workspace.path());
+    pty.screen(100, 30);
+    pty.send("\t\t\t\t\t"); // to the Checkpoints tab
+    let empty = pty.screen_showing(100, 30, "nothing snapshotted yet").join("\n");
+    assert!(empty.contains("`c` takes one"), "and says how one is taken:\n{empty}");
+
+    pty.send("cbefore the risky bit\r");
+    let taken = pty.screen_showing(100, 30, "took \"before the risky bit\"").join("\n");
+    assert!(taken.contains("file(s)"), "and what went into it:\n{taken}");
+
+    // Changed behind the window, then put back — with the question asked
+    // first, because this writes over the workspace.
+    std::fs::write(workspace.path().join("notes.txt"), "after the risky bit\n").unwrap();
+    pty.send("R");
+    pty.screen_showing(100, 30, "y / n");
+    pty.send("y");
+    pty.screen_showing(100, 30, "restored");
+    let back = std::fs::read_to_string(workspace.path().join("notes.txt")).unwrap();
+    assert_eq!(back, "as it was\n", "the snapshot is what is on disk again");
 }
 
 /// Versioning a skill was two commands in another terminal with an object id

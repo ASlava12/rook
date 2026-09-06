@@ -91,6 +91,52 @@ export async function renderMemory() {
       : el('p', { class: 'empty' }, 'nothing remembered yet')));
 }
 
+// Named snapshots of the workspace: what somebody takes before a risky change
+// and puts back after one. Both were a terminal away — `rook checkpoint
+// create`, then `rook checkpoint restore <object> --to <dir>` with the id read
+// off a third command.
+export async function renderCheckpoints() {
+  const [{ items }, health] = await Promise.all([api('/api/checkpoints'), api('/api/health')]);
+  // The reference is `checkpoint/<name>/<id>`; the name is what was typed.
+  const named = (ref) => (ref.startsWith('checkpoint/') ? ref.slice(11).replace(/\/[^/]*$/, '') : ref);
+
+  const take = async () => {
+    const name = $('#snapshot').value.trim();
+    if (!name) return;
+    try {
+      await api('/api/checkpoints', { name });
+      renderCheckpoints();
+    } catch (e) {
+      alert(e.error || e);
+    }
+  };
+
+  const restore = async (row) => {
+    if (!confirm(`Restore "${named(row.ref)}" over ${health.workspace}? Files there are written over.`)) return;
+    try {
+      const { restored } = await api('/api/checkpoints/restore', { object: row.object, to: health.workspace });
+      alert(`${restored} file(s) written`);
+    } catch (e) {
+      alert(e.error || e);
+    }
+  };
+
+  const rows = items.map(row => el('tr', {},
+    el('td', {}, named(row.ref)),
+    el('td', { class: 't' }, row.object.slice(0, 12)),
+    el('td', {}, el('button', { onclick: () => restore(row) }, 'Restore'))));
+
+  $('#view').replaceChildren(el('div', { class: 'card' },
+    el('h2', {}, `checkpoints (${items.length})`),
+    el('p', { class: 'sub' }, `of ${health.workspace}`),
+    el('form', { class: 'ask', onsubmit: (e) => { e.preventDefault(); take(); } },
+      el('input', { id: 'snapshot', placeholder: 'name this snapshot…' }),
+      el('button', {}, 'Take one')),
+    items.length
+      ? el('table', {}, el('tr', {}, ['name', 'object', ''].map(h => el('th', {}, h))), rows)
+      : el('p', { class: 'empty' }, 'nothing snapshotted yet — the agent takes its own before every write, and those are what a rewind puts back; these are yours')));
+}
+
 export async function renderSkills() {
   const { items } = await api('/api/skills');
   if (!state.skill && items.length) state.skill = items[0].name;

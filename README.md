@@ -81,6 +81,7 @@ cargo test 2>&1 | rook run "why does this fail?"   # stdin joins the prompt
 rook --json run "..." | jq .outcome.reply  # one object: reply, tokens, changes
                                            # exit 2 if the turn did not finish
 rook tui                                   # full terminal UI: chat plus a store browser
+rook checkpoint create before-refactor     # or `c` in the TUI's Checkpoints tab
 rookd                                      # http://127.0.0.1:7717 — web UI + API
 rook daemon status                         # where it is, and whether it is this build
 rook daemon restart                        # after an upgrade; names any turn it ends

@@ -2,7 +2,7 @@
 import { $, el, api, state, nav, errorCard } from './lib.js';
 import { renderChat } from './chat.js';
 import { renderSessions } from './sessions.js';
-import { renderSearch, renderMemory, renderSkills, renderJobs, renderStore } from './views.js';
+import { renderSearch, renderMemory, renderSkills, renderJobs, renderStore, renderCheckpoints } from './views.js';
 
 const tabs = {
   chat: renderChat,
@@ -11,6 +11,7 @@ const tabs = {
   memory: renderMemory,
   skills: renderSkills,
   jobs: renderJobs,
+  checkpoints: renderCheckpoints,
   store: renderStore,
 };
 

@@ -194,6 +194,16 @@ what unblocks the most.
   last. Anthropic's signed blocks are left alone; a second copy as text would
   be the same thought twice. The bound is what lets `session context` price a
   thought from its stored size without reading it. 2 tests.
+- **Checkpoints where the workspace is** — taking a snapshot and putting one
+  back were `rook checkpoint create` and `rook checkpoint restore <object> --to
+  <dir>`, with the id read off a third command. The TUI has a Checkpoints tab
+  now — `c` takes one under a name you type, `R` puts one back over the
+  workspace after asking — and the browser has the same as a tab of its own.
+  The CLI asks for `--to` because a checkpoint can be restored anywhere; a
+  window is about one directory, so the question there is not where but
+  whether. With this and skills versioning, nothing the command line can do is
+  missing from the other two. 1 test, on a pty, which changes a file behind the
+  window and reads it back after the restore.
 - **Versioning a skill outside the command line** — capturing a version and
   going back to one were `rook skills capture` and `rook skills rollback <name>
   <object>` in a terminal, with the object id read off a third command's
