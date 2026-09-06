@@ -1376,3 +1376,57 @@ commits), the Guardian review service and its tickets, timing metrics and
 context retention (fifteen), model-picker and guidance entries for a model
 that does not exist here, managed worktrees, jemalloc for musl, their app
 server's managed policies, and a long tail of test-fixture stabilisation.
+
+## cline 952df213e → dac3b35ba, 2026-09-06
+
+Two commits, nothing to port. `make apply_patch Add File refuse to overwrite
+existing files` is a rule this already keeps where it applies: `skills new`
+refuses a directory that exists, and `move_file` refuses a destination that
+does — a create that overwrites is a deletion nobody asked for. `write_file`
+overwrites on purpose, which is what it is for, and a checkpoint is taken
+before it so a rewind puts the old contents back. Their search-combobox header
+is UI this does not have.
+
+## openhands 4524a9199 → f7fb0c4b2, 2026-09-06
+
+Six commits, nothing to port, and two worth the check they prompted.
+`percent-encode branch names in provider branch URLs` is the shape of a bug
+this could have: names go into routed URLs. They are escaped where they are
+interpolated, and a skill name is letters, digits, hyphens and underscores by
+`usable_name`, so there is nothing to encode that is not already encoded.
+`preserve base_url for subscription LLM configs` is a settings layer where a
+preset overwrote an endpoint; base URLs here come from one environment variable
+each with a default beside it, and nothing rewrites them. The rest is their
+documentation, a jsdom teardown in their test suite, and message timestamps in
+their web UI.
+
+## codex a31c18ab7 → 6af345407, 2026-09-06
+
+Nine commits, nothing to port. Seven are the native voice runtime and its Bazel
+plumbing on Windows and Unix. `Gate experimental context by model capability at
+session startup` decides once, from a table of what a model supports, what to
+send it; here the same question is answered from refusals — an endpoint that
+rejects the effort field is asked again without it and never asked with it
+again, and the context window is learnt the same way. Theirs is the more
+precise answer where the table is right and the silent one where it is not.
+`Add managed worktree creation to TUI session commands` is a shape this does
+not have: a session with a git worktree of its own.
+
+## opencode 8a6cf2c9a → 337fd144d, 2026-09-06
+
+Twenty-four commits, and one class worth acting on. `compare Codex GPT versions
+by major and minor` and `allow integer GPT versions in Codex model filter` are
+two fixes in three days to a model filter that reads version numbers out of
+names — and goose's `Support GPT-6 Astra models`, triaged this morning, is a
+table of the same names. Three references maintaining one list.
+
+The list here was `gpt-5`, `o1`, `o3`, `o4`, and what it decided was whether to
+send `reasoning_effort`. It is a shape now: the `o` series where a digit
+follows the letter, and `gpt` from five up. The two mistakes are not equal,
+which is what makes the looser test the right one — sending the field to
+something that will not take it costs one refusal, which the retry layer drops
+and asks again without, and never sends to that endpoint again; not sending it
+is silent, and the model reasons at whatever the endpoint defaults to forever.
+
+The rest is their console, their hosted model catalogue, documentation in three
+languages, release syncing, and a Copilot header.

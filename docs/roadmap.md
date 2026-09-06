@@ -194,6 +194,17 @@ what unblocks the most.
   last. Anthropic's signed blocks are left alone; a second copy as text would
   be the same thought twice. The bound is what lets `session context` price a
   thought from its stored size without reading it. 2 tests.
+- **A model family recognised by its shape** — `reasoning_effort` was sent to a
+  list of names: `gpt-5`, `o1`, `o3`, `o4`. A list ages the moment a family
+  gains a version, and three references in one day were maintaining one — a
+  table of new model names, and two fixes to a version comparison that read
+  `gpt-5.1` as something other than `gpt-5`. It is the `o` series and `gpt`
+  from five up now, tested by shape. What makes the looser test right is that
+  the two mistakes are not equal: the field sent to something that will not
+  take it costs one refusal, which the retry layer answers by dropping it and
+  asking again and never sends there again, while the field not sent is silent
+  — the model reasons at whatever the endpoint defaults to, forever, and
+  nothing says so. 2 tests.
 - **Renaming a file without retyping it** — a move was three calls: read the
   file, write it somewhere else, delete the original — and the middle one
   retypes every line of it through the model, which is where a long file loses

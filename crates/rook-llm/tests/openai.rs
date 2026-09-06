@@ -100,4 +100,24 @@ async fn nothing_is_said_about_effort_to_a_model_that_has_none() {
 
     let body = sent("gpt-5", None).await;
     assert!(body.get("reasoning_effort").is_none(), "a request that asked for nothing says nothing: {body}");
+
+    // The `o` is a family, not a letter: these are ordinary models whose names
+    // begin with one.
+    for ordinary in ["olmo-7b", "opus-20260101", "gpt-4o", "gpt-4.1", "qwen3-27b"] {
+        let body = sent(ordinary, Some(Effort::High)).await;
+        assert!(body.get("reasoning_effort").is_none(), "{ordinary} does not reason: {body}");
+    }
+}
+
+/// A list of model names ages the moment a family gains a version — three
+/// references in one day were maintaining one — and the two mistakes are not
+/// equal: sending the field to something that will not take it costs one
+/// refusal, which is dropped and retried and never sent again, while not
+/// sending it is silent forever.
+#[tokio::test]
+async fn a_family_that_reasons_is_recognised_by_its_shape_rather_than_by_a_list() {
+    for reasoning in ["gpt-5", "gpt-5.1", "gpt-5-mini", "gpt-6", "gpt-11", "o1", "o3-mini", "o4", "o5"] {
+        let body = sent(reasoning, Some(Effort::Low)).await;
+        assert_eq!(body["reasoning_effort"], "low", "{reasoning} reasons: {body}");
+    }
 }

@@ -420,16 +420,12 @@ struct WireRequest<'a> {
 /// The rung this dialect understands, or `None` for a model that has no
 /// reasoning to spend.
 ///
-/// Sent only to families documented to accept it. A strict OpenAI-compatible
-/// server rejects an unknown field outright rather than ignoring it, and most
-/// of what speaks this dialect is not OpenAI — so the default is to say
-/// nothing, which is also what the field did before it was mapped at all.
+/// Sent only to families that reason. A strict OpenAI-compatible server
+/// rejects an unknown field outright rather than ignoring it, and most of what
+/// speaks this dialect is not OpenAI — so the default is to say nothing, which
+/// is also what the field did before it was mapped at all.
 fn reasoning_effort(model: &str, effort: crate::Effort) -> Option<&'static str> {
-    let reasons = model.starts_with("gpt-5")
-        || model.starts_with("o1")
-        || model.starts_with("o3")
-        || model.starts_with("o4");
-    if !reasons {
+    if !reasons(model) {
         return None;
     }
     Some(match effort {
@@ -439,6 +435,30 @@ fn reasoning_effort(model: &str, effort: crate::Effort) -> Option<&'static str> 
         crate::Effort::Medium => "medium",
         crate::Effort::High | crate::Effort::XHigh | crate::Effort::Max => "high",
     })
+}
+
+/// Whether a model's name is one of the reasoning families: the `o` series, and
+/// `gpt` from 5 up.
+///
+/// A shape rather than a list of names. A list ages the moment a family gains a
+/// version — three references in one day were maintaining one: a table of new
+/// model names, and two fixes for a version comparison that read `gpt-5.1` as
+/// something other than `gpt-5`. And the two mistakes are not equal here.
+/// Sending the field to something that will not take it costs one refusal,
+/// which [`crate::retry`] answers by dropping it and asking again, and then
+/// never sends it to that endpoint again. Not sending it is silent: the model
+/// reasons at whatever the endpoint defaults to, forever, and nothing says so.
+fn reasons(model: &str) -> bool {
+    let mut name = model.chars();
+    match (name.next(), name.next()) {
+        // `o1`, `o3-mini`, `o4`, and whatever the next one is — but not `opus`
+        // or `olmo`, where what follows the `o` is a letter.
+        (Some('o'), Some(next)) if next.is_ascii_digit() => return true,
+        _ => {}
+    }
+    let Some(version) = model.strip_prefix("gpt-") else { return false };
+    let major: String = version.chars().take_while(char::is_ascii_digit).collect();
+    major.parse::<u32>().is_ok_and(|n| n >= 5)
 }
 
 /// Without this, a streamed response carries no token counts at all, and the
