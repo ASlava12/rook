@@ -784,6 +784,47 @@ impl Drop for Daemon {
     }
 }
 
+/// Versioning a skill was two commands in another terminal with an object id
+/// read off a third: `skills history`, then `skills capture`, then `skills
+/// rollback <name> <object>`. The tab that lists the skills is where both
+/// belong, and a rollback nobody can see the versions of is one nobody asks
+/// for.
+#[test]
+fn a_skill_can_be_captured_and_rolled_back_where_it_is_listed() {
+    let _one = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let skills = home.path().join("skills/tidy-up");
+    std::fs::create_dir_all(&skills).unwrap();
+    std::fs::write(
+        skills.join("SKILL.md"),
+        "---\nname: tidy-up\ndescription: How to tidy up.\nversion: 1.0.0\n---\nsweep\n",
+    )
+    .unwrap();
+
+    let mut pty = tui(home.path(), workspace.path());
+    pty.screen(100, 30);
+    pty.send("\t\t\t"); // to the Skills tab
+    let listed = pty.screen_showing(100, 30, "versions").join("\n");
+    assert!(listed.contains("none captured"), "an empty history says what to do:\n{listed}");
+
+    pty.send("c");
+    let captured = pty.screen_showing(100, 30, "captured tidy-up").join("\n");
+    assert!(captured.contains("file(s)"), "and what it took:\n{captured}");
+    assert!(captured.contains("versions (1)"), "which is then listed:\n{captured}");
+
+    // Changed on disk behind the window, then put back from the capture.
+    std::fs::write(
+        skills.join("SKILL.md"),
+        "---\nname: tidy-up\ndescription: How to tidy up.\nversion: 1.0.0\n---\nburn it down\n",
+    )
+    .unwrap();
+    pty.send("u");
+    pty.screen_showing(100, 30, "rolled tidy-up back");
+    let body = std::fs::read_to_string(skills.join("SKILL.md")).unwrap();
+    assert!(body.contains("sweep"), "the captured body is back: {body}");
+}
+
 /// The Sessions tab is where a session is found, and the id was the only way
 /// to take it up: read it there, then type it into the chat.
 #[test]

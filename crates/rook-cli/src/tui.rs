@@ -555,6 +555,12 @@ struct App {
     fact_note: String,
     skills: Vec<SkillCard>,
     skill_state: ListState,
+    /// Every captured version of the selected skill, newest first. Loaded with
+    /// the selection, as a session's transcript is: it is what makes a
+    /// rollback something you can see before you ask for it.
+    skill_versions: Vec<rook_core::SkillVersionRecord>,
+    /// What the last skill action did, said on the pane it changed.
+    skill_note: String,
     objects: Vec<(String, String, u64, u64)>,
     stats: Option<StoreStats>,
     status: String,
@@ -631,6 +637,8 @@ impl App {
             fact_note: String::new(),
             skills: Vec::new(),
             skill_state: ListState::default(),
+            skill_versions: Vec::new(),
+            skill_note: String::new(),
             objects: Vec::new(),
             stats: None,
             status: String::new(),
@@ -670,12 +678,24 @@ impl App {
             self.skill_state.select(Some(0));
         }
         self.load_transcript();
+        self.load_versions();
         self.status = format!(
             "{} sessions · {} skills · {} on disk",
             self.sessions.len(),
             self.skills.len(),
             self.stats.as_ref().map(|s| fmt::bytes(s.disk_bytes())).unwrap_or_default()
         );
+    }
+
+    /// The captured versions of the skill under the cursor.
+    fn load_versions(&mut self) {
+        self.skill_versions.clear();
+        let Some(name) = self.selected_skill() else { return };
+        self.skill_versions = self.source.skill_history(&name).unwrap_or_default();
+    }
+
+    fn selected_skill(&self) -> Option<String> {
+        self.skill_state.selected().and_then(|at| self.skills.get(at)).map(|card| card.name.clone())
     }
 
     fn load_transcript(&mut self) {
@@ -883,6 +903,9 @@ impl App {
             return;
         }
         if self.tab == 2 && self.on_memory_key(key) {
+            return;
+        }
+        if self.tab == 3 && self.on_skill_key(key) {
             return;
         }
         match key.code {
@@ -1374,6 +1397,61 @@ impl App {
         }));
     }
 
+    /// Versioning a skill was `rook skills capture` and `rook skills rollback`
+    /// in another terminal, with the object id read off a third command's
+    /// output. The tab that lists the skills and their versions is where both
+    /// belong. Returns whether the key was this tab's.
+    fn on_skill_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Char('c') => self.capture_selected_skill(),
+            KeyCode::Char('u') => self.roll_back_selected_skill(),
+            _ => return false,
+        }
+        true
+    }
+
+    /// Take a version of the skill under the cursor, as it is on disk now.
+    fn capture_selected_skill(&mut self) {
+        let Some(name) = self.selected_skill() else { return };
+        let said = match self.source.capture_skill(&name, Some("captured from the window".into())) {
+            Ok((set, object)) => format!(
+                "captured {name} as {} — {} file(s)",
+                &object[..12.min(object.len())],
+                set.files.len()
+            ),
+            Err(e) => e.to_string(),
+        };
+        self.skill_note = said;
+        self.reload();
+    }
+
+    /// Back to the newest capture — which is what an undo means here, and what
+    /// the id in `skills rollback <name> <object>` usually spells.
+    ///
+    /// Rolling back captures what is there first, so this is itself undoable;
+    /// the note names that capture, because it is the only way back.
+    fn roll_back_selected_skill(&mut self) {
+        let Some(name) = self.selected_skill() else { return };
+        let Some(newest) = self.skill_versions.first().map(|v| v.object.clone()) else {
+            self.skill_note = format!("{name} has no captured version to go back to — `c` takes one");
+            return;
+        };
+        let said = match self.source.rollback_skill(&name, &newest) {
+            Ok(done) => format!(
+                "rolled {name} back to {} — {} file(s){}",
+                &newest[..12.min(newest.len())],
+                done.restored,
+                match done.undo {
+                    Some(undo) => format!(", and what was there is {}", undo.short()),
+                    None => String::new(),
+                }
+            ),
+            Err(e) => e.to_string(),
+        };
+        self.skill_note = said;
+        self.reload();
+    }
+
     /// The Memory tab writes as well as reads. The browser can already forget
     /// and the command line can do both, and what the agent believes is the
     /// one thing a person most needs to correct where they are reading it.
@@ -1484,8 +1562,10 @@ impl App {
         let current = state.selected().unwrap_or(0) as isize;
         let next = (current + delta).clamp(0, len as isize - 1) as usize;
         state.select(Some(next));
-        if self.tab == 1 {
-            self.load_transcript();
+        match self.tab {
+            1 => self.load_transcript(),
+            3 => self.load_versions(),
+            _ => {}
         }
     }
 
@@ -1545,6 +1625,14 @@ impl App {
                 ("↹ ", "tab  "),
                 ("j/k ", "move  "),
                 ("⏎ ", "continue  "),
+                ("r ", "reload  "),
+                ("q ", "quit  "),
+            ],
+            3 => vec![
+                ("↹ ", "tab  "),
+                ("j/k ", "move  "),
+                ("c ", "capture  "),
+                ("u ", "roll back  "),
                 ("r ", "reload  "),
                 ("q ", "quit  "),
             ],
@@ -1998,6 +2086,39 @@ impl App {
                     Style::default().fg(Color::DarkGray),
                 )));
             }
+            // Every captured version, because a rollback you cannot see is one
+            // nobody asks for: `u` goes back to the first of these.
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                format!("versions ({})", self.skill_versions.len()),
+                Style::default().add_modifier(Modifier::BOLD),
+            )));
+            if self.skill_versions.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "  none captured — `c` takes one, and `u` goes back to it",
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+            for (at, version) in self.skill_versions.iter().take(8).enumerate() {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        match at {
+                            0 => "  ▸ ".to_string(),
+                            _ => "    ".to_string(),
+                        },
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    Span::styled(
+                        format!("{:<13}", version.object.chars().take(12).collect::<String>()),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::raw(format!("{:<9}", version.version)),
+                    Span::styled(
+                        format!("{}  {} file(s)", fmt::ago(version.captured_at), version.files),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]));
+            }
         }
         let skill_errors = self.source.here().map(|rook| rook.skill_errors.clone()).unwrap_or_default();
         if !skill_errors.is_empty() {
@@ -2007,7 +2128,11 @@ impl App {
                 lines.push(Line::from(format!("  {e}")));
             }
         }
-        f.render_widget(Paragraph::new(lines).block(bordered(" Detail ")).wrap(Wrap { trim: false }), right);
+        let title = match self.skill_note.is_empty() {
+            true => " Detail ".to_string(),
+            false => format!(" Detail — {} ", self.skill_note),
+        };
+        f.render_widget(Paragraph::new(lines).block(bordered(&title)).wrap(Wrap { trim: false }), right);
     }
 
     fn draw_store(&mut self, f: &mut Frame, area: Rect) {
@@ -2108,6 +2233,9 @@ impl App {
             key("  q / Esc     quit (Ctrl-C anywhere)"),
             Line::from(""),
             key("  In Sessions: ⏎ continues the one under the cursor, in the chat"),
+            Line::from(""),
+            key("  In Skills:  c captures a version of the one under the cursor"),
+            key("              u rolls it back to the newest capture, undoably"),
             Line::from(""),
             key("  In Memory:  a adds a fact here · A adds it everywhere"),
             key("              d forgets the selected one · u puts it back"),

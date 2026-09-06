@@ -114,19 +114,44 @@ export async function renderSkills() {
     }
     let history = [];
     try { history = (await api(`/api/skills/${encodeURIComponent(state.skill)}/history`)).items; } catch { /* none */ }
-    right.append(el('h2', { style: 'margin-top:1rem' }, `versions (${history.length})`));
+    // Taking a version and going back to one were `rook skills capture` and
+    // `rook skills rollback <name> <object>` in a terminal, with the id read
+    // off this very table. The page that shows the table can do both.
+    const act = async (path, body, whether) => {
+      if (whether && !confirm(whether)) return;
+      try {
+        await api(path, body);
+        renderSkills();
+      } catch (e) {
+        alert(e.error || e);
+      }
+    };
+    const capture = el('button', {
+      onclick: () => act(`/api/skills/${encodeURIComponent(state.skill)}/capture`,
+        { message: 'captured from the browser' }),
+    }, 'Capture a version');
+
+    right.append(el('h2', { style: 'margin-top:1rem' },
+      `versions (${history.length})`, ' ', capture));
     if (!history.length) {
-      right.append(el('p', { class: 'sub' }, `no captures yet — \`rook skills capture ${state.skill}\``));
+      right.append(el('p', { class: 'sub' }, 'no captures yet — Capture takes one, and each row can be restored'));
     } else {
       right.append(el('table', {},
-        el('tr', {}, ['object', 'version', 'captured', 'files', 'size', 'note'].map(h => el('th', {}, h))),
+        el('tr', {}, ['object', 'version', 'captured', 'files', 'size', 'note', ''].map(h => el('th', {}, h))),
         history.map(h => el('tr', {},
           el('td', {}, h.object.slice(0, 12)),
           el('td', {}, h.version),
           el('td', {}, new Date(h.captured_at * 1000).toISOString().slice(0, 16).replace('T', ' ')),
           el('td', {}, String(h.files)),
           el('td', {}, bytes(h.bytes)),
-          el('td', { class: 't' }, h.note || '')))));
+          el('td', { class: 't' }, h.note || ''),
+          // What is there now is captured first, so this is itself undoable —
+          // and the asking is because it writes over a directory.
+          el('td', {}, el('button', {
+            onclick: () => act(`/api/skills/${encodeURIComponent(state.skill)}/rollback`,
+              { object: h.object },
+              `Roll ${state.skill} back to ${h.object.slice(0, 12)}? What is there now is captured first.`),
+          }, 'Roll back'))))));
     }
     try {
       const full = await api(`/api/skills/${encodeURIComponent(state.skill)}`);

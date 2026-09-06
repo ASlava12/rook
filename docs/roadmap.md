@@ -194,6 +194,17 @@ what unblocks the most.
   last. Anthropic's signed blocks are left alone; a second copy as text would
   be the same thought twice. The bound is what lets `session context` price a
   thought from its stored size without reading it. 2 tests.
+- **Versioning a skill outside the command line** — capturing a version and
+  going back to one were `rook skills capture` and `rook skills rollback <name>
+  <object>` in a terminal, with the object id read off a third command's
+  output. Both surfaces that list skills can do both now: the TUI's Skills tab
+  shows every capture under the skill it belongs to and takes `c` and `u`, and
+  the browser's version table grew a Capture button and a Roll back on each
+  row. A rollback captures what is there first, so it is itself undoable, and
+  both say what that capture is — it is the only way back. Which leaves
+  checkpoints as the last thing only the command line can do. 1 test, on a pty,
+  which changes the file behind the window and reads it back after the
+  rollback.
 - **A model the endpoint spells differently** — `doctor` and `models` compared
   the configured name to the endpoint's listing exactly, so a model configured
   the way its publisher writes it — `Qwen/Qwen3.8-27B` — was reported as one
