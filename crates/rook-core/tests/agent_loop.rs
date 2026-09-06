@@ -155,7 +155,7 @@ async fn a_session_starts_knowing_what_is_in_the_workspace() {
 
     let sent: String =
         seen.lock().unwrap().last().cloned().unwrap().messages.iter().map(|m| m.content.clone()).collect();
-    assert!(!sent.contains("What is in the workspace"), "only the first turn carries it:\n{sent}");
+    assert!(!sent.contains("listed to a depth of"), "only the first turn carries it:\n{sent}");
 }
 
 /// "Как будто не пишет на диск агент" — asked two and a half hours into a
@@ -634,6 +634,49 @@ async fn an_autonomous_turn_is_checked_against_its_goal_before_it_may_end() {
     assert!(notes[0].contains("fails"), "{notes:?}");
 }
 
+/// A turn that recorded a skill and said so was checked against an empty
+/// workspace, told "It wrote nothing", believed it, and spent the rest of its
+/// steps hunting the filesystem for the skill it had just written. Skills and
+/// memory are the agent's own and not in the workspace at all.
+#[tokio::test]
+async fn the_checker_is_told_about_what_is_not_a_file() {
+    let f = fixture();
+    let session = f.rook.start_session("s").unwrap();
+    f.rook.set_goal(session, "the deploy procedure is written down").unwrap();
+
+    let provider = Arc::new(ByPrompt(vec![
+        ("recorded deploy-notes as a skill", reply("VERDICT: holds")),
+        ("wrote skill", reply("written down")),
+        (
+            "write it down",
+            call(
+                "write_skill",
+                serde_json::json!({
+                    "name": "deploy-notes",
+                    "description": "How to deploy.",
+                    "body": "Run `make ship`."
+                }),
+            ),
+        ),
+    ]));
+
+    let mut agent = AgentLoop::new(&f.rook, provider, session);
+    agent.allow_everything_not_denied();
+    let outcome = agent.run("write it down").await.unwrap();
+
+    assert_eq!(outcome.skills_written, ["deploy-notes"]);
+    let notes: Vec<String> = f
+        .rook
+        .transcript(session, 0, 200, 1024)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == "note" && e.label == "goal check")
+        .map(|e| e.body)
+        .collect();
+    assert_eq!(notes.len(), 1, "the check ran: {notes:?}");
+    assert!(notes[0].contains("holds"), "and was told what to look for: {notes:?}");
+}
+
 /// Read from a real check, against a local model, of a turn that had just
 /// fixed a syntax error: "The file compiles and runs… the claim that it does
 /// not compile is false, so there was nothing to fix. VERDICT: fails". A
@@ -650,6 +693,10 @@ async fn the_checker_is_told_what_the_turn_wrote() {
     // answers the checker and the turn fails with "nothing to say to …".
     let provider = Arc::new(ByPrompt(vec![
         ("It wrote: notes.txt", reply("VERDICT: holds")),
+        // Never reached here; it is the shape a turn that wrote a skill sees,
+        // and a rule for it fails loudly rather than silently matching the one
+        // above.
+        ("recorded", reply("VERDICT: holds")),
         ("created", reply("done")),
         (
             "make it say done",
@@ -2621,24 +2668,52 @@ async fn a_skill_the_agent_writes_is_there_for_the_next_turn() {
     );
     assert!(f.rook.skill_history("cross-compile-freebsd").unwrap().len() == 1, "and be versioned");
 
-    // A skill goes into the agent's own directory, which is outside the
-    // workspace — so the path in the result is one the file tools refuse. A
-    // small model read it back out of this message and spent two calls being
-    // told so; the message names the tool that does work — `load_skill`, which
-    // reads what is installed, and not `find_skill`, which searches the sources
-    // you could install from and will never hold a skill just written here.
-    let wrote = f
-        .rook
-        .transcript(session, 0, 200, 4096)
-        .unwrap()
-        .into_iter()
+    // Two readers, two messages. The person's record says where the file
+    // went; the model is told how to read it back and not where it lives.
+    // A path in the model's copy has been read as an instruction twice: handed
+    // to `read_file` and refused for being outside the workspace, and — with
+    // the state directory in a temporary one — judged ephemeral, after which
+    // the model went looking for "the real skills store" and spent its turn
+    // trying to write there. `load_skill` and not `find_skill`: the first
+    // reads what is installed, which this now is, and the second searches the
+    // sources you could install from, where it will never appear.
+    let transcript = f.rook.transcript(session, 0, 200, 4096).unwrap();
+    let noted = transcript
+        .iter()
         .find(|e| e.label == "write_skill" && e.kind == "note")
         .expect("the write is in the transcript");
+    assert!(noted.body.contains("skills"), "the record says where it went: {}", noted.body);
+
+    let told = transcript
+        .iter()
+        .find(|e| e.label == "write_skill" && e.kind == "tool-result")
+        .expect("and the model was answered");
     assert!(
-        wrote.body.contains("load_skill") && !wrote.body.contains("find_skill"),
+        told.body.contains("load_skill") && !told.body.contains("find_skill"),
         "it has to name the tool that reads an installed skill: {}",
-        wrote.body
+        told.body
     );
+    assert!(!told.body.contains('/'), "and not a path: {}", told.body);
+
+    // And as a tool result, which is the kind the replay turns back into an
+    // answer. Logged as a note alone, the next turn replayed the call with
+    // "no result was recorded: the turn did not finish" under it — and a model
+    // reading that about a skill it had just written has every reason to doubt
+    // the skill exists.
+    let next = ScriptedProvider::new(vec![reply("carrying on")]);
+    let seen = next.share();
+    AgentLoop::new(&f.rook, Arc::new(next), session).run("and now?").await.unwrap();
+    let replayed: String =
+        seen.lock().unwrap().last().cloned().unwrap().messages.iter().fold(String::new(), |mut all, m| {
+            all.push_str(&m.content);
+            all.push('\n');
+            all
+        });
+    assert!(
+        !replayed.contains("no result was recorded"),
+        "the write has an answer in the replayed conversation:\n{replayed}"
+    );
+    assert!(replayed.contains("wrote skill"), "and it is the one the model was given:\n{replayed}");
 }
 
 #[tokio::test]

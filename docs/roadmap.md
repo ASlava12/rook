@@ -1298,6 +1298,26 @@ thing now: that the turn *said* it wrote the file. A turn that does the work
 and reports none of it reads exactly like one that did nothing, which is a
 question somebody asked here about a real turn.
 
+Three of ours came out of running it on this machine. A turn that recorded a
+skill and said so was checked against an empty workspace and told "It wrote
+nothing" — the line the checker had been given a few hours earlier — believed
+it, and spent the rest of its steps hunting the filesystem for the skill it had
+just written. Not everything a turn leaves behind is a file in the workspace:
+the claim says "no files in the workspace" now, and names the skills and the
+facts, which live in the agent's own directory and which `load_skill` and
+memory read back. The second was in the same reading: `write_skill` answered
+the model with the path it had written to, and a path under a temporary state
+directory reads as ephemeral — so the model went looking for "the real skills
+store". The person's record keeps the path; the model is told that the skill is
+installed and how to read it back. Writing that found the third: `write_skill`
+logged its answer as a note, which reaches nobody, so the next turn replayed
+the call with "no result was recorded: the turn did not finish" under it. It
+logs a tool result like every other tool the loop implements. And one more from
+the same run, in the sketch a session now opens with: "two levels down" was
+read as *where the files are*, so a model went looking two directories deep for
+something at the root and spent a step remarking on it. It says "listed to a
+depth of two" now.
+
 And a scenario can have a second turn now, asked in a new session against the
 same store — which is the only way to check the one claim a single turn cannot.
 `remembers into the next session` tells the agent something, then asks a fresh

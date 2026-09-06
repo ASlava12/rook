@@ -38,6 +38,11 @@ struct Turn {
     wrote: Vec<String>,
 }
 
+/// Long enough that retyping it would show, and dull enough that a model has
+/// no reason to improve it on the way past.
+const A_FILE_WORTH_KEEPING: &str = "pub const PORT: u16 = 8443;\npub const HOST: &str = \"::1\";\n\
+     pub const RETRIES: u8 = 3;\npub const NAME: &str = \"rook\";\n";
+
 const SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "reads before answering",
@@ -101,6 +106,18 @@ const SCENARIOS: &[Scenario] = &[
                 "the claim is false and the file says so",
                 turn,
             )
+        },
+    },
+    Scenario {
+        name: "moves a file rather than retyping it",
+        seed: &[("config.rs", A_FILE_WORTH_KEEPING)],
+        prompt: "Rename config.rs to settings.rs. Do not change anything in it.",
+        then: None,
+        check: |turn, workspace| {
+            expect(turn.tools.iter().any(|t| t == "move_file"), "there is a tool for this", turn)?;
+            let after = std::fs::read_to_string(workspace.join("settings.rs"))?;
+            expect(after == A_FILE_WORTH_KEEPING, "and the contents come through untouched", turn)?;
+            expect(!workspace.join("config.rs").exists(), "and it is not left in both places", turn)
         },
     },
     Scenario {

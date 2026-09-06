@@ -1049,7 +1049,11 @@ impl Rook {
         entries.sort();
         let more = entries.len().saturating_sub(most);
         entries.truncate(most);
-        let mut sketch = format!("What is in the workspace, two levels down:\n{}", entries.join("\n"));
+        // Not "two levels down", which a model read as *where the files are*:
+        // it went looking for a file two directories deep, found it at the
+        // root, and remarked on the discrepancy — steps spent on a sentence
+        // about the listing rather than on the work.
+        let mut sketch = format!("The workspace, listed to a depth of two:\n{}", entries.join("\n"));
         if more > 0 {
             sketch.push_str(&format!("\n[{more} more not shown — `list_dir` for the rest]"));
         }

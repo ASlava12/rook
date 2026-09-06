@@ -2211,7 +2211,14 @@ impl<'a> AgentLoop<'a> {
                     outcome.skills_loaded.push(resolved.skill.id());
                     let body = format!("{}{}", resolved.body, bundled(&resolved.skill));
                     self.rook.log(self.session, EventKind::SkillLoaded, &resolved.skill.id(), &body).ok();
-                    (body, false)
+                    // Named, and by where it came from: a body on its own is
+                    // anonymous, and a model that had just written a skill and
+                    // loaded it back decided it had been handed "the
+                    // environment's built-in default" and went looking for
+                    // somewhere else to write.
+                    let said =
+                        format!("skill {} ({}):\n{body}", resolved.skill.id(), resolved.skill.source.label());
+                    (said, false)
                 }
                 // The reason matters: "needs docker >=27" is actionable, "not
                 // found" sends the model looking for a typo that is not there.
@@ -2310,20 +2317,38 @@ impl<'a> AgentLoop<'a> {
                     // wrong one of those two was named here for a day, and the
                     // next smoke run showed a model following the advice into
                     // "no source offers a skill called \"config_port\"".
-                    let message = format!(
-                        "wrote skill {name:?} to {}. It is outside the workspace, so read it \
-                         back with `{LOAD_SKILL}` rather than by path.",
-                        path.display()
-                    );
+                    // The person is told where it went; the model is not.
+                    // A path here has been read as an instruction twice: first
+                    // handed to `read_file` and refused for being outside the
+                    // workspace, and then — when the state directory was a
+                    // temporary one — judged ephemeral, so the model went
+                    // hunting for "the real skills store" and spent a turn
+                    // trying to write into it. Where a skill lives is the
+                    // agent's business; what the model needs is that it is
+                    // installed and how to read it back.
+                    let note = format!("wrote skill {name:?} to {}", path.display());
                     // A note rather than a kind of its own: a new `EventKind`
                     // is a record older builds cannot decode, and the log is
                     // just as readable with the fact in the label.
-                    self.rook.log(self.session, EventKind::Note, WRITE_SKILL, &message).ok();
+                    self.rook.log(self.session, EventKind::Note, WRITE_SKILL, &note).ok();
+                    let message = format!(
+                        "wrote skill {name:?}. It is installed for this agent — read it back with \
+                         `{LOAD_SKILL}`, and it is offered to later sessions in the catalog."
+                    );
+                    // As a tool result as well, because that is the kind the
+                    // replay turns back into an answer. Every other tool the
+                    // loop implements logs one; this one logged a note, which
+                    // reaches nobody, so the next turn replayed the call with
+                    // "no result was recorded: the turn did not finish" under
+                    // it — a model reading that about a skill it had just
+                    // written has every reason to doubt the skill exists.
+                    self.rook.log(self.session, EventKind::ToolResult, WRITE_SKILL, &message).ok();
                     (message, false)
                 }
                 Err(e) => {
                     let message = format!("could not write the skill: {e}");
                     self.rook.log(self.session, EventKind::Error, WRITE_SKILL, &message).ok();
+                    self.rook.log(self.session, EventKind::ToolResult, WRITE_SKILL, &message).ok();
                     (message, true)
                 }
             };
@@ -2793,14 +2818,35 @@ impl<'a> AgentLoop<'a> {
         // of the same kind as the files.
         let wrote =
             self.wrote_paths.lock().map(|w| w.iter().cloned().collect::<Vec<_>>()).unwrap_or_default();
-        let written = match wrote.len() {
-            0 => "It wrote nothing.".to_string(),
+        let mut written = match wrote.len() {
+            // "It wrote nothing" was read as "nothing was done": a turn that
+            // recorded a skill and said so was checked against an empty
+            // workspace, told it had written nothing, believed it, and spent
+            // the rest of its steps hunting the filesystem for the skill it
+            // had just written. Not everything a turn leaves behind is a file
+            // in the workspace, so this says which is which.
+            0 => "It wrote no files in the workspace.".to_string(),
             _ => format!(
                 "It wrote: {}. That list is the filesystem's rather than the agent's account of \
                  itself — read the files.",
                 wrote.iter().take(FILES_NAMED_TO_CHECKER).cloned().collect::<Vec<_>>().join(", ")
             ),
         };
+        // The other two things a turn leaves behind, both in the agent's own
+        // directory and neither visible to a checker looking at the workspace.
+        if !outcome.skills_written.is_empty() {
+            written.push_str(&format!(
+                " It recorded {} as a skill — skills live in the agent's own directory rather than \
+                 in the workspace, and `{LOAD_SKILL}` is what reads one back.",
+                outcome.skills_written.join(", ")
+            ));
+        }
+        if !outcome.facts_learned.is_empty() {
+            written.push_str(&format!(
+                " It remembered: {}. Memory is the agent's own as well, and not on disk here.",
+                outcome.facts_learned.join("; ")
+            ));
+        }
         let claim = format!(
             "The person set this goal for the session, and the agent has just finished a turn \
              towards it:\n\n{goal}\n\nYou are looking at the workspace as it stands after that \
