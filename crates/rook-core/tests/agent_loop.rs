@@ -5292,12 +5292,25 @@ async fn a_turn_that_asks_the_same_thing_forever_is_ended_and_says_so() {
     // The same call every time, and a reply between them, which is what the
     // live transcript held.
     let same = || call("list_dir", serde_json::json!({ "path": "." }));
-    let provider = Arc::new(ScriptedProvider::new((0..20).map(|_| same()).collect()));
+    // Two calls are answered, the third to the fifth are refused as repeats,
+    // and the fifth is one refusal too many — so the sixth response is the
+    // answer the turn is asked for with nothing left to reach for.
+    let mut script: Vec<_> = (0..5).map(|_| same()).collect();
+    script.push(reply("there is one file, notes.txt"));
+    let provider = Arc::new(ScriptedProvider::new(script));
+    let seen = provider.share();
     let out = AgentLoop::new(&f.rook, provider, session).run("what is here?").await.unwrap();
 
     assert_eq!(out.stopped, "looping", "the turn ends on the loop, not on the step limit: {out:?}");
-    assert!(out.steps < 20, "and long before the steps run out: {} steps", out.steps);
-    assert!(out.reply.contains("same call"), "and the reply says what happened: {}", out.reply);
+    assert!(out.steps <= 5, "and on the fifth identical call: {} steps", out.steps);
+    // Out through the same door as the step limit: the turn has usually found
+    // what was asked for by then, and ending on the loop hands over the loop
+    // instead of the answer.
+    assert_eq!(out.reply, "there is one file, notes.txt", "the answer it had, not the loop");
+    let asked: String =
+        seen.lock().unwrap().last().cloned().unwrap().messages.last().unwrap().content.clone();
+    assert!(asked.contains("asked the same thing"), "and it was told why it was being asked: {asked}");
+    assert!(asked.contains("without calling anything"), "with nothing left to reach for: {asked}");
 
     // And the refusals are in the transcript, which held nothing but the
     // model's own messages while it spent a turn on one call.

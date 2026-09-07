@@ -1732,8 +1732,9 @@ impl<'a> AgentLoop<'a> {
         let mut repeated: std::collections::BTreeMap<(String, String), (String, u32)> =
             std::collections::BTreeMap::new();
         // How many calls this turn were refused as a repeat of one already
-        // answered.
+        // answered, and whether that was what ended it.
         let mut looping = 0usize;
+        let mut stuck = false;
         let mut checked_goal = false;
         let mut worth_compacting = true;
         // Once per turn: an endpoint that refuses the length twice is not
@@ -2173,21 +2174,22 @@ impl<'a> AgentLoop<'a> {
             // tokens to arrive at "stopped at the step limit", which says
             // nothing about what went wrong. Ending here says it.
             if looping >= STUCK_ON_ONE_CALL {
-                outcome.stopped = "looping".into();
                 let said = "the same call was made over and over and answered the same way each \
                             time, so the turn was ended rather than spending the rest of its \
                             steps on it";
                 self.rook.log(self.session, EventKind::Note, "looping", said).ok();
                 self.report(Reported::Open(said.to_string()));
-                if outcome.reply.trim().is_empty() {
-                    outcome.reply = format!("(the turn was ended: {said})");
-                }
-                self.end_of_turn(&mut outcome).await;
-                return Ok(outcome);
+                stuck = true;
+                // Out through the same door as the step limit, rather than
+                // returning here: a turn that looped has usually already found
+                // the answer — the live one had four passages of the
+                // documentation it was asked for — and ending on the loop
+                // leaves the person with the loop instead of the answer.
+                break;
             }
         }
 
-        outcome.stopped = "max_steps".into();
+        outcome.stopped = if stuck { "looping" } else { "max_steps" }.into();
         // The limit is the model's, not the children's: what they were still
         // doing is waited for here as it is at the end of a turn that finished.
         let left = drain_uncollected(&mut nursery, &mut outcome).await;
@@ -2200,8 +2202,10 @@ impl<'a> AgentLoop<'a> {
                 self.rook.log(self.session, EventKind::Note, "sub-agents", left).ok();
                 messages.push(Message::user(left));
             }
-            messages.push(Message::user(OUT_OF_STEPS));
-            self.rook.log(self.session, EventKind::Note, "out of steps", OUT_OF_STEPS).ok();
+            let told = if stuck { STOP_ASKING } else { OUT_OF_STEPS };
+            messages.push(Message::user(told));
+            let why = if stuck { "looping" } else { "out of steps" };
+            self.rook.log(self.session, EventKind::Note, why, told).ok();
             let used = measured(&messages, anchor);
             let mut request = Request::new(messages);
             request.effort = Some(self.effort);
@@ -4068,6 +4072,14 @@ fn collected(task: &str, result: &Landed, outcome: &mut TurnOutcome) -> String {
 const OUT_OF_STEPS: &str = "\
 You are out of steps for this turn. Say now, in words and without calling anything: what \
 you found, what you did, and what is left.";
+
+/// The same, for a turn that spent itself on one call rather than on all of
+/// them. It has the answer already — the live one had four passages of the
+/// documentation it was asked for — and asking again is what it was doing.
+const STOP_ASKING: &str = "\
+You have asked the same thing several times and been answered the same way each time; the \
+answer is above. Say now, in words and without calling anything: what you found, and what is \
+still missing.";
 
 const GO_ON: &str = "\
 Your reply was cut off at the output limit. Go on from where it stopped, briefly: a call you \

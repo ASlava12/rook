@@ -251,7 +251,11 @@ what unblocks the most.
   about RDB and AOF — and the model wanted what was around them, which the
   tool had no way to give. So a set that could only be quoted in fragments was
   asked the same question again until the loop guard ended the turn. Its pages
-  are numbered in every answer now, and `page: n` reads one whole. 4 tests.
+  are numbered in every answer now, and `page: n` reads one whole. And a turn
+  the loop guard stops leaves by the same door as one that ran out of steps:
+  asked once, with nothing left to reach for, to say what it found. It had
+  four passages of the documentation it was asked for and handed over the loop
+  instead. 4 tests.
 - **Ten search results that were ten copies of the tenth** — found by the
   gathering above, on the fixture that first served three results and a
   footer. The keyless engine's page is scanned rather than parsed, and the scan
