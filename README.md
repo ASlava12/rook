@@ -222,12 +222,12 @@ The scanner is not a parser: it finds declarations and attributes methods to the
 
 ### Reading a page
 
-Off by default, and off means the tool is never offered rather than the call
+On by default, and off means the tool is never offered rather than the call
 refused — a tool the model cannot see is one it cannot decide to try:
 
 ```toml
 [web]
-enabled = true
+enabled = false     # and nothing here reaches the network at all
 ```
 
 `web_fetch` reports its risk as the address it is going to, so an allow rule can
@@ -239,15 +239,19 @@ style dropped. What comes back is somebody else's writing on its way into the
 model's context — not a fact and not an instruction, which is why the answer
 always says where it came from.
 
-`web_search` needs an engine named as well, and there is no default because the
-two differ on who sees the query:
+`web_search` answers through DuckDuckGo unless told otherwise, because that is
+the one that works with nothing set up — no key, no account, no service to run.
+What the default costs is worth saying plainly: the query goes to their host,
+and the results are read out of a page rather than an API, so their markup can
+break the reading. The two alternatives each need something to be true first:
 
 ```toml
 [web]
-enabled    = true
-search     = "searxng"                  # your own instance: the query stays here
-search_url = "http://127.0.0.1:8888"
-# search   = "brave"                    # or hosted, with BRAVE_API_KEY in the environment
+search     = "duckduckgo"               # the default: nothing to set up
+# search   = "searxng"                  # your own instance: the query stays here
+# search_url = "http://127.0.0.1:8888"
+# search   = "brave"                    # hosted, with BRAVE_API_KEY in the environment
+# search   = ""                         # none: `web_search` is not offered at all
 ```
 
 Its risk is the engine's address rather than the query, so allowing your own

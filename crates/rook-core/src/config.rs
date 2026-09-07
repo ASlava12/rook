@@ -246,13 +246,23 @@ pub struct ServerConfig {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WebConfig {
-    /// Offer `web_fetch` at all. Nothing reaches the network while this is off.
+    /// Offer `web_fetch` and `web_search` at all. Nothing reaches the network
+    /// while this is off. On by default: an agent that cannot look anything up
+    /// answers from what it was trained on, which is a year old and says so
+    /// nowhere.
     pub enabled: bool,
     /// How long one page has to arrive.
     pub timeout_secs: u64,
-    /// Which search engine answers `web_search`: `searxng`, `brave`, or empty
-    /// for none. Empty is the default because the two have different answers to
-    /// "who sees the query" and neither should be picked for somebody.
+    /// Which search engine answers `web_search`: `duckduckgo`, `searxng`,
+    /// `brave`, or empty for none.
+    ///
+    /// `duckduckgo` by default, because it is the one that works with nothing
+    /// set up — no key, no account, no service to run — and a tool nobody can
+    /// use without configuring it first is a tool nobody uses. What that
+    /// default costs is stated plainly: the query goes to their host, and the
+    /// results are read out of a page rather than an API. `searxng` keeps the
+    /// query on this machine, and `brave` answers in a documented shape; both
+    /// are a line here away.
     pub search: String,
     /// The SearxNG instance to ask. Its own, usually — the reason to prefer it
     /// is that the query does not leave the machine.
@@ -262,9 +272,9 @@ pub struct WebConfig {
 impl Default for WebConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             timeout_secs: 30,
-            search: String::new(),
+            search: "duckduckgo".into(),
             search_url: "http://127.0.0.1:8888".into(),
         }
     }

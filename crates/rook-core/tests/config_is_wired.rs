@@ -247,11 +247,14 @@ fn the_whole_advertised_tool_list_stays_within_a_budget() {
     // capability with its own verbs rather than an argument on an existing one.
     // From 2,050: `move_file`, because the alternative is reading a file and
     // writing it somewhere else, which retypes every line of it through the
-    // model and is where a long one loses one. Each time the new description
-    // was cut to the bone first; what is left is the shape of the arguments,
-    // which a tool cannot be called without.
+    // model and is where a long one loses one. From 2,150: `web_fetch` and
+    // `web_search`, which are in every list now rather than in the lists of
+    // people who had turned them on — an agent that cannot look anything up
+    // answers from what it was trained on. Each time the new description was
+    // cut to the bone first; what is left is the shape of the arguments, which
+    // a tool cannot be called without.
     assert!(
-        full < 2_150,
+        full < 2_300,
         "the whole list costs ~{full} tokens on every eager request; trim a description or \
          merge an argument before raising this"
     );
@@ -262,9 +265,12 @@ fn the_whole_advertised_tool_list_stays_within_a_budget() {
     // stub is mostly the shape of its arguments. Raised from 900 for
     // `move_file`, whose stub is eleven tokens: two argument names and a
     // sentence that has to say the contents are kept, since that is the whole
-    // reason to call it rather than read and write.
+    // reason to call it rather than read and write. Raised from 950 for the two
+    // web tools, which every list carries now: looking something up is not a
+    // capability to be configured into existence, and sixteen tokens is what
+    // being able to is worth.
     assert!(
-        stubs < 950,
+        stubs < 1_000,
         "the stubs cost ~{stubs} tokens on every request, which is what is \
          actually paid: lazy loading is the default"
     );

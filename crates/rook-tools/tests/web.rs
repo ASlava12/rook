@@ -182,6 +182,46 @@ async fn a_search_lists_what_the_engine_returned_with_its_summaries_marked_as_su
     );
 }
 
+/// The engine that works with nothing set up, read out of the page it answers
+/// with: no key, no account, no service to run — and a tool nobody can use
+/// before configuring it is a tool nobody uses.
+#[tokio::test]
+async fn the_keyless_engine_reads_its_results_out_of_the_page() {
+    let base = serve(
+        "200 OK",
+        "text/html",
+        r#"<html><body>
+             <a rel="nofollow" href="https://redis.io/docs/" class="result-link">Redis Documentation</a>
+             <td class="result-snippet">Redis is an in-memory data store &amp; cache.</td>
+             <a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fredis.io%2Fdownload&amp;rut=x" class="result-link">Download</a>
+             <td class="result-snippet">Get Redis</td>
+           </body></html>"#,
+    )
+    .await;
+    let base = base.trim_end_matches("/page").to_string();
+
+    let search = rook_tools::web::Search::new(
+        rook_tools::web::Engine::DuckDuckGo(base),
+        std::time::Duration::from_secs(5),
+    )
+    .unwrap();
+    let out = search.call(&ctx(), &serde_json::json!({ "query": "redis docs" })).await.unwrap();
+
+    assert!(!out.is_error, "{}", out.content);
+    assert_eq!(out.meta["results"], 2, "{}", out.content);
+    assert!(out.content.contains("Redis Documentation"), "the title: {}", out.content);
+    assert!(out.content.contains("https://redis.io/docs/"), "and the address: {}", out.content);
+    assert!(
+        out.content.contains("in-memory data store & cache"),
+        "and the summary, entities and all: {}",
+        out.content
+    );
+    // Their own redirect is a hop, not a page: what a model is given to read
+    // is where the result points.
+    assert!(out.content.contains("https://redis.io/download"), "unwrapped: {}", out.content);
+    assert!(!out.content.contains("uddg="), "{}", out.content);
+}
+
 /// A rule that allows a local instance must not also allow a hosted one: what
 /// leaves the machine is a request to a host, and which host is the question.
 #[test]
@@ -221,6 +261,10 @@ fn an_engine_that_cannot_work_is_not_offered() {
     assert!(rook_tools::web::Engine::named("brave", "").is_none());
     assert!(rook_tools::web::Engine::named("", "http://x").is_none());
     assert!(rook_tools::web::Engine::named("nonsense", "http://x").is_none());
+    assert!(
+        rook_tools::web::Engine::named("duckduckgo", "").is_some(),
+        "the keyless one works with nothing set up, which is what makes it the default"
+    );
     assert_eq!(
         rook_tools::web::Engine::named("searxng", "http://127.0.0.1:8888/"),
         Some(rook_tools::web::Engine::Searx("http://127.0.0.1:8888".into())),

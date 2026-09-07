@@ -1085,13 +1085,19 @@ fn doctor_says_what_the_web_configuration_will_actually_do() {
         text.split("web:").nth(1).unwrap_or_default().split("\n\n").next().unwrap_or_default().to_string()
     };
 
-    assert!(doctor("").contains("off"), "the default is off and should say so");
-    assert!(doctor("[web]\nenabled = true\n").contains("no search engine"));
+    // The default is on and searches through the engine that needs nothing set
+    // up, and what a person wants from `doctor` is which one that is.
+    let out_of_the_box = doctor("");
+    assert!(out_of_the_box.contains("web_search"), "the default can search: {out_of_the_box}");
+    assert!(out_of_the_box.contains("duckduckgo"), "and says through whom: {out_of_the_box}");
+
+    assert!(doctor("[web]\nenabled = false\n").contains("off"), "and off still says so");
+    assert!(doctor("[web]\nsearch = \"\"\n").contains("no search engine"));
     assert!(
-        doctor("[web]\nenabled = true\nsearch = \"brave\"\n").contains("BRAVE_API_KEY"),
+        doctor("[web]\nsearch = \"brave\"\n").contains("BRAVE_API_KEY"),
         "named but unusable is the case worth catching before a turn does"
     );
-    let searx = doctor("[web]\nenabled = true\nsearch = \"searxng\"\n");
+    let searx = doctor("[web]\nsearch = \"searxng\"\n");
     assert!(searx.contains("web_search"), "{searx}");
     assert!(searx.contains("searxng"), "{searx}");
 }

@@ -194,6 +194,18 @@ what unblocks the most.
   last. Anthropic's signed blocks are left alone; a second copy as text would
   be the same thought twice. The bound is what lets `session context` price a
   thought from its stored size without reading it. 2 tests.
+- **Looking something up needs no setting up** — `[web]` was off by default and
+  `web_search` had no engine, on the reasoning that searxng and brave answer
+  differently to "who sees the query" and neither should be chosen for
+  somebody. What that produced is an agent that answers from what it was
+  trained on — a year old, and saying so nowhere — until a person finds the
+  two lines of config. The web is on by default now and the default engine is
+  DuckDuckGo's lite page, which needs no key, no account and no service: the
+  one engine that works out of the box. Its costs are stated where the default
+  is: the query goes to their host, and the results are scanned out of HTML
+  rather than read from an API, so their markup can break it. `searxng` keeps
+  the query on this machine, `brave` answers in a documented shape, and an
+  empty `search` offers no tool at all. 2 tests.
 - **A search that looked at nothing said "no matches"** — read from a real
   turn: a model finished a rename across four files, checked itself with
   `search` under `glob: "*.py"`, was told "no matches", and reported the old

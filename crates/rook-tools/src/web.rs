@@ -294,6 +294,16 @@ pub enum Engine {
     Searx(String),
     /// Brave's API, with the key from `BRAVE_API_KEY`.
     Brave(String),
+    /// DuckDuckGo's HTML endpoint, by base url so a test can stand in for it.
+    ///
+    /// The one that works with nothing set up: no key, no account, no service
+    /// to run. It answers in HTML rather than JSON, which is read the way a
+    /// page is read here — by scanning for the two things a result is, and not
+    /// by parsing. That is the trade: a default that works out of the box, and
+    /// a reading that their markup can break. `searxng` keeps the query on
+    /// this machine and `brave` answers in a documented shape; both are a line
+    /// of config away, and neither works without something else being true.
+    DuckDuckGo(String),
 }
 
 impl Engine {
@@ -304,13 +314,14 @@ impl Engine {
         match name.trim() {
             "searxng" | "searx" => Some(Self::Searx(searx_url.trim_end_matches('/').to_string())),
             "brave" => std::env::var("BRAVE_API_KEY").ok().filter(|k| !k.trim().is_empty()).map(Self::Brave),
+            "duckduckgo" | "ddg" => Some(Self::DuckDuckGo("https://lite.duckduckgo.com".into())),
             _ => None,
         }
     }
 
     fn endpoint(&self) -> &str {
         match self {
-            Self::Searx(base) => base,
+            Self::Searx(base) | Self::DuckDuckGo(base) => base,
             Self::Brave(_) => "https://api.search.brave.com",
         }
     }
@@ -373,6 +384,9 @@ impl Tool for Search {
         let q = escaped(&query);
         let request = match &self.engine {
             Engine::Searx(base) => self.client.get(format!("{base}/search?q={q}&format=json")),
+            // Their lite page, which is the same results without the script
+            // that draws them.
+            Engine::DuckDuckGo(base) => self.client.get(format!("{base}/lite/?q={q}")),
             Engine::Brave(key) => self
                 .client
                 .get(format!("https://api.search.brave.com/res/v1/web/search?q={q}"))
@@ -396,10 +410,18 @@ impl Tool for Search {
             )));
         }
 
-        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body) else {
-            return Ok(ToolOutcome::error(format!("{} did not answer with JSON", self.engine.endpoint())));
+        let found = match &self.engine {
+            Engine::DuckDuckGo(_) => links_in(&body, limit),
+            _ => {
+                let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body) else {
+                    return Ok(ToolOutcome::error(format!(
+                        "{} did not answer with JSON",
+                        self.engine.endpoint()
+                    )));
+                };
+                results(&self.engine, &parsed, limit)
+            }
         };
-        let found = results(&self.engine, &parsed, limit);
         if found.is_empty() {
             return Ok(ToolOutcome::ok(format!("nothing found for {query:?}")));
         }
@@ -437,13 +459,109 @@ fn escaped(query: &str) -> String {
     out
 }
 
+/// The results on a DuckDuckGo lite page, as `title\nurl\nsummary`.
+///
+/// Scanned rather than parsed, for the reason `readable` is: what is wanted
+/// off the page is two strings per result, and an HTML parser is a dependency
+/// the size of the rest of this binary. Their markup can change under this —
+/// that is the price of an engine that needs nothing set up, and it is why the
+/// answer says who could not be read rather than coming back empty.
+fn links_in(html: &str, limit: usize) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut snippets = html.split("result-snippet").skip(1);
+    for chunk in html.split("result-link").skip(1) {
+        if found.len() >= limit {
+            break;
+        }
+        // Backwards from the marker to the `href` of the anchor it is part of,
+        // because the class may sit before or after it.
+        let Some(open) = html[..html.len() - chunk.len()].rfind("<a ") else { continue };
+        let anchor = &html[open..];
+        let Some(url) = attribute(anchor, "href").map(|href| direct(&href)) else { continue };
+        if !url.starts_with("http") {
+            continue;
+        }
+        let title = anchor
+            .split_once('>')
+            .map(|(_, rest)| rest.split('<').next().unwrap_or_default())
+            .unwrap_or_default();
+        let summary = snippets
+            .next()
+            .and_then(|s| s.split_once('>'))
+            .map(|(_, rest)| rest.split('<').next().unwrap_or_default())
+            .unwrap_or_default();
+        found.push(format!(
+            "{}\n{url}\n{}",
+            unescape(title.trim()),
+            match summary.trim() {
+                "" => String::new(),
+                text => format!("[the engine's summary] {}", unescape(text)),
+            }
+        ));
+    }
+    found
+}
+
+/// The value of an attribute in a tag, however it is quoted.
+fn attribute(tag: &str, name: &str) -> Option<String> {
+    let at = tag.find(&format!("{name}="))? + name.len() + 1;
+    let rest = &tag[at..];
+    let quote = rest.chars().next()?;
+    match quote {
+        '"' | '\'' => rest[1..].split(quote).next().map(str::to_string),
+        _ => rest.split([' ', '>']).next().map(str::to_string),
+    }
+}
+
+/// Where a result actually points. Theirs are sometimes wrapped in a redirect
+/// of their own — `//duckduckgo.com/l/?uddg=<the real one>` — and what a model
+/// is given to read should be the page, not the hop.
+fn direct(href: &str) -> String {
+    let Some(at) = href.find("uddg=") else { return href.to_string() };
+    let encoded = href[at + 5..].split('&').next().unwrap_or_default();
+    let mut out = String::with_capacity(encoded.len());
+    let bytes = encoded.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                match u8::from_str_radix(&encoded[i + 1..i + 3], 16) {
+                    Ok(byte) => out.push(byte as char),
+                    Err(_) => out.push('%'),
+                }
+                i += 3;
+            }
+            b'+' => {
+                out.push(' ');
+                i += 1;
+            }
+            other => {
+                out.push(other as char);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// The handful of entities a title or a summary actually carries.
+fn unescape(text: &str) -> String {
+    text.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#x27;", "'")
+        .replace("&#39;", "'")
+}
+
 /// One entry per result, as `title\nurl\nsummary`.
 ///
 /// The two engines disagree about where the fields live and what the summary is
 /// called, and about nothing else.
 fn results(engine: &Engine, body: &serde_json::Value, limit: usize) -> Vec<String> {
     let (list, summary) = match engine {
-        Engine::Searx(_) => (body.get("results"), "content"),
+        // Never reached: that one answers in HTML and is read by `links_in`.
+        Engine::Searx(_) | Engine::DuckDuckGo(_) => (body.get("results"), "content"),
         Engine::Brave(_) => (body.pointer("/web/results"), "description"),
     };
     let text = |v: &serde_json::Value, key: &str| {
