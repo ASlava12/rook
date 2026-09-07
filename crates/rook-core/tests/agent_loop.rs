@@ -5305,3 +5305,51 @@ async fn a_turn_that_asks_the_same_thing_forever_is_ended_and_says_so() {
     let refusals = events.iter().filter(|e| e.body.contains("answered the same each time")).count();
     assert!(refusals >= 1, "the answer the model kept getting is recorded: {events:#?}");
 }
+
+/// Read off a live turn: the passages answered the question, the model wanted
+/// what was around them, and there was no way to ask — so it asked the same
+/// question again until the turn was ended. A set that can only be quoted in
+/// fragments is a set that cannot be read.
+#[tokio::test]
+async fn a_page_of_a_kept_set_can_be_read_whole() {
+    let f = fixture();
+    f.rook
+        .keep_docs(&rook_core::docs::DocSet::new(
+            "redis",
+            rook_core::docs::LATEST,
+            vec![
+                rook_core::docs::Page {
+                    url: "https://redis.io/docs/persistence".into(),
+                    title: "Persistence".into(),
+                    text: "RDB takes point-in-time snapshots.\n\nAOF logs every write and is \
+                           replayed at startup, which is the part the passages left out."
+                        .into(),
+                },
+                rook_core::docs::Page {
+                    url: "https://redis.io/docs/clustering".into(),
+                    title: "Clustering".into(),
+                    text: "Sixteen thousand hash slots across the nodes of a cluster.".into(),
+                },
+            ],
+        ))
+        .unwrap();
+
+    let session = f.rook.start_session("reading").unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("docs", serde_json::json!({ "topic": "redis", "question": "how does rdb work" })),
+        call("docs", serde_json::json!({ "topic": "redis", "page": 1 })),
+        reply("it snapshots, and appends"),
+    ]));
+    let seen = provider.share();
+    AgentLoop::new(&f.rook, provider, session).run("how does redis persist?").await.unwrap();
+
+    let handed: String =
+        seen.lock().unwrap().last().cloned().unwrap().messages.iter().map(|m| m.content.clone()).collect();
+    // The first answer says the pages are there and how to ask for one.
+    assert!(handed.contains("1. Persistence"), "the pages are numbered:\n{handed}");
+    assert!(handed.contains("`page: n` reads one whole"), "and how to read one:\n{handed}");
+    // The second is the page, whole, with both addresses again.
+    assert!(handed.contains("replayed at startup"), "the rest of the page:\n{handed}");
+    assert!(handed.contains("https://redis.io/docs/persistence"), "with its source:\n{handed}");
+    assert!(handed.contains("docs/redis/latest"), "and the local copy:\n{handed}");
+}

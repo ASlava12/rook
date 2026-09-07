@@ -2349,12 +2349,23 @@ impl App {
             // Both addresses, which is the whole point of keeping the reading
             // rather than the page: the local copy is what an answer is made
             // of, and these are what anybody else can check it against.
-            for page in &set.pages {
-                lines.push(Line::from(Span::raw(page.title.clone())));
+            for (n, page) in set.pages.iter().enumerate() {
+                lines.push(Line::from(Span::raw(format!("{}. {}", n + 1, page.title))));
                 lines.push(Line::from(Span::styled(
-                    format!("  {}", page.url),
+                    format!("   {}", page.url),
                     Style::default().fg(Color::Blue),
                 )));
+                // The opening of what was kept, because a list of links is
+                // what a browser already gives: the reason for the local copy
+                // is that the reading is here.
+                const SHOWN: usize = 400;
+                let opening: String = page.text.chars().take(SHOWN).collect();
+                let elided = page.text.chars().count() > SHOWN;
+                lines.push(Line::from(Span::styled(
+                    format!("   {opening}{}", if elided { "…" } else { "" }),
+                    Style::default().fg(Color::DarkGray),
+                )));
+                lines.push(Line::from(""));
             }
         }
         f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(bordered(" Sources ")), right);

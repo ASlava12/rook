@@ -270,6 +270,7 @@ official documentation, reads a few pages, and files the reading — not the pag
 ```
 docs { "topic": "redis", "question": "how does persistence work" }
 docs { "topic": "postgres", "version": "16" }
+docs { "topic": "redis", "page": 2 }        # one of them whole
 ```
 
 What is stored is the prose and, beside every passage, the address it was read

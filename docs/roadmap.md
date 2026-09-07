@@ -246,7 +246,12 @@ what unblocks the most.
   seventy-five identical replies with no visible cause — they are recorded now.
   And the refusal itself only said no: it says what to do instead, which for
   documentation that cannot be fetched is to answer from memory and say that
-  is what it is. 2 tests.
+  is what it is. The second live turn, with the fetch approved, found the last
+  of it: `docs` answered the question exactly — four passages off redis.io
+  about RDB and AOF — and the model wanted what was around them, which the
+  tool had no way to give. So a set that could only be quoted in fragments was
+  asked the same question again until the loop guard ended the turn. Its pages
+  are numbered in every answer now, and `page: n` reads one whole. 4 tests.
 - **Ten search results that were ten copies of the tenth** — found by the
   gathering above, on the fixture that first served three results and a
   footer. The keyless engine's page is scanned rather than parsed, and the scan

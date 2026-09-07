@@ -297,24 +297,48 @@ fn answer_from(set: &crate::docs::DocSet, question: &str, preamble: String) -> S
         true => Vec::new(),
         false => set.passages(question, DOC_PASSAGES),
     };
-    if passages.is_empty() {
-        if !question.is_empty() {
-            out.push_str(
-                "\nNothing in the local copy is about that. What it does cover is below; \
-                 `refresh` reads the site again, and `web_search` looks wider.\n",
-            );
-        }
-        out.push_str("\nThe pages it was made from:\n");
-        for page in &set.pages {
-            out.push_str(&format!("- {} — {}\n", page.title, page.url));
-        }
-        return out;
+    if passages.is_empty() && !question.is_empty() {
+        out.push_str(
+            "\nNothing in the local copy is about that in those words. What it does cover is \
+             below; `refresh` reads the site again, and `web_search` looks wider.\n",
+        );
     }
-
     for (text, url) in passages {
         out.push_str(&format!("\n[from {url}]\n{}\n", rook_tools::elide_middle(&text, DOC_PASSAGE_BYTES)));
     }
+
+    // Always, and numbered. A model handed four passages and wanting the rest
+    // asked the same question again, because nothing said there was a whole
+    // page to read or how to ask for one — it looped until the turn ended.
+    out.push_str("\nThe pages it was made from — `page: n` reads one whole:\n");
+    for (n, page) in set.pages.iter().enumerate() {
+        out.push_str(&format!("{}. {} — {}\n", n + 1, page.title, page.url));
+    }
     out
+}
+
+/// One page of a set, as it was read.
+///
+/// The rest of what a set holds, for a model that has seen the passages and
+/// wants what is around them. Bounded, because a documentation page can be a
+/// hundred kilobytes and the middle of one is where a context window goes.
+fn whole_page(set: &crate::docs::DocSet, at: usize) -> String {
+    let Some(page) = at.checked_sub(1).and_then(|at| set.pages.get(at)) else {
+        return format!(
+            "{} ({}) has {} page(s), so there is no page {at} — ask for one of them, or ask a \
+             question and get the passages that answer it.",
+            set.topic,
+            set.version,
+            set.pages.len()
+        );
+    };
+    format!(
+        "{} — read from {}, kept in {}.\n\n{}",
+        page.title,
+        page.url,
+        crate::docs::reference(&set.topic, &set.version),
+        rook_tools::elide_middle(&page.text, DOC_PAGE_BYTES)
+    )
 }
 
 /// What [`AgentLoop::checkpoint_before`] hands back: the claim to hold for the
@@ -566,6 +590,9 @@ pub const DOCS: &str = "docs";
 /// enough to answer from and short enough to read.
 const DOC_PASSAGES: usize = 4;
 const DOC_PASSAGE_BYTES: usize = 1_200;
+/// And one whole page, when the passages were not enough: a documentation page
+/// is a few thousand words, and the ones that are not are mostly navigation.
+const DOC_PAGE_BYTES: usize = 8_000;
 
 /// How deep delegation may nest. One level of sub-delegation is useful for
 /// splitting a task; beyond that the token cost compounds faster than the work
@@ -1357,6 +1384,7 @@ impl<'a> AgentLoop<'a> {
                     "topic": { "type": "string", "description": "redis, tokio, the http spec" },
                     "version": { "type": "string", "description": "omit for the current one" },
                     "question": { "type": "string", "description": "what is being asked; it picks the passages" },
+                    "page": { "type": "integer", "description": "read one page whole, by its number in the answer" },
                     "refresh": { "type": "boolean", "description": "read the site again anyway" }
                 },
                 "required": ["topic"]
@@ -3279,13 +3307,17 @@ impl<'a> AgentLoop<'a> {
             .unwrap_or(crate::docs::LATEST);
         let question = args.get("question").and_then(|q| q.as_str()).unwrap_or_default().trim();
         let refresh = args.get("refresh").and_then(|r| r.as_bool()).unwrap_or(false);
+        let page = args.get("page").and_then(|p| p.as_u64()).map(|p| p as usize);
 
         let kept = match self.rook.docs(topic, Some(version)) {
             Ok(kept) => kept,
             Err(e) => return format!("could not read the documentation kept here: {e}"),
         };
         if let Some(set) = kept.filter(|_| !refresh) {
-            return answer_from(&set, question, String::new());
+            return match page {
+                Some(page) => whole_page(&set, page),
+                None => answer_from(&set, question, String::new()),
+            };
         }
 
         // Only a miss costs the network — and it is asked for before it is
@@ -3325,7 +3357,10 @@ impl<'a> AgentLoop<'a> {
             preamble.push_str(&format!("\nsome of what came back was unreadable: {note}"));
         }
         preamble.push_str("\n\n");
-        answer_from(&set, question, preamble)
+        match page {
+            Some(page) => format!("{preamble}{}", whole_page(&set, page)),
+            None => answer_from(&set, question, preamble),
+        }
     }
 
     fn skills_matching(&self, query: &str) -> String {
