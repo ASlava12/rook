@@ -234,6 +234,19 @@ what unblocks the most.
   scored. Results are ordered by whether the host carries the project's name
   before anything is fetched — the first gathering for "redis" kept a tutorial
   site's page about the documentation as the documentation. 17 tests.
+- **A hundred and ninety-four steps spent asking the same thing** — the first
+  live turn against `docs`: refused because an unattended `rook run` has nobody
+  to approve a fetch, a small model made the same call again until the step
+  limit — 614k tokens, ending on "stopped at the step limit", which says
+  nothing about what went wrong. Three things were wrong and all three were
+  ours. The guard that answers "you asked this already" was written for a model
+  that then moves on, so a turn told that three times now ends on `looping`
+  and says so, rather than spending the rest of its budget. Its refusals were
+  answered to the model but never logged, so the transcript was a hundred and
+  seventy-five identical replies with no visible cause — they are recorded now.
+  And the refusal itself only said no: it says what to do instead, which for
+  documentation that cannot be fetched is to answer from memory and say that
+  is what it is. 2 tests.
 - **Ten search results that were ten copies of the tenth** — found by the
   gathering above, on the fixture that first served three results and a
   footer. The keyless engine's page is scanned rather than parsed, and the scan

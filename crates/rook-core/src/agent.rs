@@ -537,6 +537,11 @@ const PROBLEMS_REPORTED: usize = 5;
 /// a look at what came back, and an answer.
 const SUBTASK_STEPS_FLOOR: u32 = 3;
 
+/// How many times a turn may be told it is asking the same thing again before
+/// the turn ends. Three: the first is a slip, the second is a habit, and the
+/// third is the rest of the step budget.
+const STUCK_ON_ONE_CALL: usize = 3;
+
 /// Pseudo-tools: implemented by the loop rather than the toolbox, because they
 /// need the agent's own state.
 pub const LOAD_SKILL: &str = "load_skill";
@@ -1698,6 +1703,9 @@ impl<'a> AgentLoop<'a> {
         let mut handed_left = false;
         let mut repeated: std::collections::BTreeMap<(String, String), (String, u32)> =
             std::collections::BTreeMap::new();
+        // How many calls this turn were refused as a repeat of one already
+        // answered.
+        let mut looping = 0usize;
         let mut checked_goal = false;
         let mut worth_compacting = true;
         // Once per turn: an endpoint that refuses the length twice is not
@@ -2082,15 +2090,23 @@ impl<'a> AgentLoop<'a> {
                 // not caught by it.
                 let key = (call.name.clone(), call.arguments.to_string());
                 let (mut result, failed) = match repeated.get(&key) {
-                    Some((_, times)) if *times >= 2 => (
-                        format!(
+                    Some((_, times)) if *times >= 2 => {
+                        let said = format!(
                             "`{}` with these same arguments was made {times} times this turn and \
                              answered the same each time; the answer is above — act on it, or ask \
                              something different",
                             call.name
-                        ),
-                        true,
-                    ),
+                        );
+                        // Logged, not only answered. The refusal is written
+                        // here rather than by `dispatch`, so a turn spent in
+                        // one was a transcript of nothing but the model's own
+                        // messages: a hundred and seventy-five identical
+                        // replies with no visible cause, and the one thing
+                        // that would have explained them never recorded.
+                        self.rook.log(self.session, EventKind::ToolResult, &call.name, &said).ok();
+                        looping += 1;
+                        (said, true)
+                    }
                     _ => {
                         let done =
                             self.dispatch(call, &mut outcome, &mut on_progress, &crew, &mut nursery).await;
@@ -2120,6 +2136,26 @@ impl<'a> AgentLoop<'a> {
                     ));
                 }
                 messages.push(Message::tool_result(&call.id, result));
+            }
+
+            // Told three times that it is asking the same thing again, and
+            // asking it again. The refusal was written for a model that would
+            // then move on; one that does not spends the whole step budget on
+            // it — a hundred and ninety-four steps and six hundred thousand
+            // tokens to arrive at "stopped at the step limit", which says
+            // nothing about what went wrong. Ending here says it.
+            if looping >= STUCK_ON_ONE_CALL {
+                outcome.stopped = "looping".into();
+                let said = "the same call was made over and over and answered the same way each \
+                            time, so the turn was ended rather than spending the rest of its \
+                            steps on it";
+                self.rook.log(self.session, EventKind::Note, "looping", said).ok();
+                self.report(Reported::Open(said.to_string()));
+                if outcome.reply.trim().is_empty() {
+                    outcome.reply = format!("(the turn was ended: {said})");
+                }
+                self.end_of_turn(&mut outcome).await;
+                return Ok(outcome);
             }
         }
 
@@ -3266,7 +3302,15 @@ impl<'a> AgentLoop<'a> {
         };
         let risk = rook_tools::policy::Risk::Network(format!("{topic} documentation"));
         if let Some(refusal) = self.gate_risk(DOCS, args, risk, Shown::Nothing).await {
-            return refusal;
+            // What to do instead, said here rather than left to the model.
+            // Refused in an unattended run, one asked the same thing again
+            // until the step limit: the refusal told it to stop, and stopping
+            // is not what a model does when it has been told to check first.
+            return format!(
+                "{refusal}\n\nNothing is kept for {topic:?} here and nothing may be fetched, so \
+                 there is no copy to answer from. Answer from what you know, say that it is \
+                 unsourced, and do not ask for this again in this turn."
+            );
         }
         let (reference, set, notes) = match self.rook.gather_docs(topic, version, &sources).await {
             Ok(gathered) => gathered,

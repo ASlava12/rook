@@ -5086,19 +5086,37 @@ async fn a_tool_that_declares_its_paths_is_diffed_rather_than_only_named() {
 async fn a_turn_that_keeps_compacting_says_the_window_is_the_reason() {
     let f = fixture();
     let session = long_session(&f, 60);
-    std::fs::write(f.workspace.path().join("a.txt"), "x".repeat(6_000)).unwrap();
+    for n in 0..20 {
+        std::fs::write(f.workspace.path().join(format!("a{n}.txt")), "x".repeat(6_000)).unwrap();
+    }
 
-    // By prompt, because a compaction is itself a model call: a scripted list
-    // would have the summariser eating the replies meant for the turn.
-    // Each read refills what the compaction freed, which is what a real turn
-    // does with a window this size.
-    let provider = Arc::new(ByPrompt(vec![
-        ("compacting an agent's working transcript", reply("## Goal\nread it\n\n## Done\nread once more")),
-        // Anything else: read again, which refills what the compaction freed.
-        // A compacted turn's last message is the summary, not the prompt, so a
-        // rule keyed on the prompt would stop matching after the first one.
-        ("", call("read_file", serde_json::json!({ "path": "a.txt" }))),
-    ]));
+    // A different file each step, because the same call answered the same way
+    // is a loop and the loop ends turns now — and a turn that keeps compacting
+    // is one that keeps reading new things, not one reading the same thing
+    // twenty times. Each read refills what the compaction freed, which is what
+    // a real turn does with a window this size.
+    struct Reading(std::sync::Mutex<usize>);
+    #[async_trait]
+    impl Provider for Reading {
+        fn id(&self) -> &str {
+            "scripted/reading"
+        }
+        fn context_window(&self) -> usize {
+            16_000
+        }
+        async fn complete(&self, request: Request) -> rook_llm::Result<Response> {
+            // A compaction is itself a model call, and its reply must not be
+            // the one meant for the turn.
+            let last = request.messages.last().map(|m| m.content.clone()).unwrap_or_default();
+            if last.contains("compacting an agent's working transcript") {
+                return Ok(reply("## Goal\nread them\n\n## Done\nread another"));
+            }
+            let mut at = self.0.lock().unwrap();
+            *at += 1;
+            Ok(call("read_file", serde_json::json!({ "path": format!("a{}.txt", *at % 20) })))
+        }
+    }
+    let provider = Arc::new(Reading(std::sync::Mutex::new(0)));
     let mut agent = AgentLoop::new(&f.rook, provider, session);
     agent.set_window_for_test(4_000);
     agent.max_steps = 14;
@@ -5237,4 +5255,53 @@ async fn a_topic_with_no_local_copy_and_no_web_says_what_it_can_and_cannot_do() 
     assert!(handed.contains("web access is off"), "it says why:\n{handed}");
     assert!(handed.contains("[web] enabled"), "and what to change:\n{handed}");
     assert!(handed.contains("say that is what it is"), "and what to do meanwhile:\n{handed}");
+}
+
+/// Refused because nobody was there to approve the fetch, a model asked the
+/// same thing again until the step limit. A refusal that only says no is a
+/// refusal a model told to check first cannot act on.
+#[tokio::test]
+async fn a_gathering_nobody_can_approve_says_what_to_do_instead() {
+    let f = fixture();
+    let session = f.rook.start_session("unattended").unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("docs", serde_json::json!({ "topic": "redis" })),
+        reply("from memory, then, and unsourced"),
+    ]));
+    let seen = provider.share();
+    // Nobody to ask: `rook run` with no terminal is exactly this.
+    AgentLoop::new(&f.rook, provider, session).run("what is redis?").await.unwrap();
+
+    let handed: String =
+        seen.lock().unwrap().last().cloned().unwrap().messages.iter().map(|m| m.content.clone()).collect();
+    assert!(handed.contains("needs someone to approve"), "the refusal itself:\n{handed}");
+    assert!(handed.contains("Answer from what you know"), "and what to do instead:\n{handed}");
+    assert!(handed.contains("do not ask for this again"), "and not to ask again:\n{handed}");
+}
+
+/// Read off a live run: a small model called `docs`, was refused because
+/// nobody was there to approve the fetch, and then made the same call with the
+/// same arguments until the step limit — a hundred and ninety-four steps and
+/// six hundred thousand tokens, ending on "stopped at the step limit", which
+/// says nothing about what went wrong. The guard that answers "you asked this
+/// already" was written for a model that then moves on.
+#[tokio::test]
+async fn a_turn_that_asks_the_same_thing_forever_is_ended_and_says_so() {
+    let f = fixture();
+    let session = f.rook.start_session("stuck").unwrap();
+    // The same call every time, and a reply between them, which is what the
+    // live transcript held.
+    let same = || call("list_dir", serde_json::json!({ "path": "." }));
+    let provider = Arc::new(ScriptedProvider::new((0..20).map(|_| same()).collect()));
+    let out = AgentLoop::new(&f.rook, provider, session).run("what is here?").await.unwrap();
+
+    assert_eq!(out.stopped, "looping", "the turn ends on the loop, not on the step limit: {out:?}");
+    assert!(out.steps < 20, "and long before the steps run out: {} steps", out.steps);
+    assert!(out.reply.contains("same call"), "and the reply says what happened: {}", out.reply);
+
+    // And the refusals are in the transcript, which held nothing but the
+    // model's own messages while it spent a turn on one call.
+    let events = f.rook.transcript(session, 0, 200, 4_000).unwrap();
+    let refusals = events.iter().filter(|e| e.body.contains("answered the same each time")).count();
+    assert!(refusals >= 1, "the answer the model kept getting is recorded: {events:#?}");
 }
