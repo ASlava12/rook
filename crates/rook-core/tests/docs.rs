@@ -245,3 +245,124 @@ async fn gathering_with_the_web_off_says_so_instead_of_coming_back_empty() {
     assert!(refused.contains("web access is off"), "{refused}");
     assert!(refused.contains("[web] enabled"), "and says what to change: {refused}");
 }
+
+/// Read off a real gathering: "how does persistence work" ranked three copies
+/// of "a filter will be created if it does not exist" above the paragraph about
+/// persistence, because they contain "does" and the counting could not tell
+/// that from an answer.
+#[test]
+fn the_words_that_carry_a_question_are_the_ones_the_set_does_not_repeat() {
+    let mut text = String::new();
+    for command in ["BF.ADD", "CF.ADD", "TS.ADD", "JSON.SET", "XADD", "HSET", "LPUSH", "SADD", "ZADD"] {
+        text.push_str(&format!(
+            "{command} adds one or more items to the structure. A structure will be created if it \
+             does not exist, and the command does nothing if it already does.\n\n"
+        ));
+    }
+    text.push_str(
+        "Persistence is how a restart keeps what was written: the append only file is replayed \
+         over the last snapshot on the way up.",
+    );
+    let set = docs::DocSet::new(
+        "redis",
+        docs::LATEST,
+        vec![docs::Page { url: "https://redis.io/commands".into(), title: "Commands".into(), text }],
+    );
+
+    let found = set.passages("how does persistence work", 4);
+
+    assert!(!found.is_empty(), "the one paragraph about it is in there");
+    assert!(found[0].0.contains("append only file"), "and it is what comes back first: {found:?}");
+    assert!(
+        !found.iter().any(|(text, _)| text.contains("BF.ADD")),
+        "a paragraph that shares only a question word is not an answer: {found:?}"
+    );
+}
+
+/// An index page repeats one sentence per entry, and three of five passages
+/// came back as the same sentence — which is one answer taking up five.
+#[test]
+fn the_same_paragraph_twice_is_one_passage() {
+    let repeated = "A filter will be created if it does not exist, which is the same sentence the \
+                    page prints under every command it lists.";
+    let set = docs::DocSet::new(
+        "redis",
+        docs::LATEST,
+        vec![docs::Page {
+            url: "https://redis.io/commands".into(),
+            title: "Commands".into(),
+            text: format!("{repeated}\n\n{repeated}\n\n{repeated}"),
+        }],
+    );
+
+    let found = set.passages("what does a filter do", 5);
+
+    assert_eq!(found.len(), 1, "the page says it three times and the answer says it once: {found:?}");
+}
+
+/// A live gathering for "redis" kept a tutorial site's page about the
+/// documentation alongside the documentation, because it was in the first five
+/// results. The host that carries the project's name is the source; the rest
+/// are readings of it, and a reading of a reading is what this was built to
+/// stop.
+#[test]
+fn the_projects_own_pages_are_read_before_the_sites_that_wrote_about_it() {
+    let hits = vec![
+        "Redis Tutorial\nhttps://www.swiftorial.com/tutorials/caching/redis/docs\nsummary".to_string(),
+        "Redis Docs\nhttps://redis.io/docs/latest/\nsummary".to_string(),
+        "Redis on Wikipedia\nhttps://en.wikipedia.org/wiki/Redis\nsummary".to_string(),
+        "Commands\nhttps://docs.redis.com/latest/commands/\nsummary".to_string(),
+    ];
+
+    let ordered = docs::most_official_first("redis", hits);
+
+    assert!(ordered[0].contains("redis.io"), "{ordered:?}");
+    assert!(ordered[1].contains("docs.redis.com"), "{ordered:?}");
+    // Kept, not dropped: a project whose documentation lives somewhere else is
+    // not a mistake, and the engine's ranking decides what this does not.
+    assert_eq!(ordered.len(), 4, "{ordered:?}");
+    assert!(ordered[2].contains("swiftorial"), "the engine's own order survives: {ordered:?}");
+}
+
+/// Read off a live set: ranking by rarity alone put "Redis works in most POSIX
+/// systems" above the paragraph about persistence, because "work" is a rare
+/// word in a set of documentation and "persistence" is not. Rarity cannot see
+/// that "work" is part of how the question was asked rather than what it was
+/// about.
+#[test]
+fn a_question_is_answered_by_its_subject_and_not_by_its_shape() {
+    let mut text = String::new();
+    for n in 0..12 {
+        text.push_str(&format!(
+            "Redis is written in ANSI C and works in most POSIX systems, and this is the {n}th \
+             paragraph of a page that says so at length.\n\n"
+        ));
+    }
+    text.push_str(
+        "Persistence writes the dataset to disk: an append only file replayed over the last \
+         snapshot, so a restart keeps what was written.",
+    );
+    let set = docs::DocSet::new(
+        "redis",
+        docs::LATEST,
+        vec![docs::Page { url: "https://redis.io/docs/".into(), title: "Docs".into(), text }],
+    );
+
+    let found = set.passages("how does persistence work", 3);
+
+    assert!(!found.is_empty(), "the set is about the thing being asked");
+    assert!(found[0].0.contains("append only file"), "the subject wins over the shape: {found:?}");
+    // "worker" is not "work": the shape list drops a word, not a prefix.
+    let workers = docs::DocSet::new(
+        "sidekiq",
+        docs::LATEST,
+        vec![docs::Page {
+            url: "https://example.invalid/".into(),
+            title: "Workers".into(),
+            text: "A worker runs jobs off a queue, and a worker that dies is replaced by the \
+                   supervisor without losing the job it held."
+                .into(),
+        }],
+    );
+    assert!(!workers.passages("what does a worker do", 2).is_empty(), "a set about workers answers");
+}

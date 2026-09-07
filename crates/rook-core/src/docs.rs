@@ -68,31 +68,133 @@ impl DocSet {
     ///
     /// Paragraphs rather than pages: a documentation page is mostly navigation
     /// and examples of other things, and handing a model the whole of one to
-    /// answer a sentence is how a context window goes. Scored the way memory
-    /// is — the terms the question uses, counted — because the alternative is
-    /// an embedding model to run and a second thing to keep current.
+    /// answer a sentence is how a context window goes.
+    ///
+    /// A question is mostly question — "how does persistence work" is one word
+    /// about Redis and three about English — and counting matched terms ranked
+    /// three copies of "a filter will be created if it does not exist" above
+    /// the paragraph about persistence. So a term is worth what it is rare in
+    /// this set, and a passage far weaker than the best is left out rather than
+    /// padding the answer.
     pub fn passages(&self, question: &str, most: usize) -> Vec<(String, &str)> {
-        let asked = crate::memory::terms_of(question);
+        let every: Vec<String> = crate::memory::terms_of(question).into_iter().collect();
+        let asked: Vec<String> = match every.iter().any(|term| !ASKING.contains(&term.as_str())) {
+            true => every.into_iter().filter(|term| !ASKING.contains(&term.as_str())).collect(),
+            // "what does this do" is all shape and no subject. Better to rank
+            // by the shape than to answer nothing.
+            false => every,
+        };
         if asked.is_empty() {
             return Vec::new();
         }
-        let mut scored: Vec<(usize, String, &str)> = Vec::new();
+
+        // Which of the asked terms each paragraph has, once — the same
+        // comparison answers both the ranking and how common a term is, and
+        // asking it twice is how the two drift apart.
+        let mut found: Vec<(Vec<bool>, &str, &str)> = Vec::new();
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for page in &self.pages {
             for para in page.text.split("\n\n") {
                 let para = para.trim();
-                if para.len() < 40 {
+                // Short enough to be a heading or a link, and the same line
+                // twice is a table of contents rather than two answers: an
+                // index page repeats "A filter will be created if it does not
+                // exist" once per command, and three of five passages came
+                // back as the same sentence.
+                if para.len() < 40 || !seen.insert(para) {
                     continue;
                 }
                 let terms = crate::memory::terms_of(para);
-                let hits = asked.iter().filter(|term| terms.iter().any(|word| same_word(term, word))).count();
-                if hits > 0 {
-                    scored.push((hits, para.to_string(), page.url.as_str()));
-                }
+                let matched: Vec<bool> =
+                    asked.iter().map(|term| terms.iter().any(|word| same_word(term, word))).collect();
+                // Every paragraph, matching or not: how common a term is has
+                // to be counted against the whole set. Counted against the
+                // matching ones only, a term matched by the one paragraph that
+                // matched anything is in all of them — so the only term that
+                // carried signal was the one thrown away, and a question with a
+                // single distinctive word came back empty.
+                found.push((matched, para, page.url.as_str()));
             }
         }
-        scored.sort_by_key(|(hits, ..)| std::cmp::Reverse(*hits));
-        scored.into_iter().take(most).map(|(_, text, url)| (text, url)).collect()
+        if found.is_empty() {
+            return Vec::new();
+        }
+
+        // A term is worth what it is rare: the paragraphs in the set over the
+        // paragraphs that use it. "does" turns up in a fifth of a command
+        // index and "persistence" in three paragraphs of two hundred, so one
+        // paragraph with the rare word outranks forty with the common one.
+        // That is idf, without a model to run or a stopword list to keep — and
+        // it adapts to the set, which a list cannot: "cluster" is noise in the
+        // clustering documentation and the answer everywhere else.
+        let weight: Vec<usize> = (0..asked.len())
+            .map(|term| found.len() / found.iter().filter(|(matched, ..)| matched[term]).count().max(1))
+            .collect();
+
+        let mut scored: Vec<(usize, &str, &str)> = found
+            .iter()
+            .map(|(matched, para, url)| {
+                let score: usize =
+                    matched.iter().zip(&weight).filter(|(hit, _)| **hit).map(|(_, w)| *w).sum();
+                (score, *para, *url)
+            })
+            .filter(|(score, ..)| *score > 0)
+            .collect();
+        // And a passage far weaker than the best one is not a second answer,
+        // it is the reader's work: three of five passages came back matching
+        // only the "does" in "how does persistence work", which is a paragraph
+        // about nothing that was asked.
+        const AS_GOOD: usize = 4;
+        let best = scored.iter().map(|(score, ..)| *score).max().unwrap_or_default();
+        scored.retain(|(score, ..)| score * AS_GOOD >= best);
+        scored.sort_by_key(|(score, ..)| std::cmp::Reverse(*score));
+        scored.into_iter().take(most).map(|(_, text, url)| (text.to_string(), url)).collect()
     }
+}
+
+/// The words a question is made of rather than about.
+///
+/// Rarity cannot see these, which is what makes them worth a list: "work" is a
+/// rare word in a set of documentation and carries nothing in "how does
+/// persistence work", so scoring by rarity alone put "Redis works in most POSIX
+/// systems" above the paragraph about persistence. Memory's own noise list is
+/// shorter because a fact is not phrased as a question; this is that shape, and
+/// nothing else — a term is dropped here only when no documentation would ever
+/// be about it. Prefixes are not stripped, so a set about workers still matches
+/// "worker": six characters of shared prefix is what makes two words one, and
+/// "work" is four.
+const ASKING: &[&str] = &[
+    "how", "what", "why", "when", "where", "which", "who", "whose", "does", "do", "did", "done", "can",
+    "could", "should", "would", "will", "shall", "may", "might", "must", "has", "have", "had", "been",
+    "being", "there", "here", "these", "those", "they", "them", "their", "its", "than", "then", "if", "so",
+    "such", "use", "used", "using", "work", "works", "working", "mean", "means", "tell", "show", "explain",
+    "need", "want", "get", "got", "make", "makes", "about", "into", "my", "me", "your", "not",
+];
+
+/// The results whose host is the project's own, first.
+///
+/// A search for "redis official documentation" answers with redis.io and with
+/// four sites that wrote about redis, and the pages fetched are the first few —
+/// so an aggregator's summary of the documentation gets kept as the
+/// documentation. The host carrying the topic's name is the cheapest signal
+/// that a page is the source rather than a reading of it, and it is only an
+/// ordering: nothing is dropped, because a project whose documentation lives on
+/// readthedocs is not a mistake.
+pub fn most_official_first(topic: &str, hits: Vec<String>) -> Vec<String> {
+    let name = slug(topic).replace('-', "");
+    if name.len() < 3 {
+        return hits;
+    }
+    let theirs = |hit: &String| {
+        hit.lines()
+            .nth(1)
+            .and_then(|url| url.split("://").nth(1))
+            .and_then(|rest| rest.split('/').next())
+            .is_some_and(|host| host.replace(['-', '.'], "").contains(&name))
+    };
+    // Stable, so the engine's own ranking decides everything this does not.
+    let (official, rest): (Vec<String>, Vec<String>) = hits.into_iter().partition(theirs);
+    official.into_iter().chain(rest).collect()
 }
 
 /// Two words that are the same word.
@@ -111,6 +213,20 @@ fn same_word(a: &str, b: &str) -> bool {
     }
     let shared = a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count();
     shared >= ENOUGH && a.chars().count() >= ENOUGH && b.chars().count() >= ENOUGH
+}
+
+/// How old a copy is, for a model deciding whether to trust it.
+///
+/// Documentation from a year ago is what a model already has and the whole
+/// reason for the copy; a reader who is not told the age cannot tell the two
+/// apart, and `refresh` is one argument away.
+pub fn age(fetched_at: i64) -> String {
+    let days = (rook_store::now_unix() - fetched_at).max(0) / 86_400;
+    match days {
+        0 => "today".into(),
+        1 => "yesterday".into(),
+        days => format!("{days} days ago"),
+    }
 }
 
 /// The reference a set is kept under. One per topic and version, so reading
@@ -185,6 +301,7 @@ pub async fn gather(
     if hits.is_empty() {
         return Err(format!("nothing came back for {query:?}"));
     }
+    let hits = most_official_first(topic, hits);
 
     let mut pages = Vec::new();
     let mut notes = Vec::new();

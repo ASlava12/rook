@@ -224,7 +224,16 @@ what unblocks the most.
   and a tab in the browser. Finding a passage matches near-words —
   "persistence" in the question against "persists" on the page — because an
   exact-match scorer answering "nothing in it is about that" about a page that
-  plainly is teaches a model to stop asking. 13 tests.
+  plainly is teaches a model to stop asking. What ranks them was rewritten
+  against a live gathering three times: counting matched terms put three copies
+  of "a filter will be created if it does not exist" above the paragraph about
+  persistence, so a term is now worth what it is rare in that set; rarity alone
+  then put "Redis works in most POSIX systems" on top, because "work" is a rare
+  word in documentation and part of how the question was asked rather than what
+  it was about, so the shape of a question is a list and the subject is what is
+  scored. Results are ordered by whether the host carries the project's name
+  before anything is fetched — the first gathering for "redis" kept a tutorial
+  site's page about the documentation as the documentation. 17 tests.
 - **Ten search results that were ten copies of the tenth** — found by the
   gathering above, on the fixture that first served three results and a
   footer. The keyless engine's page is scanned rather than parsed, and the scan

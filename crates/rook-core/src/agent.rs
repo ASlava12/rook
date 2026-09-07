@@ -286,9 +286,10 @@ fn answer_from(set: &crate::docs::DocSet, question: &str, preamble: String) -> S
     let reference = crate::docs::reference(&set.topic, &set.version);
     let mut out = preamble;
     out.push_str(&format!(
-        "{} ({}) — kept here as {reference}, read from {} page(s).\n",
+        "{} ({}) — kept here as {reference}, read {} from {} page(s).\n",
         set.topic,
         set.version,
+        crate::docs::age(set.fetched_at),
         set.pages.len()
     ));
 

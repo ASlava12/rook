@@ -5213,6 +5213,9 @@ async fn asking_about_a_technology_answers_from_the_local_copy_with_both_address
         "with the page it was read from:\n{handed}"
     );
     assert!(handed.contains("docs/redis/latest"), "and the local copy it came out of:\n{handed}");
+    // How old the copy is, because a model that is not told cannot tell a
+    // reading from last week from the training data it already had.
+    assert!(handed.contains("read today"), "and when it was read:\n{handed}");
 }
 
 /// The web being off is a reason to say so, not to fetch anyway — and not to
