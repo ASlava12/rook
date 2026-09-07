@@ -124,9 +124,12 @@ fn a_server_we_installed_is_not_asked_to_prove_itself() {
     let previous = std::env::var_os("ROOK_HOME");
     unsafe { std::env::set_var("ROOK_HOME", home.path()) };
 
-    let into = home.path().join("servers/pyright-langserver/current/node_modules/.bin");
-    std::fs::create_dir_all(&into).unwrap();
-    let binary = into.join("pyright-langserver");
+    // Asked of the code that decides where it goes rather than spelled out:
+    // an npm install puts `pyright-langserver.cmd` on Windows and
+    // `pyright-langserver` everywhere else, and a test that spells the unix
+    // name passes here and fails on the Windows runner — which is what it did.
+    let binary = rook_core::install::current("pyright-langserver");
+    std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
     // Answers `--version` the way pyright does: badly.
     std::fs::write(&binary, "#!/bin/sh\necho 'Error: Connection input stream is not set' >&2\nexit 1\n")
         .unwrap();

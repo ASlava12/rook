@@ -709,6 +709,18 @@ fn start_daemon(on_port: Option<u16>) -> Option<(std::process::Child, String)> {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
+    // The same on Windows, and one more thing: a daemon that outlives the
+    // command that started it must not hold that command's console or its
+    // handles. `rook daemon restart` read to the end of its own output and
+    // waited six hours for it, twelve times, because what it had started was
+    // still holding the other end.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
     Some((command.spawn().ok()?, beside.display().to_string()))
 }
 

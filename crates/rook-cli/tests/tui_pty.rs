@@ -669,7 +669,12 @@ fn two_windows_open_with_no_daemon_started_by_hand() {
     let mut two = shared(second.path());
     let beside = two.screen_showing(100, 30, "via http://").join("\n");
     assert!(beside.contains("Chat"), "and the second opens rather than dying on the lock:\n{beside}");
-    assert!(beside.contains(&second.path().display().to_string()[..20]), "on its own project:\n{beside}");
+    // By the directory's own name rather than the first twenty bytes of its
+    // path: a temporary directory is `/tmp/.tmpAbCdEf` on Linux, which is
+    // fifteen bytes long, and slicing it panicked on every runner but this
+    // one.
+    let name = second.path().file_name().unwrap().to_string_lossy().to_string();
+    assert!(beside.contains(&name), "on its own project:\n{beside}");
 }
 
 /// Kills whatever `rookd` was started against a home, when a test is done with

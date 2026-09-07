@@ -13,6 +13,11 @@ jobs:
   test:
     name: test ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    # A test that hangs otherwise takes the job to the six-hour ceiling, and
+    # the log of a run is unreadable until every job in it has finished — so
+    # one wedged test on one platform hid every other job's output for six
+    # hours, twelve pushes in a row. The suite takes four minutes.
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
