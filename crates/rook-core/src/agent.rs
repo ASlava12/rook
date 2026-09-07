@@ -2197,7 +2197,11 @@ impl<'a> AgentLoop<'a> {
         // work nobody was told about. One more call, with nothing to reach
         // for, so the turn ends on what it found rather than on the limit —
         // and with what its sub-agents brought back in front of it.
-        if outcome.reply.trim().is_empty() && !outcome.tools_called.is_empty() {
+        // A looping turn asks even with a reply already in hand: what it has is
+        // the sentence it kept repeating on the way into the loop — "I will
+        // answer, first let me check" — which is an announcement and not an
+        // answer, and it is what the person would otherwise be handed.
+        if (stuck || outcome.reply.trim().is_empty()) && !outcome.tools_called.is_empty() {
             if let Some(left) = &left {
                 self.rook.log(self.session, EventKind::Note, "sub-agents", left).ok();
                 messages.push(Message::user(left));

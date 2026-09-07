@@ -5291,7 +5291,14 @@ async fn a_turn_that_asks_the_same_thing_forever_is_ended_and_says_so() {
     let session = f.rook.start_session("stuck").unwrap();
     // The same call every time, and a reply between them, which is what the
     // live transcript held.
-    let same = || call("list_dir", serde_json::json!({ "path": "." }));
+    // With a word of text on every call, as the live one had: "I will answer,
+    // first let me check" — an announcement the turn would otherwise hand over
+    // as its reply.
+    let same = || {
+        let mut said = call("list_dir", serde_json::json!({ "path": "." }));
+        said.message.content = "I will answer, first let me check".into();
+        said
+    };
     // Two calls are answered, the third to the fifth are refused as repeats,
     // and the fifth is one refusal too many — so the sixth response is the
     // answer the turn is asked for with nothing left to reach for.
@@ -5306,7 +5313,10 @@ async fn a_turn_that_asks_the_same_thing_forever_is_ended_and_says_so() {
     // Out through the same door as the step limit: the turn has usually found
     // what was asked for by then, and ending on the loop hands over the loop
     // instead of the answer.
-    assert_eq!(out.reply, "there is one file, notes.txt", "the answer it had, not the loop");
+    assert_eq!(
+        out.reply, "there is one file, notes.txt",
+        "the answer it was asked for, not the announcement it kept repeating"
+    );
     let asked: String =
         seen.lock().unwrap().last().cloned().unwrap().messages.last().unwrap().content.clone();
     assert!(asked.contains("asked the same thing"), "and it was told why it was being asked: {asked}");
