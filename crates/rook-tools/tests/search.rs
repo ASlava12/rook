@@ -30,12 +30,17 @@ async fn a_glob_that_looks_like_one_is_matched_as_one() {
 
     // Every search tool takes this and reaches into directories with it.
     let found = find(dir.path(), serde_json::json!({ "pattern": "total", "glob": "*.py" })).await;
-    assert!(found.contains("shop/cart.py:1"), "the file under a directory is searched: {found}");
+    // By the file's own name and line: the separator between them is `\` on
+    // Windows, and a test that spells the unix one passes everywhere but the
+    // runner that matters.
+    assert!(found.contains("cart.py:1"), "the file under a directory is searched: {found}");
     assert!(!found.contains("notes.md"), "and the glob still excludes what it excludes: {found}");
 
-    // A plain substring is what the argument used to be, and still is.
-    let found = find(dir.path(), serde_json::json!({ "pattern": "total", "glob": "shop/" })).await;
-    assert!(found.contains("shop/cart.py:1"), "{found}");
+    // A plain substring is what the argument used to be, and still is — and it
+    // is matched against the path as this platform spells it.
+    let inside = format!("shop{}", std::path::MAIN_SEPARATOR);
+    let found = find(dir.path(), serde_json::json!({ "pattern": "total", "glob": inside })).await;
+    assert!(found.contains("cart.py:1"), "{found}");
     assert!(!found.contains("notes.md"), "{found}");
 }
 

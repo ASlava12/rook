@@ -50,9 +50,7 @@ impl Source {
         let Some((mut child, started)) = start_daemon(None) else {
             return Ok((Self::open(workspace)?, None));
         };
-        if came_up(&mut child)
-            && let Some(mut daemon) = Daemon::running()
-        {
+        if let Some(mut daemon) = came_up(&mut child) {
             daemon.workspace = asked_about(workspace.clone());
             return Ok((Self::Daemon(daemon), Some(started)));
         }
@@ -72,11 +70,13 @@ impl Source {
         let Some((mut child, beside)) = start_daemon(on_port) else {
             bail!("no `rookd` next to this binary — install the two together")
         };
-        if !came_up(&mut child) {
-            let _ = child.kill();
-            bail!("`{beside}` did not come up; what it says is in {}", paths::logs_dir().display());
+        match came_up(&mut child) {
+            Some(daemon) => Ok(daemon.base),
+            None => {
+                let _ = child.kill();
+                bail!("`{beside}` did not come up; what it says is in {}", paths::logs_dir().display())
+            }
         }
-        Daemon::running().map(|d| d.base).context("it answered and then stopped")
     }
 
     /// Local unless the store is locked and a daemon is reachable, which is the
@@ -767,18 +767,23 @@ fn written_since(binary: &std::path::Path, uptime_secs: u64) -> bool {
 /// Watched rather than waited out: a daemon that cannot start says so in a
 /// moment, and thirty seconds of nothing before a window opens is
 /// indistinguishable from a hang.
-fn came_up(child: &mut std::process::Child) -> bool {
+fn came_up(child: &mut std::process::Child) -> Option<Daemon> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while std::time::Instant::now() < deadline {
-        if Daemon::running().is_some() {
-            return true;
+        // The one it answered, not a second probe of the same thing: asked
+        // again, a daemon that had just come up was missed on a loaded machine
+        // and reported as one that "answered and then stopped" — after which
+        // the caller started another on a different port, which is the thing a
+        // restart exists not to do.
+        if let Some(daemon) = Daemon::running() {
+            return Some(daemon);
         }
         if matches!(child.try_wait(), Ok(Some(_)) | Err(_)) {
-            return false;
+            return None;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    false
+    None
 }
 
 /// The project being asked about, as a query value.
