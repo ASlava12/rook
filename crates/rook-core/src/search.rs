@@ -224,7 +224,10 @@ impl Rook {
 fn searchable(kind: Kind, conversation_only: bool) -> bool {
     match kind {
         Kind::Message | Kind::ToolResult | Kind::Memory | Kind::Skill => true,
-        Kind::FileBlob => !conversation_only,
+        // Documentation is reference material, like a file in the workspace:
+        // worth finding when the question is what do we know about this, and
+        // noise when the question is what was said in this session.
+        Kind::FileBlob | Kind::Docs => !conversation_only,
         Kind::Snapshot | Kind::Other => false,
     }
 }

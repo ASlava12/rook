@@ -347,6 +347,70 @@ impl Source {
         }
     }
 
+    // ------------------------------------------------------- documentation
+
+    pub fn docs_kept(&self) -> Result<Vec<rook_core::docs::Kept>> {
+        match self {
+            Self::Local(rook) => Ok(rook.docs_kept()?),
+            Self::Daemon(d) => Ok(d.get::<Page<rook_core::docs::Kept>>("/api/docs")?.items),
+        }
+    }
+
+    pub fn docs(&self, topic: &str, version: Option<&str>) -> Result<Option<rook_core::DocSet>> {
+        let version = version.unwrap_or(rook_core::docs::LATEST);
+        match self {
+            Self::Local(rook) => Ok(rook.docs(topic, Some(version))?),
+            // A topic nobody has gathered is not an error here any more than it
+            // is there: the caller decides whether to fetch it.
+            Self::Daemon(d) => match d.get::<rook_core::DocSet>(&format!(
+                "/api/docs/{}?version={}",
+                escaped(topic),
+                escaped(version)
+            )) {
+                Ok(set) => Ok(Some(set)),
+                Err(e) if e.to_string().contains("404") => Ok(None),
+                Err(e) => Err(e),
+            },
+        }
+    }
+
+    /// Read a topic's documentation off the web and keep it.
+    ///
+    /// The daemon does the fetching when there is one, because it is the
+    /// process that may write to the store — and because the copy is for
+    /// everything on this machine, not for the window that asked.
+    pub fn gather_docs(
+        &self,
+        topic: &str,
+        version: &str,
+    ) -> Result<(String, rook_core::DocSet, Vec<String>)> {
+        match self {
+            Self::Local(rook) => {
+                let sources = rook.doc_sources()?;
+                let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+                Ok(runtime.block_on(rook.gather_docs(topic, version, &sources))?)
+            }
+            Self::Daemon(d) => {
+                let said: serde_json::Value =
+                    d.post("/api/docs", &serde_json::json!({ "topic": topic, "version": version }))?;
+                let set: rook_core::DocSet = serde_json::from_value(said["set"].clone())?;
+                let notes: Vec<String> = serde_json::from_value(said["notes"].clone()).unwrap_or_default();
+                Ok((said["ref"].as_str().unwrap_or_default().to_string(), set, notes))
+            }
+        }
+    }
+
+    pub fn forget_docs(&self, topic: &str, version: Option<&str>) -> Result<usize> {
+        match self {
+            Self::Local(rook) => Ok(rook.forget_docs(topic, version)?),
+            Self::Daemon(d) => {
+                let said: serde_json::Value =
+                    d.post("/api/docs/forget", &serde_json::json!({ "topic": topic, "version": version }))?;
+                Ok(said["dropped"].as_u64().unwrap_or_default() as usize)
+            }
+        }
+    }
+
     pub fn memory(&self) -> Result<Vec<rook_core::Fact>> {
         match self {
             Self::Local(rook) => Ok(rook.memory()?.facts.clone()),

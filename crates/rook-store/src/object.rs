@@ -70,6 +70,8 @@ pub enum Kind {
     Skill = 3,
     Memory = 4,
     Snapshot = 5,
+    /// Documentation the agent fetched, read and kept.
+    Docs = 6,
     Other = 255,
 }
 
@@ -82,6 +84,7 @@ impl Kind {
             3 => Kind::Skill,
             4 => Kind::Memory,
             5 => Kind::Snapshot,
+            6 => Kind::Docs,
             _ => Kind::Other,
         }
     }
@@ -94,17 +97,19 @@ impl Kind {
             Kind::Skill => "skill",
             Kind::Memory => "memory",
             Kind::Snapshot => "snapshot",
+            Kind::Docs => "docs",
             Kind::Other => "other",
         }
     }
 
-    pub const ALL: [Kind; 7] = [
+    pub const ALL: [Kind; 8] = [
         Kind::Message,
         Kind::ToolResult,
         Kind::FileBlob,
         Kind::Skill,
         Kind::Memory,
         Kind::Snapshot,
+        Kind::Docs,
         Kind::Other,
     ];
 }

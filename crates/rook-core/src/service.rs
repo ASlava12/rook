@@ -557,6 +557,124 @@ impl Rook {
         self.store.list_refs("checkpoint/").map_err(Into::into)
     }
 
+    // ------------------------------------------------------- documentation
+
+    /// The documentation kept for a topic, at a version — `latest` when none
+    /// is named, because that is what somebody asking about a technology means
+    /// when they do not say.
+    pub fn docs(&self, topic: &str, version: Option<&str>) -> Result<Option<crate::docs::DocSet>> {
+        let version = version.unwrap_or(crate::docs::LATEST);
+        let Some(id) = self.store.get_ref(&crate::docs::reference(topic, version))? else {
+            return Ok(None);
+        };
+        Ok(Some(crate::docs::DocSet::load(&self.store, &id)?))
+    }
+
+    /// File a set under its topic and version, and answer with where it went.
+    ///
+    /// The reference is the local address an answer cites: it is stable, it is
+    /// short enough to type, and `store show` reads it. Keeping the same topic
+    /// again replaces the copy rather than growing a second one — documentation
+    /// has one current reading, and two of them is the thing being avoided.
+    pub fn keep_docs(&self, set: &crate::docs::DocSet) -> Result<(String, ObjectId)> {
+        let id = set.store(&self.store)?;
+        let reference = crate::docs::reference(&set.topic, &set.version);
+        self.store.set_ref(&reference, &id)?;
+        Ok((reference, id))
+    }
+
+    /// What is kept, newest first.
+    pub fn docs_kept(&self) -> Result<Vec<crate::docs::Kept>> {
+        let mut out = Vec::new();
+        for (reference, id) in self.store.list_refs("docs/")? {
+            let Ok(set) = crate::docs::DocSet::load(&self.store, &id) else {
+                // A set written by a build that stored it differently. Say the
+                // reference rather than failing the whole listing on one row.
+                out.push(crate::docs::Kept {
+                    topic: reference.trim_start_matches("docs/").to_string(),
+                    version: String::new(),
+                    pages: 0,
+                    bytes: 0,
+                    fetched_at: 0,
+                    object: id.to_hex(),
+                });
+                continue;
+            };
+            out.push(crate::docs::Kept {
+                topic: set.topic.clone(),
+                version: set.version.clone(),
+                pages: set.pages.len(),
+                bytes: set.bytes(),
+                fetched_at: set.fetched_at,
+                object: id.to_hex(),
+            });
+        }
+        out.sort_by_key(|k| std::cmp::Reverse(k.fetched_at));
+        Ok(out)
+    }
+
+    /// The clients a gathering needs, or why there can be none.
+    ///
+    /// Asked before anybody is prompted for approval: being asked to allow a
+    /// fetch that config has already ruled out is a question with one answer,
+    /// and asking it is how a prompt stops being read.
+    pub fn doc_sources(&self) -> Result<crate::docs::Sources> {
+        let web = &self.config.web;
+        if !web.enabled {
+            return Err(CoreError::Other(
+                "web access is off, so there is nothing to gather documentation from — turn on \
+                 `[web] enabled` in config.toml"
+                    .into(),
+            ));
+        }
+        let patience = std::time::Duration::from_secs(web.timeout_secs);
+        let Some(engine) = rook_tools::web::Engine::named(&web.search, &web.search_url) else {
+            return Err(CoreError::Other(format!(
+                "no search engine is configured to find documentation with: `[web] search` is \
+                 {:?}, and the ones that need a key need it set",
+                web.search
+            )));
+        };
+        let search =
+            rook_tools::web::Search::new(engine, patience).map_err(|e| CoreError::Other(e.to_string()))?;
+        let fetch = rook_tools::web::Fetch::new(patience).map_err(|e| CoreError::Other(e.to_string()))?;
+        Ok(crate::docs::Sources { search, fetch, pages: web.docs_pages, bytes: web.docs_bytes })
+    }
+
+    /// Read a topic's documentation and keep it, answering with where it went,
+    /// what it holds and what could not be read.
+    ///
+    /// The clients come in rather than being built here so the agent can put a
+    /// person's approval between deciding to fetch and fetching.
+    pub async fn gather_docs(
+        &self,
+        topic: &str,
+        version: &str,
+        sources: &crate::docs::Sources,
+    ) -> Result<(String, crate::docs::DocSet, Vec<String>)> {
+        let (set, notes) = crate::docs::gather(topic, version, sources).await.map_err(CoreError::Other)?;
+        let (reference, _) = self.keep_docs(&set)?;
+        Ok((reference, set, notes))
+    }
+
+    /// Drop a set, or every version of a topic when no version is named. The
+    /// objects stay until `store maintain` collects them, like everything else.
+    pub fn forget_docs(&self, topic: &str, version: Option<&str>) -> Result<usize> {
+        match version {
+            Some(version) => Ok(self.store.delete_ref(&crate::docs::reference(topic, version))? as usize),
+            None => {
+                let prefix = format!("{}/", crate::docs::reference(topic, "").trim_end_matches('/'));
+                let mut gone = 0;
+                for (reference, _) in self.store.list_refs(&prefix)? {
+                    if self.store.delete_ref(&reference)? {
+                        gone += 1;
+                    }
+                }
+                Ok(gone)
+            }
+        }
+    }
+
     // -------------------------------------------------------------- sessions
 
     pub fn sessions(&self) -> Result<Vec<SessionMeta>> {

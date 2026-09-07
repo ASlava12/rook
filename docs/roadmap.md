@@ -206,6 +206,34 @@ what unblocks the most.
   rather than read from an API, so their markup can break it. `searxng` keeps
   the query on this machine, `brave` answers in a documented shape, and an
   empty `search` offers no tool at all. 2 tests.
+- **Documentation it keeps, rather than a recollection of it** — an agent that
+  can search still answers a question about Redis from what it was trained on,
+  because searching is a decision it takes one turn at a time and reading is
+  free. `docs` inverts that: it looks for a copy kept on this machine first,
+  and only on a miss does it search for the official documentation, read a few
+  pages and file them — one set per topic and version, `latest` when none is
+  named. What it stores is the reading and not the page: a copy of somebody's
+  HTML is a copy nobody reads, and what an answer needs is the prose plus the
+  address it came from. So every answer carries both — the local copy it was
+  made of, and the page anybody else can check it against — which is the whole
+  claim, since a citation of ourselves is not one. Bounded like everything
+  that accumulates: `[web] docs_pages` and `docs_bytes`, the second applied
+  while the pages arrive. The set is a `docs/<topic>/<version>` ref, so reading
+  a topic again replaces the copy rather than growing a second, and the same
+  sets are `rook docs ls|show|add|rm`, `/docs` in a chat, the TUI's Docs tab
+  and a tab in the browser. Finding a passage matches near-words —
+  "persistence" in the question against "persists" on the page — because an
+  exact-match scorer answering "nothing in it is about that" about a page that
+  plainly is teaches a model to stop asking. 13 tests.
+- **Ten search results that were ten copies of the tenth** — found by the
+  gathering above, on the fixture that first served three results and a
+  footer. The keyless engine's page is scanned rather than parsed, and the scan
+  worked out where each result began from how much of the string was left after
+  it — which is the same thing only for the last one. Every earlier result read
+  backwards from a position past itself and found the last anchor on the page.
+  The two-result fixture it shipped with never showed it: with a short tail the
+  arithmetic lands in the right place by accident. Absolute offsets now, and a
+  test with a footer. 1 test.
 - **A search that looked at nothing said "no matches"** — read from a real
   turn: a model finished a rename across four files, checked itself with
   `search` under `glob: "*.py"`, was told "no matches", and reported the old

@@ -18,6 +18,7 @@ pub mod catalog;
 pub mod changes;
 pub mod config;
 pub mod context;
+pub mod docs;
 pub mod error;
 pub mod fileset;
 pub mod hooks;
@@ -34,6 +35,7 @@ pub mod service;
 pub mod telemetry;
 
 pub use config::{Config, ConfigError};
+pub use docs::{DocSet, Kept};
 pub use error::{CoreError, Result};
 pub use fileset::{CaptureLimits, Change, FileSet};
 pub use memory::{Fact, MemoryBook, Scope};

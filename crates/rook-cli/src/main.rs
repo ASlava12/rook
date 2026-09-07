@@ -102,6 +102,9 @@ enum Command {
     /// Read, edit and audit what the agent remembers.
     #[command(subcommand)]
     Memory(MemoryCmd),
+    /// The documentation the agent has gathered and reads from.
+    #[command(subcommand)]
+    Docs(DocsCmd),
     /// Ask the language servers what the agent would ask them.
     #[command(subcommand)]
     Lsp(LspCmd),
@@ -191,6 +194,41 @@ enum MemoryCmd {
     Since {
         #[arg(default_value_t = 1)]
         days: i64,
+    },
+}
+
+#[derive(Subcommand)]
+enum DocsCmd {
+    /// What is kept, newest first.
+    Ls,
+    /// Read a kept set: the passages that answer a question, or the pages it
+    /// was made from.
+    Show {
+        topic: String,
+        /// Which version. The current one when not said.
+        #[arg(long)]
+        version: Option<String>,
+        /// Show the passages that answer this rather than the page list.
+        #[arg(long)]
+        question: Option<String>,
+        /// Print a page whole, by its number in the list.
+        #[arg(long)]
+        page: Option<usize>,
+    },
+    /// Search the web for a topic's documentation, read it, and keep it here.
+    Add {
+        topic: String,
+        #[arg(long)]
+        version: Option<String>,
+        /// Gather it again even though a copy is kept.
+        #[arg(long)]
+        refresh: bool,
+    },
+    /// Drop a set, or every version of a topic.
+    Rm {
+        topic: String,
+        #[arg(long)]
+        version: Option<String>,
     },
 }
 
@@ -419,6 +457,7 @@ fn main() -> Result<()> {
             let here = workspace_of(&cli.workspace);
             cmd_memory(&Source::open(cli.workspace)?, c, &here, cli.json)
         }
+        Some(Command::Docs(c)) => cmd_docs(&Source::open(cli.workspace)?, c, cli.json),
         Some(Command::Lsp(c)) => cmd_lsp(cli.workspace, c, cli.json),
         Some(Command::Search { query, session, conversation, limit }) => cmd_search(
             &Source::open(cli.workspace)?,
@@ -1418,9 +1457,10 @@ fn parse_kind(s: &str) -> Result<Kind> {
         "skill" => Kind::Skill,
         "memory" => Kind::Memory,
         "snapshot" => Kind::Snapshot,
+        "docs" => Kind::Docs,
         "other" => Kind::Other,
         other => bail!(
-            "unknown kind {other:?}; expected one of message, tool-result, file, skill, memory, snapshot, other"
+            "unknown kind {other:?}; expected one of message, tool-result, file, skill, memory, snapshot, docs, other"
         ),
     })
 }
@@ -2033,6 +2073,103 @@ fn cmd_lsp(workspace: Option<PathBuf>, cmd: LspCmd, json: bool) -> Result<()> {
         }
         anyhow::Ok(())
     })
+}
+
+fn cmd_docs(source: &Source, cmd: DocsCmd, json: bool) -> Result<()> {
+    match cmd {
+        DocsCmd::Ls => {
+            let kept = source.docs_kept()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&kept)?);
+                return Ok(());
+            }
+            if kept.is_empty() {
+                println!(
+                    "nothing kept yet. `rook docs add <topic>` reads a technology's \
+                     documentation and keeps it; the agent does the same on its own when it is \
+                     asked about something it has no copy of."
+                );
+                return Ok(());
+            }
+            for set in &kept {
+                println!(
+                    "{} {} · {} page(s) · {} · read {}",
+                    set.topic,
+                    set.version,
+                    set.pages,
+                    fmt::bytes(set.bytes as u64),
+                    fmt::ago(set.fetched_at)
+                );
+            }
+        }
+        DocsCmd::Show { topic, version, question, page } => {
+            let Some(set) = source.docs(&topic, version.as_deref())? else {
+                bail!("nothing kept for {topic:?}. `rook docs add {topic}` gathers it.");
+            };
+            if json {
+                println!("{}", serde_json::to_string_pretty(&set)?);
+                return Ok(());
+            }
+            if let Some(n) = page {
+                let Some(page) = set.pages.get(n.saturating_sub(1)) else {
+                    bail!("that set has {} page(s)", set.pages.len());
+                };
+                println!("{}\n{}\n", page.title, page.url);
+                println!("{}", page.text);
+                return Ok(());
+            }
+            println!(
+                "{} {} · kept as {} · read {}",
+                set.topic,
+                set.version,
+                rook_core::docs::reference(&set.topic, &set.version),
+                fmt::ago(set.fetched_at)
+            );
+            match question {
+                Some(question) => {
+                    let found = set.passages(&question, 5);
+                    if found.is_empty() {
+                        println!("\nnothing in it is about that.");
+                    }
+                    for (text, url) in found {
+                        println!("\n[from {url}]\n{text}");
+                    }
+                }
+                None => {
+                    for (n, page) in set.pages.iter().enumerate() {
+                        println!("\n{}. {}\n   {}", n + 1, page.title, page.url);
+                    }
+                    println!("\n`--question` reads it; `--page N` prints one whole.");
+                }
+            }
+        }
+        DocsCmd::Add { topic, version, refresh } => {
+            let version = version.unwrap_or_else(|| rook_core::docs::LATEST.into());
+            if !refresh && let Some(set) = source.docs(&topic, Some(&version))? {
+                println!(
+                    "already kept: {} {} · {} page(s), read {}. `--refresh` reads the site again.",
+                    set.topic,
+                    set.version,
+                    set.pages.len(),
+                    fmt::ago(set.fetched_at)
+                );
+                return Ok(());
+            }
+            let (reference, set, notes) = source.gather_docs(&topic, &version)?;
+            for note in &notes {
+                println!("could not read one of the results: {note}");
+            }
+            println!("kept {} page(s) as {reference}:", set.pages.len());
+            for page in &set.pages {
+                println!("- {} — {}", page.title, page.url);
+            }
+        }
+        DocsCmd::Rm { topic, version } => match source.forget_docs(&topic, version.as_deref())? {
+            0 => bail!("nothing kept for {topic:?}"),
+            gone => println!("dropped {gone} set(s). `store maintain` reclaims the space."),
+        },
+    }
+    Ok(())
 }
 
 fn cmd_memory(source: &Source, cmd: MemoryCmd, at: &Path, json: bool) -> Result<()> {

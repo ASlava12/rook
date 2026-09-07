@@ -102,8 +102,46 @@ impl Tool for Fetch {
 
     async fn call(&self, ctx: &ToolContext, args: &serde_json::Value) -> Result<ToolOutcome> {
         let url = arg_str(args, self.name(), "url")?;
+        let page = match self.page(&url).await {
+            Ok(page) => page,
+            Err(refused) => return Ok(ToolOutcome::error(refused)),
+        };
+        let full = page.text.len();
+        let (text, truncated) = match full > ctx.max_output_bytes {
+            true => (crate::elide_middle(&page.text, ctx.max_output_bytes), true),
+            false => (page.text, false),
+        };
+        Ok(ToolOutcome {
+            content: format!("{} {}\n\n{text}", page.status, page.url),
+            is_error: !(200..300).contains(&page.status),
+            truncated,
+            full_bytes: full,
+            meta: Default::default(),
+        }
+        .with("status", page.status)
+        .with("content_type", page.kind))
+    }
+}
+
+/// A page as it was read: where it ended up, what it said, and as what.
+pub struct Page {
+    pub url: String,
+    pub status: u16,
+    pub kind: String,
+    /// Prose, where the page was HTML.
+    pub text: String,
+}
+
+impl Fetch {
+    /// One page, followed while it stays on its host and read while it
+    /// arrives.
+    ///
+    /// The tool above formats this; `docs` in the core keeps it. Two callers
+    /// and one reading, so a page a model is shown and a page an agent files
+    /// away cannot come back different.
+    pub async fn page(&self, url: &str) -> std::result::Result<Page, String> {
         if !url.starts_with("http://") && !url.starts_with("https://") {
-            return Ok(ToolOutcome::error(format!("{url:?} is not an http or https address")));
+            return Err(format!("{url:?} is not an http or https address"));
         }
 
         // Redirects are followed here rather than by the client, and only while
@@ -112,12 +150,12 @@ impl Tool for Fetch {
         // somewhere nobody agreed to. `http` to `https` and a missing trailing
         // slash both stay put, so this costs nothing ordinary.
         const MOST_HOPS: usize = 4;
-        let mut at = url.clone();
+        let mut at = url.to_string();
         let mut landed = None;
         for _ in 0..MOST_HOPS {
             let hop = match self.client.get(&at).send().await {
                 Ok(hop) => hop,
-                Err(e) => return Ok(ToolOutcome::error(format!("could not fetch {at}: {e}"))),
+                Err(e) => return Err(format!("could not fetch {at}: {e}")),
             };
             let Some(to) = redirected_to(&hop) else {
                 landed = Some(hop);
@@ -125,15 +163,15 @@ impl Tool for Fetch {
             };
             let to = absolute(&at, &to);
             if host_of(&to) != host_of(&at) {
-                return Ok(ToolOutcome::error(format!(
+                return Err(format!(
                     "{at} redirects to {to}, which is a different host — fetch that address if it \
                      is the one you want"
-                )));
+                ));
             }
             at = to;
         }
         let Some(response) = landed else {
-            return Ok(ToolOutcome::error(format!("{url} redirects more than {MOST_HOPS} times")));
+            return Err(format!("{url} redirects more than {MOST_HOPS} times"));
         };
         let status = response.status();
         let kind = response.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok());
@@ -141,7 +179,7 @@ impl Tool for Fetch {
 
         let body = match bounded_body(response, MOST_BYTES).await {
             Ok(bytes) => bytes,
-            Err(why) => return Ok(ToolOutcome::error(format!("{url} {why}"))),
+            Err(why) => return Err(format!("{url} {why}")),
         };
 
         let text = String::from_utf8_lossy(&body);
@@ -149,21 +187,7 @@ impl Tool for Fetch {
             true => readable(&text),
             false => text.into_owned(),
         };
-        let full = text.len();
-        let (text, truncated) = match full > ctx.max_output_bytes {
-            true => (crate::elide_middle(&text, ctx.max_output_bytes), true),
-            false => (text, false),
-        };
-
-        Ok(ToolOutcome {
-            content: format!("{status} {at}\n\n{text}"),
-            is_error: !status.is_success(),
-            truncated,
-            full_bytes: full,
-            meta: Default::default(),
-        }
-        .with("status", status.as_u16())
-        .with("content_type", kind))
+        Ok(Page { url: at, status: status.as_u16(), kind, text })
     }
 }
 
@@ -380,52 +404,13 @@ impl Tool for Search {
             .and_then(|n| n.as_u64())
             .map(|n| (n as usize).clamp(1, MOST_RESULTS))
             .unwrap_or(5);
-
-        let q = escaped(&query);
-        let request = match &self.engine {
-            Engine::Searx(base) => self.client.get(format!("{base}/search?q={q}&format=json")),
-            // Their lite page, which is the same results without the script
-            // that draws them.
-            Engine::DuckDuckGo(base) => self.client.get(format!("{base}/lite/?q={q}")),
-            Engine::Brave(key) => self
-                .client
-                .get(format!("https://api.search.brave.com/res/v1/web/search?q={q}"))
-                .header("X-Subscription-Token", key)
-                .header("Accept", "application/json"),
-        };
-
-        let response = match request.send().await {
-            Ok(response) => response,
-            Err(e) => {
-                return Ok(ToolOutcome::error(format!("could not reach {}: {e}", self.engine.endpoint())));
-            }
-        };
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        if !status.is_success() {
-            return Ok(ToolOutcome::error(format!(
-                "{} answered {status}: {}",
-                self.engine.endpoint(),
-                crate::elide_middle(&body, 400)
-            )));
-        }
-
-        let found = match &self.engine {
-            Engine::DuckDuckGo(_) => links_in(&body, limit),
-            _ => {
-                let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body) else {
-                    return Ok(ToolOutcome::error(format!(
-                        "{} did not answer with JSON",
-                        self.engine.endpoint()
-                    )));
-                };
-                results(&self.engine, &parsed, limit)
-            }
+        let found = match self.hits(&query, limit).await {
+            Ok(found) => found,
+            Err(refused) => return Ok(ToolOutcome::error(refused)),
         };
         if found.is_empty() {
             return Ok(ToolOutcome::ok(format!("nothing found for {query:?}")));
         }
-
         let listed = found.join("\n\n");
         let full = listed.len();
         let (listed, truncated) = match full > ctx.max_output_bytes {
@@ -440,6 +425,52 @@ impl Tool for Search {
             meta: Default::default(),
         }
         .with("results", found.len()))
+    }
+}
+
+impl Search {
+    /// What the engine answered, one entry per result as `title\nurl\nsummary`.
+    ///
+    /// The tool above formats these; `docs` in the core reads the addresses out
+    /// of them to fetch. One asking, so what a model is shown and what an agent
+    /// files away cannot come from different questions.
+    pub async fn hits(&self, query: &str, limit: usize) -> std::result::Result<Vec<String>, String> {
+        let q = escaped(query);
+        let request = match &self.engine {
+            Engine::Searx(base) => self.client.get(format!("{base}/search?q={q}&format=json")),
+            // Their lite page, which is the same results without the script
+            // that draws them.
+            Engine::DuckDuckGo(base) => self.client.get(format!("{base}/lite/?q={q}")),
+            Engine::Brave(key) => self
+                .client
+                .get(format!("https://api.search.brave.com/res/v1/web/search?q={q}"))
+                .header("X-Subscription-Token", key)
+                .header("Accept", "application/json"),
+        };
+
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(e) => return Err(format!("could not reach {}: {e}", self.engine.endpoint())),
+        };
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(format!(
+                "{} answered {status}: {}",
+                self.engine.endpoint(),
+                crate::elide_middle(&body, 400)
+            ));
+        }
+
+        match &self.engine {
+            Engine::DuckDuckGo(_) => Ok(links_in(&body, limit)),
+            _ => {
+                let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body) else {
+                    return Err(format!("{} did not answer with JSON", self.engine.endpoint()));
+                };
+                Ok(results(&self.engine, &parsed, limit))
+            }
+        }
     }
 }
 
@@ -469,13 +500,19 @@ fn escaped(query: &str) -> String {
 fn links_in(html: &str, limit: usize) -> Vec<String> {
     let mut found = Vec::new();
     let mut snippets = html.split("result-snippet").skip(1);
-    for chunk in html.split("result-link").skip(1) {
+    // By absolute offset. The first version of this worked out where a result
+    // began from how much of the string was left after it, which is the same
+    // thing only for the last one: every other result read backwards from a
+    // position past itself, and on a page with a footer — which theirs has —
+    // that is the last anchor on the page, so ten results came back as ten
+    // copies of the tenth.
+    for (at, _) in html.match_indices("result-link") {
         if found.len() >= limit {
             break;
         }
         // Backwards from the marker to the `href` of the anchor it is part of,
         // because the class may sit before or after it.
-        let Some(open) = html[..html.len() - chunk.len()].rfind("<a ") else { continue };
+        let Some(open) = html[..at].rfind("<a ") else { continue };
         let anchor = &html[open..];
         let Some(url) = attribute(anchor, "href").map(|href| direct(&href)) else { continue };
         if !url.starts_with("http") {

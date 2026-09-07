@@ -1101,3 +1101,59 @@ fn doctor_says_what_the_web_configuration_will_actually_do() {
     assert!(searx.contains("web_search"), "{searx}");
     assert!(searx.contains("searxng"), "{searx}");
 }
+
+/// What a model says about a technology is what it was trained on, and it says
+/// so nowhere. A kept set is the alternative, and it is only worth keeping if
+/// an answer out of it carries both addresses: the local copy it was made from
+/// and the page anybody else can check it against.
+#[test]
+fn docs_answers_from_the_local_copy_and_names_where_it_came_from() {
+    let rook = Rook::new();
+
+    let empty = rook.ok(&["docs", "ls"]);
+    assert!(empty.contains("nothing kept yet"), "{empty}");
+    assert!(empty.contains("rook docs add"), "and how to gather one: {empty}");
+
+    // Seeded rather than fetched: a test that reaches the internet tests the
+    // internet. The store is closed again before the binary opens it.
+    {
+        let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+        let (skills, _) = rook_skills::SkillIndex::discover(&[]);
+        let engine = rook_core::Rook::from_parts(
+            store,
+            rook_core::Config::default(),
+            rook_skills::Environment::bare("linux", "x86_64", "0.1.0"),
+            skills,
+            rook.workspace.path().to_path_buf(),
+        );
+        engine
+            .keep_docs(&rook_core::docs::DocSet::new(
+                "redis",
+                rook_core::docs::LATEST,
+                vec![rook_core::docs::Page {
+                    url: "https://redis.io/docs/persistence".into(),
+                    title: "Persistence".into(),
+                    text: "Redis persists with an append only file, rewritten in the background \
+                           once it grows past a configured size."
+                        .into(),
+                }],
+            ))
+            .unwrap();
+    }
+
+    let listed = rook.ok(&["docs", "ls"]);
+    assert!(listed.contains("redis latest"), "{listed}");
+    assert!(listed.contains("1 page(s)"), "{listed}");
+
+    let shown = rook.ok(&["docs", "show", "redis"]);
+    assert!(shown.contains("docs/redis/latest"), "the local copy: {shown}");
+    assert!(shown.contains("https://redis.io/docs/persistence"), "and the source: {shown}");
+
+    let asked = rook.ok(&["docs", "show", "redis", "--question", "how does persistence work"]);
+    assert!(asked.contains("append only file"), "the passage that answers: {asked}");
+    assert!(asked.contains("[from https://redis.io/docs/persistence]"), "with its page: {asked}");
+
+    let dropped = rook.ok(&["docs", "rm", "redis"]);
+    assert!(dropped.contains("dropped 1 set"), "{dropped}");
+    assert!(rook.ok(&["docs", "ls"]).contains("nothing kept yet"), "and it is gone");
+}

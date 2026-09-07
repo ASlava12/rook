@@ -250,11 +250,14 @@ fn the_whole_advertised_tool_list_stays_within_a_budget() {
     // model and is where a long one loses one. From 2,150: `web_fetch` and
     // `web_search`, which are in every list now rather than in the lists of
     // people who had turned them on — an agent that cannot look anything up
-    // answers from what it was trained on. Each time the new description was
-    // cut to the bone first; what is left is the shape of the arguments, which
-    // a tool cannot be called without.
+    // answers from what it was trained on. From 2,300: `docs`, which is four
+    // arguments and the difference between an answer about a technology and a
+    // recollection of one — its passages carry the page they came from, so what
+    // it costs buys a citation rather than a claim. Each time the new
+    // description was cut to the bone first; what is left is the shape of the
+    // arguments, which a tool cannot be called without.
     assert!(
-        full < 2_300,
+        full < 2_500,
         "the whole list costs ~{full} tokens on every eager request; trim a description or \
          merge an argument before raising this"
     );
@@ -268,9 +271,11 @@ fn the_whole_advertised_tool_list_stays_within_a_budget() {
     // reason to call it rather than read and write. Raised from 950 for the two
     // web tools, which every list carries now: looking something up is not a
     // capability to be configured into existence, and sixteen tokens is what
-    // being able to is worth.
+    // being able to is worth. Raised from 1,000 for `docs`: four argument names
+    // and a sentence saying it looks locally first, which is the part that has
+    // to reach a model deciding whether to answer from memory.
     assert!(
-        stubs < 1_000,
+        stubs < 1_100,
         "the stubs cost ~{stubs} tokens on every request, which is what is \
          actually paid: lazy loading is the default"
     );

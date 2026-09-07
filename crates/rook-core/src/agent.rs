@@ -276,6 +276,46 @@ pub fn changed_note(files: &[String]) -> Option<String> {
     }
 }
 
+/// A set, read for whoever asked.
+///
+/// Both addresses on every answer: the local one, which is what the answer was
+/// made of, and the source, which is what somebody else can check. A model
+/// asked for "the link" has no way to know there are two unless it is holding
+/// both — and the local copy alone is a citation of ourselves.
+fn answer_from(set: &crate::docs::DocSet, question: &str, preamble: String) -> String {
+    let reference = crate::docs::reference(&set.topic, &set.version);
+    let mut out = preamble;
+    out.push_str(&format!(
+        "{} ({}) — kept here as {reference}, read from {} page(s).\n",
+        set.topic,
+        set.version,
+        set.pages.len()
+    ));
+
+    let passages = match question.is_empty() {
+        true => Vec::new(),
+        false => set.passages(question, DOC_PASSAGES),
+    };
+    if passages.is_empty() {
+        if !question.is_empty() {
+            out.push_str(
+                "\nNothing in the local copy is about that. What it does cover is below; \
+                 `refresh` reads the site again, and `web_search` looks wider.\n",
+            );
+        }
+        out.push_str("\nThe pages it was made from:\n");
+        for page in &set.pages {
+            out.push_str(&format!("- {} — {}\n", page.title, page.url));
+        }
+        return out;
+    }
+
+    for (text, url) in passages {
+        out.push_str(&format!("\n[from {url}]\n{}\n", rook_tools::elide_middle(&text, DOC_PASSAGE_BYTES)));
+    }
+    out
+}
+
 /// What [`AgentLoop::checkpoint_before`] hands back: the claim to hold for the
 /// duration of the call, and whatever the model has to be told.
 type ClaimedResult<'a> = std::result::Result<(Option<crate::service::Writing<'a>>, Option<String>), String>;
@@ -511,6 +551,15 @@ pub const PLAN: &str = "plan";
 pub const STANCE: &str = "stance";
 pub const SUBAGENTS: &str = "subagents";
 pub const VERIFY: &str = "verify";
+pub const DOCS: &str = "docs";
+
+/// How many passages one `docs` answer carries, and how long each may be.
+///
+/// A documentation page is mostly navigation, and handing a model the whole of
+/// one to answer a sentence is how a context window goes. Four paragraphs is
+/// enough to answer from and short enough to read.
+const DOC_PASSAGES: usize = 4;
+const DOC_PASSAGE_BYTES: usize = 1_200;
 
 /// How deep delegation may nest. One level of sub-delegation is useful for
 /// splitting a task; beyond that the token cost compounds faster than the work
@@ -995,7 +1044,10 @@ impl<'a> AgentLoop<'a> {
         let mut s = String::new();
         s.push_str(
             "You are Rook, an autonomous agent working in a local workspace.\n\
-             Work in small verified steps. Prefer reading before editing. State what you did.\n",
+             Work in small verified steps. Prefer reading before editing. State what you did.\n\
+             Before saying how a library, tool or protocol behaves, ask `docs` about it instead \
+             of recalling: it answers from documentation kept on this machine, and gathers it \
+             when there is none.\n",
         );
         // One or the other, never both: they are the two answers to the same
         // question, and asking for a sentence and a checklist at once measures
@@ -1286,6 +1338,24 @@ impl<'a> AgentLoop<'a> {
                 }),
             });
         }
+        push(ToolSpec {
+            name: DOCS.into(),
+            description: "Look a technology up in the documentation kept here, fetching it \
+                          first if it is not. Ask before saying how a library or protocol \
+                          behaves: what a model remembers is a year old and does not say so. \
+                          Answers cite the local copy and the page each passage came from."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "topic": { "type": "string", "description": "redis, tokio, the http spec" },
+                    "version": { "type": "string", "description": "omit for the current one" },
+                    "question": { "type": "string", "description": "what is being asked; it picks the passages" },
+                    "refresh": { "type": "boolean", "description": "read the site again anyway" }
+                },
+                "required": ["topic"]
+            }),
+        });
         push(ToolSpec {
             name: LOAD_SKILL.into(),
             description: "Load a skill's full instructions into context by name. An unknown \
@@ -2237,6 +2307,17 @@ impl<'a> AgentLoop<'a> {
             };
         }
 
+        if call.name == DOCS {
+            let text = self.documentation(&call.arguments).await;
+            let failed = text.starts_with("could not") || text.starts_with("no ");
+            let kind = match failed {
+                true => EventKind::Error,
+                false => EventKind::ToolResult,
+            };
+            self.rook.log(self.session, kind, DOCS, &text).ok();
+            return (text, failed);
+        }
+
         if call.name == FIND_SKILL {
             let query = call.arguments.get("query").and_then(|q| q.as_str()).unwrap_or_default();
             let Some(name) = call.arguments.get("install").and_then(|n| n.as_str()) else {
@@ -3140,6 +3221,68 @@ impl<'a> AgentLoop<'a> {
     ///
     /// One function because two callers ask the same question: a search on its
     /// own, and a search that came alongside an install that failed.
+    /// Answer from the documentation kept here, gathering it first on a miss.
+    ///
+    /// The order matters and is the whole point: look locally, and only reach
+    /// for the network when there is nothing to look at. A model that answers
+    /// about a technology from what it was trained on is answering from a
+    /// snapshot it cannot date, and neither it nor the person reading can tell
+    /// which sentences are still true. What comes back here has a source url on
+    /// every passage, so both can.
+    async fn documentation(&self, args: &serde_json::Value) -> String {
+        let topic = args.get("topic").and_then(|t| t.as_str()).unwrap_or_default().trim();
+        if topic.is_empty() {
+            return "docs needs a topic: the technology to look up.".into();
+        }
+        let version = args
+            .get("version")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or(crate::docs::LATEST);
+        let question = args.get("question").and_then(|q| q.as_str()).unwrap_or_default().trim();
+        let refresh = args.get("refresh").and_then(|r| r.as_bool()).unwrap_or(false);
+
+        let kept = match self.rook.docs(topic, Some(version)) {
+            Ok(kept) => kept,
+            Err(e) => return format!("could not read the documentation kept here: {e}"),
+        };
+        if let Some(set) = kept.filter(|_| !refresh) {
+            return answer_from(&set, question, String::new());
+        }
+
+        // Only a miss costs the network — and it is asked for before it is
+        // approved, so a person is never prompted about a fetch that config
+        // has already ruled out.
+        let sources = match self.rook.doc_sources() {
+            Ok(sources) => sources,
+            Err(why) => {
+                return format!(
+                    "no documentation for {topic:?} is kept here and none can be fetched: {why}. \
+                     Answer from memory if that is all there is, and say that is what it is."
+                );
+            }
+        };
+        let risk = rook_tools::policy::Risk::Network(format!("{topic} documentation"));
+        if let Some(refusal) = self.gate_risk(DOCS, args, risk, Shown::Nothing).await {
+            return refusal;
+        }
+        let (reference, set, notes) = match self.rook.gather_docs(topic, version, &sources).await {
+            Ok(gathered) => gathered,
+            Err(e) => return format!("could not gather documentation for {topic:?}: {e}"),
+        };
+        let mut preamble = format!(
+            "gathered {} page(s) into {reference}, which later turns and later sessions read \
+             without fetching again.",
+            set.pages.len()
+        );
+        for note in notes.iter().take(3) {
+            preamble.push_str(&format!("\nsome of what came back was unreadable: {note}"));
+        }
+        preamble.push_str("\n\n");
+        answer_from(&set, question, preamble)
+    }
+
     fn skills_matching(&self, query: &str) -> String {
         let (offered, errors) = self.rook.skills_offered(query, false);
         let listed: Vec<String> = offered

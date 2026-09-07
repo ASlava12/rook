@@ -36,6 +36,9 @@ pub fn router(state: Shared) -> Router {
         .route("/api/memory/history", get(memory_history))
         .route("/api/memory/diff", get(memory_diff))
         .route("/api/memory/since", get(memory_since))
+        .route("/api/docs", get(docs_kept).post(gather_docs))
+        .route("/api/docs/forget", post(forget_docs))
+        .route("/api/docs/{topic}", get(docs))
         .route("/api/skills", get(skills))
         .route("/api/skills/{name}", get(skill))
         .route("/api/skills/{name}/history", get(skill_history))
@@ -313,6 +316,68 @@ async fn memory(
         None => book.in_scope(&workspace).cloned().collect(),
     };
     Ok(Json(Page::new(facts)))
+}
+
+#[derive(Deserialize)]
+struct DocsQuery {
+    #[serde(default)]
+    version: Option<String>,
+}
+
+async fn docs_kept(State(s): State<Shared>) -> ApiResult<Page<rook_core::docs::Kept>> {
+    let rook = s.rook.read().await;
+    Ok(Json(Page::new(rook.docs_kept()?)))
+}
+
+async fn docs(
+    State(s): State<Shared>,
+    Path(topic): Path<String>,
+    Query(query): Query<DocsQuery>,
+) -> ApiResult<rook_core::DocSet> {
+    let rook = s.rook.read().await;
+    match rook.docs(&topic, query.version.as_deref())? {
+        Some(set) => Ok(Json(set)),
+        // Not an error, but not a set either: 404 is how the caller tells "no
+        // copy yet" from "the store would not answer", and the two lead
+        // different places.
+        None => Err(Fail(
+            StatusCode::NOT_FOUND,
+            ApiError::new("no_docs", format!("nothing is kept for {topic:?}")),
+        )),
+    }
+}
+
+#[derive(Deserialize)]
+struct GatherDocs {
+    topic: String,
+    #[serde(default)]
+    version: Option<String>,
+}
+
+/// Read a topic's documentation off the web and keep it.
+///
+/// The one endpoint here that reaches the network on purpose, and it does it
+/// because the daemon is the process that may write to the store: a window
+/// that gathered its own copy would have nowhere to put it.
+async fn gather_docs(State(s): State<Shared>, Json(body): Json<GatherDocs>) -> ApiResult<serde_json::Value> {
+    let rook = s.rook.read().await;
+    let version = body.version.unwrap_or_else(|| rook_core::docs::LATEST.into());
+    let sources = rook.doc_sources()?;
+    let (reference, set, notes) = rook.gather_docs(&body.topic, &version, &sources).await?;
+    Ok(Json(serde_json::json!({ "ref": reference, "set": set, "notes": notes })))
+}
+
+#[derive(Deserialize)]
+struct ForgetDocs {
+    topic: String,
+    #[serde(default)]
+    version: Option<String>,
+}
+
+async fn forget_docs(State(s): State<Shared>, Json(body): Json<ForgetDocs>) -> ApiResult<serde_json::Value> {
+    let rook = s.rook.read().await;
+    let dropped = rook.forget_docs(&body.topic, body.version.as_deref())?;
+    Ok(Json(serde_json::json!({ "dropped": dropped })))
 }
 
 #[derive(Deserialize)]
@@ -1111,9 +1176,14 @@ mod tests {
     #[tokio::test]
     async fn the_paged_endpoints_all_answer_with_items() {
         let f = fixture();
-        for path in
-            ["/api/sessions", "/api/skills", "/api/store/objects", "/api/store/refs", "/api/checkpoints"]
-        {
+        for path in [
+            "/api/sessions",
+            "/api/skills",
+            "/api/store/objects",
+            "/api/store/refs",
+            "/api/checkpoints",
+            "/api/docs",
+        ] {
             let (status, body) = get(&f, path).await;
             assert_eq!(status, StatusCode::OK, "{path}");
             assert!(body["items"].is_array(), "{path} answered {body}");
@@ -1130,6 +1200,48 @@ mod tests {
         let items = body["items"].as_array().unwrap();
         assert_eq!(items.len(), 1, "{body}");
         assert!(items[0]["body"].as_str().unwrap().contains("find the leak"), "{body}");
+    }
+
+    /// The browser reads and drops sets through these; the gathering endpoint
+    /// is the only one that reaches the web, and it is not exercised here for
+    /// the reason none of these tests are: a test that fetches tests the
+    /// internet.
+    #[tokio::test]
+    async fn documentation_is_listed_read_and_dropped_over_http() {
+        let f = fixture();
+        {
+            let rook = f.state.rook.read().await;
+            rook.keep_docs(&rook_core::docs::DocSet::new(
+                "redis",
+                rook_core::docs::LATEST,
+                vec![rook_core::docs::Page {
+                    url: "https://redis.io/docs/persistence".into(),
+                    title: "Persistence".into(),
+                    text: "An append only file, rewritten in the background.".into(),
+                }],
+            ))
+            .unwrap();
+        }
+
+        let (status, body) = get(&f, "/api/docs").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["items"][0]["topic"], "redis", "{body}");
+
+        let (status, body) = get(&f, "/api/docs/redis?version=latest").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["pages"][0]["url"], "https://redis.io/docs/persistence", "{body}");
+
+        // A topic nobody has gathered is a 404 rather than an empty set: the
+        // caller's next move is to fetch it, and "nothing here" and "nothing
+        // like that" lead different places.
+        let (status, _) = get(&f, "/api/docs/postgres").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let (status, body) = post(&f, "/api/docs/forget", serde_json::json!({ "topic": "redis" })).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["dropped"], 1, "{body}");
+        let (status, _) = get(&f, "/api/docs/redis?version=latest").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

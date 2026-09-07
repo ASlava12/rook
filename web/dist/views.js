@@ -137,6 +137,79 @@ export async function renderCheckpoints() {
       : el('p', { class: 'empty' }, 'nothing snapshotted yet — the agent takes its own before every write, and those are what a rewind puts back; these are yours')));
 }
 
+// The documentation the agent gathered, with both addresses on every page: the
+// local copy an answer was made of, and the source anybody else can check.
+// Gathering from here as well as from a terminal, because a page that can only
+// show what somebody else collected is a report, not a tool.
+export async function renderDocs() {
+  const { items } = await api('/api/docs');
+  if (!state.docsTopic && items.length) state.docsTopic = `${items[0].topic}/${items[0].version}`;
+
+  const gather = async () => {
+    const asked = $('#topic').value.trim();
+    if (!asked) return;
+    const [topic, version] = asked.split(/\s+/);
+    const button = $('#gather');
+    // It goes to the web and reads several pages, which is seconds rather than
+    // milliseconds; a button that looks idle while it works gets pressed twice.
+    button.disabled = true;
+    button.textContent = 'reading…';
+    try {
+      const said = await api('/api/docs', { topic, version });
+      state.docsTopic = said.ref.replace(/^docs\//, '');
+      renderDocs();
+    } catch (e) {
+      alert(e.error || e);
+      button.disabled = false;
+      button.textContent = 'Gather';
+    }
+  };
+
+  const drop = async (row) => {
+    if (!confirm(`Drop the ${row.topic} ${row.version} documentation? The agent gathers it again when it is asked.`)) return;
+    try {
+      await api('/api/docs/forget', { topic: row.topic, version: row.version });
+      state.docsTopic = null;
+      renderDocs();
+    } catch (e) {
+      alert(e.error || e);
+    }
+  };
+
+  const list = el('ul', { class: 'list' }, items.map(row => el('li', {
+      'aria-current': String(`${row.topic}/${row.version}` === state.docsTopic),
+      onclick: () => { state.docsTopic = `${row.topic}/${row.version}`; renderDocs(); }
+    },
+    el('div', { class: 'name' }, `${row.topic} ${row.version}`),
+    el('div', { class: 'sub' }, `${row.pages} page(s) · ${bytes(row.bytes)} · read ${ago(row.fetched_at)}`))));
+
+  const left = el('div', { class: 'card' },
+    el('h2', {}, `docs (${items.length})`),
+    el('form', { class: 'ask', onsubmit: (e) => { e.preventDefault(); gather(); } },
+      el('input', { id: 'topic', placeholder: 'redis, or redis 6.2…' }),
+      el('button', { id: 'gather' }, 'Gather')),
+    items.length ? list : el('p', { class: 'empty' }, 'nothing gathered yet — a topic here is read from the web once and answered from afterwards, so the agent cites a page instead of its training'));
+
+  const right = el('div', { class: 'card' }, el('h2', {}, 'sources'));
+  if (state.docsTopic) {
+    const [topic, version] = state.docsTopic.split('/');
+    try {
+      const set = await api(`/api/docs/${encodeURIComponent(topic)}?version=${encodeURIComponent(version)}`);
+      const row = items.find(r => r.topic === topic && r.version === version);
+      right.append(el('p', { class: 'sub' }, `kept as docs/${topic}/${version} · read ${ago(set.fetched_at)}`));
+      right.append(el('ul', { class: 'list' }, set.pages.map(page => el('li', {},
+        el('div', { class: 'name' }, page.title),
+        el('div', { class: 'sub' }, el('a', { href: page.url, target: '_blank', rel: 'noreferrer' }, page.url)),
+        el('p', {}, page.text.slice(0, 400) + (page.text.length > 400 ? '…' : ''))))));
+      if (row) right.append(el('button', { onclick: () => drop(row) }, 'Drop this set'));
+    } catch (e) {
+      right.append(el('p', { class: 'warn' }, e.error || String(e)));
+    }
+  }
+
+  $('#view').replaceChildren(el('div', { class: 'split' }, left, right));
+}
+
 export async function renderSkills() {
   const { items } = await api('/api/skills');
   if (!state.skill && items.length) state.skill = items[0].name;

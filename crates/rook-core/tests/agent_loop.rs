@@ -2031,7 +2031,11 @@ async fn a_projects_own_instructions_reach_the_model_under_both_names() {
 async fn instructions_a_repository_committed_cannot_spend_the_context_window() {
     let mut f = fixture();
     f.rook.config.agent.max_instructions_bytes = 64;
-    let huge = format!("what this project is\n{}\nnever commit the key\n", "x".repeat(4096));
+    // Filler that says what it is, so what reaches the prompt can be counted
+    // rather than inferred from the prompt's total length — which measures
+    // every other line in it as well, and moves whenever one of those changes.
+    const COPIES: usize = 512;
+    let huge = format!("what this project is\n{}\nnever commit the key\n", "padding ".repeat(COPIES));
     std::fs::write(f.workspace.path().join("AGENTS.md"), &huge).unwrap();
     assert!(huge.len() > f.rook.config.agent.max_instructions_bytes, "the file has to exceed the limit");
 
@@ -2039,8 +2043,9 @@ async fn instructions_a_repository_committed_cannot_spend_the_context_window() {
     let provider = Arc::new(ScriptedProvider::new(vec![reply("ok")]));
     let prompt = AgentLoop::new(&f.rook, provider, session).system_prompt();
 
-    assert!(prompt.len() < huge.len() / 4, "most of it is not carried: {} bytes", prompt.len());
-    assert!(!prompt.contains(&"x".repeat(64)), "and the middle is what went: {prompt}");
+    let carried = prompt.matches("padding").count();
+    assert!(carried < COPIES / 32, "most of it is not carried: {carried} of {COPIES} copies");
+    assert!(!prompt.contains(&"padding ".repeat(16)), "and the middle is what went: {prompt}");
     // Both ends. A conventions file is written like one — the subject at the
     // top and the sharpest rule at the bottom — and cutting at the ceiling
     // dropped the second silently.
@@ -5168,4 +5173,65 @@ async fn without_the_flag_there_is_no_tool_and_the_line_says_no_checklist() {
     let prompt = agent.system_prompt();
     assert!(prompt.contains("Do not keep a checklist"), "{prompt}");
     assert!(!prompt.contains("write the plan with `plan`"), "{prompt}");
+}
+
+/// A model asked about a technology answers from its training, which was a year
+/// old the day it shipped. The point of the local copy is that the answer comes
+/// with an address instead — and it has to come with both addresses, since the
+/// local one is a citation of ourselves.
+#[tokio::test]
+async fn asking_about_a_technology_answers_from_the_local_copy_with_both_addresses() {
+    let f = fixture();
+    f.rook
+        .keep_docs(&rook_core::docs::DocSet::new(
+            "redis",
+            rook_core::docs::LATEST,
+            vec![rook_core::docs::Page {
+                url: "https://redis.io/docs/persistence".into(),
+                title: "Persistence".into(),
+                text: "Redis persists with an append only file, rewritten in the background when \
+                       it grows past a configured size."
+                    .into(),
+            }],
+        ))
+        .unwrap();
+
+    let session = f.rook.start_session("asking").unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("docs", serde_json::json!({ "topic": "redis", "question": "how does persistence work" })),
+        reply("it appends to a file"),
+    ]));
+    let seen = provider.share();
+    let out = AgentLoop::new(&f.rook, provider, session).run("how does redis persist?").await.unwrap();
+
+    assert!(out.tools_called.contains(&"docs".to_string()), "{:?}", out.tools_called);
+    let handed: String =
+        seen.lock().unwrap().last().cloned().unwrap().messages.iter().map(|m| m.content.clone()).collect();
+    assert!(handed.contains("append only file"), "the passage is what it answers from:\n{handed}");
+    assert!(
+        handed.contains("https://redis.io/docs/persistence"),
+        "with the page it was read from:\n{handed}"
+    );
+    assert!(handed.contains("docs/redis/latest"), "and the local copy it came out of:\n{handed}");
+}
+
+/// The web being off is a reason to say so, not to fetch anyway — and not to
+/// leave the model with nothing, which is how a turn ends having done nothing.
+#[tokio::test]
+async fn a_topic_with_no_local_copy_and_no_web_says_what_it_can_and_cannot_do() {
+    let mut f = fixture();
+    f.rook.config.web.enabled = false;
+    let session = f.rook.start_session("nothing kept").unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("docs", serde_json::json!({ "topic": "redis" })),
+        reply("from memory, then"),
+    ]));
+    let seen = provider.share();
+    AgentLoop::new(&f.rook, provider, session).run("what is redis?").await.unwrap();
+
+    let handed: String =
+        seen.lock().unwrap().last().cloned().unwrap().messages.iter().map(|m| m.content.clone()).collect();
+    assert!(handed.contains("web access is off"), "it says why:\n{handed}");
+    assert!(handed.contains("[web] enabled"), "and what to change:\n{handed}");
+    assert!(handed.contains("say that is what it is"), "and what to do meanwhile:\n{handed}");
 }

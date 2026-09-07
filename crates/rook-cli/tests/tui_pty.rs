@@ -977,3 +977,49 @@ fn the_prompt_box_edits_and_remembers_like_a_terminal() {
         screen = pty.screen(100, 30);
     }
 }
+
+/// Documentation the agent gathered was readable only by asking the agent
+/// about it again. What a person wants off it is the addresses — the local copy
+/// an answer was made of, and the page it came from — and both are on this pane.
+#[test]
+fn documentation_is_listed_with_both_addresses_and_can_be_dropped() {
+    let _one = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+
+    // Seeded and then closed: redb takes one writer, and the window opens the
+    // same store the moment it starts.
+    {
+        let store = rook_store::Store::open(home.path().join("store")).unwrap();
+        let (skills, _) = rook_skills::SkillIndex::discover(&[]);
+        let rook = rook_core::Rook::from_parts(
+            store,
+            rook_core::Config::default(),
+            rook_skills::Environment::bare("linux", "x86_64", "0.1.0"),
+            skills,
+            workspace.path().to_path_buf(),
+        );
+        rook.keep_docs(&rook_core::docs::DocSet::new(
+            "redis",
+            rook_core::docs::LATEST,
+            vec![rook_core::docs::Page {
+                url: "https://redis.io/docs/persistence".into(),
+                title: "Persistence".into(),
+                text: "An append only file, rewritten in the background as it grows.".into(),
+            }],
+        ))
+        .unwrap();
+    }
+
+    let mut pty = tui(home.path(), workspace.path());
+    pty.screen(100, 30);
+    pty.send("\t\t\t\t\t\t"); // to the Docs tab
+    let listed = pty.screen_showing(100, 30, "redis").join("\n");
+    assert!(listed.contains("latest"), "the version is part of what is kept:\n{listed}");
+    assert!(listed.contains("docs/redis/latest"), "the local copy, by its reference:\n{listed}");
+    assert!(listed.contains("redis.io/docs/persistence"), "and the page it was read from:\n{listed}");
+
+    pty.send("d");
+    let dropped = pty.screen_showing(100, 30, "no documentation gathered yet").join("\n");
+    assert!(dropped.contains("/docs <topic>"), "and says how to gather one:\n{dropped}");
+}

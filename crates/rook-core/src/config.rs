@@ -267,6 +267,18 @@ pub struct WebConfig {
     /// The SearxNG instance to ask. Its own, usually — the reason to prefer it
     /// is that the query does not leave the machine.
     pub search_url: String,
+    /// How many pages one `docs` gathering may fetch for a topic.
+    ///
+    /// The difference between reading a few pages of a site and mirroring it.
+    /// Five covers what a documentation front page, an overview and a
+    /// reference index say between them, which is what a question about a
+    /// technology usually wants.
+    pub docs_pages: usize,
+    /// The ceiling on what one kept set holds, applied while the pages arrive.
+    ///
+    /// Documentation accumulates — one set per topic per version, kept until
+    /// somebody drops it — so it has a limit like everything else here.
+    pub docs_bytes: usize,
 }
 
 impl Default for WebConfig {
@@ -276,6 +288,8 @@ impl Default for WebConfig {
             timeout_secs: 30,
             search: "duckduckgo".into(),
             search_url: "http://127.0.0.1:8888".into(),
+            docs_pages: 5,
+            docs_bytes: 200_000,
         }
     }
 }

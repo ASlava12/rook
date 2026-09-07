@@ -30,7 +30,7 @@ use tokio::sync::mpsc;
 
 use crate::fmt;
 
-const TABS: [&str; 7] = ["Chat", "Sessions", "Memory", "Skills", "Store", "Checkpoints", "Help"];
+const TABS: [&str; 8] = ["Chat", "Sessions", "Memory", "Skills", "Store", "Checkpoints", "Docs", "Help"];
 
 /// How often the loop wakes to drain turn events when no key is pressed.
 const TICK: Duration = Duration::from_millis(60);
@@ -571,6 +571,13 @@ struct App {
     /// one thing here worth asking about twice.
     restoring: Option<(String, String)>,
     checkpoint_note: String,
+    /// The documentation gathered here, and the set under the cursor read out.
+    /// A copy nobody can see is one nobody trusts — and the question a person
+    /// actually has about it is which pages it was made from.
+    docs: Vec<rook_core::docs::Kept>,
+    docs_state: ListState,
+    doc_set: Option<rook_core::DocSet>,
+    docs_note: String,
     objects: Vec<(String, String, u64, u64)>,
     stats: Option<StoreStats>,
     status: String,
@@ -650,6 +657,10 @@ impl App {
             skill_versions: Vec::new(),
             skill_note: String::new(),
             checkpoints: Vec::new(),
+            docs: Vec::new(),
+            docs_state: ListState::default(),
+            doc_set: None,
+            docs_note: String::new(),
             checkpoint_state: ListState::default(),
             naming: None,
             restoring: None,
@@ -679,6 +690,11 @@ impl App {
         self.checkpoint_state.select(
             (!self.checkpoints.is_empty()).then(|| self.checkpoint_state.selected().unwrap_or(0).min(last)),
         );
+        self.docs = self.source.docs_kept().unwrap_or_default();
+        let last = self.docs.len().saturating_sub(1);
+        self.docs_state
+            .select((!self.docs.is_empty()).then(|| self.docs_state.selected().unwrap_or(0).min(last)));
+        self.load_doc_set();
         self.objects = self
             .source
             .objects(None, 300)
@@ -931,6 +947,20 @@ impl App {
         if self.tab == 5 && self.on_checkpoint_key(key) {
             return;
         }
+        if self.tab == 6
+            && key.code == KeyCode::Char('d')
+            && let Some(set) = self.docs_state.selected().and_then(|at| self.docs.get(at)).cloned()
+        {
+            self.docs_note = match self.source.forget_docs(&set.topic, Some(&set.version)) {
+                Ok(0) => format!("{} {} was already gone", set.topic, set.version),
+                Ok(_) => {
+                    format!("dropped {} {} — the agent will read it again when asked", set.topic, set.version)
+                }
+                Err(e) => format!("could not drop it: {e}"),
+            };
+            self.reload();
+            return;
+        }
         match key.code {
             // The session under the cursor, taken up in the chat — which is
             // what the Sessions tab is for. `/session <id>` does the same from
@@ -939,7 +969,7 @@ impl App {
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
             KeyCode::Tab | KeyCode::Right => self.tab = (self.tab + 1) % TABS.len(),
             KeyCode::BackTab | KeyCode::Left => self.tab = (self.tab + TABS.len() - 1) % TABS.len(),
-            KeyCode::Char(c @ '1'..='7') => self.tab = c as usize - '1' as usize,
+            KeyCode::Char(c @ '1'..='8') => self.tab = c as usize - '1' as usize,
             KeyCode::Char('r') => self.reload(),
             KeyCode::Char('j') | KeyCode::Down => self.move_selection(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_selection(-1),
@@ -1574,6 +1604,7 @@ impl App {
             1 => (&mut self.session_state, self.sessions.len()),
             2 => (&mut self.fact_state, self.facts.len()),
             5 => (&mut self.checkpoint_state, self.checkpoints.len()),
+            6 => (&mut self.docs_state, self.docs.len()),
             3 => (&mut self.skill_state, self.skills.len()),
             _ => {
                 self.transcript_scroll = self.transcript_scroll.saturating_add_signed(delta as i16 * 3);
@@ -1589,6 +1620,7 @@ impl App {
         match self.tab {
             1 => self.load_transcript(),
             3 => self.load_versions(),
+            6 => self.load_doc_set(),
             _ => {}
         }
     }
@@ -1622,6 +1654,7 @@ impl App {
             3 => self.draw_skills(f, body),
             4 => self.draw_store(f, body),
             5 => self.draw_checkpoints(f, body),
+            6 => self.draw_docs(f, body),
             _ => self.draw_help(f, body),
         }
 
@@ -1668,7 +1701,14 @@ impl App {
                 ("R ", "restore  "),
                 ("q ", "quit  "),
             ],
-            _ => vec![("↹/1-7 ", "tab  "), ("j/k ", "move  "), ("r ", "reload  "), ("q ", "quit  ")],
+            6 => vec![
+                ("↹ ", "tab  "),
+                ("j/k ", "move  "),
+                ("d ", "drop  "),
+                ("r ", "reload  "),
+                ("q ", "quit  "),
+            ],
+            _ => vec![("↹/1-8 ", "tab  "), ("j/k ", "move  "), ("r ", "reload  "), ("q ", "quit  ")],
         };
         let mut spans: Vec<Span> = vec![Span::raw(" ")];
         for (key, what) in keys {
@@ -2229,6 +2269,97 @@ impl App {
 
     /// Named snapshots of the workspace, and the two things anybody does with
     /// them: take one, and put one back.
+    /// The pages of the set under the cursor, loaded with the selection.
+    ///
+    /// With the selection rather than with the tab, because what a person wants
+    /// off this pane is the addresses — and a list of topics with no sources
+    /// under it is the same claim without the evidence.
+    fn load_doc_set(&mut self) {
+        self.doc_set = self
+            .docs_state
+            .selected()
+            .and_then(|at| self.docs.get(at))
+            .and_then(|kept| self.source.docs(&kept.topic, Some(&kept.version)).ok().flatten());
+    }
+
+    fn draw_docs(&mut self, f: &mut Frame, area: Rect) {
+        let [left, right] =
+            Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).areas(area);
+
+        let title = match self.docs_note.is_empty() {
+            true => format!(" Docs ({}) ", self.docs.len()),
+            false => format!(" Docs ({}) — {} ", self.docs.len(), self.docs_note),
+        };
+        if self.docs.is_empty() {
+            f.render_widget(
+                Paragraph::new(vec![
+                    Line::from("no documentation gathered yet"),
+                    Line::from(""),
+                    Line::from("`/docs <topic>` reads a technology's documentation and keeps it"),
+                    Line::from("here; `rook docs add <topic>` does the same from a terminal. The"),
+                    Line::from("agent gathers on its own when it is asked about something it has"),
+                    Line::from("no copy of, rather than answering from what it was trained on."),
+                ])
+                .style(Style::default().fg(Color::DarkGray))
+                .block(bordered(&title)),
+                area,
+            );
+            return;
+        }
+
+        let items: Vec<ListItem> = self
+            .docs
+            .iter()
+            .map(|set| {
+                ListItem::new(Line::from(vec![
+                    Span::raw(format!("{:<20}", set.topic)),
+                    Span::styled(format!("{:<9}", set.version), Style::default().fg(Color::Cyan)),
+                    Span::styled(
+                        format!("{:>3}p  {}", set.pages, fmt::ago(set.fetched_at)),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]))
+            })
+            .collect();
+
+        f.render_stateful_widget(
+            List::new(items)
+                .block(bordered(&title))
+                .highlight_style(Style::default().bg(Color::Rgb(40, 44, 52)))
+                .highlight_symbol("▌"),
+            left,
+            &mut self.docs_state,
+        );
+
+        let mut lines = Vec::new();
+        if let Some(set) = &self.doc_set {
+            lines.push(Line::from(Span::styled(
+                format!("{} {}", set.topic, set.version),
+                Style::default().add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "kept as {} · read {}",
+                    rook_core::docs::reference(&set.topic, &set.version),
+                    fmt::ago(set.fetched_at)
+                ),
+                Style::default().fg(Color::DarkGray),
+            )));
+            lines.push(Line::from(""));
+            // Both addresses, which is the whole point of keeping the reading
+            // rather than the page: the local copy is what an answer is made
+            // of, and these are what anybody else can check it against.
+            for page in &set.pages {
+                lines.push(Line::from(Span::raw(page.title.clone())));
+                lines.push(Line::from(Span::styled(
+                    format!("  {}", page.url),
+                    Style::default().fg(Color::Blue),
+                )));
+            }
+        }
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(bordered(" Sources ")), right);
+    }
+
     fn draw_checkpoints(&mut self, f: &mut Frame, area: Rect) {
         let asking = self.naming.is_some() || self.restoring.is_some();
         let [list, entry] =
@@ -2400,6 +2531,7 @@ impl App {
             command("  rook skills history <name>     every captured version"),
             command("  rook skills rollback <n> <id>  restore one, undoably"),
             command("  rook checkpoint create <name>  snapshot part of the workspace"),
+            command("  rook docs ls / show <topic>    documentation gathered here"),
             command("  rook doctor                    detected toolchains and platform"),
             Line::from(""),
             Line::from(Span::styled("keys", Style::default().add_modifier(Modifier::BOLD))),
@@ -2412,6 +2544,7 @@ impl App {
             key("  In Sessions: ⏎ continues the one under the cursor, in the chat"),
             Line::from(""),
             key("  In Checkpoints: c takes one of the workspace · R restores one over it"),
+            key("  In Docs: d drops the set under the cursor · /docs <topic> gathers one"),
             Line::from(""),
             key("  In Skills:  c captures a version of the one under the cursor"),
             key("              u rolls it back to the newest capture, undoably"),

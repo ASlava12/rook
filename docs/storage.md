@@ -29,8 +29,8 @@ sees enough context to build a model. A 16 KiB dictionary trained on a few hundr
 messages of the same shape turns each one into a few dozen bytes.
 
 Dictionaries are trained per [`Kind`](../crates/rook-store/src/object.rs) —
-messages, tool results, file blobs, skills, memories, snapshots — because those
-populations have genuinely different shapes.
+messages, tool results, file blobs, skills, memories, snapshots, documentation —
+because those populations have genuinely different shapes.
 
 Retraining never invalidates history: **every object records the codec it was
 written with**, so old objects keep decoding against the dictionary they were
@@ -134,6 +134,11 @@ and a ref is a root — so until `max_history_entries` existed, every object the
 named was immortal and the byte cap could not be met at any price. Retention now
 keeps the newest entries of each and drops the rest; `None` keeps them all, which
 is what the store did before.
+
+Documentation the agent gathered is one ref per topic and version,
+`docs/<topic>/<version>`, and reading a topic again replaces the set rather than
+appending one — so it is bounded by how many topics have been asked about, and
+`rook docs rm` is how one goes.
 
 What it still does not touch is `skill/<name>/v/<version>`, which is one ref per
 distinct version rather than one per write, and `memory/head`, which is the

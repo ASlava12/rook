@@ -222,6 +222,45 @@ async fn the_keyless_engine_reads_its_results_out_of_the_page() {
     assert!(!out.content.contains("uddg="), "{}", out.content);
 }
 
+/// Their page is a list with a footer under it, and the result of reading it
+/// backwards from what was left of the string is that every result reports the
+/// last one's address. Three results and a footer is the smallest page where
+/// that shows, and the two-result fixture above did not.
+#[tokio::test]
+async fn every_result_on_the_page_reports_its_own_address_and_not_the_last_one() {
+    let base = serve(
+        "200 OK",
+        "text/html",
+        r#"<html><body>
+             <a class="result-link" href="https://redis.io/one">One</a>
+             <td class="result-snippet">first</td>
+             <a class="result-link" href="https://redis.io/two">Two</a>
+             <td class="result-snippet">second</td>
+             <a class="result-link" href="https://redis.io/three">Three</a>
+             <td class="result-snippet">third</td>
+             <div class="footer">Set DuckDuckGo as your default search engine. Privacy, simplified.
+             Learn more about our policies, our apps, and everything else we do.</div>
+           </body></html>"#,
+    )
+    .await;
+    let base = base.trim_end_matches("/page").to_string();
+
+    let search = rook_tools::web::Search::new(
+        rook_tools::web::Engine::DuckDuckGo(base),
+        std::time::Duration::from_secs(5),
+    )
+    .unwrap();
+    let found = search.hits("redis", 5).await.unwrap();
+
+    assert_eq!(found.len(), 3, "{found:?}");
+    for (n, expected) in ["one", "two", "three"].iter().enumerate() {
+        assert!(
+            found[n].contains(&format!("https://redis.io/{expected}")),
+            "result {n} is its own: {found:?}"
+        );
+    }
+}
+
 /// A rule that allows a local instance must not also allow a hosted one: what
 /// leaves the machine is a request to a host, and which host is the question.
 #[test]

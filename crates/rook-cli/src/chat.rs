@@ -26,6 +26,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("stance", "[name]", "how much latitude: readonly, assist or autonomous"),
     ("effort", "[name]", "how much the model may think: low … max"),
     ("memory", "[query]", "what it remembers, or what matches"),
+    ("docs", "[topic]", "documentation kept here, or gather a topic's"),
     ("search", "<query>", "find it in everything said, read and run"),
     ("diff", "", "what this session has changed on disk"),
     ("btw", "<question>", "ask about this conversation without joining it"),
@@ -430,6 +431,54 @@ pub async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command
             for fact in facts {
                 let pin = if fact.pinned { "* " } else { "  " };
                 say!("{pin}[{}] {}", fact.id, fact.text);
+            }
+        }
+
+        "docs" if rest.is_empty() => {
+            let kept = rook.docs_kept()?;
+            if kept.is_empty() {
+                say!("nothing gathered yet — `/docs <topic>` reads a technology's documentation");
+            }
+            for set in kept {
+                say!(
+                    "{} {} · {} page(s) · {} · read {}",
+                    set.topic,
+                    set.version,
+                    set.pages,
+                    crate::fmt::bytes(set.bytes as u64),
+                    crate::fmt::ago(set.fetched_at)
+                );
+            }
+        }
+
+        // A topic, and optionally the version of it being asked about. Reading
+        // is free and gathering is not, so a copy that is already here is
+        // answered from rather than fetched again: `/docs redis` twice is one
+        // trip to the web.
+        "docs" => {
+            let (topic, version) = rest.split_once(' ').unwrap_or((rest, rook_core::docs::LATEST));
+            let (topic, version) = (topic.trim(), version.trim());
+            let set = match rook.docs(topic, Some(version))? {
+                Some(set) => set,
+                None => {
+                    let sources = rook.doc_sources()?;
+                    let (reference, set, notes) = rook.gather_docs(topic, version, &sources).await?;
+                    for note in notes {
+                        say!("could not read one of the results: {note}");
+                    }
+                    say!("gathered {} page(s) into {reference}", set.pages.len());
+                    set
+                }
+            };
+            say!(
+                "{} {} · kept as {} · read {}",
+                set.topic,
+                set.version,
+                rook_core::docs::reference(&set.topic, &set.version),
+                crate::fmt::ago(set.fetched_at)
+            );
+            for page in &set.pages {
+                say!("  {} — {}", page.title, page.url);
             }
         }
 

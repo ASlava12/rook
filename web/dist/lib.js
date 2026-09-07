@@ -44,7 +44,7 @@ export const api = async (path, body) => {
 // One object, shared by every view: a tab that re-renders reads what the
 // others left, which is how "continue in chat" from the sessions tab works.
 export const state = {
-  tab: 'chat', session: null, skill: null, job: null, query: '', memoryAll: false,
+  tab: 'chat', session: null, skill: null, job: null, query: '', memoryAll: false, docsTopic: null,
   chat: { session: null, busy: false, waiting: false, settings: null, spent: null, sessions: [] },
 };
 

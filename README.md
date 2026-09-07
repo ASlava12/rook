@@ -82,6 +82,7 @@ rook --json run "..." | jq .outcome.reply  # one object: reply, tokens, changes
                                            # exit 2 if the turn did not finish
 rook tui                                   # full terminal UI: chat plus a store browser
 rook checkpoint create before-refactor     # or `c` in the TUI's Checkpoints tab
+rook docs add redis                        # read its documentation once, answer from it after
 rookd                                      # http://127.0.0.1:7717 — web UI + API
 rook daemon status                         # where it is, and whether it is this build
 rook daemon restart                        # after an upgrade; names any turn it ends
@@ -258,6 +259,34 @@ Its risk is the engine's address rather than the query, so allowing your own
 instance does not also allow somebody else's. An engine named without the key it
 needs is offered as nothing at all — a tool that fails on its first call teaches
 the model to stop asking.
+
+### Documentation it keeps
+
+A model asked about Redis answers from what it was trained on, which was a year
+old the day it shipped and says so nowhere. `docs` is the alternative: it looks
+for a copy kept on this machine, and when there is none it searches for the
+official documentation, reads a few pages, and files the reading — not the page.
+
+```
+docs { "topic": "redis", "question": "how does persistence work" }
+docs { "topic": "postgres", "version": "16" }
+```
+
+What is stored is the prose and, beside every passage, the address it was read
+from — so an answer carries both: the local copy it was made of, and the page
+anybody else can check it against. A copy is one per topic and version, `latest`
+when none is named, and reading a topic again replaces it rather than growing a
+second. The gathering is bounded like everything else that accumulates:
+
+```toml
+[web]
+docs_pages = 5          # how many pages one topic may cost
+docs_bytes = 200000     # and what a kept set may hold, applied as it arrives
+```
+
+The same sets are `rook docs ls | show <topic> | add <topic> | rm <topic>`, the
+Docs tab in the TUI, and a tab in the browser — the reading is the agent's, and
+what it read is yours to see.
 
 ### Checking, rather than believing
 
