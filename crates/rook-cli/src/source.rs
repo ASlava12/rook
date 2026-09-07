@@ -721,6 +721,13 @@ fn start_daemon(on_port: Option<u16>) -> Option<(std::process::Child, String)> {
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
         command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
     }
+    // And not this command's handles either. Windows hands a child every
+    // inheritable handle the parent holds, not only the stdio it was given, so
+    // the daemon kept the pipe `rook daemon restart` was writing its own output
+    // to — and whoever was reading that pipe waited for an end that could not
+    // come while the daemon lived. Detaching the process does not undo that;
+    // only clearing the flag does.
+    rook_contain::keep_the_console_to_ourselves();
     Some((command.spawn().ok()?, beside.display().to_string()))
 }
 

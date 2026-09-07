@@ -54,10 +54,47 @@ pub fn label_low(dir: &std::path::Path) -> Result<(), String> {
     }
 }
 
+/// Stop this process's standard handles from reaching the children it starts.
+///
+/// Windows hands a child every inheritable handle the parent holds, not only
+/// the ones it was given as its own stdio — so a daemon started by a command
+/// whose output is a pipe keeps that pipe open after the command exits, and
+/// whoever is reading it waits for an end that never comes. `rook daemon
+/// restart` did exactly that, and the CI job it ran in sat at the six-hour
+/// ceiling twelve times.
+///
+/// Called before starting something that outlives the command. Nothing else
+/// needs it: every other child here is given its own pipes or `NUL`, and a
+/// handle that is not inheritable is not passed on.
+pub fn keep_the_console_to_ourselves() {
+    #[cfg(windows)]
+    {
+        windows::keep_std_handles();
+    }
+}
+
 #[cfg(windows)]
 mod windows {
     use std::path::Path;
     use std::ptr::null_mut;
+
+    /// `SetHandleInformation(h, HANDLE_FLAG_INHERIT, 0)` for the three
+    /// standard handles: after this, a child started from here is handed
+    /// whatever stdio it is given and none of ours.
+    pub fn keep_std_handles() {
+        use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
+        use windows_sys::Win32::System::Console::{
+            GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+        };
+        for which in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            // Safety: `GetStdHandle` returns a handle this process owns or an
+            // invalid one, and clearing a flag on either is defined.
+            unsafe {
+                let handle = GetStdHandle(which);
+                SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0);
+            }
+        }
+    }
 
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, HLOCAL, LocalFree};
     use windows_sys::Win32::Security::Authorization::{
