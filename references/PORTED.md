@@ -1653,11 +1653,12 @@ characters is refused rather than kept as an empty secret that looks set. Their
 other commit is a webview offering a model switch for an image the model cannot
 read.
 
-**hermes 866332bfb → c8aa5608c, read but not advanced.** The pointer stays where
-it was: the host rate-limited the fetch that `advance` makes, twice, and moving
-a pointer without being able to re-read what it points at is a pointer nobody
-can trust. The range was readable because an earlier fetch had already brought
-it. A range this size is not a day's work and is not read as one either: the
+**hermes 866332bfb → c8aa5608c.** Read before it could be advanced: the host
+rate-limited the fetch that `advance` makes, twice, and a pointer moved without
+being able to re-read what it points at is a pointer nobody can trust. The range
+was readable meanwhile because an earlier fetch had already brought it, and the
+pointer moved on a retry once the limit lifted — over exactly the range read
+here. A range this size is not a day's work and is not read as one either: the
 count this morning was capped by a shallow fetch, so the 1,384 is what was
 always there rather than what arrived. Read by subject, and
 one of them is the third carrier of a bug this repository has now fixed twice.
