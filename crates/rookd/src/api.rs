@@ -442,12 +442,18 @@ async fn gather_docs(State(s): State<Shared>, Json(body): Json<GatherDocs>) -> A
         return Ok(Json(serde_json::json!({
             "ref": reference,
             "set": checked.set,
+            // Said, because "none had changed" is a result and "nothing was
+            // checked, it was gathered" is a different one — and a caller that
+            // cannot tell them apart prints the wrong sentence.
+            "checked": true,
             "changed": checked.changed,
             "notes": checked.unreadable,
         })));
     }
     let (reference, set, notes) = rook.gather_docs(&body.topic, &version, &sources).await?;
-    Ok(Json(serde_json::json!({ "ref": reference, "set": set, "changed": [], "notes": notes })))
+    Ok(Json(
+        serde_json::json!({ "ref": reference, "set": set, "checked": false, "changed": [], "notes": notes }),
+    ))
 }
 
 #[derive(Deserialize)]

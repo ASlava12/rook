@@ -480,9 +480,14 @@ impl Source {
                 let set: rook_core::DocSet = serde_json::from_value(said["set"].clone())?;
                 let mut notes: Vec<String> =
                     serde_json::from_value(said["notes"].clone()).unwrap_or_default();
-                let changed: Vec<String> =
-                    serde_json::from_value(said["changed"].clone()).unwrap_or_default();
-                notes.insert(0, changed_note(&changed));
+                // Only when it was a check. A gather has nothing to say about
+                // what changed, and saying "none had changed" about a set that
+                // did not exist a second ago is a sentence about nothing.
+                if said["checked"].as_bool().unwrap_or(false) {
+                    let changed: Vec<String> =
+                        serde_json::from_value(said["changed"].clone()).unwrap_or_default();
+                    notes.insert(0, changed_note(&changed));
+                }
                 Ok((said["ref"].as_str().unwrap_or_default().to_string(), set, notes))
             }
         }

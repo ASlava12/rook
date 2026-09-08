@@ -227,7 +227,9 @@ enum DocsCmd {
         topic: String,
         #[arg(long)]
         version: Option<String>,
-        /// Gather it again even though a copy is kept.
+        /// Ask the sources what has changed and re-read only that. Age says
+        /// nothing on its own — a pinned version does not go stale by getting
+        /// older, and `latest` can be wrong the day after it was read.
         #[arg(long)]
         refresh: bool,
     },
@@ -2302,7 +2304,8 @@ fn cmd_docs(source: &Source, cmd: DocsCmd, json: bool) -> Result<()> {
             let version = version.unwrap_or_else(|| rook_core::docs::LATEST.into());
             if !refresh && let Some(set) = source.docs(&topic, Some(&version))? {
                 println!(
-                    "already kept: {} {} · {} page(s), read {}. `--refresh` reads the site again.",
+                    "already kept: {} {} · {} page(s), read {}. `--refresh` asks the sources \
+                     what changed.",
                     set.topic,
                     set.version,
                     set.pages.len(),
@@ -2312,9 +2315,9 @@ fn cmd_docs(source: &Source, cmd: DocsCmd, json: bool) -> Result<()> {
             }
             let (reference, set, notes) = source.gather_docs(&topic, &version)?;
             for note in &notes {
-                println!("could not read one of the results: {note}");
+                println!("{note}");
             }
-            println!("kept {} page(s) as {reference}:", set.pages.len());
+            println!("{} page(s) in {reference}:", set.pages.len());
             for page in &set.pages {
                 println!("- {} — {}", page.title, page.url);
             }
