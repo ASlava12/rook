@@ -148,17 +148,18 @@ async fn a_command_is_given_the_value_and_the_transcript_is_not() {
 
     let session = rook.start_session("secret").unwrap();
     let seen: Arc<Mutex<Vec<Request>>> = Default::default();
+    // Printed on purpose: the value reaches the command, and what comes back
+    // must still not carry it. The command is per platform and the claim is
+    // not — `cmd.exe` does not expand `$VAR` and has no `printf`, so the unix
+    // spelling ran and printed nothing, and the test failed on the assertion
+    // about redaction while proving nothing about it.
+    let echo_it = match cfg!(windows) {
+        true => "echo %ROOK_SECRET_SSH_PROD%",
+        false => "printf '%s' \"$ROOK_SECRET_SSH_PROD\"",
+    };
     let provider = Arc::new(Scripted(
         Mutex::new(vec![
-            call(
-                "run_command",
-                serde_json::json!({
-                    // Printed on purpose: the value reaches the command, and
-                    // what comes back must still not carry it.
-                    "command": "printf '%s' \"$ROOK_SECRET_SSH_PROD\"",
-                    "secrets": ["ssh_prod"]
-                }),
-            ),
+            call("run_command", serde_json::json!({ "command": echo_it, "secrets": ["ssh_prod"] })),
             reply("done"),
         ]),
         seen.clone(),
