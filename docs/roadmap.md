@@ -1163,14 +1163,31 @@ recorded so the design question survives the session that raised it.
    file whole — is refused when somebody else looked last, with `edit_file`
    offered instead. A session working alone is always the last to have looked, so
    it never meets the rule, which is what keeps a rule from being switched off.
-8. **Secrets the agent can use and cannot leak.** At the concept stage. The
-   shape that fits: a secret is named, never valued, in everything the model
-   sees — it asks for `deploy_token` and the substitution happens at the edge,
-   in the tool, on its way out. That keeps it out of the transcript, out of
-   compaction, out of what a sub-agent inherits, and out of any provider
-   request. What it needs settled first is where the values live (the store is
-   readable by design, which is the wrong property here) and what stops a tool
-   from being asked to print one.
+8. **Secrets the agent can use and cannot leak** — *done, and honest about
+   what it is not*. A secret is named, never valued, in everything the model
+   sees: it asks for `ssh_prod`, and the value is put in inside the tool, into
+   the environment of the process that needs it, and taken back out of whatever
+   comes back — at the one place a tool's answer becomes context, so a command's
+   output, a page, a file and an MCP server's answer are one rule rather than
+   four. The two questions that held it up are answered in
+   [ADR-0013](adr/0013-secrets-are-named-never-valued.md). Values live in
+   `~/.rook/secrets.toml`, 0600, in the clear — the same property as an
+   unencrypted SSH key or `~/.aws/credentials`, and encrypting them under a
+   passphrase would mean an agent that cannot run without somebody to type one;
+   a value that already lives in a password manager stays there behind `env:`,
+   `cmd:` or `keychain:`. And nothing stops a model printing a secret on
+   purpose, so nothing here claims to: what stops that is the approval, which
+   names the secret a call would spend. What this stops is the way secrets
+   actually reach transcripts — written into a command, dumped by a script,
+   `cat`ed out of a config file.
+
+   `ssh` is why the mechanism is not just an environment variable: it reads a
+   password from a terminal and from nowhere else, so a command naming one
+   secret is given `SSH_ASKPASS`, `GIT_ASKPASS` and `SUDO_ASKPASS` pointing at a
+   helper that prints the variable it inherits — no value in an argument, none
+   in the script, and the script gone with the command. `rook secrets add|ls|rm`
+   with the value typed rather than passed, `/secrets` in a chat, a tab in the
+   browser, and no call anywhere that returns a value. 12 tests.
 
    OpenClaw has shipped the second half of that and it is worth copying: a
    secret is bound to the exact destination hosts it may be substituted into,

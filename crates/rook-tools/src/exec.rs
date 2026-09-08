@@ -31,6 +31,11 @@ impl Tool for RunCommand {
                     "background": {
                         "type": "boolean",
                         "description": "Leave it running and answer at once with a job id."
+                    },
+                    "secrets": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Names from `rook secrets`, put in the environment as $ROOK_SECRET_<NAME> for this command only. Values are never shown to you and are cut out of the output."
                     }
                 },
                 "required": ["command"]
@@ -68,7 +73,27 @@ impl Tool for RunCommand {
             return Ok(ToolOutcome::ok(format!("started {id}; `job` reads what it prints")).with("job", id));
         }
 
+        // Resolved before anything is spawned, so a name nobody set is a
+        // refusal rather than a command that runs and fails halfway through
+        // with an empty password.
+        let asked_for = args
+            .get("secrets")
+            .and_then(|s| s.as_array())
+            .map(|names| names.iter().filter_map(|n| n.as_str().map(str::to_string)).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let env = match secret_env(ctx, &asked_for) {
+            Ok(env) => env,
+            Err(refused) => return Ok(ToolOutcome::error(refused)),
+        };
+
         if let Some(terminals) = &ctx.terminals {
+            if !env.is_empty() {
+                return Ok(ToolOutcome::error(
+                    "this front end runs commands in its own terminal, whose environment is not \
+                     this one's — a secret cannot be put there. Run it without `secrets`, or \
+                     without the editor.",
+                ));
+            }
             return elsewhere(terminals.as_ref(), &command, &cwd, ctx, timeout).await;
         }
 
@@ -76,7 +101,16 @@ impl Tool for RunCommand {
             Ok(chosen) => chosen,
             Err(refused) => return Ok(ToolOutcome::error(refused)),
         };
-        let mut child = spawn_shell(&command, &cwd, &[], isolation)?;
+        // Written for the life of the command and removed after it: `ssh` reads
+        // a password from a terminal and from nowhere else, so a value in the
+        // environment reaches it only through an askpass helper. The helper
+        // holds no value — it prints the variable it inherits.
+        let helper = (env.len() == 1).then(|| askpass(&env[0].0)).flatten();
+        let mut env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        if let Some(helper) = &helper {
+            env.extend(helper.env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+        }
+        let mut child = spawn_shell(&command, &cwd, &env, isolation)?;
         let group = child.id();
         let mut stdout = child.stdout.take();
         let mut stderr = child.stderr.take();
@@ -394,6 +428,83 @@ pub fn spawn_shell(
     // child does not inherit the TUI's terminal signals.
     cmd.process_group(0);
     cmd.spawn().map_err(|e| ToolError::Io { path: cwd.to_path_buf(), source: e })
+}
+
+/// The environment a command's named secrets become, or why it cannot have
+/// them.
+///
+/// `ROOK_SECRET_<NAME>`, upper-cased, because that is what a shell can read and
+/// what `sshpass -e`, `PGPASSWORD` and every other program of that shape
+/// expect. Resolved here and not before: a value that is fetched when it is
+/// used is a value that is not sitting in memory for the rest of the turn.
+fn secret_env(ctx: &ToolContext, names: &[String]) -> std::result::Result<Vec<(String, String)>, String> {
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let Some(secrets) = &ctx.secrets else {
+        return Err("this front end has no secrets to give a command — `rook secrets add <name>` \
+                    keeps one, and the terminal or the browser can set it"
+            .into());
+    };
+    let mut env = Vec::new();
+    for name in names {
+        let Some(value) = secrets.value(name) else {
+            return Err(format!(
+                "no secret {name:?}, or it did not answer — `rook secrets ls` says which are set \
+                 and which resolve"
+            ));
+        };
+        env.push((format!("ROOK_SECRET_{}", name.to_uppercase().replace('-', "_")), value));
+    }
+    Ok(env)
+}
+
+/// An askpass helper for one secret, and the variables that point programs at
+/// it.
+///
+/// `ssh` takes a password from a terminal and from nowhere else — not from an
+/// argument, not from the environment — so a secret reaches it only through the
+/// helper OpenSSH already asks for. The same three variables serve `git` over
+/// HTTPS and `sudo -A`. The script holds no value: it prints the variable it
+/// inherits, so what is on disk is a line of shell and what is in memory is the
+/// same environment the command already has.
+struct Askpass {
+    env: Vec<(String, String)>,
+    _dir: tempfile::TempDir,
+}
+
+#[cfg(unix)]
+fn askpass(variable: &str) -> Option<Askpass> {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().ok()?;
+    let path = dir.path().join("askpass");
+    let mut file = std::fs::File::create(&path).ok()?;
+    file.write_all(format!("#!/bin/sh\nprintf '%s\\n' \"${{{variable}}}\"\n").as_bytes()).ok()?;
+    drop(file);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).ok()?;
+    let at = path.display().to_string();
+    Some(Askpass {
+        env: vec![
+            ("SSH_ASKPASS".into(), at.clone()),
+            // OpenSSH only consults the helper without a terminal unless it is
+            // told to; 8.4 and later take `force`, and older ones want a
+            // `DISPLAY` set, which is why both are here.
+            ("SSH_ASKPASS_REQUIRE".into(), "force".into()),
+            ("DISPLAY".into(), std::env::var("DISPLAY").unwrap_or_else(|_| ":0".into())),
+            ("GIT_ASKPASS".into(), at.clone()),
+            ("SUDO_ASKPASS".into(), at),
+        ],
+        _dir: dir,
+    })
+}
+
+/// No askpass on Windows: the programs that ask for one are not the ones people
+/// run there, and inventing a path for it would be a mechanism nobody uses.
+#[cfg(windows)]
+fn askpass(_variable: &str) -> Option<Askpass> {
+    None
 }
 
 /// Which of the two ends of a command arrived first.

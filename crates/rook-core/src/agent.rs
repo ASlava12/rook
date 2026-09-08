@@ -186,11 +186,29 @@ enum Shown<'a> {
 
 impl Shown<'_> {
     async fn build(&self, ctx: &rook_tools::ToolContext, args: &serde_json::Value) -> Option<String> {
-        match self {
+        let preview = match self {
             Shown::Nothing => None,
             Shown::Text(text) => Some((*text).to_string()),
             Shown::Tool(tool) => tool.preview(ctx, args).await,
+        };
+        // What the call would spend, said where the question is asked. A person
+        // approving a command should see that it comes with a password
+        // attached, whatever else the preview shows — and here rather than in
+        // the tool, because the answer is the same for every tool that grows
+        // the argument.
+        let named: Vec<&str> = args
+            .get("secrets")
+            .and_then(|s| s.as_array())
+            .map(|names| names.iter().filter_map(|n| n.as_str()).collect())
+            .unwrap_or_default();
+        if named.is_empty() {
+            return preview;
         }
+        let spent = format!("uses the secret {}", named.join(", "));
+        Some(match preview {
+            Some(preview) => format!("{spent}\n\n{preview}"),
+            None => spent,
+        })
     }
 }
 
@@ -664,6 +682,10 @@ pub struct AgentLoop<'a> {
     pub tool_ctx: ToolContext,
     pub session: u128,
     pub policy: std::sync::Arc<Policy>,
+    /// The secrets this machine holds, and what has been handed to a tool this
+    /// turn. Per turn on purpose: a value resolved for one turn is not in
+    /// memory for the next, and the loop is rebuilt for every turn.
+    vault: std::sync::Arc<crate::secrets::Vault>,
     pub hooks: std::sync::Arc<Hooks>,
     pub servers: std::sync::Arc<crate::lsp::Servers>,
     /// Who condenses a span when the context fills. `None` builds it from
@@ -719,7 +741,7 @@ pub struct AgentLoop<'a> {
 
 impl<'a> AgentLoop<'a> {
     pub fn new(rook: &'a Rook, provider: std::sync::Arc<dyn Provider>, session: u128) -> Self {
-        let tool_ctx = tool_context(&rook.config, &rook.workspace, &rook.output_dir);
+        let mut tool_ctx = tool_context(&rook.config, &rook.workspace, &rook.output_dir);
 
         // No language servers until a front end hands them over with `equip`.
         // A loop is rebuilt for every turn, so a pool built here is rebuilt with
@@ -748,6 +770,14 @@ impl<'a> AgentLoop<'a> {
             }
         }
 
+        // Read once per turn. A machine with no secrets file gets an empty one,
+        // which answers every name with "no such secret" and costs nothing.
+        let vault = std::sync::Arc::new(crate::secrets::Vault::load().unwrap_or_else(|e| {
+            tracing::warn!("secrets are unreadable, so none are offered: {e}");
+            crate::secrets::Vault::empty()
+        }));
+        tool_ctx.secrets = Some(vault.clone());
+
         let (hooks, bad_hooks) = Hooks::compile(&rook.config.hooks);
         for error in bad_hooks {
             tracing::warn!("ignoring unusable hook matcher: {error}");
@@ -762,6 +792,7 @@ impl<'a> AgentLoop<'a> {
             tool_ctx,
             session,
             policy: policy_for(&rook.config),
+            vault,
             hooks: std::sync::Arc::new(hooks),
             servers,
             summariser: None,
@@ -2576,6 +2607,11 @@ impl<'a> AgentLoop<'a> {
         {
             text.push_str(&format!("\n\n{broken}"));
         }
+        // The one place a tool's answer becomes context, so the one place a
+        // value has to be taken back out of it: before the model reads it and
+        // before the store keeps it. A command's output, a page, a file and an
+        // MCP server's answer are all the same question here.
+        let text = self.vault.redact(&text);
         self.rook.log(self.session, EventKind::ToolResult, &call.name, &text).ok();
         (text, outcome.is_error)
     }

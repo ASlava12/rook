@@ -31,6 +31,7 @@ pub mod paths;
 pub mod plugins;
 pub mod script;
 pub mod search;
+pub mod secrets;
 pub mod service;
 pub mod telemetry;
 
@@ -39,6 +40,7 @@ pub use docs::{DocSet, Kept};
 pub use error::{CoreError, Result};
 pub use fileset::{CaptureLimits, Change, FileSet};
 pub use memory::{Fact, MemoryBook, Scope};
+pub use secrets::{Named, Source, Vault};
 pub use service::{
     AGENT_VERSION, AuthoredSkill, ContextUsage, KindUsage, MaintenanceReport, McpSession, MemoryVersion,
     Rewind, Rollback, Rook, SessionSummary, SkillCandidate, SkillVersionRecord, SkillWhy, TranscriptEntry,

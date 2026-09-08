@@ -105,6 +105,13 @@ enum Command {
     /// The documentation the agent has gathered and reads from.
     #[command(subcommand)]
     Docs(DocsCmd),
+    /// Secrets the agent can use by name, and never see the value of.
+    #[command(subcommand)]
+    Secrets(SecretsCmd),
+    /// Print a secret to whatever asked for a password. Set as `SSH_ASKPASS`
+    /// for a command that names one; not useful by hand.
+    #[command(hide = true)]
+    Askpass { name: String },
     /// Ask the language servers what the agent would ask them.
     #[command(subcommand)]
     Lsp(LspCmd),
@@ -230,6 +237,24 @@ enum DocsCmd {
         #[arg(long)]
         version: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum SecretsCmd {
+    /// What is set, where each comes from, and whether it answers. Never a
+    /// value: there is no command here that prints one.
+    Ls,
+    /// Keep a value on this machine, typed rather than passed — an argument
+    /// would be in the shell's history before the agent ever saw it.
+    Add {
+        name: String,
+        /// Where the value lives instead of here: `env:NAME`, `cmd:op read …`,
+        /// `keychain:service/account`. Without it, the value is asked for.
+        #[arg(long)]
+        source: Option<String>,
+    },
+    /// Drop one.
+    Rm { name: String },
 }
 
 #[derive(Subcommand)]
@@ -458,6 +483,21 @@ fn main() -> Result<()> {
             cmd_memory(&Source::open(cli.workspace)?, c, &here, cli.json)
         }
         Some(Command::Docs(c)) => cmd_docs(&Source::open(cli.workspace)?, c, cli.json),
+        Some(Command::Secrets(c)) => cmd_secrets(&Source::open(cli.workspace)?, c, cli.json),
+        // Answered before anything else is built: it is spawned by `ssh` in the
+        // middle of a command, and everything this binary does on the way to a
+        // subcommand — opening a store, starting a daemon — is time a password
+        // prompt is waiting on.
+        Some(Command::Askpass { name }) => {
+            let variable = format!("ROOK_SECRET_{}", name.to_uppercase().replace('-', "_"));
+            match std::env::var(&variable) {
+                Ok(value) => {
+                    println!("{value}");
+                    Ok(())
+                }
+                Err(_) => bail!("{variable} is not in this environment — nothing asked for {name:?}"),
+            }
+        }
         Some(Command::Lsp(c)) => cmd_lsp(cli.workspace, c, cli.json),
         Some(Command::Search { query, session, conversation, limit }) => cmd_search(
             &Source::open(cli.workspace)?,
@@ -2082,6 +2122,101 @@ fn cmd_lsp(workspace: Option<PathBuf>, cmd: LspCmd, json: bool) -> Result<()> {
         }
         anyhow::Ok(())
     })
+}
+
+/// A line off the terminal with nothing shown for it.
+///
+/// Through crossterm, which this binary already carries for the TUI, rather
+/// than a crate for the one function: raw mode, characters until Enter, and
+/// nothing echoed. Ctrl-C leaves without keeping anything, because a password
+/// half-typed and abandoned should not become a secret.
+fn read_hidden(prompt: &str) -> Result<String> {
+    use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
+    use std::io::{IsTerminal, Write};
+
+    if !std::io::stdin().is_terminal() {
+        bail!(
+            "there is no terminal to type into. Run this where you can type, or name where the \
+             value lives instead: --source env:NAME"
+        );
+    }
+    print!("{prompt}");
+    std::io::stdout().flush().ok();
+    crossterm::terminal::enable_raw_mode().context("taking the terminal to read without echo")?;
+    let mut typed = String::new();
+    let read = loop {
+        match crossterm::event::read() {
+            Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => match key.code {
+                KeyCode::Enter => break Ok(()),
+                KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
+                    break Err(anyhow::anyhow!("cancelled, and nothing was kept"));
+                }
+                KeyCode::Backspace => {
+                    typed.pop();
+                }
+                KeyCode::Char(c) => typed.push(c),
+                _ => {}
+            },
+            Ok(_) => {}
+            Err(e) => break Err(anyhow::anyhow!("reading the terminal: {e}")),
+        }
+    };
+    // Always, whatever happened: a terminal left in raw mode is a shell that
+    // stops echoing anything the user types next.
+    crossterm::terminal::disable_raw_mode().ok();
+    println!();
+    read.map(|()| typed)
+}
+
+fn cmd_secrets(source: &Source, cmd: SecretsCmd, json: bool) -> Result<()> {
+    match cmd {
+        SecretsCmd::Ls => {
+            let kept = source.secrets()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&kept)?);
+                return Ok(());
+            }
+            if kept.is_empty() {
+                println!(
+                    "nothing set. `rook secrets add <name>` keeps a value here, or names where it \
+                     already lives: --source env:NAME, cmd:… or keychain:service/account.\n\
+                     A command uses one by name: run_command {{\"secrets\": [\"<name>\"]}}."
+                );
+                return Ok(());
+            }
+            for secret in &kept {
+                let answers = match secret.resolves {
+                    true => "",
+                    false => "  — does not answer right now",
+                };
+                println!("{:<24} {}{answers}", secret.name, secret.source);
+            }
+        }
+        SecretsCmd::Add { name, source: from } => match from {
+            Some(from) => {
+                let parsed = rook_core::Source::parse(&from).with_context(|| {
+                    format!("{from:?} is not a source — env:NAME, cmd:<command>, keychain:service/account")
+                })?;
+                source.refer_secret(&name, &parsed)?;
+                println!("{name} reads from {}", parsed.as_str());
+            }
+            None => {
+                // Off the terminal with the echo off: an argument would be in
+                // the shell's history, and a pipe would be in whatever wrote it.
+                let value = read_hidden("value (not echoed): ")?;
+                if value.trim().is_empty() {
+                    bail!("nothing was typed, so nothing was kept");
+                }
+                source.keep_secret(&name, &value)?;
+                println!("kept as {name} — a command uses it with `secrets: [\"{name}\"]`");
+            }
+        },
+        SecretsCmd::Rm { name } => match source.forget_secret(&name)? {
+            true => println!("dropped {name}"),
+            false => bail!("no secret {name:?}"),
+        },
+    }
+    Ok(())
 }
 
 fn cmd_docs(source: &Source, cmd: DocsCmd, json: bool) -> Result<()> {

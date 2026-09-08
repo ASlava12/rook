@@ -27,6 +27,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("effort", "[name]", "how much the model may think: low … max"),
     ("memory", "[query]", "what it remembers, or what matches"),
     ("docs", "[topic]", "documentation kept here, or gather a topic's"),
+    ("secrets", "", "what the agent can use by name, never the values"),
     ("search", "<query>", "find it in everything said, read and run"),
     ("diff", "", "what this session has changed on disk"),
     ("btw", "<question>", "ask about this conversation without joining it"),
@@ -468,6 +469,30 @@ pub async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command
             for fact in facts {
                 let pin = if fact.pinned { "* " } else { "  " };
                 say!("{pin}[{}] {}", fact.id, fact.text);
+            }
+        }
+
+        // Listing only. Keeping one means typing a value, and a value typed
+        // into this box is a value in the session log, in the store and in the
+        // next request to the model — which is the whole thing being prevented.
+        "secrets" => {
+            let vault = rook_core::Vault::load()?;
+            let kept = vault.named();
+            if kept.is_empty() {
+                say!("nothing set — `rook secrets add <name>` in a terminal, or the browser's Secrets tab");
+            }
+            for secret in kept {
+                let answers = match secret.resolves {
+                    true => "",
+                    false => "  — does not answer right now",
+                };
+                say!("{:<24} {}{answers}", secret.name, secret.source);
+            }
+            if !rest.is_empty() {
+                say!(
+                    "\nvalues are set where they can be typed without being logged: `rook secrets \
+                     add {rest}` in a terminal, or the browser's Secrets tab"
+                );
             }
         }
 

@@ -137,6 +137,60 @@ export async function renderCheckpoints() {
       : el('p', { class: 'empty' }, 'nothing snapshotted yet — the agent takes its own before every write, and those are what a rewind puts back; these are yours')));
 }
 
+// Secrets, managed and never shown. The page can set one and drop one; there is
+// no call anywhere that returns a value, so there is nothing here to leak — the
+// list is names, where each comes from, and whether it answers.
+export async function renderSecrets() {
+  const { items } = await api('/api/secrets');
+
+  const set = async () => {
+    const name = $('#secret-name').value.trim();
+    const value = $('#secret-value').value;
+    const from = $('#secret-source').value.trim();
+    if (!name) return;
+    if (!value && !from) { alert('a secret needs a value or a source'); return; }
+    try {
+      // One of the two, and the value never comes back: the field is cleared
+      // here rather than waiting for a re-render, so it is not sitting in the
+      // page while the request is in flight.
+      const body = from ? { name, source: from } : { name, value };
+      $('#secret-value').value = '';
+      await api('/api/secrets', body);
+      renderSecrets();
+    } catch (e) {
+      alert(e.error || e);
+    }
+  };
+
+  const drop = async (row) => {
+    if (!confirm(`Drop the secret "${row.name}"? Anything using it stops working.`)) return;
+    try {
+      await api('/api/secrets/forget', { name: row.name });
+      renderSecrets();
+    } catch (e) {
+      alert(e.error || e);
+    }
+  };
+
+  const rows = items.map(row => el('tr', {},
+    el('td', {}, row.name),
+    el('td', { class: 't' }, row.source),
+    el('td', { class: row.resolves ? 'ok' : 'warn' }, row.resolves ? 'answers' : 'does not answer'),
+    el('td', {}, el('button', { onclick: () => drop(row) }, 'Drop'))));
+
+  $('#view').replaceChildren(el('div', { class: 'card' },
+    el('h2', {}, `secrets (${items.length})`),
+    el('p', { class: 'sub' }, 'The agent uses these by name — run_command {"secrets": ["name"]} — and never sees a value. Nothing here, and no other page, can read one back.'),
+    el('form', { class: 'ask', onsubmit: (e) => { e.preventDefault(); set(); } },
+      el('input', { id: 'secret-name', placeholder: 'name, e.g. ssh_prod' }),
+      el('input', { id: 'secret-value', type: 'password', autocomplete: 'new-password', placeholder: 'value…' }),
+      el('input', { id: 'secret-source', placeholder: 'or where it lives: env:NAME, cmd:…' }),
+      el('button', {}, 'Keep')),
+    items.length
+      ? el('table', {}, el('tr', {}, ['name', 'from', '', ''].map(h => el('th', {}, h))), rows)
+      : el('p', { class: 'empty' }, 'nothing set — a value typed here is kept on this machine in ~/.rook/secrets.toml, 0600; a source names where it already lives and keeps it there')));
+}
+
 // The documentation the agent gathered, with both addresses on every page: the
 // local copy an answer was made of, and the source anybody else can check.
 // Gathering from here as well as from a terminal, because a page that can only

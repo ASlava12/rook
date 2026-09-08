@@ -36,6 +36,8 @@ pub fn router(state: Shared) -> Router {
         .route("/api/memory/history", get(memory_history))
         .route("/api/memory/diff", get(memory_diff))
         .route("/api/memory/since", get(memory_since))
+        .route("/api/secrets", get(secrets).post(set_secret))
+        .route("/api/secrets/forget", post(forget_secret))
         .route("/api/docs", get(docs_kept).post(gather_docs))
         .route("/api/docs/forget", post(forget_docs))
         .route("/api/docs/{topic}", get(docs))
@@ -316,6 +318,69 @@ async fn memory(
         None => book.in_scope(&workspace).cloned().collect(),
     };
     Ok(Json(Page::new(facts)))
+}
+
+/// What is set and whether it answers. There is no endpoint that returns a
+/// value, and adding one would undo the rest of this: a browser that can read a
+/// secret is a browser that can leak one, and the page never needs to.
+async fn secrets(State(_): State<Shared>) -> ApiResult<Page<rook_core::Named>> {
+    let vault = rook_core::Vault::load().map_err(Fail::from)?;
+    Ok(Json(Page::new(vault.named())))
+}
+
+#[derive(Deserialize)]
+struct SetSecret {
+    name: String,
+    /// The value itself, typed by a person into a page or a terminal. It
+    /// travels this way once, over the loopback connection the daemon listens
+    /// on, and is never sent back.
+    #[serde(default)]
+    value: Option<String>,
+    /// Or where the value already lives, which is better when it does.
+    #[serde(default)]
+    source: Option<String>,
+}
+
+async fn set_secret(State(_): State<Shared>, Json(body): Json<SetSecret>) -> ApiResult<serde_json::Value> {
+    let mut vault = rook_core::Vault::load().map_err(Fail::from)?;
+    match (body.value, body.source) {
+        (_, Some(source)) => {
+            let parsed = rook_core::Source::parse(&source).ok_or_else(|| {
+                Fail(
+                    StatusCode::BAD_REQUEST,
+                    ApiError::new(
+                        "bad_request",
+                        format!("{source:?} is not a source — env:NAME, cmd:…, keychain:service/account"),
+                    ),
+                )
+            })?;
+            vault.refer(&body.name, &parsed).map_err(Fail::from)?;
+        }
+        (Some(value), None) if !value.trim().is_empty() => {
+            vault.keep(&body.name, &value).map_err(Fail::from)?;
+        }
+        _ => {
+            return Err(Fail(
+                StatusCode::BAD_REQUEST,
+                ApiError::new("bad_request", "a secret needs a value or a source"),
+            ));
+        }
+    }
+    Ok(Json(serde_json::json!({ "kept": body.name })))
+}
+
+#[derive(Deserialize)]
+struct ForgetSecret {
+    name: String,
+}
+
+async fn forget_secret(
+    State(_): State<Shared>,
+    Json(body): Json<ForgetSecret>,
+) -> ApiResult<serde_json::Value> {
+    let mut vault = rook_core::Vault::load().map_err(Fail::from)?;
+    let dropped = vault.forget(&body.name).map_err(Fail::from)?;
+    Ok(Json(serde_json::json!({ "dropped": dropped })))
 }
 
 #[derive(Deserialize)]
@@ -1200,6 +1265,40 @@ mod tests {
         let items = body["items"].as_array().unwrap();
         assert_eq!(items.len(), 1, "{body}");
         assert!(items[0]["body"].as_str().unwrap().contains("find the leak"), "{body}");
+    }
+
+    /// The property the whole feature rests on: no call anywhere hands a value
+    /// back. A browser that can read a secret is a browser that can leak one,
+    /// and the page never needs to.
+    #[tokio::test]
+    async fn secrets_are_set_and_listed_over_http_and_never_read_back() {
+        let f = fixture();
+        const PASSWORD: &str = "hunter2-and-then-some";
+
+        let (status, _) =
+            post(&f, "/api/secrets", serde_json::json!({ "name": "ssh_prod", "value": PASSWORD })).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, body) = get(&f, "/api/secrets").await;
+        assert_eq!(status, StatusCode::OK);
+        let listed = body.to_string();
+        assert!(listed.contains("ssh_prod"), "{listed}");
+        assert!(listed.contains("kept"), "where it comes from: {listed}");
+        assert!(!listed.contains(PASSWORD), "and never the value itself: {listed}");
+
+        // A source names where a value lives without holding it, and a spelling
+        // nothing can act on is said rather than kept.
+        let (status, _) =
+            post(&f, "/api/secrets", serde_json::json!({ "name": "npm", "source": "env:NPM_TOKEN" })).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) =
+            post(&f, "/api/secrets", serde_json::json!({ "name": "bad", "source": "nonsense" })).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let (status, body) = post(&f, "/api/secrets/forget", serde_json::json!({ "name": "ssh_prod" })).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["dropped"], true, "{body}");
+        assert!(!get(&f, "/api/secrets").await.1.to_string().contains("ssh_prod"));
     }
 
     /// The browser reads and drops sets through these; the gathering endpoint

@@ -347,6 +347,54 @@ impl Source {
         }
     }
 
+    // ------------------------------------------------------------- secrets
+
+    /// What is set, where each comes from, and whether it answers — never a
+    /// value. There is no method here that returns one, and no endpoint behind
+    /// it that would: that is the property the whole feature rests on.
+    pub fn secrets(&self) -> Result<Vec<rook_core::Named>> {
+        match self {
+            // Read straight off the file rather than through the engine: a
+            // window with no daemon still manages secrets, and the file is the
+            // user's, not the store's.
+            Self::Local(_) => Ok(rook_core::Vault::load()?.named()),
+            Self::Daemon(d) => Ok(d.get::<Page<rook_core::Named>>("/api/secrets")?.items),
+        }
+    }
+
+    pub fn keep_secret(&self, name: &str, value: &str) -> Result<()> {
+        match self {
+            Self::Local(_) => Ok(rook_core::Vault::load()?.keep(name, value)?),
+            Self::Daemon(d) => {
+                let _: serde_json::Value =
+                    d.post("/api/secrets", &serde_json::json!({ "name": name, "value": value }))?;
+                Ok(())
+            }
+        }
+    }
+
+    pub fn refer_secret(&self, name: &str, source: &rook_core::Source) -> Result<()> {
+        match self {
+            Self::Local(_) => Ok(rook_core::Vault::load()?.refer(name, source)?),
+            Self::Daemon(d) => {
+                let _: serde_json::Value =
+                    d.post("/api/secrets", &serde_json::json!({ "name": name, "source": source.as_str() }))?;
+                Ok(())
+            }
+        }
+    }
+
+    pub fn forget_secret(&self, name: &str) -> Result<bool> {
+        match self {
+            Self::Local(_) => Ok(rook_core::Vault::load()?.forget(name)?),
+            Self::Daemon(d) => {
+                let said: serde_json::Value =
+                    d.post("/api/secrets/forget", &serde_json::json!({ "name": name }))?;
+                Ok(said["dropped"].as_bool().unwrap_or(false))
+            }
+        }
+    }
+
     // ------------------------------------------------------- documentation
 
     pub fn docs_kept(&self) -> Result<Vec<rook_core::docs::Kept>> {

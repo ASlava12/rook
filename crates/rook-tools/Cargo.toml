@@ -25,6 +25,9 @@ tracing = "0.1.44"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.180"
+# The askpass helper is a file that has to be somewhere no other user can
+# pre-create: a predictable name under /tmp is a symlink waiting to be made.
+tempfile = "3.27.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4"

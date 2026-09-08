@@ -397,3 +397,68 @@ async fn an_ordinary_command_does_not_wait_for_the_grace_the_other_one_needs() {
     assert!(!out.content.contains("still running"), "nothing was left running: {}", out.content);
     assert!(took < std::time::Duration::from_secs(1), "and it answered at once: {took:?}");
 }
+
+/// `ssh` takes a password from a terminal and from nowhere else — not from an
+/// argument, not from the environment — so a secret reaches it only through the
+/// helper OpenSSH already asks for. Standing in for ssh here, because a test
+/// that reaches a host tests the host: what is claimed is that the program
+/// named by `SSH_ASKPASS` prints the value, and that the value is in no argument.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_secret_reaches_a_program_that_only_reads_a_terminal() {
+    struct One(&'static str, &'static str);
+    impl rook_tools::Secrets for One {
+        fn value(&self, name: &str) -> Option<String> {
+            (name == self.0).then(|| self.1.to_string())
+        }
+    }
+
+    let (_d, mut ctx) = ctx();
+    ctx.secrets = Some(std::sync::Arc::new(One("ssh_prod", "hunter2-and-then-some")));
+    let out = run(
+        &ctx,
+        serde_json::json!({
+            // What ssh does with the helper, done by hand: run it and read
+            // what it prints.
+            "command": "\"$SSH_ASKPASS\"",
+            "secrets": ["ssh_prod"]
+        }),
+    )
+    .await;
+
+    assert!(!out.is_error, "{}", out.content);
+    assert!(out.content.contains("hunter2-and-then-some"), "the helper hands it over: {}", out.content);
+    // And OpenSSH is told to use it without a terminal, or it never asks.
+    let told =
+        run(&ctx, serde_json::json!({ "command": "echo $SSH_ASKPASS_REQUIRE", "secrets": ["ssh_prod"] }))
+            .await;
+    assert!(told.content.contains("force"), "{}", told.content);
+}
+
+/// The helper is a file with a line of shell in it, not a file with a password
+/// in it — and it is gone when the command is.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_askpass_helper_holds_no_value_and_does_not_outlive_the_command() {
+    struct One;
+    impl rook_tools::Secrets for One {
+        fn value(&self, _: &str) -> Option<String> {
+            Some("hunter2-and-then-some".into())
+        }
+    }
+
+    let (_d, mut ctx) = ctx();
+    ctx.secrets = Some(std::sync::Arc::new(One));
+    let out = run(
+        &ctx,
+        serde_json::json!({ "command": "cat \"$SSH_ASKPASS\"; echo AT $SSH_ASKPASS", "secrets": ["x"] }),
+    )
+    .await;
+
+    assert!(!out.content.contains("hunter2"), "the script carries no value: {}", out.content);
+    assert!(out.content.contains("ROOK_SECRET_X"), "it prints the variable it inherits: {}", out.content);
+
+    let at = out.content.split("AT ").nth(1).unwrap_or_default().trim().to_string();
+    assert!(!at.is_empty(), "{}", out.content);
+    assert!(!std::path::Path::new(&at).exists(), "the helper outlived the command: {at}");
+}

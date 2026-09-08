@@ -260,6 +260,47 @@ instance does not also allow somebody else's. An engine named without the key it
 needs is offered as nothing at all — a tool that fails on its first call teaches
 the model to stop asking.
 
+### Secrets it can use and cannot leak
+
+A password the agent needs is named in everything it sees and valued only
+inside the tool, on the way out:
+
+```sh
+rook secrets add ssh_prod                 # typed, not echoed, never an argument
+rook secrets add npm --source env:NPM_TOKEN    # or say where it already lives
+rook secrets ls                           # names, sources, whether they answer
+```
+
+```
+run_command { "command": "sshpass -e ssh deploy@prod 'systemctl restart api'",
+              "secrets": ["ssh_prod"] }
+```
+
+The value becomes `$ROOK_SECRET_SSH_PROD` in that command's environment and
+nothing else: not the tool call, not the session log, not the store, not what
+compaction summarises, not what a sub-agent inherits, and not the next request
+to the provider. Whatever the command prints comes back with the value taken out
+of it, at the one place a tool's answer becomes context. The approval names the
+secret a call would spend, so what is granted is visible.
+
+`ssh` reads a password from a terminal and nowhere else, so a command naming one
+secret is also given `SSH_ASKPASS`, `GIT_ASKPASS` and `SUDO_ASKPASS` pointing at
+a helper that prints the variable it inherits — the value is in no argument, and
+the helper is gone with the command.
+
+Values live in `~/.rook/secrets.toml`, 0600, in the clear — the same property as
+an unencrypted SSH key or `~/.aws/credentials`. A value that already lives in a
+password manager stays there: `env:`, `cmd:op read …` and `keychain:service/account`
+name where to get it. **No call returns a value** — not the CLI, not the API, not
+the browser. There is no `show`.
+
+What it does not do is stop a model printing one on purpose: a command that can
+use a secret can echo it in an encoding no redaction catches.
+[ADR-0013](docs/adr/0013-secrets-are-named-never-valued.md) says so plainly —
+this stops the way secrets actually reach transcripts, which is by accident.
+The same secrets are `rook secrets`, `/secrets` in a chat, and a tab in the
+browser.
+
 ### Documentation it keeps
 
 A model asked about Redis answers from what it was trained on, which was a year

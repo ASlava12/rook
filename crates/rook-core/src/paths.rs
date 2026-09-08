@@ -36,6 +36,13 @@ pub fn store_dir() -> PathBuf {
     home().join("store")
 }
 
+/// Where secrets live: beside the config and not in the store, which is
+/// content-addressed, searchable and copied by a fork — every property that
+/// makes it good is the wrong one here.
+pub fn secrets_file() -> PathBuf {
+    home().join("secrets.toml")
+}
+
 pub fn config_file() -> PathBuf {
     home().join("config.toml")
 }

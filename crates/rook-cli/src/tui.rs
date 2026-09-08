@@ -2879,7 +2879,7 @@ mod tests {
         assert!(all.len() > 10, "everything, for a bare slash: {}", all.len());
 
         let se: Vec<&str> = crate::chat::commands_matching("/se").iter().map(|(n, ..)| *n).collect();
-        assert_eq!(se, ["session", "search"], "two share the prefix, so both are offered");
+        assert_eq!(se, ["session", "secrets", "search"], "everything sharing the prefix is offered");
 
         let past = crate::chat::commands_matching("/search rook");
         assert_eq!(past.len(), 1, "past the name it is an argument, not a prefix");

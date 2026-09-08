@@ -107,6 +107,15 @@ pub trait Terminals: Send + Sync {
     async fn run(&self, command: &str, cwd: &std::path::Path, output_limit: usize) -> Result<Ran>;
 }
 
+/// Where a tool gets a secret's value, when a call names one.
+///
+/// A trait rather than a map, and asked per call rather than filled in per
+/// turn: the value is fetched when it is about to be used and the thing that
+/// answers is the thing that later takes it back out of what comes back.
+pub trait Secrets: Send + Sync {
+    fn value(&self, name: &str) -> Option<String>;
+}
+
 /// What a command did, however it was run.
 pub struct Ran {
     pub output: String,
@@ -147,6 +156,10 @@ pub struct ToolContext {
     /// call; this caps the looking, which is what turns a walk of somebody's
     /// home directory into a hang.
     pub max_files_searched: usize,
+    /// Where a named secret's value comes from, when a call names one. `None`
+    /// where nothing set it, and then a call naming a secret is refused rather
+    /// than run without it.
+    pub secrets: Option<Arc<dyn Secrets>>,
 }
 
 impl std::fmt::Debug for ToolContext {
@@ -209,6 +222,7 @@ impl ToolContext {
             spill_dir: None,
             max_spill_bytes: 0,
             max_files_searched: 20_000,
+            secrets: None,
         }
     }
 
