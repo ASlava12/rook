@@ -402,8 +402,23 @@ fn refs(action: RefsCmd) -> Result<()> {
                     );
                     continue;
                 }
-                let (head, behind) = upstream(r)?;
-                println!("{:<12} {:<10} {:<10} {}", r.name, short(&pin), short(&head), behind);
+                // One unreachable remote is not eight: GitHub rate-limits a
+                // burst of fetches, and abandoning the whole listing on the
+                // first 429 hid what the other seven had drifted by — the
+                // question the listing exists to answer.
+                match upstream(r) {
+                    Ok((head, behind)) => {
+                        println!("{:<12} {:<10} {:<10} {}", r.name, short(&pin), short(&head), behind)
+                    }
+                    Err(e) => {
+                        let why = e.to_string();
+                        let said = match why.contains("429") || why.to_lowercase().contains("rate-limit") {
+                            true => "rate-limited by the host — try again in a few minutes".into(),
+                            false => why.lines().next().unwrap_or("could not be fetched").to_string(),
+                        };
+                        println!("{:<12} {:<10} {:<10} {said}", r.name, short(&pin), "?");
+                    }
+                }
             }
             println!("\nAdvancing a pointer is how upstream work gets triaged; see references/PORTED.md.");
             Ok(())

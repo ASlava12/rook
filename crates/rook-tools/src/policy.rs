@@ -263,13 +263,76 @@ pub enum Decision {
 /// and does not claim to be a sandbox. What cannot be taken apart is still
 /// asked about rather than allowed.
 fn carriers(line: &str) -> Vec<String> {
-    let mut out = vec![line.to_string()];
+    let mut out = Vec::new();
+    carried(line, 0, &mut out);
+    out
+}
+
+/// Depth, because a carrier can carry one: `env -S '$(rm -rf /)'` is both of
+/// them at once. Three is past anything anybody writes on purpose and stops a
+/// line of nested substitutions from costing time to refuse.
+fn carried(line: &str, depth: usize, out: &mut Vec<String>) {
+    out.push(line.to_string());
+    if depth >= 3 {
+        return;
+    }
     for part in line.split([';', '&', '|', '\n']) {
         if let Some(bare) = past_env(part.trim())
             && !bare.trim().is_empty()
         {
-            out.push(bare);
+            carried(&bare, depth + 1, out);
         }
+    }
+    for body in substituted(line) {
+        carried(&body, depth + 1, out);
+    }
+}
+
+/// The commands inside `$(…)` and backticks.
+///
+/// They run, and a rule anchored to command position does not see them: in
+/// `echo "$(rm -rf /)"` the `rm` is preceded by a bracket, which is not the
+/// start of a line and not a separator, so the rule that denies `rm -rf /`
+/// matched nothing. `commands_in` already refuses to take such a line apart —
+/// that is what sends it to a person — but a denial is not a question, and it
+/// has to hold on its own. Read off hermes, whose approval scanner spent a
+/// commit on the same brackets the same week.
+fn substituted(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let bytes: Vec<char> = line.chars().collect();
+    let mut at = 0;
+    while at < bytes.len() {
+        match bytes[at] {
+            '$' if bytes.get(at + 1) == Some(&'(') => {
+                let mut depth = 0;
+                let mut end = at + 1;
+                while end < bytes.len() {
+                    match bytes[end] {
+                        '(' => depth += 1,
+                        ')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    end += 1;
+                }
+                if end < bytes.len() {
+                    out.push(bytes[at + 2..end].iter().collect());
+                    at = end;
+                }
+            }
+            '`' => {
+                if let Some(end) = bytes[at + 1..].iter().position(|c| *c == '`') {
+                    out.push(bytes[at + 1..at + 1 + end].iter().collect());
+                    at += end + 1;
+                }
+            }
+            _ => {}
+        }
+        at += 1;
     }
     out
 }

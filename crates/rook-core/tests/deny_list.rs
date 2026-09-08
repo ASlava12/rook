@@ -132,3 +132,39 @@ fn a_line_of_nothing_but_allowed_commands_still_runs() {
         assert!(runs_without_asking(command), "{command:?} is allowed and should not ask");
     }
 }
+
+/// The third carrier of the same family, and the same week hermes spent a
+/// commit on it: the commands inside `$(…)` and backticks run, and a rule
+/// anchored to command position does not see them — `rm` there is preceded by
+/// a bracket, which is neither the start of a line nor a separator. The line is
+/// already one nobody may run without being asked; a denial is not a question,
+/// and has to hold on its own.
+#[test]
+fn a_command_inside_a_substitution_is_still_the_command() {
+    for hidden in [
+        "echo \"$(rm -rf /)\"",
+        "echo `rm -rf /`",
+        "x=$(rm -rf /) echo done",
+        "printf '%s' \"$(sudo rm -rf /)\"",
+        // Both carriers at once, which is what a depth is for.
+        "env -S 'echo $(rm -rf /)'",
+        "echo \"$(env -i rm -rf /)\"",
+    ] {
+        assert!(refuses(hidden), "carried past the deny list: {hidden}");
+    }
+}
+
+/// And the half that keeps the list worth having: a substitution is how a shell
+/// line is written, and refusing every line with one in it would refuse most of
+/// them.
+#[test]
+fn an_ordinary_substitution_is_ordinary() {
+    for fine in [
+        "echo \"$(date)\"",
+        "cd \"$(git rev-parse --show-toplevel)\" && cargo test",
+        "for f in $(ls); do echo $f; done",
+        "echo `whoami`",
+    ] {
+        assert!(!refuses(fine), "refused something harmless: {fine}");
+    }
+}

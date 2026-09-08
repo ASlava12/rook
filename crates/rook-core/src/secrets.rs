@@ -165,7 +165,14 @@ impl Vault {
     /// Hold a value here, because there was nowhere else to put it.
     pub fn keep(&mut self, name: &str, value: &str) -> Result<()> {
         let name = usable_name(name)?;
-        self.entries.insert(name, Entry { value: Some(value.to_string()), source: None });
+        let value = cleaned(value);
+        if value.is_empty() {
+            return Err(crate::CoreError::Other(format!(
+                "{name:?} would be empty: what was given is whitespace and invisible characters, \
+                 which is what a bad paste looks like"
+            )));
+        }
+        self.entries.insert(name, Entry { value: Some(value), source: None });
         self.save()
     }
 
@@ -206,12 +213,16 @@ impl Vault {
     }
 
     fn value_of(&self, entry: &Entry) -> Option<String> {
-        match self.source_of(entry) {
+        let raw = match self.source_of(entry) {
             Source::Kept => entry.value.clone(),
-            Source::Env(name) => std::env::var(name).ok().filter(|v| !v.is_empty()),
+            Source::Env(name) => std::env::var(name).ok(),
             Source::Command(line) => from_command(&line),
             Source::Keychain(what) => from_keychain(&what),
-        }
+        };
+        // Every source, not only the one typed here: a variable exported by a
+        // script keeps its trailing newline, and a manager that prints a banner
+        // prints it in whatever encoding it likes.
+        raw.map(|value| cleaned(&value)).filter(|value| !value.is_empty())
     }
 
     /// The value, and remembered as handed out so it can be taken back out of
@@ -295,6 +306,28 @@ fn from_keychain(what: &str) -> Option<String> {
         let value = String::from_utf8(out.stdout).ok()?.trim_end_matches(['\n', '\r']).to_string();
         (!value.is_empty()).then_some(value)
     }
+}
+
+/// A value without what a paste puts around it.
+///
+/// Ported from cline: a key pasted with a byte-order mark or a zero-width space
+/// is stored corrupted and then answers 401 indistinguishably from a wrong one
+/// — and here nothing prints a value, so the one way to see the difference is
+/// gone. Control and format characters are never part of a credential, and
+/// neither is the whitespace around one.
+fn cleaned(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| {
+            !c.is_control()
+                // Cf, which `is_control` does not cover: the byte-order mark, the
+                // zero-width spaces and joiners, the bidirectional marks, and the
+                // soft hyphen a word processor leaves behind.
+                && !matches!(c, '\u{200B}'..='\u{200F}' | '\u{2060}' | '\u{FEFF}' | '\u{00AD}')
+        })
+        .collect::<String>()
+        .trim()
+        .to_string()
 }
 
 /// A name a tool argument can carry and a shell can hold in a variable.

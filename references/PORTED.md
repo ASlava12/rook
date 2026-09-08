@@ -1635,3 +1635,69 @@ The rest is theirs, and the shape of the list is the usual one: Matrix,
 Mattermost and Feishu channels, a webchat surface, ClawHub skill types, plugin
 compatibility fixtures, release calibration, and about forty commits of test
 matrices being compacted.
+
+## The daily pass, 2026-09-08
+
+Eight pointers moved the same day the backlog was closed, which is what a daily
+drift looks like. Two ports, and both were the same lesson arriving twice.
+
+**cline fc28a5fe3 → 8ff5f22cf.** Two commits, one ported. `sanitize credential
+fields when saving provider settings` is a key pasted with a byte-order mark or
+a zero-width space: it is stored corrupted and then answers 401 exactly as a
+wrong key does. That lands here on the day secrets were built, and worse —
+nothing here prints a value, so the one way to tell a corrupt key from a wrong
+one is gone. A value is cleaned of control and format characters and of the
+whitespace around it, on the way in and out of every source: what is typed here,
+what a variable holds, what a manager prints. One made only of invisible
+characters is refused rather than kept as an empty secret that looks set. Their
+other commit is a webview offering a model switch for an image the model cannot
+read.
+
+**hermes 866332bfb → c8aa5608c, read but not advanced.** The pointer stays where
+it was: the host rate-limited the fetch that `advance` makes, twice, and moving
+a pointer without being able to re-read what it points at is a pointer nobody
+can trust. The range was readable because an earlier fetch had already brought
+it. A range this size is not a day's work and is not read as one either: the
+count this morning was capped by a shallow fetch, so the 1,384 is what was
+always there rather than what arrived. Read by subject, and
+one of them is the third carrier of a bug this repository has now fixed twice.
+`a quoted $(...)/backtick body keeps its command boundaries` is command position
+again: the commands inside a substitution run, and `rm` there is preceded by a
+bracket — not the start of a line, not a separator — so the rule that denies
+`rm -rf /` matched nothing in `echo "$(rm -rf /)"`. `commands_in` already
+refuses to take such a line apart, which is what sends it to a person; but a
+denial is not a question and has to hold on its own. Substitution bodies are
+carriers now, with a depth, because `env -S '$(rm -rf /)'` is both carriers at
+once. Both halves asserted, as before: `echo "$(date)"` and `cd "$(git
+rev-parse --show-toplevel)"` are how shell lines are written.
+
+**codex d6489472f → dd9512c00.** Fifteen commits, nothing ported, and one that
+prompted a check worth having. `Preserve reasoning effort through compaction and
+reset it on success` is a compaction that spent the effort chosen for the task;
+here it has spent `Effort::Low` on the summariser since the multi-level-model
+work, which is the same answer reached from the other end — a summary is
+mechanical, and the effort a person chose for the work has nothing to do with
+it. `Prioritize human evidence in memory v2 extraction` is a rollout budget
+spent on tool output; there is no extraction budget here, because memory is
+written by a call the model makes on purpose. The rest is Guardian context
+profiles, memory v2 dual writes, and enterprise OIDC.
+
+**openclaw c667fa4cd → f0f5eade5.** A hundred and twenty-nine, nothing ported,
+and a confirmation: `preserve commands after inherited descriptors close` is the
+seam cline's #13817 was on, read from the other side — they killed a process
+group too early when a descendant closed the descriptors, where cline's shell
+waited for descriptors a descendant held open. Two projects on the same seam in
+the same week, and the fix here this morning sits between them: both ends are
+waited for, and nothing is killed for exiting first. The rest is channels,
+plugins, a curated xAI catalog, and forty commits of test fixtures.
+
+**acp, goose, opencode, openhands.** Seven commits between them and nothing to
+read past the list: a client registry, two release bumps, Bedrock DeepSeek model
+ids — which are passed through here rather than rewritten, so there is nothing
+to preserve — and a rename of Canvas Extensions to Apps.
+
+**And the tool itself.** `refs status` abandoned the whole listing when one
+remote answered 429, which is what GitHub answers to eight fetches in a row: the
+question the listing exists to answer went unanswered for seven references
+because the eighth was rate-limited. Each row now says what happened to it and
+the rest of the table still prints.

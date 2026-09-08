@@ -217,3 +217,43 @@ fn a_source_nothing_can_act_on_is_said_rather_than_guessed_at() {
     assert_eq!(Source::parse("TOKEN"), None, "a bare word is not a source");
     assert_eq!(Source::parse("env:"), None, "and neither is a prefix with nothing after it");
 }
+
+/// Ported from cline #13716: a key pasted with a byte-order mark or a
+/// zero-width space is kept corrupted and then answers 401 exactly as a wrong
+/// key does — and here nothing prints a value, so the one way to tell the
+/// difference is gone.
+#[test]
+fn a_value_pasted_with_what_a_paste_carries_is_kept_without_it() {
+    let (dir, mut vault) = alone();
+    // A byte-order mark in front, a zero-width space inside the trailing
+    // whitespace, and a newline at the end: what a copy out of a browser or a
+    // word processor actually looks like.
+    vault.keep("pasted", "\u{FEFF}  hunter2-and-then-some \u{200B}\n").unwrap();
+
+    let text = std::fs::read_to_string(dir.path().join("secrets.toml")).unwrap();
+    assert!(text.contains("hunter2-and-then-some"), "{text}");
+    assert!(!text.contains('\u{FEFF}'), "the mark is not part of the key: {text:?}");
+    assert!(!text.contains('\u{200B}'), "and neither is the zero-width space: {text:?}");
+    assert!(!text.contains("some \""), "nor the whitespace around it: {text:?}");
+
+    // And nothing that is only invisible is kept at all: an empty secret that
+    // looks set is the same failure one step later.
+    let mut vault = Vault::load_from(dir.path().join("secrets.toml")).unwrap();
+    let refused = vault.keep("empty", "\u{FEFF} \u{200B}\n").unwrap_err().to_string();
+    assert!(refused.contains("invisible characters"), "{refused}");
+}
+
+/// The same for a value that comes from somewhere else: a variable exported by
+/// a script keeps its trailing newline, and a manager that prints a banner
+/// prints it however it likes.
+#[test]
+fn a_value_from_another_source_is_cleaned_the_same_way() {
+    let (dir, mut vault) = alone();
+    unsafe { std::env::set_var("ROOK_TEST_TRAILING", "value-with-a-newline\n") };
+    vault.refer("trailing", &Source::Env("ROOK_TEST_TRAILING".into())).unwrap();
+
+    let vault = Vault::load_from(dir.path().join("secrets.toml")).unwrap();
+    let handed = rook_tools::Secrets::value(&vault, "trailing").unwrap();
+
+    assert_eq!(handed, "value-with-a-newline", "the newline is not part of the value");
+}
