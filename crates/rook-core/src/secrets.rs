@@ -281,6 +281,7 @@ fn from_command(line: &str) -> Option<String> {
 ///
 /// Reading only, and by name: the name is what lands in the process list, which
 /// is where writing one would have put the value.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn from_keychain(what: &str) -> Option<String> {
     let (service, account) = what.split_once('/')?;
     #[cfg(target_os = "macos")]
@@ -293,19 +294,25 @@ fn from_keychain(what: &str) -> Option<String> {
         .args(["lookup", "service", service, "account", account])
         .output()
         .ok()?;
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    let out = {
-        let _ = (service, account);
+    if !out.status.success() {
         return None;
-    };
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    {
-        if !out.status.success() {
-            return None;
-        }
-        let value = String::from_utf8(out.stdout).ok()?.trim_end_matches(['\n', '\r']).to_string();
-        (!value.is_empty()).then_some(value)
     }
+    let value = String::from_utf8(out.stdout).ok()?.trim_end_matches(['\n', '\r']).to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+/// Nothing to read here yet.
+///
+/// Windows has a Credential Manager and FreeBSD has nothing of the kind, and
+/// neither is reached by a command this would recognise. `cmd:` covers both
+/// without this knowing anything: `cmd:powershell -c "…"` is a source like any
+/// other. A separate function rather than a branch inside one, because a branch
+/// that ends in `return` leaves the binding above it unused, and an unused
+/// binding is an error under `-D warnings` on exactly the platform nothing here
+/// compiles for locally.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn from_keychain(_what: &str) -> Option<String> {
+    None
 }
 
 /// A value without what a paste puts around it.
