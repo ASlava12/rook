@@ -1,5 +1,7 @@
 # Rook
 
+[English](README.md) · [Русский](README.ru.md)
+
 An autonomous agent whose memory you can actually read.
 
 Rook is a general-purpose local agent — coding, research, automation — written in
@@ -54,17 +56,43 @@ platform-specific bodies instead of forking into `deploy-linux` and
 
 ## Install
 
+Linux and macOS:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ASlava12/rook/main/install.sh | sh
+```
+
+Windows:
+
+```powershell
+irm https://raw.githubusercontent.com/ASlava12/rook/main/install.ps1 | iex
+```
+
+The script downloads the build for this machine, checks it against the release's
+`SHA256SUMS` and refuses to go on if they disagree, and copies two binaries and
+the built-in skills under `~/.local` — nowhere else, and with no privileges. It
+does not edit your shell's configuration; it tells you if the directory is not on
+your `PATH`. `ROOK_PREFIX` puts it somewhere else, `ROOK_VERSION` pins a release,
+and the script is a hundred readable lines in this repository if you would rather
+look before piping it anywhere.
+
+From source, which needs a Rust toolchain and a C compiler (two dependencies
+vendor C — see [docs/platforms.md](docs/platforms.md)); no Node, no Python, no
+Docker:
+
 ```sh
 git clone https://github.com/ASlava12/rook && cd rook
 cargo xtask dist               # builds, packages the built-in skills, prints the sizes
 ```
 
-Two binaries, no runtime and no shared libraries — 5.4 MiB and 5.3 MiB at the
+Two binaries, no runtime and no shared libraries — 6.4 MiB and 6.0 MiB at the
 time of writing, which `dist` prints so the number here can be checked rather
 than believed.
 
-Requires a Rust toolchain and a C compiler (two dependencies vendor C — see
-[docs/platforms.md](docs/platforms.md)). No Node, no Python, no Docker.
+Releases carry `x86_64` and `aarch64` builds for Linux (static, musl — they run
+on the distribution you have rather than the one the runner had), `x86_64` for
+Windows, and both architectures for macOS. FreeBSD is a supported target that
+builds and tests in CI and has no published binary yet: build it from a clone.
 
 ## Use
 
@@ -902,6 +930,30 @@ lose people's trust:
   that walk reads, so a command that rewrites a file with the same bytes is
   listed too, and a workspace too large to walk says so rather than reporting
   nothing.
+
+## Documentation
+
+Everything here is in this repository; nothing is on a website that can rot
+separately from the code.
+
+| | |
+|---|---|
+| [docs/architecture.md](docs/architecture.md) | the crates, what each owns, and which way the dependencies run |
+| [docs/storage.md](docs/storage.md) | the store: addressing, dictionaries, retention, garbage collection |
+| [docs/skills.md](docs/skills.md) | writing a skill, the frontmatter, what gates one |
+| [docs/platforms.md](docs/platforms.md) | supported targets, and the two C dependencies that constrain them |
+| [docs/roadmap.md](docs/roadmap.md) | what exists, what is next, what is deliberately not being built |
+| [docs/adr/](docs/adr/) | thirteen decisions, each with the failure that prompted it |
+| [docs/research/agent-landscape.md](docs/research/agent-landscape.md) | the public failures the design answers, with citations |
+| [references/PORTED.md](references/PORTED.md) | every pass over another agent's history: what was taken, and why the rest was not |
+
+The ADRs are the ones to read if you want to know *why* rather than *what*:
+[0003](docs/adr/0003-agent-skills-format.md) on using somebody else's skill
+format, [0009](docs/adr/0009-ask-before-acting.md) on ask-before-acting,
+[0010](docs/adr/0010-no-todo-tool.md) on the planning tool that measurement
+declined, [0011](docs/adr/0011-containment-is-the-platforms.md) on containment
+being the platform's job, and
+[0013](docs/adr/0013-secrets-are-named-never-valued.md) on secrets.
 
 ## Development
 

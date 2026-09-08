@@ -1,0 +1,140 @@
+name: release
+
+# A tag is the trigger, and the tag is the version: nothing here reads
+# `Cargo.toml`, so a release cannot disagree with what it was called.
+on:
+  push:
+    tags: ['v*']
+  # For a dry run: builds and packages everything and uploads it as workflow
+  # artifacts, and publishes nothing. A release worth cutting is one somebody
+  # has already downloaded and run.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # musl rather than glibc for Linux: a binary that runs on the distro
+          # somebody has rather than on the one the runner had. The install
+          # script fetches these, and a glibc build refuses to start on
+          # anything older than the runner's.
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest, cross: true }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-latest, cross: true }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+          - { target: aarch64-apple-darwin, os: macos-latest }
+          - { target: x86_64-apple-darwin, os: macos-latest }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cross
+        if: matrix.cross
+
+      - name: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.cross || 'false' }}" = "true" ]; then
+            cross build --release --workspace --target ${{ matrix.target }}
+          else
+            cargo build --release --workspace --target ${{ matrix.target }}
+          fi
+
+      # The layout the binaries themselves look for: `share/rook/skills` beside
+      # `bin`, which is the second place `builtin_skills_dir` looks. A release
+      # without it is an agent with no built-in skills, and nothing in a dev
+      # build would ever notice.
+      - name: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A tag names the version; a dry run names the commit. Written as an
+          # `if` rather than a `&&` chain, because a chain whose test is false
+          # returns non-zero and `set -e` ends the step on it — which is the
+          # ordinary case here, not the exceptional one.
+          if [ "${GITHUB_REF_NAME}" != "${GITHUB_REF_NAME#v}" ]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="$(git rev-parse --short HEAD)"
+          fi
+          name="rook-${version}-${{ matrix.target }}"
+          mkdir -p "dist/$name/bin" "dist/$name/share/rook"
+          from="target/${{ matrix.target }}/release"
+          for binary in rook rookd; do
+            if [ -f "$from/$binary.exe" ]; then
+              cp "$from/$binary.exe" "dist/$name/bin/"
+            else
+              cp "$from/$binary" "dist/$name/bin/"
+            fi
+          done
+          cp -R skills "dist/$name/share/rook/skills"
+          cp README.md LICENSE-MIT LICENSE-APACHE "dist/$name/"
+          cd dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a -tzip "$name.zip" "$name" > /dev/null
+            archive="$name.zip"
+          else
+            tar czf "$name.tar.gz" "$name"
+            archive="$name.tar.gz"
+          fi
+          # `sha256sum` on Linux and in Git Bash, `shasum` on macOS: the same
+          # two columns either way, which is what verifies an install.
+          if command -v sha256sum > /dev/null; then
+            sha256sum "$archive" > "$name.sha256"
+          else
+            shasum -a 256 "$archive" > "$name.sha256"
+          fi
+          rm -rf "$name"
+          ls -la
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: publish
+    needs: build
+    runs-on: ubuntu-latest
+    # A dry run builds everything and publishes nothing: the point of it is to
+    # find a packaging mistake before a tag exists that has to be deleted.
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: staged
+      - name: collect
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find staged -type f -exec mv {} dist/ \;
+          # One file with every checksum in it, which is what an install script
+          # can verify against without knowing which archive it wants first.
+          cat dist/*.sha256 > SHA256SUMS
+          rm dist/*.sha256
+          mv SHA256SUMS dist/
+          ls -la dist
+      - name: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag

@@ -234,6 +234,26 @@ what unblocks the most.
   scored. Results are ordered by whether the host carries the project's name
   before anything is fetched — the first gathering for "redis" kept a tutorial
   site's page about the documentation as the documentation. 17 tests.
+- **Something to install rather than something to build** — the only way in was
+  `git clone` and a Rust toolchain, which is a fine way to try a compiler and a
+  poor way to try an agent. A tagged release now builds on five targets:
+  `x86_64` and `aarch64` Linux, static against musl so a binary runs on the
+  distribution somebody has rather than the one the runner had; `x86_64`
+  Windows; and both architectures of macOS. Each archive carries the two
+  binaries and the built-in skills in the layout the binaries look for —
+  `bin/rook` finds them at `../share/rook/skills`, which is the second place it
+  looks and the reason a release without them would be an agent with no skills
+  and nothing to notice.
+
+  `install.sh` and `install.ps1` are the front door: they work out which build
+  this machine wants, fetch the release's `SHA256SUMS` first — the archive's
+  name carries a version that `latest` does not know yet, so the name is read
+  out of the sums — verify before unpacking, and copy into `~/.local` with no
+  privileges and no edit to a shell's configuration. What they cannot answer is
+  who built the archive; that needs a certificate, and until there is one the
+  checksum answers only whether it arrived intact. Both are parsed by CI on the
+  platform that runs them, because the install script is the first thing a
+  stranger runs and the one thing no test here executes.
 - **A copy is out of date when its source says so, not when it gets old** —
   asked for by the person who uses this: documentation changes between versions
   and then does not change for a year, so a threshold on age would re-download a
@@ -1993,10 +2013,11 @@ standard is how you get a second, wrong one. Revisit when the specification is
 published; until then the entry exists so the design question is recorded rather
 than rediscovered.
 
-**Signed release binaries.** `cargo xtask dist` ships unsigned, so Windows
+**Signed release binaries.** The release workflow ships unsigned, so Windows
 SmartScreen warns on every download and macOS Gatekeeper needs a right-click to
 open. cline signs with Azure Trusted Signing; both need a certificate this
-repository does not have.
+repository does not have. Until then the install scripts verify a checksum,
+which answers "did this arrive intact" and does not answer "who built it".
 
 ## Not planned
 

@@ -35,6 +35,22 @@ jobs:
       - run: rustup target add x86_64-apple-darwin && cargo check --workspace --target x86_64-apple-darwin
         if: matrix.os == 'macos-latest'
 
+      # The install scripts are the first thing a stranger runs and the one
+      # thing no test here executes: a syntax slip in either would be found by
+      # a user, on the machine where nothing else is installed yet. Parsed on
+      # the platform that runs it.
+      - run: sh -n install.sh
+        if: matrix.os != 'windows-latest'
+      - name: parse install.ps1
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path ./install.ps1), [ref]$null, [ref]$errors) | Out-Null
+          if ($errors) { $errors; exit 1 }
+          'install.ps1 parses'
+
   # FreeBSD is a supported target and GitHub offers no runner for it. A real VM
   # is used rather than a cross-compile check, because the two dependencies that
   # carry C code (`zstd-sys` and `ring`) are precisely the ones a cross-check
