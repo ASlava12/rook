@@ -39,7 +39,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      # No cache here on purpose. Two `cross` targets share one `target/`
+      # directory for the host-side build scripts, and their containers do not
+      # share a glibc: a script built in the newer image and restored into the
+      # older one failed with `GLIBC_2.28 not found`, on the second run and not
+      # the first, which is what a poisoned cache looks like. A release is built
+      # rarely and downloaded by strangers; three minutes of cache is not worth
+      # one artefact assembled from something built somewhere else.
       - uses: taiki-e/install-action@cross
         if: matrix.cross
 
