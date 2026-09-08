@@ -470,6 +470,12 @@ fn secret_env(ctx: &ToolContext, names: &[String]) -> std::result::Result<Vec<(S
 /// same environment the command already has.
 struct Askpass {
     env: Vec<(String, String)>,
+    /// Held so the directory outlives the command and is removed with it. Unix
+    /// only, and the field is gated rather than the struct: `tempfile` is a
+    /// dependency of this crate on unix alone, and a field naming a crate that
+    /// is not there fails to compile on Windows however unreachable the code
+    /// around it is — which is what CI said and a macOS gate could not.
+    #[cfg(unix)]
     _dir: tempfile::TempDir,
 }
 

@@ -210,6 +210,15 @@ model is a different run, not the same one again. Its first find was
 the same path, so an ordinary bad argument was reported as work that could not
 be undone.
 
+**A green local gate is not a green CI.** The gate here runs on one platform,
+and the three that matter are checked only after a push: a field naming a
+crate that is a dependency on unix alone compiled here and failed on Windows,
+and four more commits went out on top of it because nobody looked. `gh run
+list --workflow=ci.yml --limit 5` is one command and it is the last step of
+pushing, not a thing to do when something feels wrong. Nothing local can
+substitute — `rook-tools` carries two C dependencies, so it cannot be
+cross-checked from a Mac, which is exactly why the check is remote.
+
 **A job's log does not wait for the run.** `gh run view --log` serves nothing
 until every job in the run has finished, and the FreeBSD VM holds a run open
 for up to forty-five minutes. A job that has finished is readable at once:
