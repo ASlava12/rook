@@ -1157,3 +1157,44 @@ fn docs_answers_from_the_local_copy_and_names_where_it_came_from() {
     assert!(dropped.contains("dropped 1 set"), "{dropped}");
     assert!(rook.ok(&["docs", "ls"]).contains("nothing kept yet"), "and it is gone");
 }
+
+/// `/docs redis persistence` is a topic of two words, and reading the second
+/// as a version files the gathering under `docs/redis/persistence` — where
+/// nothing will look for it again.
+#[test]
+fn a_two_word_topic_is_not_read_as_a_topic_and_a_version() {
+    let rook = Rook::new();
+    {
+        let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+        let (skills, _) = rook_skills::SkillIndex::discover(&[]);
+        let engine = rook_core::Rook::from_parts(
+            store,
+            rook_core::Config::default(),
+            rook_skills::Environment::bare("linux", "x86_64", "0.1.0"),
+            skills,
+            rook.workspace.path().to_path_buf(),
+        );
+        for (topic, version) in [("redis persistence", "latest"), ("redis", "6.2")] {
+            engine
+                .keep_docs(&rook_core::docs::DocSet::new(
+                    topic,
+                    version,
+                    vec![rook_core::docs::Page {
+                        url: "https://redis.io/".into(),
+                        title: "Redis".into(),
+                        text: format!("the {topic} {version} set"),
+                    }],
+                ))
+                .unwrap();
+        }
+    }
+
+    // Through `/docs`, where the guess is made: the command takes one line and
+    // has to decide which of its words is a version.
+    let said = rook.chat("/docs redis persistence\n/docs redis 6.2\n/quit\n");
+    assert!(said.contains("docs/redis-persistence/latest"), "two words are the topic: {said}");
+    assert!(said.contains("redis 6.2 · kept as docs/redis/6.2"), "a version still names one: {said}");
+    // And neither gathered anything: both were already here, which is the
+    // whole point of the copy.
+    assert!(!said.contains("gathered"), "{said}");
+}

@@ -148,7 +148,14 @@ export async function renderDocs() {
   const gather = async () => {
     const asked = $('#topic').value.trim();
     if (!asked) return;
-    const [topic, version] = asked.split(/\s+/);
+    // The last word is a version only when it looks like one: "redis
+    // persistence" is two words of topic, and reading the second as a version
+    // gathers the wrong thing under a name nobody will find again.
+    const words = asked.split(/\s+/);
+    const last = words[words.length - 1];
+    const versioned = words.length > 1 && (last === 'latest' || /^v?\d/.test(last));
+    const topic = versioned ? words.slice(0, -1).join(' ') : asked;
+    const version = versioned ? last : undefined;
     const button = $('#gather');
     // It goes to the web and reads several pages, which is seconds rather than
     // milliseconds; a button that looks idle while it works gets pressed twice.

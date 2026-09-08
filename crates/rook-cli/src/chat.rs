@@ -298,6 +298,16 @@ pub struct Said {
     pub quit: bool,
 }
 
+/// Whether a word at the end of `/docs …` names a version rather than more of
+/// the topic. A digit at the front, `v` and a digit, or the word for the
+/// current one — anything else is a word of the subject.
+fn looks_like_a_version(word: &str) -> bool {
+    let word = word.trim();
+    word == rook_core::docs::LATEST
+        || word.starts_with(|c: char| c.is_ascii_digit())
+        || word.strip_prefix('v').is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+}
+
 pub async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command: &str) -> Result<Said> {
     let mcp = &shared.mcp;
     let out = &mut String::new();
@@ -456,8 +466,13 @@ pub async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command
         // answered from rather than fetched again: `/docs redis` twice is one
         // trip to the web.
         "docs" => {
-            let (topic, version) = rest.split_once(' ').unwrap_or((rest, rook_core::docs::LATEST));
-            let (topic, version) = (topic.trim(), version.trim());
+            // The last word is a version only when it looks like one: "redis
+            // persistence" is two words of topic, and reading it as a version
+            // gathers the wrong thing under a name nobody will find again.
+            let (topic, version) = match rest.rsplit_once(' ') {
+                Some((head, tail)) if looks_like_a_version(tail) => (head.trim(), tail.trim()),
+                _ => (rest, rook_core::docs::LATEST),
+            };
             let set = match rook.docs(topic, Some(version))? {
                 Some(set) => set,
                 None => {
