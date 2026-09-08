@@ -2248,7 +2248,18 @@ fn cmd_docs(source: &Source, cmd: DocsCmd, json: bool) -> Result<()> {
         }
         DocsCmd::Show { topic, version, question, page } => {
             let Some(set) = source.docs(&topic, version.as_deref())? else {
-                bail!("nothing kept for {topic:?}. `rook docs add {topic}` gathers it.");
+                // What is here under a name near the one asked for, because
+                // that is usually the answer: a narrower question gathered an
+                // hour ago is a set nobody remembers the exact name of.
+                let near = source.docs_like(&topic)?;
+                let beside = match near.is_empty() {
+                    true => String::new(),
+                    false => format!(
+                        " Kept under a name near it: {}.",
+                        near.iter().map(|s| s.topic.clone()).collect::<Vec<_>>().join(", ")
+                    ),
+                };
+                bail!("nothing kept for {topic:?}. `rook docs add {topic}` gathers it.{beside}");
             };
             if json {
                 println!("{}", serde_json::to_string_pretty(&set)?);

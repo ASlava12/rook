@@ -262,7 +262,29 @@ export async function renderDocs() {
         el('div', { class: 'name' }, page.title),
         el('div', { class: 'sub' }, el('a', { href: page.url, target: '_blank', rel: 'noreferrer' }, page.url)),
         el('p', {}, page.text.slice(0, 400) + (page.text.length > 400 ? '…' : ''))))));
-      if (row) right.append(el('button', { onclick: () => drop(row) }, 'Drop this set'));
+      if (row) {
+        // Asking the sources what changed, not downloading it again: a check
+        // that costs a round trip per page is one somebody will actually press.
+        const check = async (button) => {
+          button.disabled = true;
+          button.textContent = 'checking…';
+          try {
+            const said = await api('/api/docs', { topic, version, refresh: true });
+            alert(said.changed && said.changed.length
+              ? `read again: ${said.changed.join(', ')}`
+              : 'checked every page against its source — none had changed');
+            renderDocs();
+          } catch (e) {
+            alert(e.error || e);
+            button.disabled = false;
+            button.textContent = 'Check the sources';
+          }
+        };
+        const button = el('button', {}, 'Check the sources');
+        button.addEventListener('click', () => check(button));
+        right.append(button);
+        right.append(el('button', { onclick: () => drop(row) }, 'Drop this set'));
+      }
     } catch (e) {
       right.append(el('p', { class: 'warn' }, e.error || String(e)));
     }

@@ -422,6 +422,29 @@ impl Source {
         }
     }
 
+    /// Sets kept under a name near this one, for a miss that is usually
+    /// answered by one of them.
+    pub fn docs_like(&self, topic: &str) -> Result<Vec<rook_core::DocSet>> {
+        match self {
+            Self::Local(rook) => Ok(rook.docs_like(topic)?),
+            // Worked out from the listing rather than routed: the daemon
+            // already answers what is kept, and a second endpoint for a
+            // question this one contains is an endpoint to keep in step.
+            Self::Daemon(_) => {
+                let mut out = Vec::new();
+                for kept in self.docs_kept()? {
+                    if rook_core::docs::relates(topic, &kept.topic)
+                        && !kept.topic.eq_ignore_ascii_case(topic.trim())
+                        && let Some(set) = self.docs(&kept.topic, Some(&kept.version))?
+                    {
+                        out.push(set);
+                    }
+                }
+                Ok(out)
+            }
+        }
+    }
+
     /// Read a topic's documentation off the web and keep it.
     ///
     /// The daemon does the fetching when there is one, because it is the
@@ -436,13 +459,30 @@ impl Source {
             Self::Local(rook) => {
                 let sources = rook.doc_sources()?;
                 let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-                Ok(runtime.block_on(rook.gather_docs(topic, version, &sources))?)
+                // A copy already here is checked against its sources rather
+                // than read again: each page is asked for with the validator
+                // its server gave, and one that has not moved answers 304 with
+                // no body. That is what makes a refresh cheap enough to do.
+                match rook.docs(topic, Some(version))? {
+                    Some(kept) => {
+                        let (reference, checked) = runtime.block_on(rook.recheck_docs(&kept, &sources))?;
+                        let notes = said_about(&checked);
+                        Ok((reference, checked.set, notes))
+                    }
+                    None => Ok(runtime.block_on(rook.gather_docs(topic, version, &sources))?),
+                }
             }
             Self::Daemon(d) => {
-                let said: serde_json::Value =
-                    d.post("/api/docs", &serde_json::json!({ "topic": topic, "version": version }))?;
+                let said: serde_json::Value = d.post(
+                    "/api/docs",
+                    &serde_json::json!({ "topic": topic, "version": version, "refresh": true }),
+                )?;
                 let set: rook_core::DocSet = serde_json::from_value(said["set"].clone())?;
-                let notes: Vec<String> = serde_json::from_value(said["notes"].clone()).unwrap_or_default();
+                let mut notes: Vec<String> =
+                    serde_json::from_value(said["notes"].clone()).unwrap_or_default();
+                let changed: Vec<String> =
+                    serde_json::from_value(said["changed"].clone()).unwrap_or_default();
+                notes.insert(0, changed_note(&changed));
                 Ok((said["ref"].as_str().unwrap_or_default().to_string(), set, notes))
             }
         }
@@ -901,6 +941,20 @@ fn came_up(child: &mut std::process::Child) -> Option<Daemon> {
 /// The project being asked about, as a query value.
 fn here(workspace: &std::path::Path) -> String {
     escaped(&workspace.display().to_string())
+}
+
+/// What a check found, as a line somebody reads.
+fn said_about(checked: &rook_core::docs::Checked) -> Vec<String> {
+    std::iter::once(changed_note(&checked.changed)).chain(checked.unreadable.clone()).collect()
+}
+
+/// Nothing having changed is a result, not a silence: a check that says nothing
+/// reads as a check that did nothing.
+fn changed_note(changed: &[String]) -> String {
+    match changed.is_empty() {
+        true => "checked every page against its source: none had changed".into(),
+        false => format!("read again: {}", changed.join(", ")),
+    }
 }
 
 /// A query safe to paste into a url. Written out for the same reason as the one

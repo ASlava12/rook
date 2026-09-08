@@ -23,7 +23,7 @@ use crate::error::Result;
 /// What `latest` means: the newest the sources had when it was read.
 pub const LATEST: &str = "latest";
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Page {
     /// Where it was read from, which is what an answer cites beside the local
     /// copy: a reading nobody can check against its source is a claim.
@@ -31,6 +31,18 @@ pub struct Page {
     pub title: String,
     /// The prose, as `web_fetch` reads a page — not the markup it arrived in.
     pub text: String,
+    /// What the server called this version of the page, so asking whether it
+    /// has changed is a conditional request that usually answers 304 with no
+    /// body. Absent for a page kept before this was recorded, and for a server
+    /// that offers neither — those are re-read rather than asked about.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub etag: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified: Option<String>,
+    /// When this page was last read, which is not when the set was: a refresh
+    /// that changed one page of five leaves the other four as they were.
+    #[serde(default)]
+    pub fetched_at: i64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -171,6 +183,87 @@ const ASKING: &[&str] = &[
     "need", "want", "get", "got", "make", "makes", "about", "into", "my", "me", "your", "not",
 ];
 
+/// What a check of a kept set found.
+pub struct Checked {
+    pub set: DocSet,
+    /// Pages the source answered differently, by title.
+    pub changed: Vec<String>,
+    /// Pages the source no longer serves, or would not answer for.
+    pub unreadable: Vec<String>,
+}
+
+/// Ask the sources whether a kept set is still what they serve, and re-read
+/// only what changed.
+///
+/// Age is the wrong question and this is the right one. A copy of a version
+/// that is pinned — `postgres 16` — does not go stale by getting older, and a
+/// copy of `latest` can be wrong the day after it was read. So nothing is
+/// decided from a timestamp: each page is asked for with the validator the
+/// server gave, and a server that says 304 has said the copy is current for the
+/// cost of a round trip and no body. A page whose server offered neither an
+/// `ETag` nor a `Last-Modified` is simply read again — there is nothing to ask
+/// with, and pretending otherwise would be a check that always passes.
+pub async fn recheck(set: &DocSet, from: &Sources) -> Checked {
+    let mut pages = Vec::with_capacity(set.pages.len());
+    let mut changed = Vec::new();
+    let mut unreadable = Vec::new();
+    let mut spent = 0usize;
+
+    for page in &set.pages {
+        let asked = from.fetch.page_unless(&page.url, page.etag.as_deref(), page.modified.as_deref()).await;
+        let fresh = match asked {
+            // The source says the copy is current, which is the answer this
+            // exists to get cheaply.
+            Ok(None) => {
+                spent += page.text.len();
+                pages.push(page.clone());
+                continue;
+            }
+            Ok(Some(fresh)) if fresh.status < 400 => fresh,
+            Ok(Some(fresh)) => {
+                unreadable.push(format!("{} answered {}", page.url, fresh.status));
+                pages.push(page.clone());
+                continue;
+            }
+            Err(why) => {
+                // A page that cannot be reached is not a page that changed: the
+                // copy stands, and what could not be checked is said.
+                unreadable.push(why);
+                pages.push(page.clone());
+                continue;
+            }
+        };
+
+        let text = fresh.text.trim();
+        // The same bound as a gathering, applied the same way: a page that grew
+        // past what a set may hold is cut where the rest of them are.
+        let room = from.bytes.saturating_sub(spent);
+        let text = match text.len() > room {
+            true => trimmed(text, room),
+            false => text.to_string(),
+        };
+        if text != page.text {
+            changed.push(page.title.clone());
+        }
+        spent += text.len();
+        pages.push(Page {
+            url: fresh.url,
+            title: page.title.clone(),
+            text,
+            etag: fresh.etag,
+            modified: fresh.modified,
+            fetched_at: rook_store::now_unix(),
+        });
+    }
+
+    let mut set = DocSet { pages, ..set.clone() };
+    // The set's own stamp is when it was last *checked*, since that is what
+    // somebody reading "read 3 days ago" wants to know; a page that did not
+    // change keeps its own older one.
+    set.fetched_at = rook_store::now_unix();
+    Checked { set, changed, unreadable }
+}
+
 /// The results whose host is the project's own, first.
 ///
 /// A search for "redis official documentation" answers with redis.io and with
@@ -227,6 +320,34 @@ pub fn age(fetched_at: i64) -> String {
         1 => "yesterday".into(),
         days => format!("{days} days ago"),
     }
+}
+
+/// Whether two topics are about the same thing.
+///
+/// One word in common, of four characters or more. `redis` and `redis
+/// persistence` are the case this exists for — a narrow question gathered an
+/// hour ago, and a broad one about to spend five fetches finding the same site.
+/// Four characters because `the` and `api` are in half of everything, and one
+/// word because two topics that share nothing are two topics.
+pub fn relates(asked: &str, kept: &str) -> bool {
+    let words = |text: &str| -> Vec<String> {
+        slug(text).split('-').filter(|w| w.chars().count() >= 4).map(str::to_string).collect()
+    };
+    let (asked, kept) = (words(asked), words(kept));
+    asked.iter().any(|word| kept.contains(word))
+}
+
+/// A page cut to what is left of the allowance, saying where it stopped.
+///
+/// Room for the marker as well as the prose: a cap that the sentence explaining
+/// the cap pushes past is not a cap.
+fn trimmed(text: &str, room: usize) -> String {
+    const STOPPED: &str = "\n\n[the rest of this page was past the size a set may keep]";
+    let mut cut = room.saturating_sub(STOPPED.len());
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}{STOPPED}", &text[..cut])
 }
 
 /// The reference a set is kept under. One per topic and version, so reading
@@ -332,18 +453,9 @@ pub async fn gather(
         // Cut to what is left of the allowance rather than dropping the page:
         // the first part of a documentation page is the part that says what
         // the thing is.
-        const STOPPED: &str = "\n\n[the rest of this page was past the size a set may keep]";
         let room = from.bytes - spent;
         let text = match text.len() > room {
-            true => {
-                // Room for the marker as well as the prose: a cap that the
-                // sentence explaining the cap pushes past is not a cap.
-                let mut cut = room.saturating_sub(STOPPED.len());
-                while cut > 0 && !text.is_char_boundary(cut) {
-                    cut -= 1;
-                }
-                format!("{}{STOPPED}", &text[..cut])
-            }
+            true => trimmed(text, room),
             false => text.to_string(),
         };
         spent += text.len();
@@ -351,7 +463,14 @@ pub async fn gather(
             true => url.to_string(),
             false => title,
         };
-        pages.push(Page { url: page.url, title, text });
+        pages.push(Page {
+            url: page.url,
+            title,
+            text,
+            etag: page.etag,
+            modified: page.modified,
+            fetched_at: rook_store::now_unix(),
+        });
     }
 
     if pages.is_empty() {

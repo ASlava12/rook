@@ -641,6 +641,43 @@ impl Rook {
         Ok(crate::docs::Sources { search, fetch, pages: web.docs_pages, bytes: web.docs_bytes })
     }
 
+    /// Ask the sources whether a kept set is still what they serve, and keep
+    /// what came back.
+    ///
+    /// The answer to "is this out of date", asked of the source rather than of
+    /// the clock: a pinned version does not go stale by getting older, and a
+    /// copy of `latest` can be wrong the day after it was read.
+    pub async fn recheck_docs(
+        &self,
+        set: &crate::docs::DocSet,
+        sources: &crate::docs::Sources,
+    ) -> Result<(String, crate::docs::Checked)> {
+        let checked = crate::docs::recheck(set, sources).await;
+        let (reference, _) = self.keep_docs(&checked.set)?;
+        Ok((reference, checked))
+    }
+
+    /// Sets kept under a topic near this one.
+    ///
+    /// A miss for `redis` used to reach for the network while
+    /// `docs/redis-persistence/latest` sat on the disk, gathered an hour
+    /// earlier by a narrower question. Words rather than prefixes, so it works
+    /// in both directions — the narrow question finds the broad set and the
+    /// broad one finds the narrow.
+    pub fn docs_like(&self, topic: &str) -> Result<Vec<crate::docs::DocSet>> {
+        let mut out = Vec::new();
+        for (reference, id) in self.store.list_refs("docs/")? {
+            let Ok(set) = crate::docs::DocSet::load(&self.store, &id) else { continue };
+            if reference != crate::docs::reference(&set.topic, &set.version) {
+                continue;
+            }
+            if crate::docs::relates(topic, &set.topic) && !set.topic.eq_ignore_ascii_case(topic.trim()) {
+                out.push(set);
+            }
+        }
+        Ok(out)
+    }
+
     /// Read a topic's documentation and keep it, answering with where it went,
     /// what it holds and what could not be read.
     ///

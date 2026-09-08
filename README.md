@@ -326,6 +326,18 @@ docs_pages = 5          # how many pages one topic may cost
 docs_bytes = 200000     # and what a kept set may hold, applied as it arrives
 ```
 
+A copy goes out of date when its source says so, not when it gets old: each page
+is kept with the `ETag` and `Last-Modified` its server gave, and `--refresh`
+asks for them back with those — a page that has not moved answers 304 with no
+body, and only what changed is read again. A pinned version does not go stale by
+getting older, and `latest` can be wrong the day after it was read; neither is a
+question a timestamp can answer.
+
+A topic with no set of its own is answered from a set beside it when there is
+one — asking about `redis` finds the `redis persistence` gathered an hour ago
+instead of fetching the same site again — and the answer says which set it came
+from.
+
 The same sets are `rook docs ls | show <topic> | add <topic> | rm <topic>`, the
 Docs tab in the TUI, and a tab in the browser — the reading is the agent's, and
 what it read is yours to see.

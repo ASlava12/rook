@@ -417,6 +417,10 @@ struct GatherDocs {
     topic: String,
     #[serde(default)]
     version: Option<String>,
+    /// Ask the sources what changed in a set already here, rather than
+    /// gathering one that is not.
+    #[serde(default)]
+    refresh: bool,
 }
 
 /// Read a topic's documentation off the web and keep it.
@@ -428,8 +432,22 @@ async fn gather_docs(State(s): State<Shared>, Json(body): Json<GatherDocs>) -> A
     let rook = s.rook.read().await;
     let version = body.version.unwrap_or_else(|| rook_core::docs::LATEST.into());
     let sources = rook.doc_sources()?;
+    // A refresh of something already here asks each page's source with the
+    // validator it gave, so a set that has not moved costs a round trip per
+    // page and no bodies at all.
+    if body.refresh
+        && let Some(kept) = rook.docs(&body.topic, Some(&version))?
+    {
+        let (reference, checked) = rook.recheck_docs(&kept, &sources).await?;
+        return Ok(Json(serde_json::json!({
+            "ref": reference,
+            "set": checked.set,
+            "changed": checked.changed,
+            "notes": checked.unreadable,
+        })));
+    }
     let (reference, set, notes) = rook.gather_docs(&body.topic, &version, &sources).await?;
-    Ok(Json(serde_json::json!({ "ref": reference, "set": set, "notes": notes })))
+    Ok(Json(serde_json::json!({ "ref": reference, "set": set, "changed": [], "notes": notes })))
 }
 
 #[derive(Deserialize)]
@@ -1020,12 +1038,30 @@ mod tests {
         session: u128,
     }
 
+    /// One home for every test in this file, set once.
+    ///
+    /// `ROOK_HOME` belongs to the process, so a fixture that sets its own moves
+    /// the config and the secrets out from under whichever test is reading
+    /// them — which passed alone and failed in parallel, as such a thing does.
+    /// The store is still per test: redb takes one writer, and two tests
+    /// sharing a path would fight over it.
+    fn shared_home() -> &'static std::path::Path {
+        static HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        HOME.get_or_init(|| {
+            let dir = tempfile::tempdir().unwrap();
+            unsafe { std::env::set_var("ROOK_HOME", dir.path()) };
+            dir
+        })
+        .path()
+    }
+
     fn fixture() -> Fixture {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let home = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("ROOK_HOME", home.path()) };
+        let mine = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
-        let store = rook_store::Store::open(home.path().join("store")).unwrap();
+        let store = rook_store::Store::open(shared_home().join(format!("store-{mine}"))).unwrap();
         let env = rook_skills::Environment::bare("linux", "x86_64", "0.1.0");
         let (skills, _) = rook_skills::SkillIndex::discover(&[]);
         let rook = rook_core::Rook::from_parts(
@@ -1317,6 +1353,7 @@ mod tests {
                     url: "https://redis.io/docs/persistence".into(),
                     title: "Persistence".into(),
                     text: "An append only file, rewritten in the background.".into(),
+                    ..Default::default()
                 }],
             ))
             .unwrap();

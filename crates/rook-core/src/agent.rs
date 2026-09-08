@@ -3357,11 +3357,31 @@ impl<'a> AgentLoop<'a> {
             Ok(kept) => kept,
             Err(e) => return format!("could not read the documentation kept here: {e}"),
         };
-        if let Some(set) = kept.filter(|_| !refresh) {
+        if let Some(set) = kept.as_ref().filter(|_| !refresh) {
             return match page {
-                Some(page) => whole_page(&set, page),
-                None => answer_from(&set, question, String::new()),
+                Some(page) => whole_page(set, page),
+                None => answer_from(set, question, String::new()),
             };
+        }
+
+        // A miss is not always a miss. A narrower question gathered an hour ago
+        // leaves `docs/redis-persistence/latest` on the disk, and asking about
+        // `redis` used to walk past it to the network — five fetches to arrive
+        // at the same site. Only when it actually answers the question, and
+        // always saying which set answered: a passage from a neighbouring topic
+        // presented as this one is a different claim.
+        if kept.is_none()
+            && !question.is_empty()
+            && let Ok(near) = self.rook.docs_like(topic)
+            && let Some(set) = near.into_iter().find(|set| !set.passages(question, 1).is_empty())
+        {
+            let preamble = format!(
+                "nothing is kept for {topic:?} itself, and this answers from {}, which is here. \
+                 `docs {{\"topic\": {topic:?}, \"refresh\": true}}` gathers the wider set if this \
+                 is not what was meant.\n\n",
+                crate::docs::reference(&set.topic, &set.version)
+            );
+            return answer_from(&set, question, preamble);
         }
 
         // Only a miss costs the network — and it is asked for before it is
@@ -3388,17 +3408,45 @@ impl<'a> AgentLoop<'a> {
                  unsourced, and do not ask for this again in this turn."
             );
         }
-        let (reference, set, notes) = match self.rook.gather_docs(topic, version, &sources).await {
-            Ok(gathered) => gathered,
-            Err(e) => return format!("could not gather documentation for {topic:?}: {e}"),
+        // A refresh of something already here asks the sources what changed
+        // rather than downloading it again: each page is asked for with the
+        // validator its server gave, and a 304 costs a round trip and no body.
+        // So refreshing is cheap enough to do, which is the point — a check
+        // nobody can afford is a copy nobody updates.
+        let (reference, set, notes) = match kept {
+            Some(kept) => match self.rook.recheck_docs(&kept, &sources).await {
+                Ok((reference, checked)) => {
+                    let said = match checked.changed.len() {
+                        0 => "checked every page against its source: none had changed".to_string(),
+                        n => format!(
+                            "{n} page(s) had changed and were read again: {}",
+                            checked.changed.join(", ")
+                        ),
+                    };
+                    let notes: Vec<String> = std::iter::once(said).chain(checked.unreadable).collect();
+                    (reference, checked.set, notes)
+                }
+                Err(e) => return format!("could not check {topic:?} against its sources: {e}"),
+            },
+            None => match self.rook.gather_docs(topic, version, &sources).await {
+                Ok((reference, set, notes)) => (
+                    reference,
+                    set,
+                    notes
+                        .into_iter()
+                        .map(|note| format!("some of what came back was unreadable: {note}"))
+                        .collect(),
+                ),
+                Err(e) => return format!("could not gather documentation for {topic:?}: {e}"),
+            },
         };
         let mut preamble = format!(
-            "gathered {} page(s) into {reference}, which later turns and later sessions read \
-             without fetching again.",
+            "{} page(s) in {reference}, which later turns and later sessions read without \
+             fetching again.",
             set.pages.len()
         );
         for note in notes.iter().take(3) {
-            preamble.push_str(&format!("\nsome of what came back was unreadable: {note}"));
+            preamble.push_str(&format!("\n{note}"));
         }
         preamble.push_str("\n\n");
         match page {

@@ -1136,6 +1136,7 @@ fn docs_answers_from_the_local_copy_and_names_where_it_came_from() {
                     text: "Redis persists with an append only file, rewritten in the background \
                            once it grows past a configured size."
                         .into(),
+                    ..Default::default()
                 }],
             ))
             .unwrap();
@@ -1183,6 +1184,7 @@ fn a_two_word_topic_is_not_read_as_a_topic_and_a_version() {
                         url: "https://redis.io/".into(),
                         title: "Redis".into(),
                         text: format!("the {topic} {version} set"),
+                        ..Default::default()
                     }],
                 ))
                 .unwrap();

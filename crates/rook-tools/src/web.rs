@@ -130,6 +130,13 @@ pub struct Page {
     pub kind: String,
     /// Prose, where the page was HTML.
     pub text: String,
+    /// What the server said this version of the page is called, when it said
+    /// anything: `ETag`, and `Last-Modified` beside it. Kept so that asking
+    /// whether it has changed since is one conditional request that usually
+    /// answers 304 with no body — which is the difference between checking a
+    /// set and downloading it again.
+    pub etag: Option<String>,
+    pub modified: Option<String>,
 }
 
 impl Fetch {
@@ -140,6 +147,28 @@ impl Fetch {
     /// and one reading, so a page a model is shown and a page an agent files
     /// away cannot come back different.
     pub async fn page(&self, url: &str) -> std::result::Result<Page, String> {
+        match self.page_unless(url, None, None).await {
+            Ok(Some(page)) => Ok(page),
+            // Nothing was asked to be compared against, so nothing can answer
+            // "unchanged" — a 304 to an unconditional request is a broken
+            // server, and reading it as an empty page would be worse.
+            Ok(None) => Err(format!("{url} answered 304 without being asked a condition")),
+            Err(why) => Err(why),
+        }
+    }
+
+    /// The same, unless the server says the copy already here is current.
+    ///
+    /// `None` for a 304: the page is what it was, and the point of asking this
+    /// way is that the answer costs a round trip and no body. Anything else is
+    /// read as an ordinary fetch, because a server that ignores the condition
+    /// is a server that just sent the page.
+    pub async fn page_unless(
+        &self,
+        url: &str,
+        etag: Option<&str>,
+        modified: Option<&str>,
+    ) -> std::result::Result<Option<Page>, String> {
         if !url.starts_with("http://") && !url.starts_with("https://") {
             return Err(format!("{url:?} is not an http or https address"));
         }
@@ -153,10 +182,23 @@ impl Fetch {
         let mut at = url.to_string();
         let mut landed = None;
         for _ in 0..MOST_HOPS {
-            let hop = match self.client.get(&at).send().await {
+            let mut asking = self.client.get(&at);
+            if let Some(etag) = etag {
+                asking = asking.header(reqwest::header::IF_NONE_MATCH, etag);
+            }
+            if let Some(modified) = modified {
+                asking = asking.header(reqwest::header::IF_MODIFIED_SINCE, modified);
+            }
+            let hop = match asking.send().await {
                 Ok(hop) => hop,
                 Err(e) => return Err(format!("could not fetch {at}: {e}")),
             };
+            // Before the redirect check, and not after: 304 is a 3xx, so a
+            // "not modified" read as a redirection is a redirection to nowhere
+            // — followed four times and reported as a loop.
+            if hop.status() == reqwest::StatusCode::NOT_MODIFIED {
+                return Ok(None);
+            }
             let Some(to) = redirected_to(&hop) else {
                 landed = Some(hop);
                 break;
@@ -174,6 +216,13 @@ impl Fetch {
             return Err(format!("{url} redirects more than {MOST_HOPS} times"));
         };
         let status = response.status();
+        if status == reqwest::StatusCode::NOT_MODIFIED {
+            return Ok(None);
+        }
+        let header = |name: reqwest::header::HeaderName| {
+            response.headers().get(name).and_then(|v| v.to_str().ok()).map(str::to_string)
+        };
+        let (etag, modified) = (header(reqwest::header::ETAG), header(reqwest::header::LAST_MODIFIED));
         let kind = response.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok());
         let kind = kind.unwrap_or("").split(';').next().unwrap_or("").trim().to_string();
 
@@ -187,7 +236,7 @@ impl Fetch {
             true => readable(&text),
             false => text.into_owned(),
         };
-        Ok(Page { url: at, status: status.as_u16(), kind, text })
+        Ok(Some(Page { url: at, status: status.as_u16(), kind, text, etag, modified }))
     }
 }
 

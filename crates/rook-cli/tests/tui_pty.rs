@@ -1006,6 +1006,7 @@ fn documentation_is_listed_with_both_addresses_and_can_be_dropped() {
                 url: "https://redis.io/docs/persistence".into(),
                 title: "Persistence".into(),
                 text: "An append only file, rewritten in the background as it grows.".into(),
+                ..Default::default()
             }],
         ))
         .unwrap();

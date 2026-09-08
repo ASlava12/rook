@@ -234,6 +234,30 @@ what unblocks the most.
   scored. Results are ordered by whether the host carries the project's name
   before anything is fetched — the first gathering for "redis" kept a tutorial
   site's page about the documentation as the documentation. 17 tests.
+- **A copy is out of date when its source says so, not when it gets old** —
+  asked for by the person who uses this: documentation changes between versions
+  and then does not change for a year, so a threshold on age would re-download a
+  pinned `postgres 16` that cannot move and still miss a `latest` that changed
+  yesterday. Nothing is decided from a timestamp. Each page is kept with the
+  `ETag` and `Last-Modified` its server gave, and a refresh asks for it back
+  with those — a server that answers 304 has said the copy is current for one
+  round trip and no body, and only what actually moved is read again. That is
+  what makes a refresh cheap enough to do at all, which was the real problem: a
+  check nobody can afford is a copy nobody updates. A page whose server offers
+  neither validator is simply read, because a check that always passes for want
+  of anything to ask with is worse than no check. Found on the way: 304 is a
+  3xx, so a "not modified" was read as a redirection to nowhere and followed
+  four times. `rook docs add --refresh`, `docs {"refresh": true}`, and a button
+  in the browser that says what changed. 4 tests.
+- **A miss that is not a miss** — a narrow question gathered
+  `docs/redis-persistence/latest`, and asking about `redis` an hour later walked
+  past it to the network: five fetches to arrive at the same site. A topic with
+  no set of its own is now answered from a set beside it — one word of four
+  characters or more in common, so it works in both directions — but only when
+  that set actually answers the question, and always saying which set answered.
+  A passage from a neighbouring topic presented as this one is a different
+  claim. `rook docs show` names the neighbours it found rather than only saying
+  no. 2 tests.
 - **A hundred and ninety-four steps spent asking the same thing** — the first
   live turn against `docs`: refused because an unattended `rook run` has nobody
   to approve a fetch, a small model made the same call again until the step

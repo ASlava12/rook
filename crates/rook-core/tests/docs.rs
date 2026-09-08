@@ -15,6 +15,16 @@ use rook_store::Store;
 /// pointing back at this same server — which is the only way to have a
 /// gathering follow links without leaving the machine.
 async fn site(pages: Vec<(&'static str, String)>) -> String {
+    served(pages, None).await
+}
+
+/// The same, with an `ETag` on every page and a 304 for anyone who already has
+/// it — which is what a real documentation host does and what a check is for.
+async fn versioned(pages: Vec<(&'static str, String)>, tag: &'static str) -> String {
+    served(pages, Some(tag)).await
+}
+
+async fn served(pages: Vec<(&'static str, String)>, tag: Option<&'static str>) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -33,10 +43,14 @@ async fn site(pages: Vec<(&'static str, String)>) -> String {
         while let Ok((mut socket, _)) = listener.accept().await {
             let mut scratch = [0u8; 4096];
             let read = socket.read(&mut scratch).await.unwrap_or(0);
-            let request = String::from_utf8_lossy(&scratch[..read]).to_string();
+            let request = String::from_utf8_lossy(&scratch[..read]).to_lowercase();
             let path = request.split_whitespace().nth(1).unwrap_or("/").to_string();
+            let known = tag.is_some_and(|tag| request.contains(&format!("if-none-match: {tag}")));
             let (status, body) = if path.starts_with("/lite/") {
                 ("200 OK", results.clone())
+            } else if known {
+                // The whole point of asking this way: an answer with no body.
+                ("304 Not Modified", String::new())
             } else {
                 match pages.iter().find(|(p, body)| path.starts_with(p) && !body.is_empty()) {
                     Some((_, body)) => ("200 OK", body.clone()),
@@ -45,8 +59,9 @@ async fn site(pages: Vec<(&'static str, String)>) -> String {
                     None => ("404 Not Found", "<html><body>no such page</body></html>".into()),
                 }
             };
+            let etag = tag.map(|tag| format!("ETag: {tag}\r\n")).unwrap_or_default();
             let response = format!(
-                "HTTP/1.1 {status}\r\nContent-Type: text/html\r\nConnection: close\r\n\
+                "HTTP/1.1 {status}\r\nContent-Type: text/html\r\n{etag}Connection: close\r\n\
                  Content-Length: {}\r\n\r\n{body}",
                 body.len()
             );
@@ -173,11 +188,13 @@ fn a_passage_comes_back_with_the_page_it_was_read_from() {
                 text: "Redis persists to an append only file, rewritten in the background.\n\n\
                        Replication copies a primary to its replicas asynchronously by default."
                     .into(),
+                ..Default::default()
             },
             docs::Page {
                 url: "https://redis.io/clustering".into(),
                 title: "Clustering".into(),
                 text: "A cluster shards keys across nodes by hash slot, sixteen thousand of them.".into(),
+                ..Default::default()
             },
         ],
     );
@@ -193,8 +210,12 @@ fn a_passage_comes_back_with_the_page_it_was_read_from() {
 #[test]
 fn reading_the_same_topic_again_replaces_the_copy_instead_of_keeping_two() {
     let (_dir, rook) = rook();
-    let page =
-        |text: &str| docs::Page { url: "https://redis.io/".into(), title: "Redis".into(), text: text.into() };
+    let page = |text: &str| docs::Page {
+        url: "https://redis.io/".into(),
+        title: "Redis".into(),
+        text: text.into(),
+        ..Default::default()
+    };
 
     rook.keep_docs(&docs::DocSet::new("redis", docs::LATEST, vec![page("the first reading")])).unwrap();
     rook.keep_docs(&docs::DocSet::new("redis", docs::LATEST, vec![page("the second reading")])).unwrap();
@@ -208,8 +229,12 @@ fn reading_the_same_topic_again_replaces_the_copy_instead_of_keeping_two() {
 #[test]
 fn two_versions_of_a_topic_are_two_sets_and_the_unnamed_one_is_latest() {
     let (_dir, rook) = rook();
-    let page =
-        |text: &str| docs::Page { url: "https://redis.io/".into(), title: "R".into(), text: text.into() };
+    let page = |text: &str| docs::Page {
+        url: "https://redis.io/".into(),
+        title: "R".into(),
+        text: text.into(),
+        ..Default::default()
+    };
     rook.keep_docs(&docs::DocSet::new("redis", docs::LATEST, vec![page("current")])).unwrap();
     rook.keep_docs(&docs::DocSet::new("redis", "6.2", vec![page("older")])).unwrap();
 
@@ -266,7 +291,12 @@ fn the_words_that_carry_a_question_are_the_ones_the_set_does_not_repeat() {
     let set = docs::DocSet::new(
         "redis",
         docs::LATEST,
-        vec![docs::Page { url: "https://redis.io/commands".into(), title: "Commands".into(), text }],
+        vec![docs::Page {
+            url: "https://redis.io/commands".into(),
+            title: "Commands".into(),
+            text,
+            ..Default::default()
+        }],
     );
 
     let found = set.passages("how does persistence work", 4);
@@ -292,6 +322,7 @@ fn the_same_paragraph_twice_is_one_passage() {
             url: "https://redis.io/commands".into(),
             title: "Commands".into(),
             text: format!("{repeated}\n\n{repeated}\n\n{repeated}"),
+            ..Default::default()
         }],
     );
 
@@ -345,7 +376,12 @@ fn a_question_is_answered_by_its_subject_and_not_by_its_shape() {
     let set = docs::DocSet::new(
         "redis",
         docs::LATEST,
-        vec![docs::Page { url: "https://redis.io/docs/".into(), title: "Docs".into(), text }],
+        vec![docs::Page {
+            url: "https://redis.io/docs/".into(),
+            title: "Docs".into(),
+            text,
+            ..Default::default()
+        }],
     );
 
     let found = set.passages("how does persistence work", 3);
@@ -362,7 +398,109 @@ fn a_question_is_answered_by_its_subject_and_not_by_its_shape() {
             text: "A worker runs jobs off a queue, and a worker that dies is replaced by the \
                    supervisor without losing the job it held."
                 .into(),
+            ..Default::default()
         }],
     );
     assert!(!workers.passages("what does a worker do", 2).is_empty(), "a set about workers answers");
+}
+
+/// Age is the wrong question. A copy of a pinned version does not go stale by
+/// getting older, and a copy of `latest` can be wrong the day after it was
+/// read — so what is asked is the source, with the validator it gave, and a
+/// server that answers 304 has said the copy is current for a round trip and
+/// no body.
+#[tokio::test]
+async fn a_check_asks_the_source_what_changed_rather_than_downloading_it_again() {
+    let page_one = page(
+        "Persistence",
+        &[
+            "Redis writes an append only file so that a restart does not lose the last seconds \
+             of writes, and rewrites it in the background.",
+            "Snapshotting is the other durability option, and the two are used together.",
+        ],
+    );
+    let base = versioned(vec![("/persistence", page_one)], "\"v1\"").await;
+    let (set, _) = docs::gather("redis", docs::LATEST, &sources(&base, 3, 100_000)).await.unwrap();
+    assert_eq!(set.pages[0].etag.as_deref(), Some("\"v1\""), "the validator is kept with the page");
+    let before = set.pages[0].text.clone();
+
+    let checked = docs::recheck(&set, &sources(&base, 3, 100_000)).await;
+
+    assert!(checked.changed.is_empty(), "the source says it is current: {:?}", checked.changed);
+    assert!(checked.unreadable.is_empty(), "{:?}", checked.unreadable);
+    assert_eq!(checked.set.pages[0].text, before, "and the copy is untouched");
+    assert!(checked.set.fetched_at >= set.fetched_at, "the set records when it was checked");
+}
+
+/// And the other half: a source serving something else says so, and only that
+/// page is read again.
+#[tokio::test]
+async fn a_page_the_source_has_changed_is_the_one_that_is_read_again() {
+    let first = page(
+        "Persistence",
+        &[
+            "The first reading of this page, which has to be long enough that a gathering keeps \
+             it rather than passing it over as a stub.",
+            "A second paragraph, for the same reason: a page of one line is navigation.",
+        ],
+    );
+    let base = versioned(vec![("/persistence", first)], "\"v1\"").await;
+    let (set, _) = docs::gather("redis", docs::LATEST, &sources(&base, 3, 100_000)).await.unwrap();
+
+    // A different server, serving different words under a different validator:
+    // the same page, edited.
+    let second = page(
+        "Persistence",
+        &[
+            "The second reading, which says something else entirely now, at the same length as \
+             the first so that only the words have changed.",
+            "A second paragraph, for the same reason: a page of one line is navigation.",
+        ],
+    );
+    let moved = versioned(vec![("/persistence", second)], "\"v2\"").await;
+    let mut set = set;
+    set.pages[0].url = format!("{moved}/persistence");
+
+    let checked = docs::recheck(&set, &sources(&moved, 3, 100_000)).await;
+
+    // Named as the set knows it, which is what the search result called it.
+    assert_eq!(checked.changed, vec![set.pages[0].title.clone()], "the page that moved is named");
+    assert!(checked.set.pages[0].text.contains("second reading"), "and re-read");
+    assert_eq!(checked.set.pages[0].etag.as_deref(), Some("\"v2\""), "with what it is now called");
+}
+
+/// A source that offers neither validator cannot be asked, so it is read — a
+/// check that always passes because there was nothing to ask with would be
+/// worse than no check.
+#[tokio::test]
+async fn a_source_that_offers_no_validator_is_read_rather_than_assumed_current() {
+    let body = page(
+        "Persistence",
+        &[
+            "A page from a server that says nothing about which version of it this is, and is \
+             long enough to be worth keeping.",
+            "A second paragraph, for the same reason: a page of one line is navigation.",
+        ],
+    );
+    let base = site(vec![("/persistence", body)]).await;
+    let (set, _) = docs::gather("redis", docs::LATEST, &sources(&base, 3, 100_000)).await.unwrap();
+    assert!(set.pages[0].etag.is_none(), "the precondition: nothing to ask with");
+
+    let checked = docs::recheck(&set, &sources(&base, 3, 100_000)).await;
+
+    assert!(checked.changed.is_empty(), "the same bytes came back: {:?}", checked.changed);
+    assert!(checked.set.pages[0].fetched_at >= set.pages[0].fetched_at, "and it was actually read");
+}
+
+/// Read off a live gathering: a narrow question left `docs/redis-persistence`
+/// on the disk, and asking about `redis` walked past it to the network.
+#[test]
+fn topics_about_the_same_thing_are_recognised_as_such() {
+    assert!(docs::relates("redis", "redis persistence"));
+    assert!(docs::relates("redis persistence", "redis"), "and in both directions");
+    assert!(docs::relates("postgres", "postgres 16 replication"));
+    // Not everything that shares a short word: `api` and `the` are in half of
+    // everything, and two topics that share nothing are two topics.
+    assert!(!docs::relates("redis", "postgres"));
+    assert!(!docs::relates("redis api", "stripe api"), "a word this short carries nothing");
 }
