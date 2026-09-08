@@ -71,6 +71,10 @@ impl Provider for OpenAiCompatible {
         true
     }
 
+    fn takes_effort(&self) -> bool {
+        reasons(&self.model)
+    }
+
     async fn complete(&self, request: Request) -> Result<Response> {
         let resp = self.send(&request, false).await?;
         let status = resp.status();

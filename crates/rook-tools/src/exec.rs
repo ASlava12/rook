@@ -94,29 +94,57 @@ impl Tool for RunCommand {
             .map(|s| std::sync::Arc::new(std::sync::Mutex::new(s)));
         let mut out = Ends::new(keep, spill.clone());
         let mut err = Ends::new(keep, spill.clone());
-        let overran = {
-            // Together, not one after the other: a pipe holds about 64 KiB, and
-            // a command that fills stderr while stdout is being drained blocks
-            // on the write — so it never finishes stdout and the drain never
-            // ends. Any build with enough warnings did exactly that, and hung
-            // until the timeout with nothing to show for it.
-            let capture = async {
-                let reading_out = async {
-                    if let Some(s) = stdout.as_mut() {
-                        out.drain(s).await;
-                    }
-                };
-                let reading_err = async {
-                    if let Some(s) = stderr.as_mut() {
-                        err.drain(s).await;
-                    }
-                };
-                tokio::join!(reading_out, reading_err);
+        // Together, not one after the other: a pipe holds about 64 KiB, and a
+        // command that fills stderr while stdout is being drained blocks on the
+        // write — so it never finishes stdout and the drain never ends. Any
+        // build with enough warnings did exactly that, and hung until the
+        // timeout with nothing to show for it.
+        macro_rules! capture {
+            () => {
+                async {
+                    let reading_out = async {
+                        if let Some(s) = stdout.as_mut() {
+                            out.drain(s).await;
+                        }
+                    };
+                    let reading_err = async {
+                        if let Some(s) = stderr.as_mut() {
+                            err.drain(s).await;
+                        }
+                    };
+                    tokio::join!(reading_out, reading_err);
+                }
             };
-            tokio::time::timeout(timeout, capture).await.is_err()
-        };
+        }
+        // The end of the output and the end of the command are two events, and
+        // waiting only for the first is what hangs on `make &` or `nohup …`: a
+        // backgrounded child inherits the pipe, so the write end stays open
+        // after the shell has exited and the read never reaches EOF. The
+        // command finished in milliseconds and was reported, one timeout later,
+        // as one that never finished. So both are waited for, and whichever
+        // arrives first decides.
+        let mut exited = None;
+        let ended = tokio::time::timeout(timeout, async {
+            tokio::select! {
+                _ = capture!() => Ended::Drained,
+                status = child.wait() => {
+                    exited = status.ok();
+                    Ended::Exited
+                }
+            }
+        })
+        .await
+        .unwrap_or(Ended::TimedOut);
 
-        if overran {
+        // Exited first: ordinarily the pipes close microseconds later and this
+        // is the same drain finishing. Generously, because the alternative is
+        // reporting a command that printed as one that did not — and it only
+        // ever expires when something really is still holding the output.
+        const PIPES_AFTER_EXIT: std::time::Duration = std::time::Duration::from_secs(2);
+        let orphaned =
+            ended == Ended::Exited && tokio::time::timeout(PIPES_AFTER_EXIT, capture!()).await.is_err();
+
+        if ended == Ended::TimedOut {
             // The whole group, not the shell: `sh -c` may fork rather than
             // exec, and killing the shell alone leaves the real work running.
             let killed = kill_group(group);
@@ -135,7 +163,13 @@ impl Tool for RunCommand {
                 None => outcome,
             });
         }
-        let status = child.wait().await;
+        // Already reaped on the path that ended on the exit rather than on the
+        // output; waiting again there is a second wait for a process nobody is
+        // waiting for.
+        let status = match exited {
+            Some(status) => Ok(status),
+            None => child.wait().await,
+        };
 
         let code = status.ok().and_then(|s| s.code()).unwrap_or(-1);
         let full = out.seen + err.seen;
@@ -158,9 +192,20 @@ impl Tool for RunCommand {
             }
             false => "",
         };
+        // Said, because the difference matters to whoever reads the answer: the
+        // command is over, and something it started is not — so what is above
+        // is all of the output there will be, and the rest goes nowhere.
+        let left_running = match orphaned {
+            true => {
+                "\n(the command finished, but something it started is still running and still \
+                 holds the output — nothing it prints from here is captured. `background: true` \
+                 keeps a command whose output you want.)"
+            }
+            false => "",
+        };
         let outcome = ToolOutcome {
             content: format!(
-                "exit {code}\n{combined}{}{held}",
+                "exit {code}\n{combined}{}{held}{left_running}",
                 kept.as_ref().map(|(n, _)| n.as_str()).unwrap_or("")
             ),
             is_error: code != 0,
@@ -349,6 +394,20 @@ pub fn spawn_shell(
     // child does not inherit the TUI's terminal signals.
     cmd.process_group(0);
     cmd.spawn().map_err(|e| ToolError::Io { path: cwd.to_path_buf(), source: e })
+}
+
+/// Which of the two ends of a command arrived first.
+///
+/// The output ending and the command ending are not the same event, and a
+/// command that backgrounds something ends without its output ever ending.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ended {
+    /// The pipes reached EOF: everything that was going to be printed was.
+    Drained,
+    /// The shell exited while the pipes were still open, which is either
+    /// microseconds of ordinary lag or a child holding them open for good.
+    Exited,
+    TimedOut,
 }
 
 /// What to say about the kept copy, and where it is — or nothing, once the file

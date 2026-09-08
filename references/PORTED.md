@@ -1480,3 +1480,158 @@ Of what remains, several are the same questions this repository has already
 answered its own way — waiting out temporary rate limits, keeping tool-schema
 references through a dialect, bounding the encoding of output tails — and the
 rest is Bun compatibility for their test suite.
+
+## cline dac3b35ba → fc28a5fe3, 2026-09-08
+
+Six commits, one ported, and it is a bug this repository had in the same shape
+for the same reason. `fix(core): complete run_commands when background children
+hold the stdio pipes` is the difference between two events that look like one:
+a command ends, and its output ends. `run_command` waited only for the second —
+draining both pipes to EOF and only then reaping the shell — so `make &`,
+`nohup …`, or anything else that leaves a child holding the inherited write end
+never reached EOF. The command was over in milliseconds and was reported, one
+whole timeout later, as one that had to be killed. An interactive terminal
+gives the opposite answer: the prompt comes back and the background job keeps
+printing. Both ends are waited for now, whichever arrives first decides, and an
+exit that beats the pipes gets two seconds of grace before the answer says the
+command finished and something it started still holds the output. Generous on
+purpose: the grace only ever expires when something really is holding it, so an
+ordinary command never pays it.
+
+The other five are theirs. `report silent shell-integration successes as empty
+output` prompted the check it deserved and found nothing: their fallback reads
+a clipboard snapshot of the terminal when the capture is empty and calls the
+command failed, which is a heuristic this does not have — a command run in the
+editor's terminal takes its exit code from the client over ACP, and an empty
+output is an empty output. The rest is a host-bridge spawn token, Windows
+session-import paths, desktop backend startup and a Windows taskbar icon.
+
+## opencode 337fd144d → d6855b6b4, 2026-09-08
+
+Fifteen commits: nine are generated files, nix hashes, SDK bumps and docs.
+Nothing ported, and one that paid for the pass by prompting a look here.
+
+`fix(provider): preserve explicit OpenAI service tiers` is a patch to a vendored
+SDK whose capability table dropped a `service_tier` the user had configured,
+because its own list said the model did not support it. The polarity here is
+the safe one — every dialect *adds* a field only for the families documented to
+take it, and the comment beside each says why: guessing wrong fails every
+request rather than degrading. But the other half of their bug was ours. A
+model with no reasoning to spend never receives `effort`, and until now nothing
+said so: `/effort high` was accepted, the footer showed `assist/high` beside the
+stance, and no request carried it. The dialect already knows — `takes_effort`
+asks it rather than deciding again, `doctor` says it beside the model, and
+`/effort` says it where somebody sets it. One table, in the dialect that owns
+it, and no second copy in a front end to go stale.
+
+The rest is theirs: an OAuth client metadata document for their console, Go
+client compatibility guidance, a GitLab provider bump, and the generated output
+of all of it.
+
+## acp 23925785a → 533356d4b, 2026-09-08
+
+Thirty-nine commits and nothing to read past the list: thirty-two are registry
+and client-list documentation — Sublime Text, Ghosty Teams, Runmote, a Go SDK,
+a C++ one — and the rest are dependency bumps and workflow pins. Outside
+`docs/`, the only files touched in the whole range are two workflows and three
+lockfiles. The protocol itself did not move, so neither did `rook-acp`.
+
+## codex 6af345407 → d6489472f, 2026-09-08
+
+Ninety-two commits, one ported, and the port is a message rather than a
+mechanism.
+
+`Warn when the connected Codex service is older than the CLI` and `Add a stable
+TUI/app-server version comparison helper` are the question a daemon
+architecture asks of everybody who builds one, and this repository had answered
+it in two places and not in the third. `rook daemon status` says the binary on
+disk is newer than the process answering, and a window opening through
+`Source::shared` says it on the way in — but an ordinary routed command said
+nothing, and yesterday's `rookd` answered `rook docs ls` with "404: no such
+endpoint", which is true and sends nobody anywhere. Routes are added and never
+removed, so a 404 for a route this binary knows about *is* a version skew and
+can be reported as one, at the moment it matters and without a version
+comparison at all.
+
+The rest is theirs, and the size of it is the point of the pass rather than an
+argument against it: about thirty commits of live WebRTC voice in the TUI —
+split-flap transcript animation, mute shortcuts, a GStreamer playback path — a
+dozen on Guardian, their reviewer subsystem, being moved into a shared context
+registry, user verification signed by the Secure Enclave with its own RPC
+contracts, managed app-server daemons with update policies and PID identity,
+a worktree browser, and Bazel stamping. Two prompted checks that found nothing:
+`Treat zombie processes as inactive in the Unix PID backend` is a liveness
+question answered here by an HTTP health call, which a zombie fails by
+definition, and `Sort JSON schema object keys for consistent output` is the
+prompt-cache rule this repository already keeps — tools sorted by name, and a
+schema built once per process from a literal.
+
+## hermes 3513a3b92 → 866332bfb, 2026-09-08
+
+Two hundred commits, one ported, and it is the kind worth the whole pass.
+
+Three of theirs in a single day — `match denied executable paths behind shell
+prefixes`, `preserve env argv and shell comment boundaries`, `honor GNU env
+split escapes and argv0 operands` — are one bug seen three times: `env` is a
+program whose job is to run another program, and everything between the two
+words belongs to `env`. A deny rule anchored to command position sees `env` and
+stops. This repository's own anchor already skipped `sudo`, `doas` and
+`env FOO=1`, and every other carrier walked straight through it: `env -S 'rm
+-rf /'` put the whole command inside a quoted argument, `env -i`, `env -a name`
+and `env --argv0 name` put an option where an assignment was expected. Denial
+is the one decision nothing here can override, so a carrier past it is worth
+more than its size.
+
+The deny check now runs against what the line says *and* against what it would
+run: an `env` prefix is walked — assignments, options, the operands of `-a`,
+`--argv0`, `-u` and `-C` — and `-S`/`--split-string` is unwrapped, `\_` for the
+spaces and `#` starting a comment, exactly the escapes they enumerated. Both
+halves are asserted, because a deny list that cries wolf gets turned off:
+`env -S 'cargo build --release'` is still ordinary, and so is a line that only
+says the words.
+
+Named and not fixed, because fixing it on a guess is worse: Gemini's function
+declarations take a subset of JSON Schema, and `write_skill` advertises
+`additionalProperties` three times. Their `collapse array-typed tool schemas`
+is a sanitizer bug in a sanitizer this does not have — schemas go to Google
+untouched — so if that subset refuses the field, every turn there fails on it.
+There is no key here to find out with, and a 400 for tool definitions already
+answers with `[agent] native_tools = false` rather than with silence. Worth
+measuring before it is worth rewriting.
+
+The rest is theirs: their relay and gateway, Bot Mode, Kanban wakes, a desktop
+with tiles and queues, QQ bot approvals, split-flap voice transcripts, and a
+week of shared-session fan-out — a session model where several terminals attach
+to one conversation, which is a different answer to multi-window than the one
+here.
+
+## openclaw 140d9e705 → c667fa4cd, 2026-09-08
+
+Two hundred commits, one ported.
+
+`fix(agents): stop retrying wrapped parameter validation failures` is a reading
+of the same seam this repository has: what is a *later* and what is a *no*. A
+gateway between the agent and the model answers its upstream's 400 with a 500,
+and a status-only classification sends the same wrong request four times with a
+backoff between them before the message naming what is wrong ever arrives. The
+statuses that mean later are unchanged; a body carrying a canonical code —
+`invalid_request_error`, `context_length_exceeded`, `invalid_api_key`,
+`authentication_error`, `permission_error`, `model_not_found` — is a verdict
+whatever status carried it. Codes rather than prose, deliberately: their own
+bug was the other direction, a parameter *named* `timeout` read as a transient
+failure because the word was in the message.
+
+The same reading pays twice. `names_the_context` decided on 400 and 413 alone,
+so a too-long prompt wrapped in a gateway's 500 was retried four times and then
+ended the turn — when the answer to it is a compaction, which the loop already
+knows how to do. The canonical code now decides on its own.
+
+A prompted check that passes: `fix(providers): honor self-hosted model context
+metadata` is a window taken from the endpoint rather than from a setting, which
+this does at the first compaction — the moment it changes anything — and
+believes over its own guess when the endpoint refuses one as too long.
+
+The rest is theirs, and the shape of the list is the usual one: Matrix,
+Mattermost and Feishu channels, a webchat surface, ClawHub skill types, plugin
+compatibility fixtures, release calibration, and about forty commits of test
+matrices being compacted.

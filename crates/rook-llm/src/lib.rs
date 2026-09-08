@@ -243,6 +243,19 @@ pub trait Provider: Send + Sync {
         true
     }
 
+    /// Whether `effort` reaches this model at all.
+    ///
+    /// Each dialect sends it only to the families documented to take it, which
+    /// is right — an unknown field is rejected outright by a strict endpoint,
+    /// and guessing fails every request rather than degrading. What was wrong
+    /// is that the setting then did nothing and said nothing: a front end
+    /// showing `assist/high` in its footer was reporting a knob connected to
+    /// nothing. Asked here so a person can be told, rather than inferred twice
+    /// by whoever writes the next front end.
+    fn takes_effort(&self) -> bool {
+        true
+    }
+
     async fn complete(&self, request: Request) -> Result<Response>;
 
     fn supports_streaming(&self) -> bool {

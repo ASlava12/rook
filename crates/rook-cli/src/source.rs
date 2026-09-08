@@ -868,6 +868,27 @@ fn escaped(query: &str) -> String {
         .collect()
 }
 
+/// What a refused routed call says.
+///
+/// A 404 for a route this binary knows about is not a missing thing, it is a
+/// daemon older than the binary asking: routes are added, never removed, so the
+/// one process that cannot have the route is one built before it. `rook docs
+/// ls` against yesterday's `rookd` answered "404: no such endpoint", which is
+/// true and sends nobody anywhere. Codex answers the same question by comparing
+/// versions on connect; the failure itself carries it here, where somebody is
+/// already reading.
+fn refused(url: &str, status: reqwest::StatusCode, body: &str) -> String {
+    let older = status == reqwest::StatusCode::NOT_FOUND && body.contains("no such endpoint");
+    match older {
+        true => format!(
+            "{url} answered {status}: {body}\nthat route exists in this build of `rook`, so the \
+             `rookd` answering is an older one — `rook daemon restart` picks up the installed \
+             build on the same port"
+        ),
+        false => format!("{url} answered {status}: {body}"),
+    }
+}
+
 fn is_locked(e: &rook_core::CoreError) -> bool {
     matches!(e, rook_core::CoreError::Store(rook_store::StoreError::Locked { .. }))
 }
@@ -929,7 +950,7 @@ impl Daemon {
             let status = response.status();
             let said = response.text().await.with_context(|| format!("reading {url}"))?;
             if !status.is_success() {
-                bail!("{url} answered {status}: {said}");
+                bail!("{}", refused(&url, status, &said));
             }
             serde_json::from_str(&said).with_context(|| format!("decoding {url}"))
         })
@@ -942,7 +963,7 @@ impl Daemon {
             let status = response.status();
             let said = response.text().await.with_context(|| format!("reading {url}"))?;
             if !status.is_success() {
-                bail!("{url} answered {status}: {said}");
+                bail!("{}", refused(&url, status, &said));
             }
             serde_json::from_str(&said).with_context(|| format!("decoding {url}"))
         })
@@ -955,7 +976,7 @@ impl Daemon {
             let status = response.status();
             let body = response.text().await.with_context(|| format!("reading {url}"))?;
             if !status.is_success() {
-                bail!("{url} answered {status}: {body}");
+                bail!("{}", refused(&url, status, &body));
             }
             serde_json::from_str(&body).with_context(|| format!("decoding {url}"))
         })
@@ -965,6 +986,30 @@ impl Daemon {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A route this build knows and the daemon does not is a version skew, and
+    /// "404: no such endpoint" is the one answer that sends nobody anywhere.
+    /// Read off a real one: `rook docs ls` against yesterday's `rookd`.
+    #[test]
+    fn a_route_the_daemon_has_never_heard_of_says_the_daemon_is_older() {
+        let said = refused(
+            "http://127.0.0.1:7717/api/docs",
+            reqwest::StatusCode::NOT_FOUND,
+            "{\"error\":\"no such endpoint\"}",
+        );
+        assert!(said.contains("older one"), "{said}");
+        assert!(said.contains("daemon restart"), "and what to do about it: {said}");
+
+        // Every other refusal is left as it was: a 404 from an endpoint that
+        // exists means the thing asked for is not there, which is a different
+        // sentence.
+        let missing = refused(
+            "http://127.0.0.1:7717/api/skills/nope",
+            reqwest::StatusCode::NOT_FOUND,
+            "{\"error\":\"no skill nope\"}",
+        );
+        assert!(!missing.contains("older one"), "{missing}");
+    }
 
     /// The daemon most likely to be running yesterday's code is the one too
     /// old to say so — the field it would answer with did not exist then — so

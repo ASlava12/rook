@@ -337,3 +337,63 @@ fn the_middle_is_what_goes_when_output_is_elided() {
     assert!(elided.trim_end().ends_with("THE_END"), "and so is the tail");
     assert!(elided.contains("elided from the middle"), "and the gap says so");
 }
+
+/// Ported from cline (#13817, and their #12417 behind it): the shell exits and
+/// a child it backgrounded keeps the inherited pipe open, so the read never
+/// reaches EOF. Waiting only for the output made a command that finished in
+/// milliseconds arrive as one that had to be killed at the timeout — the answer
+/// an interactive terminal never gives, because a prompt comes back while the
+/// background job keeps printing.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_command_that_leaves_something_running_finishes_when_it_finishes() {
+    let (_d, ctx) = ctx();
+    // A duration this platform's `sleep` accepts, made unique by the fraction:
+    // a marker built as a huge integer is rejected outright by BSD `sleep`,
+    // and the test then asserted against its usage message.
+    let marker = format!("771771.{}", std::process::id());
+    let started = std::time::Instant::now();
+    // The timeout is far longer than the sleep this backgrounds, so a timeout
+    // cannot be what ends the call — and the sleep outlives the call, which is
+    // the precondition: the pipe is still held when the answer is written.
+    let out = run(
+        &ctx,
+        serde_json::json!({
+            // Not redirected: inheriting this call's pipes is the whole
+            // scenario, and `>/dev/null` on the child is how the first
+            // version of this test quietly tested nothing.
+            "command": format!("echo done; sleep {marker} &"),
+            "timeout_secs": 60
+        }),
+    )
+    .await;
+    let took = started.elapsed();
+
+    assert!(!out.is_error, "the command succeeded: {}", out.content);
+    assert!(out.content.starts_with("exit 0\n"), "{}", out.content);
+    assert!(out.content.contains("done"), "and what it printed is kept: {}", out.content);
+    assert!(took < std::time::Duration::from_secs(30), "and it did not wait out the timeout: {took:?}");
+    // Said, because it changes what the output means: there will be no more of
+    // it, and something is still running.
+    assert!(out.content.contains("still running"), "{}", out.content);
+
+    // The precondition, checked after the fact: something really was holding
+    // the pipe while the answer was written.
+    assert_eq!(sleepers(&marker), 1, "the backgrounded child outlives the call");
+    std::process::Command::new("pkill").args(["-f", &format!("sleep {marker}")]).status().ok();
+}
+
+/// The same shape without a background child: nothing may pay the grace period
+/// that one costs, and an ordinary command still answers at once.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_ordinary_command_does_not_wait_for_the_grace_the_other_one_needs() {
+    let (_d, ctx) = ctx();
+    let started = std::time::Instant::now();
+    let out = run(&ctx, serde_json::json!({"command": "echo quick", "timeout_secs": 60})).await;
+    let took = started.elapsed();
+
+    assert!(out.content.contains("quick"), "{}", out.content);
+    assert!(!out.content.contains("still running"), "nothing was left running: {}", out.content);
+    assert!(took < std::time::Duration::from_secs(1), "and it answered at once: {took:?}");
+}

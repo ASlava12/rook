@@ -26,6 +26,46 @@ fn refuses(command: &str) -> bool {
     matches!(policy.decide(&Risk::Execute(command.to_string())), Decision::Deny(_))
 }
 
+/// Ported from hermes, where three commits in one day were this: `env` runs
+/// another program, and everything between the two words belongs to `env`. A
+/// rule anchored to command position saw `env` and stopped, so every one of
+/// these carried `rm -rf /` past the one decision nothing can override.
+#[test]
+fn a_command_carried_by_env_is_still_the_command() {
+    for carried in [
+        "env -S 'rm -rf /'",
+        "env -S \"rm -rf /\"",
+        r"env -S 'rm\_-rf\_/'",
+        "env -S 'rm -rf / # tidying up'",
+        "env -i rm -rf /",
+        "env -a tidy rm -rf /",
+        "env --argv0 tidy rm -rf /",
+        "env -u HOME rm -rf /",
+        "env FOO=1 -i rm -rf /",
+        "/usr/bin/env -S 'rm -rf /'",
+        "echo done; env -S 'rm -rf /'",
+    ] {
+        assert!(refuses(carried), "carried past the deny list: {carried}");
+    }
+}
+
+/// And the other half, which is what makes a deny list worth having: `env` in
+/// front of something harmless is harmless, and a line that merely says the
+/// words is a line about them.
+#[test]
+fn env_in_front_of_something_ordinary_is_still_ordinary() {
+    for fine in [
+        "env FOO=1 cargo test",
+        "env -S 'cargo build --release'",
+        "env",
+        "printenv",
+        "echo 'rm -rf /' >> notes.md",
+        "grep -r 'rm -rf' docs/",
+    ] {
+        assert!(!refuses(fine), "refused something harmless: {fine}");
+    }
+}
+
 #[test]
 fn the_shapes_that_cannot_be_undone_are_refused() {
     for command in [

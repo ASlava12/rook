@@ -298,6 +298,20 @@ pub struct Said {
     pub quit: bool,
 }
 
+/// What `effort` costs on a model that has none to spend, said where it is set.
+const EFFORT_UNSPENT: &str = "  this model is not one of the families that reason, so the effort \
+                              is not sent with a request — `rook doctor` says the same beside the \
+                              model";
+
+/// Whether the configured model takes an effort at all.
+///
+/// Asked of the provider rather than decided again here: each dialect knows
+/// which of its families take the field, and a second table in a front end is
+/// the one that goes stale.
+fn reaches_nothing(rook: &Rook) -> bool {
+    crate::provider(&rook.config).is_ok_and(|provider| !provider.takes_effort())
+}
+
 /// Whether a word at the end of `/docs …` names a version rather than more of
 /// the topic. A digit at the front, `v` and a digit, or the word for the
 /// current one — anything else is a word of the subject.
@@ -333,9 +347,22 @@ pub async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command
             None => say!("no stance {rest:?} — readonly, assist or autonomous"),
         },
 
-        "effort" if rest.is_empty() => say!("{}", shared.effort.get().as_str()),
+        // A setting that reaches no request is worse than no setting: the
+        // footer shows it beside the stance, and on a model with no reasoning
+        // to spend it was being shown a knob connected to nothing.
+        "effort" if rest.is_empty() => {
+            say!("{}", shared.effort.get().as_str());
+            if reaches_nothing(rook) {
+                say!("{EFFORT_UNSPENT}");
+            }
+        }
         "effort" => match rook_llm::Effort::parse(rest) {
-            Some(effort) => shared.effort.set(effort),
+            Some(effort) => {
+                shared.effort.set(effort);
+                if reaches_nothing(rook) {
+                    say!("{EFFORT_UNSPENT}");
+                }
+            }
             None => say!("no effort {rest:?} — low, medium, high, xhigh or max"),
         },
 

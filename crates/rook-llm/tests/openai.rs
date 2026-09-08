@@ -121,3 +121,19 @@ async fn a_family_that_reasons_is_recognised_by_its_shape_rather_than_by_a_list(
         assert_eq!(body["reasoning_effort"], "low", "{reasoning} reasons: {body}");
     }
 }
+
+/// Prompted by opencode #47671, where an SDK's capability table dropped an
+/// explicitly configured service tier. The tables here only ever *add* a field,
+/// which is the safe polarity — but the setting then reached nothing and said
+/// nothing, and every front end shows it beside the stance. What the dialect
+/// already decides is now answerable.
+#[test]
+fn a_model_with_no_reasoning_to_spend_says_the_effort_is_not_sent() {
+    let patience = std::time::Duration::from_secs(30);
+    let reasoning = rook_llm::from_spec_with("openai/gpt-5.1", patience, Some(128_000)).unwrap();
+    assert!(reasoning.takes_effort(), "a family that reasons takes it");
+
+    // The ordinary local model, which is what most of this dialect is.
+    let local = rook_llm::from_spec_with("lmstudio/qwen3-8b", patience, Some(32_000)).unwrap();
+    assert!(!local.takes_effort(), "and one that does not, does not");
+}

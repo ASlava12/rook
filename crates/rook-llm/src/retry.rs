@@ -34,9 +34,36 @@ const FIRST_WAIT: Duration = Duration::from_secs(1);
 /// Statuses that mean *later*.
 ///
 /// A 400 or a 401 answers the same however many times it is asked, and retrying
-/// one only delays the message that says what to fix.
+/// one only delays the message that says what to fix. The status alone is not
+/// the whole question: a gateway between here and the model answers 500 or 502
+/// for its upstream's 400, and the same wrong request was then sent four times
+/// with a backoff between them before the message that named it arrived.
 fn worth_asking_again(error: &LlmError) -> bool {
     matches!(error, LlmError::Status { status, .. } if matches!(status, 408 | 429 | 500 | 502 | 503 | 504 | 529))
+        && !names_a_wrong_request(error)
+}
+
+/// Whether a refusal carries a code that means *no* rather than *later*.
+///
+/// Codes rather than prose, and only the canonical ones: these are the strings
+/// an API puts in a `type` or `code` field, so a body carrying one is stating a
+/// deterministic verdict whatever status it arrived under. Matching prose here
+/// would be the mistake openclaw made in the other direction — a message
+/// containing the word "timeout" read as a transient failure when it was a
+/// parameter named `timeout` being rejected.
+fn names_a_wrong_request(error: &LlmError) -> bool {
+    let LlmError::Status { body, .. } = error else { return false };
+    let said = body.to_ascii_lowercase();
+    [
+        "invalid_request_error",
+        "context_length_exceeded",
+        "invalid_api_key",
+        "authentication_error",
+        "permission_error",
+        "model_not_found",
+    ]
+    .iter()
+    .any(|code| said.contains(code))
 }
 
 /// Whether a refusal is about the effort this crate added.
@@ -63,7 +90,10 @@ fn names_the_effort(error: &LlmError) -> bool {
 pub fn names_the_context(error: &LlmError) -> bool {
     let LlmError::Status { status, body, .. } = error else { return false };
     let said = body.to_ascii_lowercase();
-    (*status == 400 || *status == 413)
+    // The canonical code decides on its own, whatever status carried it: a
+    // gateway wrapping its upstream's 400 in a 500 was answered here by four
+    // retries and then a failed turn, when what it needed was a compaction.
+    (*status == 400 || *status == 413 || said.contains("context_length_exceeded"))
         && ["context length", "context_length", "too long", "input length", "maximum context"]
             .iter()
             .any(|word| said.contains(word))
@@ -189,6 +219,10 @@ impl Provider for Retrying {
 
     fn supports_tools(&self) -> bool {
         self.inner.supports_tools()
+    }
+
+    fn takes_effort(&self) -> bool {
+        self.inner.takes_effort()
     }
 
     fn supports_streaming(&self) -> bool {

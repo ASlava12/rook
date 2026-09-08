@@ -299,3 +299,72 @@ async fn the_wait_is_the_one_the_provider_asked_for() {
     // reading the header the first wait is one second.
     assert!(waited >= std::time::Duration::from_secs(2), "waited only {waited:?}");
 }
+
+/// Answers the same status and body for ever, counting the asks.
+async fn always(status: &'static str, body: &'static str) -> (String, Arc<AtomicUsize>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let seen = Arc::new(AtomicUsize::new(0));
+    let counted = seen.clone();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let mut scratch = [0u8; 8192];
+            let _ = socket.read(&mut scratch).await;
+            counted.fetch_add(1, Ordering::SeqCst);
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nConnection: close\r\n\
+                 Content-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+        }
+    });
+    (format!("http://{addr}/v1"), seen)
+}
+
+/// Ported from openclaw #140991: a gateway between here and the model answers
+/// its upstream's 400 with a 500, and a status-only reading of that sends the
+/// same wrong request four times with a backoff between them before the message
+/// that names what is wrong arrives. The code in the body is a verdict whatever
+/// carried it.
+#[tokio::test]
+async fn a_deterministic_refusal_wrapped_in_a_gateway_error_is_not_asked_again() {
+    let (url, seen) = always(
+        "502 Bad Gateway",
+        r#"{"error":{"type":"invalid_request_error","message":"unknown parameter: reasoning"}}"#,
+    )
+    .await;
+
+    let refused = provider(url).complete(Request::new(Vec::new())).await.unwrap_err();
+
+    assert_eq!(seen.load(Ordering::SeqCst), 1, "the same wrong request was sent again");
+    assert!(refused.to_string().contains("invalid_request_error"), "and it says what: {refused}");
+}
+
+/// The other half, which is what the retry is for: a gateway error that says
+/// nothing about the request is still *later* rather than *no*.
+#[tokio::test]
+async fn a_gateway_error_that_names_nothing_is_still_waited_out() {
+    let (url, seen) = flaky(vec!["502 Bad Gateway", "500 Internal Server Error"]).await;
+
+    let answered = provider(url).complete(Request::new(Vec::new())).await;
+
+    assert_eq!(seen.load(Ordering::SeqCst), 3, "it has to have been refused twice to test anything");
+    assert_eq!(answered.expect("a gateway hiccup means later").message.content, "answered");
+}
+
+/// And the compaction path: the too-long refusal reaches the loop even when a
+/// gateway wrapped it, because the loop shrinks the window on that answer and
+/// otherwise ends the turn on a failure it could have recovered from.
+#[test]
+fn a_wrapped_context_refusal_is_still_read_as_one() {
+    let wrapped = LlmError::Status {
+        status: 500,
+        body: r#"{"error":{"code":"context_length_exceeded","message":"maximum context length is 8192 tokens"}}"#
+            .into(),
+        retry_after: None,
+    };
+    assert!(rook_llm::retry::names_the_context(&wrapped), "a compaction is the answer to this");
+}

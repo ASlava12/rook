@@ -249,6 +249,105 @@ pub enum Decision {
     Deny(String),
 }
 
+/// The same line, and the same line as the shell would actually run it.
+///
+/// `env` is a program whose job is to run another program, and everything
+/// between the two words is `env`'s own: assignments, options, `-a name` and
+/// `--argv0 name`, and `-S 'a whole command line'`. A rule anchored to command
+/// position sees `env` there and nothing else, so `env -S 'rm -rf /'` walked
+/// straight past the rule that denies `rm -rf /` — which is the entire value of
+/// a deny rule, lost to a prefix nobody types by accident. Ported from hermes,
+/// where three commits in one day were this same carrier.
+///
+/// Normalisation, and said plainly as that: it covers the carriers named here
+/// and does not claim to be a sandbox. What cannot be taken apart is still
+/// asked about rather than allowed.
+fn carriers(line: &str) -> Vec<String> {
+    let mut out = vec![line.to_string()];
+    for part in line.split([';', '&', '|', '\n']) {
+        if let Some(bare) = past_env(part.trim())
+            && !bare.trim().is_empty()
+        {
+            out.push(bare);
+        }
+    }
+    out
+}
+
+/// What an `env …` prefix is in front of, or `None` when the part is not one.
+fn past_env(part: &str) -> Option<String> {
+    let words = words(part);
+    let first = words.first()?;
+    if first != "env" && !first.ends_with("/env") {
+        return None;
+    }
+    let mut at = 1;
+    while at < words.len() {
+        let word = &words[at];
+        // GNU's split-string: one argument holding a whole command line, with
+        // `\_` for the spaces and `#` starting a comment inside it.
+        if word == "-S" || word == "--split-string" {
+            return words.get(at + 1).map(|payload| unescaped(payload));
+        }
+        if let Some(payload) = word.strip_prefix("--split-string=") {
+            return Some(unescaped(payload));
+        }
+        // Options that take the next word as their operand, which is a name
+        // rather than the command: `env -a sudo printf ok` runs `printf`.
+        if matches!(word.as_str(), "-a" | "--argv0" | "-u" | "--unset" | "-C" | "--chdir") {
+            at += 2;
+            continue;
+        }
+        if word.starts_with('-') || word.contains('=') {
+            at += 1;
+            continue;
+        }
+        return Some(words[at..].join(" "));
+    }
+    None
+}
+
+/// A line split into words, with quotes taken off what they enclose. Not a
+/// shell parser: what it is for is finding the command inside a carrier, and
+/// anything it cannot take apart goes to the prompt as before.
+fn words(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut word = String::new();
+    let mut quote: Option<char> = None;
+    let mut started = false;
+    for c in line.chars() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), c) => word.push(c),
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                started = true;
+            }
+            (None, c) if c.is_whitespace() => {
+                if started || !word.is_empty() {
+                    out.push(std::mem::take(&mut word));
+                    started = false;
+                }
+            }
+            (None, c) => word.push(c),
+        }
+    }
+    if started || !word.is_empty() {
+        out.push(word);
+    }
+    out
+}
+
+/// GNU `env -S` escapes, as far as they carry a command: `\_` is a space and
+/// `#` starts a comment. Enough to read what would run, which is the question.
+fn unescaped(payload: &str) -> String {
+    let spaced = payload.replace("\\_", " ");
+    match spaced.split_once('#') {
+        Some((before, _)) => before.trim_end().to_string(),
+        None => spaced,
+    }
+}
+
 /// The commands a shell line runs, or nothing when that cannot be told.
 ///
 /// Split on the separators rather than parsed: a quoted `;` splits a line that
@@ -358,7 +457,11 @@ impl Policy {
 
         // Denial first, and it is final: an approval prompt that can override
         // the deny list would make the deny list decorative.
-        if let Some(rule) = self.deny.iter().find(|r| r.matches(&subject)) {
+        // Against what the line says and against what it would run: a carrier
+        // that hides the command from a command-anchored rule is a bypass of
+        // the one decision nothing can override.
+        let running = carriers(&subject);
+        if let Some(rule) = self.deny.iter().find(|r| running.iter().any(|line| r.matches(line))) {
             return Decision::Deny(format!("matches the deny rule {rule:?}"));
         }
         // Asked even at read-only: asking for more is the one thing a stance

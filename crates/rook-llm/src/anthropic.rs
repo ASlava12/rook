@@ -104,6 +104,10 @@ impl Provider for Anthropic {
         true
     }
 
+    fn takes_effort(&self) -> bool {
+        takes_adaptive_thinking(&self.model)
+    }
+
     async fn models(&self) -> Result<Vec<ModelInfo>> {
         #[derive(Deserialize)]
         struct Listing {

@@ -824,6 +824,15 @@ fn probe_provider(config: &rook_core::Config) -> Result<String> {
             "\n  the endpoint reports {reported}; set `context_window = {reported}` under [agent] to use it"
         ));
     }
+    // A knob connected to nothing is worse than no knob: every front end shows
+    // the effort beside the stance, and on a model with no reasoning to spend
+    // it was being shown a setting that reached no request.
+    if !provider.takes_effort() {
+        note.push_str(
+            "\n  `effort` is not sent to this model — it is not one of the families that reason, \
+             and an unknown field is refused by a strict endpoint rather than ignored",
+        );
+    }
     Ok(note)
 }
 
