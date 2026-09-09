@@ -208,9 +208,21 @@ pub struct About {
     pub arch: String,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Before the runtime, deliberately: setting an environment variable in a
+/// process that already has threads is the case `set_var` is unsafe for, and
+/// `#[tokio::main]` builds a multi-threaded runtime before the body runs. So
+/// the file is read here, in a `main` with one thread in it, and the server is
+/// what the runtime runs.
+fn main() -> Result<()> {
     rook_contain::launcher_entry();
+    // The same file the CLI reads, for the same reason: the daemon runs the
+    // turns, and a key it cannot see is a key the turn does not have.
+    rook_core::config::load_env_file();
+    serve()
+}
+
+#[tokio::main]
+async fn serve() -> Result<()> {
     let args = Args::parse();
     let rook = Rook::open(args.workspace).context("opening the store")?;
     let config = rook.config.clone();

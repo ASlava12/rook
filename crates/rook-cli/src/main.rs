@@ -442,6 +442,10 @@ fn main() -> Result<()> {
     // Before anything else: started as the launcher, this process lowers
     // itself and runs a command instead of being rook.
     rook_contain::launcher_entry();
+    // Before anything reads the environment and before this process has a
+    // second thread: provider keys live there, and a shell that has them and a
+    // desktop launcher that does not should not behave differently.
+    rook_core::config::load_env_file();
     let cli = Cli::parse();
     // Defaults if the config is unreadable: logging must not be what reports a
     // broken config, and the command about to run will report it properly.
@@ -541,6 +545,35 @@ fn cmd_doctor(workspace: &Path, json: bool) -> Result<()> {
     println!("arch      {}", env.arch);
     println!("workspace {}", workspace.display());
     println!("store     {}", rook_core::paths::store_dir().display());
+
+    // Where the provider keys came from, which is the first thing anybody
+    // debugging a 401 wants and the last thing they can see: names only, and
+    // never a value.
+    let dotenv = rook_core::paths::home().join(".env");
+    if dotenv.is_file() {
+        // Read at startup, so by now they are in this process's environment;
+        // what the file would have set is what it names.
+        let names = std::fs::read_to_string(&dotenv)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("export ").unwrap_or(line.trim()).split_once('='))
+            .map(|(name, _)| name.trim().to_string())
+            .filter(|name| !name.is_empty() && !name.starts_with('#'))
+            .collect::<Vec<_>>();
+        println!("env       {} — {}", dotenv.display(), names.join(", "));
+    }
+    // Not read, and said rather than left silent: a workspace is somebody
+    // else's repository as often as it is yours, and a `.env` in one can point
+    // a provider's base URL at a host of its choosing.
+    if workspace.join(".env").is_file() {
+        println!(
+            "env       {} is NOT read — a cloned repository must not be able to redirect a key.\n\
+             \x20         Move what rook needs to {}, or export it.",
+            workspace.join(".env").display(),
+            dotenv.display()
+        );
+    }
+
     println!();
     println!("toolchains detected:");
     if env.languages.is_empty() {

@@ -13,9 +13,11 @@ web UI, all views over the same engine.
 > **Status: young, and honest about it.** The storage layer, the skill system,
 > the inspection tools, the agent loop, streaming, MCP, LSP and ACP are
 > implemented and under test — including whole turns driven over a real socket
-> against a server that speaks the provider's dialect. What has never happened is
-> a model with judgement driving any of it. Nothing below describes something
-> that does not exist, and what is missing is listed under
+> against a server that speaks the provider's dialect. A capable model has now
+> driven it end to end: read the file, take the checkpoint, make the edit, run
+> the compiler, and answer a goal check — one model, a handful of turns, which
+> is a beginning and not a track record. Nothing below describes something that
+> does not exist, and what is missing is listed under
 > [what is not done](#what-is-not-done-yet).
 
 ## Why another one

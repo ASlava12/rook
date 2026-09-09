@@ -489,6 +489,54 @@ impl AgentConfig {
     }
 }
 
+/// Read `~/.rook/.env` into this process's environment, and answer with the
+/// names it set.
+///
+/// Provider keys come from the environment — `ANTHROPIC_API_KEY`,
+/// `ANTHROPIC_BASE_URL` and the rest — which means a shell that has them and a
+/// desktop launcher that does not behave differently for reasons nobody can
+/// see. A file beside `config.toml` is the same answer everything else here
+/// gives: user-owned, one place, readable.
+///
+/// **The workspace's own `.env` is deliberately not read.** A workspace is
+/// somebody else's repository as often as it is yours, and a `.env` in one can
+/// set `ANTHROPIC_BASE_URL` to a host of its choosing — which sends your key
+/// there on the next turn. Cloning a repository must not be a way to take a
+/// key. `doctor` says so where a workspace has one, rather than leaving the
+/// silence to be read as a bug.
+///
+/// What is already in the environment wins: an explicit `export` is a person
+/// saying something on purpose, and a file should not overrule it.
+pub fn load_env_file() -> Vec<String> {
+    let path = crate::paths::home().join(".env");
+    let Ok(text) = std::fs::read_to_string(&path) else { return Vec::new() };
+    let mut set = Vec::new();
+    for line in text.lines() {
+        let line = line.trim().strip_prefix("export ").unwrap_or(line.trim());
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((name, value)) = line.split_once('=') else { continue };
+        let name = name.trim();
+        if name.is_empty() || std::env::var_os(name).is_some() {
+            continue;
+        }
+        let value = value.trim();
+        // Quotes are how a value with a space in it is written, and they are
+        // not part of it.
+        let value = value
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+            .unwrap_or(value);
+        // Before any thread of this process exists, which is why every front
+        // end calls this as the first thing it does.
+        unsafe { std::env::set_var(name, value) };
+        set.push(name.to_string());
+    }
+    set
+}
+
 impl Config {
     /// A malformed config is an error, not a fallback to defaults: silently
     /// ignoring it would also silently change which model the agent talks to.

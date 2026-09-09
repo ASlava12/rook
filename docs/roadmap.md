@@ -234,6 +234,30 @@ what unblocks the most.
   scored. Results are ordered by whether the host carries the project's name
   before anything is fetched — the first gathering for "redis" kept a tutorial
   site's page about the documentation as the documentation. 17 tests.
+- **A key in a file the process cannot see** — provider keys come from the
+  environment, so a shell that has them and a launcher that does not behaved
+  differently for a reason nobody could see, and a `.env` written in the
+  obvious place did nothing at all. `~/.rook/.env` is read now, beside
+  `config.toml`, by every front end, before the process has a second thread —
+  which is what `set_var` is unsafe for, and why `rookd` reads it in a `main`
+  the runtime has not started yet. What is already exported wins: a person
+  saying something on purpose is not overruled by a file.
+
+  **The workspace's own `.env` is deliberately not read**, and `doctor` says so
+  where one exists rather than leaving the silence to be read as a bug. A
+  workspace is somebody else's repository as often as it is yours, and a `.env`
+  in one can point `ANTHROPIC_BASE_URL` at a host of its choosing — cloning a
+  repository must not be a way to take a key.
+- **A model with judgement drove the loop** — through ProxyAPI against
+  `z-ai/glm-5.3`, with `z-ai/glm-5.3-flash` doing the compaction, which is the
+  arm ADR-0010's measurement argued for and the first time both have been real
+  at once. Asked to fix a typo it could not see: read the file, took the
+  checkpoint, made the edit, ran the compiler, and answered its own goal check
+  through a sub-agent. Unattended first, where the write was refused because
+  nobody could approve it — and the answer said what it had found and what it
+  would have done, which is the behaviour that was designed and never observed.
+  One model and a handful of turns is a beginning, not a track record, and the
+  README says exactly that now.
 - **Something to install rather than something to build** — the only way in was
   `git clone` and a Rust toolchain, which is a fine way to try a compiler and a
   poor way to try an agent. A tagged release now builds on five targets:
