@@ -24,23 +24,6 @@ use serde::{Deserialize, Serialize};
 /// `X-Rook-Api`; the daemon refuses a mismatch rather than misbehaving quietly.
 pub const API_VERSION: u32 = 1;
 
-pub mod routes {
-    pub const HEALTH: &str = "/api/health";
-    pub const STATS: &str = "/api/store/stats";
-    pub const OBJECTS: &str = "/api/store/objects";
-    pub const OBJECT: &str = "/api/store/objects/{id}";
-    pub const REFS: &str = "/api/store/refs";
-    pub const SESSIONS: &str = "/api/sessions";
-    pub const SESSION: &str = "/api/sessions/{id}";
-    pub const TRANSCRIPT: &str = "/api/sessions/{id}/transcript";
-    pub const SKILLS: &str = "/api/skills";
-    pub const SKILL: &str = "/api/skills/{name}";
-    pub const SKILL_HISTORY: &str = "/api/skills/{name}/history";
-    pub const CHECKPOINTS: &str = "/api/checkpoints";
-    pub const MAINTENANCE: &str = "/api/maintenance";
-    pub const EVENTS_WS: &str = "/api/events";
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Health {
     pub ok: bool,

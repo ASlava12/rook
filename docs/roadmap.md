@@ -285,6 +285,17 @@ what unblocks the most.
   later says what a session being watched says. Both fields default, so a
   window talking to a daemon that predates them falls back to the name it
   always had. 8 tests.
+- **A list of routes nobody read, naming a socket that does not exist** —
+  `rook-proto` carried fifteen path constants under `pub mod routes`, and the
+  module's own doc said the HTTP surface therefore had exactly one definition.
+  Nothing read them: the daemon's router writes all fifty of its routes out by
+  hand, so does the CLI's remote client, and the browser writes strings. One of
+  the fifteen was `/api/events`, which is not a route — the chat socket is
+  `/api/chat` — so the list had drifted from what it described, which is what an
+  unread list does. `pub` in a library turns off the dead-code lint for a
+  constant exactly as it does for a function, and the two guards that catch
+  functions and error variants had no third: `every_public_constant_is_read_
+  somewhere` is it. 1 test.
 - **A key in a file the process cannot see** — provider keys come from the
   environment, so a shell that has them and a launcher that does not behaved
   differently for a reason nobody could see, and a `.env` written in the

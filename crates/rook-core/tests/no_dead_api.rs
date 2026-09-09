@@ -121,6 +121,55 @@ fn every_public_function_is_called_somewhere() {
     );
 }
 
+/// The same question asked of a public constant. `rook-proto` carried a
+/// `routes` module of fifteen path strings that nothing read: every route was
+/// written out by hand in the daemon's router, in the CLI's remote client and
+/// in the browser, and the module's own doc claimed the HTTP surface had
+/// exactly one definition. One of the fifteen named `/api/events`, a socket
+/// that does not exist and never did — the chat socket is `/api/chat` — so the
+/// list was not merely unread but wrong, which is what an unread list becomes.
+///
+/// `crates/` only: a constant in `xtask` is in a binary, where the dead-code
+/// lint still works, and a scan of the text alone cannot tell a declaration
+/// from one written inside a string literal — `smoke.rs` has a fixture that
+/// looks exactly like one.
+#[test]
+fn every_public_constant_is_read_somewhere() {
+    let root = repo_root().join("crates");
+    let sources: Vec<String> = ignore::WalkBuilder::new(&root)
+        .build()
+        .flatten()
+        .map(|e| e.into_path())
+        .filter(|p| p.extension().is_some_and(|e| e == "rs"))
+        .filter_map(|p| std::fs::read_to_string(&p).ok())
+        .collect();
+    let whole = sources.join("\n");
+
+    let mut declared: BTreeMap<String, usize> = BTreeMap::new();
+    for line in whole.lines().map(str::trim) {
+        if let Some(rest) = line.strip_prefix("pub const ") {
+            let name = rest.split(':').next().unwrap_or_default().trim();
+            if !name.is_empty()
+                && name.chars().all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+            {
+                *declared.entry(name.to_string()).or_default() += 1;
+            }
+        }
+    }
+    assert!(declared.len() > 30, "the parser found only {}, so it is broken", declared.len());
+
+    let unread: Vec<&String> = declared
+        .iter()
+        .filter(|(name, declarations)| whole.matches(name.as_str()).count() <= **declarations)
+        .map(|(name, _)| name)
+        .collect();
+
+    assert!(
+        unread.is_empty(),
+        "public but read by nothing, so what it names is a claim and not a fact: {unread:?}"
+    );
+}
+
 /// The same question asked of production alone.
 ///
 /// Counting every `.rs` file lets a function that only tests reach pass as used,
