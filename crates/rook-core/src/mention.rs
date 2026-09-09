@@ -88,9 +88,15 @@ mod tests {
             "deep/deep/service.toml", // as does this, further away
         ]);
         let found = matching(&here(dir.path(), 1000), "service", 10);
+        // Asked for rather than spelled: these are paths, and the separator is
+        // the platform's. `deep/deep/service.toml` passed here and failed on
+        // the Windows runner, which is the third time that has happened.
+        let spelt = |path: &str| path.split('/').collect::<std::path::PathBuf>().display().to_string();
         assert_eq!(
             found,
-            vec!["service.toml", "deep/deep/service.toml", "src/my_service.rs", "service/notes.md"],
+            ["service.toml", "deep/deep/service.toml", "src/my_service.rs", "service/notes.md"]
+                .map(spelt)
+                .to_vec(),
             "starts-with before contains before a match up the path, and the nearer of two equals first"
         );
     }
