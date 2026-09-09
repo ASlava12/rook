@@ -234,6 +234,28 @@ what unblocks the most.
   scored. Results are ordered by whether the host carries the project's name
   before anything is fetched — the first gathering for "redis" kept a tutorial
   site's page about the documentation as the documentation. 17 tests.
+- **The window is the conversation** — the TUI was eight tabs across the top of
+  every screen, a Tab key that meant "leave the conversation" where every other
+  terminal means "complete this", and a footer that had to promise something
+  different on each one. Read against opencode, whose shape is the answer: one
+  view, and everything else summoned, used and dismissed. `^p` opens a palette
+  of the panes and the slash commands in one filtered list, because from where
+  a person stands they are one question — what can I do from here — and it was
+  being answered in two places, one of which was `/help`, where you look after
+  giving up. A pane opens *over* the conversation rather than instead of it, so
+  what you were doing is still there at the edges and Esc puts you back in it.
+  Tab completes and does nothing else.
+
+  What the tab bar carried had to go somewhere, and both halves were worth
+  keeping: which project this window is about — two windows on two projects
+  being the case the sessions pane was labelled for — and whether the window
+  holds the store or works through `rookd`. Both are in the conversation's own
+  title now, and the model and the stance are in the footer, where neither had
+  ever been. Three defects on the way, each caught by the tests that were
+  already there: `^k` taken for the palette is the key that kills to the end of
+  a line, an overlay at 88% of the width cut the end off a two-pane row, and a
+  bare Esc followed immediately by text is an escape sequence rather than a
+  key — which the prompt test had already learned once. 22 tests.
 - **A key in a file the process cannot see** — provider keys come from the
   environment, so a shell that has them and a launcher that does not behaved
   differently for a reason nobody could see, and a `.env` written in the

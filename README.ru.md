@@ -93,7 +93,7 @@ rook chat --session last                   # продолжить с того м
 rook session show last                     # `last` работает везде, где ждут сессию
 cargo test 2>&1 | rook run "почему падает?"   # stdin приклеивается к запросу
 rook --json run "..." | jq .outcome.reply  # один объект: ответ, токены, изменения
-rook tui                                   # терминальный интерфейс: чат и браузер хранилища
+rook tui                                   # разговор во весь экран, ^p — всё остальное
 rook checkpoint create before-refactor     # или `c` во вкладке Checkpoints
 rook docs add redis                        # прочитать документацию один раз и отвечать из неё
 rook secrets add ssh_prod                  # пароль, который агент использует и не видит

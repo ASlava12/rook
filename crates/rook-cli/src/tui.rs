@@ -15,7 +15,7 @@ use ratatui::crossterm::execute;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph, Tabs, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 
 use rook_core::agent::{AgentLoop, Progress};
@@ -30,7 +30,89 @@ use tokio::sync::mpsc;
 
 use crate::fmt;
 
-const TABS: [&str; 8] = ["Chat", "Sessions", "Memory", "Skills", "Store", "Checkpoints", "Docs", "Help"];
+/// What is over the conversation, when anything is.
+///
+/// Tabs were the shape before this, and their cost was constant: eight names
+/// across the top of every screen, a Tab key that meant "leave the
+/// conversation" where every other terminal means "complete this", and a
+/// footer that had to say something different on each one. The conversation is
+/// the window now, and everything else is summoned, used and dismissed — which
+/// is how opencode reads, and how a tool that is mostly one thing should.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Overlay {
+    /// Everything reachable, filtered as it is typed. `^P`, the key every
+    /// editor has made mean this.
+    Palette,
+    Sessions,
+    Memory,
+    Skills,
+    Store,
+    Checkpoints,
+    Docs,
+    Help,
+}
+
+impl Overlay {
+    /// The panes the palette offers, in the order somebody reaches for them.
+    const PANES: [Overlay; 7] = [
+        Overlay::Sessions,
+        Overlay::Docs,
+        Overlay::Memory,
+        Overlay::Skills,
+        Overlay::Checkpoints,
+        Overlay::Store,
+        Overlay::Help,
+    ];
+
+    fn name(self) -> &'static str {
+        match self {
+            Overlay::Palette => "commands",
+            Overlay::Sessions => "sessions",
+            Overlay::Memory => "memory",
+            Overlay::Skills => "skills",
+            Overlay::Store => "store",
+            Overlay::Checkpoints => "checkpoints",
+            Overlay::Docs => "docs",
+            Overlay::Help => "help",
+        }
+    }
+
+    /// What it is for, said where somebody is choosing between them.
+    fn what(self) -> &'static str {
+        match self {
+            Overlay::Palette => "everything reachable from here",
+            Overlay::Sessions => "past conversations — enter continues one here",
+            Overlay::Memory => "what the agent believes, and how to correct it",
+            Overlay::Skills => "what applies in this workspace, and why",
+            Overlay::Store => "what memory costs, per kind of object",
+            Overlay::Checkpoints => "snapshots of the workspace, and putting one back",
+            Overlay::Docs => "documentation gathered here, with its sources",
+            Overlay::Help => "the keys and the commands",
+        }
+    }
+
+    /// The keys the footer promises while this one is up. Per overlay, because
+    /// a hint that does nothing where it is shown reads as an application that
+    /// has stopped responding.
+    fn keys(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Overlay::Palette => &[("↑↓ ", "choose  "), ("⏎ ", "open  "), ("esc ", "close  ")],
+            Overlay::Sessions => &[("j/k ", "move  "), ("⏎ ", "continue  "), ("r ", "reload  ")],
+            Overlay::Memory => &[
+                ("j/k ", "move  "),
+                ("a ", "add  "),
+                ("A ", "global  "),
+                ("d ", "forget  "),
+                ("u ", "undo  "),
+            ],
+            Overlay::Skills => &[("j/k ", "move  "), ("c ", "capture  "), ("u ", "roll back  ")],
+            Overlay::Store => &[("r ", "reload  ")],
+            Overlay::Checkpoints => &[("j/k ", "move  "), ("c ", "take one  "), ("R ", "restore  ")],
+            Overlay::Docs => &[("j/k ", "move  "), ("d ", "drop  "), ("r ", "reload  ")],
+            Overlay::Help => &[("esc ", "close  ")],
+        }
+    }
+}
 
 /// How often the loop wakes to drain turn events when no key is pressed.
 const TICK: Duration = Duration::from_millis(60);
@@ -535,7 +617,14 @@ struct App {
     /// implementation rather than two that drift.
     shared: crate::chat::Session,
     turn: Option<tokio::task::JoinHandle<()>>,
-    tab: usize,
+    /// `None` is the ordinary state: the conversation, whole.
+    overlay: Option<Overlay>,
+    /// What is typed into the palette, and where the cursor sits in its list.
+    palette: Typing,
+    palette_at: usize,
+    /// The model this window talks to, for the footer. Read once: a file read
+    /// per sixty-millisecond tick is a file read per frame.
+    model: String,
     sessions: Vec<SessionSummary>,
     session_state: ListState,
     transcript: Vec<TranscriptEntry>,
@@ -641,7 +730,10 @@ impl App {
             },
             source,
             turn: None,
-            tab: 0,
+            overlay: None,
+            palette: Typing::default(),
+            palette_at: 0,
+            model: rook_core::Config::load().map(|c| c.agent.model).unwrap_or_default(),
             sessions: Vec::new(),
             session_state: ListState::default(),
             transcript: Vec::new(),
@@ -927,27 +1019,50 @@ impl App {
             }
             return;
         }
-        // Before the per-tab dispatch: the chat tab is where you would want to
-        // drop to read-only, and there a digit is a character in the message.
+        // The two settings worth changing mid-turn, from wherever you are.
         match key.code {
             KeyCode::F(2) => return self.cycle_stance(),
             KeyCode::F(3) => return self.cycle_effort(),
             _ => {}
         }
-        if self.tab == 0 {
-            self.on_chat_key(key);
+        // `^p` from anywhere, including from inside another overlay: a palette
+        // you have to close something else to reach is a palette nobody uses.
+        // `^p` alone, and not `^k` beside it: `^k` kills to the end of the line
+        // and has done in every shell for fifty years — taking it for a palette
+        // broke the message box, which a test noticed and a person would have
+        // noticed sooner.
+        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('p') {
+            self.palette.clear();
+            self.palette_at = 0;
+            self.overlay = Some(Overlay::Palette);
             return;
         }
-        if self.tab == 2 && self.on_memory_key(key) {
+        match self.overlay {
+            Some(overlay) => self.on_overlay_key(overlay, key),
+            None => self.on_chat_key(key),
+        }
+    }
+
+    /// Keys while a pane is up. Esc closes, and every pane's own keys are the
+    /// ones it had as a tab — what changed is how you get to it.
+    fn on_overlay_key(&mut self, overlay: Overlay, key: crossterm::event::KeyEvent) {
+        if key.code == KeyCode::Esc {
+            self.overlay = None;
             return;
         }
-        if self.tab == 3 && self.on_skill_key(key) {
+        if overlay == Overlay::Palette {
+            return self.on_palette_key(key);
+        }
+        if overlay == Overlay::Memory && self.on_memory_key(key) {
             return;
         }
-        if self.tab == 5 && self.on_checkpoint_key(key) {
+        if overlay == Overlay::Skills && self.on_skill_key(key) {
             return;
         }
-        if self.tab == 6
+        if overlay == Overlay::Checkpoints && self.on_checkpoint_key(key) {
+            return;
+        }
+        if overlay == Overlay::Docs
             && key.code == KeyCode::Char('d')
             && let Some(set) = self.docs_state.selected().and_then(|at| self.docs.get(at)).cloned()
         {
@@ -962,14 +1077,14 @@ impl App {
             return;
         }
         match key.code {
-            // The session under the cursor, taken up in the chat — which is
-            // what the Sessions tab is for. `/session <id>` does the same from
-            // the chat, and needs the id typed; here it is the row being read.
-            KeyCode::Enter if self.tab == 1 => self.continue_selected(),
-            KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
-            KeyCode::Tab | KeyCode::Right => self.tab = (self.tab + 1) % TABS.len(),
-            KeyCode::BackTab | KeyCode::Left => self.tab = (self.tab + TABS.len() - 1) % TABS.len(),
-            KeyCode::Char(c @ '1'..='8') => self.tab = c as usize - '1' as usize,
+            // The session under the cursor, taken up in the chat — and the
+            // overlay closes, because continuing one is a thing you do in the
+            // conversation, which is now underneath.
+            KeyCode::Enter if overlay == Overlay::Sessions => {
+                self.continue_selected();
+                self.overlay = None;
+            }
+            KeyCode::Char('q') => self.overlay = None,
             KeyCode::Char('r') => self.reload(),
             KeyCode::Char('j') | KeyCode::Down => self.move_selection(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_selection(-1),
@@ -977,6 +1092,46 @@ impl App {
                 self.transcript_scroll = self.transcript_scroll.saturating_add(20)
             }
             KeyCode::PageUp => self.transcript_scroll = self.transcript_scroll.saturating_sub(20),
+            _ => {}
+        }
+    }
+
+    /// Typing in the palette narrows the list; enter takes what is under the
+    /// cursor.
+    fn on_palette_key(&mut self, key: crossterm::event::KeyEvent) {
+        let found = self.palette_entries();
+        match key.code {
+            KeyCode::Enter => {
+                let Some((name, _)) = found.get(self.palette_at.min(found.len().saturating_sub(1))) else {
+                    return;
+                };
+                let name = name.clone();
+                self.overlay = None;
+                match name.strip_prefix('/') {
+                    // A command goes to the message box rather than running
+                    // itself: several take an argument, and one that ran the
+                    // moment it was chosen would be a command with no way to
+                    // give it one.
+                    Some(command) => {
+                        let bare = command.split_whitespace().next().unwrap_or(command);
+                        self.chat.input.set(&format!("/{bare} "));
+                    }
+                    None => {
+                        self.overlay = Overlay::PANES.iter().copied().find(|pane| pane.name() == name);
+                        self.reload();
+                    }
+                }
+            }
+            KeyCode::Down => self.palette_at = (self.palette_at + 1).min(found.len().saturating_sub(1)),
+            KeyCode::Up => self.palette_at = self.palette_at.saturating_sub(1),
+            KeyCode::Backspace => {
+                self.palette.backspace();
+                self.palette_at = 0;
+            }
+            KeyCode::Char(c) => {
+                self.palette.insert(c);
+                self.palette_at = 0;
+            }
             _ => {}
         }
     }
@@ -1027,11 +1182,10 @@ impl App {
         }
 
         match key.code {
-            // A half-typed command is what Tab is for while one is being
-            // typed; the tabs are still a Tab away from anything else.
-            KeyCode::Tab if self.chat.input.as_str().starts_with('/') => self.complete(),
-            KeyCode::Tab => self.tab = (self.tab + 1) % TABS.len(),
-            KeyCode::BackTab => self.tab = (self.tab + TABS.len() - 1) % TABS.len(),
+            // Tab completes, and does nothing else. It used to leave the
+            // conversation for the next tab, which is not what Tab means in
+            // any other box somebody has ever typed into.
+            KeyCode::Tab => self.complete(),
             KeyCode::Esc if self.chat.input.is_empty() => self.quit = true,
             KeyCode::Esc => self.chat.input.clear(),
             KeyCode::Left => self.chat.input.left(),
@@ -1158,13 +1312,13 @@ impl App {
     /// transcript is read from the top.
     fn on_scroll(&mut self, wheel: MouseEventKind) {
         const BY: u16 = 3;
-        match (self.tab, wheel) {
-            (0, MouseEventKind::ScrollUp) => self.chat.scroll = self.chat.scroll.saturating_add(BY),
-            (0, MouseEventKind::ScrollDown) => self.chat.scroll = self.chat.scroll.saturating_sub(BY),
-            (1, MouseEventKind::ScrollUp) => {
+        match (self.overlay, wheel) {
+            (None, MouseEventKind::ScrollUp) => self.chat.scroll = self.chat.scroll.saturating_add(BY),
+            (None, MouseEventKind::ScrollDown) => self.chat.scroll = self.chat.scroll.saturating_sub(BY),
+            (Some(Overlay::Sessions), MouseEventKind::ScrollUp) => {
                 self.transcript_scroll = self.transcript_scroll.saturating_sub(BY)
             }
-            (1, MouseEventKind::ScrollDown) => {
+            (Some(Overlay::Sessions), MouseEventKind::ScrollDown) => {
                 self.transcript_scroll = self.transcript_scroll.saturating_add(BY)
             }
             _ => {}
@@ -1209,7 +1363,7 @@ impl App {
     fn continue_selected(&mut self) {
         if self.chat.busy {
             self.chat.push("stat", "  a turn is running here — stop it or let it finish first");
-            self.tab = 0;
+            self.overlay = None;
             return;
         }
         let Some(session) = self.session_state.selected().and_then(|at| self.sessions.get(at)) else {
@@ -1229,7 +1383,7 @@ impl App {
                 }
             ),
         );
-        self.tab = 0;
+        self.overlay = None;
     }
 
     /// The tail of a session's transcript, in the chat pane, as the window
@@ -1600,12 +1754,12 @@ impl App {
     }
 
     fn move_selection(&mut self, delta: isize) {
-        let (state, len) = match self.tab {
-            1 => (&mut self.session_state, self.sessions.len()),
-            2 => (&mut self.fact_state, self.facts.len()),
-            5 => (&mut self.checkpoint_state, self.checkpoints.len()),
-            6 => (&mut self.docs_state, self.docs.len()),
-            3 => (&mut self.skill_state, self.skills.len()),
+        let (state, len) = match self.overlay {
+            Some(Overlay::Sessions) => (&mut self.session_state, self.sessions.len()),
+            Some(Overlay::Memory) => (&mut self.fact_state, self.facts.len()),
+            Some(Overlay::Checkpoints) => (&mut self.checkpoint_state, self.checkpoints.len()),
+            Some(Overlay::Docs) => (&mut self.docs_state, self.docs.len()),
+            Some(Overlay::Skills) => (&mut self.skill_state, self.skills.len()),
             _ => {
                 self.transcript_scroll = self.transcript_scroll.saturating_add_signed(delta as i16 * 3);
                 return;
@@ -1617,117 +1771,150 @@ impl App {
         let current = state.selected().unwrap_or(0) as isize;
         let next = (current + delta).clamp(0, len as isize - 1) as usize;
         state.select(Some(next));
-        match self.tab {
-            1 => self.load_transcript(),
-            3 => self.load_versions(),
-            6 => self.load_doc_set(),
+        // What the selection is worth reading alongside, loaded with it: a
+        // transcript, a skill's versions, a set's pages.
+        match self.overlay {
+            Some(Overlay::Sessions) => self.load_transcript(),
+            Some(Overlay::Skills) => self.load_versions(),
+            Some(Overlay::Docs) => self.load_doc_set(),
             _ => {}
         }
     }
 
     fn draw(&mut self, f: &mut Frame) {
-        let [header, body, footer] =
-            Layout::vertical([Constraint::Length(3), Constraint::Min(3), Constraint::Length(1)])
-                .areas(f.area());
+        // The conversation and one line under it. No tab bar: what somebody
+        // came here to do is talk to the agent, and eight names across the top
+        // of every screen are eight names in the way of it.
+        let [body, footer] = Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).areas(f.area());
+        self.draw_chat(f, body);
 
-        let tabs = Tabs::new(TABS.iter().map(|t| Span::raw(*t)).collect::<Vec<_>>())
-            .select(self.tab)
-            .highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD))
-            .block(Block::default().borders(Borders::ALL).border_type(BorderType::Rounded).title(format!(
-                " rook {} — {}{} ",
-                rook_core::AGENT_VERSION,
-                self.source.workspace().display(),
-                // Whether this window holds the store or shares one: it decides
-                // what the slash commands can do and whose engine runs the
-                // turns, and it was invisible.
-                match self.source.daemon_base() {
-                    Some(base) => format!(" — via {base}"),
-                    None => " — this window holds the store".into(),
-                }
-            )));
-        f.render_widget(tabs, header);
-
-        match self.tab {
-            0 => self.draw_chat(f, body),
-            1 => self.draw_sessions(f, body),
-            2 => self.draw_memory(f, body),
-            3 => self.draw_skills(f, body),
-            4 => self.draw_store(f, body),
-            5 => self.draw_checkpoints(f, body),
-            6 => self.draw_docs(f, body),
-            _ => self.draw_help(f, body),
+        // Over the conversation rather than instead of it: what is underneath
+        // stays visible at the edges, so opening a pane does not read as
+        // having left the place you were.
+        if let Some(overlay) = self.overlay {
+            // Wide enough that a two-pane view is still readable — these
+            // were laid out for a whole screen, and a session's row lost the
+            // end of its workspace name at 88 — and short enough that the
+            // conversation is visibly still there behind it.
+            let area = centred(f.area(), 94, 86);
+            f.render_widget(Clear, area);
+            match overlay {
+                Overlay::Palette => self.draw_palette(f, area),
+                Overlay::Sessions => self.draw_sessions(f, area),
+                Overlay::Memory => self.draw_memory(f, area),
+                Overlay::Skills => self.draw_skills(f, area),
+                Overlay::Store => self.draw_store(f, area),
+                Overlay::Checkpoints => self.draw_checkpoints(f, area),
+                Overlay::Docs => self.draw_docs(f, area),
+                Overlay::Help => self.draw_help(f, area),
+            }
         }
 
-        // Per tab, because every key here is a character in the message box on
-        // the chat tab: the footer promised `j/k move`, somebody trying to
-        // scroll back typed `jjkkk` into their next prompt, and a hint that
-        // does nothing where it is shown reads as an application that has
-        // stopped responding.
-        let keys: Vec<(&str, &str)> = match self.tab {
-            0 => vec![
-                ("↹ ", "tab  "),
-                ("↑↓ ", "history  "),
-                ("PgUp/PgDn ", "scroll  "),
-                ("/ ", "commands  "),
-                ("^C ", "stop  "),
-            ],
-            2 => vec![
-                ("↹ ", "tab  "),
-                ("j/k ", "move  "),
-                ("a ", "add  "),
-                ("A ", "global  "),
-                ("d ", "forget  "),
-                ("u ", "undo  "),
-            ],
-            1 => vec![
-                ("↹ ", "tab  "),
-                ("j/k ", "move  "),
-                ("⏎ ", "continue  "),
-                ("r ", "reload  "),
-                ("q ", "quit  "),
-            ],
-            3 => vec![
-                ("↹ ", "tab  "),
-                ("j/k ", "move  "),
-                ("c ", "capture  "),
-                ("u ", "roll back  "),
-                ("r ", "reload  "),
-                ("q ", "quit  "),
-            ],
-            5 => vec![
-                ("↹ ", "tab  "),
-                ("j/k ", "move  "),
-                ("c ", "take one  "),
-                ("R ", "restore  "),
-                ("q ", "quit  "),
-            ],
-            6 => vec![
-                ("↹ ", "tab  "),
-                ("j/k ", "move  "),
-                ("d ", "drop  "),
-                ("r ", "reload  "),
-                ("q ", "quit  "),
-            ],
-            _ => vec![("↹/1-8 ", "tab  "), ("j/k ", "move  "), ("r ", "reload  "), ("q ", "quit  ")],
+        let keys: &[(&str, &str)] = match self.overlay {
+            Some(overlay) => overlay.keys(),
+            None => &[("^p ", "commands  "), ("⏎ ", "send  "), ("^c ", "stop  ")],
         };
         let mut spans: Vec<Span> = vec![Span::raw(" ")];
         for (key, what) in keys {
-            spans.push(Span::styled(key, Style::default().fg(Color::Cyan)));
-            spans.push(Span::raw(what));
+            spans.push(Span::styled(*key, Style::default().fg(Color::Cyan)));
+            spans.push(Span::raw(*what));
         }
-        spans.push(Span::styled("F2/F3 ", Style::default().fg(Color::Cyan)));
-        spans.push(Span::raw(format!(
-            "{}/{}  {}  {}",
-            self.shared.policy.stance().as_str(),
-            self.shared.effort.get().as_str(),
-            spent(self.chat.spent),
-            self.status
-        )));
+        // What this window is talking to and under what rules — the two things
+        // a person glances down to check, and neither was on the screen.
+        spans.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(short_model(&self.model), Style::default().fg(Color::LightBlue)));
+        spans.push(Span::styled(
+            format!("  {}/{}", self.shared.policy.stance().as_str(), self.shared.effort.get().as_str()),
+            Style::default().fg(Color::DarkGray),
+        ));
+        let tail = format!("  {}  {}", spent(self.chat.spent), self.status);
+        spans.push(Span::styled(tail, Style::default().fg(Color::DarkGray)));
 
         f.render_widget(
             Paragraph::new(Line::from(spans)).style(Style::default().fg(Color::DarkGray)),
             footer,
         );
+    }
+
+    /// Everything reachable from here, filtered as it is typed.
+    ///
+    /// The panes and the slash commands in one list, because from where a
+    /// person stands they are one question — "what can I do from here" — and
+    /// answering it in two places is how the commands ended up discoverable
+    /// only from `/help`, which is where you look after giving up.
+    fn draw_palette(&mut self, f: &mut Frame, area: Rect) {
+        let [entry, list] = Layout::vertical([Constraint::Length(3), Constraint::Min(3)]).areas(area);
+        let typed = self.palette.as_str().to_string();
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("› ", Style::default().fg(Color::Cyan)),
+                Span::raw(typed.clone()),
+            ]))
+            .block(bordered(" what would you like to do ")),
+            entry,
+        );
+        f.set_cursor_position((entry.x + 3 + self.palette.column(), entry.y + 1));
+
+        let found = self.palette_entries();
+        let items: Vec<ListItem> = found
+            .iter()
+            .map(|(name, what)| {
+                // A column and at least one space after it: `/session
+                // [id|last]` is exactly as wide as the column, and ran into
+                // its own description.
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!("{name:<19} "), Style::default().fg(Color::Cyan)),
+                    Span::styled(what.clone(), Style::default().fg(Color::DarkGray)),
+                ]))
+            })
+            .collect();
+        let mut state = ListState::default();
+        state.select((!items.is_empty()).then_some(self.palette_at.min(items.len().saturating_sub(1))));
+        match items.is_empty() {
+            true => f.render_widget(
+                Paragraph::new("nothing matches that")
+                    .style(Style::default().fg(Color::DarkGray))
+                    .block(bordered(" ")),
+                list,
+            ),
+            false => f.render_stateful_widget(
+                List::new(items)
+                    .block(bordered(" "))
+                    .highlight_style(Style::default().bg(Color::Rgb(40, 44, 52)))
+                    .highlight_symbol("▌"),
+                list,
+                &mut state,
+            ),
+        }
+    }
+
+    /// The panes and the commands that match what has been typed.
+    ///
+    /// A pane is named as itself; a command keeps its slash, so what lands in
+    /// the message box is what would have been typed there anyway.
+    fn palette_entries(&self) -> Vec<(String, String)> {
+        let typed = self.palette.as_str().trim().trim_start_matches('/').to_lowercase();
+        let matches = |name: &str, what: &str| {
+            typed.is_empty() || name.contains(&typed) || what.to_lowercase().contains(&typed)
+        };
+        let mut out: Vec<(String, String)> = Overlay::PANES
+            .iter()
+            .filter(|pane| matches(pane.name(), pane.what()))
+            .map(|pane| (pane.name().to_string(), pane.what().to_string()))
+            .collect();
+        out.extend(
+            crate::chat::commands_matching("/")
+                .into_iter()
+                .filter(|(name, _, what)| matches(name, what))
+                .map(|(name, args, what)| {
+                    let name = match args.is_empty() {
+                        true => format!("/{name}"),
+                        false => format!("/{name} {args}"),
+                    };
+                    (name, (*what).to_string())
+                }),
+        );
+        out
     }
 
     fn draw_chat(&mut self, f: &mut Frame, area: Rect) {
@@ -1772,7 +1959,7 @@ impl App {
         }
         if lines.is_empty() {
             lines.push(Line::from(Span::styled(
-                "Ask it something. Tab switches to the browsing tabs.",
+                "Ask it something. ^p opens everything else.",
                 Style::default().fg(Color::DarkGray),
             )));
         }
@@ -1798,13 +1985,33 @@ impl App {
         // Scrolled up, the pane looks exactly like a pane that has stopped
         // receiving: same border, same title, nothing moving. It says where it
         // is and how to get back.
-        let title = match (self.chat.session, self.chat.scroll) {
-            (Some(id), 0) => format!(" {} ", rook_store::format_session_id(id)),
-            (Some(id), back) => {
-                format!(" {} — {back} lines back, End returns ", rook_store::format_session_id(id))
-            }
-            (None, 0) => " new session ".into(),
-            (None, back) => format!(" new session — {back} lines back, End returns "),
+        // Whether this window holds the store or shares one through `rookd`:
+        // it decides what the slash commands can do and whose engine runs the
+        // turns. It was in the header the tabs sat in, and the header is gone —
+        // so it lives here, on the pane it is about.
+        let where_from = match self.source.daemon_base() {
+            Some(base) => format!(" · via {base}"),
+            None => " · this window holds the store".to_string(),
+        };
+        // Which project, by the directory's own name: two windows on two
+        // projects is the ordinary case, and a session from the other one read
+        // as this one's until the window said which it was.
+        let project = self
+            .source
+            .workspace()
+            .file_name()
+            .map(|name| format!("{} · ", name.to_string_lossy()))
+            .unwrap_or_default();
+        let session = match self.chat.session {
+            Some(id) => rook_store::format_session_id(id),
+            None => "new session".into(),
+        };
+        let title = match self.chat.scroll {
+            0 => format!(" {project}{session}{where_from} "),
+            // Scrolled up, the pane looks exactly like one that has stopped
+            // receiving — same border, nothing moving — so the way back
+            // displaces the rest rather than being appended to it.
+            back => format!(" {project}{session} — {back} lines back, End returns "),
         };
         f.render_widget(
             Paragraph::new(lines).block(bordered(&title)).wrap(Wrap { trim: false }).scroll((scroll, 0)),
@@ -1936,7 +2143,7 @@ impl App {
 
         f.render_stateful_widget(
             List::new(items)
-                .block(bordered(" Sessions "))
+                .block(bordered(" sessions "))
                 .highlight_style(Style::default().bg(Color::Rgb(40, 44, 52)))
                 .highlight_symbol("▌"),
             left,
@@ -2002,7 +2209,7 @@ impl App {
 
         f.render_widget(
             Paragraph::new(lines)
-                .block(bordered(" Transcript "))
+                .block(bordered(" transcript "))
                 .wrap(Wrap { trim: false })
                 .scroll((self.transcript_scroll, 0)),
             right,
@@ -2063,8 +2270,8 @@ impl App {
             });
         }
         let title = match self.fact_note.is_empty() {
-            true => format!(" Memory ({}) ", self.facts.len()),
-            false => format!(" Memory ({}) — {} ", self.facts.len(), self.fact_note),
+            true => format!(" memory ({}) ", self.facts.len()),
+            false => format!(" memory ({}) — {} ", self.facts.len(), self.fact_note),
         };
         f.render_widget(Paragraph::new(lines).block(bordered(&title)), list);
 
@@ -2098,7 +2305,7 @@ impl App {
                 Line::from("write its own — they land in the same directory either way."),
             ])
             .style(Style::default().fg(Color::DarkGray))
-            .block(bordered(" Skills "));
+            .block(bordered(" skills "));
             f.render_widget(empty, area);
             return;
         }
@@ -2120,7 +2327,7 @@ impl App {
 
         f.render_stateful_widget(
             List::new(items)
-                .block(bordered(" Skills "))
+                .block(bordered(" skills "))
                 .highlight_style(Style::default().bg(Color::Rgb(40, 44, 52)))
                 .highlight_symbol("▌"),
             left,
@@ -2251,7 +2458,7 @@ impl App {
                 ]));
             }
         }
-        f.render_widget(Paragraph::new(lines).block(bordered(" Store ")).wrap(Wrap { trim: false }), top);
+        f.render_widget(Paragraph::new(lines).block(bordered(" store ")).wrap(Wrap { trim: false }), top);
 
         let items: Vec<ListItem> = self
             .objects
@@ -2287,8 +2494,8 @@ impl App {
             Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).areas(area);
 
         let title = match self.docs_note.is_empty() {
-            true => format!(" Docs ({}) ", self.docs.len()),
-            false => format!(" Docs ({}) — {} ", self.docs.len(), self.docs_note),
+            true => format!(" docs ({}) ", self.docs.len()),
+            false => format!(" docs ({}) — {} ", self.docs.len(), self.docs_note),
         };
         if self.docs.is_empty() {
             f.render_widget(
@@ -2368,7 +2575,7 @@ impl App {
                 lines.push(Line::from(""));
             }
         }
-        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(bordered(" Sources ")), right);
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(bordered(" sources ")), right);
     }
 
     fn draw_checkpoints(&mut self, f: &mut Frame, area: Rect) {
@@ -2392,8 +2599,8 @@ impl App {
             .collect();
 
         let title = match self.checkpoint_note.is_empty() {
-            true => format!(" Checkpoints ({}) ", self.checkpoints.len()),
-            false => format!(" Checkpoints ({}) — {} ", self.checkpoints.len(), self.checkpoint_note),
+            true => format!(" checkpoints ({}) ", self.checkpoints.len()),
+            false => format!(" checkpoints ({}) — {} ", self.checkpoints.len(), self.checkpoint_note),
         };
         match self.checkpoints.is_empty() {
             true => f.render_widget(
@@ -2531,8 +2738,9 @@ impl App {
         let text = vec![
             Line::from(Span::styled("rook", Style::default().add_modifier(Modifier::BOLD))),
             Line::from(""),
-            Line::from("The Chat tab runs turns; the rest browse what is stored."),
-            Line::from("Everything here is also on the command line, as tables or --json:"),
+            Line::from("The window is the conversation. Everything else — sessions, memory,"),
+            Line::from("skills, checkpoints, docs, the store — opens over it from ^p and closes"),
+            Line::from("with Esc. Everything here is also on the command line, as tables or --json:"),
             Line::from(""),
             command("  rook store stat                what memory costs, per kind"),
             command("  rook store ls / cat <id>       list and print raw objects"),
@@ -2546,24 +2754,22 @@ impl App {
             command("  rook doctor                    detected toolchains and platform"),
             Line::from(""),
             Line::from(Span::styled("keys", Style::default().add_modifier(Modifier::BOLD))),
-            key("  Tab         switch tab          j k ↑ ↓   move"),
-            key("  1-7         switch tab, outside Chat where digits are text"),
-            key("  Space/PgDn  scroll transcript    r         reload"),
-            key("  wheel       scrolls either pane; hold Shift to select text"),
-            key("  q / Esc     quit (Ctrl-C anywhere)"),
+            key("  ^p          everything reachable, filtered as you type"),
+            key("  Esc         closes what is open; in the chat, clears then quits"),
+            key("  j k ↑ ↓     move · Space/PgDn scroll · r reload · wheel scrolls"),
             Line::from(""),
-            key("  In Sessions: ⏎ continues the one under the cursor, in the chat"),
+            key("  In sessions: ⏎ continues the one under the cursor, in the chat"),
             Line::from(""),
-            key("  In Checkpoints: c takes one of the workspace · R restores one over it"),
-            key("  In Docs: d drops the set under the cursor · /docs <topic> gathers one"),
+            key("  In checkpoints: c takes one of the workspace · R restores one over it"),
+            key("  In docs: d drops the set under the cursor · /docs <topic> gathers one"),
             Line::from(""),
-            key("  In Skills:  c captures a version of the one under the cursor"),
+            key("  In skills:  c captures a version of the one under the cursor"),
             key("              u rolls it back to the newest capture, undoably"),
             Line::from(""),
-            key("  In Memory:  a adds a fact here · A adds it everywhere"),
+            key("  In memory:  a adds a fact here · A adds it everywhere"),
             key("              d forgets the selected one · u puts it back"),
             Line::from(""),
-            key("  In Chat:    Enter sends · Esc clears, then quits"),
+            key("  In the chat: Enter sends · Esc clears, then quits"),
             key("              /btw <question> asks without joining the conversation"),
             key("              y / a / n answer an approval"),
             key("              enter     answer a question, one at a time"),
@@ -2574,7 +2780,7 @@ impl App {
             key("              F2 / F3   cycle approvals / reasoning effort"),
             key("              ctrl-c    stops a running turn, or quits when none is"),
         ];
-        f.render_widget(Paragraph::new(text).block(bordered(" Help ")), area);
+        f.render_widget(Paragraph::new(text).block(bordered(" help ")), area);
     }
 }
 
@@ -2613,6 +2819,37 @@ fn named(reference: &str) -> String {
         .and_then(|rest| rest.rsplit_once('/'))
         .map(|(name, _)| name.to_string())
         .unwrap_or_else(|| reference.to_string())
+}
+
+/// A rectangle in the middle of another, by percentage.
+///
+/// Not the whole screen: what is underneath stays visible at the edges, so an
+/// overlay reads as something on top of the conversation rather than as having
+/// left it.
+fn centred(area: Rect, width: u16, height: u16) -> Rect {
+    let w = area.width * width / 100;
+    let h = area.height * height / 100;
+    Rect {
+        x: area.x + (area.width.saturating_sub(w)) / 2,
+        y: area.y + (area.height.saturating_sub(h)) / 2,
+        width: w.min(area.width),
+        height: h.min(area.height),
+    }
+}
+
+/// The model, as much of it as a footer can carry.
+///
+/// A spec is `provider/vendor/model-name-and-a-date` often enough that the
+/// whole of it would push everything else off the line. The last two segments
+/// are the part that differs between the models somebody actually switches
+/// between.
+fn short_model(spec: &str) -> String {
+    let parts: Vec<&str> = spec.split('/').collect();
+    match parts.len() {
+        0 => String::new(),
+        1 => parts[0].to_string(),
+        n => parts[n - 2..].join("/"),
+    }
 }
 
 fn bordered(title: &str) -> Block<'_> {

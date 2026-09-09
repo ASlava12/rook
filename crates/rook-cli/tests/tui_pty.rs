@@ -251,7 +251,7 @@ fn tui(home: &std::path::Path, workspace: &std::path::Path) -> Pty {
 }
 
 #[test]
-fn the_tui_starts_and_draws_its_tabs() {
+fn the_tui_starts_on_the_conversation() {
     let _one = one_at_a_time();
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
@@ -260,39 +260,47 @@ fn the_tui_starts_and_draws_its_tabs() {
     let screen = pty.screen(100, 30);
     let all = screen.join("\n");
 
-    assert!(all.contains("Chat"), "the first tab must be drawn:\n{all}");
+    // The window is the conversation, and what it says first is what to type.
+    assert!(all.contains("Ask it something"), "the conversation must be drawn:\n{all}");
+    assert!(all.contains("^p commands"), "and the one key that opens everything else:\n{all}");
     // The chat's own keys, and not the browsing ones: `j`, `k`, `r` and `q` are
     // characters in the message box here, and a footer promising them had
     // somebody typing `jjkkk` into their next prompt trying to scroll back.
-    assert!(all.contains("scroll"), "the footer names the keys that work here:\n{all}");
     assert!(!all.contains("j/k"), "and not the ones that type letters:\n{all}");
     assert!(
         screen.iter().filter(|line| !line.is_empty()).count() > 3,
         "a nearly blank screen means it drew into a zero-sized terminal:\n{all}"
     );
 
-    pty.send("\t");
+    // Where those keys do work is inside a pane, and a pane is a `^p` away.
+    pty.send("\u{10}");
+    pty.screen_showing(100, 30, "what would you like to do");
+    pty.send("sessions\r");
     let browsing = pty.screen_showing(100, 30, "j/k").join("\n");
-    assert!(browsing.contains("quit"), "where those keys do work, they are offered:\n{browsing}");
+    assert!(browsing.contains("continue"), "with the keys that pane actually has:\n{browsing}");
 }
 
 #[test]
-fn the_browsing_tabs_render_without_a_model() {
+fn a_pane_opens_over_the_conversation_and_closes_again() {
     let _one = one_at_a_time();
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let mut pty = tui(home.path(), workspace.path());
     pty.screen(100, 30);
 
-    // Tab, not "3": on the chat tab a digit is a character in the message.
-    pty.send("\t\t");
-    let screen = pty.screen_showing(100, 30, "Skills").join("\n");
+    pty.send("\u{10}");
+    pty.send("skills\r");
+    let screen = pty.screen_showing(100, 30, "skills").join("\n");
 
-    assert!(screen.contains("Skills"), "the skills tab must render on an empty store:\n{screen}");
-    assert!(
-        !screen.contains("Ask it something"),
-        "the chat pane should be gone once another tab is selected:\n{screen}"
-    );
+    assert!(screen.contains("skills"), "the pane must render on an empty store:\n{screen}");
+    // Over the conversation rather than instead of it, which is the whole
+    // difference from the tabs this replaced: what you were doing is still
+    // there, at the edges, and Esc puts you back in it.
+    assert!(screen.contains("Ask it something"), "the conversation stays visible underneath:\n{screen}");
+
+    pty.send("\u{1b}");
+    let back = pty.screen_showing(100, 30, "^p commands").join("\n");
+    assert!(!back.contains("no skills here yet"), "and Esc closes it:\n{back}");
 }
 
 #[test]
@@ -327,9 +335,9 @@ fn the_memory_tab_shows_what_the_agent_remembers() {
 
     let mut pty = tui(home.path(), workspace.path());
     pty.screen(100, 30);
-    // Tabs, not "3": on the chat tab a digit is a character in the message.
-    pty.send("\t\t");
-    let screen = pty.screen_showing(100, 30, "Memory").join("\n");
+    pty.send("\u{10}");
+    pty.send("memory\r");
+    let screen = pty.screen_showing(100, 30, "memory (").join("\n");
 
     assert!(screen.contains("prefer tabs in Makefiles"), "and the fact:\n{screen}");
     assert!(screen.contains("style"), "with its tags:\n{screen}");
@@ -344,8 +352,9 @@ fn the_memory_tab_adds_and_forgets_what_it_lists() {
     let workspace = tempfile::tempdir().unwrap();
     let mut pty = tui(home.path(), workspace.path());
     pty.screen(100, 30);
-    pty.send("\t\t");
-    pty.screen_showing(100, 30, "Memory");
+    pty.send("\u{10}");
+    pty.send("memory\r");
+    pty.screen_showing(100, 30, "memory (");
 
     pty.send("a");
     pty.screen_showing(100, 30, "enter saves");
@@ -357,7 +366,7 @@ fn the_memory_tab_adds_and_forgets_what_it_lists() {
     // The fact is named in the pane's title while it can still be put back, so
     // what says it is gone is the count and the empty list, not its absence.
     let gone = pty.screen_showing(100, 30, "puts it back").join("\n");
-    assert!(gone.contains("Memory (0)"), "forgetting removes the row it was on:\n{gone}");
+    assert!(gone.contains("memory (0)"), "forgetting removes the row it was on:\n{gone}");
     assert!(gone.contains("nothing remembered yet"), "and the pane says so:\n{gone}");
 
     // Undo, because the row `d` lands on is the one a wrong keystroke costs.
@@ -545,7 +554,7 @@ fn ctrl_c_stops_a_running_turn_rather_than_the_whole_ui() {
     pty.send("\u{3}");
     let after = pty.screen_showing(100, 30, "[stopped]").join("\n");
     assert!(after.contains("[stopped]"), "ctrl-c stops the turn:\n{after}");
-    assert!(after.contains("Chat"), "and the tabs are still drawn, so it did not quit:\n{after}");
+    assert!(after.contains("^p commands"), "and the window is still up, so it did not quit:\n{after}");
 }
 
 /// The store holds every workspace, and the sessions tab named none of them:
@@ -578,9 +587,9 @@ fn the_sessions_tab_names_the_workspace_only_when_it_is_another_one() {
 
     let mut pty = tui(home.path(), &here);
     pty.screen(100, 30);
-    // Digits are characters in the message box on the chat tab, so the way to
-    // the next tab is the key the footer names.
-    pty.send("\t");
+    pty.send("\u{10}");
+    pty.screen_showing(100, 30, "what would you like to do");
+    pty.send("sessions\r");
     let screen = pty.screen_showing(100, 30, "events · theirs").join("\n");
 
     assert!(screen.contains("events · theirs"), "a session from another project says which:\n{screen}");
@@ -619,14 +628,21 @@ fn a_second_window_opens_and_browses_while_the_daemon_holds_the_store() {
 
     let mut pty = tui(home.path(), workspace.path());
     pty.screen(100, 30);
-    pty.send("\t");
+    // Wait for the palette before typing into it, rather than for a settling
+    // window: a window that reads through a daemon takes longer to come up,
+    // and the keys went where the palette was not yet.
+    pty.send("\u{10}");
+    pty.screen_showing(100, 30, "what would you like to do");
+    pty.send("sessions\r");
     let browsing = pty.screen_showing(100, 30, "held-open").join("\n");
-    assert!(browsing.contains("held-open"), "the sessions tab reads over the daemon:\n{browsing}");
+    assert!(browsing.contains("held-open"), "the sessions pane reads over the daemon:\n{browsing}");
 
-    // Back to the chat by number rather than by wrapping around: a count of
-    // tabs is a number that changes when a tab is added, and this test then
-    // types a slash command into whatever tab it happened to land on.
-    pty.send("1");
+    // `q` rather than Esc: alone Esc is a key, and followed immediately by
+    // text it is the start of an escape sequence, which is what a terminal has
+    // to assume — so the pane stayed open and `/context` was typed into it,
+    // where `\r` continued a session instead. The pane offers both.
+    pty.send("q");
+    pty.screen_showing(100, 30, "^p commands");
     pty.send("/context\r");
     let chat = pty.screen_showing(100, 30, "holds the store").join("\n");
     assert!(chat.contains("holds the store"), "a slash command says why it cannot run here:\n{chat}");
@@ -668,7 +684,10 @@ fn two_windows_open_with_no_daemon_started_by_hand() {
 
     let mut two = shared(second.path());
     let beside = two.screen_showing(100, 30, "via http://").join("\n");
-    assert!(beside.contains("Chat"), "and the second opens rather than dying on the lock:\n{beside}");
+    assert!(
+        beside.contains("Ask it something"),
+        "and the second opens rather than dying on the lock:\n{beside}"
+    );
     // By the directory's own name rather than the first twenty bytes of its
     // path: a temporary directory is `/tmp/.tmpAbCdEf` on Linux, which is
     // fifteen bytes long, and slicing it panicked on every runner but this
@@ -804,7 +823,8 @@ fn a_checkpoint_can_be_taken_and_put_back_from_the_window() {
 
     let mut pty = tui(home.path(), workspace.path());
     pty.screen(100, 30);
-    pty.send("\t\t\t\t\t"); // to the Checkpoints tab
+    pty.send("\u{10}");
+    pty.send("checkpoints\r");
     let empty = pty.screen_showing(100, 30, "nothing snapshotted yet").join("\n");
     assert!(empty.contains("`c` takes one"), "and says how one is taken:\n{empty}");
 
@@ -843,7 +863,8 @@ fn a_skill_can_be_captured_and_rolled_back_where_it_is_listed() {
 
     let mut pty = tui(home.path(), workspace.path());
     pty.screen(100, 30);
-    pty.send("\t\t\t"); // to the Skills tab
+    pty.send("\u{10}");
+    pty.send("skills\r");
     let listed = pty.screen_showing(100, 30, "versions").join("\n");
     assert!(listed.contains("none captured"), "an empty history says what to do:\n{listed}");
 
@@ -880,7 +901,9 @@ fn the_session_under_the_cursor_can_be_taken_up_where_it_is() {
 
     let mut pty = tui(home.path(), workspace.path());
     pty.screen(100, 30);
-    pty.send("\t"); // to the Sessions tab, where the cursor is on the newest
+    // The sessions pane, where the cursor starts on the newest.
+    pty.send("\u{10}");
+    pty.send("sessions\r");
     pty.screen_showing(100, 30, "continue");
     pty.send("\r");
 
@@ -1014,7 +1037,8 @@ fn documentation_is_listed_with_both_addresses_and_can_be_dropped() {
 
     let mut pty = tui(home.path(), workspace.path());
     pty.screen(100, 30);
-    pty.send("\t\t\t\t\t\t"); // to the Docs tab
+    pty.send("\u{10}");
+    pty.send("docs\r");
     let listed = pty.screen_showing(100, 30, "redis").join("\n");
     assert!(listed.contains("latest"), "the version is part of what is kept:\n{listed}");
     assert!(listed.contains("docs/redis/latest"), "the local copy, by its reference:\n{listed}");

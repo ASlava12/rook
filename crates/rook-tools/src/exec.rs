@@ -171,10 +171,17 @@ impl Tool for RunCommand {
         .unwrap_or(Ended::TimedOut);
 
         // Exited first: ordinarily the pipes close microseconds later and this
-        // is the same drain finishing. Generously, because the alternative is
-        // reporting a command that printed as one that did not — and it only
-        // ever expires when something really is still holding the output.
-        const PIPES_AFTER_EXIT: std::time::Duration = std::time::Duration::from_secs(2);
+        // is the same drain finishing.
+        //
+        // Generous, and it was not generous enough at two seconds: under a full
+        // `cargo xtask ci`, with the machine running a dozen other test
+        // binaries, an `echo` paid the whole grace and was told something it
+        // had started was still running. What this waits for is not a slow
+        // command — the command has already exited — it is a scheduler, so the
+        // number only has to be past what a loaded machine costs. Five seconds
+        // is, and the only thing that pays it is a command that really did
+        // leave something holding the output.
+        const PIPES_AFTER_EXIT: std::time::Duration = std::time::Duration::from_secs(5);
         let orphaned =
             ended == Ended::Exited && tokio::time::timeout(PIPES_AFTER_EXIT, capture!()).await.is_err();
 
