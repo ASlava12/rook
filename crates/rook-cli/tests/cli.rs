@@ -293,6 +293,22 @@ fn the_workspace_is_where_the_flag_says_it_is() {
 struct Daemon {
     child: std::process::Child,
     address: String,
+    /// One daemon at a time, for the reason `tui_pty` serialises its windows:
+    /// each of these starts a whole `rookd` from cold — opening a store,
+    /// discovering skills and plugins, binding a port — and nine at once on the
+    /// Windows runner starved one past thirty seconds of having published
+    /// nothing. The deadline had already been raised from four seconds to
+    /// thirty, which is the tell that the number was never the problem.
+    ///
+    /// Held by the daemon rather than taken by each test, so the tenth test
+    /// cannot forget it, and released after `Drop` has killed the child —
+    /// fields drop after the `Drop` impl has run, and this one is last.
+    _one: std::sync::MutexGuard<'static, ()>,
+}
+
+fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+    static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    GATE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// `CARGO_BIN_EXE_` is only set for this package's own binaries, so the daemon
@@ -328,13 +344,18 @@ impl Daemon {
     /// Port 0: the OS picks a free one and rookd writes where it landed, so two
     /// tests can never collide over a number someone chose.
     fn start(rook: &Rook) -> Self {
+        let one = one_at_a_time();
+        // Kept rather than discarded: a daemon that never published its address
+        // and one that exited on the way to binding are the same silence, and
+        // the runner where that happens is not the one this is read on.
+        let complaints = rook.home.path().join("rookd.err");
         let mut child = Command::new(rookd())
             .env("ROOK_HOME", rook.home.path())
             .env("ROOK_LOG", "error")
             .args(["--workspace", rook.workspace.path().to_str().unwrap()])
             .args(["--port", "0"])
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::fs::File::create(&complaints).unwrap())
             .spawn()
             .unwrap();
         // Generous, because it only tells a failed start from a slow one:
@@ -346,13 +367,19 @@ impl Daemon {
         while std::time::Instant::now() < deadline {
             if let Ok(address) = std::fs::read_to_string(&address_file) {
                 std::thread::sleep(std::time::Duration::from_millis(150));
-                return Self { child, address: address.trim().to_string() };
+                return Self { child, address: address.trim().to_string(), _one: one };
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
+        let alive = match child.try_wait() {
+            Ok(None) => "still running, so it is slow rather than broken".to_string(),
+            Ok(Some(status)) => format!("exited with {status}"),
+            Err(e) => format!("unknown: {e}"),
+        };
+        let said = std::fs::read_to_string(&complaints).unwrap_or_default();
         let _ = child.kill();
         let _ = child.wait();
-        panic!("rookd never published its address");
+        panic!("rookd never published its address in 30s: {alive}\nits stderr:\n{said}");
     }
 }
 
