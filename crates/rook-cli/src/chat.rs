@@ -237,7 +237,7 @@ async fn turn(
             let _ = out.flush();
         }
         Progress::Delta(Delta::ToolCall(call)) => {
-            print!("\n  · {}", call.name);
+            print!("\n  · {}", rook_core::calls::doing(&call.name, Some(&call.arguments)));
             let _ = out.flush();
         }
         Progress::Delegated { task, done, total } => {

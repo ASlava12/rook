@@ -893,6 +893,16 @@ impl Rook {
                 tokens_in: e.record.tokens_in,
                 tokens_out: e.record.tokens_out,
                 truncated,
+                // The arguments are logged whole and windowed for reading, so a
+                // long one may not parse here; the name is then all there is,
+                // which is what the entry said before this existed.
+                doing: match e.record.kind {
+                    EventKind::ToolCall => crate::calls::doing(
+                        &e.record.label,
+                        serde_json::from_str::<serde_json::Value>(&body).ok().as_ref(),
+                    ),
+                    _ => String::new(),
+                },
                 body,
             });
         }
@@ -1948,6 +1958,12 @@ pub struct TranscriptEntry {
     pub tokens_out: u32,
     pub truncated: bool,
     pub body: String,
+    /// For a tool call, what it was doing — `read src/main.rs` rather than
+    /// `read_file`. Computed here rather than by each reader because the
+    /// browser cannot compute it at all, and a session read back showed the
+    /// name where watching it live showed the work. Empty for everything else.
+    #[serde(default)]
+    pub doing: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

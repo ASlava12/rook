@@ -170,6 +170,15 @@ pub enum ChatEvent {
     },
     Tool {
         name: String,
+        /// What the call is doing, in the words a person would use — `read
+        /// src/main.rs` rather than `read_file`. Sent because a window over the
+        /// socket showed the tool's name where the same window holding the
+        /// store showed the work, which is the same turn read two ways.
+        ///
+        /// Defaulted, so a client talking to a daemon that predates it reads an
+        /// empty string and falls back to the name it already has.
+        #[serde(default)]
+        doing: String,
     },
     /// The call named by the most recent [`ChatEvent::Tool`] has finished.
     ToolDone {

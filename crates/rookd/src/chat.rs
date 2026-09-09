@@ -252,7 +252,10 @@ async fn turn(
             let event = match progress {
                 Progress::Delta(Delta::Text(text)) => ChatEvent::Text { text: text.clone() },
                 Progress::Delta(Delta::Reasoning(text)) => ChatEvent::Reasoning { text: text.clone() },
-                Progress::Delta(Delta::ToolCall(call)) => ChatEvent::Tool { name: call.name.clone() },
+                Progress::Delta(Delta::ToolCall(call)) => ChatEvent::Tool {
+                    name: call.name.clone(),
+                    doing: rook_core::calls::doing(&call.name, Some(&call.arguments)),
+                },
                 Progress::Delegated { task, done, total } => {
                     ChatEvent::Reasoning { text: format!("\n  [{done}/{total}] {task}") }
                 }

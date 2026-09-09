@@ -420,6 +420,12 @@ async fn a_tool_call_runs_and_both_halves_reach_the_log() {
     let kinds: Vec<&str> = entries.iter().map(|e| e.kind.as_str()).collect();
     assert_eq!(kinds, vec!["user", "tool-call", "tool-result", "assistant"]);
     assert!(entries[2].body.contains("line two"), "{}", entries[2].body);
+    // Read back, a call says what it was doing — the same words a front end
+    // watching it live shows. It said `read_file` here, which answers "it read
+    // something" and never "which file".
+    assert_eq!(entries[1].label, "read_file", "the log keeps the tool's own name");
+    assert_eq!(entries[1].doing, "read hello.txt", "and the entry says what it was for");
+    assert!(entries[0].doing.is_empty(), "nothing else claims to be a call");
 }
 
 #[tokio::test]

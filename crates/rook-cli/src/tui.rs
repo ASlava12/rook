@@ -971,7 +971,10 @@ impl App {
             }
             ChatEvent::Text { text } => self.chat.push("text", &text),
             ChatEvent::Reasoning { text } => self.chat.push("think", &text),
-            ChatEvent::Tool { name } => self.chat.tool_started(&name, &name),
+            ChatEvent::Tool { name, doing } => {
+                let said = from_daemon(&name, &doing);
+                self.chat.tool_started(&name, &said)
+            }
             // The daemon sends the tool's name and not its arguments, so a
             // window attached to one says less than a window running the turn
             // itself. What it must not do is say it twice.
@@ -1451,7 +1454,10 @@ impl App {
             match entry.kind.as_str() {
                 "user" => self.chat.push("you", &entry.body),
                 "assistant" => self.chat.push("text", &entry.body),
-                "tool-call" => self.chat.push("tool", &format!("  · {}", entry.label)),
+                // What it was doing, the same words as while it was running.
+                "tool-call" => {
+                    self.chat.push("tool", &format!("  · {}", rook_core::calls::within(&entry.doing, 72)))
+                }
                 _ => {}
             }
         }
@@ -2934,42 +2940,21 @@ fn wrapped(text: &str, width: usize) -> Vec<String> {
 /// and nothing about the work: the argument that matters is the file, the
 /// command, the query. Named tools get the argument that identifies the call;
 /// anything else is its own name, which is what it was before.
-fn tool_line(name: &str, args: Option<&serde_json::Value>) -> String {
-    let field =
-        |key: &str| args.and_then(|a| a.get(key)).and_then(|v| v.as_str()).map(|v| v.trim().to_string());
-    let first_path = || {
-        field("path").or_else(|| {
-            args.and_then(|a| a.get("files"))
-                .and_then(|f| f.as_array())
-                .and_then(|files| files.first())
-                .and_then(|first| first.get("path"))
-                .and_then(|p| p.as_str())
-                .map(str::to_string)
-        })
-    };
-    let said = match name {
-        "read_file" => first_path().map(|p| format!("read {p}")),
-        "write_file" => first_path().map(|p| format!("write {p}")),
-        "edit_file" => first_path().map(|p| format!("edit {p}")),
-        "delete_file" => first_path().map(|p| format!("delete {p}")),
-        "move_file" => field("from").map(|from| format!("move {from}")),
-        "list_dir" => first_path().map(|p| format!("list {p}")),
-        "run_command" => field("command").map(|c| format!("run {c}")),
-        "search" => field("pattern").map(|p| format!("search {p}")),
-        "web_fetch" => field("url").map(|u| format!("fetch {u}")),
-        "web_search" => field("query").map(|q| format!("search the web for {q}")),
-        "docs" => field("topic").map(|t| format!("docs {t}")),
-        "load_skill" | "find_skill" => field("name").map(|n| format!("{name} {n}")),
-        "delegate" => Some("delegate".into()),
-        _ => None,
-    };
-    // One line however long the argument is: a command that fills the pane
-    // pushes the answer off it.
-    let said = said.unwrap_or_else(|| name.to_string());
-    match said.chars().count() > 72 {
-        true => format!("{}…", said.chars().take(71).collect::<String>()),
-        false => said,
+/// What a call over the socket is doing. An upgrade leaves the running daemon
+/// on the old code — which is a case `daemon status` reports on purpose — and
+/// one that predates the field sends nothing, where the tool's own name is
+/// what a window has always shown.
+fn from_daemon(name: &str, doing: &str) -> String {
+    match doing.is_empty() {
+        true => name.to_string(),
+        false => rook_core::calls::within(doing, 72),
     }
+}
+
+fn tool_line(name: &str, args: Option<&serde_json::Value>) -> String {
+    // The phrase is core's, so the same call reads the same here, in the chat
+    // REPL, in `rook run` and in the browser. How much room there is is ours.
+    rook_core::calls::within(&rook_core::calls::doing(name, args), 72)
 }
 
 /// A rectangle in the middle of another, by percentage.
@@ -3251,6 +3236,24 @@ mod tests {
         assert_eq!(chat.log.len(), 1, "still one line: {:?}", chat.log);
         assert!(chat.log[0].1.ends_with('✓'), "{:?}", chat.log);
         assert_eq!(chat.running(), None, "and nothing is running");
+    }
+
+    /// A feature reachable from one front end and not another is a defect here,
+    /// and this one was invisible: the window holding the store showed the
+    /// work, the window over the socket showed the tool's name.
+    #[test]
+    fn a_window_over_the_socket_reads_a_call_the_same_as_one_holding_the_store() {
+        // The same call, both ways in: the daemon sends the phrase, and the
+        // window that holds the store works it out itself.
+        let arguments = serde_json::json!({ "path": "src/main.rs" });
+        let held = tool_line("read_file", Some(&arguments));
+        let over = from_daemon("read_file", &rook_core::calls::doing("read_file", Some(&arguments)));
+        assert_eq!(held, over, "one turn, one reading");
+        assert_eq!(held, "read src/main.rs");
+
+        // A daemon older than the field: the name, which is what it sent
+        // before, rather than an empty line where a call was.
+        assert_eq!(from_daemon("read_file", ""), "read_file", "and never nothing at all");
     }
 
     /// Several calls are announced before any of them runs, and they finish in

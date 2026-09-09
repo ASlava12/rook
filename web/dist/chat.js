@@ -63,7 +63,9 @@ export function connect() {
       case 'started': state.chat.session = e.session; state.chat.spent = null; renderPicker(); break;
       case 'text': saidByModel(e.text); break;
       case 'reasoning': say('think', e.text); break;
-      case 'tool': say('tool', `· ${e.name}`); break;
+      // `doing` says which file, which command; a daemon older than the
+      // field sends nothing and the name is what it always said.
+      case 'tool': say('tool', `· ${e.doing || e.name}`); break;
       case 'tool_done': {
         const last = chatOut() && chatOut().lastElementChild;
         if (last && last.className === 'tool') last.append(e.failed ? ' ✗' : ' ✓');
@@ -252,7 +254,7 @@ export async function resume(session) {
     for (const e of items) {
       if (e.kind === 'user') say('you', `› ${e.body}`);
       else if (e.kind === 'assistant') { current = null; saidByModel(e.body); current = null; }
-      else if (e.kind === 'tool-call') say('tool', `· ${e.label}`);
+      else if (e.kind === 'tool-call') say('tool', `· ${e.doing || e.label}`);
       else if (e.kind === 'tool-result') say('stat', e.body.split('\n').slice(0, 3).join('\n'));
       else if (e.kind === 'note') say('stat', `${e.label}: ${e.body}`);
     }

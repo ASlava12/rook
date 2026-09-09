@@ -272,7 +272,19 @@ what unblocks the most.
   pairing is a queue rather than a lookup, since a turn may announce three
   calls before the first result comes back, and two of them may be the same
   tool: the test that says so reads two files and runs one command, and the
-  second read is the one that fails. 4 tests.
+  second read is the one that fails.
+
+  That phrase was then the TUI's alone, and the same call read five ways
+  depending on where you watched from: `read_file` in the chat REPL,
+  `read_file({"path":"src/main.rs",…})` from `rook run`, the work in a window
+  holding the store, the tool's name in a window over the socket, and the name
+  again in the browser. It is one function in core now — core rather than
+  beside the tools, because the loop adds `delegate`, `docs` and `load_skill`,
+  so `rook-tools` cannot hold the whole list — carried on the wire by
+  `ChatEvent::Tool` and on `TranscriptEntry`, so a session read back a week
+  later says what a session being watched says. Both fields default, so a
+  window talking to a daemon that predates them falls back to the name it
+  always had. 8 tests.
 - **A key in a file the process cannot see** — provider keys come from the
   environment, so a shell that has them and a launcher that does not behaved
   differently for a reason nobody could see, and a `.env` written in the

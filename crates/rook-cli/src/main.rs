@@ -1034,7 +1034,8 @@ fn cmd_run(
                     let _ = out.flush();
                 }
                 Progress::Delta(rook_llm::Delta::ToolCall(call)) => {
-                    let _ = write!(out, "\n  · {}({})", call.name, compact(&call.arguments));
+                    let said = rook_core::calls::doing(&call.name, Some(&call.arguments));
+                    let _ = write!(out, "\n  · {said}");
                     let _ = out.flush();
                 }
                 Progress::Delegated { task, done, total } => {
@@ -1128,15 +1129,6 @@ fn unfinished(finished: bool, stopped: &str) -> bool {
 }
 
 /// One-line form of tool arguments, for the progress line.
-fn compact(args: &serde_json::Value) -> String {
-    let text = args.to_string();
-    if text.len() <= 80 {
-        return text;
-    }
-    let cut = (0..=80).rev().find(|i| text.is_char_boundary(*i)).unwrap_or(0);
-    format!("{}…", &text[..cut])
-}
-
 /// Cache hits only matter when there are any; a constant "0 cached" is noise.
 pub fn cached(tokens: u32) -> String {
     if tokens == 0 { String::new() } else { format!(" ({tokens} cached)") }
