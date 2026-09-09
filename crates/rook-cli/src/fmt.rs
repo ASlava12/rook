@@ -111,6 +111,18 @@ pub fn hit_where(hit: &rook_core::search::Hit) -> String {
     }
 }
 
+/// `12s`, `4m10s` — the two units a person waiting reads, and no more.
+///
+/// Here rather than in the TUI because a call that took a while says so in
+/// every front end now, and two formatters for one question drift.
+pub fn elapsed(since: std::time::Duration) -> String {
+    let seconds = since.as_secs();
+    match seconds < 60 {
+        true => format!("{seconds}s"),
+        false => format!("{}m{:02}s", seconds / 60, seconds % 60),
+    }
+}
+
 /// A turn's tool calls as a terminal reads them: announced when they start,
 /// marked when they finish.
 ///
@@ -152,8 +164,16 @@ impl Calls {
     }
 
     pub fn finished(&mut self, name: &str, failed: bool) -> String {
-        let mark = if failed { "✗" } else { "✓" };
-        let said = self.running.finished(name);
+        let (said, took) = self.running.finished(name);
+        // A call worth having waited for says how long it was. `working…`
+        // counts the turn rather than the call, so a minute spent inside one
+        // command left no trace of itself once the command came back.
+        let mark = match (failed, took) {
+            (true, None) => "✗".to_string(),
+            (false, None) => "✓".to_string(),
+            (true, Some(took)) => format!("✗ {}", elapsed(took)),
+            (false, Some(took)) => format!("✓ {}", elapsed(took)),
+        };
         let line = match self.announced.as_deref() == Some(said.as_str()) {
             true => format!(" {mark}\n"),
             false => format!("{}  {mark} {said}\n", if self.open { "\n" } else { "" }),
@@ -202,5 +222,21 @@ mod tests {
         screen.push_str(&calls.finished("run_command", true));
 
         assert_eq!(screen, "  · read a.rs ✓\n  · run cargo test ✗\n", "and a failure says so");
+    }
+
+    /// A turn that sat on one command for a minute left no trace of it once the
+    /// command came back: `working…` counts the turn, not the call. Whether a
+    /// call is long enough to be worth a number is core's rule and is tested
+    /// there; what this asks is that nothing is said before it is known, and
+    /// that a fast call stays quiet.
+    #[test]
+    fn a_duration_is_claimed_only_once_there_is_one_worth_claiming() {
+        let mut calls = Calls::default();
+        assert_eq!(
+            calls.started("run_command", "run cargo test"),
+            "  · run cargo test",
+            "the announcement is the work, and the call has not finished"
+        );
+        assert_eq!(calls.finished("run_command", false), " ✓\n", "and a fast one stays quiet");
     }
 }

@@ -397,6 +397,14 @@ what unblocks the most.
   `a_public_function_no_production_code_calls_says_it_is_a_test_seam` stops
   reading: it reported `router` as called by nobody while `serve` called it
   forty lines below. 1 test.
+- **A minute spent inside one command left no trace of it** — `working…` counts
+  the turn, and the footer names the call it is waiting on only while it waits,
+  so a command that took a minute and came back was a tick like any other. A
+  call that took more than two seconds now says how long it was, and a fast one
+  stays quiet: a number on every line is noise, and its absence on a long one
+  leaves "is this stuck" unanswered. The clock is where the queue already is, so
+  all three front ends report it, and the two units a waiting person reads —
+  `12s`, `4m10s` — are formatted in one place rather than in each. 3 tests.
 - **A key in a file the process cannot see** — provider keys come from the
   environment, so a shell that has them and a launcher that does not behaved
   differently for a reason nobody could see, and a `.env` written in the

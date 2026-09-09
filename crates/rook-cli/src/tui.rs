@@ -469,21 +469,12 @@ fn inline(text: &str, base: Style, code: Style) -> Vec<Span<'static>> {
     spans
 }
 
-/// `12s`, `4m10s` — the two units a person waiting reads, and no more.
-fn elapsed(since: std::time::Duration) -> String {
-    let seconds = since.as_secs();
-    match seconds < 60 {
-        true => format!("{seconds}s"),
-        false => format!("{}m{:02}s", seconds / 60, seconds % 60),
-    }
-}
-
 /// What a long pause is waiting on, in the words of the log being read: the
 /// tool that is still running, or the model that has sent nothing.
 fn waiting_on(quiet: std::time::Duration, running: Option<&str>) -> String {
     match running {
-        Some(tool) => format!(" · {tool} running {}", elapsed(quiet)),
-        None => format!(" · nothing from the model for {}", elapsed(quiet)),
+        Some(tool) => format!(" · {tool} running {}", crate::fmt::elapsed(quiet)),
+        None => format!(" · nothing from the model for {}", crate::fmt::elapsed(quiet)),
     }
 }
 
@@ -598,8 +589,17 @@ impl Chat {
     /// every call read as two events, and a turn of a dozen calls filled the
     /// pane twice over.
     fn tool_done(&mut self, name: &str, failed: bool) {
-        let mark = if failed { " ✗" } else { " ✓" };
-        let said = self.running_calls.finished(name);
+        let (said, took) = self.running_calls.finished(name);
+        // A long call says how long it was: `working…` counts the turn, not
+        // which call it is waiting on, so a turn that sat on one command for a
+        // minute left no trace of it once the command came back.
+        let mark = match (failed, took) {
+            (true, None) => " ✗".to_string(),
+            (false, None) => " ✓".to_string(),
+            (true, Some(took)) => format!(" ✗ {}", crate::fmt::elapsed(took)),
+            (false, Some(took)) => format!(" ✓ {}", crate::fmt::elapsed(took)),
+        };
+        let mark = mark.as_str();
         let unmarked = self
             .log
             .iter_mut()
@@ -2245,7 +2245,7 @@ impl App {
         let prompt = match (self.chat.busy && self.chat.asking.is_none(), self.chat.since) {
             (true, Some(since)) => format!(
                 "  working… {}{}{}  ",
-                elapsed(since.elapsed()),
+                crate::fmt::elapsed(since.elapsed()),
                 match self.chat.step {
                     Some((at, of)) => format!(" · step {at}/{of}"),
                     None => String::new(),
@@ -3308,10 +3308,10 @@ mod tests {
     /// which it was not.
     #[test]
     fn how_long_it_has_been_working_is_said_in_the_units_someone_waiting_reads() {
-        assert_eq!(elapsed(std::time::Duration::from_secs(9)), "9s");
-        assert_eq!(elapsed(std::time::Duration::from_secs(59)), "59s");
-        assert_eq!(elapsed(std::time::Duration::from_secs(60)), "1m00s");
-        assert_eq!(elapsed(std::time::Duration::from_secs(250)), "4m10s");
+        assert_eq!(crate::fmt::elapsed(std::time::Duration::from_secs(9)), "9s");
+        assert_eq!(crate::fmt::elapsed(std::time::Duration::from_secs(59)), "59s");
+        assert_eq!(crate::fmt::elapsed(std::time::Duration::from_secs(60)), "1m00s");
+        assert_eq!(crate::fmt::elapsed(std::time::Duration::from_secs(250)), "4m10s");
     }
 
     /// A call was written when it started and written again when it finished,

@@ -74,20 +74,31 @@ pub fn within(said: &str, room: usize) -> String {
 /// on, so a turn that listed a directory and read a file put the first tick at
 /// the end of the second line and the second tick on a line of its own.
 #[derive(Debug, Default)]
-pub struct Running(Vec<(String, String)>);
+pub struct Running(Vec<(String, String, std::time::Instant)>);
+
+/// Under this, a call is not a wait and how long it took is noise on a line
+/// somebody is trying to read. Over it, it is the answer to "is this stuck",
+/// which is otherwise asked by watching a `working…` that says nothing about
+/// which call it is waiting on.
+const WORTH_SAYING: std::time::Duration = std::time::Duration::from_secs(2);
 
 impl Running {
     pub fn started(&mut self, name: &str, doing: &str) {
-        self.0.push((name.to_string(), doing.to_string()));
+        self.0.push((name.to_string(), doing.to_string(), std::time::Instant::now()));
     }
 
-    /// What the finishing call was doing. A finish with no start — a window
-    /// that attached to a daemon mid-turn — is the tool's name, which is all
-    /// the result carries.
-    pub fn finished(&mut self, name: &str) -> String {
-        match self.0.iter().position(|(started, _)| started == name) {
-            Some(at) => self.0.remove(at).1,
-            None => name.to_string(),
+    /// What the finishing call was doing, and how long it took if that is worth
+    /// saying. A finish with no start — a window that attached to a daemon
+    /// mid-turn — is the tool's name, which is all the result carries, and no
+    /// duration, because nothing here saw it begin.
+    pub fn finished(&mut self, name: &str) -> (String, Option<std::time::Duration>) {
+        match self.0.iter().position(|(started, ..)| started == name) {
+            Some(at) => {
+                let (_, doing, since) = self.0.remove(at);
+                let took = since.elapsed();
+                (doing, (took >= WORTH_SAYING).then_some(took))
+            }
+            None => (name.to_string(), None),
         }
     }
 }
@@ -129,12 +140,34 @@ mod tests {
         running.started("run_command", "run cargo test");
 
         // The results carry the tool's name and nothing else.
-        assert_eq!(running.finished("read_file"), "read a.rs");
-        assert_eq!(running.finished("run_command"), "run cargo test", "and not by turn either");
-        assert_eq!(running.finished("read_file"), "read b.rs");
+        assert_eq!(running.finished("read_file").0, "read a.rs");
+        assert_eq!(running.finished("run_command").0, "run cargo test", "and not by turn either");
+        assert_eq!(running.finished("read_file").0, "read b.rs");
 
         // A window that attached mid-turn saw no start for this one.
-        assert_eq!(running.finished("search"), "search", "a finish alone still says something");
+        let (said, took) = running.finished("search");
+        assert_eq!(said, "search", "a finish alone still says something");
+        assert_eq!(took, None, "and claims no duration it did not see");
+    }
+
+    /// A call that took a moment says so, and one that did not stays quiet: a
+    /// duration on every line is noise, and its absence on a long one is the
+    /// question "is this stuck" left unanswered.
+    #[test]
+    fn only_a_call_worth_waiting_for_says_how_long_it_took() {
+        let mut running = Running::default();
+        running.started("read_file", "read a.rs");
+        assert_eq!(running.finished("read_file").1, None, "nothing to report about a fast read");
+
+        running.started("run_command", "run cargo test");
+        // The one this is about, without a stopwatch in the assertion: the
+        // start is moved back rather than the test being made to wait.
+        if let Some((.., since)) = running.0.last_mut() {
+            *since -= WORTH_SAYING;
+        }
+        let (said, took) = running.finished("run_command");
+        assert_eq!(said, "run cargo test");
+        assert!(took.is_some_and(|t| t >= WORTH_SAYING), "a long one is worth a number: {took:?}");
     }
 
     #[test]
