@@ -2971,6 +2971,22 @@ impl<'a> AgentLoop<'a> {
                     // same shape, and a model twice handed this one to `forget`
                     // before going back to the claim. Naming what the id is
                     // costs a word.
+                    // A `fails` says what to report, and a small model read it
+                    // as a task: asked to verify that `add` returns the sum, it
+                    // rewrote `add` twice until the verdict flipped and then
+                    // reported the claim verified. Said on the result rather
+                    // than in the tool's description, where it would be paid for
+                    // on every request of every turn — the whole advertised list
+                    // is 2,500 tokens and has a test holding it there — instead
+                    // of in the one turn where a claim has just failed.
+                    Some("fails") => (
+                        format!(
+                            "checked in session {id}:\n{}\n\nThat is the answer to report. \
+                             Editing what was checked until it passes answers a different question.",
+                            child.reply
+                        ),
+                        Some("fails"),
+                    ),
                     Some(verdict) => (format!("checked in session {id}:\n{}", child.reply), Some(verdict)),
                     // Not treated as passing: a check that would not commit is
                     // the outcome this exists to make visible.

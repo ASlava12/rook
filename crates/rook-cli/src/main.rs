@@ -1026,16 +1026,18 @@ fn cmd_run(
         let mut out = std::io::stdout();
         // Under `--json` the turn's one output is the object at the end, so the
         // stream that a person would watch would only corrupt it.
+        let mut calls = crate::fmt::Calls::default();
         let outcome = agent
             .run_with(&prompt, |progress| match progress {
                 _ if json => {}
                 Progress::Delta(rook_llm::Delta::Text(text)) => {
                     let _ = write!(out, "{text}");
+                    calls.said(text);
                     let _ = out.flush();
                 }
                 Progress::Delta(rook_llm::Delta::ToolCall(call)) => {
                     let said = rook_core::calls::doing(&call.name, Some(&call.arguments));
-                    let _ = write!(out, "\n  · {said}");
+                    let _ = write!(out, "{}", calls.started(&call.name, &said));
                     let _ = out.flush();
                 }
                 Progress::Delegated { task, done, total } => {
@@ -1046,8 +1048,8 @@ fn cmd_run(
                     let _ = writeln!(out, "\n    {task}: {tool}");
                     let _ = out.flush();
                 }
-                Progress::ToolDone { failed, .. } => {
-                    let _ = writeln!(out, "{}", if failed { " ✗" } else { " ✓" });
+                Progress::ToolDone { name, failed } => {
+                    let _ = write!(out, "{}", calls.finished(name, failed));
                     let _ = out.flush();
                 }
                 _ => {}

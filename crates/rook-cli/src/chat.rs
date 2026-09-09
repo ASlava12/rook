@@ -231,13 +231,16 @@ async fn turn(
     agent.effort = shared.effort.get();
 
     let mut out = std::io::stdout();
+    let mut calls = crate::fmt::Calls::default();
     let running = agent.run_with(prompt, |progress| match progress {
         Progress::Delta(Delta::Text(text)) => {
             print!("{text}");
+            calls.said(text);
             let _ = out.flush();
         }
         Progress::Delta(Delta::ToolCall(call)) => {
-            print!("\n  · {}", rook_core::calls::doing(&call.name, Some(&call.arguments)));
+            let said = rook_core::calls::doing(&call.name, Some(&call.arguments));
+            print!("{}", calls.started(&call.name, &said));
             let _ = out.flush();
         }
         Progress::Delegated { task, done, total } => {
@@ -248,8 +251,8 @@ async fn turn(
             let _ = writeln!(out, "\n    {task}: {tool}");
             let _ = out.flush();
         }
-        Progress::ToolDone { failed, .. } => {
-            println!("{}", if failed { " ✗" } else { " ✓" });
+        Progress::ToolDone { name, failed } => {
+            print!("{}", calls.finished(name, failed));
             let _ = out.flush();
         }
         _ => {}

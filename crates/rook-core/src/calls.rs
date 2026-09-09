@@ -64,6 +64,34 @@ pub fn within(said: &str, room: usize) -> String {
     }
 }
 
+/// The calls a turn has announced and not yet finished, oldest first.
+///
+/// A message announces several calls before any of them runs, and a result
+/// carries only the tool's name — so two reads in one message are told apart by
+/// the order they were announced in and by nothing else. Every front end has to
+/// answer the same question, "which announced call is this result", and the two
+/// terminal ones were not: they marked whichever line the cursor happened to be
+/// on, so a turn that listed a directory and read a file put the first tick at
+/// the end of the second line and the second tick on a line of its own.
+#[derive(Debug, Default)]
+pub struct Running(Vec<(String, String)>);
+
+impl Running {
+    pub fn started(&mut self, name: &str, doing: &str) {
+        self.0.push((name.to_string(), doing.to_string()));
+    }
+
+    /// What the finishing call was doing. A finish with no start — a window
+    /// that attached to a daemon mid-turn — is the tool's name, which is all
+    /// the result carries.
+    pub fn finished(&mut self, name: &str) -> String {
+        match self.0.iter().position(|(started, _)| started == name) {
+            Some(at) => self.0.remove(at).1,
+            None => name.to_string(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,6 +119,22 @@ mod tests {
         assert_eq!(doing("github__create_issue", Some(&json!({"title": "x"}))), "github__create_issue");
         assert_eq!(doing("read_file", None), "read_file");
         assert_eq!(doing("read_file", Some(&json!({"paths": ["a"]}))), "read_file");
+    }
+
+    #[test]
+    fn two_calls_to_one_tool_are_told_apart_by_the_order_they_were_announced() {
+        let mut running = Running::default();
+        running.started("read_file", "read a.rs");
+        running.started("read_file", "read b.rs");
+        running.started("run_command", "run cargo test");
+
+        // The results carry the tool's name and nothing else.
+        assert_eq!(running.finished("read_file"), "read a.rs");
+        assert_eq!(running.finished("run_command"), "run cargo test", "and not by turn either");
+        assert_eq!(running.finished("read_file"), "read b.rs");
+
+        // A window that attached mid-turn saw no start for this one.
+        assert_eq!(running.finished("search"), "search", "a finish alone still says something");
     }
 
     #[test]

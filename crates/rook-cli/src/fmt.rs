@@ -110,3 +110,97 @@ pub fn hit_where(hit: &rook_core::search::Hit) -> String {
         (None, _) => format!("{}  #{:<4}", &hit.session[..12], hit.seq),
     }
 }
+
+/// A turn's tool calls as a terminal reads them: announced when they start,
+/// marked when they finish.
+///
+/// The mark used to go wherever the cursor was, which is right only while calls
+/// run one at a time. A turn that lists a directory and reads a file announces
+/// both before either finishes, and the two ticks landed on the end of the
+/// second line and on a line of their own — so the read was reported as
+/// finished twice and the listing not at all. What the mark belongs to is a
+/// queue question, which `rook_core::calls::Running` answers for every front
+/// end; what a terminal can do about it is this: append when the call's own
+/// line is still the last thing written, and name the call again when it is
+/// not.
+///
+/// Not "when only one is running": a call can be alone and still not be the
+/// last line, because another finished under it.
+#[derive(Debug, Default)]
+pub struct Calls {
+    running: rook_core::calls::Running,
+    /// The announcement whose line is still the last thing written.
+    announced: Option<String>,
+    /// Whether what was written last left the line unterminated.
+    open: bool,
+}
+
+impl Calls {
+    /// Text from the model. It writes itself; what this needs to know is that
+    /// no call's line is the current one any more.
+    pub fn said(&mut self, text: &str) {
+        self.announced = None;
+        self.open = !text.ends_with('\n');
+    }
+
+    pub fn started(&mut self, name: &str, doing: &str) -> String {
+        let line = format!("{}  · {doing}", if self.open { "\n" } else { "" });
+        self.running.started(name, doing);
+        self.announced = Some(doing.to_string());
+        self.open = true;
+        line
+    }
+
+    pub fn finished(&mut self, name: &str, failed: bool) -> String {
+        let mark = if failed { "✗" } else { "✓" };
+        let said = self.running.finished(name);
+        let line = match self.announced.as_deref() == Some(said.as_str()) {
+            true => format!(" {mark}\n"),
+            false => format!("{}  {mark} {said}\n", if self.open { "\n" } else { "" }),
+        };
+        self.announced = None;
+        self.open = false;
+        line
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two calls announced before either finishes. The mark used to go where
+    /// the cursor was, so the listing's tick landed on the read's line and the
+    /// read's tick on a line of its own — one call marked twice, the other not
+    /// at all, and a stray ` ✓` under them both.
+    #[test]
+    fn a_mark_belongs_to_its_own_call_however_many_are_running() {
+        let mut calls = Calls::default();
+        let mut screen = String::new();
+        screen.push_str("I'll look.");
+        calls.said("I'll look.");
+
+        screen.push_str(&calls.started("list_dir", "list ."));
+        screen.push_str(&calls.started("read_file", "read service.toml"));
+        screen.push_str(&calls.finished("list_dir", false));
+        screen.push_str(&calls.finished("read_file", false));
+
+        assert_eq!(
+            screen, "I'll look.\n  · list .\n  · read service.toml\n  ✓ list .\n  ✓ read service.toml\n",
+            "each call is announced once and marked once, by name"
+        );
+    }
+
+    /// One at a time, which is most turns: the mark goes on the end of the line
+    /// the call was announced on, and no line names it twice.
+    #[test]
+    fn a_call_that_is_the_only_one_running_is_marked_where_it_stands() {
+        let mut calls = Calls::default();
+        let mut screen = String::new();
+        screen.push_str(&calls.started("read_file", "read a.rs"));
+        screen.push_str(&calls.finished("read_file", false));
+        screen.push_str(&calls.started("run_command", "run cargo test"));
+        screen.push_str(&calls.finished("run_command", true));
+
+        assert_eq!(screen, "  · read a.rs ✓\n  · run cargo test ✗\n", "and a failure says so");
+    }
+}

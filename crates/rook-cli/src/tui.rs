@@ -309,10 +309,11 @@ struct Chat {
     history: Vec<String>,
     recalled: Option<usize>,
     log: Vec<(&'static str, String)>,
-    /// Calls announced and not yet finished, as `(tool name, what was
-    /// written)`. A message announces several before any of them runs and they
-    /// finish in that order, so this is what pairs a finish with its line.
-    running_calls: Vec<(String, String)>,
+    /// Calls announced and not yet finished. A message announces several
+    /// before any of them runs, so this is what pairs a finish with its line —
+    /// core's, because the chat REPL and `rook run` ask the same question and
+    /// used to answer it by marking whatever line the cursor was on.
+    running_calls: rook_core::calls::Running,
     session: Option<u128>,
     busy: bool,
     pending: Option<ApprovalRequest>,
@@ -548,7 +549,7 @@ impl Chat {
     /// pairs each finish with the line it belongs to.
     fn tool_started(&mut self, name: &str, said: &str) {
         self.push("tool", &format!("  · {said}"));
-        self.running_calls.push((name.to_string(), said.to_string()));
+        self.running_calls.started(name, said);
     }
 
     /// Mark the line that call was written for.
@@ -559,10 +560,7 @@ impl Chat {
     /// pane twice over.
     fn tool_done(&mut self, name: &str, failed: bool) {
         let mark = if failed { " ✗" } else { " ✓" };
-        let said = match self.running_calls.iter().position(|(started, _)| started == name) {
-            Some(at) => self.running_calls.remove(at).1,
-            None => name.to_string(),
-        };
+        let said = self.running_calls.finished(name);
         let unmarked = self
             .log
             .iter_mut()

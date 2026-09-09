@@ -25,7 +25,7 @@ use async_trait::async_trait;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LlmError {
-    #[error("cannot reach {endpoint}: {detail}\n{}", advice(.endpoint))]
+    #[error("cannot reach {endpoint}: {detail}\n{}", advice(.endpoint, .detail))]
     Unreachable { endpoint: String, detail: String },
     #[error("provider returned {status}: {body}{}", what_to_try(*.status, .body))]
     Status {
@@ -111,15 +111,39 @@ impl LlmError {
     }
 }
 
-/// What to try, which depends only on where the endpoint is.
+/// What to try, which depends on where the endpoint is *and* on what happened.
 ///
-/// A local one that answers nothing means the server is not running; a remote
-/// one usually means the network or a missing key. Naming the wrong one wastes
-/// the user's time, so this says both only when it cannot tell.
-fn advice(endpoint: &str) -> String {
+/// It depended only on the address once, and told the smoke job twice in one
+/// run that nothing was listening on a server that was answering every other
+/// request — it was busy with a long generation and the connection timed out.
+/// Refused, timed out and a name that does not resolve are three different
+/// fixes, which is why `root_cause` digs the reason out of the chain; throwing
+/// it away here and guessing from the address is how the guess came to
+/// contradict the line above it.
+fn advice(endpoint: &str, detail: &str) -> String {
     // The whole 127/8 range, not just the usual address: a local server moved
     // off 127.0.0.1 is exactly the case where the wrong advice costs most.
     let local = ["://127.", "localhost", "[::1]", "://0.0.0.0"].iter().any(|h| endpoint.contains(h));
+    let said = detail.to_ascii_lowercase();
+    if said.contains("timed out") || said.contains("timeout") {
+        return match local {
+            // Something answered the address or the connection would have been
+            // refused, so "start the server" is the opposite of the fix.
+            true => "It is listening but did not answer in time — usually a model still \
+                     loading, or a server working on another request. Give it a moment, or \
+                     point `[agent] model` at something smaller."
+                .to_string(),
+            false => "It did not answer in time. Check the network — a provider that is \
+                      overloaded looks the same from here."
+                .to_string(),
+        };
+    }
+    if ["dns", "failed to lookup", "name or service not known", "nodename nor servname"]
+        .iter()
+        .any(|d| said.contains(d))
+    {
+        return "That host does not resolve. Check the spelling of the endpoint, and DNS.".to_string();
+    }
     match local {
         true => "Nothing is listening there. Start the server, or point `[agent] model` at one \
                  that is running — `rook models` lists what an endpoint offers."
@@ -431,6 +455,34 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    /// The smoke job said it twice in one run, against an ollama that was
+    /// answering every other request and merely busy with a long one: `cannot
+    /// reach http://127.0.0.1:11434: operation timed out` followed by "Nothing
+    /// is listening there. Start the server." The line above it had the answer
+    /// and the line below it contradicted it.
+    #[test]
+    fn what_went_wrong_decides_what_to_try_not_only_where_it_went_wrong() {
+        let said = |detail: &str| {
+            LlmError::Unreachable { endpoint: "http://127.0.0.1:11434".into(), detail: detail.into() }
+                .to_string()
+        };
+
+        let busy = said("operation timed out");
+        assert!(busy.contains("did not answer in time"), "a timeout is not silence: {busy}");
+        assert!(!busy.contains("Nothing is listening"), "and it is running: {busy}");
+
+        let refused = said("Connection refused (os error 61)");
+        assert!(refused.contains("Nothing is listening"), "refused is the case that was right: {refused}");
+
+        let remote = LlmError::Unreachable {
+            endpoint: "https://api.example".into(),
+            detail: "dns error: failed to lookup address information".into(),
+        }
+        .to_string();
+        assert!(remote.contains("does not resolve"), "a name is a third fix again: {remote}");
+        assert!(!remote.contains("API key"), "and not the one for a key: {remote}");
+    }
 
     /// A gateway on plain http is an ordinary thing to run on this machine.
     /// Sending it a bearer token across a network is not, and the first

@@ -318,6 +318,36 @@ what unblocks the most.
   up, where it costs more. Asserted structurally rather than with a stopwatch —
   a deadline in a test is a guess about a machine, and three failures here were
   exactly that. 2 tests.
+- **A red smoke, read** — five of eight scenarios failed against
+  `qwen2.5-coder:3b`, and two of the five were one defect of ours: `cannot reach
+  http://127.0.0.1:11434: operation timed out`, followed by *Nothing is
+  listening there. Start the server.* Ollama was answering every other request
+  in that job and was busy with a long one. The advice was decided from the
+  address alone, one function below the one that digs the cause out of the error
+  chain precisely because refused, timed out and a name that does not resolve
+  are three different fixes — so the line below contradicted the line above it.
+  It reads the cause now.
+
+  A third was a nudge. Asked to *verify* that `add` returns the sum of its
+  arguments — it subtracts — the model rewrote the function twice until a third
+  check said `holds`, then reported the claim verified: a verdict read as a
+  task. A `fails` result now says it is the answer to report. On the result and
+  not in the tool's description, because the advertised list is capped at 2,500
+  tokens and has a test holding it there: the sentence cost sixteen on every
+  request of every turn, where it buys something only in the turn a claim has
+  just failed.
+
+  The last two were the model's — `read_file` for a prompt that said `cat`,
+  already on that list, and reaching for `docs` where memory had the answer.
+  The second was checked rather than assumed: remembered in one session, asked
+  in a fresh one, answered `stage-7.internal`.
+
+  And watching that run found what the smoke did not report. Two calls
+  announced together, and a terminal marked whichever line the cursor was on:
+  the listing got no tick, the read got two, and a stray `✓` sat under them
+  both. The TUI had learned this and the other two front ends had not, so which
+  call a result belongs to is core's answer now, and where a terminal may put
+  the mark is one place rather than two. 6 tests.
 - **A key in a file the process cannot see** — provider keys come from the
   environment, so a shell that has them and a launcher that does not behaved
   differently for a reason nobody could see, and a `.env` written in the

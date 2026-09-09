@@ -4268,6 +4268,73 @@ async fn a_refused_reach_is_not_a_check_either() {
     assert!(said.contains("reached for nothing"), "{said}");
 }
 
+/// `verify` was answered by editing the subject. Asked whether `add` returns
+/// the sum of its arguments — it subtracts — a small model rewrote the function
+/// twice, until a third check said `holds`, and reported the claim verified. The
+/// verdict said what was true and was read as a task.
+#[tokio::test]
+async fn a_failed_check_says_it_is_an_answer_rather_than_a_thing_to_edit_away() {
+    let f = fixture();
+    let session = f.rook.start_session("verdicts").unwrap();
+    std::fs::write(f.workspace.path().join("lib.rs"), "fn add(a: i32, b: i32) -> i32 { a - b }\n").unwrap();
+
+    let script = vec![
+        call("verify", serde_json::json!({ "claim": "add returns the sum" })),
+        call("read_file", serde_json::json!({ "path": "lib.rs" })),
+        reply("`a - b` subtracts.\n\nVERDICT: fails"),
+        reply("it fails: add subtracts"),
+    ];
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
+    agent.allow_everything_not_denied();
+    agent.run("check it").await.unwrap();
+
+    let results: Vec<String> = f
+        .rook
+        .transcript(session, 0, usize::MAX, 4096)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == "tool-result" && e.label == "verify")
+        .map(|e| e.body)
+        .collect();
+    let said = results.last().expect("the check ran");
+    assert!(said.contains("VERDICT: fails"), "the verdict is still the verdict: {said}");
+    assert!(
+        said.contains("answer to report"),
+        "a small model rewrote the function twice until this flipped, then called it verified: {said}"
+    );
+}
+
+/// Only the failing one carries it: a verdict that held has nothing to warn
+/// about, and every token here is paid inside the turn that asked.
+#[tokio::test]
+async fn a_check_that_holds_is_not_told_what_a_failure_would_mean() {
+    let f = fixture();
+    let session = f.rook.start_session("verdicts").unwrap();
+    std::fs::write(f.workspace.path().join("lib.rs"), "fn add(a: i32, b: i32) -> i32 { a + b }\n").unwrap();
+
+    let script = vec![
+        call("verify", serde_json::json!({ "claim": "add returns the sum" })),
+        call("read_file", serde_json::json!({ "path": "lib.rs" })),
+        reply("`a + b` adds.\n\nVERDICT: holds"),
+        reply("it holds"),
+    ];
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
+    agent.allow_everything_not_denied();
+    agent.run("check it").await.unwrap();
+
+    let said = f
+        .rook
+        .transcript(session, 0, usize::MAX, 4096)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == "tool-result" && e.label == "verify")
+        .map(|e| e.body)
+        .next_back()
+        .expect("the check ran");
+    assert!(said.contains("VERDICT: holds"), "{said}");
+    assert!(!said.contains("answer to report"), "nothing to warn about here: {said}");
+}
+
 /// A checker that narrates what it would run and stops has not answered. Asked
 /// once more in its own session, it does the thing and commits; the parent sees
 /// the verdict, not the plan.
