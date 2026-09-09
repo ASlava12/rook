@@ -1799,6 +1799,22 @@ returned non-zero is evidence; a command that did not run is not, and telling
 those apart is not something an exit code will do reliably. The instructions
 say it in words instead.
 
+The fourth reading was five of eight, and two of the five were one defect of
+ours — a request that timed out reported as a server that was not running, twice
+— with a third answered by a nudge: asked to *verify* that `add` returns the sum
+of its arguments, against a function that subtracts, the model rewrote the
+function until the verdict flipped. Both are fixed above, and the reading after
+them is three of eight: the timeout scenario passes, and so does the verify one.
+All three that remain are the model's, and were checked rather than assumed —
+`read_file` for a prompt that said `cat`, a `delegate` whose `tasks` were filled
+with nested objects made of the tool's own argument names against a schema that
+says `array of string`, and a skill whose procedure was run rather than
+reported. The second is worth reading twice: the refusal named the wrong shape
+*and* the right one, and the model answered by echoing the task text back as its
+reply rather than trying again. Three readings running with every remaining
+failure the model's own is the evidence this entry asked for; the open question
+is no longer whether the scenarios are wrong but whether the tag is.
+
 **Autonomy is a task and its boundaries, and the task is what was asked.**
 The goal check ran only for a session with a goal set, so `rook run` at
 autonomous — the stance with nobody else to check — checked nothing. With no
