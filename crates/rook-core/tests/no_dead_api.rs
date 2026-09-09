@@ -232,6 +232,15 @@ fn a_public_function_no_production_code_calls_says_it_is_a_test_seam() {
 }
 
 /// A file without the inline `mod tests` at the end of it.
+///
+/// Cut at the *first* `#[cfg(test)]`, which assumes test-only code is at the
+/// end — the convention here. A `#[cfg(test)]` helper put in the middle of a
+/// file hides everything below it from this, and the failure reads as though a
+/// function nothing calls is called by nobody: `router` was reported that way
+/// while `serve` was calling it forty lines further down. Conservative on
+/// purpose, since the other direction — counting a test helper as a production
+/// caller — is the one that lets dead API through, which is what this exists
+/// to catch.
 fn before_inline_tests(text: &str) -> String {
     match text.find("\n#[cfg(test)]") {
         Some(at) => text[..at].to_string(),

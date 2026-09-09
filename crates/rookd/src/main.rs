@@ -381,6 +381,28 @@ async fn shutdown(state: Arc<AppState>) {
     });
 }
 
+/// One home for every test in this *binary*, set once.
+///
+/// `ROOK_HOME` belongs to the process, so a test that sets its own moves the
+/// config and the secrets out from under whichever test is reading them — which
+/// passes alone and fails in parallel, as such a thing does. It lived in
+/// `api.rs` and said "every test in this file"; the hazard was never the file.
+/// A test added over here set its own and took the secrets test down with it.
+///
+/// The store is still per test: redb takes one writer, and two tests sharing a
+/// path would fight over it.
+#[cfg(test)]
+pub(crate) fn shared_home() -> &'static std::path::Path {
+    static HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    HOME.get_or_init(|| {
+        let dir = tempfile::tempdir().unwrap();
+        // SAFETY: set once, before any test has a second thread reading it.
+        unsafe { std::env::set_var("ROOK_HOME", dir.path()) };
+        dir
+    })
+    .path()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,10 +417,9 @@ mod tests {
     /// guess about a machine, and three CI failures here were exactly that.
     #[test]
     fn starting_up_does_not_probe_the_machine() {
-        let home = tempfile::tempdir().unwrap();
-        // SAFETY: single-threaded, before anything else reads the environment.
-        unsafe { std::env::set_var("ROOK_HOME", home.path()) };
-        let rook = Rook::open(Some(home.path().to_path_buf())).unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let _ = crate::shared_home();
+        let rook = Rook::open(Some(workspace.path().to_path_buf())).unwrap();
 
         let about = about(&rook);
         assert_eq!(about.os, std::env::consts::OS, "and it still says what it is running on");

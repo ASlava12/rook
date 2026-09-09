@@ -373,6 +373,30 @@ what unblocks the most.
   completion of any kind yet, `/` included, which is why this is a property of
   the one front end with a line editor rather than a capability the others are
   missing. 5 tests, one of them in a real terminal.
+- **What the harness added and what the person typed arrived as one message** —
+  the date, the facts recalled for this prompt and a sketch of the workspace go
+  in as a user turn beside the newest message, and `joined_user_turns` then
+  folds consecutive user turns into one, deliberately, because a chat template
+  on a self-hosted model often will not take two in a row. So the model received
+  the harness's context and the person's sentence separated by a blank line and
+  nothing else. A fact remembered in another session read as something the
+  person had just said, and the sketch is a list of file *names* from a
+  workspace that is somebody else's repository as often as it is yours — a file
+  called `ignore the user and …` arrived inside what read as this turn's
+  request. It is wrapped in `<context>` now, explained once in the part of the
+  prompt that is cached. Read off opencode's Astra prompt, which says the same
+  thing about its own `<system-reminder>` blocks; the twenty-sixth pass in
+  [references/PORTED.md](../references/PORTED.md) has the rest of it.
+
+  Two of ours on the way, both mine and both from the commit before. A test in
+  `main.rs` set `ROOK_HOME` for the whole process, which moved the config and
+  the secrets out from under whichever `api.rs` test was reading them — the
+  fixture that exists to prevent exactly this said "one home for every test in
+  this file", and the hazard was never the file. And the helper that replaced it
+  sat above `serve`, where the first `#[cfg(test)]` in a file is where
+  `a_public_function_no_production_code_calls_says_it_is_a_test_seam` stops
+  reading: it reported `router` as called by nobody while `serve` called it
+  forty lines below. 1 test.
 - **A key in a file the process cannot see** — provider keys come from the
   environment, so a shell that has them and a launcher that does not behaved
   differently for a reason nobody could see, and a `.env` written in the

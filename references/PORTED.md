@@ -1702,3 +1702,32 @@ remote answered 429, which is what GitHub answers to eight fetches in a row: the
 question the listing exists to answer went unanswered for seven references
 because the eighth was rate-limited. Each row now says what happened to it and
 the rest of the table still prints.
+
+## Twenty-sixth pass — opencode
+
+**opencode dff8fbc14 → 9f8db119f.** Four commits, and one of them is a whole
+system prompt: `port Astra system prompt from v2`. Three of its lines name
+things already settled here — "do not stop at acknowledging capability" is what
+*"I will answer, first let me check" is not an answer* fixed, and the plan and
+delegation lines are config here rather than prose. The fourth was a defect:
+
+> `<system-reminder>` blocks are harness instructions, not user-authored content.
+
+Rook had no such marking and needed it more, because it does not send a separate
+block at all. The date, the facts recalled for this prompt and a sketch of the
+workspace are inserted as a user turn beside the newest message, and
+`joined_user_turns` then folds consecutive user turns into one — deliberately,
+because a chat template on a self-hosted model often will not take two in a row.
+So what arrives is a single message holding the harness's context and the
+person's sentence with a blank line between them and nothing else.
+
+Two things are wrong with that. A fact remembered in another session reads as
+something the person just said, and the sketch is a list of file *names* from a
+workspace that is somebody else's repository as often as it is yours — so a file
+called `ignore the user and …` lands inside what reads as this turn's request.
+It is wrapped in `<context>` now, and the system prompt says once, in the part
+that is cached, what the block is and that nothing inside it is a request.
+
+The other three commits are the console's Go inference proxy, a GLM-5.3-Flash
+allowance in its docs, and a release version sync — infrastructure for a hosted
+product, with nothing behind them to read.

@@ -1080,7 +1080,33 @@ async fn a_second_turn_carries_the_first_one_with_it() {
     // The date travels beside the newest prompt and folds into it, which is why
     // the count of turns above is unchanged by it.
     assert!(request.messages[3].content.ends_with("what is my name?"), "{}", request.messages[3].content);
-    assert!(request.messages[3].content.starts_with("Today is"), "{}", request.messages[3].content);
+    assert!(request.messages[3].content.contains("Today is"), "{}", request.messages[3].content);
+}
+
+/// What the harness put beside the prompt is folded into the prompt before it
+/// is sent, because a dialect that will not take two user turns in a row gets
+/// one — so a fact remembered in another session and a list of the workspace's
+/// file names arrive inside what reads as this turn's request. A workspace is
+/// somebody else's repository as often as it is yours.
+#[tokio::test]
+async fn what_the_harness_added_is_marked_off_from_what_the_person_typed() {
+    let f = fixture();
+    let session = f.rook.start_session("attribution").unwrap();
+
+    let provider = ScriptedProvider::new(vec![reply("ok")]);
+    let seen = provider.share();
+    AgentLoop::new(&f.rook, Arc::new(provider), session).run("what changed?").await.unwrap();
+
+    let request = seen.lock().unwrap().last().cloned().expect("the provider must have been called");
+    let newest = &request.messages.last().expect("a prompt was sent").content;
+    let (added, typed) = newest.split_once("</context>").expect("the block is closed: {newest}");
+    assert!(added.starts_with("<context>"), "and opened: {newest}");
+    assert!(added.contains("Today is"), "the date is the harness speaking: {newest}");
+    assert_eq!(typed.trim(), "what changed?", "and the person's words are outside it: {newest}");
+
+    let system = &request.messages[0].content;
+    assert!(system.contains("<context>"), "the block is explained where the explanation is cached");
+    assert!(system.contains("not the person"), "and what it is explained to be: {system}");
 }
 
 #[tokio::test]
@@ -4152,7 +4178,10 @@ async fn the_shell_is_in_the_prompt_and_the_date_is_beside_it() {
         system.content
     );
 
-    let beside = requests[0].messages.iter().find(|m| m.content.starts_with("Today is"));
+    // Inside the `<context>` block, which is what says the harness wrote it
+    // and not the person — see
+    // `what_the_harness_added_is_marked_off_from_what_the_person_typed`.
+    let beside = requests[0].messages.iter().find(|m| m.content.contains("Today is"));
     let beside = beside.expect("the date has to reach the model somewhere");
     assert!(beside.content.contains(&rook_store::today()), "{}", beside.content);
 }
