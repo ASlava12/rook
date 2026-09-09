@@ -2292,7 +2292,7 @@ dependencies = [
 
 [[package]]
 name = "rook-acp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "rook-core",
@@ -2310,7 +2310,7 @@ dependencies = [
 
 [[package]]
 name = "rook-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2342,14 +2342,14 @@ dependencies = [
 
 [[package]]
 name = "rook-contain"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "windows-sys 0.59.0",
 ]
 
 [[package]]
 name = "rook-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "flate2",
@@ -2381,7 +2381,7 @@ dependencies = [
 
 [[package]]
 name = "rook-llm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2399,7 +2399,7 @@ dependencies = [
 
 [[package]]
 name = "rook-lsp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "serde",
@@ -2412,7 +2412,7 @@ dependencies = [
 
 [[package]]
 name = "rook-mcp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -2428,7 +2428,7 @@ dependencies = [
 
 [[package]]
 name = "rook-proto"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2437,7 +2437,7 @@ dependencies = [
 
 [[package]]
 name = "rook-skills"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "semver",
  "serde",
@@ -2451,7 +2451,7 @@ dependencies = [
 
 [[package]]
 name = "rook-store"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "hex",
@@ -2468,7 +2468,7 @@ dependencies = [
 
 [[package]]
 name = "rook-tools"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "globset",
@@ -2492,7 +2492,7 @@ dependencies = [
 
 [[package]]
 name = "rookd"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3989,7 +3989,7 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
