@@ -986,19 +986,24 @@ fn the_prompt_box_edits_and_remembers_like_a_terminal() {
     // A command rather than a prompt, so no turn runs: what the box says while
     // one does is `working…`, and this is about what comes back into the box.
     pty.send("/session\r");
-    let sent = pty.screen_showing(100, 30, "› /session").join("\n");
-    assert!(sent.contains("› /session"), "what was sent goes into the log:\n{sent}");
+    // In the log it carries the mark of who said it; in the box it carries the
+    // prompt. Two marks, one text — asserting the text alone would pass on
+    // either half of that.
+    let sent = pty.screen_showing(100, 30, "▌ /session").join("\n");
+    assert!(sent.contains("▌ /session"), "what was sent goes into the log:\n{sent}");
 
     pty.send("\u{1b}[A"); // up, for the last thing sent
-    // Twice on the screen: once where it was said, once back in the box. They
-    // are drawn the same, which is the point — it is there to be edited.
-    let recalled = pty.screen(100, 30);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    let mut screen = recalled;
-    while screen.iter().filter(|l| l.contains("› /session")).count() < 2 {
+    let mut screen = pty.screen(100, 30);
+    while !screen.iter().any(|l| l.contains("› /session")) {
         assert!(std::time::Instant::now() < deadline, "never came back:\n{}", screen.join("\n"));
         screen = pty.screen(100, 30);
     }
+    assert!(
+        screen.iter().any(|l| l.contains("▌ /session")),
+        "and it is still where it was said:\n{}",
+        screen.join("\n")
+    );
 }
 
 /// Documentation the agent gathered was readable only by asking the agent

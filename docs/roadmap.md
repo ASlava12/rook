@@ -256,6 +256,23 @@ what unblocks the most.
   a line, an overlay at 88% of the width cut the end off a two-pane row, and a
   bare Esc followed immediately by text is an escape sequence rather than a
   key — which the prompt test had already learned once. 22 tests.
+
+  Then how a conversation reads. Every line came out the same colour with a
+  `› ` in front of the ones you said, so a long answer, the model's reasoning
+  and your own question were one wall of text scrolled past rather than read.
+  Each kind of line now carries a mark in the left-hand gutter instead — a
+  cyan bar for what you said, red for what failed, a dotted one for thinking —
+  which survives wrapping, because the wrap is ours: character-counted and
+  broken on words, so a mark stands beside every row of a paragraph and not
+  only its first. A tool call was two lines of JSON in the middle of the prose;
+  it is one line that says what is being done — `read service.toml`, `run cargo
+  test`, `search for TODO in src` — and gains a `✓` or a `✗` when it finishes.
+  A call is named by its argument because that is what a person is checking:
+  the name alone answers "it is reading something" and never "which file". The
+  pairing is a queue rather than a lookup, since a turn may announce three
+  calls before the first result comes back, and two of them may be the same
+  tool: the test that says so reads two files and runs one command, and the
+  second read is the one that fails. 4 tests.
 - **A key in a file the process cannot see** — provider keys come from the
   environment, so a shell that has them and a launcher that does not behaved
   differently for a reason nobody could see, and a `.env` written in the

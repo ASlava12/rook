@@ -154,7 +154,12 @@ enum TurnEvent {
     Started(u128),
     Text(String),
     Reasoning(String),
-    Tool(String),
+    /// A call the model has just made: the tool's own name, which is what
+    /// pairs it with the finish, and what to show, which is the work.
+    Tool {
+        name: String,
+        said: String,
+    },
     ToolDone(String, bool),
     /// A sub-agent's progress. Its own kind rather than more reasoning: work
     /// happening in another agent is not the model thinking out loud, and it
@@ -304,6 +309,10 @@ struct Chat {
     history: Vec<String>,
     recalled: Option<usize>,
     log: Vec<(&'static str, String)>,
+    /// Calls announced and not yet finished, as `(tool name, what was
+    /// written)`. A message announces several before any of them runs and they
+    /// finish in that order, so this is what pairs a finish with its line.
+    running_calls: Vec<(String, String)>,
     session: Option<u128>,
     busy: bool,
     pending: Option<ApprovalRequest>,
@@ -528,6 +537,42 @@ impl Chat {
             _ => self.log.push((kind, text.to_string())),
         }
         self.trim();
+    }
+
+    /// A call has started: write its line, and remember which line it was.
+    ///
+    /// The name is kept beside what was written because the two differ — the
+    /// line says `read src/main.rs` and the finish only names `read_file` —
+    /// and because a message can announce several calls before any of them
+    /// runs. They finish in the order they were announced, so a queue per name
+    /// pairs each finish with the line it belongs to.
+    fn tool_started(&mut self, name: &str, said: &str) {
+        self.push("tool", &format!("  · {said}"));
+        self.running_calls.push((name.to_string(), said.to_string()));
+    }
+
+    /// Mark the line that call was written for.
+    ///
+    /// The line gains its mark rather than a second line being written under
+    /// it, which is what the code did while the comment below said otherwise:
+    /// every call read as two events, and a turn of a dozen calls filled the
+    /// pane twice over.
+    fn tool_done(&mut self, name: &str, failed: bool) {
+        let mark = if failed { " ✗" } else { " ✓" };
+        let said = match self.running_calls.iter().position(|(started, _)| started == name) {
+            Some(at) => self.running_calls.remove(at).1,
+            None => name.to_string(),
+        };
+        let unmarked = self
+            .log
+            .iter_mut()
+            .find(|(kind, body)| *kind == "tool" && body.trim_start().trim_start_matches("· ") == said);
+        match unmarked {
+            Some((_, body)) => body.push_str(mark),
+            // A call whose start was never seen — a window that attached to a
+            // daemon mid-turn — still says that it finished.
+            None => self.push("tool", &format!("  · {said}{mark}")),
+        }
     }
 
     /// The tool the turn is in the middle of, read from the log the person is
@@ -886,12 +931,10 @@ impl App {
                 TurnEvent::Started(id) => self.chat.session = Some(id),
                 TurnEvent::Text(text) => self.chat.push("text", &text),
                 TurnEvent::Reasoning(text) => self.chat.push("think", &text),
-                TurnEvent::Tool(name) => self.chat.push("tool", &format!("  · {name}")),
+                TurnEvent::Tool { name, said } => self.chat.tool_started(&name, &said),
                 TurnEvent::Agent(line) => self.chat.push("agent", &line),
                 TurnEvent::Step(at, of) => self.chat.step = Some((at, of)),
-                TurnEvent::ToolDone(name, failed) => {
-                    self.chat.push("tool", &format!("  · {name} {}", if failed { "✗" } else { "✓" }))
-                }
+                TurnEvent::ToolDone(name, failed) => self.chat.tool_done(&name, failed),
                 TurnEvent::Spent { input, output, cached } => self.chat.spent = Some((input, output, cached)),
                 TurnEvent::Approval(request) => self.chat.pending = Some(request),
                 TurnEvent::Ask(request) => {
@@ -928,10 +971,11 @@ impl App {
             }
             ChatEvent::Text { text } => self.chat.push("text", &text),
             ChatEvent::Reasoning { text } => self.chat.push("think", &text),
-            ChatEvent::Tool { name } => self.chat.push("tool", &format!("  · {name}")),
-            ChatEvent::ToolDone { name, failed } => {
-                self.chat.push("tool", &format!("  · {name} {}", if failed { "✗" } else { "✓" }))
-            }
+            ChatEvent::Tool { name } => self.chat.tool_started(&name, &name),
+            // The daemon sends the tool's name and not its arguments, so a
+            // window attached to one says less than a window running the turn
+            // itself. What it must not do is say it twice.
+            ChatEvent::ToolDone { name, failed } => self.chat.tool_done(&name, failed),
             ChatEvent::Step { at, of } => self.chat.step = Some((at, of)),
             ChatEvent::Remembered { text } => self.chat.push("stat", &format!("  remembered: {text}")),
             ChatEvent::Forgot { text } => self.chat.push("stat", &format!("  forgot: {text}")),
@@ -1405,7 +1449,7 @@ impl App {
         let from = events.saturating_sub(RECALLED as u64);
         for entry in self.source.transcript(session, from, RECALLED, 4_000).unwrap_or_default() {
             match entry.kind.as_str() {
-                "user" => self.chat.push("you", &format!("› {}", entry.body)),
+                "user" => self.chat.push("you", &entry.body),
                 "assistant" => self.chat.push("text", &entry.body),
                 "tool-call" => self.chat.push("tool", &format!("  · {}", entry.label)),
                 _ => {}
@@ -1475,7 +1519,7 @@ impl App {
         // do but stop it and start again.
         if self.chat.busy {
             self.shared.interjections.say(&prompt);
-            self.chat.push("you", &format!("› {prompt}"));
+            self.chat.push("you", &prompt);
             self.chat.push("stat", "  (the turn will see this at its next step)");
             self.chat.scroll = 0;
             return;
@@ -1484,11 +1528,11 @@ impl App {
         // other slash command is answered here, by the same code the plain CLI
         // runs.
         if let Some(command) = prompt.strip_prefix('/').filter(|c| !c.starts_with("btw ")) {
-            self.chat.push("you", &format!("› {prompt}"));
+            self.chat.push("you", &prompt);
             return self.command(command);
         }
         let aside = prompt.strip_prefix("/btw ").map(|q| q.trim().to_string());
-        self.chat.push("you", &format!("› {prompt}"));
+        self.chat.push("you", &prompt);
         self.chat.busy = true;
         self.chat.since = Some(std::time::Instant::now());
         self.chat.step = None;
@@ -1564,7 +1608,10 @@ impl App {
                     let event = match progress {
                         Progress::Delta(Delta::Text(text)) => TurnEvent::Text(text.clone()),
                         Progress::Delta(Delta::Reasoning(text)) => TurnEvent::Reasoning(text.clone()),
-                        Progress::Delta(Delta::ToolCall(call)) => TurnEvent::Tool(call.name.clone()),
+                        Progress::Delta(Delta::ToolCall(call)) => TurnEvent::Tool {
+                            name: call.name.clone(),
+                            said: tool_line(&call.name, Some(&call.arguments)),
+                        },
                         Progress::Delegated { task, done, total } => {
                             TurnEvent::Agent(format!("  [{done}/{total}] {task}"))
                         }
@@ -1948,12 +1995,38 @@ impl App {
                 "err" => Style::default().fg(Color::Red),
                 _ => Style::default(),
             };
+            // A bar down the left of what somebody said, and of what went
+            // wrong. Colour alone told these apart, which is a difference a
+            // person has to remember rather than see — and on a screen of
+            // wrapped paragraphs the eye needs an edge to find where a message
+            // starts. The model's own words get none: they are the voice this
+            // pane is for, and a marker on everything marks nothing.
+            let gutter = match *kind {
+                "you" => Some(("▌ ", Style::default().fg(Color::Cyan))),
+                "err" => Some(("▌ ", Style::default().fg(Color::Red))),
+                "think" => Some(("┆ ", Style::default().fg(THINKING))),
+                _ => None,
+            };
             // The model's own words are the only ones with Markdown in them:
             // a tool line or a note is written here and says what it says.
-            match *kind {
-                "text" => lines.extend(answer(body, style)),
-                _ => lines
-                    .extend(body.split('\n').map(|line| Line::from(Span::styled(line.to_string(), style)))),
+            match gutter {
+                // Wrapped here rather than by the paragraph, so the bar is on
+                // every row of the block and not only its first: a marker that
+                // stops after one line marks a line, and what is being marked
+                // is a message. These are the kinds with no Markdown in them,
+                // which is what makes wrapping them here safe.
+                Some((bar, bar_style)) => {
+                    let room = log.width.saturating_sub(2 + bar.chars().count() as u16) as usize;
+                    for line in wrapped(body, room.max(8)) {
+                        lines.push(Line::from(vec![Span::styled(bar, bar_style), Span::styled(line, style)]));
+                    }
+                }
+                None => match *kind {
+                    "text" => lines.extend(answer(body, style)),
+                    _ => lines.extend(
+                        body.split('\n').map(|line| Line::from(Span::styled(line.to_string(), style))),
+                    ),
+                },
             }
             lines.push(Line::from(""));
         }
@@ -2821,6 +2894,84 @@ fn named(reference: &str) -> String {
         .unwrap_or_else(|| reference.to_string())
 }
 
+/// Text broken to a width, on word boundaries where there are any.
+///
+/// Written out because what needs wrapping here is what carries a marker down
+/// its left edge, and a paragraph that wraps for us puts the marker on the
+/// first row only. Characters rather than bytes: the messages this wraps are
+/// as often Russian as English, and slicing a byte count through one of those
+/// is a panic.
+fn wrapped(text: &str, width: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    for paragraph in text.split('\n') {
+        let mut line = String::new();
+        for word in paragraph.split(' ') {
+            let room = width.saturating_sub(line.chars().count());
+            if !line.is_empty() && word.chars().count() + 1 > room {
+                out.push(std::mem::take(&mut line));
+            }
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            // A word longer than the pane is cut where the pane ends rather
+            // than pushing the rest of the line off it.
+            let mut word: String = word.to_string();
+            while word.chars().count() > width {
+                let head: String = word.chars().take(width).collect();
+                out.push(head.clone());
+                word = word.chars().skip(width).collect();
+            }
+            line.push_str(&word);
+        }
+        out.push(line);
+    }
+    out
+}
+
+/// What a call is doing, in a few words.
+///
+/// A transcript of `read_file`, `read_file`, `edit_file` says which tools ran
+/// and nothing about the work: the argument that matters is the file, the
+/// command, the query. Named tools get the argument that identifies the call;
+/// anything else is its own name, which is what it was before.
+fn tool_line(name: &str, args: Option<&serde_json::Value>) -> String {
+    let field =
+        |key: &str| args.and_then(|a| a.get(key)).and_then(|v| v.as_str()).map(|v| v.trim().to_string());
+    let first_path = || {
+        field("path").or_else(|| {
+            args.and_then(|a| a.get("files"))
+                .and_then(|f| f.as_array())
+                .and_then(|files| files.first())
+                .and_then(|first| first.get("path"))
+                .and_then(|p| p.as_str())
+                .map(str::to_string)
+        })
+    };
+    let said = match name {
+        "read_file" => first_path().map(|p| format!("read {p}")),
+        "write_file" => first_path().map(|p| format!("write {p}")),
+        "edit_file" => first_path().map(|p| format!("edit {p}")),
+        "delete_file" => first_path().map(|p| format!("delete {p}")),
+        "move_file" => field("from").map(|from| format!("move {from}")),
+        "list_dir" => first_path().map(|p| format!("list {p}")),
+        "run_command" => field("command").map(|c| format!("run {c}")),
+        "search" => field("pattern").map(|p| format!("search {p}")),
+        "web_fetch" => field("url").map(|u| format!("fetch {u}")),
+        "web_search" => field("query").map(|q| format!("search the web for {q}")),
+        "docs" => field("topic").map(|t| format!("docs {t}")),
+        "load_skill" | "find_skill" => field("name").map(|n| format!("{name} {n}")),
+        "delegate" => Some("delegate".into()),
+        _ => None,
+    };
+    // One line however long the argument is: a command that fills the pane
+    // pushes the answer off it.
+    let said = said.unwrap_or_else(|| name.to_string());
+    match said.chars().count() > 72 {
+        true => format!("{}…", said.chars().take(71).collect::<String>()),
+        false => said,
+    }
+}
+
 /// A rectangle in the middle of another, by percentage.
 ///
 /// Not the whole screen: what is underneath stays visible at the edges, so an
@@ -3084,6 +3235,82 @@ mod tests {
         assert_eq!(elapsed(std::time::Duration::from_secs(59)), "59s");
         assert_eq!(elapsed(std::time::Duration::from_secs(60)), "1m00s");
         assert_eq!(elapsed(std::time::Duration::from_secs(250)), "4m10s");
+    }
+
+    /// A call was written when it started and written again when it finished,
+    /// so a turn of a dozen calls filled the pane twice over — while the
+    /// comment on `running` said the line gained its mark.
+    #[test]
+    fn a_call_is_one_line_that_gains_its_mark() {
+        let mut chat = Chat::default();
+        chat.tool_started("read_file", "read src/main.rs");
+        assert_eq!(chat.log.len(), 1, "{:?}", chat.log);
+        assert_eq!(chat.running(), Some("read src/main.rs"), "and it is what the turn is doing");
+
+        chat.tool_done("read_file", false);
+        assert_eq!(chat.log.len(), 1, "still one line: {:?}", chat.log);
+        assert!(chat.log[0].1.ends_with('✓'), "{:?}", chat.log);
+        assert_eq!(chat.running(), None, "and nothing is running");
+    }
+
+    /// Several calls are announced before any of them runs, and they finish in
+    /// that order. The finish carries only the tool's name, so what pairs it
+    /// with its line is the order it was announced in.
+    #[test]
+    fn calls_announced_together_mark_the_lines_they_belong_to() {
+        let mut chat = Chat::default();
+        chat.tool_started("read_file", "read a.rs");
+        chat.tool_started("read_file", "read b.rs");
+        chat.tool_started("run_command", "run cargo test");
+
+        chat.tool_done("read_file", false);
+        chat.tool_done("read_file", true);
+        chat.tool_done("run_command", false);
+
+        let marks: Vec<&str> = chat.log.iter().map(|(_, body)| body.as_str()).collect();
+        assert_eq!(
+            marks,
+            vec!["  · read a.rs ✓", "  · read b.rs ✗", "  · run cargo test ✓"],
+            "each line gets its own call's answer"
+        );
+    }
+
+    /// A transcript of `read_file`, `read_file`, `edit_file` says which tools
+    /// ran and nothing about the work.
+    #[test]
+    fn a_call_says_what_it_is_doing_and_not_only_its_name() {
+        let path = serde_json::json!({ "path": "src/main.rs" });
+        assert_eq!(tool_line("read_file", Some(&path)), "read src/main.rs");
+        assert_eq!(tool_line("edit_file", Some(&path)), "edit src/main.rs");
+        let command = serde_json::json!({ "command": "cargo test -p rook-core" });
+        assert_eq!(tool_line("run_command", Some(&command)), "run cargo test -p rook-core");
+        // A refactor names files rather than a path, and the first of them is
+        // what identifies the call.
+        let files = serde_json::json!({ "files": [{ "path": "a.rs" }, { "path": "b.rs" }] });
+        assert_eq!(tool_line("edit_file", Some(&files)), "edit a.rs");
+        // A tool nothing here knows about keeps its own name, which is what
+        // every tool had before.
+        assert_eq!(tool_line("some_mcp_tool", Some(&path)), "some_mcp_tool");
+        assert_eq!(tool_line("read_file", None), "read_file");
+        // And a line stays a line: a command that fills the pane pushes the
+        // answer off it.
+        let long = serde_json::json!({ "command": "x".repeat(200) });
+        assert!(tool_line("run_command", Some(&long)).chars().count() <= 72);
+    }
+
+    /// A marker that stops after the first row marks a row, and what is being
+    /// marked is a message.
+    #[test]
+    fn a_wrapped_message_is_broken_on_words_and_counts_characters() {
+        let lines = wrapped("одно два три четыре пять", 12);
+        assert!(lines.iter().all(|line| line.chars().count() <= 12), "{lines:?}");
+        assert_eq!(lines.join(" "), "одно два три четыре пять", "and nothing is lost");
+
+        // A word wider than the pane is cut at the pane rather than pushing
+        // the rest of the line off it.
+        let long = wrapped("ααααααααααααααααα", 8);
+        assert!(long.iter().all(|line| line.chars().count() <= 8), "{long:?}");
+        assert_eq!(long.concat(), "ααααααααααααααααα");
     }
 
     /// A minute of nothing on the screen is a build running, a model thinking,
