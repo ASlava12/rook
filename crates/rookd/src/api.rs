@@ -1083,8 +1083,8 @@ mod tests {
         let about = crate::About {
             store_root: rook.store.root().display().to_string(),
             workspace: rook.workspace.display().to_string(),
-            os: rook.env().os.clone(),
-            arch: rook.env().arch.clone(),
+            os: std::env::consts::OS.to_string(),
+            arch: std::env::consts::ARCH.to_string(),
         };
         let state = Arc::new(AppState {
             rook: Arc::new(tokio::sync::RwLock::new(rook)),

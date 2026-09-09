@@ -296,6 +296,28 @@ what unblocks the most.
   constant exactly as it does for a function, and the two guards that catch
   functions and error variants had no third: `every_public_constant_is_read_
   somewhere` is it. 1 test.
+- **A daemon that started a JVM before it would say where it was** — the
+  Windows runner failed `a_restart_comes_back_on_the_address_the_windows_are_
+  holding` with `rookd never published its address`, and the deadline had
+  already been raised from four seconds to thirty, which is the tell that the
+  number was never the problem. Two things were: nine daemon tests each spawn a
+  whole `rookd` and all did it at once, and the message could not tell a daemon
+  that was still starting from one that had exited on the way to binding.
+  The fixture holds a gate now — held by the daemon rather than taken by each
+  test, so the tenth cannot forget it — and `rookd`'s stderr goes to a file the
+  panic reads.
+
+  Which is how the real one was found, on the next run: *still running, so it is
+  slow rather than broken*, stderr empty, with the tests already serialised.
+  `/api/health` reports the machine's OS and architecture, and it was reading
+  them off `Rook::env()` — which detects the machine: sixteen subprocesses,
+  among them `java -version`, which starts a JVM. 732 ms here, past thirty
+  seconds there, and paid *before* the address file every window waits for.
+  Both answers are compile-time constants. `Rook::open` stopped probing at
+  startup for this exact reason and the daemon had reintroduced it one layer
+  up, where it costs more. Asserted structurally rather than with a stopwatch —
+  a deadline in a test is a guess about a machine, and three failures here were
+  exactly that. 2 tests.
 - **A key in a file the process cannot see** — provider keys come from the
   environment, so a shell that has them and a launcher that does not behaved
   differently for a reason nobody could see, and a `.env` written in the

@@ -147,6 +147,15 @@ impl Rook {
         self.env.get_or_init(|| Environment::detect(AGENT_VERSION))
     }
 
+    /// Whether the machine has been probed yet. A test seam: detection spawns
+    /// sixteen processes, and the only way to ask "did this path pay for it"
+    /// from outside this crate is to time it — which is a number, not a claim,
+    /// and this repository has three CI failures that were exactly that.
+    #[doc(hidden)]
+    pub fn machine_probed(&self) -> bool {
+        self.env.get().is_some()
+    }
+
     pub fn open(workspace: Option<PathBuf>) -> Result<Self> {
         paths::ensure_dirs().map_err(|e| CoreError::Io { path: paths::home(), source: e })?;
         let workspace =

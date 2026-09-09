@@ -221,6 +221,25 @@ fn main() -> Result<()> {
     serve()
 }
 
+/// What this daemon is, for `/api/health`.
+///
+/// Not `rook.env()`, which detects the machine: that is sixteen subprocesses —
+/// `java -version` starts a JVM, `dotnet` and `docker` are no faster — and it
+/// was paid before the address file was written, so every window waiting for
+/// this daemon waited for a probe whose only two answers here are compile-time
+/// constants. The store stopped doing this at startup for the same reason; the
+/// daemon had reintroduced it one layer up, where it cost more, because a
+/// window cannot begin until the address exists. It read as a slow start on the
+/// Windows runner and failed a test outright there, twice.
+fn about(rook: &Rook) -> About {
+    About {
+        store_root: rook.store.root().display().to_string(),
+        workspace: rook.workspace.display().to_string(),
+        os: std::env::consts::OS.to_string(),
+        arch: std::env::consts::ARCH.to_string(),
+    }
+}
+
 #[tokio::main]
 async fn serve() -> Result<()> {
     let args = Args::parse();
@@ -239,12 +258,7 @@ async fn serve() -> Result<()> {
         );
     }
 
-    let about = About {
-        store_root: rook.store.root().display().to_string(),
-        workspace: rook.workspace.display().to_string(),
-        os: rook.env().os.clone(),
-        arch: rook.env().arch.clone(),
-    };
+    let about = about(&rook);
     let state = Arc::new(AppState {
         rook: Arc::new(RwLock::new(rook)),
         elsewhere: RwLock::new(std::collections::HashMap::new()),
@@ -365,4 +379,32 @@ async fn shutdown(state: Arc<AppState>) {
         std::fs::remove_file(rook_core::paths::daemon_address_file()).ok();
         std::process::exit(0);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The address file is what every window waits for, so anything on the way
+    /// to it is paid by all of them. Detecting the machine — sixteen processes,
+    /// among them a JVM — was on that path for two compile-time constants, and
+    /// on the Windows runner it was slow enough that `rookd never published its
+    /// address` failed the daemon tests twice.
+    ///
+    /// Asked of `about` rather than of a stopwatch: a deadline in a test is a
+    /// guess about a machine, and three CI failures here were exactly that.
+    #[test]
+    fn starting_up_does_not_probe_the_machine() {
+        let home = tempfile::tempdir().unwrap();
+        // SAFETY: single-threaded, before anything else reads the environment.
+        unsafe { std::env::set_var("ROOK_HOME", home.path()) };
+        let rook = Rook::open(Some(home.path().to_path_buf())).unwrap();
+
+        let about = about(&rook);
+        assert_eq!(about.os, std::env::consts::OS, "and it still says what it is running on");
+        assert!(
+            !rook.machine_probed(),
+            "the daemon probed the machine before publishing its address, which every window waits for"
+        );
+    }
 }
