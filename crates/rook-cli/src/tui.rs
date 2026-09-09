@@ -288,6 +288,45 @@ impl Typing {
     fn column(&self) -> u16 {
         self.text[..self.at].chars().count() as u16
     }
+
+    /// The file being named at the cursor: what follows the last `@` of the
+    /// word the cursor is in, or nothing.
+    ///
+    /// The word rather than the line, because a prompt is a sentence and `@`
+    /// belongs to one file in it — and behind the cursor rather than the whole
+    /// text, because going back to fix an earlier mention should offer that
+    /// mention, not the last one typed. An email address is the reason a `@`
+    /// with a character before it is not one of these.
+    fn mentioning(&self) -> Option<&str> {
+        let before = &self.text[..self.at];
+        let word = before.rsplit([' ', '\t', '\n']).next()?;
+        let fragment = word.strip_prefix('@')?;
+        match fragment.contains('@') {
+            true => None,
+            false => Some(fragment),
+        }
+    }
+
+    /// Grow the mention being typed to `common` without finishing it: several
+    /// files share this much, so the cursor stays where more can be typed.
+    fn narrow(&mut self, common: &str) {
+        let Some(fragment) = self.mentioning() else { return };
+        if common.len() <= fragment.len() {
+            return;
+        }
+        let start = self.at - fragment.len();
+        self.text.replace_range(start..self.at, common);
+        self.at = start + common.len();
+    }
+
+    /// Put `path` where the mention being typed is, and a space after it: the
+    /// name is finished and the sentence goes on.
+    fn mention(&mut self, path: &str) {
+        let Some(fragment) = self.mentioning() else { return };
+        let start = self.at - fragment.len() - '@'.len_utf8();
+        self.text.replace_range(start..self.at, &format!("@{path} "));
+        self.at = start + path.len() + '@'.len_utf8() + ' '.len_utf8();
+    }
 }
 
 /// A fact being typed on the Memory tab, and how far it will reach. Scope is
@@ -652,6 +691,12 @@ struct App {
     source: crate::source::Source,
     runtime: tokio::runtime::Runtime,
     chat: Chat,
+    /// Every file in the workspace, walked when a mention starts and kept until
+    /// it ends. Walking per keystroke would be twenty thousand files sixty
+    /// times a second to narrow a list already in hand; walking once per
+    /// mention also means a file written during the turn is picked up by the
+    /// next `@` rather than never.
+    files_here: Option<Vec<String>>,
     events: mpsc::UnboundedReceiver<TurnEvent>,
     to_loop: mpsc::UnboundedSender<TurnEvent>,
     approver: Arc<ChannelApprover>,
@@ -668,6 +713,10 @@ struct App {
     /// The model this window talks to, for the footer. Read once: a file read
     /// per sixty-millisecond tick is a file read per frame.
     model: String,
+    /// How many files a walk of the workspace may look at, from the same
+    /// setting that caps the search tool's looking. Read once, for the reason
+    /// above.
+    most_files: usize,
     sessions: Vec<SessionSummary>,
     session_state: ListState,
     transcript: Vec<TranscriptEntry>,
@@ -756,6 +805,8 @@ impl App {
         let mut app = Self {
             runtime,
             chat: Chat { history: remembered_prompts(), ..Chat::default() },
+            files_here: None,
+            most_files: config.sandbox.max_files_searched,
             events,
             to_loop,
             approver: Arc::new(ChannelApprover::new(requests, patience)),
@@ -1331,12 +1382,47 @@ impl App {
         }));
     }
 
+    /// The files the mention being typed names, best first — and nothing at
+    /// all when no mention is being typed.
+    ///
+    /// The walk happens on the first call of a mention and is kept until the
+    /// mention ends, because the fragment grows a character at a time and the
+    /// answer narrows from the same set each time.
+    fn mentioned(&mut self) -> Vec<String> {
+        let Some(fragment) = self.chat.input.mentioning().map(str::to_string) else {
+            self.files_here = None;
+            return Vec::new();
+        };
+        if self.files_here.is_none() {
+            let workspace = self.source.workspace().to_path_buf();
+            self.files_here = Some(rook_core::mention::here(&workspace, self.most_files));
+        }
+        let here = self.files_here.as_deref().unwrap_or_default();
+        rook_core::mention::matching(here, &fragment, 8)
+    }
+
     /// Finish the command being typed, as far as it is unambiguous.
     ///
     /// One match completes to the name and, where it takes arguments, a space
     /// to type them after. Several complete to what they share, which is how a
     /// person discovers `/se` is two commands rather than a typo.
     fn complete(&mut self) {
+        // A file being named takes the key first: `/` starts a line and `@` is
+        // in the middle of one, so only one of the two can be being typed.
+        let files = self.mentioned();
+        if let Some((first, rest)) = files.split_first() {
+            let common = rest.iter().fold(first.clone(), |common: String, path| {
+                common.chars().zip(path.chars()).take_while(|(a, b)| a == b).map(|(a, _)| a).collect()
+            });
+            // One match is finished, several complete to what they share —
+            // which is how a directory of near-identical names narrows without
+            // the list being read.
+            match files.len() {
+                1 => self.chat.input.mention(first),
+                _ => self.chat.input.narrow(&common),
+            }
+            return;
+        }
         let matches = crate::chat::commands_matching(self.chat.input.as_str());
         let Some((first, args, _)) = matches.first() else { return };
         let common = matches.iter().skip(1).fold(first.to_string(), |common, (name, ..)| {
@@ -1978,9 +2064,11 @@ impl App {
             true => crate::chat::commands_matching(self.chat.input.as_str()),
             false => Vec::new(),
         };
+        let mentioned = self.mentioned();
         let blocking = match (&self.chat.pending, &self.chat.asking) {
             (Some(request), _) => approval_height(request, area.width, area.height),
             (_, Some(asking)) => asking.panel().len() as u16 + 2,
+            _ if !mentioned.is_empty() => ((mentioned.len() + 2) as u16).min((area.height / 2).max(3)),
             _ if !completing.is_empty() => ((completing.len() + 2) as u16).min((area.height / 2).max(3)),
             _ => 0,
         };
@@ -2146,6 +2234,12 @@ impl App {
                 })
                 .collect();
             f.render_widget(Paragraph::new(lines).block(bordered(" commands · tab completes ")), ask);
+        } else if !mentioned.is_empty() {
+            let lines: Vec<Line> = mentioned
+                .iter()
+                .map(|path| Line::from(Span::styled(path.clone(), Style::default().fg(Color::Cyan))))
+                .collect();
+            f.render_widget(Paragraph::new(lines).block(bordered(" files · tab completes ")), ask);
         }
 
         let prompt = match (self.chat.busy && self.chat.asking.is_none(), self.chat.since) {
@@ -3234,6 +3328,68 @@ mod tests {
         assert_eq!(chat.log.len(), 1, "still one line: {:?}", chat.log);
         assert!(chat.log[0].1.ends_with('✓'), "{:?}", chat.log);
         assert_eq!(chat.running(), None, "and nothing is running");
+    }
+
+    /// Naming a file meant knowing its path and typing it, so the short way to
+    /// ask about one was to leave the window and come back with a paste.
+    #[test]
+    fn a_file_is_named_at_the_cursor_and_the_sentence_goes_on() {
+        let mut typing = Typing::default();
+        for c in "why does ".chars() {
+            typing.insert(c);
+        }
+        assert_eq!(typing.mentioning(), None, "an ordinary sentence names no file");
+
+        for c in "@serv".chars() {
+            typing.insert(c);
+        }
+        assert_eq!(typing.mentioning(), Some("serv"), "what follows the mark is the fragment");
+
+        typing.mention("src/service.rs");
+        assert_eq!(typing.as_str(), "why does @src/service.rs ", "the path lands where the mark was");
+        assert_eq!(typing.mentioning(), None, "and the mention is over, so the pane closes");
+
+        // Typing goes on after it, in the middle of the line.
+        for c in "fail?".chars() {
+            typing.insert(c);
+        }
+        assert_eq!(typing.as_str(), "why does @src/service.rs fail?");
+    }
+
+    /// An address is not a mention, and neither is a mention somebody has gone
+    /// back past: the pane offers what the cursor is in.
+    #[test]
+    fn a_mark_with_a_word_against_it_is_not_a_file() {
+        let mut typing = Typing::default();
+        for c in "mail vart@example.com".chars() {
+            typing.insert(c);
+        }
+        assert_eq!(typing.mentioning(), None, "an address is one word with a mark inside it");
+
+        let mut earlier = Typing::default();
+        for c in "read @a.rs and @b.rs".chars() {
+            earlier.insert(c);
+        }
+        assert_eq!(earlier.mentioning(), Some("b.rs"), "the one the cursor is in");
+        // Back to just after the first `a.rs`, which `"read @a.rs"` is the
+        // length of.
+        for _ in 0..("read @a.rs and @b.rs".len() - "read @a.rs".len()) {
+            earlier.left();
+        }
+        assert_eq!(earlier.mentioning(), Some("a.rs"), "and it follows the cursor back");
+    }
+
+    /// Several files share a prefix; completing to it is how a directory of
+    /// near-identical names narrows without the list being read.
+    #[test]
+    fn several_files_complete_as_far_as_they_agree() {
+        let mut typing = Typing::default();
+        for c in "read @ser".chars() {
+            typing.insert(c);
+        }
+        typing.narrow("service");
+        assert_eq!(typing.as_str(), "read @service", "grown, not finished");
+        assert_eq!(typing.mentioning(), Some("service"), "so more can be typed");
     }
 
     /// A feature reachable from one front end and not another is a defect here,

@@ -348,6 +348,31 @@ what unblocks the most.
   both. The TUI had learned this and the other two front ends had not, so which
   call a result belongs to is core's answer now, and where a terminal may put
   the mark is one place rather than two. 6 tests.
+- **A file is named by a few letters of it** — referring to a file meant
+  knowing where it was and spelling it out, so the shortest way to ask about
+  one was to leave the window, find the path and paste it back. `@serv` offers
+  the workspace files that match and Tab finishes the name, or grows it to what
+  several of them share.
+
+  Ranked by where the fragment matched, because that is what a person meant: a
+  *name* that starts with what was typed, then a name that contains it, then a
+  match somewhere up the directory path — and ties to the shorter path, since a
+  deeply nested near-duplicate is what pushes the wanted answer off a short
+  list. The walk is bounded by the same `max_files_searched` that caps the
+  search tool's looking rather than by a second setting meaning the same thing,
+  and it happens once when a mention starts: the cap is twenty thousand files
+  and the window redraws sixty times a second, so each keystroke narrows a set
+  already in hand. Walking per mention rather than once at startup also means a
+  file the turn just wrote is offered by the next `@`.
+
+  The cursor decides what is being named, not the line: `vart@example.com` is a
+  word with a mark inside it and not a mention, and going back to fix an
+  earlier `@a.rs` offers that one rather than the last one typed.
+
+  The ranking is in core, so the browser can offer the same list — it has no
+  completion of any kind yet, `/` included, which is why this is a property of
+  the one front end with a line editor rather than a capability the others are
+  missing. 5 tests, one of them in a real terminal.
 - **A key in a file the process cannot see** — provider keys come from the
   environment, so a shell that has them and a launcher that does not behaved
   differently for a reason nobody could see, and a `.env` written in the

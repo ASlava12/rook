@@ -28,6 +28,7 @@ pub mod instructions;
 pub mod lsp;
 pub mod mcp_server;
 pub mod memory;
+pub mod mention;
 pub mod paths;
 pub mod plugins;
 pub mod script;

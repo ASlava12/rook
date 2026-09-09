@@ -961,6 +961,27 @@ fn a_window_opens_knowing_what_was_typed_in_the_last_one() {
     assert!(older.contains("look at the parser"), "and the one before it:\n{older}");
 }
 
+/// Naming a file meant knowing where it was: the short way to ask about one
+/// was to leave the window, find the path, and paste it back.
+#[test]
+fn a_file_is_named_by_a_few_letters_of_it() {
+    let _one = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(workspace.path().join("src")).unwrap();
+    std::fs::write(workspace.path().join("src/service.rs"), "fn main() {}\n").unwrap();
+    let mut pty = tui(home.path(), workspace.path());
+    pty.screen(100, 30);
+
+    pty.send("why does @serv");
+    let offered = pty.screen_showing(100, 30, "src/service.rs").join("\n");
+    assert!(offered.contains("tab completes"), "the pane says what to press:\n{offered}");
+
+    pty.send("\t");
+    let taken = pty.screen_showing(100, 30, "@src/service.rs").join("\n");
+    assert!(taken.contains("why does @src/service.rs"), "and the path lands in the sentence:\n{taken}");
+}
+
 /// The box you type in was a `String` with `push` and `pop`: no cursor, no
 /// history, so a typo in the middle of a long prompt cost every character
 /// after it and running the last thing again meant retyping it.
