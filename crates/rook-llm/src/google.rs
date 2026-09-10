@@ -62,13 +62,7 @@ pub struct Google {
 
 impl Google {
     pub fn new(id: &str, model: &str, config: Config) -> Result<Self> {
-        crate::init_tls();
-        let http = reqwest::Client::builder()
-            .user_agent(concat!("rook/", env!("CARGO_PKG_VERSION")))
-            .timeout(Duration::from_secs(600))
-            .connect_timeout(Duration::from_secs(15))
-            .build()
-            .map_err(|e| LlmError::unreachable(&config.base_url, e))?;
+        let http = crate::client_for(&config.base_url)?;
         Ok(Self { id: id.to_string(), model: model.to_string(), config, http })
     }
 

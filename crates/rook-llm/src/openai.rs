@@ -44,15 +44,7 @@ pub struct OpenAiCompatible {
 
 impl OpenAiCompatible {
     pub fn new(id: &str, model: &str, config: Config) -> Result<Self> {
-        crate::init_tls();
-        let http = reqwest::Client::builder()
-            .user_agent(concat!("rook/", env!("CARGO_PKG_VERSION")))
-            // A long-running agent turn can legitimately take minutes on a local
-            // model; a short default timeout would look like a provider bug.
-            .timeout(std::time::Duration::from_secs(600))
-            .connect_timeout(std::time::Duration::from_secs(15))
-            .build()
-            .map_err(|e| LlmError::unreachable(&config.base_url, e))?;
+        let http = crate::client_for(&config.base_url)?;
         Ok(Self { id: id.to_string(), model: model.to_string(), config, http })
     }
 }

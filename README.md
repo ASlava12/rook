@@ -572,6 +572,15 @@ as a call when it names a tool that was offered, and as an answer when not. A
 refusal that names them says so, because the setting is the answer and nobody
 finds it by reading provider JSON.
 
+A local runtime does not have to be on this machine: `OLLAMA_HOST` and
+`LMSTUDIO_HOST` point those two somewhere else — `LMSTUDIO_HOST=http://192.168.1.46:1234`
+is a model on the desk next door — and `ROOK_LLM_BASE_URL` does the same for
+`openai-compatible`. An endpoint on your own network is reached directly whatever
+`http_proxy` says, because a proxy in the environment is a proxy to the internet:
+sent through a VPN, a request to the next desk comes back as whatever the tunnel
+makes of an address it cannot route to. A key is still refused over plain http to
+anything but this machine, own network or not.
+
 A request refused for something the agent added rather than you is asked again
 without it. Whether a model takes a reasoning effort is decided by its name, and
 a gateway serving something else under that name is where a name is wrong: the

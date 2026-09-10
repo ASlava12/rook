@@ -54,6 +54,7 @@ Add a row when you implement something after reading a reference. Add it to
 | A deny list anchored to command position | hermes *anchor the mkfs hardline pattern to command position* — the same half-anchoring, and the same reasoning: an unoverridable rule that fires on a mention takes a harmless command away for good | source, via `refs advance` | `config::COMMAND`, `deny_list.rs` |
 | Durable memory with provenance and history | hermes ([#12238](https://github.com/NousResearch/hermes-agent/issues/12238)); read `hermes/tools/memory_tool.py` and `goose/crates/goose-mcp/src/memory` | source | `rook-core/src/memory.rs`, `rook memory` |
 | Bounded logging and retention | codex SQLite growth ([#28224](https://github.com/openai/codex/issues/28224), [#17320](https://github.com/openai/codex/issues/17320)) | issues, not source | `RetentionPolicy`, `TelemetryConfig` |
+| Not sending a request to the next desk out through a VPN | openclaw fixed it three times, each time wider — `bypass the managed proxy for configured local embedding origins`, `bypass inherited proxy environment for local Gateway control-plane WebSockets to localhost as well as loopback IPs`, `force direct loopback agent paths … when proxy env vars are set` — ours honoured `http_proxy` for every address, so an `LMSTUDIO_HOST` on the LAN came back as an empty 502 after eighty seconds and was reported as unreachable | source, via `refs advance` | `rook-llm::beside_us`, `client_for` |
 
 ## Triage log
 

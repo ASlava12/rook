@@ -357,12 +357,7 @@ fn in_the_clear(base: &str, key: Option<&str>) -> Result<()> {
     if key.is_none() || !base.trim().to_ascii_lowercase().starts_with("http://") {
         return Ok(());
     }
-    let host = reqwest::Url::parse(base.trim())
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_string))
-        .unwrap_or_default();
-    // The brackets an IPv6 host is written in are not part of the address, and
-    // `[::1]` parses as nothing at all with them left on.
+    let host = host_of(base);
     let address = host.trim_matches(['[', ']']);
     let local = host == "localhost"
         || address.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
@@ -374,6 +369,72 @@ fn in_the_clear(base: &str, key: Option<&str>) -> Result<()> {
         "{base} is http and an API key is set, so the key would cross the network in clear text. \
          Use https, or unset the key if {host} does not need one."
     )))
+}
+
+/// The host an endpoint names. The brackets an IPv6 host is written in are not
+/// part of the address, and `[::1]` parses as nothing at all with them left on,
+/// so callers trim them.
+fn host_of(base: &str) -> String {
+    reqwest::Url::parse(base.trim())
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
+/// Whether an endpoint is on this machine or on this network.
+///
+/// A proxy in the environment is a proxy to the internet — a VPN client's, a
+/// company's — and a request to the next desk sent through one comes back as
+/// whatever the tunnel makes of an address it cannot route to. Here that was an
+/// empty 502 after eighty seconds from an `LMSTUDIO_HOST` two rooms away, which
+/// rook reported as `cannot reach … operation timed out`: an answer that sends
+/// you to look at the machine that was answering fine all along.
+///
+/// openclaw fixed this three times, each time wider — loopback, then localhost
+/// by name, then "configured local origins" — see
+/// [references/PORTED.md](../../../references/PORTED.md). A provider's base URL
+/// *is* the configured origin: it is the only address this client ever talks to,
+/// so there is no wider target to be careless about.
+///
+/// A different question from the one [`in_the_clear`] answers, and deliberately
+/// broader: a key must not cross even a LAN in clear text, but a request to a
+/// LAN has no business going through a proxy.
+fn beside_us(base: &str) -> bool {
+    let host = host_of(base);
+    // Both resolve on this machine or this network, or not at all.
+    if host == "localhost" || host.ends_with(".localhost") || host.ends_with(".local") {
+        return true;
+    }
+    match host.trim_matches(['[', ']']).parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+        // `is_unique_local` and `is_unicast_link_local` are still unstable, and
+        // the two prefixes they name are fixed: fc00::/7 and fe80::/10.
+        Ok(std::net::IpAddr::V6(ip)) => {
+            ip.is_loopback() || ip.segments()[0] & 0xfe00 == 0xfc00 || ip.segments()[0] & 0xffc0 == 0xfe80
+        }
+        // A name that is not an address is reached however the machine reaches
+        // names, proxy included.
+        Err(_) => false,
+    }
+}
+
+/// The HTTP client every provider in this crate talks through.
+///
+/// One function because all three have to answer the same two questions the
+/// same way, and three copies of a builder is three places for the answers to
+/// drift apart.
+fn client_for(base: &str) -> Result<reqwest::Client> {
+    init_tls();
+    let mut client = reqwest::Client::builder()
+        .user_agent(concat!("rook/", env!("CARGO_PKG_VERSION")))
+        // A long-running agent turn can legitimately take minutes on a local
+        // model; a short default timeout would look like a provider bug.
+        .timeout(std::time::Duration::from_secs(600))
+        .connect_timeout(std::time::Duration::from_secs(15));
+    if beside_us(base) {
+        client = client.no_proxy();
+    }
+    client.build().map_err(|e| LlmError::unreachable(base, e))
 }
 
 fn build(
@@ -499,6 +560,41 @@ mod tests {
         assert!(refused.contains("clear text"), "it says what would happen: {refused}");
         assert!(refused.contains("https"), "and what to do instead: {refused}");
         assert!(refused.contains("gateway.example"), "and to whom: {refused}");
+    }
+
+    /// The address that started this was `192.168.1.46` — a model two rooms
+    /// away, reached through a VPN's proxy and reported as unreachable.
+    #[test]
+    fn an_endpoint_on_this_network_is_told_from_one_on_the_internet() {
+        for local in [
+            "http://192.168.1.46:1234",
+            "http://10.0.0.5:11434/v1",
+            "http://172.16.3.9:8080",
+            "http://172.31.255.254:8080",
+            "http://127.0.0.1:11434/v1",
+            "http://localhost:1234/v1",
+            "http://desk.local:1234/v1",
+            "http://[::1]:8080/v1",
+            "http://[fd00::1]:8080/v1",
+            "http://[fe80::1]:8080/v1",
+            "http://169.254.7.7:80",
+        ] {
+            assert!(beside_us(local), "{local} is on this network");
+        }
+
+        for away in [
+            "https://api.anthropic.com",
+            "https://api.proxyapi.ru/v1",
+            // Adjacent to the private block on either side, and not in it.
+            "http://172.15.0.1:8080",
+            "http://172.32.0.1:8080",
+            "http://8.8.8.8",
+            // A name is reached however the machine reaches names.
+            "http://gateway.example/v1",
+            "",
+        ] {
+            assert!(!beside_us(away), "{away} is not");
+        }
     }
 
     fn headers(pairs: &[(&str, &str)]) -> reqwest::header::HeaderMap {
