@@ -307,6 +307,49 @@ impl Typing {
         self.at = 0;
     }
 
+    /// The start of the row the cursor is in, and the end of it.
+    fn row_start(&self, at: usize) -> usize {
+        self.text[..at].rfind('\n').map_or(0, |nl| nl + 1)
+    }
+
+    fn row_end(&self, at: usize) -> usize {
+        self.text[at..].find('\n').map_or(self.text.len(), |nl| at + nl)
+    }
+
+    /// Up a row, keeping the column where the row above is long enough.
+    ///
+    /// False when there is no row above, which is when the key means the
+    /// previous prompt instead — the box holds several rows now, and Up walking
+    /// straight into the history took a half-written message with it.
+    fn up(&mut self) -> bool {
+        let start = self.row_start(self.at);
+        if start == 0 {
+            return false;
+        }
+        let column = self.text[start..self.at].chars().count();
+        // `start - 1` is the newline that ends the row above.
+        self.at = self.along(self.row_start(start - 1), start - 1, column);
+        true
+    }
+
+    /// Down a row. False when there is none, where the key means the next
+    /// prompt.
+    fn down(&mut self) -> bool {
+        let end = self.row_end(self.at);
+        if end == self.text.len() {
+            return false;
+        }
+        let column = self.text[self.row_start(self.at)..self.at].chars().count();
+        self.at = self.along(end + 1, self.row_end(end + 1), column);
+        true
+    }
+
+    /// `column` characters along the row from `from`, or its end — a short row
+    /// takes the cursor to where it ends rather than past it.
+    fn along(&self, from: usize, to: usize, column: usize) -> usize {
+        self.text[from..to].char_indices().nth(column).map_or(to, |(at, _)| from + at)
+    }
+
     fn end(&mut self) {
         self.at = self.text.len();
     }
@@ -451,6 +494,13 @@ struct Chat {
     /// typed, and a session's transcript is the record.
     history: Vec<String>,
     recalled: Option<usize>,
+    /// What was being typed when the walk through history started, put back
+    /// when the walk comes past the newest entry again.
+    ///
+    /// It was cleared instead, so pressing Up on a half-written message and
+    /// Down to come back left an empty box: the walk destroyed the thing it was
+    /// offering an alternative to.
+    draft: String,
     log: Vec<(&'static str, String)>,
     /// Calls announced and not yet finished. A message announces several
     /// before any of them runs, so this is what pairs a finish with its line —
@@ -1473,8 +1523,18 @@ impl App {
             KeyCode::End if self.chat.input.is_empty() => self.chat.scroll = 0,
             KeyCode::End => self.chat.input.end(),
             KeyCode::Delete => self.chat.input.delete(),
-            KeyCode::Up => self.recall(-1),
-            KeyCode::Down => self.recall(1),
+            // Within the message first: the box holds several rows, and a key
+            // that leaves it takes what is written with it.
+            KeyCode::Up => {
+                if !self.chat.input.up() {
+                    self.recall(-1);
+                }
+            }
+            KeyCode::Down => {
+                if !self.chat.input.down() {
+                    self.recall(1);
+                }
+            }
             // A newline by hand, since Enter sends. Shift+Enter is what a hand
             // reaches for and almost no terminal tells it from Enter; Alt is
             // the modifier that actually arrives.
@@ -1496,6 +1556,11 @@ impl App {
         if self.chat.history.is_empty() {
             return;
         }
+        // Kept before the first step of the walk, which is the only step that
+        // has it to lose.
+        if self.chat.recalled.is_none() {
+            self.chat.draft = self.chat.input.as_str().to_string();
+        }
         let last = self.chat.history.len() - 1;
         self.chat.recalled = match (self.chat.recalled, by) {
             (None, -1) => Some(last),
@@ -1507,7 +1572,10 @@ impl App {
         };
         match self.chat.recalled {
             Some(at) => self.chat.input.set(&self.chat.history[at].clone()),
-            None => self.chat.input.clear(),
+            None => {
+                let draft = std::mem::take(&mut self.chat.draft);
+                self.chat.input.set(&draft);
+            }
         }
     }
 
@@ -1789,6 +1857,7 @@ impl App {
             remember_prompt(&prompt);
         }
         self.chat.recalled = None;
+        self.chat.draft.clear();
         // Typed while a turn runs, it goes to the turn. It used to be dropped
         // where it was taken, so watching one go the wrong way left nothing to
         // do but stop it and start again.
@@ -3632,6 +3701,39 @@ mod tests {
         assert_eq!(chat.log.len(), 1, "still one line: {:?}", chat.log);
         assert!(chat.log[0].1.ends_with('✓'), "{:?}", chat.log);
         assert_eq!(chat.running(), None, "and nothing is running");
+    }
+
+    /// Up walked straight into the history and set the box to the last prompt,
+    /// so a half-written message of several rows was gone at the first press of
+    /// a key that, in every editor, moves within it.
+    #[test]
+    fn up_walks_the_rows_before_it_walks_the_history() {
+        let mut typing = Typing::default();
+        typing.paste("first\nsecond\nthird");
+
+        assert!(typing.up(), "from the last row there is one above");
+        assert_eq!(typing.caret(), (1, 5), "and the column is kept where the row is long enough");
+        assert!(typing.up());
+        assert_eq!(typing.caret(), (0, 5));
+        assert!(!typing.up(), "at the top the box has nothing more to offer");
+
+        assert!(typing.down());
+        assert_eq!(typing.caret(), (1, 5));
+        typing.end();
+        assert!(!typing.down(), "and at the end of the last row, nothing below");
+
+        // A short row takes the cursor to where it ends rather than past it.
+        let mut ragged = Typing::default();
+        ragged.paste("a very long first row\nshort");
+        ragged.end();
+        assert!(ragged.up());
+        assert_eq!(ragged.caret(), (0, 5), "five characters along, which is where `short` reached");
+
+        // One row is where it always was: nothing above, so the key is history.
+        let mut one = Typing::default();
+        one.set("just this");
+        assert!(!one.up());
+        assert!(!one.down());
     }
 
     /// A pasted paragraph was sent one line at a time: the terminal delivers a

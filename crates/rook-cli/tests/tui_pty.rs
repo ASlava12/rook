@@ -961,6 +961,40 @@ fn a_window_opens_knowing_what_was_typed_in_the_last_one() {
     assert!(older.contains("look at the parser"), "and the one before it:\n{older}");
 }
 
+/// Up set the box to the last prompt, so a half-written message went at the
+/// first press of the key that everywhere else moves within one — and coming
+/// back down cleared the box rather than giving it back.
+#[test]
+fn what_was_being_typed_survives_a_walk_through_the_history() {
+    let _one = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let mut pty = tui(home.path(), workspace.path());
+    pty.screen(100, 30);
+
+    // Something to walk back to.
+    pty.send("/nosuch remembered\r");
+    pty.screen_showing(100, 30, "▌ /nosuch remembered");
+
+    // A message of two rows, half written.
+    pty.send("\u{1b}[200~alpha line\r\nbeta line\u{1b}[201~");
+    pty.screen_showing(100, 30, "beta line");
+
+    // Up moves within it rather than leaving it.
+    pty.send("\u{1b}[A");
+    let inside = pty.screen_showing(100, 30, "alpha line").join("\n");
+    assert!(inside.contains("beta line"), "both rows are still there:\n{inside}");
+
+    // Up from the top row is the history, and Down comes back to what was
+    // being written rather than to an empty box.
+    pty.send("\u{1b}[A");
+    let walked = pty.screen_showing(100, 30, "› /nosuch remembered").join("\n");
+    assert!(!walked.contains("› alpha line"), "the history is what is offered now:\n{walked}");
+    pty.send("\u{1b}[B");
+    let back = pty.screen_showing(100, 30, "› alpha line").join("\n");
+    assert!(back.contains("beta line"), "and it comes back whole:\n{back}");
+}
+
 /// Pasting a paragraph sent it one line at a time — the first line as a
 /// prompt, the rest chasing it as prompts of their own — because a terminal
 /// delivers a pasted newline as the Enter key. Bracketed paste tells the two
