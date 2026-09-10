@@ -961,6 +961,62 @@ fn a_window_opens_knowing_what_was_typed_in_the_last_one() {
     assert!(older.contains("look at the parser"), "and the one before it:\n{older}");
 }
 
+/// A conversation shows a call as one line, which is right while a turn runs
+/// and not enough afterwards: "it edited `service.toml`" does not say what it
+/// wrote there. Reaching the bytes meant the sessions pane, a session to select
+/// and a transcript to scroll.
+#[test]
+fn what_a_call_was_given_and_what_came_back_is_one_key_away() {
+    let _one = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+
+    // Seeded and closed: redb takes one writer and the window opens the same
+    // store as it starts.
+    {
+        // Built from parts rather than opened: `Rook::open` reads `ROOK_HOME`
+        // from this process, and the store the window will use is under the
+        // home the pty is given.
+        let store = rook_store::Store::open(home.path().join("store")).unwrap();
+        let (skills, _) = rook_skills::SkillIndex::discover(&[]);
+        let rook = rook_core::Rook::from_parts(
+            store,
+            rook_core::Config::default(),
+            rook_skills::Environment::bare("linux", "x86_64", "0.1.0"),
+            skills,
+            workspace.path().to_path_buf(),
+        );
+        let session = rook.start_session("calls").unwrap();
+        rook.log(session, rook_store::EventKind::UserMessage, "prompt", "what is in it?").unwrap();
+        rook.log(
+            session,
+            rook_store::EventKind::ToolCall,
+            "read_file",
+            &serde_json::json!({ "path": "service.toml" }).to_string(),
+        )
+        .unwrap();
+        rook.log(session, rook_store::EventKind::ToolResult, "read_file", "port = 8080\n").unwrap();
+    }
+
+    let mut pty = tui(home.path(), workspace.path());
+    pty.screen(100, 30);
+
+    // A window opens on a new conversation, so the one that made the call is
+    // taken up first — which is what a person asking "what did it do" has just
+    // done anyway.
+    pty.send("\u{10}");
+    pty.screen_showing(100, 30, "what would you like to do");
+    pty.send("sessions\r");
+    pty.screen_showing(100, 30, "j/k");
+    pty.send("\r");
+    pty.screen_showing(100, 30, "read service.toml");
+
+    pty.send("\u{f}"); // ctrl-o
+    let opened = pty.screen_showing(100, 30, "what it was given").join("\n");
+    assert!(opened.contains("service.toml"), "the call is named:\n{opened}");
+    assert!(opened.contains("port = 8080"), "and what came back is there:\n{opened}");
+}
+
 /// Naming a file meant knowing where it was: the short way to ask about one
 /// was to leave the window, find the path, and paste it back.
 #[test]

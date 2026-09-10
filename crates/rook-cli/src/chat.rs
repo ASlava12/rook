@@ -232,6 +232,8 @@ async fn turn(
 
     let mut out = std::io::stdout();
     let mut calls = crate::fmt::Calls::default();
+    // Before the loop borrows the agent, for the phrase a call is named by.
+    let here = rook.workspace.clone();
     let running = agent.run_with(prompt, |progress| match progress {
         Progress::Delta(Delta::Text(text)) => {
             print!("{text}");
@@ -239,7 +241,7 @@ async fn turn(
             let _ = out.flush();
         }
         Progress::Delta(Delta::ToolCall(call)) => {
-            let said = rook_core::calls::doing(&call.name, Some(&call.arguments));
+            let said = rook_core::calls::doing(&call.name, Some(&call.arguments), &here);
             print!("{}", calls.started(&call.name, &said));
             let _ = out.flush();
         }

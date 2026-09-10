@@ -1027,6 +1027,8 @@ fn cmd_run(
         // Under `--json` the turn's one output is the object at the end, so the
         // stream that a person would watch would only corrupt it.
         let mut calls = crate::fmt::Calls::default();
+        // Before the loop borrows the agent, for the phrase a call is named by.
+        let here = rook.workspace.clone();
         let outcome = agent
             .run_with(&prompt, |progress| match progress {
                 _ if json => {}
@@ -1036,7 +1038,7 @@ fn cmd_run(
                     let _ = out.flush();
                 }
                 Progress::Delta(rook_llm::Delta::ToolCall(call)) => {
-                    let said = rook_core::calls::doing(&call.name, Some(&call.arguments));
+                    let said = rook_core::calls::doing(&call.name, Some(&call.arguments), &here);
                     let _ = write!(out, "{}", calls.started(&call.name, &said));
                     let _ = out.flush();
                 }

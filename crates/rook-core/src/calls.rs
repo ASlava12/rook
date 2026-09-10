@@ -12,14 +12,29 @@
 //! its own — `delegate`, `load_skill` and `docs` among them — so `rook-tools`
 //! is the wrong layer to hold the whole list.
 
+use std::path::Path;
+
 use serde_json::Value;
 
 /// The phrase for one call: the verb a person would use and the argument they
 /// are checking. Unknown tools — an MCP server's, a plugin's — keep their name,
 /// which is all anything knows about them.
 ///
+/// Paths are said the way somebody standing in that workspace would say them:
+/// `read service.toml`, not `read /private/tmp/rook-live/service.toml`. A model
+/// usually passes the absolute path, and the prefix is the one part of the line
+/// nobody reads — it is identical on every line of every turn. A path *outside*
+/// the workspace keeps all of it, because there the prefix is the news.
+///
 /// Not shortened here: how much room there is belongs to whoever is drawing.
-pub fn doing(name: &str, arguments: Option<&Value>) -> String {
+pub fn doing(name: &str, arguments: Option<&Value>, workspace: &Path) -> String {
+    let nearer = |path: String| match Path::new(&path).strip_prefix(workspace) {
+        // The workspace itself, which `list_dir` is usually handed: `.` is what
+        // a person calls where they are standing.
+        Ok(rest) if rest.as_os_str().is_empty() => ".".to_string(),
+        Ok(rest) => rest.display().to_string(),
+        Err(_) => path,
+    };
     let field =
         |key: &str| arguments.and_then(|a| a.get(key)).and_then(|v| v.as_str()).map(|v| v.trim().to_string());
     // `edit_file` takes its work as a list so a refactor across several files
@@ -36,12 +51,12 @@ pub fn doing(name: &str, arguments: Option<&Value>) -> String {
         })
     };
     match name {
-        "read_file" => first_path().map(|p| format!("read {p}")),
-        "write_file" => first_path().map(|p| format!("write {p}")),
-        "edit_file" => first_path().map(|p| format!("edit {p}")),
-        "delete_file" => first_path().map(|p| format!("delete {p}")),
-        "move_file" => field("from").map(|from| format!("move {from}")),
-        "list_dir" => first_path().map(|p| format!("list {p}")),
+        "read_file" => first_path().map(nearer).map(|p| format!("read {p}")),
+        "write_file" => first_path().map(nearer).map(|p| format!("write {p}")),
+        "edit_file" => first_path().map(nearer).map(|p| format!("edit {p}")),
+        "delete_file" => first_path().map(nearer).map(|p| format!("delete {p}")),
+        "move_file" => field("from").map(nearer).map(|from| format!("move {from}")),
+        "list_dir" => first_path().map(nearer).map(|p| format!("list {p}")),
         "run_command" => field("command").map(|c| format!("run {c}")),
         "search" => field("pattern").map(|p| format!("search {p}")),
         "web_fetch" => field("url").map(|u| format!("fetch {u}")),
@@ -119,17 +134,61 @@ mod tests {
             ("move_file", json!({"from": "a.rs", "to": "b.rs"}), "move a.rs"),
         ];
         for (name, arguments, want) in cases {
-            assert_eq!(doing(name, Some(&arguments)), want, "{name} says what it is doing");
+            assert_eq!(
+                doing(name, Some(&arguments), Path::new("/nowhere")),
+                want,
+                "{name} says what it is doing"
+            );
         }
+    }
+
+    /// A model passes the absolute path, and the workspace prefix is the one
+    /// part of the line nobody reads: identical on every line of every turn,
+    /// and long enough to push the file name towards the cut.
+    #[test]
+    fn a_path_is_said_the_way_somebody_in_the_workspace_would_say_it() {
+        let here = Path::new("/tmp/project");
+        let at = |path: &str| json!({ "path": path });
+
+        assert_eq!(doing("read_file", Some(&at("/tmp/project/service.toml")), here), "read service.toml");
+        assert_eq!(
+            doing("read_file", Some(&at("/tmp/project/src/main.rs")), here),
+            "read src/main.rs",
+            "and the part inside it is kept whole"
+        );
+        assert_eq!(
+            doing("list_dir", Some(&at("/tmp/project")), here),
+            "list .",
+            "the workspace itself is where you are standing"
+        );
+        assert_eq!(
+            doing("read_file", Some(&at("service.toml")), here),
+            "read service.toml",
+            "a relative path was already said that way"
+        );
+        // Outside it the prefix is the news, not the noise — this is the one
+        // case where the whole path is what a person needs to see.
+        assert_eq!(
+            doing("read_file", Some(&at("/etc/hosts")), here),
+            "read /etc/hosts",
+            "and a near-miss is not trimmed either"
+        );
+        assert_eq!(
+            doing("read_file", Some(&at("/tmp/project-two/a.rs")), here),
+            "read /tmp/project-two/a.rs"
+        );
     }
 
     #[test]
     fn a_tool_nothing_here_knows_keeps_its_name() {
         // An MCP server's tool, and a call whose argument is not there at all:
         // both are the name, which is what a caller can still read.
-        assert_eq!(doing("github__create_issue", Some(&json!({"title": "x"}))), "github__create_issue");
-        assert_eq!(doing("read_file", None), "read_file");
-        assert_eq!(doing("read_file", Some(&json!({"paths": ["a"]}))), "read_file");
+        assert_eq!(
+            doing("github__create_issue", Some(&json!({"title": "x"})), Path::new("/nowhere")),
+            "github__create_issue"
+        );
+        assert_eq!(doing("read_file", None, Path::new("/nowhere")), "read_file");
+        assert_eq!(doing("read_file", Some(&json!({"paths": ["a"]})), Path::new("/nowhere")), "read_file");
     }
 
     #[test]

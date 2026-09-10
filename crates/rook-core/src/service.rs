@@ -909,6 +909,7 @@ impl Rook {
                     EventKind::ToolCall => crate::calls::doing(
                         &e.record.label,
                         serde_json::from_str::<serde_json::Value>(&body).ok().as_ref(),
+                        &self.workspace,
                     ),
                     _ => String::new(),
                 },

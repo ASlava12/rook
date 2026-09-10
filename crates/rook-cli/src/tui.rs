@@ -43,6 +43,9 @@ enum Overlay {
     /// Everything reachable, filtered as it is typed. `^P`, the key every
     /// editor has made mean this.
     Palette,
+    /// Every call this conversation made, with what it was given and what came
+    /// back. `^o`, from the conversation, for the call you are looking at.
+    Calls,
     Sessions,
     Memory,
     Skills,
@@ -54,7 +57,8 @@ enum Overlay {
 
 impl Overlay {
     /// The panes the palette offers, in the order somebody reaches for them.
-    const PANES: [Overlay; 7] = [
+    const PANES: [Overlay; 8] = [
+        Overlay::Calls,
         Overlay::Sessions,
         Overlay::Docs,
         Overlay::Memory,
@@ -67,6 +71,7 @@ impl Overlay {
     fn name(self) -> &'static str {
         match self {
             Overlay::Palette => "commands",
+            Overlay::Calls => "calls",
             Overlay::Sessions => "sessions",
             Overlay::Memory => "memory",
             Overlay::Skills => "skills",
@@ -81,6 +86,7 @@ impl Overlay {
     fn what(self) -> &'static str {
         match self {
             Overlay::Palette => "everything reachable from here",
+            Overlay::Calls => "what each call was given and what came back",
             Overlay::Sessions => "past conversations — enter continues one here",
             Overlay::Memory => "what the agent believes, and how to correct it",
             Overlay::Skills => "what applies in this workspace, and why",
@@ -97,6 +103,7 @@ impl Overlay {
     fn keys(self) -> &'static [(&'static str, &'static str)] {
         match self {
             Overlay::Palette => &[("↑↓ ", "choose  "), ("⏎ ", "open  "), ("esc ", "close  ")],
+            Overlay::Calls => &[("j/k ", "move  "), ("r ", "reload  "), ("esc ", "close  ")],
             Overlay::Sessions => &[("j/k ", "move  "), ("⏎ ", "continue  "), ("r ", "reload  ")],
             Overlay::Memory => &[
                 ("j/k ", "move  "),
@@ -112,6 +119,61 @@ impl Overlay {
             Overlay::Help => &[("esc ", "close  ")],
         }
     }
+}
+
+/// One call, as the pane that answers "what did that actually do" reads it.
+///
+/// The mark is not stored anywhere — `ToolDone`'s `failed` is a stream event and
+/// the log keeps the result, not a verdict about it — so the pane shows what
+/// came back and lets it speak, rather than inventing a tick from the text.
+struct Call {
+    seq: u64,
+    doing: String,
+    name: String,
+    given: String,
+    came_back: Option<String>,
+    elided: bool,
+}
+
+/// A session's calls, newest first, each with the result that answers it.
+///
+/// Paired by order within a tool name, which is the rule every front end uses:
+/// a result carries only the name, and a turn that reads two files at once logs
+/// two `read_file` results told apart by nothing else. Pairing them the other
+/// way would show a call returning another call's bytes, which is worse than
+/// showing nothing.
+fn paired(entries: Vec<TranscriptEntry>) -> Vec<Call> {
+    let mut calls: Vec<Call> = Vec::new();
+    let mut waiting: Vec<usize> = Vec::new();
+    for entry in entries {
+        match entry.kind.as_str() {
+            "tool-call" => {
+                waiting.push(calls.len());
+                calls.push(Call {
+                    seq: entry.seq,
+                    doing: match entry.doing.is_empty() {
+                        true => entry.label.clone(),
+                        false => entry.doing,
+                    },
+                    name: entry.label,
+                    given: entry.body,
+                    came_back: None,
+                    elided: entry.truncated,
+                });
+            }
+            "tool-result" => {
+                let waited = waiting.iter().position(|at| calls[*at].name == entry.label);
+                if let Some(at) = waited.map(|at| waiting.remove(at)) {
+                    calls[at].came_back = Some(entry.body);
+                    calls[at].elided |= entry.truncated;
+                }
+            }
+            _ => {}
+        }
+    }
+    // Newest first: the question is almost always about what just happened.
+    calls.reverse();
+    calls
 }
 
 /// How often the loop wakes to drain turn events when no key is pressed.
@@ -719,6 +781,12 @@ struct App {
     most_files: usize,
     sessions: Vec<SessionSummary>,
     session_state: ListState,
+    /// Every call this conversation made, newest first, with what it was given
+    /// and what came back. Read from the session's own log rather than kept as
+    /// the turn runs: a window that attached to a daemon mid-turn saw none of
+    /// the earlier ones, and the log has them all.
+    calls: Vec<Call>,
+    call_state: ListState,
     transcript: Vec<TranscriptEntry>,
     /// What the selected session was for and what it did, which is usually why
     /// its transcript is being read at all.
@@ -830,6 +898,8 @@ impl App {
             model: rook_core::Config::load().map(|c| c.agent.model).unwrap_or_default(),
             sessions: Vec::new(),
             session_state: ListState::default(),
+            calls: Vec::new(),
+            call_state: ListState::default(),
             transcript: Vec::new(),
             selected: None,
             transcript_scroll: 0,
@@ -876,6 +946,7 @@ impl App {
         self.checkpoint_state.select(
             (!self.checkpoints.is_empty()).then(|| self.checkpoint_state.selected().unwrap_or(0).min(last)),
         );
+        self.load_calls();
         self.docs = self.source.docs_kept().unwrap_or_default();
         let last = self.docs.len().saturating_sub(1);
         self.docs_state
@@ -918,6 +989,27 @@ impl App {
 
     fn selected_skill(&self) -> Option<String> {
         self.skill_state.selected().and_then(|at| self.skills.get(at)).map(|card| card.name.clone())
+    }
+
+    /// The calls this conversation made, newest first, paired with their
+    /// results.
+    ///
+    /// Paired by order within a tool name, which is the same rule every front
+    /// end uses: a result carries only the name, and a turn that reads two files
+    /// at once produces two `read_file` results that are told apart by nothing
+    /// else. Read from the log rather than accumulated as the turn streams,
+    /// because a window that attached to a daemon mid-turn never saw the
+    /// earlier calls and the log has them all.
+    fn load_calls(&mut self) {
+        self.calls.clear();
+        self.call_state.select(None);
+        let Some(session) = self.chat.session else { return };
+        // Enough of a result to answer the question, not the whole object: a
+        // command's output can be megabytes, and `store cat` is what reads one
+        // of those whole.
+        let entries = self.source.transcript(session, 0, 2_000, 8_000).unwrap_or_default();
+        self.calls = paired(entries);
+        self.call_state.select((!self.calls.is_empty()).then_some(0));
     }
 
     fn load_transcript(&mut self) {
@@ -1246,6 +1338,15 @@ impl App {
                 KeyCode::Char('w') => return self.chat.input.kill_word(),
                 KeyCode::Char('u') => return self.chat.input.kill_to_start(),
                 KeyCode::Char('k') => return self.chat.input.kill_to_end(),
+                // Not a line-editing key, but it belongs to this branch: the
+                // conversation says a call happened and this is the one gesture
+                // that says what it did. `o` for what came out of it.
+                KeyCode::Char('o') => {
+                    self.load_calls();
+                    self.transcript_scroll = 0;
+                    self.overlay = Some(Overlay::Calls);
+                    return;
+                }
                 _ => {}
             }
         }
@@ -1693,6 +1794,9 @@ impl App {
             rook_core::agent::equip(&mut agent, servers, &mcp, jobs);
 
             let emit = to_loop.clone();
+            // Before the loop borrows the agent: a call names its paths the way
+            // somebody standing in this project would.
+            let here = rook.workspace.clone();
             let result = agent
                 .run_with(&prompt, |progress| {
                     let event = match progress {
@@ -1700,7 +1804,7 @@ impl App {
                         Progress::Delta(Delta::Reasoning(text)) => TurnEvent::Reasoning(text.clone()),
                         Progress::Delta(Delta::ToolCall(call)) => TurnEvent::Tool {
                             name: call.name.clone(),
-                            said: tool_line(&call.name, Some(&call.arguments)),
+                            said: tool_line(&call.name, Some(&call.arguments), &here),
                         },
                         Progress::Delegated { task, done, total } => {
                             TurnEvent::Agent(format!("  [{done}/{total}] {task}"))
@@ -1892,6 +1996,7 @@ impl App {
 
     fn move_selection(&mut self, delta: isize) {
         let (state, len) = match self.overlay {
+            Some(Overlay::Calls) => (&mut self.call_state, self.calls.len()),
             Some(Overlay::Sessions) => (&mut self.session_state, self.sessions.len()),
             Some(Overlay::Memory) => (&mut self.fact_state, self.facts.len()),
             Some(Overlay::Checkpoints) => (&mut self.checkpoint_state, self.checkpoints.len()),
@@ -1911,6 +2016,8 @@ impl App {
         // What the selection is worth reading alongside, loaded with it: a
         // transcript, a skill's versions, a set's pages.
         match self.overlay {
+            // A different call, read from the top of its own detail.
+            Some(Overlay::Calls) => self.transcript_scroll = 0,
             Some(Overlay::Sessions) => self.load_transcript(),
             Some(Overlay::Skills) => self.load_versions(),
             Some(Overlay::Docs) => self.load_doc_set(),
@@ -1937,6 +2044,7 @@ impl App {
             f.render_widget(Clear, area);
             match overlay {
                 Overlay::Palette => self.draw_palette(f, area),
+                Overlay::Calls => self.draw_calls(f, area),
                 Overlay::Sessions => self.draw_sessions(f, area),
                 Overlay::Memory => self.draw_memory(f, area),
                 Overlay::Skills => self.draw_skills(f, area),
@@ -1949,7 +2057,7 @@ impl App {
 
         let keys: &[(&str, &str)] = match self.overlay {
             Some(overlay) => overlay.keys(),
-            None => &[("^p ", "commands  "), ("⏎ ", "send  "), ("^c ", "stop  ")],
+            None => &[("^p ", "commands  "), ("^o ", "calls  "), ("⏎ ", "send  "), ("^c ", "stop  ")],
         };
         let mut spans: Vec<Span> = vec![Span::raw(" ")];
         for (key, what) in keys {
@@ -2384,6 +2492,86 @@ impl App {
                 .wrap(Wrap { trim: false })
                 .scroll((self.transcript_scroll, 0)),
             right,
+        );
+    }
+
+    /// What each call was given and what came back.
+    ///
+    /// A conversation shows a call as one line, which is the right amount while
+    /// a turn is running and not enough afterwards: "it edited `service.toml`"
+    /// does not say what it wrote there. The log has both halves and this is
+    /// where they are read — one gesture from the conversation rather than the
+    /// four it took to reach the same bytes through the sessions pane.
+    fn draw_calls(&mut self, f: &mut Frame, area: Rect) {
+        let [list, detail] =
+            Layout::horizontal([Constraint::Percentage(38), Constraint::Percentage(62)]).areas(area);
+
+        let rows: Vec<ListItem> = self
+            .calls
+            .iter()
+            .map(|call| {
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!("#{:<4} ", call.seq), Style::default().fg(Color::DarkGray)),
+                    Span::styled(call.doing.clone(), Style::default().fg(Color::Magenta)),
+                ]))
+            })
+            .collect();
+        let title = format!(" calls ({}) ", self.calls.len());
+        f.render_stateful_widget(
+            List::new(rows).block(bordered(&title)).highlight_symbol("▌"),
+            list,
+            &mut self.call_state,
+        );
+
+        let mut lines: Vec<Line> = Vec::new();
+        match self.call_state.selected().and_then(|at| self.calls.get(at)) {
+            None => lines.push(Line::from(Span::styled(
+                match self.chat.session {
+                    None => "nothing has been asked in this conversation yet.",
+                    Some(_) => "no calls in this conversation — the model has answered from what it knew.",
+                },
+                Style::default().fg(Color::DarkGray),
+            ))),
+            Some(call) => {
+                lines.push(Line::from(Span::styled(
+                    call.name.clone(),
+                    Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                )));
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled("given", Style::default().fg(Color::DarkGray))));
+                for line in call.given.lines() {
+                    lines.push(Line::from(Span::raw(format!("  {line}"))));
+                }
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled("came back", Style::default().fg(Color::DarkGray))));
+                match &call.came_back {
+                    // A call with no result in the log is one still running, or
+                    // one the turn was interrupted in the middle of. Both are
+                    // worth saying rather than showing an empty half.
+                    None => lines.push(Line::from(Span::styled(
+                        "  nothing yet — it is still running, or the turn ended inside it",
+                        Style::default().fg(Color::Yellow),
+                    ))),
+                    Some(came_back) => {
+                        for line in came_back.lines() {
+                            lines.push(Line::from(Span::raw(format!("  {line}"))));
+                        }
+                    }
+                }
+                if call.elided {
+                    lines.push(Line::from(Span::styled(
+                        "  … elided; `rook store cat` for the whole object",
+                        Style::default().fg(Color::Yellow),
+                    )));
+                }
+            }
+        }
+        f.render_widget(
+            Paragraph::new(lines)
+                .block(bordered(" what it was given, what came back "))
+                .wrap(Wrap { trim: false })
+                .scroll((self.transcript_scroll, 0)),
+            detail,
         );
     }
 
@@ -2926,6 +3114,8 @@ impl App {
             Line::from(""),
             Line::from(Span::styled("keys", Style::default().add_modifier(Modifier::BOLD))),
             key("  ^p          everything reachable, filtered as you type"),
+            key("  ^o          what each call was given and what came back"),
+            key("  @           names a file in the workspace · tab completes it"),
             key("  Esc         closes what is open; in the chat, clears then quits"),
             key("  j k ↑ ↓     move · Space/PgDn scroll · r reload · wheel scrolls"),
             Line::from(""),
@@ -3043,10 +3233,10 @@ fn from_daemon(name: &str, doing: &str) -> String {
     }
 }
 
-fn tool_line(name: &str, args: Option<&serde_json::Value>) -> String {
+fn tool_line(name: &str, args: Option<&serde_json::Value>, workspace: &std::path::Path) -> String {
     // The phrase is core's, so the same call reads the same here, in the chat
     // REPL, in `rook run` and in the browser. How much room there is is ours.
-    rook_core::calls::within(&rook_core::calls::doing(name, args), 72)
+    rook_core::calls::within(&rook_core::calls::doing(name, args, workspace), 72)
 }
 
 /// A rectangle in the middle of another, by percentage.
@@ -3392,6 +3582,67 @@ mod tests {
         assert_eq!(typing.mentioning(), Some("service"), "so more can be typed");
     }
 
+    /// Two reads in one turn produce two `read_file` results that are told
+    /// apart by the order they were logged in and by nothing else — the same
+    /// rule the conversation marks its lines by. Paired the wrong way, the
+    /// pane says a call returned somebody else's bytes, which is worse than
+    /// saying nothing.
+    #[test]
+    fn a_result_is_paired_with_the_call_it_answers_and_not_the_first_of_its_name() {
+        let calls = paired(logged(&[
+            ("tool-call", "read_file", r#"{"path":"a.rs"}"#),
+            ("tool-call", "read_file", r#"{"path":"b.rs"}"#),
+            ("tool-call", "run_command", r#"{"command":"cargo test"}"#),
+            ("tool-result", "read_file", "contents of a"),
+            ("tool-result", "run_command", "ok"),
+            ("tool-result", "read_file", "contents of b"),
+        ]));
+
+        // Newest first, which is what the question is almost always about.
+        let answered: Vec<(&str, &str)> =
+            calls.iter().map(|c| (c.given.as_str(), c.came_back.as_deref().unwrap_or("nothing"))).collect();
+        assert_eq!(
+            answered,
+            vec![
+                (r#"{"command":"cargo test"}"#, "ok"),
+                (r#"{"path":"b.rs"}"#, "contents of b"),
+                (r#"{"path":"a.rs"}"#, "contents of a"),
+            ],
+            "each call keeps its own answer"
+        );
+    }
+
+    /// A turn stopped in the middle of a call leaves it with no result. Saying
+    /// so beats an empty half that reads as a call that returned nothing.
+    #[test]
+    fn a_call_the_turn_ended_inside_says_that_nothing_came_back() {
+        let calls = paired(logged(&[("tool-call", "run_command", r#"{"command":"sleep 90"}"#)]));
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].came_back, None, "and it is not invented");
+    }
+
+    /// Entries as the log hands them over, with the fields the pairing reads.
+    fn logged(events: &[(&str, &str, &str)]) -> Vec<TranscriptEntry> {
+        events
+            .iter()
+            .enumerate()
+            .map(|(seq, (kind, label, body))| TranscriptEntry {
+                seq: seq as u64,
+                ts: 0,
+                kind: (*kind).to_string(),
+                label: (*label).to_string(),
+                object: String::new(),
+                bytes: body.len() as u64,
+                stored_bytes: body.len() as u64,
+                tokens_in: 0,
+                tokens_out: 0,
+                truncated: false,
+                body: (*body).to_string(),
+                doing: String::new(),
+            })
+            .collect()
+    }
+
     /// A feature reachable from one front end and not another is a defect here,
     /// and this one was invisible: the window holding the store showed the
     /// work, the window over the socket showed the tool's name.
@@ -3399,9 +3650,10 @@ mod tests {
     fn a_window_over_the_socket_reads_a_call_the_same_as_one_holding_the_store() {
         // The same call, both ways in: the daemon sends the phrase, and the
         // window that holds the store works it out itself.
+        let here = std::path::Path::new("/nowhere");
         let arguments = serde_json::json!({ "path": "src/main.rs" });
-        let held = tool_line("read_file", Some(&arguments));
-        let over = from_daemon("read_file", &rook_core::calls::doing("read_file", Some(&arguments)));
+        let held = tool_line("read_file", Some(&arguments), here);
+        let over = from_daemon("read_file", &rook_core::calls::doing("read_file", Some(&arguments), here));
         assert_eq!(held, over, "one turn, one reading");
         assert_eq!(held, "read src/main.rs");
 
@@ -3436,23 +3688,26 @@ mod tests {
     /// ran and nothing about the work.
     #[test]
     fn a_call_says_what_it_is_doing_and_not_only_its_name() {
+        // Paths already relative to it, which is the ordinary case; the
+        // trimming of an absolute one is core's, and tested there.
+        let here = std::path::Path::new("/nowhere");
         let path = serde_json::json!({ "path": "src/main.rs" });
-        assert_eq!(tool_line("read_file", Some(&path)), "read src/main.rs");
-        assert_eq!(tool_line("edit_file", Some(&path)), "edit src/main.rs");
+        assert_eq!(tool_line("read_file", Some(&path), here), "read src/main.rs");
+        assert_eq!(tool_line("edit_file", Some(&path), here), "edit src/main.rs");
         let command = serde_json::json!({ "command": "cargo test -p rook-core" });
-        assert_eq!(tool_line("run_command", Some(&command)), "run cargo test -p rook-core");
+        assert_eq!(tool_line("run_command", Some(&command), here), "run cargo test -p rook-core");
         // A refactor names files rather than a path, and the first of them is
         // what identifies the call.
         let files = serde_json::json!({ "files": [{ "path": "a.rs" }, { "path": "b.rs" }] });
-        assert_eq!(tool_line("edit_file", Some(&files)), "edit a.rs");
+        assert_eq!(tool_line("edit_file", Some(&files), here), "edit a.rs");
         // A tool nothing here knows about keeps its own name, which is what
         // every tool had before.
-        assert_eq!(tool_line("some_mcp_tool", Some(&path)), "some_mcp_tool");
-        assert_eq!(tool_line("read_file", None), "read_file");
+        assert_eq!(tool_line("some_mcp_tool", Some(&path), here), "some_mcp_tool");
+        assert_eq!(tool_line("read_file", None, here), "read_file");
         // And a line stays a line: a command that fills the pane pushes the
         // answer off it.
         let long = serde_json::json!({ "command": "x".repeat(200) });
-        assert!(tool_line("run_command", Some(&long)).chars().count() <= 72);
+        assert!(tool_line("run_command", Some(&long), here).chars().count() <= 72);
     }
 
     /// A marker that stops after the first row marks a row, and what is being

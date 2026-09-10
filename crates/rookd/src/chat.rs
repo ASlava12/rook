@@ -247,6 +247,9 @@ async fn turn(
     rook_core::agent::equip(&mut agent, shared.servers.clone(), &shared.mcp, shared.jobs.clone());
 
     let emit = outbound.clone();
+    // Cloned out before the loop borrows the agent: a call's phrase names paths
+    // the way somebody standing in this project would.
+    let workspace = rook.workspace.clone();
     let result = agent
         .run_with(&prompt, |progress| {
             let event = match progress {
@@ -254,7 +257,7 @@ async fn turn(
                 Progress::Delta(Delta::Reasoning(text)) => ChatEvent::Reasoning { text: text.clone() },
                 Progress::Delta(Delta::ToolCall(call)) => ChatEvent::Tool {
                     name: call.name.clone(),
-                    doing: rook_core::calls::doing(&call.name, Some(&call.arguments)),
+                    doing: rook_core::calls::doing(&call.name, Some(&call.arguments), &workspace),
                 },
                 Progress::Delegated { task, done, total } => {
                     ChatEvent::Reasoning { text: format!("\n  [{done}/{total}] {task}") }

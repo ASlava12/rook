@@ -405,6 +405,29 @@ what unblocks the most.
   leaves "is this stuck" unanswered. The clock is where the queue already is, so
   all three front ends report it, and the two units a waiting person reads —
   `12s`, `4m10s` — are formatted in one place rather than in each. 3 tests.
+- **A path said the way somebody standing there would say it** — a model passes
+  the absolute path, so every call line carried the workspace prefix: `read
+  /private/tmp/rook-live/service.toml`, identical on every line of every turn and
+  long enough to push the file name towards the cut at 72 columns. Inside the
+  workspace it is relative now, the workspace itself is `.`, and a path *outside*
+  keeps all of it — there the prefix is the news rather than the noise. All four
+  front ends, because the phrase is one function. 1 test.
+- **What a call was given and what came back, one key from the conversation** —
+  a call is one line while a turn runs, which is right then and not enough
+  afterwards: "it edited `service.toml`" does not say what it wrote there. The
+  bytes were always in the log and took four gestures to reach — the palette,
+  the sessions pane, a session to select, a transcript to scroll. `^o` opens a
+  pane over the conversation with this session's calls newest first, and what
+  each was handed beside what it answered.
+
+  Read from the log rather than accumulated as the turn streams, so a window
+  that attached to a daemon mid-turn has the earlier calls too. Paired by order
+  within a tool name — the same rule the conversation marks its lines by, and
+  the reason it is a rule: a turn that reads two files logs two `read_file`
+  results told apart by nothing else, and pairing them the other way shows a
+  call returning another call's bytes, which is worse than showing nothing. A
+  call the turn ended inside says that nothing came back rather than leaving an
+  empty half. 3 tests, one of them in a real terminal.
 - **A key in a file the process cannot see** — provider keys come from the
   environment, so a shell that has them and a launcher that does not behaved
   differently for a reason nobody could see, and a `.env` written in the
