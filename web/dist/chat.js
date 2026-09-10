@@ -48,6 +48,13 @@ function done() {
   state.chat.busy = false;
   state.chat.waiting = false;
   current = null;
+  // Whatever the turn was waiting for goes with it. An `Allow once` button for
+  // a turn that has ended is a control that does nothing, and nothing about it
+  // says so — the terminal had the same fault, where it was worse, because an
+  // approval there holds the keyboard.
+  for (const open of document.querySelectorAll('.approve, .ask-form')) {
+    open.replaceWith(el('div', { class: 'stat' }, 'the turn ended, so what it was waiting for is gone'));
+  }
   setTitle();
   const send = $('#send'), stop = $('#stop');
   if (send) send.textContent = 'Send';

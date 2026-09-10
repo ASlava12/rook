@@ -680,6 +680,24 @@ impl Chat {
         }
     }
 
+    /// A turn is over, however it ended.
+    ///
+    /// The window stops waiting and forgets where to send answers, so a key
+    /// pressed afterwards is not sent into a turn that has ended. And whatever
+    /// the turn was waiting for goes with it, which is the part `^c` left
+    /// behind: an approval on screen takes the whole keyboard and answers
+    /// nobody, so the window reads as frozen, and a question on screen captures
+    /// Enter, so nothing can be sent. Said rather than done silently — a
+    /// question that vanishes unexplained is its own confusion.
+    fn ended(&mut self) {
+        self.busy = false;
+        self.remote = None;
+        let waiting = self.pending.take().is_some() || self.asking.take().is_some();
+        if waiting {
+            self.push("stat", "  the turn ended, so what it was waiting for is gone");
+        }
+    }
+
     /// The tool the turn is in the middle of, read from the log the person is
     /// looking at: a call is written when it starts and gains its mark when it
     /// ends, so the last line answers it without a second place to keep it.
@@ -1067,7 +1085,7 @@ impl App {
             rook.log(session, rook_store::EventKind::Note, "interrupted", "the user stopped this turn").ok();
         }
         self.chat.push("stat", "[stopped]");
-        self.chat.busy = false;
+        self.chat.ended();
         self.status = "turn stopped".into();
     }
 
@@ -1094,12 +1112,11 @@ impl App {
                 }
                 TurnEvent::Done(note) => {
                     self.chat.push("stat", &note);
-                    self.chat.busy = false;
-                    self.reload();
+                    self.finished();
                 }
                 TurnEvent::Error(message) => {
                     self.chat.push("err", &message);
-                    self.chat.busy = false;
+                    self.finished();
                 }
                 TurnEvent::FromDaemon(event) => self.heard_from_daemon(*event),
             }
@@ -1187,12 +1204,9 @@ impl App {
         }
     }
 
-    /// A remote turn is over: the window stops waiting and forgets where to
-    /// send answers, so a key pressed afterwards is not sent into a turn that
-    /// has ended.
+    /// A turn is over — answered, stopped or failed.
     fn finished(&mut self) {
-        self.chat.busy = false;
-        self.chat.remote = None;
+        self.chat.ended();
         self.reload();
     }
 
@@ -3659,6 +3673,40 @@ mod tests {
                 doing: String::new(),
             })
             .collect()
+    }
+
+    /// `^c` on a turn that was waiting for an answer left the question on
+    /// screen. An approval takes the whole keyboard until it is answered, so
+    /// the window read as frozen; a question captures Enter, so nothing could
+    /// be sent. Both belong to the turn that asked and end with it.
+    #[test]
+    fn a_turn_that_ends_takes_what_it_was_waiting_for_with_it() {
+        let mut chat = Chat {
+            busy: true,
+            pending: Some(rook_tools::policy::ApprovalRequest {
+                id: "1".into(),
+                tool: "run_command".into(),
+                action: "rm -rf build".into(),
+                preview: None,
+                kind: Vec::new(),
+            }),
+            ..Chat::default()
+        };
+
+        chat.ended();
+        assert!(!chat.busy, "the window stops waiting");
+        assert!(chat.pending.is_none(), "and the approval goes with the turn that asked");
+        assert!(
+            chat.log.iter().any(|(_, body)| body.contains("what it was waiting for is gone")),
+            "and it is said, because a question that vanishes is its own confusion: {:?}",
+            chat.log
+        );
+
+        // A turn nobody was asked about says nothing extra: a note on every
+        // ending is a note nobody reads.
+        let mut quiet = Chat { busy: true, ..Chat::default() };
+        quiet.ended();
+        assert!(quiet.log.is_empty(), "{:?}", quiet.log);
     }
 
     /// A feature reachable from one front end and not another is a defect here,

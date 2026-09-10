@@ -1731,3 +1731,56 @@ that is cached, what the block is and that nothing inside it is a request.
 The other three commits are the console's Go inference proxy, a GLM-5.3-Flash
 allowance in its docs, and a release version sync — infrastructure for a hosted
 product, with nothing behind them to read.
+
+## Twenty-seventh pass — acp, openhands, cline, goose, codex
+
+One hundred and ninety-one commits across five references, nothing ported, and
+one defect of ours found by reading them — which is the usual ratio and the
+reason the passes happen.
+
+**codex dd9512c00 → 434efa95e.** A hundred and eight. `Clear pending TUI
+questions when accepting a new prompt` is the one that pointed at us. Here it is
+not a new prompt that leaves a question behind, it is `^c`: `stop` aborted the
+turn and set `busy = false`, and both the approval and the `ask` question stayed
+on screen. An approval takes the whole keyboard until it is answered, so the
+window read as frozen; a question captures Enter, so nothing could be sent. They
+belong to the turn that asked and end with it now — in the browser too, where
+the fault was milder because a stale `Allow once` button does not hold the
+keyboard, only pretends to be live. Said rather than done silently: a question
+that vanishes unexplained is its own confusion.
+
+Three more confirmations. `Prevent command hooks from hanging on blocked stdin`
+is the deadlock `hooks` had here on a full pipe. `Isolate the hook pipe I/O
+timeout test from shell startup files` is the shape of the `ROOK_HOME` collision
+this morning — a test that reached outside itself and took another one down.
+`Block goals after three empty automatic continuation turns` counts to three
+where `STUCK_ON_ONE_CALL` does. The rest is Guardian orchestration, thread
+attachments, remote control ownership and a Windows sandbox this design does not
+have.
+
+**goose 13f4d26e1 → 7c6dddd03.** Twenty-nine, and two arrived the same week as
+our own versions of them. `report the real cause of external backend connection
+failures` is `advice` reading the cause instead of the address, fixed here
+hours earlier off the smoke job. `pair functionResponse names with the preceding
+request` is pairing a result to its call by order, which is what
+`calls::Running` does for every front end. `stop re-nudging on every tool call`
+asks the question we already answer — `asked_to_go_on` and `asked_to_say` are
+each asked once, and the goal check runs once for a turn that did something.
+`show output for failed tool calls` is what the new calls pane does regardless of
+the verdict. What is left unported is a real idea: an opt-in terminal bell when a
+turn finishes or an approval is waiting. Nothing here tells a person to come
+back, and watching `working…` is the alternative.
+
+**cline 8ff5f22cf → 1063db45d.** Twenty-eight, and the two with teeth were
+already answered here more thoroughly. `tell the model how to recover when
+editor old_text is null` is `edit_file`'s `{new}` with no `old`, which is named
+as the replace-the-file case rather than reported as a missing field, and an
+empty `old` is refused with what to do instead. `widen exit-grace shell test
+budget for slow Windows runners` is the drain grace raised from two seconds to
+five here this morning, for the same reason on the same kind of runner. The rest
+is a desktop application: title bars, provider pickers, subscription tiers.
+
+**openhands ea7a85c27 → bb4ec4420, acp 5ebaf0ace → 367c56fb6.** Twenty-one
+between them with nothing behind the list. openhands is Canvas extensions, a
+React Query refactor, SDK version bumps and requiring Node 24; acp is eight
+commits of registry documentation.

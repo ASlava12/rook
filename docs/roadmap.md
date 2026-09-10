@@ -448,6 +448,18 @@ what unblocks the most.
   2 tests, plus the page's own logic driven against a fake input in node —
   there is no JavaScript test harness here, and this is the hand check
   `web/dist` asks for rather than an automated one.
+- **A stopped turn left its question on the screen** — `^c` aborted the turn and
+  stopped the window waiting, and the approval or the `ask` question it was
+  blocked on stayed where it was. An approval takes the whole keyboard until it
+  is answered, so the window read as frozen; a question captures Enter, so
+  nothing could be sent. Both belong to the turn that asked and end with it now,
+  wherever it ended — answered, stopped or failed, which is one function rather
+  than four places setting a flag. The browser had the same fault, milder,
+  because a stale `Allow once` button does not hold the keyboard, only pretends
+  to be live. Said rather than done quietly: a question that vanishes
+  unexplained is its own confusion. Read off codex's *clear pending TUI
+  questions when accepting a new prompt*; the twenty-seventh pass in
+  [references/PORTED.md](../references/PORTED.md) has the rest of it. 1 test.
 - **A key in a file the process cannot see** — provider keys come from the
   environment, so a shell that has them and a launcher that does not behaved
   differently for a reason nobody could see, and a `.env` written in the
