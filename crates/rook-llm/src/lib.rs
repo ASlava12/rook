@@ -79,13 +79,30 @@ const MOST_PATIENCE_SECS: u64 = 120;
 
 /// What a person can do about a request this endpoint will not take.
 ///
-/// A 400 is the agent's request being wrong, and one shape of wrong is a field
-/// the agent added rather than the user: the tool definitions, which some
+/// A 400 is usually the agent's request being wrong, and one shape of wrong is a
+/// field the agent added rather than the user: the tool definitions, which some
 /// OpenAI-compatible servers refuse outright. Dropping them here would leave an
 /// agent that cannot act and does not say why, so the setting that puts them in
 /// the prompt instead is named and the choice is left where it belongs.
+///
+/// The other shape is not the request at all. A local runtime loads a model when
+/// it is first asked for one, and a model it cannot load is refused with the same
+/// 400 as a malformed request — `Failed to load model "…". Error: Failed to load
+/// model.` was the whole of it, printed as provider JSON, with nothing to say
+/// whether the name, the machine or the file was at fault. It was the file: a
+/// 9B refused to load on a machine that had just loaded a 27B, and the reason
+/// was in the server's log and nowhere else.
 fn what_to_try(status: u16, body: &str) -> &'static str {
     let said = body.to_ascii_lowercase();
+    // Checked before the request is blamed, and at any status: LM Studio says
+    // this with a 400 and llama.cpp's server with a 500, and it means the same
+    // either way.
+    if said.contains("failed to load") {
+        return "\nThe server lists this model but could not load it, so the fault is on that side \
+                rather than in `[agent] model`: the reason is in the server's own log and not in \
+                this reply. A quantisation its build has no kernels for and a download that did \
+                not finish are the usual two.";
+    }
     let about_tools = ["tool", "function"].iter().any(|word| said.contains(word));
     match status == 400 && about_tools {
         true => {

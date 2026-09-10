@@ -180,3 +180,35 @@ fn every_listed_provider_is_one_the_code_actually_dispatches() {
         assert!(!matches!(built, Err(LlmError::UnknownProvider { .. })), "{name} is listed and not handled");
     }
 }
+
+/// The body here is LM Studio's, verbatim from a turn that ended on it. A 9B
+/// would not load on a machine that had just loaded a 27B, so neither the name
+/// nor the memory was at fault — and what rook printed was the provider's JSON
+/// and nothing else, which points at none of the three.
+#[test]
+fn a_model_the_server_cannot_load_is_told_from_a_request_it_will_not_take() {
+    let refused = |status: u16, body: &str| {
+        LlmError::Status { status, body: body.to_string(), retry_after: None }.to_string()
+    };
+
+    let load = refused(
+        400,
+        r#"{"error":{"message":"Failed to load model \"qwen3.8-9b-heretic-uncensored\". Error: Failed to load model.","type":"invalid_request_error","param":"model","code":null}}"#,
+    );
+    assert!(load.contains("could not load it"), "it says what happened: {load}");
+    assert!(load.contains("log"), "and where the reason is, which is not this reply: {load}");
+    assert!(!load.contains("native_tools"), "and not the advice for a different 400: {load}");
+
+    // The same words at the status llama.cpp's own server answers with, because
+    // what they mean does not depend on which one said it.
+    assert!(refused(500, "failed to load model").contains("could not load it"));
+
+    // The case that was already here, unchanged by the one in front of it.
+    let tools = refused(400, r#"{"error":{"message":"tools are not supported by this endpoint"}}"#);
+    assert!(tools.contains("native_tools"), "a refused tool definition still names the setting: {tools}");
+
+    // And a 400 that is neither gets no guess dressed up as advice.
+    let neither = refused(400, r#"{"error":{"message":"context length exceeded"}}"#);
+    assert!(!neither.contains("native_tools"), "nothing to offer here: {neither}");
+    assert!(!neither.contains("could not load"), "nor here: {neither}");
+}
