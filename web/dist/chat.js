@@ -264,6 +264,63 @@ export async function resume(session) {
   }
 }
 
+// What follows the last `@` of the word the caret is in, or null when no file
+// is being named.
+//
+// The word rather than the whole line, because a prompt is a sentence and `@`
+// belongs to one file in it; behind the caret rather than the whole value, so
+// going back to fix an earlier mention offers that one. A second `@` in the
+// word means an address, which is not a mention.
+function naming(input) {
+  const before = input.value.slice(0, input.selectionStart ?? input.value.length);
+  const word = before.split(/\s/).pop();
+  if (!word.startsWith('@')) return null;
+  const fragment = word.slice(1);
+  return fragment.includes('@') ? null : fragment;
+}
+
+// Put `path` where the mention being typed is, and a space after it: the name
+// is finished and the sentence goes on.
+function name(input, path) {
+  const at = input.selectionStart ?? input.value.length;
+  const fragment = naming(input);
+  if (fragment === null) return;
+  const start = at - fragment.length - 1;
+  // A space after it, so the sentence goes on — unless there is already one,
+  // which is what completing a mention in the middle of a line runs into.
+  const rest = input.value.slice(at);
+  const gap = rest.startsWith(' ') ? '' : ' ';
+  input.value = `${input.value.slice(0, start)}@${path}${gap}${rest}`;
+  const caret = start + path.length + 1 + gap.length;
+  input.setSelectionRange(caret, caret);
+  input.focus();
+}
+
+// Ranked by the daemon, because a browser cannot walk a filesystem and a second
+// ranking written here is a second answer to one question. A newer keystroke
+// wins: the answer to `@ser` is worthless once `@serv` has been asked.
+let asked = 0;
+async function offer(input, row) {
+  const fragment = naming(input);
+  if (fragment === null) {
+    row.replaceChildren();
+    return;
+  }
+  const mine = ++asked;
+  let found = [];
+  try {
+    found = await api(`/api/files?fragment=${encodeURIComponent(fragment)}`);
+  } catch {
+    found = [];
+  }
+  if (mine !== asked) return;
+  row.replaceChildren(...found.map((path, at) => el('button', {
+    type: 'button',
+    class: at === 0 ? 'chip picked' : 'chip',
+    onclick: () => { name(input, path); row.replaceChildren(); },
+  }, path)));
+}
+
 export async function renderChat() {
   try { state.chat.sessions = (await api('/api/sessions')).items.slice(0, 30); } catch { state.chat.sessions = []; }
   const stream = el('div', { class: 'stream', id: 'stream' });
@@ -288,12 +345,33 @@ export async function renderChat() {
     sendButton.textContent = '…';
     stopButton.hidden = false;
   } }, input, sendButton, stopButton);
-  input.addEventListener('keydown', (e) => { if (e.key === 'Escape') stop(); });
+  // Naming a file meant knowing the path and typing it, which in a browser
+  // means leaving the page to go and look. The ranking is the daemon's, so the
+  // page offers the same list the terminal does.
+  const naming = el('div', { class: 'row', id: 'naming' });
+  input.addEventListener('input', () => offer(input, naming));
+  input.addEventListener('keydown', (e) => {
+    const offered = naming.firstElementChild;
+    if (e.key === 'Tab' && offered) {
+      // Tab moves focus by default, which here means leaving the box you are
+      // still typing in.
+      e.preventDefault();
+      name(input, offered.textContent);
+      naming.replaceChildren();
+      return;
+    }
+    // Escape closes the list first and stops the turn only when there is no
+    // list: one key, and the nearer thing goes first.
+    if (e.key === 'Escape') {
+      if (offered) naming.replaceChildren();
+      else stop();
+    }
+  });
 
   $('#view').replaceChildren(el('div', { class: 'card' },
     el('div', { class: 'row', id: 'picker' }),
     el('div', { class: 'row', id: 'settings' }),
-    stream, form));
+    stream, form, naming));
   renderPicker();
   renderSettings();
   connect();

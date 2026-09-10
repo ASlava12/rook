@@ -70,6 +70,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/jobs/{id}", get(job))
         .route("/api/jobs/{id}/stop", post(stop_job))
         .route("/api/search", get(search))
+        .route("/api/files", get(naming))
         .with_state(state)
 }
 
@@ -834,6 +835,37 @@ async fn search(
 }
 
 #[derive(Deserialize)]
+struct Naming {
+    /// What has been typed after the `@`. Empty is a question — "what is here" —
+    /// and is answered with the first few rather than with nothing.
+    #[serde(default)]
+    fragment: String,
+    #[serde(default = "eight")]
+    limit: usize,
+}
+
+fn eight() -> usize {
+    8
+}
+
+/// Workspace files a fragment names, best first.
+///
+/// The browser cannot walk a filesystem, so the ranking that the TUI does for
+/// itself has to come from here — the alternative was a front end where naming
+/// a file means typing the path, which is the thing the gesture exists to
+/// avoid.
+///
+/// The walk is capped by `[sandbox] max_files_searched`, the same setting that
+/// caps the search tool's looking, and the limit on what comes back is capped
+/// again here: a client asking for ten thousand suggestions is asking for a
+/// response nobody can read.
+async fn naming(State(s): State<Shared>, Query(query): Query<Naming>) -> ApiResult<Vec<String>> {
+    let rook = s.rook.read().await;
+    let here = rook_core::mention::here(&rook.workspace, rook.config.sandbox.max_files_searched);
+    Ok(Json(rook_core::mention::matching(&here, &query.fragment, query.limit.clamp(1, 50))))
+}
+
+#[derive(Deserialize)]
 struct NewCheckpoint {
     name: String,
     #[serde(default)]
@@ -1290,6 +1322,42 @@ mod tests {
         let items = body["items"].as_array().unwrap();
         assert_eq!(items.len(), 1, "{body}");
         assert!(items[0]["body"].as_str().unwrap().contains("find the leak"), "{body}");
+    }
+
+    /// A browser cannot walk a filesystem, so naming a file there meant knowing
+    /// the path — which means leaving the page to go and look for it. The
+    /// ranking is one function in core; this is the only way the page can reach
+    /// it.
+    #[tokio::test]
+    async fn the_files_a_fragment_names_come_back_ranked() {
+        let f = fixture();
+        let workspace = f.state.rook.read().await.workspace.clone();
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        std::fs::write(workspace.join("service.toml"), "port = 8080\n").unwrap();
+        std::fs::write(workspace.join("src/my_service.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(workspace.join("unrelated.md"), "hello\n").unwrap();
+
+        let (status, body) = get(&f, "/api/files?fragment=service").await;
+        assert_eq!(status, StatusCode::OK);
+        let found: Vec<String> = serde_json::from_value(body).unwrap();
+        assert_eq!(
+            found.first().map(String::as_str),
+            Some("service.toml"),
+            "the name that starts with it, nearest the root: {found:?}"
+        );
+        assert_eq!(found.len(), 2, "and nothing that does not match: {found:?}");
+
+        // `@` with nothing after it is a question — what is here — and a blank
+        // answer teaches nobody the gesture.
+        let (_, body) = get(&f, "/api/files").await;
+        let all: Vec<String> = serde_json::from_value(body).unwrap();
+        assert_eq!(all.len(), 3, "every file, ranked by nothing in particular: {all:?}");
+
+        // A client asking for ten thousand suggestions is asking for a response
+        // nobody can read.
+        let (_, body) = get(&f, "/api/files?limit=10000").await;
+        let capped: Vec<String> = serde_json::from_value(body).unwrap();
+        assert!(capped.len() <= 50, "the limit is capped here too: {}", capped.len());
     }
 
     /// The property the whole feature rests on: no call anywhere hands a value

@@ -84,6 +84,10 @@ button.quiet:hover{color:var(--fg)}
 form.ask button,.row button,.approve button,.ask-form button{padding:.5rem .9rem;border:1px solid var(--line);
   border-radius:6px;background:var(--panel);color:var(--fg);cursor:pointer;font:inherit}
 form.ask button[disabled]{opacity:.5;cursor:default}
+/* Files a mention names. The first is what Tab takes, and says so by looking
+   like the default rather than by a note nobody reads. */
+.row button.chip{padding:.2rem .5rem;font-family:var(--mono);font-size:.8rem;color:var(--dim)}
+.row button.chip.picked{color:var(--fg);border-color:var(--accent)}
 .approve{border:1px solid var(--warn);border-radius:6px;padding:.6rem .8rem;margin:.5rem 0;
   display:flex;gap:.5rem;align-items:center;flex-wrap:wrap}
 .approve span{flex:1;font-family:var(--mono);font-size:.82rem}

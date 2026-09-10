@@ -428,6 +428,26 @@ what unblocks the most.
   call returning another call's bytes, which is worse than showing nothing. A
   call the turn ended inside says that nothing came back rather than leaving an
   empty half. 3 tests, one of them in a real terminal.
+- **The browser can name a file too** — `@serv` there offers the same list the
+  terminal offers, from `GET /api/files`: a browser cannot walk a filesystem,
+  and a second ranking written in JavaScript would be a second answer to a
+  question core already answers. The walk is capped by the same
+  `max_files_searched`, and what comes back is capped again at the route,
+  because a client asking for ten thousand suggestions is asking for a response
+  nobody can read. A newer keystroke wins — the answer to `@ser` is worthless
+  once `@serv` has been asked — and Escape closes the list before it stops a
+  turn, which is the nearer of the two things that key can mean.
+
+  `/` is not offered there and should not be: the page has no slash commands at
+  all. They read and write this process's store, which is why a window over a
+  daemon says so rather than pretending. Completing a command the page cannot
+  run would be worse than completing nothing.
+
+  Both halves of the gesture then turned out to leave a double space when a
+  mention was completed in the middle of a line, in the terminal as well.
+  2 tests, plus the page's own logic driven against a fake input in node —
+  there is no JavaScript test harness here, and this is the hand check
+  `web/dist` asks for rather than an automated one.
 - **A key in a file the process cannot see** — provider keys come from the
   environment, so a shell that has them and a launcher that does not behaved
   differently for a reason nobody could see, and a `.env` written in the

@@ -386,8 +386,14 @@ impl Typing {
     fn mention(&mut self, path: &str) {
         let Some(fragment) = self.mentioning() else { return };
         let start = self.at - fragment.len() - '@'.len_utf8();
-        self.text.replace_range(start..self.at, &format!("@{path} "));
-        self.at = start + path.len() + '@'.len_utf8() + ' '.len_utf8();
+        // A space after it unless there is one already, which is what
+        // completing a mention in the middle of a line runs into.
+        let gap = match self.text[self.at..].starts_with(' ') {
+            true => "",
+            false => " ",
+        };
+        self.text.replace_range(start..self.at, &format!("@{path}{gap}"));
+        self.at = start + path.len() + '@'.len_utf8() + gap.len();
     }
 }
 
@@ -3538,6 +3544,18 @@ mod tests {
         typing.mention("src/service.rs");
         assert_eq!(typing.as_str(), "why does @src/service.rs ", "the path lands where the mark was");
         assert_eq!(typing.mentioning(), None, "and the mention is over, so the pane closes");
+
+        // In the middle of a line the space is already there, and a second one
+        // is a gap nobody typed.
+        let mut middle = Typing::default();
+        for c in "read @a and then some".chars() {
+            middle.insert(c);
+        }
+        for _ in 0.."read @a and then some".len() - "read @a".len() {
+            middle.left();
+        }
+        middle.mention("alpha.rs");
+        assert_eq!(middle.as_str(), "read @alpha.rs and then some");
 
         // Typing goes on after it, in the middle of the line.
         for c in "fail?".chars() {
