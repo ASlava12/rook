@@ -156,6 +156,25 @@ impl DocSet {
         // it is the reader's work: three of five passages came back matching
         // only the "does" in "how does persistence work", which is a paragraph
         // about nothing that was asked.
+        //
+        // Requiring two matched terms was tried here and measured against a
+        // live set, because a reference had just fixed the same shape of noise
+        // that way — "a query no tool answers returns nothing, not five tools
+        // sharing one word". It does remove that noise: "how should I document
+        // my quarterly marketing budget" stops answering with two paragraphs
+        // about contributing to documentation. It also loses answers that were
+        // right, which is the objection. Asked how to configure Kubernetes
+        // ingress for Grafana, a set with a Kubernetes paragraph and a Grafana
+        // paragraph answered nothing at all, because neither paragraph holds
+        // both words. One word in common is usually an accident and sometimes
+        // the answer, and counting words cannot tell those apart.
+        //
+        // What is left, and is not solved by this or by anything here yet: the
+        // cutoff is relative, so a question the set cannot answer at all still
+        // comes back with the best of the weak — "what happens when redis runs
+        // out of memory", against a set of index pages that never discusses
+        // eviction, answers with the paragraph about POSIX support. A set that
+        // has nothing to say says so only when it matches nothing whatsoever.
         const AS_GOOD: usize = 4;
         let best = scored.iter().map(|(score, ..)| *score).max().unwrap_or_default();
         scored.retain(|(score, ..)| score * AS_GOOD >= best);

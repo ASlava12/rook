@@ -1897,6 +1897,13 @@ impl<'a> AgentLoop<'a> {
             // sub-agents get to run. Without this they would only advance while
             // the parent was blocked on them, which is the thing being undone.
             let mut carried: Vec<String> = Vec::new();
+            // Kept rather than returned from inside the loop, so what the model
+            // had already said is logged before the error goes up. `?` there
+            // dropped it: a provider that died two paragraphs in left a session
+            // whose prompt is followed by nothing, which reads as an agent that
+            // said nothing rather than a connection that went away — and the
+            // window had shown those two paragraphs.
+            let mut broke: Option<CoreError> = None;
             loop {
                 tokio::select! {
                     biased;
@@ -1909,14 +1916,42 @@ impl<'a> AgentLoop<'a> {
                     }
                     delta = stream.next() => {
                         let Some(delta) = delta else { break };
-                        let delta = delta.map_err(|e| CoreError::Other(e.to_string()))?;
-                        on_progress(Progress::Delta(&delta));
-                        assembler.push(delta).map_err(|e| CoreError::Other(e.to_string()))?;
+                        match delta {
+                            Ok(delta) => {
+                                on_progress(Progress::Delta(&delta));
+                                if let Err(e) = assembler.push(delta) {
+                                    broke = Some(CoreError::Other(e.to_string()));
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                broke = Some(CoreError::Other(e.to_string()));
+                                break;
+                            }
+                        }
                     }
                 }
             }
             for text in carried {
                 self.interjections.say(&text);
+            }
+            if let Some(e) = broke {
+                // Both halves, because either can be the whole of what a turn
+                // managed: a model that thought for a page and was cut before
+                // its first word said something, and it is not the error.
+                let reasoning = assembler.reasoning().to_string();
+                if !reasoning.is_empty() {
+                    self.rook.log(self.session, EventKind::Reasoning, "", &reasoning).ok();
+                }
+                let partial = assembler.finish();
+                if !partial.message.content.is_empty() {
+                    let said = partial.message.content;
+                    self.rook.log(self.session, EventKind::AssistantMessage, "cut off", &said).ok();
+                }
+                // Why it stops here, in the session rather than only on the
+                // screen of whoever was watching.
+                self.rook.log(self.session, EventKind::Note, "failed", &e.to_string()).ok();
+                return Err(e);
             }
             let thinking = assembler.reasoning().to_string();
             if !thinking.is_empty() {

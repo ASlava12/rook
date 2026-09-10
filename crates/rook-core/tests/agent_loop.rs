@@ -49,6 +49,38 @@ impl Provider for ScriptedProvider {
     }
 }
 
+/// A provider that says some of an answer and then breaks, which is what a
+/// dropped connection looks like from here.
+struct Breaks {
+    said: String,
+}
+
+#[async_trait]
+impl Provider for Breaks {
+    fn id(&self) -> &str {
+        "breaks/test"
+    }
+    fn context_window(&self) -> usize {
+        16_000
+    }
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+    async fn complete(&self, _request: Request) -> rook_llm::Result<Response> {
+        Err(LlmError::Other("never asked this way".into()))
+    }
+    async fn stream(&self, _request: Request) -> rook_llm::Result<rook_llm::ResponseStream> {
+        // No `Done`: the stream ends in an error, so nothing tells the assembler
+        // what the stop reason or the usage was.
+        let deltas = vec![
+            Ok(rook_llm::Delta::Reasoning("the file is small, so".into())),
+            Ok(rook_llm::Delta::Text(self.said.clone())),
+            Err(LlmError::Other("connection reset by peer".into())),
+        ];
+        Ok(Box::pin(futures_util::stream::iter(deltas)))
+    }
+}
+
 fn reply(text: &str) -> Response {
     Response {
         message: Message::assistant(text),
@@ -1054,6 +1086,33 @@ async fn context_usage_separates_what_is_live_from_what_is_merely_stored() {
         usage.logged_tokens
     );
     assert!(usage.compact_at < usage.window);
+}
+
+/// A provider that dies two paragraphs in left a session whose prompt was
+/// followed by nothing, which reads as an agent that said nothing rather than a
+/// connection that went away — and the window had shown those two paragraphs.
+#[tokio::test]
+async fn a_turn_that_broke_keeps_what_it_had_already_said() {
+    let f = fixture();
+    let session = f.rook.start_session("cut off").unwrap();
+
+    let provider = Breaks { said: "the port is 8080, and the host".into() };
+    let failed = AgentLoop::new(&f.rook, Arc::new(provider), session).run("what is the port?").await;
+    let e = failed.expect_err("the stream ended in an error");
+    assert!(e.to_string().contains("connection reset"), "and it says which: {e}");
+
+    let entries = f.rook.transcript(session, 0, usize::MAX, 4096).unwrap();
+    let kinds: Vec<&str> = entries.iter().map(|e| e.kind.as_str()).collect();
+    assert_eq!(
+        kinds,
+        vec!["user", "reasoning", "assistant", "note"],
+        "what it said is in the log, and why it stopped: {kinds:?}"
+    );
+    let said = entries.iter().find(|e| e.kind == "assistant").expect("the half-answer");
+    assert_eq!(said.body, "the port is 8080, and the host");
+    assert_eq!(said.label, "cut off", "labelled as what it is, not as a finished answer");
+    let why = entries.last().expect("the note");
+    assert!(why.body.contains("connection reset"), "the reason is in the session too: {}", why.body);
 }
 
 #[tokio::test]

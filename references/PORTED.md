@@ -1784,3 +1784,49 @@ is a desktop application: title bars, provider pickers, subscription tiers.
 between them with nothing behind the list. openhands is Canvas extensions, a
 React Query refactor, SDK version bumps and requiring Node 24; acp is eight
 commits of registry documentation.
+
+## Twenty-eighth pass — openclaw, hermes, opencode
+
+Five hundred and forty-three commits, three defects of ours, one idea tried and
+rejected on measurement, and nothing else taken.
+
+**openclaw f0f5eade5 → 0153d84c0.** Two hundred. `keep partial-text failed turns
+visible in replay` pointed at the worst of the three. The streaming loop returned
+its error with `?`, which dropped everything the assembler had collected — so a
+provider that died two paragraphs in left a session whose prompt is followed by
+nothing. That reads as an agent which said nothing rather than a connection that
+went away, and the window had shown those two paragraphs. Both halves are logged
+now, the reply labelled `cut off` rather than as a finished answer, with a note
+carrying the reason so `session show` tells the whole story. It was untestable
+until this pass: `ScriptedProvider` implements `complete`, so the default
+`stream` synthesises a tidy sequence that cannot fail halfway. A provider that
+hands out two deltas and then an error is three dozen lines and it now exists.
+
+`restore final answers after an earlier tool error` is the same seam from the
+other side and is already right here. `distinguish interrupted dev runners from
+completed shutdowns` is `Ended::{Drained, Exited, TimedOut}`. The rest is Comfy
+workflows, Mattermost previews, voice calls and a hundred and forty commits of
+shared test fixtures.
+
+**hermes c8aa5608c → cfdbbb6e3.** Three hundred and thirty-seven, and one
+mechanism worth having. `add send deadline to _safe_send_many so a stalled
+send_text latches the transport closed` and `give the send deadline its own 30s
+clock` are the same fault we had: `sink.send` on a socket nobody is reading
+blocks once the kernel buffer fills, with no error to notice, while the turn goes
+on filling an unbounded queue in front of it. A throttled browser tab looks
+exactly like this. Thirty seconds for one frame now ends the socket, which is
+what bounds the queue.
+
+`a query no tool answers returns nothing, not five tools sharing one word` is the
+one that was tried and rejected. Requiring two matched terms in `docs::passages`
+does remove that noise, and it loses answers: a question about Kubernetes ingress
+for Grafana, against a set holding a Kubernetes paragraph and a Grafana
+paragraph, answered nothing at all, because neither paragraph holds both words.
+Measured against a live set, reverted, and written into the code beside the
+relative cutoff so the next reader does not spend the afternoon on it. What it
+did surface is a real limitation, now named there: the cutoff is relative, so a
+set with nothing to say still answers with the best of the weak.
+
+**opencode 9f8db119f → 859106eb1.** Six, and nothing: a DeepSeek model entry, a
+Copilot plugin asking for summarised thinking on every model rather than one, two
+generated catalogs and two documentation edits.

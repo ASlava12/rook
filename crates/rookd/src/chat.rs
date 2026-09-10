@@ -91,19 +91,12 @@ async fn serve(
     shared: Arc<tokio::sync::OnceCell<Shared>>,
     state: Arc<AppState>,
 ) {
-    let (mut sink, mut stream) = socket.split();
-    let (outbound, mut queued) = mpsc::unbounded_channel::<ChatEvent>();
+    let (sink, mut stream) = socket.split();
+    let (outbound, queued) = mpsc::unbounded_channel::<ChatEvent>();
 
     // One writer task: the turn, the approver and the error path all emit
     // concurrently, and a socket has a single writer.
-    let writer = tokio::spawn(async move {
-        while let Some(event) = queued.recv().await {
-            let Ok(text) = serde_json::to_string(&event) else { continue };
-            if sink.send(Message::Text(text.into())).await.is_err() {
-                break;
-            }
-        }
-    });
+    let writer = tokio::spawn(write_frames(sink, queued));
 
     let patience = engine.read().await.config.agent.answer_timeout();
     let (approver, relay) = approver(outbound.clone(), patience);
@@ -195,6 +188,38 @@ async fn serve(
     ask_relay.abort();
     drop(outbound);
     let _ = writer.await;
+}
+
+/// How long one frame may take to reach a client before the socket counts as
+/// gone rather than slow.
+///
+/// A `send` on a socket nobody is reading blocks once the kernel's buffer
+/// fills, and there is no error to notice: the writer waits, the turn goes on
+/// producing deltas into the queue in front of it, and neither ever ends. A
+/// browser tab that has been throttled to a stop looks exactly like this. Half
+/// a minute for one frame is not slow, it is away — and the queue is what makes
+/// this a bound rather than a nicety, because it grows for as long as the writer
+/// is stuck.
+const SEND_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Every event, in order, until the socket stops taking them.
+///
+/// Its own function so the deadline can be tested with a sink that never
+/// completes, rather than by holding a real socket unread for thirty seconds.
+async fn write_frames<S>(mut sink: S, mut queued: mpsc::UnboundedReceiver<ChatEvent>)
+where
+    S: SinkExt<Message> + Unpin,
+{
+    while let Some(event) = queued.recv().await {
+        let Ok(text) = serde_json::to_string(&event) else { continue };
+        // Both endings are one ending: this socket is not taking frames.
+        // Dropping the sink closes the write half, which is what tells the
+        // client — and closes the read half's loop, which stops the turn.
+        match tokio::time::timeout(SEND_DEADLINE, sink.send(Message::Text(text.into()))).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) | Err(_) => break,
+        }
+    }
 }
 
 /// What the connection gives a turn: who answers its questions, and what the
@@ -435,5 +460,71 @@ mod settings_tests {
         assert!(stances.contains(&mode), "the current stance is one of the offered: {mode} in {stances:?}");
         assert_eq!(efforts, ["low", "medium", "high", "xhigh", "max"]);
         assert!(efforts.contains(&effort), "{effort} in {efforts:?}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A sink that accepts a frame and then never finishes another, which is
+    /// what a socket whose reader has stopped does once the buffer fills.
+    struct Stalls {
+        took: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl futures_util::Sink<Message> for Stalls {
+        type Error = std::convert::Infallible;
+
+        fn poll_ready(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            match self.took.load(std::sync::atomic::Ordering::SeqCst) {
+                0 => std::task::Poll::Ready(Ok(())),
+                // Pending forever, and never waking: nothing is coming.
+                _ => std::task::Poll::Pending,
+            }
+        }
+        fn start_send(self: std::pin::Pin<&mut Self>, _item: Message) -> Result<(), Self::Error> {
+            self.took.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+        fn poll_close(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    /// The writer waited forever on a socket nobody was reading, and the turn
+    /// went on filling the queue in front of it: neither the connection nor the
+    /// memory it was using ever ended.
+    ///
+    /// Time is paused, so this is the deadline being tested and not thirty
+    /// seconds being spent.
+    #[tokio::test(start_paused = true)]
+    async fn a_socket_that_stops_taking_frames_is_let_go_of() {
+        let took = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (outbound, queued) = mpsc::unbounded_channel::<ChatEvent>();
+        for text in ["one", "two", "three"] {
+            outbound.send(ChatEvent::Text { text: text.into() }).unwrap();
+        }
+
+        let writer = tokio::spawn(write_frames(Stalls { took: took.clone() }, queued));
+        // Held open, as a stalled client holds it: the writer has to end on the
+        // deadline rather than because the queue closed.
+        let done = tokio::time::timeout(SEND_DEADLINE * 3, writer).await;
+
+        assert!(done.is_ok(), "the writer let go of the socket");
+        assert_eq!(took.load(std::sync::atomic::Ordering::SeqCst), 1, "after the one frame it took");
+        drop(outbound);
     }
 }

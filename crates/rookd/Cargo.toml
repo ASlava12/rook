@@ -31,4 +31,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 [dev-dependencies]
 tempfile = "3.24.0"
+# `start_paused` for the socket deadline: a test about a timeout should not
+# spend it.
+tokio = { version = "1.53.1", features = ["test-util"] }
 tower = { version = "0.5.3", features = ["util"] }

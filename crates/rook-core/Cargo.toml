@@ -38,6 +38,9 @@ zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
 
 [dev-dependencies]
 async-trait = "0.1.92"
+# For a test provider that hands out a few deltas and then an error, which is
+# what a dropped connection looks like to the loop.
+futures-util = "0.3.34"
 rook-llm.workspace = true
 rook-skills.workspace = true
 rook-store.workspace = true
