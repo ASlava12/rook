@@ -191,8 +191,10 @@ pub fn run(source: crate::source::Source, yes: bool, started: Option<String>) ->
     let mut terminal = ratatui::init();
     // The wheel is how a person scrolls back through what an agent said, and
     // without capture the terminal scrolls its own buffer instead — which under
-    // the alternate screen is empty. Selecting text with the mouse needs Shift
-    // held while this is on, which is the usual bargain and is in the help.
+    // the alternate screen is empty. The other half of that bargain is that the
+    // terminal never sees the drag that selects a line, so `^s` hands the mouse
+    // back; the comment that used to be here said the modifier for it was in
+    // the help, and it was in neither.
     let mouse = execute!(std::io::stdout(), event::EnableMouseCapture).is_ok();
     // Without this a pasted newline arrives as the Enter key, so a paragraph
     // pasted into the box was sent one line at a time — the first as a prompt
@@ -200,7 +202,9 @@ pub fn run(source: crate::source::Source, yes: bool, started: Option<String>) ->
     // whole of it arrives as one event, newlines included.
     let pasting = execute!(std::io::stdout(), event::EnableBracketedPaste).is_ok();
     let daemon = source.daemon_base().map(str::to_string);
-    let result = App::new(source, runtime, yes).run(&mut terminal);
+    let mut app = App::new(source, runtime, yes);
+    app.mouse = mouse;
+    let result = app.run(&mut terminal);
     if mouse {
         let _ = execute!(std::io::stdout(), event::DisableMouseCapture);
     }
@@ -888,6 +892,15 @@ struct App {
     source: crate::source::Source,
     runtime: tokio::runtime::Runtime,
     chat: Chat,
+    /// Whether this window is taking the mouse, and so whether the terminal's
+    /// own selection works.
+    ///
+    /// Both are wanted and only one can be had: capture is how the wheel
+    /// scrolls back through what the agent said, and while it is on the
+    /// terminal never sees the drag that selects a line to copy. Every terminal
+    /// offers a modifier to get past it and no two agree on which — so this is
+    /// a key instead, and the footer says which of the two you currently have.
+    mouse: bool,
     /// Every file in the workspace, walked when a mention starts and kept until
     /// it ends. Walking per keystroke would be twenty thousand files sixty
     /// times a second to narrow a list already in hand; walking once per
@@ -1039,6 +1052,10 @@ impl App {
                 yes,
             },
             source,
+            // Enabled by `run` before this window draws; a window that could
+            // not take the mouse says so by leaving this false, and the footer
+            // then offers nothing to toggle.
+            mouse: false,
             turn: None,
             overlay: None,
             palette: Typing::default(),
@@ -1338,6 +1355,21 @@ impl App {
         self.reload();
     }
 
+    /// Give the mouse to the terminal, or take it back.
+    ///
+    /// A failure leaves the flag where it was rather than claiming the swap:
+    /// a footer that says the wheel is yours while the terminal is still
+    /// selecting is worse than one that never changed.
+    fn take_or_yield_the_mouse(&mut self) {
+        let swapped = match self.mouse {
+            true => execute!(std::io::stdout(), event::DisableMouseCapture).is_ok(),
+            false => execute!(std::io::stdout(), event::EnableMouseCapture).is_ok(),
+        };
+        if swapped {
+            self.mouse = !self.mouse;
+        }
+    }
+
     fn on_key(&mut self, key: crossterm::event::KeyEvent) {
         if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('c') {
             // A running turn is what there is to stop, as in the chat REPL and
@@ -1372,6 +1404,18 @@ impl App {
             self.palette_at = 0;
             self.overlay = Some(Overlay::Palette);
             return;
+        }
+        // `^s` hands the mouse back to the terminal so a line can be selected
+        // and copied, and takes it again for the wheel. Not a modifier held
+        // while dragging: every terminal has one and no two agree on which —
+        // Shift here, Option there, a setting somewhere else — so the answer
+        // to "I cannot copy what it said" was a different answer per terminal
+        // and none of them was in this window.
+        //
+        // `^s` is safe to take: raw mode clears `IXON`, so it arrives as a key
+        // rather than stopping the terminal's output as it would in a shell.
+        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('s') {
+            return self.take_or_yield_the_mouse();
         }
         match self.overlay {
             Some(overlay) => self.on_overlay_key(overlay, key),
@@ -2256,7 +2300,14 @@ impl App {
 
         let keys: &[(&str, &str)] = match self.overlay {
             Some(overlay) => overlay.keys(),
-            None => &[("^p ", "commands  "), ("^o ", "calls  "), ("⏎ ", "send  "), ("^c ", "stop  ")],
+            // The mouse hint says what pressing it gives you, which is also
+            // how this window says which of the two it is holding: a wheel
+            // that has stopped scrolling reads as an application that has
+            // stopped responding, and this is the line that explains it.
+            None if self.mouse => {
+                &[("^p ", "commands  "), ("^o ", "calls  "), ("^s ", "select  "), ("^c ", "stop  ")]
+            }
+            None => &[("^p ", "commands  "), ("^o ", "calls  "), ("^s ", "wheel  "), ("^c ", "stop  ")],
         };
         let mut spans: Vec<Span> = vec![Span::raw(" ")];
         for (key, what) in keys {
@@ -3338,6 +3389,8 @@ impl App {
             Line::from(Span::styled("keys", Style::default().add_modifier(Modifier::BOLD))),
             key("  ^p          everything reachable, filtered as you type"),
             key("  ^o          what each call was given and what came back"),
+            key("  ^s          gives the mouse to the terminal, to select and copy what"),
+            key("              was said · press it again to get the wheel back"),
             key("  @           names a file in the workspace · tab completes it"),
             key("  ⌥⏎          a newline in the message · ⏎ sends · paste keeps its lines"),
             key("  Esc         closes what is open; in the chat, clears then quits"),

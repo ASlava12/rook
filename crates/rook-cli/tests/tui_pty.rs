@@ -1195,3 +1195,37 @@ fn documentation_is_listed_with_both_addresses_and_can_be_dropped() {
     let dropped = pty.screen_showing(100, 30, "no documentation gathered yet").join("\n");
     assert!(dropped.contains("/docs <topic>"), "and says how to gather one:\n{dropped}");
 }
+
+/// Both halves of the bargain, and the window says which one it is holding.
+///
+/// Capture is how the wheel scrolls back through a turn, and while it is on the
+/// terminal never sees the drag that selects a line — so what the agent wrote
+/// could be read and not copied. Asserted on the escape sequences themselves,
+/// because that is the contract with the terminal: the footer is how a person
+/// finds the key, and `?1000` is what actually decides whether they can select.
+#[test]
+fn the_mouse_can_be_handed_to_the_terminal_so_a_line_can_be_selected() {
+    let _one = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let mut pty = tui(home.path(), workspace.path());
+
+    // The precondition: it took the mouse on the way in, and offers to give it
+    // back.
+    let before = pty.screen_showing(100, 30, "^s").join("\n");
+    assert!(before.contains("select"), "the footer offers what pressing it gives:\n{before}");
+    assert!(pty.seen.contains("?1000h"), "and the terminal was actually asked for the mouse");
+
+    pty.send("\u{13}");
+    let handed = pty.screen_showing(100, 30, "wheel").join("\n");
+    assert!(handed.contains("wheel"), "and now offers the other one back:\n{handed}");
+    assert!(
+        pty.seen.contains("?1000l"),
+        "the mouse has to actually go back to the terminal, or nothing can be selected"
+    );
+
+    // And again, because a toggle that only goes one way is a setting.
+    pty.send("\u{13}");
+    let taken = pty.screen_showing(100, 30, "select").join("\n");
+    assert!(taken.contains("select"), "back to holding it:\n{taken}");
+}
