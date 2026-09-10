@@ -69,6 +69,16 @@ pub struct AppState {
     pub started_at: std::time::SystemTime,
     /// Turns in flight, so stopping can say what it would interrupt.
     turns: std::sync::atomic::AtomicU32,
+    /// When the turn that has been running longest started, or `None` when
+    /// none is.
+    ///
+    /// A count answers "is it doing anything" and not "has it stopped", and
+    /// those are the same screen: a local model spends minutes on prompt
+    /// processing before its first token, so a turn twenty minutes in is
+    /// ordinary and a turn twenty minutes in is also what a wedged one looks
+    /// like. The number that tells them apart is how long it has been, and
+    /// nothing was keeping it.
+    oldest_turn: std::sync::Mutex<Option<std::time::Instant>>,
     /// Asked to stop over the API rather than by a signal. Stopping a daemon
     /// meant finding its process id, which is not something a person should
     /// have to do to a program they started by opening a window.
@@ -82,7 +92,11 @@ pub struct Running(Arc<AppState>);
 
 impl Drop for Running {
     fn drop(&mut self) {
-        self.0.turns.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        // `fetch_sub` returns the value before it, so one left means this was
+        // the last.
+        if self.0.turns.fetch_sub(1, std::sync::atomic::Ordering::Relaxed) <= 1 {
+            *self.0.oldest_turn.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
     }
 }
 
@@ -100,12 +114,27 @@ impl AppState {
     /// a watcher is a thread and a dependency for a question that costs one
     /// `stat`.
     pub fn turn_started(self: &Arc<Self>) -> Running {
-        self.turns.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let was = self.turns.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // The first of them, and not each: what is worth reporting is how long
+        // this daemon has been busy without pause, and a second turn starting
+        // beside the first does not make the first any younger.
+        if was == 0 {
+            *self.oldest_turn.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
+        }
         Running(self.clone())
     }
 
     pub fn turns_running(&self) -> u32 {
         self.turns.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// How long the daemon has been running turns without a gap.
+    pub fn busy_for(&self) -> Option<std::time::Duration> {
+        self.oldest_turn
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .filter(|_| self.turns_running() > 0)
+            .map(|at| at.elapsed())
     }
 
     /// Whether the `rookd` on disk is not the one this process is running.
@@ -272,6 +301,7 @@ async fn serve() -> Result<()> {
         config_path: rook_core::paths::config_file(),
         started_at: std::time::SystemTime::now(),
         turns: std::sync::atomic::AtomicU32::new(0),
+        oldest_turn: std::sync::Mutex::new(None),
         stopping: tokio::sync::Notify::new(),
         started: std::time::Instant::now(),
         about,

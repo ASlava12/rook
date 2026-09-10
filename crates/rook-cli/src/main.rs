@@ -1236,7 +1236,17 @@ fn cmd_daemon(cmd: DaemonCmd, json: bool) -> Result<()> {
                 fmt::ago(rook_store::now_unix() - health.uptime_secs as i64)
             );
             println!("store      {}", health.store_root);
-            println!("turns      {}", health.turns_running);
+            // With how long, because the count alone cannot tell a turn that
+            // is thinking from one that has stopped, and both are what a
+            // person is looking at this line to find out.
+            match health.busy_for_secs {
+                Some(secs) => println!(
+                    "turns      {} · the oldest has been running {}",
+                    health.turns_running,
+                    fmt::elapsed(std::time::Duration::from_secs(secs))
+                ),
+                None => println!("turns      {}", health.turns_running),
+            }
             if daemon.replaced {
                 println!(
                     "\nthe `rookd` on disk was installed after this one started: it is running the \n\

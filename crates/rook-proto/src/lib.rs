@@ -38,6 +38,15 @@ pub struct Health {
     /// to stop can say what stopping would interrupt.
     #[serde(default)]
     pub turns_running: u32,
+    /// How long the daemon has been running turns without a gap, when it is.
+    ///
+    /// The count says something is happening; this says whether it is still
+    /// happening. On a local model a large context is minutes of prompt
+    /// processing before a single byte comes back, so "a turn is running" and
+    /// "a turn is wedged" draw the same line — and the number that separates
+    /// them was in no answer this daemon gave.
+    #[serde(default)]
+    pub busy_for_secs: Option<u64>,
     /// Whether the `rookd` on disk has changed since this process started it.
     /// An upgrade leaves the running daemon on the old code — the store, the
     /// API and the web UI all keep working, at the previous version — and

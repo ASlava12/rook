@@ -133,6 +133,7 @@ async fn health(State(s): State<Shared>) -> ApiResult<Health> {
         arch: s.about.arch.clone(),
         uptime_secs: s.started.elapsed().as_secs(),
         turns_running: s.turns_running(),
+        busy_for_secs: s.busy_for().map(|d| d.as_secs()),
         binary_replaced: s.binary_replaced(),
     }))
 }
@@ -1112,6 +1113,7 @@ mod tests {
             config_path: home.path().join("config.toml"),
             started_at: std::time::SystemTime::now(),
             turns: std::sync::atomic::AtomicU32::new(0),
+            oldest_turn: std::sync::Mutex::new(None),
             stopping: tokio::sync::Notify::new(),
         });
         Fixture { _home: home, _workspace: workspace, router: router(state.clone()), state, session }
@@ -1165,6 +1167,39 @@ mod tests {
         let (status, body) = post(&f, "/api/shutdown", serde_json::json!({})).await;
         assert_eq!(status, StatusCode::OK, "with nothing running there is nothing to weigh: {body}");
         assert_eq!(body["turns_interrupted"], 0);
+    }
+
+    /// A count says something is happening and cannot say whether it still is.
+    ///
+    /// Both are read off the same line: on a local model a large context is
+    /// minutes of prompt processing before a byte comes back, so a turn that
+    /// has been going twenty minutes is ordinary — and is also exactly what a
+    /// wedged one looks like. How long it has been going is the number that
+    /// separates them, and health gave no answer at all.
+    #[tokio::test]
+    async fn health_says_how_long_it_has_been_busy_and_not_only_that_it_is() {
+        let f = fixture();
+        let (_, idle) = get(&f, "/api/health").await;
+        assert_eq!(idle["turns_running"], 0);
+        assert!(idle["busy_for_secs"].is_null(), "nothing running is not zero seconds: {idle}");
+
+        let first = f.state.turn_started();
+        let (_, busy) = get(&f, "/api/health").await;
+        assert_eq!(busy["turns_running"], 1);
+        assert!(busy["busy_for_secs"].as_u64().is_some(), "and now there is a number: {busy}");
+
+        // A second turn beside the first does not make the first any younger,
+        // and the one worth reporting is the one that has been waiting longest.
+        let second = f.state.turn_started();
+        drop(second);
+        let (_, still) = get(&f, "/api/health").await;
+        assert_eq!(still["turns_running"], 1, "the first is still going");
+        assert!(still["busy_for_secs"].as_u64().is_some(), "and still timed from when it began");
+
+        drop(first);
+        let (_, quiet) = get(&f, "/api/health").await;
+        assert_eq!(quiet["turns_running"], 0);
+        assert!(quiet["busy_for_secs"].is_null(), "and the clock stops with the last of them: {quiet}");
     }
 
     /// An upgrade leaves the running daemon on the old code: the store, the
