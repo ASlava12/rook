@@ -973,6 +973,7 @@ impl Rook {
                 event.record.kind,
                 bytes,
                 self.config.agent.max_reasoning_tokens,
+                self.config.agent.max_replayed_result_tokens,
             );
         }
 

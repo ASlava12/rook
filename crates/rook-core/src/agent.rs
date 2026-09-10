@@ -1283,6 +1283,7 @@ impl<'a> AgentLoop<'a> {
         // not a conversation any dialect accepts.
         let mut thought: Option<String> = None;
         let thinking_budget = self.rook.config.agent.max_reasoning_tokens;
+        let result_budget = self.rook.config.agent.max_replayed_result_tokens;
         // A replayed conversation reads as continuous however long the gaps
         // were, so a session picked up a week later looks like one paused for a
         // moment — and "did you already run the tests?" has a different answer
@@ -1344,7 +1345,8 @@ impl<'a> AgentLoop<'a> {
                     // list invalid for the provider, so drop it rather than
                     // send something that will be rejected.
                     if let Some(id) = open_call.take() {
-                        messages.push(Message::tool_result(id, body));
+                        let kept = crate::context::shorten_result(&body, result_budget);
+                        messages.push(Message::tool_result(id, kept));
                     }
                 }
                 _ => {}

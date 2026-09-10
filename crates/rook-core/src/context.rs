@@ -151,12 +151,53 @@ fn from_end(text: &str, bytes: usize) -> usize {
     (from..=text.len()).find(|at| text.is_char_boundary(*at)).unwrap_or(text.len())
 }
 
+/// How much of a tool's answer is carried into the next request.
+///
+/// Head and tail, for the reason a command's own capture keeps both: a
+/// compiler's first error is at the head and the reason it stopped is at the
+/// tail, and the middle is the part the two already stand for. The marker says
+/// what went and where the whole of it still is, because a model reading a
+/// shortened result must not read it as the whole answer.
+///
+/// Measured on a real turn before it was written: thirty-eight results, a median
+/// of 826 bytes and three of 29, 13 and 13 KiB — so a ceiling touches the few
+/// that are large and leaves the many that are not, which is the shape that
+/// makes it worth having.
+///
+/// **Deterministic on purpose.** A prompt cache is a prefix match, so the same
+/// result has to render the same way at every step of a turn: shortening by
+/// recency — the newest few whole, older ones cut — rewrites a message that was
+/// already sent, which breaks the prefix there and makes everything after it
+/// uncached. That costs more than it saves.
+pub fn shorten_result(text: &str, budget_tokens: usize) -> String {
+    if budget_tokens == 0 || estimate_tokens(text) <= budget_tokens {
+        return text.to_string();
+    }
+    let dropped = estimate_tokens(text) - budget_tokens;
+    let marker = format!("\n\n[… {dropped} tokens elided; `rook store cat` has the whole of it …]\n\n");
+    let Some(room) = budget_tokens.checked_sub(estimate_tokens(&marker)).map(|left| left * 4) else {
+        return String::new();
+    };
+    // More head than tail: a result is usually read from the top — a listing, a
+    // file, the first error — where a thought is read for its conclusion.
+    let head = at_boundary(text, room * 3 / 4);
+    let tail = from_end(text, room - room * 3 / 4);
+    format!("{}{marker}{}", &text[..head], &text[tail..])
+}
+
 /// What an event costs the next request, from its stored size — which is all
-/// `session context` has, and all it needs: a thought is carried whole or
-/// shortened to the budget, so its cost is the smaller of the two.
-pub fn tokens_in_request(kind: rook_store::EventKind, bytes: usize, reasoning_budget: usize) -> usize {
+/// `session context` has, and all it needs: a thought and a tool's answer are
+/// each carried whole or shortened to their budget, so the cost is the smaller
+/// of the two.
+pub fn tokens_in_request(
+    kind: rook_store::EventKind,
+    bytes: usize,
+    reasoning_budget: usize,
+    result_budget: usize,
+) -> usize {
     match kind {
         rook_store::EventKind::Reasoning => bytes.div_ceil(4).min(reasoning_budget),
+        rook_store::EventKind::ToolResult if result_budget > 0 => bytes.div_ceil(4).min(result_budget),
         _ => bytes.div_ceil(4),
     }
 }
@@ -174,6 +215,47 @@ pub fn kind_reaches_the_model(kind: &str) -> bool {
 mod tests {
     use super::ContextBudget;
 
+    /// Tool results were 79% of a forty-step turn's context and were re-sent on
+    /// every step of it. The ceiling touches the few that are large — a median
+    /// result was 826 bytes and the largest was 29 KiB — and the price
+    /// `session context` reports has to agree with what is actually sent, or
+    /// the number that exists to explain the bill explains a different one.
+    #[test]
+    fn a_long_result_is_carried_by_its_ends_and_priced_as_it_is_carried() {
+        let long = format!("first line\n{}\nlast line", "middle ".repeat(4_000));
+        let kept = super::shorten_result(&long, 200);
+
+        assert!(super::estimate_tokens(&kept) <= 200, "it fits the budget: {}", kept.len());
+        assert!(kept.starts_with("first line"), "the head is where a result is read from");
+        assert!(kept.ends_with("last line"), "and the tail is why it stopped");
+        assert!(kept.contains("elided"), "and it says the middle went: {kept}");
+        assert!(kept.contains("store cat"), "and where the whole of it still is");
+
+        assert_eq!(
+            super::tokens_in_request(rook_store::EventKind::ToolResult, long.len(), 800, 200),
+            200,
+            "priced as it is carried, not as it is stored"
+        );
+        // A result that fits is untouched, which is most of them.
+        let short = "port = 8080\n";
+        assert_eq!(super::shorten_result(short, 200), short);
+        assert_eq!(super::tokens_in_request(rook_store::EventKind::ToolResult, short.len(), 800, 200), 3);
+        // And 0 is the budget that carries everything, as it did before.
+        assert_eq!(super::shorten_result(&long, 0), long);
+    }
+
+    /// A prompt cache is a prefix match, so the same result has to render the
+    /// same way at every step of a turn. Shortening by recency would rewrite a
+    /// message that was already sent, break the prefix there, and make
+    /// everything after it uncached — costing more than it saved.
+    #[test]
+    fn the_same_result_is_carried_the_same_way_every_time() {
+        let long = "x".repeat(40_000);
+        let once = super::shorten_result(&long, 300);
+        let again = super::shorten_result(&long, 300);
+        assert_eq!(once, again, "nothing about the step it is sent on changes it");
+    }
+
     /// The bound is what lets `session context` price a thought from its
     /// stored size without reading it back, so it has to hold for every
     /// budget — including one too small to say anything in.
@@ -190,7 +272,7 @@ mod tests {
                 super::estimate_tokens(&kept)
             );
             assert!(
-                super::tokens_in_request(rook_store::EventKind::Reasoning, long.len(), budget)
+                super::tokens_in_request(rook_store::EventKind::Reasoning, long.len(), budget, 0)
                     >= super::estimate_tokens(&kept),
                 "and what the report prices it at is never less than what is carried"
             );

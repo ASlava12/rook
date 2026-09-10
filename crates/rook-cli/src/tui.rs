@@ -194,10 +194,18 @@ pub fn run(source: crate::source::Source, yes: bool, started: Option<String>) ->
     // the alternate screen is empty. Selecting text with the mouse needs Shift
     // held while this is on, which is the usual bargain and is in the help.
     let mouse = execute!(std::io::stdout(), event::EnableMouseCapture).is_ok();
+    // Without this a pasted newline arrives as the Enter key, so a paragraph
+    // pasted into the box was sent one line at a time — the first as a prompt
+    // and the rest chasing it. With it the terminal brackets the paste and the
+    // whole of it arrives as one event, newlines included.
+    let pasting = execute!(std::io::stdout(), event::EnableBracketedPaste).is_ok();
     let daemon = source.daemon_base().map(str::to_string);
     let result = App::new(source, runtime, yes).run(&mut terminal);
     if mouse {
         let _ = execute!(std::io::stdout(), event::DisableMouseCapture);
+    }
+    if pasting {
+        let _ = execute!(std::io::stdout(), event::DisableBracketedPaste);
     }
     ratatui::restore();
     // Said on the way out rather than on the way in, where it would scroll past
@@ -346,9 +354,37 @@ impl Typing {
         &self.text
     }
 
-    /// How far along the line the cursor is drawn: characters, not bytes.
+    /// How far along its one line the cursor is: characters, not bytes. For the
+    /// boxes that hold one line — the palette, a fact being added, a topic.
     fn column(&self) -> u16 {
         self.text[..self.at].chars().count() as u16
+    }
+
+    /// Where the cursor is drawn in the message box, which holds newlines: the
+    /// row it is on and how far along that row.
+    fn caret(&self) -> (u16, u16) {
+        let before = &self.text[..self.at];
+        let row = before.matches('\n').count() as u16;
+        let column = before.rsplit('\n').next().unwrap_or_default().chars().count() as u16;
+        (row, column)
+    }
+
+    fn rows(&self) -> u16 {
+        (self.text.matches('\n').count() + 1) as u16
+    }
+
+    /// Text arriving from the terminal in one piece, newlines and all.
+    ///
+    /// A terminal delivers a pasted newline as the Enter key, so a paragraph
+    /// pasted in was sent a line at a time: the first line went as a prompt and
+    /// the rest chased it as prompts of their own. Bracketed paste is what tells
+    /// a paste from typing, and this is the half that keeps the newlines.
+    fn paste(&mut self, text: &str) {
+        // `\r\n` and a bare `\r` both mean a new line here. A `\r` left in
+        // would move the cursor back over what was already drawn.
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        self.text.insert_str(self.at, &text);
+        self.at += text.len();
     }
 
     /// The file being named at the cursor: what follows the last `@` of the
@@ -1063,6 +1099,7 @@ impl App {
             if event::poll(TICK)? {
                 match event::read()? {
                     Event::Key(key) if key.kind == KeyEventKind::Press => self.on_key(key),
+                    Event::Paste(text) => self.on_paste(&text),
                     Event::Mouse(mouse) => self.on_scroll(mouse.kind),
                     _ => {}
                 }
@@ -1253,6 +1290,29 @@ impl App {
 
     /// Keys while a pane is up. Esc closes, and every pane's own keys are the
     /// ones it had as a tab — what changed is how you get to it.
+    /// Text pasted into whichever box is taking typing.
+    ///
+    /// Whole, and never sent: a paste is material to work with, and deciding it
+    /// was a prompt because it ended in a newline is what made pasting a
+    /// paragraph impossible. An approval has the keyboard and takes no text, so
+    /// a paste arriving there is dropped rather than typed into a box nobody can
+    /// see.
+    fn on_paste(&mut self, text: &str) {
+        match self.overlay {
+            Some(Overlay::Palette) => self.palette.paste(text),
+            // The one-line boxes take a paste as one line: a fact or a topic
+            // with a newline in it is not two of them.
+            Some(Overlay::Memory) => {
+                if let Some(adding) = &mut self.adding {
+                    adding.text.paste(&text.replace('\n', " "));
+                }
+            }
+            Some(_) => {}
+            None if self.chat.pending.is_none() => self.chat.input.paste(text),
+            None => {}
+        }
+    }
+
     fn on_overlay_key(&mut self, overlay: Overlay, key: crossterm::event::KeyEvent) {
         if key.code == KeyCode::Esc {
             self.overlay = None;
@@ -1415,6 +1475,10 @@ impl App {
             KeyCode::Delete => self.chat.input.delete(),
             KeyCode::Up => self.recall(-1),
             KeyCode::Down => self.recall(1),
+            // A newline by hand, since Enter sends. Shift+Enter is what a hand
+            // reaches for and almost no terminal tells it from Enter; Alt is
+            // the modifier that actually arrives.
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => self.chat.input.insert('\n'),
             KeyCode::Enter if self.chat.asking.is_some() => self.answer(),
             KeyCode::Enter => self.send(),
             KeyCode::Backspace => self.chat.input.backspace(),
@@ -1738,7 +1802,12 @@ impl App {
         // `/btw` is a turn without tools, so it goes down the normal path; every
         // other slash command is answered here, by the same code the plain CLI
         // runs.
-        if let Some(command) = prompt.strip_prefix('/').filter(|c| !c.starts_with("btw ")) {
+        // A command is one line. Pasted text that happens to start with a path
+        // is not `/Users/...` the command, and reading it as one would answer a
+        // paste with "no such command".
+        if let Some(command) =
+            prompt.strip_prefix('/').filter(|c| !c.starts_with("btw ") && !c.contains('\n'))
+        {
             self.chat.push("you", &prompt);
             return self.command(command);
         }
@@ -2200,8 +2269,13 @@ impl App {
             _ if !completing.is_empty() => ((completing.len() + 2) as u16).min((area.height / 2).max(3)),
             _ => 0,
         };
+        // The box grows with what is in it, because a pasted paragraph is one
+        // prompt and a person editing it has to see it. Capped, since the
+        // conversation is what the window is for: past this the box scrolls.
+        const MOST_ROWS: u16 = 10;
+        let typed = self.chat.input.rows().clamp(1, MOST_ROWS) + 2;
         let [log, ask, input] =
-            Layout::vertical([Constraint::Min(3), Constraint::Length(blocking), Constraint::Length(3)])
+            Layout::vertical([Constraint::Min(3), Constraint::Length(blocking), Constraint::Length(typed)])
                 .areas(area);
 
         let mut lines: Vec<Line> = Vec::new();
@@ -2383,22 +2457,41 @@ impl App {
             (true, None) => "  working… ".to_string(),
             _ => "› ".to_string(),
         };
-        f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(prompt.clone(), Style::default().fg(Color::DarkGray)),
-                Span::raw(self.chat.input.as_str().to_string()),
-            ]))
-            .block(bordered("")),
-            input,
-        );
+        // The prompt marks the first row only; the rest are indented to line up
+        // under it, so a pasted block reads as one message rather than as a
+        // column of fragments.
+        let gutter = prompt.chars().count();
+        let typing: Vec<Line> = self
+            .chat
+            .input
+            .as_str()
+            .split('\n')
+            .enumerate()
+            .map(|(row, line)| {
+                let mark = match row {
+                    0 => prompt.clone(),
+                    _ => " ".repeat(gutter),
+                };
+                Line::from(vec![
+                    Span::styled(mark, Style::default().fg(Color::DarkGray)),
+                    Span::raw(line.to_string()),
+                ])
+            })
+            .collect();
+        // Held to the cursor's row: typing at the bottom of a block longer than
+        // the box would otherwise write where nothing is shown.
+        let (row, column) = self.chat.input.caret();
+        let visible = input.height.saturating_sub(2);
+        let scroll = row.saturating_sub(visible.saturating_sub(1));
+        f.render_widget(Paragraph::new(typing).block(bordered("")).scroll((scroll, 0)), input);
         // Wherever the box takes typing, which is everywhere but an approval:
         // a running turn takes what is typed as an interjection, and hiding the
         // caret there left somebody typing into a box with no sign of it. An
         // approval is answered with a letter and has the keyboard.
         if self.chat.pending.is_none() {
             f.set_cursor_position((
-                input.x + 1 + prompt.chars().count() as u16 + self.chat.input.column(),
-                input.y + 1,
+                input.x + 1 + gutter as u16 + column,
+                input.y + 1 + row.saturating_sub(scroll),
             ));
         }
     }
@@ -3136,6 +3229,7 @@ impl App {
             key("  ^p          everything reachable, filtered as you type"),
             key("  ^o          what each call was given and what came back"),
             key("  @           names a file in the workspace · tab completes it"),
+            key("  ⌥⏎          a newline in the message · ⏎ sends · paste keeps its lines"),
             key("  Esc         closes what is open; in the chat, clears then quits"),
             key("  j k ↑ ↓     move · Space/PgDn scroll · r reload · wheel scrolls"),
             Line::from(""),
@@ -3538,6 +3632,46 @@ mod tests {
         assert_eq!(chat.log.len(), 1, "still one line: {:?}", chat.log);
         assert!(chat.log[0].1.ends_with('✓'), "{:?}", chat.log);
         assert_eq!(chat.running(), None, "and nothing is running");
+    }
+
+    /// A pasted paragraph was sent one line at a time: the terminal delivers a
+    /// pasted newline as the Enter key, so the first line went as a prompt and
+    /// the rest chased it as prompts of their own. Bracketed paste is what tells
+    /// a paste from typing; this is the half that keeps the newlines.
+    #[test]
+    fn a_pasted_paragraph_is_one_message_and_not_one_per_line() {
+        let mut typing = Typing::default();
+        for c in "look at ".chars() {
+            typing.insert(c);
+        }
+        typing.paste("first line\r\nsecond line\rthird line\n");
+
+        assert_eq!(
+            typing.as_str(),
+            "look at first line\nsecond line\nthird line\n",
+            "every ending is a newline: a bare `\\r` left in would draw over the line before it"
+        );
+        assert_eq!(typing.rows(), 4, "and the box grows to hold them");
+        assert_eq!(typing.caret(), (3, 0), "with the cursor after the last one");
+
+        // Typing goes on where the paste left off, on the row it left off on.
+        for c in "and that".chars() {
+            typing.insert(c);
+        }
+        assert_eq!(typing.caret(), (3, 8));
+        assert!(typing.as_str().ends_with("third line\nand that"));
+    }
+
+    /// The cursor is a row and a column now, and both are counted in characters
+    /// — a byte offset put it in the middle of a letter in anybody's language
+    /// but English.
+    #[test]
+    fn the_caret_is_counted_in_characters_on_the_row_it_is_on() {
+        let mut typing = Typing::default();
+        typing.paste("посмотри\nна файл");
+        assert_eq!(typing.caret(), (1, 7), "seven characters, not thirteen bytes");
+        typing.home();
+        assert_eq!(typing.caret(), (0, 0));
     }
 
     /// Naming a file meant knowing its path and typing it, so the short way to

@@ -173,6 +173,18 @@ pub struct AgentConfig {
     /// work does. Past this the middle is elided and the marker says how much
     /// went. 0 carries none, which is what it did before.
     pub max_reasoning_tokens: usize,
+    /// How much of a tool's answer is carried back into each later request.
+    ///
+    /// A result is stored whole — `session show` and the calls pane read it —
+    /// and this is only what is replayed. It is where a long turn's bill
+    /// actually goes: measured on a forty-step turn, tool results were 79% of
+    /// the context and were re-sent on every one of those steps, and their
+    /// sizes were a median of 826 bytes with three of 29, 13 and 13 KiB. A
+    /// ceiling touches those three and leaves the other thirty-five alone.
+    ///
+    /// Past this the middle goes and the marker says how much and where the
+    /// rest is. 0 carries every result whole, which is what it did before.
+    pub max_replayed_result_tokens: usize,
     /// Ceiling on how much of an `AGENTS.md` reaches the model, per file. It is
     /// paid for on every request and is written by whoever sends the pull
     /// request, so a repository cannot spend the context window by committing a
@@ -387,6 +399,10 @@ impl Default for AgentConfig {
             answer_timeout_secs: 600,
             compaction_model: String::new(),
             max_reasoning_tokens: 800,
+            // Four kilobytes or so: above the median result by a factor of
+            // five, so the ordinary ones are untouched, and well under the
+            // three that made up more than half of one turn's context.
+            max_replayed_result_tokens: 1_000,
             max_instructions_bytes: 32 * 1024,
             prompt_cache_ttl: "5m".into(),
         }

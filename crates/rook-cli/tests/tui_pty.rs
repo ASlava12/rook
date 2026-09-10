@@ -961,6 +961,37 @@ fn a_window_opens_knowing_what_was_typed_in_the_last_one() {
     assert!(older.contains("look at the parser"), "and the one before it:\n{older}");
 }
 
+/// Pasting a paragraph sent it one line at a time — the first line as a
+/// prompt, the rest chasing it as prompts of their own — because a terminal
+/// delivers a pasted newline as the Enter key. Bracketed paste tells the two
+/// apart, and this sends what a terminal sends when it brackets one.
+#[test]
+fn a_pasted_paragraph_stays_in_the_box_as_one_message() {
+    let _one = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let mut pty = tui(home.path(), workspace.path());
+    pty.screen(100, 30);
+
+    // What a terminal writes for a paste, which is the whole reason this
+    // works: the same bytes typed by hand are Enter, and Enter sends.
+    pty.send("\u{1b}[200~first line\r\nsecond line\r\nthird line\u{1b}[201~");
+    let held = pty.screen_showing(100, 30, "third line").join("\n");
+    assert!(held.contains("› first line"), "the box takes the first line:\n{held}");
+    assert!(held.contains("second line"), "and the rest of them:\n{held}");
+    // Nothing was sent: a message that has been sent carries the mark of who
+    // said it, and this is still in the box.
+    assert!(!held.contains("▌ first line"), "and none of it went as a message:\n{held}");
+
+    // Cleared, so what goes next is only what is pasted next.
+    pty.send("\u{15}"); // ctrl-u, kill to the start
+    // A command, so no turn runs: an unknown one is answered here rather than
+    // by a model. Its second line is what proves the whole paste went at once.
+    pty.send("\u{1b}[200~/nosuch alpha\r\nomega\u{1b}[201~\r");
+    let sent = pty.screen_showing(100, 30, "▌ /nosuch alpha").join("\n");
+    assert!(sent.contains("omega"), "the whole paste went as one message:\n{sent}");
+}
+
 /// A conversation shows a call as one line, which is right while a turn runs
 /// and not enough afterwards: "it edited `service.toml`" does not say what it
 /// wrote there. Reaching the bytes meant the sessions pane, a session to select

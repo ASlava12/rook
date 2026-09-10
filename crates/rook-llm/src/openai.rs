@@ -126,6 +126,7 @@ impl Provider for OpenAiCompatible {
             usage: Usage {
                 input_tokens: wire.usage.as_ref().map(|u| u.prompt_tokens).unwrap_or(0),
                 output_tokens: wire.usage.as_ref().map(|u| u.completion_tokens).unwrap_or(0),
+                cache_read_tokens: wire.usage.as_ref().map(WireUsage::cached).unwrap_or(0),
                 ..Default::default()
             },
             model: wire.model.unwrap_or_else(|| self.model.clone()),
@@ -251,6 +252,7 @@ impl Provider for OpenAiCompatible {
                             usage = Usage {
                                 input_tokens: u.prompt_tokens,
                                 output_tokens: u.completion_tokens,
+                                cache_read_tokens: u.cached(),
                                 ..Default::default()
                             };
                         }
@@ -651,4 +653,25 @@ struct WireUsage {
     prompt_tokens: u32,
     #[serde(default)]
     completion_tokens: u32,
+    /// What the provider served from its cache rather than reading again.
+    ///
+    /// Never read here before, so every turn over this route reported nothing
+    /// cached whether or not anything was — and the one number that says
+    /// whether a long turn is costing what it looks like was the one nobody
+    /// had. Anthropic's route has always carried it; this one is the dialect
+    /// most endpoints speak, so it is where most of the bill is.
+    #[serde(default)]
+    prompt_tokens_details: Option<WireCached>,
+}
+
+#[derive(Deserialize)]
+struct WireCached {
+    #[serde(default)]
+    cached_tokens: u32,
+}
+
+impl WireUsage {
+    fn cached(&self) -> u32 {
+        self.prompt_tokens_details.as_ref().map(|d| d.cached_tokens).unwrap_or(0)
+    }
 }
