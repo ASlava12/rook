@@ -634,10 +634,17 @@ fn inline(text: &str, base: Style, code: Style) -> Vec<Span<'static>> {
 
 /// What a long pause is waiting on, in the words of the log being read: the
 /// tool that is still running, or the model that has sent nothing.
-fn waiting_on(quiet: std::time::Duration, running: Option<&str>) -> String {
+fn waiting_on(quiet: std::time::Duration, running: Option<&str>, patience: std::time::Duration) -> String {
     match running {
+        // A tool has its own timeout and its own line; this one is about the
+        // model, and naming a deadline that is not this wait's would be worse
+        // than naming none.
         Some(tool) => format!(" · {tool} running {}", crate::fmt::elapsed(quiet)),
-        None => format!(" · nothing from the model for {}", crate::fmt::elapsed(quiet)),
+        None => format!(
+            " · nothing from the model for {} of {}",
+            crate::fmt::elapsed(quiet),
+            crate::fmt::elapsed(patience)
+        ),
     }
 }
 
@@ -825,9 +832,9 @@ impl Chat {
     /// Silence, named — after half a minute of it, and not before, because a
     /// pause between tokens is ordinary and a caption that cries wolf is one
     /// more thing to ignore.
-    fn silence(&self) -> String {
+    fn silence(&self, patience: std::time::Duration) -> String {
         match self.heard.map(|at| at.elapsed()).filter(|d| *d >= QUIET) {
-            Some(quiet) => waiting_on(quiet, self.running()),
+            Some(quiet) => waiting_on(quiet, self.running(), patience),
             None => String::new(),
         }
     }
@@ -930,6 +937,14 @@ struct App {
     /// What a request may carry, so the footer can say how much of it the
     /// newest one used. Read once with the model, for the same reason.
     usable: usize,
+    /// How long a stream may say nothing before the turn gives up on it.
+    ///
+    /// Shown beside the silence, because a wait with no end named reads as no
+    /// end: on a local model a large context is minutes of prompt processing
+    /// before the first token, and `nothing from the model for 12m` alone
+    /// cannot be told from a turn that will sit there forever. With the
+    /// deadline beside it, the same line says the wait is bounded and when.
+    patience: std::time::Duration,
     sessions: Vec<SessionSummary>,
     session_state: ListState,
     /// Every call this conversation made, newest first, with what it was given
@@ -1036,6 +1051,7 @@ impl App {
                     rook_core::context::ContextBudget::new(window, config.agent.compact_at).usable()
                 })
                 .unwrap_or(0),
+            patience: config.agent.stream_idle(),
             events,
             to_loop,
             approver: Arc::new(ChannelApprover::new(requests, patience)),
@@ -2613,7 +2629,7 @@ impl App {
                     Some((at, of)) => format!(" · step {at}/{of}"),
                     None => String::new(),
                 },
-                self.chat.silence()
+                self.chat.silence(self.patience)
             ),
             (true, None) => "  working… ".to_string(),
             _ => "› ".to_string(),
@@ -4145,23 +4161,38 @@ mod tests {
     /// A minute of nothing on the screen is a build running, a model thinking,
     /// or a turn that has died, and all three drew the same `working…`. Two of
     /// the three can be named, which is enough to know whether to wait.
+    ///
+    /// And the wait is named with its end. On a local model a large context is
+    /// minutes of prompt processing before the first token — thirteen of them,
+    /// measured, at the size a sub-agent reaches — so the honest answer to "has
+    /// it stopped?" is not only how long it has been quiet but how long it will
+    /// stay before the turn gives up on the stream.
     #[test]
-    fn a_quiet_turn_says_what_it_is_waiting_on() {
+    fn a_quiet_turn_says_what_it_is_waiting_on_and_for_how_much_longer() {
         let a_while = std::time::Duration::from_secs(90);
+        let patience = std::time::Duration::from_secs(1200);
         let mut chat = Chat::default();
-        assert_eq!(waiting_on(a_while, chat.running()), " · nothing from the model for 1m30s");
+        assert_eq!(
+            waiting_on(a_while, chat.running(), patience),
+            " · nothing from the model for 1m30s of 20m00s"
+        );
 
+        // A tool has a timeout of its own, so the model's would be the wrong
+        // number to put beside it.
         chat.push("tool", "  · run_command");
-        assert_eq!(waiting_on(a_while, chat.running()), " · run_command running 1m30s");
+        assert_eq!(waiting_on(a_while, chat.running(), patience), " · run_command running 1m30s");
 
         // A call that has finished is not what the turn is waiting on.
         chat.push("tool", "  · run_command ✓");
-        assert_eq!(waiting_on(a_while, chat.running()), " · nothing from the model for 1m30s");
+        assert_eq!(
+            waiting_on(a_while, chat.running(), patience),
+            " · nothing from the model for 1m30s of 20m00s"
+        );
 
         let mut waiting = Chat { heard: Some(std::time::Instant::now()), ..Chat::default() };
-        assert_eq!(waiting.silence(), "", "an ordinary pause between tokens says nothing");
+        assert_eq!(waiting.silence(patience), "", "an ordinary pause between tokens says nothing");
         waiting.heard = None;
-        assert_eq!(waiting.silence(), "", "and neither does a turn nobody started");
+        assert_eq!(waiting.silence(patience), "", "and neither does a turn nobody started");
     }
 
     /// The commands were discoverable only from `/help`, which is where you
