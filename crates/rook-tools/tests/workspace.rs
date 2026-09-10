@@ -117,3 +117,41 @@ async fn plain_parent_traversal_is_still_refused() {
     assert!(read(&ctx, "../out/secret.txt").await.is_err());
     assert!(read(&ctx, &d.outside.join("secret.txt").display().to_string()).await.is_err());
 }
+
+/// Taken from a turn that spent three tool calls and eleven thousand tokens
+/// reading one file. The model asked for `/app/backup.sh` in a workspace that
+/// held `app/backup.sh`; the refusal offered `rook -C` and a sandbox setting,
+/// and the model — which can do neither — tried `run_command`, was refused
+/// again, and finally spelled the whole absolute path.
+#[tokio::test]
+async fn a_leading_slash_is_told_from_an_attempt_to_leave_the_workspace() {
+    let d = dirs();
+    std::fs::create_dir_all(d.workspace.join("app")).unwrap();
+    std::fs::write(d.workspace.join("app/backup.sh"), "mysqldump\n").unwrap();
+    let ctx = ToolContext::new(d.workspace.clone());
+
+    // The precondition: it is refused, and refused for being outside.
+    let slipped = read(&ctx, "/app/backup.sh").await.unwrap_err().to_string();
+    assert!(slipped.contains("outside the workspace"), "{slipped}");
+    assert!(
+        slipped.contains("drop the leading slash"),
+        "the one thing the model can act on has to be in it: {slipped}"
+    );
+    let named = PathBuf::from("app").join("backup.sh");
+    assert!(slipped.contains(&named.display().to_string()), "and the path it meant: {slipped}");
+
+    // And the same path, written the way the message says, works.
+    let got = read(&ctx, "app/backup.sh").await.unwrap();
+    assert!(got.contains("mysqldump"), "the file itself, numbered as this tool numbers lines: {got}");
+
+    // A real escape is still refused as one. Suggesting `<workspace>/etc/passwd`
+    // here would read as a hint about how to get through.
+    let escape = read(&ctx, "/etc/passwd").await.unwrap_err().to_string();
+    assert!(escape.contains("outside the workspace"), "{escape}");
+    assert!(!escape.contains("drop the leading slash"), "nothing of ours is there: {escape}");
+
+    // Nor for an absolute path that names nothing anywhere: a suggestion to try
+    // it inside would be a guess, and the file is not there either.
+    let nowhere = read(&ctx, "/app/absent.sh").await.unwrap_err().to_string();
+    assert!(!nowhere.contains("drop the leading slash"), "no file to point at: {nowhere}");
+}

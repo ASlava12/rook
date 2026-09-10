@@ -247,6 +247,24 @@ impl ToolContext {
             } else {
                 format!(" (it is {} through a symlink)", real.display())
             };
+            // A leading slash is not an attempt to leave the workspace, and the
+            // reader of this message is the model. `read_file {"path":
+            // "/app/mover.py"}` in a workspace holding `app/mover.py` was
+            // answered with `rook -C` and a sandbox setting — two things a
+            // person does and a model cannot — so it went to `run_command`,
+            // was refused there for the same reason, and read the file on the
+            // third try with the whole absolute path. Three calls and eleven
+            // thousand tokens to read one file, and the one word that would
+            // have fixed it was never said.
+            if let Some(meant) = self.same_path_within(raw) {
+                return Err(ToolError::Denied(format!(
+                    "{} is outside the workspace {}, but {} is in it — paths here are relative to \
+                     the workspace, so drop the leading slash",
+                    normalized.display(),
+                    root.display(),
+                    meant.display()
+                )));
+            }
             return Err(ToolError::Denied(format!(
                 "{} is outside the workspace {}{via} — run in a workspace that contains it \
                  (`rook -C`), or set sandbox.allow_outside_workspace",
@@ -255,6 +273,36 @@ impl ToolContext {
             )));
         }
         Ok(real)
+    }
+}
+
+impl ToolContext {
+    /// The path the caller probably meant: the same one, taken as relative to
+    /// the workspace, when something is actually there.
+    ///
+    /// Only when it exists. Offering it for any absolute path would answer a
+    /// genuine escape — `/etc/passwd` — with a suggestion to try
+    /// `<workspace>/etc/passwd`, which is a worse message than the plain
+    /// refusal and reads as a hint about how to get through.
+    ///
+    /// The root is dropped by components rather than by trimming a `/`, because
+    /// what an absolute path begins with differs by platform: `C:\\app` has a
+    /// prefix as well as a root, and neither is a separator to strip.
+    fn same_path_within(&self, raw: &str) -> Option<PathBuf> {
+        let asked = PathBuf::from(raw);
+        if !asked.is_absolute() {
+            return None;
+        }
+        let relative: PathBuf = asked
+            .components()
+            .skip_while(|c| matches!(c, std::path::Component::Prefix(_) | std::path::Component::RootDir))
+            .collect();
+        if relative.as_os_str().is_empty() {
+            return None;
+        }
+        let root = normalize(&self.workspace);
+        let within = normalize(&root.join(&relative));
+        (within.starts_with(&root) && within.exists()).then_some(relative)
     }
 }
 
