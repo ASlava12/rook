@@ -170,6 +170,9 @@ pub fn why_it_stopped(stopped: &str) -> Option<String> {
     }
     Some(match stopped {
         "max_steps" => "stopped at the step limit — raise `[agent] max_steps` or narrow the task".to_string(),
+        "budget" => {
+            "stopped at the spend limit — raise `[agent] max_turn_tokens` or narrow the task".to_string()
+        }
         other => format!("the turn ended as {other:?} rather than finishing"),
     })
 }
@@ -724,6 +727,12 @@ pub struct AgentLoop<'a> {
     pub interjections: std::sync::Arc<Interjections>,
     pub depth: u32,
     pub max_steps: u32,
+    /// What is left of the turn's allowance, in tokens, its sub-agents
+    /// included. A child is given the remainder rather than a fresh one, which
+    /// is the whole point: `max_steps` is inherited whole, so nine errands are
+    /// nine times the bound, and this is the bound that cannot be multiplied.
+    /// 0 lifts it.
+    pub max_turn_tokens: u64,
     pub effort: rook_llm::Effort,
     budget: ContextBudget,
     /// Sub-agents started so far, shared with every child so one that delegates
@@ -806,6 +815,7 @@ impl<'a> AgentLoop<'a> {
             interjections: Default::default(),
             depth: 0,
             max_steps: rook.config.agent.max_steps,
+            max_turn_tokens: rook.config.agent.max_turn_tokens,
             effort: rook.config.agent.effort(),
             budget,
             spawned: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -1101,6 +1111,37 @@ impl<'a> AgentLoop<'a> {
     /// `base_url` will accept.
     fn native_tools(&self) -> bool {
         self.rook.config.agent.native_tools && self.provider.supports_tools()
+    }
+
+    /// Whether this turn has spent its allowance, its sub-agents included.
+    ///
+    /// Input and output together, because both are billed and a turn that
+    /// writes a great deal is spending as surely as one that reads.
+    fn overspent(&self, outcome: &TurnOutcome) -> bool {
+        let spent = outcome.input_tokens as u64 + outcome.output_tokens as u64;
+        self.max_turn_tokens > 0 && spent >= self.max_turn_tokens
+    }
+
+    /// What is left of the allowance for a sub-agent to spend.
+    ///
+    /// The remainder rather than a fresh allowance: `max_steps` is inherited
+    /// whole, so nine errands are nine times that bound, and a ceiling that
+    /// multiplies is not one. A turn already at its limit hands out nothing,
+    /// which the `1` says — 0 would lift the ceiling for the child.
+    fn left_to_spend(&self, outcome: &TurnOutcome) -> u64 {
+        if self.max_turn_tokens == 0 {
+            return 0;
+        }
+        let spent = outcome.input_tokens as u64 + outcome.output_tokens as u64;
+        self.max_turn_tokens.saturating_sub(spent).max(1)
+    }
+
+    fn spend_note(&self) -> String {
+        format!(
+            "this turn has spent its allowance of {} tokens, sub-agents included — \
+             answering with what it has rather than going on",
+            self.max_turn_tokens
+        )
     }
 
     pub fn system_prompt(&self) -> String {
@@ -1766,8 +1807,10 @@ impl<'a> AgentLoop<'a> {
 
         // Built once, before the loop borrows `self` mutably: a child's future
         // takes the crew rather than the parent, which is what lets the parent
-        // go on stepping while it runs.
-        let crew = self.crew();
+        // go on stepping while it runs. The allowance it carries is what the
+        // turn had at the start, since the crew outlives every step: a child
+        // started late is bounded by its share of that rather than by nothing.
+        let crew = self.crew(self.max_turn_tokens);
         let (mut nursery, mut nursery_steps) = Nursery::new(self.rook.config.agent.max_parallel_subagents);
         let mut carrying = tokio::time::interval(std::time::Duration::from_millis(200));
 
@@ -1791,6 +1834,17 @@ impl<'a> AgentLoop<'a> {
         // that covered. See `measured`.
         let mut anchor: Option<(usize, usize)> = None;
         while outcome.steps < self.max_steps {
+            // Before the request, because the request is what costs. A turn
+            // that has reached its allowance has stopped converging, and the
+            // step count says nothing about that: a step is worth whatever the
+            // context happened to be.
+            if self.overspent(&outcome) {
+                let said = self.spend_note();
+                self.rook.log(self.session, EventKind::Note, "budget", &said).ok();
+                self.report(Reported::Open(said));
+                outcome.stopped = "budget".into();
+                break;
+            }
             outcome.steps += 1;
             on_progress(Progress::Step { at: outcome.steps, of: self.max_steps });
 
@@ -2270,7 +2324,12 @@ impl<'a> AgentLoop<'a> {
             }
         }
 
-        outcome.stopped = if stuck { "looping" } else { "max_steps" }.into();
+        // The spend ceiling names itself on the way out; the other two are told
+        // apart here. All three leave through the same door below, which is
+        // what asks the model for what it found rather than ending on a limit.
+        if outcome.stopped != "budget" {
+            outcome.stopped = if stuck { "looping" } else { "max_steps" }.into();
+        }
         // The limit is the model's, not the children's: what they were still
         // doing is waited for here as it is at the end of a turn that finished.
         let left = drain_uncollected(&mut nursery, &mut outcome).await;
@@ -2773,8 +2832,15 @@ impl<'a> AgentLoop<'a> {
         // One queue each, filled from the parent's while they run.
         let relayed: Vec<std::sync::Arc<Interjections>> = (0..total).map(|_| Default::default()).collect();
         let (doing, mut steps) = tokio::sync::mpsc::unbounded_channel::<(usize, String)>();
-        let crew = self.crew();
+        let crew = self.crew(0);
         let crew = &crew;
+        // Shared out rather than handed to each: errands of one call run at the
+        // same time, and each taking the whole remainder is the multiplication
+        // the ceiling exists to stop.
+        let each = match self.left_to_spend(outcome) {
+            0 => 0,
+            left => (left / total.max(1) as u64).max(1),
+        };
         let running: futures_util::stream::FuturesUnordered<_> = tasks
             .iter()
             .enumerate()
@@ -2785,7 +2851,8 @@ impl<'a> AgentLoop<'a> {
                 let said = relayed[i].clone();
                 async move {
                     let _permit = limit.acquire().await;
-                    (i, crew.run_subtask(task, inherited.as_deref(), max_steps, doing, i, said).await)
+                    let bounds = Bounds { steps: max_steps, tokens: each };
+                    (i, crew.run_subtask(task, inherited.as_deref(), bounds, doing, i, said).await)
                 }
             })
             .collect();
@@ -3175,7 +3242,7 @@ impl<'a> AgentLoop<'a> {
     /// Taken out of the loop rather than read from it so a child's future
     /// borrows the engine and not the parent: the parent has to keep stepping
     /// while they run, and a future holding `&self` freezes it.
-    fn crew(&self) -> Crew<'a> {
+    fn crew(&self, left_to_spend: u64) -> Crew<'a> {
         Crew {
             rook: self.rook,
             provider: self.provider.clone(),
@@ -3189,6 +3256,7 @@ impl<'a> AgentLoop<'a> {
             parent: self.session,
             depth: self.depth,
             max_steps: self.max_steps,
+            left_to_spend,
         }
     }
 
@@ -4009,6 +4077,20 @@ impl AgentLoop<'_> {
     }
 }
 
+/// What an errand may spend: steps, and its share of the turn's allowance.
+///
+/// Together because they are one question — how far this may go — and apart
+/// they were two arguments among eight, which is where a caller starts passing
+/// them in the wrong order.
+#[derive(Clone, Copy)]
+struct Bounds {
+    steps: Option<u32>,
+    /// A share rather than the whole remainder: the errands of one call run at
+    /// the same time, and each taking the remainder is the multiplication the
+    /// ceiling exists to stop.
+    tokens: u64,
+}
+
 struct Crew<'a> {
     rook: &'a Rook,
     provider: std::sync::Arc<dyn Provider>,
@@ -4022,6 +4104,9 @@ struct Crew<'a> {
     parent: u128,
     depth: u32,
     max_steps: u32,
+    /// What the turn had left to spend when the crew was assembled, shared out
+    /// among the errands it is given. 0 lifts the ceiling, as everywhere else.
+    left_to_spend: u64,
 }
 
 impl Crew<'_> {
@@ -4029,7 +4114,7 @@ impl Crew<'_> {
         &self,
         task: &str,
         inherited: Option<&str>,
-        max_steps: Option<u32>,
+        bounds: Bounds,
         doing: tokio::sync::mpsc::UnboundedSender<(usize, String)>,
         index: usize,
         said: std::sync::Arc<Interjections>,
@@ -4058,7 +4143,8 @@ impl Crew<'_> {
         // A sub-task is a bounded errand, and lower effort means fewer and more
         // consolidated tool calls rather than a worse answer.
         child.effort = rook_llm::Effort::Low;
-        child.max_steps = max_steps.unwrap_or(self.max_steps);
+        child.max_steps = bounds.steps.unwrap_or(self.max_steps);
+        child.max_turn_tokens = bounds.tokens;
 
         // Boxed because this is `run` calling itself through a tool call. The
         // channel carries only tool names, so it holds at most one short string
@@ -4098,6 +4184,7 @@ struct Nursery<'f> {
     /// Shared with the blocking path for the same reason it has one: the
     /// sub-tasks share a provider and a token budget.
     limit: std::sync::Arc<tokio::sync::Semaphore>,
+    parallel: usize,
     doing: tokio::sync::mpsc::UnboundedSender<(usize, String)>,
 }
 
@@ -4111,6 +4198,9 @@ impl<'f> Nursery<'f> {
             landed: Vec::new(),
             taken: Vec::new(),
             limit: std::sync::Arc::new(tokio::sync::Semaphore::new(parallel.max(1))),
+            // How many can be running at once, which is how the turn's
+            // remaining allowance is shared among errands started one by one.
+            parallel: parallel.max(1),
             doing,
         };
         (nursery, steps)
@@ -4131,10 +4221,18 @@ impl<'f> Nursery<'f> {
         self.landed.push(None);
         self.taken.push(false);
         let task = task.to_string();
+        // The most that can be running at once is what the remainder is shared
+        // among: started one at a time, each taking the whole of it would be
+        // the multiplication the ceiling exists to stop.
+        let share = match crew.left_to_spend {
+            0 => 0,
+            left => (left / self.parallel as u64).max(1),
+        };
         let (limit, doing) = (self.limit.clone(), self.doing.clone());
         self.running.push(Box::pin(async move {
             let _permit = limit.acquire().await;
-            (at, crew.run_subtask(&task, inherited.as_deref(), max_steps, doing, at, said).await)
+            let bounds = Bounds { steps: max_steps, tokens: share };
+            (at, crew.run_subtask(&task, inherited.as_deref(), bounds, doing, at, said).await)
         }));
         name_of(at)
     }

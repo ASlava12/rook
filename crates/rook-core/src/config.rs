@@ -185,6 +185,20 @@ pub struct AgentConfig {
     /// Past this the middle goes and the marker says how much and where the
     /// rest is. 0 carries every result whole, which is what it did before.
     pub max_replayed_result_tokens: usize,
+    /// Everything one turn may spend, its sub-agents included. 0 lifts it.
+    ///
+    /// Steps were the only bound, and they do not bound this: a sub-agent
+    /// inherits the whole step budget rather than what is left of it, so a turn
+    /// that delegates nine errands may take ten times two hundred steps. One
+    /// did. It spent 2.8M tokens itself and 2.2M across nine children — five
+    /// million on a task it had not finished — and nothing in the loop could
+    /// have stopped it, because nothing was counting against anything.
+    ///
+    /// Tokens rather than steps because tokens are the bill, and a step is
+    /// worth whatever the context happened to be. A turn that reaches this has
+    /// stopped converging; it stops and says so, with what it did so far, which
+    /// is the difference between a budget and a surprise.
+    pub max_turn_tokens: u64,
     /// Ceiling on how much of an `AGENTS.md` reaches the model, per file. It is
     /// paid for on every request and is written by whoever sends the pull
     /// request, so a repository cannot spend the context window by committing a
@@ -403,6 +417,10 @@ impl Default for AgentConfig {
             // five, so the ordinary ones are untouched, and well under the
             // three that made up more than half of one turn's context.
             max_replayed_result_tokens: 1_000,
+            // Generous enough that ordinary work never meets it — a turn is
+            // usually thousands, a long one hundreds of thousands — and low
+            // enough to halve the runaway that prompted it.
+            max_turn_tokens: 2_000_000,
             max_instructions_bytes: 32 * 1024,
             prompt_cache_ttl: "5m".into(),
         }

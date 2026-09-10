@@ -518,6 +518,11 @@ struct Chat {
     drawn: u16,
     /// Input, output and cached tokens so far in this turn.
     spent: Option<(u32, u32, u32)>,
+    /// What the newest request carried, which is the context as the provider
+    /// counted it: the cumulative figure above less what it was before this
+    /// reply. A running total was being read as the size of the context, and it
+    /// is thirty-nine steps' worth of them.
+    carried: u32,
     /// Which step of its budget the turn in flight is on. A window showing
     /// only that something is happening cannot say how much room is left, and
     /// a turn at step 190 of 200 is about to stop mid-task.
@@ -634,13 +639,33 @@ fn waiting_on(quiet: std::time::Duration, running: Option<&str>) -> String {
 
 /// Short enough for the footer, which already carries the mode, the effort and
 /// whatever the last command said.
-fn spent(totals: Option<(u32, u32, u32)>) -> String {
+///
+/// The window's share comes first because it is the question the rest of the
+/// line was being read as the answer to: `1595.2k in` beside `2.4 MiB on disk`
+/// was taken for how full the context was, when it is what thirty-nine steps
+/// have spent between them. Somebody asked whether their context had passed a
+/// million; it was at 29%.
+///
+/// The share is the newest request's own input, which the provider counted,
+/// rather than an estimate of what the next one will carry — measured beats
+/// guessed, and it is already here.
+fn spent(totals: Option<(u32, u32, u32)>, carried: u32, usable: usize) -> String {
     let Some((input, output, cached)) = totals else { return String::new() };
-    let cached = match cached {
-        0 => String::new(),
-        n => format!(" ({} cached)", thousands(n)),
+    // A percentage rather than a second large number: what is worth knowing
+    // about the cache is how much of the bill it took, not its size.
+    let cached = match (cached, input) {
+        (0, _) | (_, 0) => String::new(),
+        // Rounded, not truncated: 86.998% shown as 86 is a percentage point
+        // given away for nothing.
+        (n, all) => format!(" ({}% cached)", (n as u64 * 100 + all as u64 / 2) / all as u64),
     };
-    format!("{} in / {} out{cached}", thousands(input), thousands(output))
+    let window = match (carried, usable) {
+        (0, _) | (_, 0) => String::new(),
+        (carried, usable) => {
+            format!("ctx {}/{} · ", thousands(carried), thousands(usable.min(u32::MAX as usize) as u32))
+        }
+    };
+    format!("{window}{} in / {} out{cached}", thousands(input), thousands(output))
 }
 
 /// The tail of a path, which is what tells two projects apart in a narrow list.
@@ -889,6 +914,9 @@ struct App {
     /// setting that caps the search tool's looking. Read once, for the reason
     /// above.
     most_files: usize,
+    /// What a request may carry, so the footer can say how much of it the
+    /// newest one used. Read once with the model, for the same reason.
+    usable: usize,
     sessions: Vec<SessionSummary>,
     session_state: ListState,
     /// Every call this conversation made, newest first, with what it was given
@@ -985,6 +1013,16 @@ impl App {
             chat: Chat { history: remembered_prompts(), ..Chat::default() },
             files_here: None,
             most_files: config.sandbox.max_files_searched,
+            // Only when the window is configured. Otherwise it is the
+            // provider's to report, and a share of a guess is worse than no
+            // share at all.
+            usable: config
+                .agent
+                .context_window
+                .map(|window| {
+                    rook_core::context::ContextBudget::new(window, config.agent.compact_at).usable()
+                })
+                .unwrap_or(0),
             events,
             to_loop,
             approver: Arc::new(ChannelApprover::new(requests, patience)),
@@ -1187,7 +1225,10 @@ impl App {
                 TurnEvent::Agent(line) => self.chat.push("agent", &line),
                 TurnEvent::Step(at, of) => self.chat.step = Some((at, of)),
                 TurnEvent::ToolDone(name, failed) => self.chat.tool_done(&name, failed),
-                TurnEvent::Spent { input, output, cached } => self.chat.spent = Some((input, output, cached)),
+                TurnEvent::Spent { input, output, cached } => {
+                    self.chat.carried = input.saturating_sub(self.chat.spent.map_or(0, |(was, ..)| was));
+                    self.chat.spent = Some((input, output, cached));
+                }
                 TurnEvent::Approval(request) => self.chat.pending = Some(request),
                 TurnEvent::Ask(request) => {
                     self.chat.asking = Some(Asking {
@@ -2230,7 +2271,7 @@ impl App {
             format!("  {}/{}", self.shared.policy.stance().as_str(), self.shared.effort.get().as_str()),
             Style::default().fg(Color::DarkGray),
         ));
-        let tail = format!("  {}  {}", spent(self.chat.spent), self.status);
+        let tail = format!("  {}  {}", spent(self.chat.spent, self.chat.carried, self.usable), self.status);
         spans.push(Span::styled(tail, Style::default().fg(Color::DarkGray)));
 
         f.render_widget(
@@ -3701,6 +3742,27 @@ mod tests {
         assert_eq!(chat.log.len(), 1, "still one line: {:?}", chat.log);
         assert!(chat.log[0].1.ends_with('✓'), "{:?}", chat.log);
         assert_eq!(chat.running(), None, "and nothing is running");
+    }
+
+    /// Somebody read `1595.2k in` beside `2.4 MiB on disk` and asked whether
+    /// their context had passed a million tokens. It had not: that is what
+    /// thirty-nine steps had spent between them, and the context was at 29% of
+    /// the window. The line answered a question nobody was asking and left the
+    /// one they were.
+    #[test]
+    fn the_footer_says_how_full_the_window_is_before_what_the_turn_has_spent() {
+        let said = spent(Some((1_595_200, 24_400, 1_387_800)), 41_000, 175_000);
+        assert!(said.starts_with("ctx 41.0k/175.0k · "), "the window's share comes first: {said}");
+        assert!(said.contains("1595.2k in"), "and what the turn has spent is still there: {said}");
+        assert!(said.contains("(87% cached)"), "as a share, not a second large number: {said}");
+
+        // A window nobody configured is the provider's to report, and a share
+        // of a guess is worse than none.
+        let unknown = spent(Some((900, 20, 0)), 800, 0);
+        assert_eq!(unknown, "900 in / 20 out", "no share, and no claim about the cache either");
+
+        // Before the first reply there is nothing to report at all.
+        assert_eq!(spent(None, 0, 175_000), "");
     }
 
     /// Up walked straight into the history and set the box to the last prompt,

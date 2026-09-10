@@ -49,6 +49,44 @@ impl Provider for ScriptedProvider {
     }
 }
 
+/// A provider that reports a large bill for every reply, which is what a long
+/// context costs once a turn has been running for a while.
+struct Expensive {
+    each: u32,
+}
+
+#[async_trait]
+impl Provider for Expensive {
+    fn id(&self) -> &str {
+        "expensive/test"
+    }
+    fn context_window(&self) -> usize {
+        200_000
+    }
+    async fn complete(&self, _request: Request) -> rook_llm::Result<Response> {
+        // A real call every time, so the loop goes on stepping — a reply with
+        // nothing to run ends the turn on its own and would measure that
+        // instead.
+        Ok(Response {
+            message: Message {
+                role: Role::Assistant,
+                content: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "call_1".into(),
+                    name: "list_dir".into(),
+                    arguments: serde_json::json!({ "path": "." }),
+                }],
+                tool_call_id: None,
+                cache: false,
+                reasoning: Vec::new(),
+            },
+            stop_reason: StopReason::ToolUse,
+            usage: Usage { input_tokens: self.each, output_tokens: 10, ..Default::default() },
+            model: "expensive".into(),
+        })
+    }
+}
+
 /// A provider that says some of an answer and then breaks, which is what a
 /// dropped connection looks like from here.
 struct Breaks {
@@ -1091,6 +1129,51 @@ async fn context_usage_separates_what_is_live_from_what_is_merely_stored() {
 /// A provider that dies two paragraphs in left a session whose prompt was
 /// followed by nothing, which reads as an agent that said nothing rather than a
 /// connection that went away — and the window had shown those two paragraphs.
+/// Steps were the only bound on a turn, and steps are not the bill: one turn
+/// spent 2.8M tokens itself and 2.2M across nine sub-agents — five million on a
+/// task it never finished — because a sub-agent inherits the whole step budget
+/// rather than what is left of it, so the only bound multiplied.
+#[tokio::test]
+async fn a_turn_stops_when_it_has_spent_its_allowance_and_says_that_is_why() {
+    let f = fixture();
+    let session = f.rook.start_session("budget").unwrap();
+
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(Expensive { each: 40_000 }), session);
+    agent.allow_everything_not_denied();
+    agent.max_steps = 200;
+    agent.max_turn_tokens = 100_000;
+    let outcome = agent.run("audit everything").await.unwrap();
+
+    assert_eq!(outcome.stopped, "budget", "and not as a turn that decided it was done");
+    // The precondition, without which this passes on a turn that simply ran
+    // out of replies: it stopped well inside the step budget.
+    assert!(outcome.steps < 200, "it stopped for the money, not the steps: {}", outcome.steps);
+    assert!(
+        outcome.input_tokens as u64 >= 100_000,
+        "and only once it had spent the allowance: {}",
+        outcome.input_tokens
+    );
+    let why = rook_core::agent::why_it_stopped(&outcome.stopped).expect("a limit says what to do");
+    assert!(why.contains("max_turn_tokens"), "which knob raises it: {why}");
+}
+
+/// 0 is what it was before this existed, and a turn that has to be allowed to
+/// run all afternoon has to remain possible.
+#[tokio::test]
+async fn a_turn_with_no_allowance_set_is_bounded_only_by_its_steps() {
+    let f = fixture();
+    let session = f.rook.start_session("budget").unwrap();
+
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(Expensive { each: 40_000 }), session);
+    agent.allow_everything_not_denied();
+    agent.max_steps = 3;
+    agent.max_turn_tokens = 0;
+    let outcome = agent.run("audit everything").await.unwrap();
+
+    assert_eq!(outcome.stopped, "max_steps", "the steps are what ended it: {outcome:?}");
+    assert!(outcome.input_tokens > 100_000, "having spent past what a ceiling would have allowed");
+}
+
 #[tokio::test]
 async fn a_turn_that_broke_keeps_what_it_had_already_said() {
     let f = fixture();
