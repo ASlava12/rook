@@ -47,7 +47,12 @@ fn nothing_that_ships_can_panic_without_saying_why() {
 
     for entry in ignore::WalkBuilder::new(root.join("crates")).build().flatten() {
         let path = entry.into_path();
-        if path.extension().is_none_or(|e| e != "rs") || !path.to_string_lossy().contains("/src/") {
+        // Asked of the path rather than spelled into it: `contains("/src/")` is
+        // true of every file here and of none on Windows, where the runner read
+        // nothing at all and said so — which is the only reason this was not a
+        // test that passed by looking at an empty workspace.
+        let in_src = path.components().any(|c| c.as_os_str() == "src");
+        if path.extension().is_none_or(|e| e != "rs") || !in_src {
             continue;
         }
         let Ok(text) = std::fs::read_to_string(&path) else { continue };
