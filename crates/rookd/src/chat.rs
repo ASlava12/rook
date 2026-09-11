@@ -292,9 +292,11 @@ async fn turn(
                 Progress::Delegated { task, done, total } => {
                     ChatEvent::Reasoning { text: format!("\n  [{done}/{total}] {task}") }
                 }
-                Progress::Delegating { task, tool } => {
-                    ChatEvent::Reasoning { text: format!("\n    {task}: {tool}") }
-                }
+                // Counted from one, because the reader is a person and the
+                // first sub-agent is the first, not the zeroth.
+                Progress::Delegating { at, doing } => ChatEvent::Reasoning {
+                    text: format!("\n    {}", rook_core::calls::delegating(at, doing)),
+                },
                 Progress::ToolDone { name, failed } => ChatEvent::ToolDone { name: name.to_string(), failed },
                 Progress::Step { at, of } => ChatEvent::Step { at, of },
                 Progress::Spent { input, output, cached } => {

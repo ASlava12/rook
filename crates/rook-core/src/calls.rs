@@ -118,6 +118,18 @@ impl Running {
     }
 }
 
+/// One sub-agent's line, the same in every front end.
+///
+/// Counted from one, because the reader is a person and the first sub-agent is
+/// the first, not the zeroth. The marker goes in front so the line reads as
+/// something happening rather than as prose: what was here was
+/// `    {task}: {tool}` with the task cut to forty-eight characters, and
+/// `Find regressions and new defects in the veil-nod: write_file` was read as a
+/// sentence that had gone wrong.
+pub fn delegating(at: usize, doing: &str) -> String {
+    format!("↳ {} {doing}", at + 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,5 +248,13 @@ mod tests {
         assert_eq!(cut.chars().count(), 40, "it fills the room and no more: {cut:?}");
         assert!(cut.ends_with('…'), "and says it was cut: {cut:?}");
         assert_eq!(within("run cargo test", 40), "run cargo test", "one that fits is untouched");
+    }
+
+    /// Five front ends drew this line and all five drew it the same way, which
+    /// is five places for the answer to drift.
+    #[test]
+    fn a_sub_agents_line_is_a_number_and_a_phrase_not_a_cut_sentence() {
+        assert_eq!(delegating(0, "write veil-node/sync.rs"), "↳ 1 write veil-node/sync.rs");
+        assert_eq!(delegating(3, "read Cargo.toml"), "↳ 4 read Cargo.toml");
     }
 }

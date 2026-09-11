@@ -3492,14 +3492,16 @@ async fn a_sub_task_says_what_it_is_doing_before_it_is_done() {
     let mut doing: Vec<String> = Vec::new();
     agent
         .run_with("look", |progress| {
-            if let rook_core::agent::Progress::Delegating { task, tool } = progress {
-                doing.push(format!("{task}: {tool}"));
+            if let rook_core::agent::Progress::Delegating { at, doing: what } = progress {
+                doing.push(rook_core::calls::delegating(at, what));
             }
         })
         .await
         .unwrap();
 
-    assert_eq!(doing, ["look at a.txt: read_file"], "the parent sees the child working: {doing:?}");
+    // The phrase, not the tool's name: what the parent shows is what the child
+    // is doing, and `read_file` is only the half of that a schema knows.
+    assert_eq!(doing, ["↳ 1 read a.txt"], "the parent sees the child working: {doing:?}");
 }
 
 /// A hook that never answers must not become an approval by default. It is

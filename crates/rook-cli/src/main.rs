@@ -1046,8 +1046,8 @@ fn cmd_run(
                     let _ = writeln!(out, "\n  [{done}/{total}] {task}");
                     let _ = out.flush();
                 }
-                Progress::Delegating { task, tool } => {
-                    let _ = writeln!(out, "\n    {task}: {tool}");
+                Progress::Delegating { at, doing } => {
+                    let _ = writeln!(out, "\n    {}", rook_core::calls::delegating(at, doing));
                     let _ = out.flush();
                 }
                 Progress::ToolDone { name, failed } => {

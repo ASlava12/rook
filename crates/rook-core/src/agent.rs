@@ -453,12 +453,20 @@ pub enum Progress<'a> {
         done: usize,
         total: usize,
     },
-    /// A sub-task called a tool. Several run at once, so the task is named
+    /// A sub-task called a tool. Several run at once, so which one is said
     /// alongside: without this a delegation that takes minutes shows a counter
     /// that does not move, which reads the same as a hang.
+    ///
+    /// A number rather than the task, and a phrase rather than a tool's name.
+    /// It used to be `    {task}: {tool}`, with the task cut to forty-eight
+    /// characters — `Find regressions and new defects in the veil-nod:
+    /// write_file`, which reads as a sentence that has gone wrong rather than
+    /// as a thing being done. The task each number stands for is in the
+    /// transcript and in the calls pane; what a person watching four of these
+    /// wants from this line is that they are moving, and on what.
     Delegating {
-        task: &'a str,
-        tool: &'a str,
+        at: usize,
+        doing: &'a str,
     },
     /// A step of the turn, as it begins. What a person watching wants to know
     /// is not only that it is still going but how much of the budget is left:
@@ -1967,8 +1975,8 @@ impl<'a> AgentLoop<'a> {
             loop {
                 tokio::select! {
                     biased;
-                    Some((at, tool)) = nursery_steps.recv() => {
-                        on_progress(Progress::Delegating { task: short(&nursery.tasks[at]), tool: &tool });
+                    Some((at, doing)) = nursery_steps.recv() => {
+                        on_progress(Progress::Delegating { at, doing: &doing });
                     }
                     _ = carrying.tick() => relay(&self.interjections, &nursery.said, &mut carried),
                     Some((at, result)) = nursery.running.next(), if nursery.busy() => {
@@ -2880,8 +2888,8 @@ impl<'a> AgentLoop<'a> {
                 // both are: the children have finished and their last tool names
                 // are still in the channel.
                 biased;
-                Some((i, tool)) = steps.recv() => {
-                    on_progress(Progress::Delegating { task: short(&tasks[i]), tool: &tool });
+                Some((i, doing)) = steps.recv() => {
+                    on_progress(Progress::Delegating { at: i, doing: &doing });
                 }
                 // Said to the conversation while its work is out with the
                 // children. It reaches each of them at their next step, and is
@@ -2902,8 +2910,8 @@ impl<'a> AgentLoop<'a> {
         // Bias orders the two branches; it does not stop the last child sending
         // between the final poll and the break. Every sender is dropped by now,
         // so this drains what is left and cannot block.
-        while let Ok((i, tool)) = steps.try_recv() {
-            on_progress(Progress::Delegating { task: short(&tasks[i]), tool: &tool });
+        while let Ok((i, doing)) = steps.try_recv() {
+            on_progress(Progress::Delegating { at: i, doing: &doing });
         }
         for text in carried {
             self.interjections.say(&text);
@@ -3019,14 +3027,13 @@ impl<'a> AgentLoop<'a> {
         // showed the first forty-eight characters of the claim beside every
         // call the checker made, and the claim starts with the same sentence
         // every time.
-        self.check(&format!("checking: {}", short(claim)), claim, settles, outcome, on_progress).await.0
+        self.check(claim, settles, outcome, on_progress).await.0
     }
 
     /// The report and the verdict it carries. The report is what a model reads;
     /// the verdict is what the loop acts on when it asked the question itself.
     async fn check(
         &self,
-        what: &str,
         claim: &str,
         settles: &str,
         outcome: &mut TurnOutcome,
@@ -3057,15 +3064,14 @@ impl<'a> AgentLoop<'a> {
         let checked = loop {
             tokio::select! {
                 biased;
-                Some((_, tool)) = steps.recv() => on_progress(Progress::Delegating {
-                    task: what,
-                    tool: &tool,
-                }),
+                Some((at, doing)) = steps.recv() => {
+                    on_progress(Progress::Delegating { at, doing: &doing })
+                }
                 done = &mut running => break done,
             }
         };
-        while let Ok((_, tool)) = steps.try_recv() {
-            on_progress(Progress::Delegating { task: what, tool: &tool });
+        while let Ok((at, doing)) = steps.try_recv() {
+            on_progress(Progress::Delegating { at, doing: &doing });
         }
 
         match checked {
@@ -3186,7 +3192,7 @@ impl<'a> AgentLoop<'a> {
              something the person forbade was done — say which, and what would put it right. \
              Whether the task was worth doing is not one of the questions."
         );
-        self.check("goal check", &claim, "", outcome, on_progress).await
+        self.check(&claim, "", outcome, on_progress).await
     }
 
     async fn run_checker(
@@ -3219,9 +3225,13 @@ impl<'a> AgentLoop<'a> {
         // Enough steps to read a few files and run one command, and no more.
         child.max_steps = self.max_steps.min(CHECKER_STEPS);
 
+        // Cloned out before the closure: a phrase names a path relative to the
+        // workspace, and the closure outlives this borrow of `self`.
+        let where_it_runs = self.rook.workspace.clone();
         let mut relay = |progress: Progress<'_>| {
             if let Progress::Delta(Delta::ToolCall(call)) = progress {
-                let _ = doing.send((0, call.name.clone()));
+                let _ =
+                    doing.send((0, crate::calls::doing(&call.name, Some(&call.arguments), &where_it_runs)));
             }
         };
         let mut outcome = Box::pin(child.run_with(instruction, &mut relay)).await?;
@@ -4153,9 +4163,11 @@ impl Crew<'_> {
         // Boxed because this is `run` calling itself through a tool call. The
         // channel carries only tool names, so it holds at most one short string
         // per step the children are already bounded to.
-        let outcome = Box::pin(child.run_with(task, |progress| {
+        let where_it_runs = self.rook.workspace.clone();
+        let outcome = Box::pin(child.run_with(task, move |progress| {
             if let Progress::Delta(Delta::ToolCall(call)) = progress {
-                let _ = doing.send((index, call.name.clone()));
+                let _ = doing
+                    .send((index, crate::calls::doing(&call.name, Some(&call.arguments), &where_it_runs)));
             }
         }))
         .await?;

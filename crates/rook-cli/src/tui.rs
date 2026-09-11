@@ -2068,8 +2068,8 @@ impl App {
                         Progress::Delegated { task, done, total } => {
                             TurnEvent::Agent(format!("  [{done}/{total}] {task}"))
                         }
-                        Progress::Delegating { task, tool } => {
-                            TurnEvent::Agent(format!("    {task}: {tool}"))
+                        Progress::Delegating { at, doing } => {
+                            TurnEvent::Agent(format!("    {}", rook_core::calls::delegating(at, doing)))
                         }
                         Progress::Step { at, of } => TurnEvent::Step(at, of),
                         Progress::ToolDone { name, failed } => TurnEvent::ToolDone(name.to_string(), failed),
