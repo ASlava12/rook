@@ -211,6 +211,20 @@ pub struct AgentConfig {
     /// stopped converging; it stops and says so, with what it did so far, which
     /// is the difference between a budget and a surprise.
     pub max_turn_tokens: u64,
+    /// How long one turn may run, its sub-agents included, before it stops and
+    /// says so. 0 lifts it.
+    ///
+    /// The companion to [`Self::max_turn_tokens`] and, on a local model, the
+    /// one that matters: tokens are free there and hours are not. A turn spent
+    /// a whole night on a task it did not finish, and nothing in the loop could
+    /// have ended it — the ceiling it had was denominated in the one resource
+    /// that had stopped costing anything.
+    ///
+    /// A wall-clock deadline rather than a duration each: sub-agents run at the
+    /// same time, so a share would be either nine times the bound or nine ways
+    /// of dividing something that is not divisible. They finish by the same
+    /// moment the turn does.
+    pub max_turn_secs: u64,
     /// Ceiling on how much of an `AGENTS.md` reaches the model, per file. It is
     /// paid for on every request and is written by whoever sends the pull
     /// request, so a repository cannot spend the context window by committing a
@@ -434,6 +448,9 @@ impl Default for AgentConfig {
             // usually thousands, a long one hundreds of thousands — and low
             // enough to halve the runaway that prompted it.
             max_turn_tokens: 2_000_000,
+            // Four hours. Long enough that a night of honest work never meets it,
+            // short enough that a turn still going tomorrow is not.
+            max_turn_secs: 14_400,
             max_instructions_bytes: 32 * 1024,
             prompt_cache_ttl: "5m".into(),
         }

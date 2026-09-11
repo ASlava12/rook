@@ -87,6 +87,49 @@ impl Provider for Expensive {
     }
 }
 
+/// A provider that takes its time and never repeats itself.
+///
+/// Both matter for a clock: a turn that repeats a call is ended by the loop
+/// detector long before a second is up, and one that answers instantly spends
+/// no time at all.
+struct Slow {
+    each: std::time::Duration,
+    called: std::sync::atomic::AtomicU32,
+}
+
+#[async_trait]
+impl Provider for Slow {
+    fn id(&self) -> &str {
+        "slow/test"
+    }
+    fn context_window(&self) -> usize {
+        200_000
+    }
+    async fn complete(&self, _request: Request) -> rook_llm::Result<Response> {
+        tokio::time::sleep(self.each).await;
+        let n = self.called.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(Response {
+            message: Message {
+                role: Role::Assistant,
+                content: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: format!("call_{n}"),
+                    name: "list_dir".into(),
+                    // A different path each time, so this reads as work rather
+                    // than as the same question asked twice.
+                    arguments: serde_json::json!({ "path": format!("./{n}") }),
+                }],
+                tool_call_id: None,
+                cache: false,
+                reasoning: Vec::new(),
+            },
+            stop_reason: StopReason::ToolUse,
+            usage: Usage { input_tokens: 100, output_tokens: 10, ..Default::default() },
+            model: "slow".into(),
+        })
+    }
+}
+
 /// A provider that says some of an answer and then breaks, which is what a
 /// dropped connection looks like from here.
 struct Breaks {
@@ -1157,6 +1200,34 @@ async fn a_turn_stops_when_it_has_spent_its_allowance_and_says_that_is_why() {
     assert!(why.contains("max_turn_tokens"), "which knob raises it: {why}");
 }
 
+/// Tokens are the bill on a paid model and free on a local one, where the
+/// resource a runaway turn actually spends is the afternoon. A turn spent a
+/// whole night on a task it did not finish, and the only ceiling it had was
+/// denominated in the one thing that had stopped costing anything.
+#[tokio::test]
+async fn a_turn_stops_when_it_has_used_its_time_and_says_that_is_why() {
+    let f = fixture();
+    let session = f.rook.start_session("time").unwrap();
+
+    let slow = Slow { each: std::time::Duration::from_millis(400), called: Default::default() };
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(slow), session);
+    agent.allow_everything_not_denied();
+    agent.max_steps = 200;
+    agent.max_turn_tokens = 0;
+    agent.max_turn_secs = 1;
+    let began = std::time::Instant::now();
+    let outcome = agent.run("audit everything").await.unwrap();
+
+    assert_eq!(outcome.stopped, "time", "and not as a turn that decided it was done: {outcome:?}");
+    // The preconditions, without which this passes on a turn that ran out of
+    // replies or steps: it stopped well inside the step budget, and only once
+    // the time had actually gone.
+    assert!(outcome.steps < 200, "it stopped for the clock, not the steps: {}", outcome.steps);
+    assert!(began.elapsed() >= std::time::Duration::from_secs(1), "and not before the second was up");
+    let why = rook_core::agent::why_it_stopped(&outcome.stopped).expect("a limit says what to do");
+    assert!(why.contains("max_turn_secs"), "which knob raises it: {why}");
+}
+
 /// 0 is what it was before this existed, and a turn that has to be allowed to
 /// run all afternoon has to remain possible.
 #[tokio::test]
@@ -1168,6 +1239,7 @@ async fn a_turn_with_no_allowance_set_is_bounded_only_by_its_steps() {
     agent.allow_everything_not_denied();
     agent.max_steps = 3;
     agent.max_turn_tokens = 0;
+    agent.max_turn_secs = 0;
     let outcome = agent.run("audit everything").await.unwrap();
 
     assert_eq!(outcome.stopped, "max_steps", "the steps are what ended it: {outcome:?}");

@@ -1238,6 +1238,28 @@ what unblocks the most.
   the matrix names the CI job behind it and a test fails if that job is gone, so
   the table cannot outlive its evidence.
 
+- **What a turn may spend** — a ceiling in tokens and one in wall-clock time,
+  both counting a turn's sub-agents. Steps were the only bound and steps are not
+  the bill: one turn spent 2.8M tokens itself and 2.2M across nine children —
+  five million on a task it never finished — because a sub-agent inherits the
+  whole step budget rather than what is left of it, so the only bound
+  multiplied. `[agent] max_turn_tokens` is shared out among the errands of a
+  call; `[agent] max_turn_secs` is a deadline they share rather than divide,
+  because they run at the same time. Both name themselves on the way out, and
+  `why_it_stopped` says which knob raises which. Time is the one that matters on
+  a local model, where tokens are free and an afternoon is not. 3 tests.
+- **What a tool's answer costs on every later step** — results are stored whole
+  and replayed shortened, to `[agent] max_replayed_result_tokens`. Measured on a
+  forty-step turn before it was written: tool results were 79% of the context
+  and were re-sent on every one of those steps, their sizes a median of 826
+  bytes with three of 29, 13 and 13 KiB — so a ceiling touches the few that are
+  large and leaves the many that are not, and that turn went from 32,379 tokens
+  a step to 20,265. Deterministic rather than by recency, because a prompt cache
+  is a prefix match and rewriting an older message breaks everything behind it.
+  The cache is counted too: `cached_tokens` comes back from both the streaming
+  and non-streaming paths, so the footer can say how much of a bill the cache
+  took rather than only how large the bill was.
+
 ## Measured against a live model
 
 Everything below was found by running Rook against a local 27B model in LM

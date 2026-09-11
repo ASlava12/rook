@@ -173,6 +173,7 @@ pub fn why_it_stopped(stopped: &str) -> Option<String> {
         "budget" => {
             "stopped at the spend limit — raise `[agent] max_turn_tokens` or narrow the task".to_string()
         }
+        "time" => "stopped at the time limit — raise `[agent] max_turn_secs` or narrow the task".to_string(),
         other => format!("the turn ended as {other:?} rather than finishing"),
     })
 }
@@ -741,6 +742,15 @@ pub struct AgentLoop<'a> {
     /// nine times the bound, and this is the bound that cannot be multiplied.
     /// 0 lifts it.
     pub max_turn_tokens: u64,
+    /// How long this turn may run. 0 lifts it.
+    pub max_turn_secs: u64,
+    /// The moment this turn stops, set when it starts and inherited by every
+    /// sub-agent unchanged.
+    ///
+    /// An instant rather than a duration, because sub-agents run at the same
+    /// time: they finish by the moment the turn does, and a duration each would
+    /// be the multiplication that made the step budget useless.
+    by: Option<std::time::Instant>,
     pub effort: rook_llm::Effort,
     budget: ContextBudget,
     /// Sub-agents started so far, shared with every child so one that delegates
@@ -824,6 +834,8 @@ impl<'a> AgentLoop<'a> {
             depth: 0,
             max_steps: rook.config.agent.max_steps,
             max_turn_tokens: rook.config.agent.max_turn_tokens,
+            max_turn_secs: rook.config.agent.max_turn_secs,
+            by: None,
             effort: rook.config.agent.effort(),
             budget,
             spawned: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -1142,6 +1154,19 @@ impl<'a> AgentLoop<'a> {
         }
         let spent = outcome.input_tokens as u64 + outcome.output_tokens as u64;
         self.max_turn_tokens.saturating_sub(spent).max(1)
+    }
+
+    /// Whether this turn has run out of time.
+    fn out_of_time(&self) -> bool {
+        self.by.is_some_and(|by| std::time::Instant::now() >= by)
+    }
+
+    fn time_note(&self) -> String {
+        format!(
+            "this turn has used its {} seconds, sub-agents included — answering with what it \
+             has rather than going on",
+            self.max_turn_secs
+        )
     }
 
     fn spend_note(&self) -> String {
@@ -1793,6 +1818,13 @@ impl<'a> AgentLoop<'a> {
         // flight. Only the turn a person asked for: a sub-agent's session ends
         // with its parent's, and two explanations of one death read as two.
         let _running = (self.depth == 0).then(|| crate::service::Running::marked(self.session));
+        // Set here and not in `new`: a front end builds the loop and may hold
+        // it before there is a prompt, and what is being bounded is the turn.
+        // Only at the top, because a sub-agent is given the parent's and a
+        // fresh one each would be the multiplication this exists to stop.
+        if self.depth == 0 && self.by.is_none() && self.max_turn_secs > 0 {
+            self.by = Some(std::time::Instant::now() + std::time::Duration::from_secs(self.max_turn_secs));
+        }
         if let Some(context) = gate.context() {
             self.rook.log(self.session, EventKind::Note, "hook", &context)?;
         }
@@ -1855,6 +1887,15 @@ impl<'a> AgentLoop<'a> {
                 self.rook.log(self.session, EventKind::Note, "budget", &said).ok();
                 self.report(Reported::Open(said));
                 outcome.stopped = "budget".into();
+                break;
+            }
+            // And the other ceiling, which on a local model is the only one
+            // that costs: tokens are free there and an afternoon is not.
+            if self.out_of_time() {
+                let said = self.time_note();
+                self.rook.log(self.session, EventKind::Note, "time", &said).ok();
+                self.report(Reported::Open(said));
+                outcome.stopped = "time".into();
                 break;
             }
             outcome.steps += 1;
@@ -2336,10 +2377,10 @@ impl<'a> AgentLoop<'a> {
             }
         }
 
-        // The spend ceiling names itself on the way out; the other two are told
-        // apart here. All three leave through the same door below, which is
+        // The two ceilings name themselves on the way out; the other two are
+        // told apart here. All four leave through the same door below, which is
         // what asks the model for what it found rather than ending on a limit.
-        if outcome.stopped != "budget" {
+        if !matches!(outcome.stopped.as_str(), "budget" | "time") {
             outcome.stopped = if stuck { "looping" } else { "max_steps" }.into();
         }
         // The limit is the model's, not the children's: what they were still
@@ -2863,7 +2904,7 @@ impl<'a> AgentLoop<'a> {
                 let said = relayed[i].clone();
                 async move {
                     let _permit = limit.acquire().await;
-                    let bounds = Bounds { steps: max_steps, tokens: each };
+                    let bounds = Bounds { steps: max_steps, by: self.by, tokens: each };
                     (i, crew.run_subtask(task, inherited.as_deref(), bounds, doing, i, said).await)
                 }
             })
@@ -3271,6 +3312,7 @@ impl<'a> AgentLoop<'a> {
             depth: self.depth,
             max_steps: self.max_steps,
             left_to_spend,
+            by: self.by,
         }
     }
 
@@ -4099,6 +4141,9 @@ impl AgentLoop<'_> {
 #[derive(Clone, Copy)]
 struct Bounds {
     steps: Option<u32>,
+    /// The turn's deadline, passed down unchanged: every sub-agent of a turn
+    /// finishes by the moment the turn does.
+    by: Option<std::time::Instant>,
     /// A share rather than the whole remainder: the errands of one call run at
     /// the same time, and each taking the remainder is the multiplication the
     /// ceiling exists to stop.
@@ -4121,6 +4166,8 @@ struct Crew<'a> {
     /// What the turn had left to spend when the crew was assembled, shared out
     /// among the errands it is given. 0 lifts the ceiling, as everywhere else.
     left_to_spend: u64,
+    /// The turn's deadline, which every child of it shares rather than divides.
+    by: Option<std::time::Instant>,
 }
 
 impl Crew<'_> {
@@ -4159,6 +4206,7 @@ impl Crew<'_> {
         child.effort = rook_llm::Effort::Low;
         child.max_steps = bounds.steps.unwrap_or(self.max_steps);
         child.max_turn_tokens = bounds.tokens;
+        child.by = bounds.by;
 
         // Boxed because this is `run` calling itself through a tool call. The
         // channel carries only tool names, so it holds at most one short string
@@ -4245,9 +4293,11 @@ impl<'f> Nursery<'f> {
             left => (left / self.parallel as u64).max(1),
         };
         let (limit, doing) = (self.limit.clone(), self.doing.clone());
+        // Read before the move: every child of a turn shares its deadline.
+        let by = crew.by;
         self.running.push(Box::pin(async move {
             let _permit = limit.acquire().await;
-            let bounds = Bounds { steps: max_steps, tokens: share };
+            let bounds = Bounds { steps: max_steps, by, tokens: share };
             (at, crew.run_subtask(&task, inherited.as_deref(), bounds, doing, at, said).await)
         }));
         name_of(at)
