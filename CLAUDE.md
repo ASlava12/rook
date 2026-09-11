@@ -269,6 +269,24 @@ reads as a broken client and is a scheduler — the tell is that every test in t
 file failed identically. Serially each gets the machine and the file still
 finishes in seconds.
 
+**Code that ships does not panic.** `panic = "abort"` is set for release, so a
+panic anywhere in `rookd` ends the whole daemon and every turn it was holding,
+without a word in any session — the process is gone before the loop can write
+one. That happened: a turn a thousand steps deep stopped mid-sentence, and all
+that was left of the reason was an address in a crash report, because the
+spawned daemon's stderr went to `/dev/null`. Surviving a panic costs a quarter
+of both binaries, measured; not having one costs a rule.
+`nothing_that_ships_can_panic_without_saying_why` is that rule: no `.unwrap()`,
+`panic!`, `todo!` or `unimplemented!` under any `src/`, and `expect` and
+`unreachable!` only with a message, which is the whole of what makes them
+acceptable. The five that were there were five unmade decisions, not
+inevitabilities — a poisoned lock is read through with
+`unwrap_or_else(|e| e.into_inner())`, a serialisation that cannot fail falls
+back instead of asserting, and a daemon that cannot install a signal handler
+says so and keeps running. Slicing a `&str` by a computed byte index is the same
+class of bug and is already answered by `at_boundary`, `boundary_at_or_after`
+and `char_boundary_at_or_before`; use them rather than an index.
+
 ## Storage changes
 
 - Bump `FORMAT_VERSION` in `crates/rook-store/src/schema.rs` for any change older

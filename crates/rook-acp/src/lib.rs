@@ -106,7 +106,7 @@ where
                 let replied = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 // Read out of the lock before the spawn: a guard living to the
                 // end of the statement would travel into the task with it.
-                let effort = *settings.effort.read().unwrap();
+                let effort = *settings.effort.read().unwrap_or_else(|e| e.into_inner());
                 turn = Some(Turn {
                     id: id.clone(),
                     replied: replied.clone(),
@@ -159,7 +159,7 @@ struct Settings {
 
 impl Settings {
     fn describe(&self) -> serde_json::Value {
-        protocol::config_options(self.policy.stance(), *self.effort.read().unwrap())
+        protocol::config_options(self.policy.stance(), *self.effort.read().unwrap_or_else(|e| e.into_inner()))
     }
 
     fn set(&self, id: &str, value: &str) -> Result<(), Error> {
@@ -172,7 +172,7 @@ impl Settings {
             "effort" => {
                 let effort = rook_llm::Effort::parse(value)
                     .ok_or_else(|| Error::invalid_params(format!("no effort {value:?}")))?;
-                *self.effort.write().unwrap() = effort;
+                *self.effort.write().unwrap_or_else(|e| e.into_inner()) = effort;
             }
             other => return Err(Error::invalid_params(format!("no setting {other:?}"))),
         }

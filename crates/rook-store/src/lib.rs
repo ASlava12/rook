@@ -202,8 +202,11 @@ impl Store {
                     "format": FORMAT_VERSION,
                     "created_at": now_unix(),
                 });
-                std::fs::write(&path, serde_json::to_vec_pretty(&body).unwrap())
-                    .map_err(|e| StoreError::io(&path, e))
+                // `to_string_pretty` over a map of a number and a timestamp
+                // has no failing case, and an empty file would be a store that
+                // reads as a different format rather than as a missing one.
+                let written = serde_json::to_vec_pretty(&body).unwrap_or_default();
+                std::fs::write(&path, written).map_err(|e| StoreError::io(&path, e))
             }
             Err(e) => Err(StoreError::io(&path, e)),
         }

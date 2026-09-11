@@ -385,11 +385,24 @@ async fn shutdown(state: Arc<AppState>) {
     let asked = async { state.stopping.notified().await };
     #[cfg(unix)]
     {
-        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = term.recv() => {}
-            _ = asked => {}
+        // A handler that cannot be installed is not worth the process: `stop`
+        // over the API and ctrl-c both still end it, and dying here would end
+        // it in the one way that leaves every turn unfinished.
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                    _ = asked => {}
+                }
+            }
+            Err(e) => {
+                tracing::warn!("no SIGTERM handler ({e}); `rook daemon stop` and ctrl-c still work");
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = asked => {}
+                }
+            }
         }
     }
     #[cfg(not(unix))]
