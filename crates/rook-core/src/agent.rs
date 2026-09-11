@@ -1781,6 +1781,10 @@ impl<'a> AgentLoop<'a> {
         }
 
         self.rook.log(self.session, EventKind::UserMessage, "", prompt)?;
+        // From here until the turn ends, this session is marked as having one in
+        // flight. Only the turn a person asked for: a sub-agent's session ends
+        // with its parent's, and two explanations of one death read as two.
+        let _running = (self.depth == 0).then(|| crate::service::Running::marked(self.session));
         if let Some(context) = gate.context() {
             self.rook.log(self.session, EventKind::Note, "hook", &context)?;
         }

@@ -163,6 +163,9 @@ impl Rook {
         let config = Config::load()?;
         let mut store = Store::open(paths::store_dir())?;
         store.set_level(config.storage.compression_level);
+        // After the lock and before anything reads a transcript: the store takes
+        // one writer, so a marker still here belongs to a process that is gone.
+        say_what_interrupted(&store, &paths::running_dir());
         let (plugins, plugin_errors) = crate::plugins::discover(&workspace);
         let (skills, mut skill_errors) = Self::discover_skills(&workspace, &plugins);
         skill_errors.extend(plugin_errors);
@@ -2098,9 +2101,108 @@ fn skill_template(name: &str, description: &str, env: &Environment) -> String {
     )
 }
 
+/// A turn in flight, as a file that outlives the process running it.
+///
+/// Removed by `Drop`, and that is the whole mechanism: `panic = "abort"` is set
+/// for release, so unwinding never happens and `Drop` never runs when the
+/// process aborts. A marker left behind therefore means exactly one thing —
+/// this turn's process did not get to the end of it — and it is equally true of
+/// a `kill`, which is the other way a turn ends with nothing written.
+pub struct Running(std::path::PathBuf);
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+impl Running {
+    /// Mark `session` as having a turn in flight. Failing to write the marker
+    /// costs the explanation next time and nothing now, so it is not an error.
+    pub fn marked(session: u128) -> Self {
+        let path = paths::running_dir().join(format!("{session:032x}"));
+        let _ = std::fs::create_dir_all(paths::running_dir());
+        let _ =
+            std::fs::write(&path, format!("pid {}\nsince {}\n", std::process::id(), rook_store::now_unix()));
+        Self(path)
+    }
+}
+
+/// Write into every session whose turn was still running when its process died.
+///
+/// The session is where a person looks, and it was the one place that said
+/// nothing: a daemon aborted at 00:24 and the turn it was running stopped
+/// mid-sentence with no note, no partial answer and no reason — the loop was
+/// gone before it could write one. This is written by the next process to open
+/// the store, which is the earliest anybody can say it.
+fn say_what_interrupted(store: &Store, running: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(running) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+        let Ok(session) = u128::from_str_radix(name, 16) else { continue };
+        let held = std::fs::read_to_string(&path).unwrap_or_default();
+        let since = held
+            .lines()
+            .find_map(|line| line.strip_prefix("since ")?.trim().parse::<i64>().ok())
+            .map(|at| format!(", which had been running since {at} (unix)"))
+            .unwrap_or_default();
+        let said = format!(
+            "The process running this turn ended before the turn did{since} — it was killed, or \
+             it crashed. Nothing above this was written by the loop finishing; it stops where the \
+             process stopped. What that process said last, a panic included, is at the end of \
+             {}.",
+            paths::logs_dir().join("rook.log").display()
+        );
+        let event = rook_store::NewEvent::new(
+            rook_store::EventKind::Note,
+            rook_store::Kind::Message,
+            said.as_bytes(),
+        )
+        .label("interrupted");
+        let _ = store.append_event(session, event);
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A turn a thousand steps deep stopped mid-sentence and its session said
+    /// nothing about why, because the daemon aborted and the loop was gone
+    /// before it could write a word. The next process to open the store is the
+    /// earliest anybody can say so, and it is said where a person looks.
+    #[test]
+    fn a_turn_whose_process_died_says_so_in_its_own_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let session = rook_store::new_session_id();
+        let meta = SessionMeta::new(session, "audit", "/tmp/ws".to_string(), rook_store::now_unix());
+        store.create_session(&meta).unwrap();
+        let running = dir.path().join("running");
+        std::fs::create_dir_all(&running).unwrap();
+        std::fs::write(running.join(format!("{session:032x}")), "pid 4242\nsince 1789000000\n").unwrap();
+
+        say_what_interrupted(&store, &running);
+
+        let events = store.events(session, 0, usize::MAX).unwrap();
+        let note = events.last().expect("the session has the note");
+        let said = String::from_utf8_lossy(&store.get(&note.record.body).unwrap()).to_string();
+        assert_eq!(note.record.label, "interrupted", "labelled as what it is: {said}");
+        assert!(said.contains("ended before the turn did"), "it says what happened: {said}");
+        assert!(said.contains("1789000000"), "and since when it had been running: {said}");
+        assert!(said.contains("rook.log"), "and where the reason is: {said}");
+
+        // Said once. The marker is gone, so opening the store again is silent.
+        assert!(!running.join(format!("{session:032x}")).exists(), "the marker is spent");
+        say_what_interrupted(&store, &running);
+        assert_eq!(
+            store.events(session, 0, usize::MAX).unwrap().len(),
+            events.len(),
+            "a second open must not repeat it"
+        );
+    }
 
     fn unprobed(dir: &Path) -> Rook {
         let (skills, _) = SkillIndex::discover(&[]);

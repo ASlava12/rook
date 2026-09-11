@@ -75,6 +75,15 @@ pub fn logs_dir() -> PathBuf {
     home().join("logs")
 }
 
+/// One file per turn in flight, removed when the turn ends.
+///
+/// Outside the store on purpose: the store takes one writer, and what is kept
+/// here has to outlive that writer's death. A file left behind is a turn whose
+/// process did not get to finish it.
+pub fn running_dir() -> PathBuf {
+    home().join("running")
+}
+
 /// Where a skill source is kept between searches, so asking twice does not
 /// fetch twice. Nothing here is authoritative — deleting it costs a download.
 pub fn sources_cache() -> PathBuf {
@@ -121,8 +130,8 @@ pub fn ensure_dirs() -> std::io::Result<()> {
 
 /// Everything the agent keeps, in one list, so the two questions asked of it —
 /// create these, and check these — cannot come to different answers.
-pub fn state_dirs() -> [PathBuf; 5] {
-    [home(), store_dir(), user_skills_dir(), logs_dir(), servers_dir()]
+pub fn state_dirs() -> [PathBuf; 6] {
+    [home(), store_dir(), user_skills_dir(), logs_dir(), servers_dir(), running_dir()]
 }
 
 /// State directories any other account on this machine can read, with the mode

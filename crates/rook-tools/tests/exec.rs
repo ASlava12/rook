@@ -109,7 +109,15 @@ async fn both_ends_survive_truncation_and_the_middle_goes() {
     assert!(out.content.contains("THE_END"), "a run says how it ended at the tail");
     assert!(out.content.contains("elided from the middle"), "{}", &out.content[..200]);
     assert!(!out.content.contains("line 2000\n"), "the middle is what goes");
-    assert!(out.content.len() <= 700, "the budget still holds: {} bytes", out.content.len());
+    // Measured on the output, which is what the budget governs — not on the
+    // advisories appended after it. `[whole output: …]` carries a temp path, and
+    // the one that says a command left something running is two hundred
+    // characters and fires under load: this asserted on all three together and
+    // failed at 828 bytes on a loaded runner, which reads as a broken cap and
+    // was a lingering subshell.
+    let output = out.content.split("\n[whole output:").next().unwrap_or(&out.content);
+    let output = output.split("\n(").next().unwrap_or(output);
+    assert!(output.len() <= 700, "the budget still holds: {} bytes", output.len());
 }
 
 #[tokio::test]
