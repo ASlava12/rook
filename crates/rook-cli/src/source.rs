@@ -843,9 +843,18 @@ fn asked_about(workspace: Option<std::path::PathBuf>) -> std::path::PathBuf {
 /// Start `rookd` beside this binary, detached, and say where it came from.
 ///
 /// Beside rather than on the `PATH`: the two are installed together and a
-/// second `rookd` from somewhere else would open a different store. Its own
-/// output goes nowhere — it logs to `$ROOK_HOME/logs`, and a line printed into
-/// a terminal a TUI is drawing in is a line that corrupts the screen.
+/// second `rookd` from somewhere else would open a different store. Its output
+/// does not come back here — a line printed into a terminal a TUI is drawing in
+/// is a line that corrupts the screen — but it goes to the log rather than to
+/// nowhere.
+///
+/// Stderr in particular. `panic = "abort"` is set for release, so a panic on
+/// any worker takes the whole daemon and every turn it was holding, and the one
+/// line that says which panic it was is printed by the runtime on stderr and
+/// nowhere else — not through `tracing`, so the log file never saw it. One did:
+/// a daemon aborted at 00:24, a turn a thousand steps deep stopped mid-sentence
+/// with nothing written in its session, and all that was left of the reason was
+/// a stripped address in a crash report.
 fn start_daemon(on_port: Option<u16>) -> Option<(std::process::Child, String)> {
     let beside = rookd_beside_us()?;
     let mut command = std::process::Command::new(&beside);
@@ -858,7 +867,21 @@ fn start_daemon(on_port: Option<u16>) -> Option<(std::process::Child, String)> {
         .args(["--port", &on_port.unwrap_or(0).to_string()])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stderr(
+            match rook_core::telemetry::open_log(
+                &paths::logs_dir(),
+                rook_core::Config::load().map(|c| c.telemetry.max_log_bytes).unwrap_or(u64::MAX),
+            ) {
+                // The same file `tracing` writes to, so what the daemon says is in
+                // one place. A tracing line is written to both and so appears
+                // twice, which at the default `warn` is a line a month and is the
+                // price of the panic that explains a crash being kept at all.
+                Some(log) => std::process::Stdio::from(log),
+                // A log that cannot be opened is not a reason to refuse to start,
+                // which is the rule the log itself follows.
+                None => std::process::Stdio::null(),
+            },
+        );
     // Its own process group, so ctrl-c in this terminal is this window's to
     // handle and does not take the engine every other window is using.
     #[cfg(unix)]
