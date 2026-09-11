@@ -286,11 +286,15 @@ impl ToolContext {
     /// refusal and reads as a hint about how to get through.
     ///
     /// The root is dropped by components rather than by trimming a `/`, because
-    /// what an absolute path begins with differs by platform: `C:\\app` has a
+    /// what a rooted path begins with differs by platform: `C:\\app` has a
     /// prefix as well as a root, and neither is a separator to strip.
     fn same_path_within(&self, raw: &str) -> Option<PathBuf> {
         let asked = PathBuf::from(raw);
-        if !asked.is_absolute() {
+        // `has_root`, not `is_absolute`: on Windows an absolute path needs a
+        // drive as well as a root, so `/app/mover.py` — the very shape this is
+        // here to catch — is not absolute there, and the Windows runner found
+        // this message never firing at all. Rooted is the question being asked.
+        if !asked.has_root() {
             return None;
         }
         let relative: PathBuf = asked

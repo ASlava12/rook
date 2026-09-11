@@ -130,7 +130,9 @@ async fn a_leading_slash_is_told_from_an_attempt_to_leave_the_workspace() {
     std::fs::write(d.workspace.join("app/backup.sh"), "mysqldump\n").unwrap();
     let ctx = ToolContext::new(d.workspace.clone());
 
-    // The precondition: it is refused, and refused for being outside.
+    // `/app/backup.sh` on both: it is what a model actually writes, and on
+    // Windows it is rooted without being absolute — which is how this was
+    // found, by the message never firing there at all.
     let slipped = read(&ctx, "/app/backup.sh").await.unwrap_err().to_string();
     assert!(slipped.contains("outside the workspace"), "{slipped}");
     assert!(
