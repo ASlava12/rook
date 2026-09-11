@@ -2142,13 +2142,18 @@ fn say_what_interrupted(store: &Store, running: &std::path::Path) {
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
         let Ok(session) = u128::from_str_radix(name, 16) else { continue };
         let held = std::fs::read_to_string(&path).unwrap_or_default();
-        let since = held
+        // The pid, not the time it started: a unix stamp in prose is a number
+        // nobody can read, and the time this stopped is the event above this
+        // one. A pid is what ties the three records together — this note, the
+        // lines it wrote in the log, and the crash report the operating system
+        // files under that number.
+        let pid = held
             .lines()
-            .find_map(|line| line.strip_prefix("since ")?.trim().parse::<i64>().ok())
-            .map(|at| format!(", which had been running since {at} (unix)"))
+            .find_map(|line| line.strip_prefix("pid ").map(|n| n.trim().to_string()))
+            .map(|pid| format!(" (pid {pid})"))
             .unwrap_or_default();
         let said = format!(
-            "The process running this turn ended before the turn did{since} — it was killed, or \
+            "The process running this turn{pid} ended before the turn did — it was killed, or \
              it crashed. Nothing above this was written by the loop finishing; it stops where the \
              process stopped. What that process said last, a panic included, is at the end of \
              {}.",
@@ -2191,7 +2196,7 @@ mod tests {
         let said = String::from_utf8_lossy(&store.get(&note.record.body).unwrap()).to_string();
         assert_eq!(note.record.label, "interrupted", "labelled as what it is: {said}");
         assert!(said.contains("ended before the turn did"), "it says what happened: {said}");
-        assert!(said.contains("1789000000"), "and since when it had been running: {said}");
+        assert!(said.contains("pid 4242"), "and which process, to tie it to the log: {said}");
         assert!(said.contains("rook.log"), "and where the reason is: {said}");
 
         // Said once. The marker is gone, so opening the store again is silent.
