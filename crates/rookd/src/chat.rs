@@ -99,8 +99,13 @@ async fn serve(
     let writer = tokio::spawn(write_frames(sink, queued));
 
     let patience = engine.read().await.config.agent.answer_timeout();
+    // A question waits longer than an approval, and for the opposite reason:
+    // an unanswered approval is denied and nothing was changed, while a turn
+    // that stops on an unanswered question throws away everything it did to
+    // reach it.
+    let deciding = engine.read().await.config.agent.decide_alone_after();
     let (approver, relay) = approver(outbound.clone(), patience);
-    let (asker, ask_relay) = asker(outbound.clone(), patience);
+    let (asker, ask_relay) = asker(outbound.clone(), deciding);
     // What this browser has typed mid-turn, which is per connection — unlike
     // the servers and the background commands in `shared`, which belong to the
     // project and outlive any one socket.

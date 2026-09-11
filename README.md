@@ -612,6 +612,18 @@ rules, whichever front end asks.
 By default the agent asks before anything that changes the machine, and refuses
 outright what the deny list forbids — no approval can override a denial:
 
+An approval and a question are bounded differently, because being unanswered
+means different things. An approval nobody answers is denied: the work stops
+and nothing was changed, which is the safe end of a wait. A question is asked
+because the decision is real, and a turn that stops on one throws away
+everything it did to reach the point of asking — so after `[agent]
+decide_alone_after_secs`, half an hour by default, the turn takes it back:
+it weighs the options it offered against each other, chooses the one that best
+serves the goal, and says in its reply which it chose and what it weighed, so
+whoever was away can see what was decided for them and change it. It does not
+put the same question again; one turn once spent a hundred and ninety-four
+steps doing that.
+
 ```toml
 [sandbox]
 stance = "assist"                  # readonly | assist | autonomous

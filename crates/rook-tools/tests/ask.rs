@@ -94,11 +94,30 @@ async fn answers_come_back_next_to_the_questions_they_answer() {
     assert_eq!(out, "Which target?\n  prod\n\nMigrate first?\n  yes");
 }
 
+/// A question nobody answered leaves the turn somewhere, and where it leaves it
+/// used to be nowhere: `(skipped)` and not another word. The turn could stop —
+/// throwing away everything it did to reach the point of asking — or ask again,
+/// which one did a hundred and ninety-four times.
 #[tokio::test]
-async fn a_skipped_question_says_so_rather_than_reading_as_an_empty_answer() {
+async fn a_question_nobody_answered_is_handed_back_to_the_turn_to_decide() {
     let tool = ask_tool(vec![vec![]]);
     let out = call(&tool, serde_json::json!({"questions": [{"question": "Which target?"}]})).await.unwrap();
-    assert_eq!(out, "Which target?\n  (skipped)");
+
+    assert!(out.contains("Which target?"), "the question it is about: {out}");
+    assert!(out.contains("(unanswered)"), "and that nobody answered it: {out}");
+    assert!(out.contains("yours to decide"), "the turn does not stop on it: {out}");
+    assert!(out.contains("asking again"), "and does not put it a second time: {out}");
+    assert!(out.contains("weigh"), "it is decided by weighing what was offered: {out}");
+    assert!(out.contains("say in your reply which you chose"), "and said out loud: {out}");
+}
+
+/// And not said when there is nothing to decide: a turn that got its answers
+/// pays none of those words.
+#[tokio::test]
+async fn an_answered_question_carries_none_of_the_advice_for_an_unanswered_one() {
+    let tool = ask_tool(vec![vec!["prod"]]);
+    let out = call(&tool, serde_json::json!({"questions": [{"question": "Which target?"}]})).await.unwrap();
+    assert_eq!(out, "Which target?\n  prod");
 }
 
 #[tokio::test]

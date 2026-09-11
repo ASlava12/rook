@@ -1055,7 +1055,7 @@ impl App {
             events,
             to_loop,
             approver: Arc::new(ChannelApprover::new(requests, patience)),
-            asker: Arc::new(ChannelAsker::new(questions, patience)),
+            asker: Arc::new(ChannelAsker::new(questions, config.agent.decide_alone_after())),
             shared: crate::chat::Session {
                 policy: rook_core::agent::policy_for(&config),
                 effort: std::cell::Cell::new(config.agent.effort()),

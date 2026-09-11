@@ -331,6 +331,7 @@ async fn prompt(
         peer: peer.clone(),
         session: request.session_id.clone(),
         patience: rook.config.agent.answer_timeout(),
+        deciding: rook.config.agent.decide_alone_after(),
     });
     agent.approver = editor.clone();
     agent.ask_via(editor);
@@ -502,6 +503,9 @@ struct EditorApprover {
     peer: Arc<Peer>,
     session: String,
     patience: std::time::Duration,
+    /// How long a question waits, which is longer than an approval does: a
+    /// denial is safe and a turn abandoned mid-way is not.
+    deciding: std::time::Duration,
 }
 
 #[async_trait]
@@ -589,7 +593,7 @@ impl EditorApprover {
 
         let picked = self
             .peer
-            .request_within("session/request_permission", params, Some(self.patience))
+            .request_within("session/request_permission", params, Some(self.deciding))
             .await
             .filter(|a| a.pointer("/outcome/outcome").and_then(|o| o.as_str()) == Some("selected"))
             .and_then(|a| a.pointer("/outcome/optionId")?.as_str()?.parse::<usize>().ok())

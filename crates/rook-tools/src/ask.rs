@@ -163,18 +163,44 @@ fn parse(args: &serde_json::Value) -> Result<Vec<Question>> {
     Ok(questions)
 }
 
+/// What a question that went unanswered leaves the turn to do.
+///
+/// Paid only in the turn that has one, which is why it is here and not in the
+/// tool's description, where it would be advertised on every request.
+///
+/// Three things, and the first is the one that cost the most: **do not ask it
+/// again.** A turn once spent a hundred and ninety-four steps putting the same
+/// question to a tab nobody was reading. The second is that stopping is not
+/// the safe option it looks like — an approval nobody answers is denied and
+/// nothing was changed, but a question is asked because the decision is real,
+/// and a turn that stops on one throws away everything it did to reach the
+/// point of asking. The third is that a decision taken in somebody's absence
+/// has to be visible when they come back, or they cannot disagree with it.
+const DECIDE_IT: &str = "Nobody answered in the time a question waits, so these are now yours \
+to decide, and asking again would only spend the turn. Take each unanswered one: weigh the \
+options you offered against each other — what each gains, what it costs, and what it would take \
+to undo — and choose the one that best serves the goal you were given. Then say in your reply \
+which you chose and what you weighed, so that whoever was away can see what was decided for them \
+and change it.";
+
 fn render(answers: &[Answer]) -> String {
     if answers.is_empty() {
         return "The user answered nothing.".into();
     }
-    answers
+    let said = answers
         .iter()
         .map(|a| match a.chosen.as_slice() {
-            [] => format!("{}\n  (skipped)", a.question),
+            [] => format!("{}\n  (unanswered)", a.question),
             chosen => format!("{}\n  {}", a.question, chosen.join("\n  ")),
         })
         .collect::<Vec<_>>()
-        .join("\n\n")
+        .join("\n\n");
+    // A question the user skipped and one the deadline passed on leave the
+    // turn in the same place, so they are told the same thing.
+    match answers.iter().any(|a| a.chosen.is_empty()) {
+        true => format!("{said}\n\n{DECIDE_IT}"),
+        false => said,
+    }
 }
 
 /// What a front end is being asked to put to the user.

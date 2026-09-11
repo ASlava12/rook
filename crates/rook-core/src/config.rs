@@ -155,6 +155,18 @@ pub struct AgentConfig {
     /// terminal would otherwise hold the turn, and the store's write lock with
     /// it, for as long as the process lives.
     pub answer_timeout_secs: u64,
+    /// How long a question put to the person waits before the agent answers it
+    /// itself.
+    ///
+    /// Longer than [`Self::answer_timeout_secs`] and for the opposite reason.
+    /// An approval that nobody answers is denied, and a denial is safe: the
+    /// work stops and nothing was changed. A question is the other way round —
+    /// it is asked because the decision is real, and a turn that stops on one
+    /// has thrown away everything it did to reach it. So the question waits
+    /// long enough for somebody to come back from lunch, and if nobody does,
+    /// the agent weighs what it listed and takes the best of it, saying which
+    /// and why rather than proceeding quietly.
+    pub decide_alone_after_secs: u64,
     /// The model that condenses a span when the context fills, where it should
     /// not be the one doing the work. Summarising is mechanical: it reads a
     /// transcript and writes a paragraph, and a model chosen for judgement
@@ -411,6 +423,7 @@ impl Default for AgentConfig {
             max_skill_cards: 50,
             stream_idle_timeout_secs: 90,
             answer_timeout_secs: 600,
+            decide_alone_after_secs: 1800,
             compaction_model: String::new(),
             max_reasoning_tokens: 800,
             // Four kilobytes or so: above the median result by a factor of
@@ -516,6 +529,10 @@ impl AgentConfig {
 
     pub fn answer_timeout(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.answer_timeout_secs)
+    }
+
+    pub fn decide_alone_after(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.decide_alone_after_secs)
     }
 
     pub fn stream_idle(&self) -> std::time::Duration {
