@@ -1114,6 +1114,7 @@ mod tests {
             started_at: std::time::SystemTime::now(),
             turns: std::sync::atomic::AtomicU32::new(0),
             oldest_turn: std::sync::Mutex::new(None),
+            live: Default::default(),
             stopping: tokio::sync::Notify::new(),
         });
         Fixture { _home: home, _workspace: workspace, router: router(state.clone()), state, session }
@@ -1167,6 +1168,52 @@ mod tests {
         let (status, body) = post(&f, "/api/shutdown", serde_json::json!({})).await;
         assert_eq!(status, StatusCode::OK, "with nothing running there is nothing to weigh: {body}");
         assert_eq!(body["turns_interrupted"], 0);
+    }
+
+    /// A turn outlives the window that asked for it, so the registry that holds
+    /// them accumulates — and a daemon that runs for a week would hold the tail
+    /// of every turn it ever ran. Finished ones go, oldest first; a running one
+    /// never does, whatever the pressure.
+    #[tokio::test]
+    async fn the_registry_forgets_finished_turns_and_never_a_running_one() {
+        let f = fixture();
+        let (said, _) = tokio::sync::broadcast::channel(4);
+        let (to_turn, _held) = tokio::sync::mpsc::unbounded_channel();
+        let running = |finished: bool| {
+            let (approver, relay) = crate::chat::approver(to_turn.clone(), std::time::Duration::from_secs(1));
+            let (asker, ask_relay) = crate::chat::asker(to_turn.clone(), std::time::Duration::from_secs(1));
+            std::sync::Arc::new(crate::chat::Live::for_test(
+                match finished {
+                    true => tokio::spawn(std::future::ready(())),
+                    false => tokio::spawn(std::future::pending()),
+                },
+                vec![relay, ask_relay],
+                said.clone(),
+                approver,
+                asker,
+            ))
+        };
+
+        let kept_alive = 1u128;
+        f.state.remember(kept_alive, running(false)).await;
+        // Finished turns, more of them than the registry keeps.
+        for id in 2..40u128 {
+            f.state.remember(id, running(true)).await;
+        }
+        // A task spawned and not yet polled is not finished, and eviction is
+        // about the ones that are — so the scheduler gets its turn first.
+        for _ in 0..10_000 {
+            if f.state.live.read().await.values().filter(|l| !l.running()).count() >= 30 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        // One more, to evict now that the finished ones have finished.
+        f.state.remember(99, running(true)).await;
+
+        let live = f.state.live.read().await;
+        assert!(live.len() <= 16, "bounded, and the bound was reached: {}", live.len());
+        assert!(live.contains_key(&kept_alive), "a running turn is never forgotten");
     }
 
     /// A count says something is happening and cannot say whether it still is.

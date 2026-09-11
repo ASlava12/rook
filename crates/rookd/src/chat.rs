@@ -98,39 +98,38 @@ async fn serve(
     // concurrently, and a socket has a single writer.
     let writer = tokio::spawn(write_frames(sink, queued));
 
-    let patience = engine.read().await.config.agent.answer_timeout();
-    // A question waits longer than an approval, and for the opposite reason:
-    // an unanswered approval is denied and nothing was changed, while a turn
-    // that stops on an unanswered question throws away everything it did to
-    // reach it.
-    let deciding = engine.read().await.config.agent.decide_alone_after();
-    let (approver, relay) = approver(outbound.clone(), patience);
-    let (asker, ask_relay) = asker(outbound.clone(), deciding);
-    // What this browser has typed mid-turn, which is per connection — unlike
-    // the servers and the background commands in `shared`, which belong to the
-    // project and outlive any one socket.
-    let interjections: Arc<rook_core::agent::Interjections> = Default::default();
     // Settings are cheap and wanted before the first prompt, so they are not in
     // the cell with the expensive things.
     let settings = Arc::new(Settings::new(&*engine.read().await));
     let _ = outbound.send(settings.describe());
-    let mut running: Option<tokio::task::JoinHandle<()>> = None;
+
+    // Which turn this window is watching, and the task carrying it here. The
+    // turn itself is the daemon's; this is only the view of it.
+    let mut watching: Option<Watching> = None;
 
     while let Some(Ok(message)) = stream.next().await {
         let Message::Text(text) = message else { continue };
         let Ok(incoming) = serde_json::from_str::<ClientMessage>(&text) else { continue };
 
         match incoming {
-            ClientMessage::Approval { id, decision } => approver.answer(
-                &id,
-                match decision {
-                    ApprovalDecision::Once => Approval::Once,
-                    ApprovalDecision::ForRun => Approval::ForRun,
-                    ApprovalDecision::KindForRun => Approval::KindForRun,
-                    ApprovalDecision::Deny => Approval::declined(),
-                },
-            ),
-            ClientMessage::Answers { id, answers } => asker.answer(&id, answers),
+            ClientMessage::Approval { id, decision } => {
+                if let Some(live) = attached(&state, &watching).await {
+                    live.approver.answer(
+                        &id,
+                        match decision {
+                            ApprovalDecision::Once => Approval::Once,
+                            ApprovalDecision::ForRun => Approval::ForRun,
+                            ApprovalDecision::KindForRun => Approval::KindForRun,
+                            ApprovalDecision::Deny => Approval::declined(),
+                        },
+                    );
+                }
+            }
+            ClientMessage::Answers { id, answers } => {
+                if let Some(live) = attached(&state, &watching).await {
+                    live.asker.answer(&id, answers);
+                }
+            }
             ClientMessage::Setting { name, value } => {
                 let _ = match settings.set(&name, &value) {
                     Ok(()) => outbound.send(settings.describe()),
@@ -138,20 +137,49 @@ async fn serve(
                 };
             }
             ClientMessage::Cancel => {
-                if let Some(handle) = running.take() {
-                    handle.abort();
+                let Some(session) = watching.as_ref().map(|w| w.session) else { continue };
+                if let Some(live) = state.live.write().await.remove(&session) {
+                    live.stop();
                     // The browser only leaves its working state on Done or
                     // Error; aborting silently leaves it stuck forever.
                     let _ = outbound.send(ChatEvent::Cancelled);
                 }
             }
+            ClientMessage::Attach { session } => {
+                let Some(id) = rook_store::parse_session_id(&session) else {
+                    let _ = outbound.send(ChatEvent::Error { message: format!("no session {session:?}") });
+                    continue;
+                };
+                let live = state.live.read().await.get(&id).cloned();
+                let running = live.as_ref().is_some_and(|l| l.running());
+                let _ = outbound.send(ChatEvent::Attached { session, running });
+                if let Some(live) = live {
+                    watching = Some(watch(&live, id, outbound.clone(), watching));
+                }
+            }
             ClientMessage::Prompt { session, text } => {
-                // Typed while a turn runs, it goes to the turn: the browser had
-                // to wait or cancel, and cancelling loses everything the turn
-                // had done to say one sentence to it.
-                if running.as_ref().is_some_and(|h| !h.is_finished()) {
-                    interjections.say(&text);
+                let id = match session.as_deref().and_then(rook_store::parse_session_id) {
+                    Some(id) => Some(id),
+                    None if session.is_some() => None,
+                    None => match engine.read().await.start_session("") {
+                        Ok(id) => Some(id),
+                        Err(e) => {
+                            report(&outbound, e.to_string());
+                            continue;
+                        }
+                    },
+                };
+                let Some(id) = id else {
+                    report(&outbound, format!("no session {:?}", session.unwrap_or_default()));
+                    continue;
+                };
+                // Typed while that session's turn runs, it goes to the turn:
+                // the window had to wait or cancel, and cancelling loses
+                // everything the turn had done to say one sentence to it.
+                if let Some(live) = state.live.read().await.get(&id).filter(|l| l.running()).cloned() {
+                    live.interjections.say(&text);
                     let _ = outbound.send(ChatEvent::Interjected { text });
+                    watching = Some(watch(&live, id, outbound.clone(), watching));
                     continue;
                 }
                 // Before the turn, because a setting changed while the daemon
@@ -160,39 +188,152 @@ async fn serve(
                 if let Some(said) = state.config_if_changed().await {
                     let _ = outbound.send(ChatEvent::Text { text: format!("({said})\n") });
                 }
-                // Counted while it runs: a daemon asked to stop should say
-                // what stopping would interrupt rather than find out after.
-                let counted = state.turn_started();
-                let running_turn = turn(
-                    engine.clone(),
-                    Connection {
-                        approver: approver.clone(),
-                        asker: asker.clone(),
-                        settings: settings.clone(),
-                        interjections: interjections.clone(),
-                    },
-                    shared.clone(),
-                    outbound.clone(),
-                    session,
-                    text,
-                );
-                running = Some(tokio::spawn(async move {
-                    // Dropped with the future, so a cancelled turn stops being
-                    // counted where it stops running.
-                    let _counted = counted;
-                    running_turn.await;
-                }));
+                let live = begin(&state, &engine, &shared, &settings, id, text).await;
+                watching = Some(watch(&live, id, outbound.clone(), watching));
+                state.remember(id, live).await;
             }
         }
     }
 
-    if let Some(handle) = running {
-        handle.abort();
+    // The window is gone; the turn is not. Only the view of it ends here —
+    // which is the whole point: an hour of work used to end with a closed tab.
+    if let Some(watching) = watching {
+        watching.carrying.abort();
     }
-    relay.abort();
-    ask_relay.abort();
     drop(outbound);
     let _ = writer.await;
+}
+
+/// A window's view of one live turn.
+struct Watching {
+    session: u128,
+    carrying: tokio::task::JoinHandle<()>,
+}
+
+/// The live turn this window is watching, if it is still registered.
+async fn attached(state: &Arc<AppState>, watching: &Option<Watching>) -> Option<Arc<Live>> {
+    let session = watching.as_ref()?.session;
+    state.live.read().await.get(&session).cloned()
+}
+
+/// Carry one turn's events to one window: what it missed, then the rest.
+///
+/// Replaces whatever this window was watching before, so a window that moves
+/// between sessions does not end up with two turns writing into it.
+fn watch(
+    live: &Arc<Live>,
+    session: u128,
+    to_window: mpsc::UnboundedSender<ChatEvent>,
+    previous: Option<Watching>,
+) -> Watching {
+    if let Some(previous) = previous {
+        previous.carrying.abort();
+    }
+    let (mut coming, missed) = live.join();
+    let carrying = tokio::spawn(async move {
+        for event in missed {
+            if to_window.send(event).is_err() {
+                return;
+            }
+        }
+        loop {
+            match coming.recv().await {
+                Ok(event) => {
+                    if to_window.send(event).is_err() {
+                        return;
+                    }
+                }
+                // Behind by more than the channel holds. The turn is fine and
+                // this window is not: say so rather than silently skipping,
+                // because a gap in a transcript reads as work that never
+                // happened.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                    let text = format!("\n[{missed} events not shown — this window fell behind]\n");
+                    if to_window.send(ChatEvent::Text { text }).is_err() {
+                        return;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    });
+    Watching { session, carrying }
+}
+
+/// Start a turn that belongs to the daemon.
+async fn begin(
+    state: &Arc<AppState>,
+    engine: &Arc<tokio::sync::RwLock<rook_core::Rook>>,
+    shared: &Arc<tokio::sync::OnceCell<Shared>>,
+    settings: &Arc<Settings>,
+    session: u128,
+    prompt: String,
+) -> Arc<Live> {
+    let patience = engine.read().await.config.agent.answer_timeout();
+    // A question waits longer than an approval, and for the opposite reason:
+    // an unanswered approval is denied and nothing was changed, while a turn
+    // that stops on an unanswered question throws away everything it did to
+    // reach it.
+    let deciding = engine.read().await.config.agent.decide_alone_after();
+
+    // What the turn writes into. One receiver, which fans it out to every
+    // window attached and to the backlog for the next one.
+    let (from_turn, mut events) = mpsc::unbounded_channel::<ChatEvent>();
+    let (approver, relay) = approver(from_turn.clone(), patience);
+    let (asker, ask_relay) = asker(from_turn.clone(), deciding);
+    let interjections: Arc<rook_core::agent::Interjections> = Default::default();
+
+    let (said, _) = tokio::sync::broadcast::channel::<ChatEvent>(BROADCAST);
+    let backlog: Arc<std::sync::Mutex<std::collections::VecDeque<ChatEvent>>> = Default::default();
+    let fan = {
+        let (said, backlog) = (said.clone(), backlog.clone());
+        tokio::spawn(async move {
+            while let Some(event) = events.recv().await {
+                {
+                    let mut kept = backlog.lock().unwrap_or_else(|e| e.into_inner());
+                    if kept.len() >= BACKLOG {
+                        kept.pop_front();
+                    }
+                    kept.push_back(event.clone());
+                }
+                // An error here is nobody attached, which is ordinary now.
+                let _ = said.send(event);
+            }
+        })
+    };
+
+    // Counted while it runs: a daemon asked to stop should say what stopping
+    // would interrupt rather than find out after.
+    let counted = state.turn_started();
+    let running_turn = turn(
+        engine.clone(),
+        Connection {
+            approver: approver.clone(),
+            asker: asker.clone(),
+            settings: settings.clone(),
+            interjections: interjections.clone(),
+        },
+        shared.clone(),
+        from_turn,
+        session,
+        prompt,
+    );
+    let task = tokio::spawn(async move {
+        // Dropped with the future, so a cancelled turn stops being counted
+        // where it stops running.
+        let _counted = counted;
+        running_turn.await;
+    });
+
+    Arc::new(Live {
+        task,
+        helpers: vec![relay, ask_relay, fan],
+        said,
+        backlog,
+        approver,
+        asker,
+        interjections,
+    })
 }
 
 /// How long one frame may take to reach a client before the socket counts as
@@ -229,6 +370,91 @@ where
 
 /// What the connection gives a turn: who answers its questions, and what the
 /// user has set for the rest of the session.
+/// A turn the daemon is running, and everything a window needs to join it.
+///
+/// The turn used to be a `JoinHandle` held by one socket, aborted when that
+/// socket closed. An hour of work ended with a window and nothing said why —
+/// and there was no way to leave a turn running and come back to it, which is
+/// the thing a long turn most needs.
+///
+/// It is here instead, and a window is a view. What the turn says goes to
+/// everyone attached and into a bounded backlog for whoever attaches next; the
+/// approver and the asker belong to the turn, so a question put while nobody
+/// was watching is still there to answer when somebody is.
+pub struct Live {
+    /// Aborting this is what `Cancel` means, and the only thing that ends a
+    /// turn early. A window closing is a window closing.
+    task: tokio::task::JoinHandle<()>,
+    /// The relays and the fan-out, which have nothing to do once the turn is
+    /// gone and would otherwise outlive it as tasks nobody can reach.
+    helpers: Vec<tokio::task::JoinHandle<()>>,
+    said: tokio::sync::broadcast::Sender<ChatEvent>,
+    /// What was said before anyone attached, oldest first.
+    ///
+    /// Bounded, like everything else that accumulates here: a turn that runs
+    /// for an hour with no window open would otherwise hold every token it
+    /// produced. Past the bound the oldest go, because the end of a turn is
+    /// what somebody joining it wants.
+    backlog: Arc<std::sync::Mutex<std::collections::VecDeque<ChatEvent>>>,
+    approver: Arc<ChannelApprover>,
+    asker: Arc<ChannelAsker>,
+    interjections: Arc<rook_core::agent::Interjections>,
+}
+
+/// Enough to read the end of a long turn, and far short of holding all of one.
+const BACKLOG: usize = 2_000;
+
+/// How far behind a window may fall before it is told rather than quietly
+/// skipped. A delta is a few words, so this is a paragraph or two of slack for
+/// a tab the browser has throttled.
+const BROADCAST: usize = 4_096;
+
+impl Live {
+    /// Assembled from parts, so the registry's own bookkeeping can be asked
+    /// about without starting a turn to ask it.
+    #[doc(hidden)]
+    pub fn for_test(
+        task: tokio::task::JoinHandle<()>,
+        helpers: Vec<tokio::task::JoinHandle<()>>,
+        said: tokio::sync::broadcast::Sender<ChatEvent>,
+        approver: Arc<ChannelApprover>,
+        asker: Arc<ChannelAsker>,
+    ) -> Self {
+        Self {
+            task,
+            helpers,
+            said,
+            backlog: Default::default(),
+            approver,
+            asker,
+            interjections: Default::default(),
+        }
+    }
+
+    pub fn running(&self) -> bool {
+        !self.task.is_finished()
+    }
+
+    /// Everything said so far, then everything said from now on.
+    ///
+    /// Subscribed before the backlog is read, so an event that lands between
+    /// the two is seen twice rather than not at all — a repeated line is a
+    /// blemish and a missing one is a turn that looks stuck.
+    fn join(&self) -> (tokio::sync::broadcast::Receiver<ChatEvent>, Vec<ChatEvent>) {
+        let live = self.said.subscribe();
+        let missed = self.backlog.lock().unwrap_or_else(|e| e.into_inner()).iter().cloned().collect();
+        (live, missed)
+    }
+
+    /// End the turn and everything that was carrying it.
+    fn stop(&self) {
+        self.task.abort();
+        for helper in &self.helpers {
+            helper.abort();
+        }
+    }
+}
+
 #[derive(Clone)]
 struct Connection {
     approver: Arc<ChannelApprover>,
@@ -242,19 +468,14 @@ async fn turn(
     connection: Connection,
     shared: Arc<tokio::sync::OnceCell<Shared>>,
     outbound: mpsc::UnboundedSender<ChatEvent>,
-    session: Option<String>,
+    session: u128,
     prompt: String,
 ) {
     // Owned so the guard outlives this task's spawn point.
     let rook = engine.read_owned().await;
-
-    let session = match session.as_deref().and_then(rook_store::parse_session_id) {
-        Some(id) => id,
-        None => match rook.start_session("") {
-            Ok(id) => id,
-            Err(e) => return report(&outbound, e.to_string()),
-        },
-    };
+    // Resolved by the caller, because the daemon has to register the turn
+    // under its session before it starts one — a turn that names itself after
+    // it is already running cannot be joined while it does so.
     let _ = outbound.send(ChatEvent::Started { session: rook_store::format_session_id(session) });
 
     let provider = match rook_llm::from_spec_with(
@@ -401,7 +622,7 @@ impl Settings {
 }
 
 /// Relays the agent's questions to the browser and routes the answers back.
-fn asker(
+pub(crate) fn asker(
     outbound: mpsc::UnboundedSender<ChatEvent>,
     patience: std::time::Duration,
 ) -> (Arc<ChannelAsker>, tokio::task::JoinHandle<()>) {
@@ -422,7 +643,7 @@ fn asker(
 }
 
 /// Relays approval requests to the browser and routes the answers back.
-fn approver(
+pub(crate) fn approver(
     outbound: mpsc::UnboundedSender<ChatEvent>,
     patience: std::time::Duration,
 ) -> (Arc<ChannelApprover>, tokio::task::JoinHandle<()>) {
@@ -473,6 +694,78 @@ mod settings_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A live turn with nothing actually running in it, to ask the questions a
+    /// window joining one asks.
+    fn parked(said: tokio::sync::broadcast::Sender<ChatEvent>) -> Live {
+        let (to_turn, _held) = mpsc::unbounded_channel::<ChatEvent>();
+        let (approver, relay) = approver(to_turn.clone(), std::time::Duration::from_secs(1));
+        let (asker, ask_relay) = asker(to_turn, std::time::Duration::from_secs(1));
+        Live {
+            task: tokio::spawn(std::future::pending()),
+            helpers: vec![relay, ask_relay],
+            said,
+            backlog: Default::default(),
+            approver,
+            asker,
+            interjections: Default::default(),
+        }
+    }
+
+    fn text(what: &str) -> ChatEvent {
+        ChatEvent::Text { text: what.to_string() }
+    }
+
+    /// A window that joins a turn already running has to be given what it
+    /// missed, or it shows a turn that is halfway through something and looks
+    /// as if it started there. And what it missed is bounded: a turn running
+    /// for an hour with nobody watching would otherwise hold every token.
+    #[tokio::test]
+    async fn joining_a_running_turn_gives_what_was_missed_and_then_the_rest() {
+        let (said, _) = tokio::sync::broadcast::channel::<ChatEvent>(16);
+        let live = parked(said.clone());
+
+        // Said before anybody was watching.
+        for i in 0..3 {
+            let event = text(&format!("before {i}"));
+            let mut kept = live.backlog.lock().unwrap();
+            kept.push_back(event);
+        }
+
+        let (mut coming, missed) = live.join();
+        assert_eq!(missed.len(), 3, "everything said before the window arrived");
+        assert!(matches!(&missed[0], ChatEvent::Text { text } if text == "before 0"), "oldest first");
+
+        let _ = said.send(text("after"));
+        let next = coming.recv().await.expect("and then what happens next");
+        assert!(matches!(&next, ChatEvent::Text { text } if text == "after"));
+
+        assert!(live.running(), "a turn nobody is watching is still running");
+        live.stop();
+        // The task is aborted, which the runtime completes at the next yield.
+        tokio::task::yield_now().await;
+        assert!(!live.running(), "and `Cancel` is the thing that ends it");
+    }
+
+    /// The backlog is what a window joining late reads, so it keeps the end of
+    /// the turn rather than the start of it.
+    #[test]
+    fn the_backlog_keeps_the_end_of_a_turn_rather_than_all_of_it() {
+        let backlog: std::sync::Mutex<std::collections::VecDeque<ChatEvent>> = Default::default();
+        for i in 0..BACKLOG + 50 {
+            let mut kept = backlog.lock().unwrap();
+            if kept.len() >= BACKLOG {
+                kept.pop_front();
+            }
+            kept.push_back(text(&format!("{i}")));
+        }
+        let kept = backlog.lock().unwrap();
+        assert_eq!(kept.len(), BACKLOG, "bounded, and reached — or this proves nothing");
+        assert!(
+            matches!(kept.back(), Some(ChatEvent::Text { text }) if text == &format!("{}", BACKLOG + 49)),
+            "the newest is the one kept"
+        );
+    }
 
     /// A sink that accepts a frame and then never finishes another, which is
     /// what a socket whose reader has stopped does once the buffer fills.

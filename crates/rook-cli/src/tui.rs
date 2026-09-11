@@ -802,6 +802,18 @@ impl Chat {
         }
     }
 
+    /// A turn is under way, whether this window started it or joined it.
+    ///
+    /// The clocks start now and not when the turn did: what they answer is
+    /// "has it stopped", and a window that has been watching for four seconds
+    /// cannot say more than that.
+    fn began(&mut self) {
+        self.busy = true;
+        self.since = Some(std::time::Instant::now());
+        self.step = None;
+        self.heard = self.since;
+    }
+
     /// A turn is over, however it ended.
     ///
     /// The window stops waiting and forgets where to send answers, so a key
@@ -1294,6 +1306,19 @@ impl App {
             ChatEvent::Started { session } => {
                 self.chat.session = rook_store::parse_session_id(&session);
             }
+            // Joined a turn this window did not start. Said out loud: a window
+            // that opens onto a session and finds it already working looks,
+            // for a second, like a window answering something you did not ask.
+            ChatEvent::Attached { session, running } => {
+                self.chat.session = rook_store::parse_session_id(&session);
+                match running {
+                    true => {
+                        self.chat.push("stat", "[joined a turn already running here]");
+                        self.chat.began();
+                    }
+                    false => self.chat.push("stat", "[nothing is running in this session]"),
+                }
+            }
             ChatEvent::Text { text } => self.chat.push("text", &text),
             ChatEvent::Reasoning { text } => self.chat.push("think", &text),
             ChatEvent::Tool { name, doing } => {
@@ -1695,9 +1720,31 @@ impl App {
     /// second window is another client of it rather than a second copy that
     /// cannot exist.
     fn send_to_daemon(&mut self, prompt: String) {
-        let Some(base) = self.source.daemon_base().map(|b| b.to_string()) else {
+        let opening = ClientMessage::Prompt {
+            session: self.chat.session.map(rook_store::format_session_id),
+            text: prompt,
+        };
+        // On the socket this window already has, if it has one: attaching to a
+        // session opens one before there is a prompt, and a second socket would
+        // be a second view of the same daemon arguing with the first.
+        if let Some(say) = &self.chat.remote {
+            let _ = say.send(opening);
+            return;
+        }
+        if !self.talk_to_daemon(opening) {
             self.chat.busy = false;
-            return self.chat.push("err", "no daemon to run this");
+        }
+    }
+
+    /// Open a socket to the daemon and say one thing on it.
+    ///
+    /// `false` when there is no daemon to say it to. Everything after the
+    /// opening message arrives as events, which is why this does not wait for
+    /// an answer: the loop reads them like any other.
+    fn talk_to_daemon(&mut self, opening: ClientMessage) -> bool {
+        let Some(base) = self.source.daemon_base().map(|b| b.to_string()) else {
+            self.chat.push("err", "no daemon to run this");
+            return false;
         };
         let (say, mut outgoing) = mpsc::unbounded_channel::<ClientMessage>();
         let (heard, mut incoming) = mpsc::unbounded_channel::<ChatEvent>();
@@ -1714,10 +1761,7 @@ impl App {
             name: "effort".into(),
             value: self.shared.effort.get().as_str().to_string(),
         });
-        let _ = say.send(ClientMessage::Prompt {
-            session: self.chat.session.map(rook_store::format_session_id),
-            text: prompt,
-        });
+        let _ = say.send(opening);
         self.chat.remote = Some(say);
 
         let to_loop = self.to_loop.clone();
@@ -1734,6 +1778,7 @@ impl App {
                 fail(&to_loop, e.to_string());
             }
         }));
+        true
     }
 
     /// The files the mention being typed names, best first — and nothing at
@@ -1868,6 +1913,20 @@ impl App {
                 }
             ),
         );
+        // And join whatever the daemon is running there. A turn belongs to the
+        // daemon, so a session switched to may already be working — and a
+        // window that showed its transcript and none of its progress was the
+        // half of this that made switching useless.
+        let joining = ClientMessage::Attach { session: rook_store::format_session_id(id) };
+        match &self.chat.remote {
+            Some(say) => {
+                let _ = say.send(joining);
+            }
+            None if self.source.daemon_base().is_some() => {
+                self.talk_to_daemon(joining);
+            }
+            None => {}
+        }
         self.overlay = None;
     }
 
@@ -1983,10 +2042,7 @@ impl App {
         }
         let aside = prompt.strip_prefix("/btw ").map(|q| q.trim().to_string());
         self.chat.push("you", &prompt);
-        self.chat.busy = true;
-        self.chat.since = Some(std::time::Instant::now());
-        self.chat.step = None;
-        self.chat.heard = self.chat.since;
+        self.chat.began();
         self.chat.scroll = 0;
 
         let Some(rook) = self.source.here().cloned() else {

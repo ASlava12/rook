@@ -44,6 +44,19 @@ function setTitle() {
   document.title = state.chat.waiting ? '? rook' : state.chat.busy ? '● rook' : 'rook';
 }
 
+/// The page is watching a turn — whether it asked for one or joined one.
+///
+/// The mirror of `done`, and by the same route: the controls are found by id,
+/// because a turn can now be joined from the socket's own handler, which is
+/// nowhere near the composer that made them.
+function working() {
+  state.chat.busy = true;
+  setTitle();
+  const send = $('#send'), stop = $('#stop');
+  if (send) send.textContent = '…';
+  if (stop) stop.hidden = false;
+}
+
 function done() {
   state.chat.busy = false;
   state.chat.waiting = false;
@@ -68,6 +81,15 @@ export function connect() {
     const e = JSON.parse(event.data);
     switch (e.type) {
       case 'started': state.chat.session = e.session; state.chat.spent = null; renderPicker(); break;
+      // Joined a turn this page did not start. Said out loud either way: a
+      // page that quietly starts streaming looks like it is answering
+      // something you did not ask, and one that says nothing after asking
+      // cannot be told from a daemon that did not hear.
+      case 'attached':
+        state.chat.session = e.session;
+        renderPicker();
+        if (e.running) { say('stat', '[joined a turn already running here]'); working(); }
+        break;
       case 'text': saidByModel(e.text); break;
       case 'reasoning': say('think', e.text); break;
       // `doing` says which file, which command; a daemon older than the
@@ -126,6 +148,13 @@ export function connect() {
       default: break;
     }
   };
+  // A turn belongs to the daemon, so one may be running in this session that
+  // this page has never seen — after a reload, or after the tab was closed and
+  // opened again. Asking is how it finds out; before the turn outlived the
+  // socket there was nothing to ask about.
+  socket.addEventListener('open', () => {
+    if (state.chat.session) socket.send(JSON.stringify({ type: 'attach', session: state.chat.session }));
+  }, { once: true });
   socket.onclose = () => { say('err', 'disconnected'); done(); };
   return socket;
 }
@@ -347,10 +376,7 @@ export async function renderChat() {
     // the working state is left alone.
     if (state.chat.busy) return;
     say('you', `› ${text}`);
-    state.chat.busy = true;
-    setTitle();
-    sendButton.textContent = '…';
-    stopButton.hidden = false;
+    working();
   } }, input, sendButton, stopButton);
   // Naming a file meant knowing the path and typing it, which in a browser
   // means leaving the page to go and look. The ranking is the daemon's, so the

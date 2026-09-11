@@ -69,6 +69,13 @@ pub struct AppState {
     pub started_at: std::time::SystemTime,
     /// Turns in flight, so stopping can say what it would interrupt.
     turns: std::sync::atomic::AtomicU32,
+    /// Every turn this daemon is running or has just run, by session.
+    ///
+    /// A turn used to belong to the socket that asked for it: closing the
+    /// window aborted it, so an hour of work ended with the window and nothing
+    /// said why. It belongs here now, and a window is a view of it — one can
+    /// leave, another can join, and only `Cancel` ends it.
+    pub live: tokio::sync::RwLock<std::collections::HashMap<u128, std::sync::Arc<crate::chat::Live>>>,
     /// When the turn that has been running longest started, or `None` when
     /// none is.
     ///
@@ -122,6 +129,26 @@ impl AppState {
             *self.oldest_turn.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
         }
         Running(self.clone())
+    }
+
+    /// Keep a turn under its session, and forget the finished ones.
+    ///
+    /// Finished turns are kept on purpose: a window that opens a moment after
+    /// one ends still wants what it said, and the backlog is where that is.
+    /// Bounded, because a daemon that runs for a week would otherwise hold the
+    /// tail of every turn it ever ran — the oldest finished ones go, and a
+    /// running one is never evicted.
+    pub async fn remember(&self, session: u128, live: std::sync::Arc<crate::chat::Live>) {
+        const KEPT: usize = 16;
+        let mut live_turns = self.live.write().await;
+        live_turns.insert(session, live);
+        while live_turns.len() > KEPT {
+            let Some(oldest) = live_turns.iter().filter(|(_, l)| !l.running()).map(|(id, _)| *id).min()
+            else {
+                break;
+            };
+            live_turns.remove(&oldest);
+        }
     }
 
     pub fn turns_running(&self) -> u32 {
@@ -301,6 +328,7 @@ async fn serve() -> Result<()> {
         config_path: rook_core::paths::config_file(),
         started_at: std::time::SystemTime::now(),
         turns: std::sync::atomic::AtomicU32::new(0),
+        live: Default::default(),
         oldest_turn: std::sync::Mutex::new(None),
         stopping: tokio::sync::Notify::new(),
         started: std::time::Instant::now(),

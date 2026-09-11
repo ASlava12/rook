@@ -123,6 +123,15 @@ pub enum ClientMessage {
     },
     /// Stop the turn in flight, leaving what it already did in the log.
     Cancel,
+    /// Join a turn this daemon is already running, without starting one.
+    ///
+    /// A turn belongs to the daemon and not to the socket that asked for it, so
+    /// a window can be closed and another opened on the same session and find
+    /// the work still going. What it missed while nothing was attached comes
+    /// back first, then the rest as it happens.
+    Attach {
+        session: String,
+    },
 }
 
 /// One question on a form the agent put to the user.
@@ -153,6 +162,14 @@ pub enum ApprovalDecision {
 pub enum ChatEvent {
     Started {
         session: String,
+    },
+    /// The answer to [`ClientMessage::Attach`]: whether a turn is running in
+    /// that session, and so whether anything more is coming. A window that
+    /// asked has to know either way — silence is the one answer it cannot
+    /// tell from a turn that is thinking.
+    Attached {
+        session: String,
+        running: bool,
     },
     Text {
         text: String,
