@@ -227,8 +227,7 @@ impl Provider for Anthropic {
 
         Ok(Box::pin(async_stream::try_stream! {
             let mut bytes = response.bytes_stream();
-            let mut buffer = String::new();
-            let mut scanned = 0usize;
+            let mut frames = crate::Frames::new();
             let mut model = fallback_model;
             let mut usage = Usage::default();
             let mut stop = None;
@@ -247,15 +246,12 @@ impl Provider for Anthropic {
                     Ok(None) => break,
                     Ok(Some(chunk)) => chunk.map_err(|e| LlmError::unreachable(&endpoint, e))?,
                 };
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
-                if buffer.len() > MAX_FRAME_BYTES {
+                frames.feed(&chunk);
+                if frames.held() > MAX_FRAME_BYTES {
                     Err(LlmError::Decode("an event exceeded the frame cap".into()))?;
                 }
 
-                while let Some(offset) = buffer[scanned..].find("\n\n") {
-                    let end = scanned + offset;
-                    scanned = 0;
-                    let frame: String = buffer.drain(..end + 2).collect();
+                for frame in frames.ready() {
                     for line in frame.lines() {
                         let Some(data) = line.strip_prefix("data:") else { continue };
                         let Ok(event) = serde_json::from_str::<Event>(data.trim()) else { continue };
@@ -324,7 +320,6 @@ impl Provider for Anthropic {
                         }
                     }
                 }
-                scanned = buffer.len().saturating_sub(1);
             }
 
             // Before the calls, as the API wants them ordered, and only the

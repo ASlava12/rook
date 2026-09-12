@@ -10,6 +10,94 @@
 //! Everything here is provider-agnostic on purpose: the agent loop must never
 //! contain a branch on which vendor is answering.
 
+/// Server-sent event frames, reassembled from transport chunks.
+///
+/// One of these rather than three. Each provider had its own copy of the same
+/// dozen lines, so each carried the same two bugs, and fixing one would have
+/// left the other two to be found the same way this one was: a daemon gone,
+/// half an hour of work with it, and a session that "stopped working".
+pub(crate) struct Frames {
+    /// Whole characters, waiting for their frame to end.
+    text: String,
+    /// The tail of a chunk that is not yet a whole character.
+    partial: Vec<u8>,
+    /// How far into `text` the search for a separator has already looked.
+    scanned: usize,
+}
+
+impl Frames {
+    pub(crate) fn new() -> Self {
+        Self { text: String::new(), partial: Vec::new(), scanned: 0 }
+    }
+
+    /// Takes one transport chunk.
+    ///
+    /// A character can straddle two chunks, and decoding each chunk on its own
+    /// with `from_utf8_lossy` turned the two halves into two replacement
+    /// characters — so a model streaming Russian lost a letter wherever the
+    /// network happened to cut. Bytes are held until they are a whole
+    /// character; at most three ever are, since a UTF-8 sequence is at most
+    /// four long.
+    pub(crate) fn feed(&mut self, chunk: &[u8]) {
+        self.partial.extend_from_slice(chunk);
+        // Until the end, not once: a chunk can hold a bad byte and then a
+        // kilobyte of perfectly good text, and stopping at the bad byte left
+        // the rest of it sitting in `partial` where nothing would ever read it.
+        // Each turn of this either finishes or drops at least one byte.
+        loop {
+            let e = match std::str::from_utf8(&self.partial) {
+                Ok(all) => {
+                    self.text.push_str(all);
+                    self.partial.clear();
+                    return;
+                }
+                Err(e) => e,
+            };
+            let whole = e.valid_up_to();
+            self.text.push_str(&String::from_utf8_lossy(&self.partial[..whole]));
+            match e.error_len() {
+                // A truncated character: the next chunk finishes it.
+                None => {
+                    self.partial.drain(..whole);
+                    return;
+                }
+                // Not UTF-8 at all. Held, it would stall the stream forever
+                // waiting for a byte that cannot make it valid.
+                Some(bad) => {
+                    self.text.push(char::REPLACEMENT_CHARACTER);
+                    self.partial.drain(..whole + bad);
+                }
+            }
+        }
+    }
+
+    /// How much is being held, for the caller's frame cap.
+    pub(crate) fn held(&self) -> usize {
+        self.text.len()
+    }
+
+    /// The frames that are now complete, in order.
+    ///
+    /// The separator is searched for in bytes, because that is what it is. As
+    /// text it panicked: the search resumes one byte back from the end of the
+    /// last chunk, to catch a `\n\n` split across two of them, and one byte back
+    /// from a Cyrillic letter is inside it — `start byte index 8185 is not a
+    /// char boundary`. Release builds abort on a panic, so that took the whole
+    /// daemon and the turn it was running.
+    pub(crate) fn ready(&mut self) -> Vec<String> {
+        let mut done = Vec::new();
+        while let Some(offset) =
+            self.text.as_bytes()[self.scanned..].windows(2).position(|pair| pair == b"\n\n")
+        {
+            let end = self.scanned + offset;
+            self.scanned = 0;
+            done.push(self.text.drain(..end + 2).collect());
+        }
+        self.scanned = self.text.len().saturating_sub(1);
+        done
+    }
+}
+
 pub mod anthropic;
 pub mod google;
 pub mod openai;
@@ -643,5 +731,64 @@ mod tests {
             Some(Duration::from_secs(MOST_PATIENCE_SECS)),
             "the ceiling itself is still an answer"
         );
+    }
+}
+
+#[cfg(test)]
+mod frames {
+    use super::Frames;
+
+    /// A character the network cut in half is neither lost nor fatal.
+    ///
+    /// Both halves of this happened at once, in production, in one panic:
+    /// `start byte index 8185 is not a char boundary; it is inside 'т'`. The
+    /// scan for the next separator resumed one byte back from the end of the
+    /// last chunk, which is inside a two-byte letter; release builds abort on a
+    /// panic, so the daemon went and the half-hour turn it was running went
+    /// with it. Underneath that, each chunk was decoded on its own, so a letter
+    /// split between two of them became two replacement characters.
+    #[test]
+    fn a_character_split_across_chunks_is_neither_lost_nor_fatal() {
+        let mut frames = Frames::new();
+        frames.feed("data: прив".as_bytes());
+        // `е` is 0xD0 0xB5, and the network stopped between them.
+        frames.feed(&[0xD0]);
+        assert!(frames.ready().is_empty(), "no separator has arrived yet");
+
+        frames.feed(&[0xB5]);
+        frames.feed("т\n\n".as_bytes());
+        assert_eq!(
+            frames.ready(),
+            vec!["data: привет\n\n".to_string()],
+            "the letter cut in half came back wrong, or the frame did not close"
+        );
+    }
+
+    /// A separator split across two chunks still ends the frame.
+    ///
+    /// Which is why the scan resumes a byte back at all, and so why the panic
+    /// above was reachable. Kept as a claim so a fix for one does not quietly
+    /// undo the other.
+    #[test]
+    fn a_separator_split_across_two_chunks_still_ends_the_frame() {
+        let mut frames = Frames::new();
+        frames.feed(b"data: one\n");
+        assert!(frames.ready().is_empty(), "half a separator is not one");
+        frames.feed(b"\ndata: two\n\n");
+        assert_eq!(frames.ready(), vec!["data: one\n\n".to_string(), "data: two\n\n".to_string()]);
+    }
+
+    /// Bytes that are not UTF-8 at all are replaced rather than held.
+    ///
+    /// Held, they would stall the stream for good, waiting for a byte that
+    /// cannot make them valid.
+    #[test]
+    fn bytes_that_are_not_a_truncated_character_do_not_stall_the_stream() {
+        let mut frames = Frames::new();
+        frames.feed(&[0xFF, 0xFE]);
+        frames.feed(b"data: ok\n\n");
+        let ready = frames.ready();
+        assert_eq!(ready.len(), 1, "the stream carried on: {ready:?}");
+        assert!(ready[0].ends_with("data: ok\n\n"), "{ready:?}");
     }
 }

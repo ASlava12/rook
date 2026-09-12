@@ -13,6 +13,12 @@ use tokio::net::TcpListener;
 
 /// Serve one request, writing `pieces` with a pause between each.
 async fn serve(pieces: Vec<&'static str>, gap: Duration, then_hang: bool) -> String {
+    serve_bytes(pieces.into_iter().map(str::as_bytes).collect(), gap, then_hang).await
+}
+
+/// The same, in bytes, so a write can end in the middle of a character. It is
+/// where the network cuts that matters here, and a `&str` cannot be cut there.
+async fn serve_bytes(pieces: Vec<&'static [u8]>, gap: Duration, then_hang: bool) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -24,7 +30,7 @@ async fn serve(pieces: Vec<&'static str>, gap: Duration, then_hang: bool) -> Str
             .await
             .unwrap();
         for piece in pieces {
-            socket.write_all(piece.as_bytes()).await.unwrap();
+            socket.write_all(piece).await.unwrap();
             socket.flush().await.unwrap();
             tokio::time::sleep(gap).await;
         }
@@ -412,4 +418,78 @@ async fn a_call_beside_a_stop_finish_reason_is_still_a_tool_use() {
     }
     assert_eq!(calls, 1);
     assert_eq!(stop, Some(StopReason::ToolUse), "the word was stop; the call decides");
+}
+
+/// A chunk that ends one byte into a Cyrillic letter does not kill the daemon.
+///
+/// It did. The scan for the next frame separator resumed one byte back from the
+/// end of the last chunk — to catch a `\n\n` split across two of them — and one
+/// byte back from a two-byte letter is inside it: `start byte index 8185 is not
+/// a char boundary; it is inside 'т'`. Release builds abort on a panic, so the
+/// whole daemon went, and the turn it had been running for half an hour went
+/// with it. Reported as "the session is not working", because from outside that
+/// is all it is.
+#[tokio::test]
+async fn a_chunk_ending_inside_a_cyrillic_letter_does_not_bring_the_stream_down() {
+    let url = serve(
+        vec![
+            // No separator yet, and the last character is two bytes wide.
+            r#"data: {"choices":[{"delta":{"content":"аудит"#,
+            r#" проектов"}}]}"#,
+            "
+
+data: [DONE]
+
+",
+        ],
+        Duration::from_millis(5),
+        false,
+    )
+    .await;
+
+    let mut stream = provider(url, Duration::from_secs(5)).stream(request()).await.unwrap();
+    let mut text = String::new();
+    while let Some(delta) = stream.next().await {
+        if let Delta::Text(t) = delta.unwrap() {
+            text.push_str(&t);
+        }
+    }
+    assert_eq!(text, "аудит проектов");
+}
+
+/// A letter cut in half by the network arrives whole.
+///
+/// Each transport chunk was decoded on its own with `from_utf8_lossy`, so the
+/// two halves of a two-byte letter became two replacement characters and the
+/// letter was destroyed — wherever the network happened to cut, every few
+/// kilobytes, in every language whose letters are not one byte wide.
+#[tokio::test]
+async fn a_letter_split_across_two_transport_chunks_arrives_whole() {
+    // `е` is 0xD0 0xB5: the write ends between the two.
+    let head = "data: {\"choices\":[{\"delta\":{\"content\":\"прив".as_bytes();
+    let split_at = [head, &[0xD0]].concat();
+    assert_eq!(
+        std::str::from_utf8(&split_at).err().map(|e| e.error_len()),
+        Some(None),
+        "the first write must end on half a letter, or this proves nothing"
+    );
+
+    let url = serve_bytes(
+        vec![
+            Box::leak(split_at.into_boxed_slice()),
+            Box::leak([&[0xB5u8][..], "т\"}}]}\n\ndata: [DONE]\n\n".as_bytes()].concat().into_boxed_slice()),
+        ],
+        Duration::from_millis(5),
+        false,
+    )
+    .await;
+
+    let mut stream = provider(url, Duration::from_secs(5)).stream(request()).await.unwrap();
+    let mut text = String::new();
+    while let Some(delta) = stream.next().await {
+        if let Delta::Text(t) = delta.unwrap() {
+            text.push_str(&t);
+        }
+    }
+    assert_eq!(text, "привет", "the letter the network cut in half came back as {text:?}");
 }

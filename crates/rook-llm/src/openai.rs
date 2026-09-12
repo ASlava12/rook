@@ -216,11 +216,7 @@ impl Provider for OpenAiCompatible {
 
         Ok(Box::pin(async_stream::try_stream! {
             let mut bytes = resp.bytes_stream();
-            let mut buffer = String::new();
-            // Where the search for a frame boundary resumes. Without it, every
-            // chunk rescans the whole buffer, which is quadratic against an
-            // endpoint that streams without ever sending a separator.
-            let mut scanned = 0usize;
+            let mut frames = crate::Frames::new();
             let mut tools = ToolCallBuffer::default();
             let mut usage = Usage::default();
             let mut model = fallback_model;
@@ -232,8 +228,8 @@ impl Provider for OpenAiCompatible {
                     Ok(None) => break,
                     Ok(Some(chunk)) => chunk.map_err(|e| LlmError::unreachable(&endpoint, e))?,
                 };
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
-                if buffer.len() > MAX_FRAME_BYTES {
+                frames.feed(&chunk);
+                if frames.held() > MAX_FRAME_BYTES {
                     Err(LlmError::Decode(format!(
                         "a single SSE frame passed {MAX_FRAME_BYTES} bytes with no separator"
                     )))?;
@@ -241,10 +237,7 @@ impl Provider for OpenAiCompatible {
 
                 // SSE frames are separated by a blank line; a frame can span
                 // several transport chunks, and a chunk can hold several frames.
-                while let Some(offset) = buffer[scanned..].find("\n\n") {
-                    let end = scanned + offset;
-                    scanned = 0;
-                    let frame: String = buffer.drain(..end + 2).collect();
+                for frame in frames.ready() {
                     for line in frame.lines() {
                         let Some(data) = line.strip_prefix("data:") else { continue };
                         let data = data.trim();
@@ -285,8 +278,6 @@ impl Provider for OpenAiCompatible {
                         }
                     }
                 }
-                // A separator can straddle two chunks, so resume one byte back.
-                scanned = buffer.len().saturating_sub(1);
             }
 
             let had_tools = !tools.is_empty();
