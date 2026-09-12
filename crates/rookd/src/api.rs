@@ -1187,7 +1187,7 @@ mod tests {
                     true => tokio::spawn(std::future::ready(())),
                     false => tokio::spawn(std::future::pending()),
                 },
-                vec![relay, ask_relay],
+                vec![relay.abort_handle(), ask_relay.abort_handle()],
                 said.clone(),
                 approver,
                 asker,

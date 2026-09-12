@@ -158,8 +158,20 @@ fn resolved(command: &str, path: &std::ffi::OsStr, exts: &str) -> std::path::Pat
         .unwrap_or_else(|| named.to_path_buf())
 }
 
+/// Long enough that a `--version` on a loaded machine is never cut off, short
+/// enough that one that will never answer does not hold the agent.
+///
+/// There was no bound at all: `output()` waits for the child, and sixteen of
+/// these run before the first turn, before `/api/health` answers, and in
+/// `doctor`. One tool that hangs — a shim waiting on a lock, an installer
+/// asking a question nobody can see — hung all of it, with nothing to say so.
+/// Read off hermes, where the same probe needed the same two things: a deadline
+/// and a kill, because giving up on a child that is still running leaves it
+/// running.
+const PATIENCE: std::time::Duration = std::time::Duration::from_secs(5);
+
 fn probe_version(probe: &Probe) -> Option<String> {
-    let out = Command::new(program(probe.command)).args(probe.args).output().ok()?;
+    let out = ran_within(Command::new(program(probe.command)).args(probe.args), PATIENCE)?;
     if !out.status.success() && out.stderr.is_empty() {
         return None;
     }
@@ -169,6 +181,36 @@ fn probe_version(probe: &Probe) -> Option<String> {
         String::from_utf8_lossy(&out.stdout).to_string()
     };
     extract_version(&text)
+}
+
+/// Run a command and give up on it, killing it rather than leaving it.
+///
+/// Polled rather than waited on a thread: this is called from a `OnceLock` on
+/// whichever thread first asks what the machine has, and a probe is a hundred
+/// milliseconds of work. Killing is the half that is easy to leave out — a
+/// deadline that only stops waiting leaves the child holding whatever it was
+/// holding, and sixteen of those is a startup that gets slower every time.
+fn ran_within(command: &mut Command, patience: std::time::Duration) -> Option<std::process::Output> {
+    let mut child = command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + patience;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return child.wait_with_output().ok(),
+            Err(_) => return None,
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                // Reaped, so the answer is not a process nobody waited for.
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    }
 }
 
 /// Pull the first `x.y[.z]` looking token out of a `--version` banner.
@@ -190,4 +232,53 @@ pub fn extract_version(text: &str) -> Option<String> {
         break;
     }
     best
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Sixteen of these run before the first turn, before `/api/health`
+    /// answers, and in `doctor` — and `output()` waits for the child however
+    /// long it takes. One tool that never answers hung all of it.
+    #[cfg(unix)]
+    #[test]
+    fn a_probe_that_will_not_answer_is_given_up_on_and_killed() {
+        let began = std::time::Instant::now();
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 30"]);
+        let out = ran_within(&mut command, std::time::Duration::from_millis(200));
+
+        assert!(out.is_none(), "a probe that did not answer answers nothing");
+        // The precondition: it gave up rather than the command being quick.
+        assert!(began.elapsed() < std::time::Duration::from_secs(5), "it gave up: {:?}", began.elapsed());
+    }
+
+    /// And the half that is easy to leave out: giving up on a child that is
+    /// still running leaves it running.
+    #[cfg(unix)]
+    #[test]
+    fn the_child_of_a_probe_that_was_given_up_on_is_gone() {
+        let marker = format!("rook-probe-{}", std::process::id());
+        let mut command = Command::new("sh");
+        command.args(["-c", &format!("sleep 30 # {marker}")]);
+        let _ = ran_within(&mut command, std::time::Duration::from_millis(200));
+
+        // `pgrep -f` matches the whole command line, which is where the marker
+        // is: a match here is a child nobody waited for.
+        let found = Command::new("pgrep").args(["-f", &marker]).output();
+        let still = found.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+        assert!(still.is_empty(), "the child outlived the probe: {still}");
+    }
+
+    /// And one that answers is still answered, or this would pass by killing
+    /// everything.
+    #[cfg(unix)]
+    #[test]
+    fn a_probe_that_answers_is_read() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "echo 1.2.3"]);
+        let out = ran_within(&mut command, std::time::Duration::from_secs(5)).expect("it answered");
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "1.2.3");
+    }
 }

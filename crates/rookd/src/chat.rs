@@ -323,22 +323,23 @@ async fn begin(
         session,
         prompt,
     );
+    let helpers = vec![relay.abort_handle(), ask_relay.abort_handle(), fan.abort_handle()];
+    let ending = helpers.clone();
     let task = tokio::spawn(async move {
         // Dropped with the future, so a cancelled turn stops being counted
         // where it stops running.
         let _counted = counted;
         running_turn.await;
+        // Nothing more will be asked or answered. Without this the relays keep
+        // their senders open, so the fan-out never sees the channel close, and
+        // all three sit until the registry forgets the turn — bounded, and
+        // still alive long after there is anything for them to do.
+        for helper in ending {
+            helper.abort();
+        }
     });
 
-    Arc::new(Live {
-        task,
-        helpers: vec![relay, ask_relay, fan],
-        said,
-        backlog,
-        approver,
-        asker,
-        interjections,
-    })
+    Arc::new(Live { task, helpers, said, backlog, approver, asker, interjections })
 }
 
 /// How long one frame may take to reach a client before the socket counts as
@@ -392,7 +393,11 @@ pub struct Live {
     task: tokio::task::JoinHandle<()>,
     /// The relays and the fan-out, which have nothing to do once the turn is
     /// gone and would otherwise outlive it as tasks nobody can reach.
-    helpers: Vec<tokio::task::JoinHandle<()>>,
+    ///
+    /// Abort handles rather than the tasks themselves, so the turn can end them
+    /// when it finishes and `Cancel` can end them when it does not — the same
+    /// three either way, without either owner having to be the only one.
+    helpers: Vec<tokio::task::AbortHandle>,
     said: tokio::sync::broadcast::Sender<ChatEvent>,
     /// What was said before anyone attached, oldest first.
     ///
@@ -420,7 +425,7 @@ impl Live {
     #[doc(hidden)]
     pub fn for_test(
         task: tokio::task::JoinHandle<()>,
-        helpers: Vec<tokio::task::JoinHandle<()>>,
+        helpers: Vec<tokio::task::AbortHandle>,
         said: tokio::sync::broadcast::Sender<ChatEvent>,
         approver: Arc<ChannelApprover>,
         asker: Arc<ChannelAsker>,
@@ -708,7 +713,7 @@ mod tests {
         let (asker, ask_relay) = asker(to_turn, std::time::Duration::from_secs(1));
         Live {
             task: tokio::spawn(std::future::pending()),
-            helpers: vec![relay, ask_relay],
+            helpers: vec![relay.abort_handle(), ask_relay.abort_handle()],
             said,
             backlog: Default::default(),
             approver,
