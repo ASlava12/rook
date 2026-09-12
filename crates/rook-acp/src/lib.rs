@@ -356,29 +356,52 @@ async fn prompt(
     // a step's calls in the order the model asked for them.
     let started = AtomicU64::new(0);
     let finished = AtomicU64::new(0);
+    // Which message the chunks being streamed belong to. A turn says several
+    // things in turn — it works something out, calls a tool, works out the
+    // next thing, answers — and the protocol's way of showing that is this id
+    // changing. Sending none left an editor with the lot as one run of text.
+    let message = AtomicU64::new(0);
+    // What is being streamed right now: nothing, thinking, or saying. A change
+    // is where one message ends and the next begins, and so is a tool call —
+    // the thinking after one is not the thinking before it.
+    let streaming = std::sync::atomic::AtomicU8::new(0);
+    let part = |kind: u8| -> String {
+        if streaming.swap(kind, Ordering::Relaxed) != kind {
+            message.fetch_add(1, Ordering::Relaxed);
+        }
+        format!("msg_{}", message.load(Ordering::Relaxed))
+    };
     let result = agent
         .run_with(&text, |progress| {
             let update = match progress {
                 Progress::Delta(Delta::Text(text)) => {
-                    protocol::agent_message_chunk(&request.session_id, text)
+                    protocol::agent_message_chunk(&request.session_id, text, &part(2))
                 }
                 Progress::Delta(Delta::Reasoning(text)) => {
-                    protocol::agent_thought_chunk(&request.session_id, text)
+                    protocol::agent_thought_chunk(&request.session_id, text, &part(1))
                 }
-                Progress::Delta(Delta::ToolCall(call)) => protocol::tool_call(
-                    &request.session_id,
-                    &format!("call_{}", started.fetch_add(1, Ordering::Relaxed)),
-                    &call.name,
-                    protocol::tool_kind(&call.name),
-                ),
+                Progress::Delta(Delta::ToolCall(call)) => {
+                    // Ends whatever was being streamed: the thinking after a
+                    // call is not a continuation of the thinking before it.
+                    streaming.store(0, Ordering::Relaxed);
+                    protocol::tool_call(
+                        &request.session_id,
+                        &format!("call_{}", started.fetch_add(1, Ordering::Relaxed)),
+                        &call.name,
+                        protocol::tool_kind(&call.name),
+                    )
+                }
                 // The editor already has a tool call open for the delegation;
                 // this is progress within it, which reads as a thought.
-                Progress::Delegated { task, done, total } => {
-                    protocol::agent_thought_chunk(&request.session_id, &format!("[{done}/{total}] {task}\n"))
-                }
+                Progress::Delegated { task, done, total } => protocol::agent_thought_chunk(
+                    &request.session_id,
+                    &format!("[{done}/{total}] {task}\n"),
+                    &part(1),
+                ),
                 Progress::Delegating { at, doing } => protocol::agent_thought_chunk(
                     &request.session_id,
                     &format!("  {}\n", rook_core::calls::delegating(at, doing)),
+                    &part(1),
                 ),
                 Progress::ToolDone { failed, .. } => protocol::tool_call_done(
                     &request.session_id,
@@ -415,7 +438,12 @@ async fn prompt(
             said.push_str(&format!("\n\nOpen question: {text}"));
         }
         if !said.is_empty() {
-            peer.notify("session/update", protocol::agent_message_chunk(&request.session_id, &said));
+            // Its own message: what a turn adds at the end is not a
+            // continuation of the last thing it streamed.
+            peer.notify(
+                "session/update",
+                protocol::agent_message_chunk(&request.session_id, &said, &part(2)),
+            );
         }
     }
     answer(match result {

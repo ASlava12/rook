@@ -164,6 +164,35 @@ async fn cancel_is_accepted_even_with_nothing_running() {
     assert_eq!(reply["result"]["protocolVersion"], 1);
 }
 
+/// The schema is explicit about what this id means: every chunk of a message
+/// carries the same one, and a change in it says a new message has started.
+/// Sending none — which this did — leaves an editor with a turn's thinking, its
+/// answer and its next thinking as one unbroken run of text. Found in
+/// opencode's fix for the same fault one step further on, where the id was
+/// there and was the wrong one.
+#[test]
+fn a_streamed_chunk_says_which_message_it_belongs_to() {
+    use rook_acp::protocol::{agent_message_chunk, agent_thought_chunk};
+
+    let thought = agent_thought_chunk("s1", "working it out", "msg_1");
+    // The envelope first: `SessionNotification` is two fields with the update
+    // nested, and this agent was putting the update's own fields beside
+    // `sessionId` — which a client deserialising to that type reads as a
+    // notification with no update in it.
+    assert_eq!(thought["sessionId"], "s1");
+    assert_eq!(thought["update"]["sessionUpdate"], "agent_thought_chunk");
+    assert_eq!(thought["update"]["messageId"], "msg_1");
+    assert!(thought.get("sessionUpdate").is_none(), "and nothing flat beside it: {thought}");
+
+    let said = agent_message_chunk("s1", "here it is", "msg_2");
+    assert_eq!(said["update"]["messageId"], "msg_2");
+    assert_eq!(said["update"]["content"]["text"], "here it is");
+
+    // The one that was already right, now through the same envelope.
+    let mode = rook_acp::protocol::current_mode_update("s1", rook_tools::policy::Stance::Assist);
+    assert_eq!(mode["update"]["sessionUpdate"], "current_mode_update");
+}
+
 #[test]
 fn tool_kinds_match_the_vocabulary_the_schema_defines() {
     use rook_acp::protocol::tool_kind;

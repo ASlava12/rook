@@ -113,21 +113,33 @@ pub struct SessionRef {
 }
 
 /// `session/update` payloads. The client renders these as the turn happens.
-pub fn agent_message_chunk(session: &str, text: &str) -> serde_json::Value {
+/// One streamed piece of what the agent is saying, and which message it is part
+/// of.
+///
+/// `message` is how a reader tells one from the next: the protocol says every
+/// chunk of a message carries the same id and that a change in it means a new
+/// message has started. Sending none at all — which this did — leaves an editor
+/// with a turn's thinking, its answer and its next thinking as one unbroken run
+/// of text. Found in opencode's own fix for it, where the id was the message's
+/// rather than the part's and two thoughts merged into one.
+pub fn agent_message_chunk(session: &str, text: &str, message: &str) -> serde_json::Value {
     update(
         session,
         serde_json::json!({
             "sessionUpdate": "agent_message_chunk",
+            "messageId": message,
             "content": { "type": "text", "text": text },
         }),
     )
 }
 
-pub fn agent_thought_chunk(session: &str, text: &str) -> serde_json::Value {
+/// The same, for what the agent is working out rather than saying.
+pub fn agent_thought_chunk(session: &str, text: &str, message: &str) -> serde_json::Value {
     update(
         session,
         serde_json::json!({
             "sessionUpdate": "agent_thought_chunk",
+            "messageId": message,
             "content": { "type": "text", "text": text },
         }),
     )
@@ -157,9 +169,18 @@ pub fn tool_call_done(session: &str, id: &str, failed: bool) -> serde_json::Valu
     )
 }
 
-fn update(session: &str, mut body: serde_json::Value) -> serde_json::Value {
-    body["sessionId"] = serde_json::Value::String(session.to_string());
-    body
+/// The envelope every `session/update` goes in.
+///
+/// `{ sessionId, update }`, with the update nested — which is what
+/// `SessionNotification` is, two fields and no flattening. This put the
+/// update's own fields beside `sessionId` instead, so a client that
+/// deserialises to the schema's type found no `update` at all and every stream
+/// this agent produced was unreadable to it. The codebase disagreed with itself
+/// about it: `current_mode_update` was written later, by hand, and got it
+/// right, which is how this was found. One function now, so there is one answer
+/// rather than two.
+fn update(session: &str, body: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({ "sessionId": session, "update": body })
 }
 
 /// Which of Rook's tools maps to which ACP tool kind, so an editor can show the
@@ -199,10 +220,10 @@ pub fn mode_from_id(id: &str) -> Option<rook_tools::policy::Stance> {
 /// Told to the editor when the mode changes for any other reason, so its menu
 /// does not drift from what the policy is actually doing.
 pub fn current_mode_update(session: &str, mode: rook_tools::policy::Stance) -> serde_json::Value {
-    serde_json::json!({
-        "sessionId": session,
-        "update": { "sessionUpdate": "current_mode_update", "currentModeId": mode_id(mode) },
-    })
+    update(
+        session,
+        serde_json::json!({ "sessionUpdate": "current_mode_update", "currentModeId": mode_id(mode) }),
+    )
 }
 
 /// The session settings an editor can offer as controls.
