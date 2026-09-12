@@ -235,6 +235,17 @@ pub fn run(source: crate::source::Source, yes: bool, started: Option<String>) ->
     result
 }
 
+/// Whether this window's settings are the ones the turn will run under.
+///
+/// They are when it is starting the turn, and they are not when it is joining
+/// one: a turn already running has its own, and a window that announces its own
+/// on the way in changes them. That happened — a turn made `autonomous`, left
+/// to run, rejoined from a new window, and pulled back to `assist` by the
+/// window's opening line, silently, while it was working.
+fn this_window_decides(opening: &ClientMessage) -> bool {
+    matches!(opening, ClientMessage::Prompt { .. })
+}
+
 /// What a running turn reports back to the drawing loop.
 enum TurnEvent {
     Started(u128),
@@ -1462,13 +1473,22 @@ impl App {
             // handshake printed `stance: assist · effort: high` three times
             // before the turn had started — noise where a difference would
             // have been news.
+            // What the turn is running under, taken rather than compared
+            // against. A window that joins a turn does not decide what it runs
+            // under — it is told, and its footer says so from then on. Only
+            // reported before, so a window that joined an `autonomous` turn drew
+            // `assist` over it and the person reading the footer had no way to
+            // know which of the two was true.
             ChatEvent::Settings { mode, effort, .. } => {
                 let ours = (self.shared.policy.stance().as_str(), self.shared.effort.get().as_str());
                 if (mode.as_str(), effort.as_str()) != ours {
-                    self.chat.push(
-                        "stat",
-                        &format!("  the daemon is running at {mode} · {effort}, not {} · {}", ours.0, ours.1),
-                    );
+                    self.chat.push("stat", &format!("  running at {mode} · {effort}"));
+                }
+                if let Some(stance) = rook_tools::policy::Stance::parse(&mode) {
+                    self.shared.policy.set_stance(stance);
+                }
+                if let Some(effort) = rook_llm::Effort::parse(&effort) {
+                    self.shared.effort.set(effort);
                 }
             }
             ChatEvent::Cancelled => {
@@ -1853,17 +1873,26 @@ impl App {
         let (heard, mut incoming) = mpsc::unbounded_channel::<ChatEvent>();
         let workspace = self.source.workspace().to_path_buf();
 
-        // The settings this window is showing, said before the prompt: a
+        // The settings this window is showing, said before a prompt: a
         // connection starts at the daemon's own and a stance cycled here would
         // otherwise be a lie the footer keeps telling.
-        let _ = say.send(ClientMessage::Setting {
-            name: "mode".into(),
-            value: self.shared.policy.stance().as_str().to_string(),
-        });
-        let _ = say.send(ClientMessage::Setting {
-            name: "effort".into(),
-            value: self.shared.effort.get().as_str().to_string(),
-        });
+        //
+        // Before a prompt, and not before an `Attach`. A window that starts a
+        // turn decides what it runs under; a window that joins one adopts what
+        // it is already running under, and saying its own here changed the turn
+        // instead. That is what happened: a turn made `autonomous`, left alone,
+        // rejoined from a new window — and dragged back to `assist` by the
+        // window's own opening line, silently, while it was running.
+        if this_window_decides(&opening) {
+            let _ = say.send(ClientMessage::Setting {
+                name: "mode".into(),
+                value: self.shared.policy.stance().as_str().to_string(),
+            });
+            let _ = say.send(ClientMessage::Setting {
+                name: "effort".into(),
+                value: self.shared.effort.get().as_str().to_string(),
+            });
+        }
         let _ = say.send(opening);
         self.chat.remote = Some(say);
 
@@ -4547,5 +4576,21 @@ mod tests {
             seen.agent.stream_idle_timeout_secs, 1200,
             "the window would have drawn a patience of {built_in}s over a turn waiting twenty minutes"
         );
+    }
+
+    /// A window that joins a turn does not decide what it runs under.
+    ///
+    /// The settings a window shows are sent ahead of what it says, so a turn it
+    /// starts begins where the footer says. Sent ahead of joining one too, they
+    /// changed a turn that was already running: made `autonomous`, left alone,
+    /// rejoined later from a new window, and back at `assist` without a word.
+    /// Reported from use, which is the only place it shows.
+    #[test]
+    fn a_window_joining_a_turn_does_not_change_what_it_runs_under() {
+        assert!(this_window_decides(&ClientMessage::Prompt {
+            session: None,
+            text: "audit the three projects".into()
+        }));
+        assert!(!this_window_decides(&ClientMessage::Attach { session: "01M26DDB".into() }));
     }
 }
