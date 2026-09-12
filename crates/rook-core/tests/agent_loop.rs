@@ -1200,6 +1200,28 @@ async fn a_turn_stops_when_it_has_spent_its_allowance_and_says_that_is_why() {
     assert!(why.contains("max_turn_tokens"), "which knob raises it: {why}");
 }
 
+/// A limit is not a verdict on the task. What ran out is a turn, and what the
+/// turn did is still in the session — so the answer more often than raising a
+/// knob is to go on, and every limit says so where a person reads it.
+#[test]
+fn every_limit_offers_the_way_on_as_well_as_the_knob() {
+    for stopped in ["max_steps", "budget", "time"] {
+        let why = rook_core::agent::why_it_stopped(stopped).expect("a limit says what to do");
+        assert!(why.contains("/continue"), "{stopped}: the way on is offered: {why}");
+        assert!(why.contains("`[agent]"), "{stopped}: and the knob still named: {why}");
+    }
+    // A turn that finished has nothing to say about limits.
+    assert!(rook_core::agent::why_it_stopped("end_turn").is_none());
+
+    // One spelling of it is a command that works in some windows and not
+    // others, which is worse than none.
+    for typed in ["/continue", " /go on ", "/carry on"] {
+        assert!(rook_core::agent::carrying_on(typed), "{typed:?} means carry on");
+    }
+    assert!(!rook_core::agent::carrying_on("/continue the audit"), "an argument makes it a prompt");
+    assert!(!rook_core::agent::carrying_on("continue"), "and a word is not a command");
+}
+
 /// Tokens are the bill on a paid model and free on a local one, where the
 /// resource a runaway turn actually spends is the afternoon. A turn spent a
 /// whole night on a task it did not finish, and the only ceiling it had was

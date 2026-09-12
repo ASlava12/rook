@@ -164,18 +164,43 @@ pub fn finished(stopped: &str) -> bool {
 /// One sentence for every front end: `rook run` said it and the windows said
 /// only how many steps had run, which reads exactly like a turn that decided
 /// it was done.
+/// What a turn stopped at a limit is asked when somebody says to carry on.
+///
+/// A limit is not a verdict on the task, and everything the turn did is in the
+/// session — so the useful thing is not to start again but to go on. Said
+/// explicitly, because a model handed a fresh prompt in a session it has
+/// already worked in will redo the reading it did in the first ten steps: what
+/// it is told here is where it stands, not what to do.
+/// Whether what was typed means "carry on" rather than being a prompt.
+///
+/// One function because three front ends ask it and a fourth spelling known to
+/// only two of them is a command that works in some windows.
+pub fn carrying_on(typed: &str) -> bool {
+    matches!(typed.trim(), "/continue" | "/go on" | "/carry on")
+}
+
+pub const CARRY_ON: &str = "The previous turn stopped at a limit rather than because the work was \
+    done. Everything it read, ran and changed is above, in this same session. Carry on from where \
+    it stopped: do not start again, and do not redo what has already been done. If you are stopped \
+    again, end by saying plainly what is left, so the next turn starts from there.";
+
 pub fn why_it_stopped(stopped: &str) -> Option<String> {
     if finished(stopped) {
         return None;
     }
     Some(match stopped {
-        "max_steps" => "stopped at the step limit — raise `[agent] max_steps` or narrow the task".to_string(),
-        "budget" => {
-            "stopped at the spend limit — raise `[agent] max_turn_tokens` or narrow the task".to_string()
-        }
-        "time" => "stopped at the time limit — raise `[agent] max_turn_secs` or narrow the task".to_string(),
+        // Every limit says the same third thing, because it is the answer more
+        // often than either of the others: what ran out is a turn, not the
+        // task, and what the turn did is still in the session.
+        "max_steps" => carry_on("the step limit", "`[agent] max_steps`"),
+        "budget" => carry_on("the spend limit", "`[agent] max_turn_tokens`"),
+        "time" => carry_on("the time limit", "`[agent] max_turn_secs`"),
         other => format!("the turn ended as {other:?} rather than finishing"),
     })
+}
+
+fn carry_on(limit: &str, knob: &str) -> String {
+    format!("stopped at {limit} — `/continue` carries on with a fresh one, or raise {knob}")
 }
 
 /// What to show whoever is asked to approve a call.

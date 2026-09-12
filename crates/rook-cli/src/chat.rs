@@ -31,6 +31,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("search", "<query>", "find it in everything said, read and run"),
     ("diff", "", "what this session has changed on disk"),
     ("btw", "<question>", "ask about this conversation without joining it"),
+    ("continue", "", "carry on a turn that stopped at a limit, with a fresh one"),
     ("mcp", "", "connected tool servers"),
     ("jobs", "[id]", "commands left running, or what one has printed"),
     ("undo", "", "rewind past the last exchange, files included"),
@@ -129,7 +130,12 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
             Ok(line) if line.trim().is_empty() => continue,
             Ok(line) => {
                 let _ = editor.add_history_entry(line.as_str());
-                let line = line.trim().to_string();
+                // A prompt rather than a command: it starts a turn in the
+                // session already open, with a fresh allowance.
+                let line = match rook_core::agent::carrying_on(&line) {
+                    true => rook_core::agent::CARRY_ON.to_string(),
+                    false => line.trim().to_string(),
+                };
                 if let Some(question) = line.strip_prefix("/btw ") {
                     let provider = rook_llm::from_spec_with(
                         &rook.config.agent.model,

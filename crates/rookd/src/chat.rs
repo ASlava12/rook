@@ -158,6 +158,11 @@ async fn serve(
                 }
             }
             ClientMessage::Prompt { session, text } => {
+                // The browser types it too, and it is the same thing there.
+                let text = match rook_core::agent::carrying_on(&text) {
+                    true => rook_core::agent::CARRY_ON.to_string(),
+                    false => text,
+                };
                 let id = match session.as_deref().and_then(rook_store::parse_session_id) {
                     Some(id) => Some(id),
                     None if session.is_some() => None,

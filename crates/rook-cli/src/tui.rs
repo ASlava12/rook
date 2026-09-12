@@ -2034,6 +2034,13 @@ impl App {
         // A command is one line. Pasted text that happens to start with a path
         // is not `/Users/...` the command, and reading it as one would answer a
         // paste with "no such command".
+        // `/continue` is a prompt rather than a command: what it does is start
+        // a turn, in the session already open, with a fresh allowance. A limit
+        // is not a verdict on the task and the work is still in the session.
+        let prompt = match rook_core::agent::carrying_on(&prompt) {
+            true => rook_core::agent::CARRY_ON.to_string(),
+            false => prompt,
+        };
         if let Some(command) =
             prompt.strip_prefix('/').filter(|c| !c.starts_with("btw ") && !c.contains('\n'))
         {
@@ -3481,6 +3488,7 @@ impl App {
             Line::from(""),
             key("  In the chat: Enter sends · Esc clears, then quits"),
             key("              /btw <question> asks without joining the conversation"),
+            key("              /continue carries a turn stopped at a limit on from there"),
             key("              y / a / n answer an approval"),
             key("              enter     answer a question, one at a time"),
             key("              /…        tab completes; the list shows as you type"),
