@@ -49,6 +49,71 @@ fn a_command_carried_by_env_is_still_the_command() {
     }
 }
 
+/// One command, nine spellings. The shipped rule is a regex over the text, and
+/// a regex over text cannot answer "is this `rm`, and is its operand the root":
+/// four of these were refused and five walked past, measured against the rule
+/// as it shipped. Asked of the parsed words instead.
+#[test]
+fn every_spelling_of_deleting_the_root_is_refused() {
+    for wipes in [
+        "rm -rf /",
+        "rm / -rf",
+        "rm -r -f /",
+        "rm -fr /",
+        "rm -rf /*",
+        "rm --recursive --force /",
+        "rm -rf --no-preserve-root /",
+        "rm -rf \"/\"",
+        "rm -rf '/'",
+        "rm -rf //",
+        "/bin/rm -rf /",
+        "sudo rm -rf /",
+        "cd /tmp && rm -rf /",
+        "bash -c 'rm -rf \"/\"'",
+    ] {
+        assert!(refuses(wipes), "walked past the deny list: {wipes}");
+    }
+}
+
+/// A path in front of a command is not a disguise, and the rules are anchored
+/// to command position rather than to a substring — so they saw `mkfs` and not
+/// `/sbin/mkfs.ext4`. Measured against the shipped list: three of these walked
+/// past rules that stopped the same commands spelled bare.
+#[test]
+fn spelling_a_command_with_its_path_does_not_hide_it() {
+    for carried in [
+        "/sbin/mkfs.ext4 /dev/sda1",
+        "/bin/dd if=/dev/zero of=/dev/sda",
+        "/bin/chmod -R 777 /",
+        "/bin/rm -rf /",
+    ] {
+        assert!(refuses(carried), "carried past the deny list: {carried}");
+    }
+    // And a path in front of something ordinary is ordinary.
+    for fine in ["/usr/bin/git status", "/bin/ls -la", "/usr/local/bin/cargo test"] {
+        assert!(!refuses(fine), "an ordinary line was refused: {fine}");
+    }
+}
+
+/// And the half that makes it worth having: nothing overrides a denial, so a
+/// rule that fires on an ordinary line takes that line away for good.
+#[test]
+fn deleting_something_that_is_not_the_root_is_ordinary() {
+    for fine in [
+        "rm -rf target",
+        "rm -rf ./build",
+        "rm -rf /tmp/scratch",
+        "rm -rf ~/Library/Caches/rook",
+        "rm file.txt",
+        "echo \"rm -rf /\"",
+        "grep -rn 'rm -rf /' .",
+        "cargo run -- --path /",
+        "ls /",
+    ] {
+        assert!(!refuses(fine), "an ordinary line was refused: {fine}");
+    }
+}
+
 /// A shell is a program whose job is to run another program, exactly as `env`
 /// is, and `-c` is where the command it runs is written. A rule anchored to
 /// command position sees `bash` there — the `rm` that follows is inside a

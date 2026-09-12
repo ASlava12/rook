@@ -291,7 +291,7 @@ fn carried(line: &str, depth: usize, out: &mut Vec<String>) {
     }
     for part in line.split([';', '&', '|', '\n']) {
         let part = part.trim();
-        for bare in [past_env(part), past_shell(part)].into_iter().flatten() {
+        for bare in [past_env(part), past_shell(part), past_path(part)].into_iter().flatten() {
             if !bare.trim().is_empty() {
                 carried(&bare, depth + 1, out);
             }
@@ -430,6 +430,63 @@ fn past_env(part: &str) -> Option<String> {
 /// A line split into words, with quotes taken off what they enclose. Not a
 /// shell parser: what it is for is finding the command inside a carrier, and
 /// anything it cannot take apart goes to the prompt as before.
+/// The same segment with its command spelled by its own name.
+///
+/// A rule anchored to command position sees `mkfs` in `mkfs.ext4 /dev/sda1` and
+/// sees nothing in `/sbin/mkfs.ext4 /dev/sda1` — the same program, with a path
+/// in front of it that nobody would call a disguise. Measured against the
+/// shipped list: `/sbin/mkfs.ext4`, `/bin/dd` and `/bin/chmod` all walked past
+/// rules that stopped the same commands spelled bare.
+///
+/// One place rather than a path-tolerant spelling of every rule, and it is why
+/// this is a carrier: the answer is another line that would run the same thing.
+fn past_path(part: &str) -> Option<String> {
+    let words = words(part);
+    let first = words.first()?;
+    let name = first.rsplit(['/', '\\']).next()?;
+    if name == first || name.is_empty() {
+        return None;
+    }
+    Some(std::iter::once(name.to_string()).chain(words[1..].iter().cloned()).collect::<Vec<_>>().join(" "))
+}
+
+/// Whether a line is `rm` pointed at the root of the filesystem.
+///
+/// Asked of the parsed words rather than matched in the text, because a regex
+/// over text cannot answer it and was not answering it. Measured against the
+/// shipped rule: `rm -rf /`, `rm / -rf`, `rm -r -f /` and `rm -fr /` were
+/// refused, and `rm --recursive --force /`, `rm -rf --no-preserve-root /`,
+/// `rm -rf "/"`, `rm -rf //` and `/bin/rm -rf /` were not. Six spellings of one
+/// command, and the rule they walked past is the one nothing can override.
+///
+/// The flags are not read at all. `rm /` without `-r` fails harmlessly and was
+/// already refused by the rule this stands beside; what decides is the operand,
+/// which is the part a person means.
+fn wipes_the_root(line: &str) -> bool {
+    line.split([';', '&', '|', '\n']).any(|part| {
+        let words = words(part.trim());
+        // `sudo` and `doas` run what follows them; `env` has been taken apart
+        // before this, and so has a shell.
+        let at = words.iter().position(|w| !matches!(w.as_str(), "sudo" | "doas"));
+        let Some(program) = at.and_then(|at| words.get(at)) else { return false };
+        // By its own name, wherever it was spelled from: `/bin/rm` is `rm`.
+        // Case-insensitively, because a deny list a shift key defeats is not
+        // one — and on a case-insensitive filesystem `RM` is what runs.
+        let name = program.rsplit(['/', '\\']).next().unwrap_or(program);
+        if !name.eq_ignore_ascii_case("rm") {
+            return false;
+        }
+        words[at.unwrap_or(0) + 1..].iter().any(|word| is_the_root(word))
+    })
+}
+
+/// A path made of nothing but separators, with or without the glob that makes
+/// it the contents rather than the thing: `/`, `//`, `/*`.
+fn is_the_root(word: &str) -> bool {
+    let bare = word.trim_end_matches('*');
+    !bare.is_empty() && bare.chars().all(|c| c == '/')
+}
+
 fn words(line: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut word = String::new();
@@ -583,6 +640,12 @@ impl Policy {
         let running = carriers(&subject);
         if let Some(rule) = self.deny.iter().find(|r| running.iter().any(|line| r.matches(line))) {
             return Decision::Deny(format!("matches the deny rule {rule:?}"));
+        }
+        // The same question the first rule in the shipped list is trying to
+        // ask, asked of the words instead of the text — see `wipes_the_root`
+        // for the six spellings that walked past the text.
+        if running.iter().any(|line| wipes_the_root(line)) {
+            return Decision::Deny("this deletes the root of the filesystem".into());
         }
         // Asked even at read-only: asking for more is the one thing a stance
         // that changes nothing is still allowed to do.
