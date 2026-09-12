@@ -62,7 +62,7 @@ async fn quoted_text(mut response: reqwest::Response) -> String {
             _ => break,
         }
     }
-    truncate(&String::from_utf8_lossy(&body), MOST_QUOTED_BYTES)
+    rook_llm::truncate(&String::from_utf8_lossy(&body), MOST_QUOTED_BYTES)
 }
 
 pub(crate) struct Http {
@@ -175,7 +175,7 @@ impl Transport for Http {
             serde_json::from_str(&text).map_err(|e| McpError::Decode {
                 server: self.name.clone(),
                 method: method.into(),
-                message: format!("{e}: {}", truncate(&text, 300)),
+                message: format!("{e}: {}", rook_llm::truncate(&text, 300)),
             })
         }
     }
@@ -237,16 +237,4 @@ async fn read_event_stream(
             }
         }
     }
-}
-
-fn truncate(text: &str, max: usize) -> String {
-    if text.len() <= max {
-        return text.to_string();
-    }
-    let cut = (0..=max).rev().find(|i| text.is_char_boundary(*i)).unwrap_or(0);
-    // The line above is the boundary search, which is the whole point of this
-    // function: `cut` is a boundary because nothing else was accepted.
-    #[allow(clippy::string_slice)]
-    let head = &text[..cut];
-    format!("{head}…")
 }

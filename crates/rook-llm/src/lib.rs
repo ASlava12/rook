@@ -341,7 +341,13 @@ pub(crate) async fn quoted_text(mut response: reqwest::Response) -> String {
 }
 
 /// A prefix of `text`, cut on a character boundary.
-pub(crate) fn truncate(text: &str, max: usize) -> String {
+///
+/// Shared with `rook-mcp`, which had its own copy. An audit called the two
+/// unavoidable — `rook-mcp` was said to have no internal dependencies — and
+/// that was already untrue: it depends on this crate, and the same mistaken
+/// premise left the server-sent-event reassembly duplicated here too, where it
+/// grew a panic that ended a daemon mid-turn.
+pub fn truncate(text: &str, max: usize) -> String {
     if text.len() <= max {
         return text.to_string();
     }
