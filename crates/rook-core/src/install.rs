@@ -438,8 +438,7 @@ impl Installer {
                         // A copy rather than a link: a link needs a privilege
                         // on Windows that an ordinary account does not have.
                         let placed = recipe.binary_in(&current);
-                        std::fs::copy(&binary, &placed)
-                            .map_err(|e| format!("could not put {} in place: {e}", placed.display()))?;
+                        place(&binary, &placed)?;
                         executable(&placed)?;
                     }
                 }
@@ -706,11 +705,32 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
                 std::fs::create_dir_all(dir)
                     .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
             }
-            std::fs::copy(entry.path(), &dest)
-                .map_err(|e| format!("could not copy to {}: {e}", dest.display()))?;
+            place(entry.path(), &dest)?;
         }
     }
     Ok(())
+}
+
+/// Puts a file where something is going to run it, replacing whatever is there.
+///
+/// Written beside the destination and renamed onto it, rather than copied over
+/// it. Copying keeps the inode, and macOS caches a signature against it: the
+/// bytes change underneath and the next `exec` is killed with signal 9 and no
+/// message anywhere — not a word on stderr, not an exit status worth reading,
+/// just a command that does nothing. That is the least diagnosable failure
+/// this codebase can hand anyone, and an upgrade of an installed server is
+/// exactly the moment it happens. The rename also means a half-written
+/// download is never briefly in place under the name of a working one.
+fn place(from: &Path, to: &Path) -> Result<(), String> {
+    let beside = to.with_extension("incoming");
+    std::fs::copy(from, &beside).map_err(|e| format!("could not copy to {}: {e}", beside.display()))?;
+    match std::fs::rename(&beside, to) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&beside);
+            Err(format!("could not put {} in place: {e}", to.display()))
+        }
+    }
 }
 
 fn executable(path: &Path) -> Result<(), String> {
@@ -889,5 +909,36 @@ mod tests {
         let refused = unpack_gz(&bomb, &to).unwrap_err();
         assert!(refused.contains("inflates past"), "{refused}");
         assert!(!to.exists(), "and nothing half-written is left behind");
+    }
+
+    /// Installing over a server that is already there replaces the file rather
+    /// than writing through it.
+    ///
+    /// Copying keeps the inode, and macOS caches a code signature against it:
+    /// change the bytes underneath and the next run is killed with signal 9 —
+    /// nothing on stderr, nothing in any log, a command that simply does
+    /// nothing. Upgrading a server the agent installed is exactly when that
+    /// happens, and it happened here, to `rook` itself, during this work.
+    #[test]
+    fn a_server_put_in_place_replaces_the_file_rather_than_writing_through_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let installed = dir.path().join("server");
+        std::fs::write(&installed, b"the previous build").unwrap();
+        // A second name for the same file, which keeps the old bytes only if
+        // they were never written through.
+        let old_inode = dir.path().join("the-one-that-was-there");
+        std::fs::hard_link(&installed, &old_inode).unwrap();
+
+        let downloaded = dir.path().join("downloaded");
+        std::fs::write(&downloaded, b"the new build").unwrap();
+        place(&downloaded, &installed).unwrap();
+
+        assert_eq!(std::fs::read(&installed).unwrap(), b"the new build", "the new one is in place");
+        assert_eq!(
+            std::fs::read(&old_inode).unwrap(),
+            b"the previous build",
+            "and the file that was there was replaced, not rewritten under whatever is holding it"
+        );
+        assert!(!installed.with_extension("incoming").exists(), "nothing is left beside it");
     }
 }
