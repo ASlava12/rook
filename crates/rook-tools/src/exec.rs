@@ -196,14 +196,21 @@ impl Tool for RunCommand {
         // `child.wait()` is what produced `Exited`, and waiting reaps — so the
         // shell is gone from the group by the time this asks, and a member left
         // is a member the command started.
-        let orphaned = ended == Ended::Exited && group_alive(group);
-        if !orphaned {
-            let grace = match ended {
-                Ended::TimedOut => BEFORE_THE_KILL,
-                _ => PIPES_AFTER_EXIT,
-            };
-            let _ = tokio::time::timeout(grace, capture!()).await;
-        }
+        let still = group_alive(group);
+        // Short where the wait cannot end and long where it can. A drain that
+        // something is holding open never finishes, but what the command
+        // already printed is in the pipe and reading it is immediate — skipping
+        // the wait altogether lost it, which FreeBSD showed and macOS did not,
+        // because there the bytes had already arrived.
+        let grace = match (ended, still) {
+            (Ended::Exited, Some(true)) => BEFORE_THE_KILL,
+            (Ended::TimedOut, _) => BEFORE_THE_KILL,
+            _ => PIPES_AFTER_EXIT,
+        };
+        let drained = tokio::time::timeout(grace, capture!()).await.is_ok();
+        // Where the group can be asked, its answer; elsewhere the wait is all
+        // there is, which is what it was everywhere before this.
+        let orphaned = ended == Ended::Exited && still.unwrap_or(!drained);
 
         if ended == Ended::TimedOut {
             // The whole group, not the shell: `sh -c` may fork rather than
@@ -620,13 +627,16 @@ pub(crate) async fn kill_tree(child: &mut tokio::process::Child) -> bool {
 ///
 /// Elsewhere there is no group to ask about, and the caller's wait is all there
 /// is — which is what it was everywhere before this.
-fn group_alive(pid: Option<u32>) -> bool {
+/// `None` where there is no group to ask about, which is not the same as an
+/// empty one — saying `false` there would claim nothing was left behind, and
+/// `true` would claim every command leaves something.
+fn group_alive(pid: Option<u32>) -> Option<bool> {
     match pid {
         #[cfg(unix)]
-        Some(pid) => unsafe { libc::kill(-(pid as i32), 0) == 0 },
+        Some(pid) => Some(unsafe { libc::kill(-(pid as i32), 0) == 0 }),
         #[cfg(not(unix))]
-        Some(_) => true,
-        None => false,
+        Some(_) => None,
+        None => None,
     }
 }
 

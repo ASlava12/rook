@@ -49,6 +49,38 @@ fn a_command_carried_by_env_is_still_the_command() {
     }
 }
 
+/// A shell is a program whose job is to run another program, exactly as `env`
+/// is, and `-c` is where the command it runs is written. A rule anchored to
+/// command position sees `bash` there — the `rm` that follows is inside a
+/// quoted argument, preceded by neither the start of the line nor a separator —
+/// so the one decision nothing can override was walked past by a prefix
+/// anybody can type. Found going the other way: cline spent a commit on
+/// redundant shell wrappers, which is the same shape read as an annoyance.
+#[test]
+fn a_command_carried_by_a_shell_is_still_the_command() {
+    for carried in [
+        "bash -c 'rm -rf /'",
+        "sh -c 'rm -rf /'",
+        "zsh -c \"rm -rf /\"",
+        "/bin/sh -c 'rm -rf /'",
+        "sh -lc 'rm -rf /'",
+        "bash -c 'echo hello; rm -rf /'",
+        "env -S 'bash -c \"rm -rf /\"'",
+        "echo done; bash -c 'rm -rf /'",
+    ] {
+        assert!(refuses(carried), "carried past the deny list: {carried}");
+    }
+}
+
+/// And the other half, because a shell in front of something harmless is
+/// harmless: a deny list that fires on a wrapper takes the wrapper away.
+#[test]
+fn a_shell_in_front_of_something_ordinary_is_still_ordinary() {
+    for fine in ["bash -c 'cargo test'", "sh -c 'ls -la'", "bash script.sh", "sh -c \"echo rm -rf /\""] {
+        assert!(!refuses(fine), "an ordinary line was refused: {fine}");
+    }
+}
+
 /// And the other half, which is what makes a deny list worth having: `env` in
 /// front of something harmless is harmless, and a line that merely says the
 /// words is a line about them.

@@ -251,7 +251,8 @@ pub enum Decision {
 
 /// The same line, and the same line as the shell would actually run it.
 ///
-/// `env` is a program whose job is to run another program, and everything
+/// `env` and a shell are both programs whose job is to run another program, and
+/// everything
 /// between the two words is `env`'s own: assignments, options, `-a name` and
 /// `--argv0 name`, and `-S 'a whole command line'`. A rule anchored to command
 /// position sees `env` there and nothing else, so `env -S 'rm -rf /'` walked
@@ -276,11 +277,24 @@ fn carried(line: &str, depth: usize, out: &mut Vec<String>) {
     if depth >= 3 {
         return;
     }
+    // The whole line before it is cut up, because a carrier's payload may hold
+    // the separators this cuts on: `bash -c 'echo hello; rm -rf /'` is one
+    // command carrying two, and splitting first tears the payload in half —
+    // leaving a `rm -rf /'` whose trailing quote the rule no longer matches.
+    let whole = line.trim();
+    if whole.contains([';', '&', '|', '\n']) {
+        for bare in [past_env(whole), past_shell(whole)].into_iter().flatten() {
+            if !bare.trim().is_empty() {
+                carried(&bare, depth + 1, out);
+            }
+        }
+    }
     for part in line.split([';', '&', '|', '\n']) {
-        if let Some(bare) = past_env(part.trim())
-            && !bare.trim().is_empty()
-        {
-            carried(&bare, depth + 1, out);
+        let part = part.trim();
+        for bare in [past_env(part), past_shell(part)].into_iter().flatten() {
+            if !bare.trim().is_empty() {
+                carried(&bare, depth + 1, out);
+            }
         }
     }
     for body in substituted(line) {
@@ -338,6 +352,49 @@ fn substituted(line: &str) -> Vec<String> {
 }
 
 /// What an `env …` prefix is in front of, or `None` when the part is not one.
+/// The command a shell was told to run.
+///
+/// A shell is a program whose job is to run another program, which is what
+/// `env` is, and `-c` is where the program is written. A rule anchored to
+/// command position sees `bash` there and stops — in `bash -c 'rm -rf /'` the
+/// `rm` is inside a quoted argument, preceded by neither the start of the line
+/// nor a separator — so the one decision nothing can override was walked past
+/// by a prefix anybody can type, and in `autonomous` nothing would have asked.
+///
+/// Found from the other end: cline spent a commit discouraging redundant shell
+/// wrappers, which is this same shape read as an annoyance rather than a hole.
+///
+/// A script is not a command line: `bash script.sh` names a file, and what is
+/// in that file is not something a rule about command position can see anyway.
+fn past_shell(part: &str) -> Option<String> {
+    let words = words(part);
+    let first = words.first()?;
+    // Without its path and without Windows' extension, because a carrier does
+    // not stop being one for being spelled out.
+    let name = first.rsplit(['/', '\\']).next().unwrap_or(first);
+    let name = name.strip_suffix(".exe").unwrap_or(name);
+    if !matches!(name, "sh" | "bash" | "zsh" | "dash" | "ash" | "ksh") {
+        return None;
+    }
+    let mut at = 1;
+    while at < words.len() {
+        let word = &words[at];
+        // `-c` alone, and bundled with other short flags: `sh -lc '…'` is the
+        // spelling a login shell takes and carries the command just the same.
+        let bundled = word.starts_with('-') && !word.starts_with("--") && word.contains('c');
+        if word == "-c" || word == "--command" || bundled {
+            return words.get(at + 1).cloned();
+        }
+        if word.starts_with('-') {
+            at += 1;
+            continue;
+        }
+        // The first bare word is a script to run, not a command line.
+        return None;
+    }
+    None
+}
+
 fn past_env(part: &str) -> Option<String> {
     let words = words(part);
     let first = words.first()?;
