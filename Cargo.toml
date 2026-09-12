@@ -18,7 +18,7 @@ members = [
 exclude = ["references"]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT OR Apache-2.0"
@@ -27,12 +27,12 @@ authors = ["Rook contributors"]
 
 [workspace.dependencies]
 # internal
-rook-store  = { path = "crates/rook-store",  version = "0.1.0" }
-rook-skills = { path = "crates/rook-skills", version = "0.1.0" }
-rook-core   = { path = "crates/rook-core",   version = "0.1.0" }
-rook-llm    = { path = "crates/rook-llm",    version = "0.1.0" }
-rook-tools  = { path = "crates/rook-tools",  version = "0.1.0" }
-rook-proto  = { path = "crates/rook-proto",  version = "0.1.0" }
+rook-store  = { path = "crates/rook-store",  version = "0.2.0" }
+rook-skills = { path = "crates/rook-skills", version = "0.2.0" }
+rook-core   = { path = "crates/rook-core",   version = "0.2.0" }
+rook-llm    = { path = "crates/rook-llm",    version = "0.2.0" }
+rook-tools  = { path = "crates/rook-tools",  version = "0.2.0" }
+rook-proto  = { path = "crates/rook-proto",  version = "0.2.0" }
 
 [profile.release]
 opt-level = "z"

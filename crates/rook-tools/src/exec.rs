@@ -173,17 +173,37 @@ impl Tool for RunCommand {
         // Exited first: ordinarily the pipes close microseconds later and this
         // is the same drain finishing.
         //
-        // Generous, and it was not generous enough at two seconds: under a full
-        // `cargo xtask ci`, with the machine running a dozen other test
-        // binaries, an `echo` paid the whole grace and was told something it
-        // had started was still running. What this waits for is not a slow
-        // command — the command has already exited — it is a scheduler, so the
-        // number only has to be past what a loaded machine costs. Five seconds
-        // is, and the only thing that pays it is a command that really did
-        // leave something holding the output.
-        const PIPES_AFTER_EXIT: std::time::Duration = std::time::Duration::from_secs(5);
-        let orphaned =
-            ended == Ended::Exited && tokio::time::timeout(PIPES_AFTER_EXIT, capture!()).await.is_err();
+        // The wait is generous because it is a wait and not a question. Two
+        // seconds was not enough, and neither was five: under a full `cargo
+        // xtask ci`, with a dozen other test binaries on the machine, an `echo`
+        // paid the whole grace and was told something it had started was still
+        // running. What it waits for is not a slow command — the command has
+        // already exited — it is a scheduler, and no number is past what a
+        // loaded machine can cost.
+        //
+        // So the claim is not the timing any more. Whether anything the command
+        // started is still running is a question the operating system can be
+        // asked outright, and `kill(-pgid, 0)` asks it: the shell was put in its
+        // own group and has been reaped, so a group that still has a member has
+        // one this command left behind. The wait stays, because the output has
+        // to be drained either way and a drain that never ends must not hold
+        // the turn.
+        // Generous where the wait can end, short where something else ends it:
+        // on a timeout the group is killed just below, and that is what closes
+        // the write end.
+        const PIPES_AFTER_EXIT: std::time::Duration = std::time::Duration::from_secs(30);
+        const BEFORE_THE_KILL: std::time::Duration = std::time::Duration::from_secs(2);
+        // `child.wait()` is what produced `Exited`, and waiting reaps — so the
+        // shell is gone from the group by the time this asks, and a member left
+        // is a member the command started.
+        let orphaned = ended == Ended::Exited && group_alive(group);
+        if !orphaned {
+            let grace = match ended {
+                Ended::TimedOut => BEFORE_THE_KILL,
+                _ => PIPES_AFTER_EXIT,
+            };
+            let _ = tokio::time::timeout(grace, capture!()).await;
+        }
 
         if ended == Ended::TimedOut {
             // The whole group, not the shell: `sh -c` may fork rather than
@@ -591,6 +611,25 @@ pub(crate) async fn kill_tree(child: &mut tokio::process::Child) -> bool {
 /// SIGKILL to the whole group. Windows has no equivalent that is not a job
 /// object, so there `kill_on_drop` takes the shell and its children are left —
 /// the timeout still reports what happened rather than claiming otherwise.
+/// Whether anything is left in the command's process group.
+///
+/// Signal 0 is the question rather than an answer: it performs the permission
+/// and existence checks and delivers nothing. The command's own shell is in
+/// this group and has been reaped by the time this is asked, so a member left
+/// is one the command started and did not wait for.
+///
+/// Elsewhere there is no group to ask about, and the caller's wait is all there
+/// is — which is what it was everywhere before this.
+fn group_alive(pid: Option<u32>) -> bool {
+    match pid {
+        #[cfg(unix)]
+        Some(pid) => unsafe { libc::kill(-(pid as i32), 0) == 0 },
+        #[cfg(not(unix))]
+        Some(_) => true,
+        None => false,
+    }
+}
+
 pub(crate) fn kill_group(pid: Option<u32>) -> bool {
     match pid {
         #[cfg(unix)]

@@ -14,7 +14,7 @@ globset = "0.4"
 regex = "1.13.1"
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "charset", "http2", "gzip"] }
 rook-llm.workspace = true
-rook-mcp = { version = "0.1.0", path = "../rook-mcp" }
+rook-mcp = { version = "0.2.0", path = "../rook-mcp" }
 rook-proto.workspace = true
 serde = { version = "1.0.229", features = ["derive"] }
 similar = { version = "3.2.0", default-features = false, features = ["text"] }

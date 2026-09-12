@@ -18,8 +18,8 @@ flate2 = "1.1.9"
 sha2 = "0.10.9"
 hex = "0.4.3"
 rook-llm.workspace = true
-rook-lsp = { version = "0.1.0", path = "../rook-lsp" }
-rook-mcp = { version = "0.1.0", path = "../rook-mcp" }
+rook-lsp = { version = "0.2.0", path = "../rook-lsp" }
+rook-mcp = { version = "0.2.0", path = "../rook-mcp" }
 rook-proto.workspace = true
 rook-skills.workspace = true
 rook-store.workspace = true

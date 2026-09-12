@@ -21,12 +21,15 @@ fn mock(mode: &str) -> ServerConfig {
         name: format!("mock-{mode}"),
         command: env!("CARGO_BIN_EXE_mcp-mock").to_string(),
         args: vec![mode.to_string()],
-        // Shorter than the shipped defaults so a wedged mock does not hang the
-        // suite, and not so short that spawning a process counts as one. At five
-        // seconds a restart on a loaded runner timed out, and a timeout is not a
-        // transport failure — so the test read a slow machine as the cap it was
-        // there to check.
-        startup_timeout_secs: 30,
+        // Generous, because nothing here is about how long a handshake may take:
+        // it exists only to tell a wedged mock from a slow one, and every test
+        // that is about a timeout sets its own below. Five seconds failed on a
+        // loaded runner and so did thirty — under `cargo test --workspace` this
+        // file's `one_at_a_time` serialises it against itself and against
+        // nothing else, while other crates spawn whole binaries beside it. A
+        // third guess at the same number would be the mistake; this is the
+        // number ceasing to be a claim.
+        startup_timeout_secs: 300,
         call_timeout_secs: 30,
         ..Default::default()
     }
