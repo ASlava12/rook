@@ -296,12 +296,32 @@ fn about(rook: &Rook) -> About {
     }
 }
 
+/// Puts the daemon's address where every window looks for it, whole or not at
+/// all.
+///
+/// `fs::write` creates the file and then fills it, and a window that catches it
+/// between the two reads an empty address, concludes nothing is answering, and
+/// starts a second daemon of its own on another port. The windows are then
+/// split across two processes that cannot see each other's turns — which is a
+/// day's work looking for a session that "stopped working" in the window that
+/// did not have it. The gate caught it first, as an empty read.
+fn publish_address(path: &std::path::Path, address: &str) {
+    let beside = path.with_extension("addr.incoming");
+    if std::fs::write(&beside, address).is_err() {
+        return;
+    }
+    if std::fs::rename(&beside, path).is_err() {
+        std::fs::remove_file(&beside).ok();
+    }
+}
+
 #[tokio::main]
 async fn serve() -> Result<()> {
     let args = Args::parse();
     let rook = Rook::open(args.workspace).context("opening the store")?;
     let config = rook.config.clone();
-    rook_core::telemetry::init(&config.telemetry);
+    // The daemon draws nothing: its stderr is a log file or a console.
+    rook_core::telemetry::init(&config.telemetry, true);
     let port = args.port.unwrap_or(config.server.port);
     let bind: IpAddr =
         args.bind.unwrap_or(config.server.bind.clone()).parse().context("--bind must be an IP address")?;
@@ -345,7 +365,7 @@ async fn serve() -> Result<()> {
     let addr = listener.local_addr().unwrap_or(addr);
     tracing::info!("rookd listening on http://{addr}");
     let address_file = rook_core::paths::daemon_address_file();
-    std::fs::write(&address_file, format!("http://{addr}")).ok();
+    publish_address(&address_file, &format!("http://{addr}"));
     println!("rook web UI:  http://{addr}");
     println!("rook API:     http://{addr}/api/health");
 
@@ -498,5 +518,33 @@ mod tests {
             !rook.machine_probed(),
             "the daemon probed the machine before publishing its address, which every window waits for"
         );
+    }
+
+    /// A window never reads a half-written address.
+    ///
+    /// `fs::write` creates the file and then fills it. A window that reads it
+    /// in between finds nothing, decides no daemon is answering, and starts a
+    /// second one on another port — and then two sets of windows hold turns
+    /// neither can see. The gate caught the empty read; the split daemon is the
+    /// cost of not fixing it.
+    #[test]
+    fn the_address_a_window_reads_is_whole_or_it_is_the_old_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rookd.addr");
+        std::fs::write(&path, "http://127.0.0.1:1111").unwrap();
+        // A second name for the same file: it keeps the old address only if the
+        // old file was replaced rather than emptied and refilled.
+        let was = dir.path().join("what-a-window-had-open");
+        std::fs::hard_link(&path, &was).unwrap();
+
+        publish_address(&path, "http://127.0.0.1:2222");
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "http://127.0.0.1:2222");
+        assert_eq!(
+            std::fs::read_to_string(&was).unwrap(),
+            "http://127.0.0.1:1111",
+            "the file that was there was replaced, not emptied under whoever was reading it"
+        );
+        assert!(!path.with_extension("addr.incoming").exists(), "and nothing is left beside it");
     }
 }

@@ -11,25 +11,39 @@ use tracing_subscriber::fmt::writer::MakeWriterExt;
 use crate::config::TelemetryConfig;
 use crate::paths;
 
-/// Log to stderr and to `$ROOK_HOME/logs/rook.log`.
+/// Log to `$ROOK_HOME/logs/rook.log`, and to stderr unless something is drawing
+/// on it.
+///
+/// `to_terminal` is false for the window, which owns the screen: a warning
+/// written to stderr under the alternate screen lands in the middle of the
+/// drawing and stays there until something redraws over it. Every sandbox rule
+/// that will not compile, every lock read through after a panic, every note
+/// about a log that could not be written — all of it went onto the interface.
+/// The file gets it either way, which is where anyone looks afterwards.
 ///
 /// `ROOK_LOG` overrides the configured level, because the moment you need more
 /// detail is the moment you do not want to edit a file first.
-pub fn init(config: &TelemetryConfig) {
+pub fn init(config: &TelemetryConfig, to_terminal: bool) {
     let filter = std::env::var("ROOK_LOG").unwrap_or_else(|_| config.log_level.clone());
     let stderr = std::io::stderr;
+    let ansi = to_terminal && std::io::stderr().is_terminal();
+    let file = open_log(&paths::logs_dir(), config.max_log_bytes);
 
-    match open_log(&paths::logs_dir(), config.max_log_bytes) {
-        Some(file) => tracing_subscriber::fmt()
+    match (file, to_terminal) {
+        (Some(file), true) => tracing_subscriber::fmt()
             .with_env_filter(filter)
-            .with_ansi(std::io::stderr().is_terminal())
+            .with_ansi(ansi)
             .with_writer(stderr.and(file))
             .init(),
-        None => tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .with_ansi(std::io::stderr().is_terminal())
-            .with_writer(stderr)
-            .init(),
+        (Some(file), false) => {
+            tracing_subscriber::fmt().with_env_filter(filter).with_ansi(false).with_writer(file).init()
+        }
+        // No file to write to. Stderr is all there is, and a window that has to
+        // choose between a marked screen and losing the reason outright keeps
+        // the reason: the screen redraws, and the reason does not come back.
+        (None, _) => {
+            tracing_subscriber::fmt().with_env_filter(filter).with_ansi(ansi).with_writer(stderr).init()
+        }
     }
 }
 

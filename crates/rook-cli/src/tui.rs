@@ -212,6 +212,18 @@ pub fn run(source: crate::source::Source, yes: bool, started: Option<String>) ->
         let _ = execute!(std::io::stdout(), event::DisableBracketedPaste);
     }
     ratatui::restore();
+    // Written down, not only returned — and after the screen is restored, so it
+    // does not land on top of the UI. A window that ends leaves nothing behind:
+    // its stderr is a terminal that may already be closed, and the question
+    // afterwards is always the same one — did it finish, or did it die? Today
+    // that question was asked of a window that was simply gone, with no crash
+    // report, no log line and no trace of any kind, while the turn it had been
+    // drawing had finished perfectly well in the daemon. At `warn`, because a
+    // window ending is the thing someone comes here to read about.
+    match &result {
+        Ok(()) => tracing::warn!("the window closed"),
+        Err(e) => tracing::warn!("the window ended: {e}"),
+    }
     // Said on the way out rather than on the way in, where it would scroll past
     // before the screen is drawn: a daemon this window started outlives it, on
     // purpose — the next window wants it — and a background process nobody was
