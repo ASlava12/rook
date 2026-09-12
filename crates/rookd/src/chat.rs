@@ -131,8 +131,12 @@ async fn serve(
                 }
             }
             ClientMessage::Setting { name, value } => {
-                let _ = match settings.set(&name, &value) {
-                    Ok(()) => outbound.send(settings.describe()),
+                // The turn's, while one is running here: changing a stance in a
+                // window that is watching a turn means changing that turn's.
+                let theirs = attached(&state, &watching).await.filter(|l| l.running());
+                let setting = theirs.as_ref().map(|l| l.settings.clone()).unwrap_or(settings.clone());
+                let _ = match setting.set(&name, &value) {
+                    Ok(()) => outbound.send(setting.describe()),
                     Err(message) => outbound.send(ChatEvent::Error { message }),
                 };
             }
@@ -154,6 +158,12 @@ async fn serve(
                 let running = live.as_ref().is_some_and(|l| l.running());
                 let _ = outbound.send(ChatEvent::Attached { session, running });
                 if let Some(live) = live {
+                    // What it is running under, not what this window was
+                    // showing: a footer reading `autonomous` over a turn in
+                    // `assist` explains none of the approvals it asks for.
+                    if running {
+                        let _ = outbound.send(live.settings.describe());
+                    }
                     watching = Some(watch(&live, id, outbound.clone(), watching));
                 }
             }
@@ -193,6 +203,20 @@ async fn serve(
                 if let Some(said) = state.config_if_changed().await {
                     let _ = outbound.send(ChatEvent::Text { text: format!("({said})\n") });
                 }
+                // A session is somewhere, and continuing one runs it there
+                // rather than wherever the window happens to be. A turn
+                // resumed from a connection that named no project got the
+                // daemon's own workspace: it audited one repository from
+                // inside another, was refused the paths it had been reading
+                // all along, and said so — which is how this was found.
+                let (engine, shared) = match where_it_belongs(&state, id).await {
+                    Ok(Some(theirs)) => theirs,
+                    Ok(None) => (engine.clone(), shared.clone()),
+                    Err(why) => {
+                        report(&outbound, why);
+                        continue;
+                    }
+                };
                 let live = begin(&state, &engine, &shared, &settings, id, text).await;
                 watching = Some(watch(&live, id, outbound.clone(), watching));
                 state.remember(id, live).await;
@@ -207,6 +231,35 @@ async fn serve(
     }
     drop(outbound);
     let _ = writer.await;
+}
+
+/// Where a session's turns run: the workspace it was started in, always.
+///
+/// Not the window's. A session's checkpoints were taken there, its reads were
+/// relative to it, and a rewind restores into it — a turn continued anywhere
+/// else is a conversation about one project carried out in another. That
+/// happened: an audit resumed from a connection that named no project got the
+/// daemon's own workspace, was refused the paths it had been reading all along,
+/// asked for more latitude to get past the refusals, and was given it.
+///
+/// A workspace that is gone is a refusal rather than a fallback. Falling back
+/// to the window's is exactly the thing above, arrived at politely.
+async fn where_it_belongs(
+    state: &Arc<AppState>,
+    session: u128,
+) -> Result<Option<(Arc<tokio::sync::RwLock<rook_core::Rook>>, Arc<tokio::sync::OnceCell<Shared>>)>, String> {
+    // Unknown here is a session this daemon has not seen — a new one, which
+    // starts where the window is standing.
+    let Ok(Some(meta)) = state.rook.read().await.store.get_session(session) else { return Ok(None) };
+    let theirs = std::path::PathBuf::from(&meta.workspace);
+    let engine = state.engine_for(Some(&theirs)).await.map_err(|why| {
+        format!(
+            "this session belongs to {} and that is where it has to continue, but {why}",
+            theirs.display()
+        )
+    })?;
+    let shared = state.equipment_for(&engine).await;
+    Ok(Some((engine, shared)))
 }
 
 /// A window's view of one live turn.
@@ -283,29 +336,13 @@ async fn begin(
 
     // What the turn writes into. One receiver, which fans it out to every
     // window attached and to the backlog for the next one.
-    let (from_turn, mut events) = mpsc::unbounded_channel::<ChatEvent>();
+    let (from_turn, events) = mpsc::unbounded_channel::<ChatEvent>();
     let (approver, relay) = approver(from_turn.clone(), patience);
     let (asker, ask_relay) = asker(from_turn.clone(), deciding);
     let interjections: Arc<rook_core::agent::Interjections> = Default::default();
 
     let (said, _) = tokio::sync::broadcast::channel::<ChatEvent>(BROADCAST);
     let backlog: Arc<std::sync::Mutex<std::collections::VecDeque<ChatEvent>>> = Default::default();
-    let fan = {
-        let (said, backlog) = (said.clone(), backlog.clone());
-        tokio::spawn(async move {
-            while let Some(event) = events.recv().await {
-                {
-                    let mut kept = backlog.lock().unwrap_or_else(|e| e.into_inner());
-                    if kept.len() >= BACKLOG {
-                        kept.pop_front();
-                    }
-                    kept.push_back(event.clone());
-                }
-                // An error here is nobody attached, which is ordinary now.
-                let _ = said.send(event);
-            }
-        })
-    };
 
     // Counted while it runs: a daemon asked to stop should say what stopping
     // would interrupt rather than find out after.
@@ -323,23 +360,28 @@ async fn begin(
         session,
         prompt,
     );
-    let helpers = vec![relay.abort_handle(), ask_relay.abort_handle(), fan.abort_handle()];
+    let helpers = vec![relay.abort_handle(), ask_relay.abort_handle()];
     let ending = helpers.clone();
-    let task = tokio::spawn(async move {
-        // Dropped with the future, so a cancelled turn stops being counted
-        // where it stops running.
-        let _counted = counted;
-        running_turn.await;
-        // Nothing more will be asked or answered. Without this the relays keep
-        // their senders open, so the fan-out never sees the channel close, and
-        // all three sit until the registry forgets the turn — bounded, and
-        // still alive long after there is anything for them to do.
-        for helper in ending {
-            helper.abort();
+    let task = tokio::spawn({
+        let (said, backlog) = (said.clone(), backlog.clone());
+        async move {
+            // Dropped with the future, so a cancelled turn stops being counted
+            // where it stops running.
+            let _counted = counted;
+            everything_it_says(running_turn, events, said, backlog, ending).await;
         }
     });
 
-    Arc::new(Live { task, helpers, said, backlog, approver, asker, interjections })
+    Arc::new(Live {
+        task,
+        helpers,
+        said,
+        backlog,
+        approver,
+        asker,
+        interjections,
+        settings: settings.clone(),
+    })
 }
 
 /// How long one frame may take to reach a client before the socket counts as
@@ -409,6 +451,75 @@ pub struct Live {
     approver: Arc<ChannelApprover>,
     asker: Arc<ChannelAsker>,
     interjections: Arc<rook_core::agent::Interjections>,
+    /// What this turn is actually running under.
+    ///
+    /// The connection that started it chose them, and once a turn outlived its
+    /// connection the two stopped being the same thing: a window showed its own
+    /// stance in the footer while the turn ran under the one it was started
+    /// with, so `autonomous` on the screen asked for approvals because the turn
+    /// was in `assist`. A window that joins a turn is shown the turn's, and
+    /// changes those rather than its own.
+    settings: Arc<Settings>,
+}
+
+/// Runs a turn and carries what it says, to the last word.
+///
+/// The two used to be separate tasks, and the ending raced: a turn's last word
+/// — `Done`, or the error that ended it — is put in the queue as the turn
+/// returns, and the next line aborted the task that empties the queue. Whether
+/// that task had been polled in between was the scheduler's business. Once it
+/// had not, and the result was the worst shape a failure can take: eleven
+/// minutes of real work, a window still drawing `working…` over it, and a
+/// daemon reporting `turns_running: 0` beside it. Nothing was wrong and nothing
+/// said so.
+async fn everything_it_says(
+    running_turn: impl std::future::Future<Output = ()>,
+    mut events: mpsc::UnboundedReceiver<ChatEvent>,
+    said: tokio::sync::broadcast::Sender<ChatEvent>,
+    backlog: Arc<std::sync::Mutex<std::collections::VecDeque<ChatEvent>>>,
+    ending: Vec<tokio::task::AbortHandle>,
+) {
+    tokio::pin!(running_turn);
+    loop {
+        tokio::select! {
+            // What has been said goes out before the turn is noticed to have
+            // ended, so the two cannot swap places.
+            biased;
+            Some(event) = events.recv() => fan_out(&backlog, &said, event),
+            () = &mut running_turn => break,
+        }
+    }
+    // Nothing more will be asked or answered, and the relays hold senders that
+    // would otherwise keep the queue open for as long as the registry keeps the
+    // turn.
+    for helper in ending {
+        helper.abort();
+    }
+    // The turn has returned and the relays are stopped, so nothing is still
+    // being sent: what is left in the queue is the turn's last word, and
+    // reading it out is exact rather than a pause long enough to probably be
+    // enough.
+    while let Ok(event) = events.try_recv() {
+        fan_out(&backlog, &said, event);
+    }
+}
+
+/// One thing a turn said, to everyone who will ever want it: the windows
+/// attached now, and the backlog for a window that attaches later.
+fn fan_out(
+    backlog: &std::sync::Mutex<std::collections::VecDeque<ChatEvent>>,
+    said: &tokio::sync::broadcast::Sender<ChatEvent>,
+    event: ChatEvent,
+) {
+    {
+        let mut kept = backlog.lock().unwrap_or_else(|e| e.into_inner());
+        if kept.len() >= BACKLOG {
+            kept.pop_front();
+        }
+        kept.push_back(event.clone());
+    }
+    // An error here is nobody attached, which is ordinary now.
+    let _ = said.send(event);
 }
 
 /// Enough to read the end of a long turn, and far short of holding all of one.
@@ -438,6 +549,7 @@ impl Live {
             approver,
             asker,
             interjections: Default::default(),
+            settings: Arc::new(Settings::for_test()),
         }
     }
 
@@ -494,7 +606,7 @@ async fn turn(
         rook.config.agent.context_window,
     ) {
         Ok(provider) => provider,
-        Err(e) => return report(&outbound, e.to_string()),
+        Err(e) => return ended_badly(&rook, session, &outbound, e.to_string()),
     };
 
     let shared = shared.get_or_init(|| Shared::for_project(&rook)).await;
@@ -559,8 +671,29 @@ async fn turn(
                 stopped: outcome.stopped,
             });
         }
-        Err(e) => report(&outbound, e.to_string()),
+        Err(e) => ended_badly(&rook, session, &outbound, e.to_string()),
     }
+}
+
+/// A turn ending badly, said to whoever is watching and written into the
+/// session either way.
+///
+/// It used to be only said. The reason went to the window as one message and
+/// nowhere else, so a window that had closed — or a message lost on the way,
+/// which happened — left a session that simply stopped: two hundred and
+/// eighteen events, no ending, and nothing anywhere to say why. The store
+/// outlives the window, the connection and the daemon, and `session show` is
+/// where someone looks afterwards.
+fn ended_badly(
+    rook: &rook_core::Rook,
+    session: u128,
+    outbound: &mpsc::UnboundedSender<ChatEvent>,
+    message: String,
+) {
+    if let Err(e) = rook.log(session, rook_store::EventKind::Note, "failed", &message) {
+        tracing::warn!("could not record why the turn ended: {e}");
+    }
+    report(outbound, message);
 }
 
 fn report(outbound: &mpsc::UnboundedSender<ChatEvent>, message: String) {
@@ -603,6 +736,15 @@ impl Settings {
             policy: rook_core::agent::policy_for(&rook.config),
             effort: std::sync::RwLock::new(rook.config.agent.effort()),
         }
+    }
+
+    /// A policy and an effort that no config was read for, so the registry's
+    /// own bookkeeping can be tested without a project on disk. Reached only
+    /// through `Live::for_test`, which is the seam.
+    fn for_test() -> Self {
+        let (policy, _) =
+            rook_tools::policy::Policy::compile(rook_tools::policy::Stance::ALL[0], &[], &[], &[]);
+        Self { policy: Arc::new(policy), effort: std::sync::RwLock::new(rook_llm::Effort::ALL[0]) }
     }
 
     fn effort(&self) -> rook_llm::Effort {
@@ -719,6 +861,7 @@ mod tests {
             approver,
             asker,
             interjections: Default::default(),
+            settings: Arc::new(Settings::for_test()),
         }
     }
 
@@ -836,5 +979,106 @@ mod tests {
         assert!(done.is_ok(), "the writer let go of the socket");
         assert_eq!(took.load(std::sync::atomic::Ordering::SeqCst), 1, "after the one frame it took");
         drop(outbound);
+    }
+
+    /// A turn's last word reaches the window that was watching it all along.
+    ///
+    /// The turn puts its ending in the queue as it returns, and nothing else
+    /// ever will. This turn has no `.await` in it, so it finishes on its first
+    /// poll — which means a fan-out living in its own task has not been polled
+    /// once by the time the turn is over, and aborting it there loses
+    /// everything the turn said. That shipped. The window it left behind drew
+    /// `working…` over a turn that had been finished for minutes, while the
+    /// daemon beside it answered `turns_running: 0`.
+    #[tokio::test]
+    async fn a_turns_last_word_reaches_the_window_that_was_watching_all_along() {
+        let (from_turn, events) = mpsc::unbounded_channel::<ChatEvent>();
+        let (said, mut watching) = tokio::sync::broadcast::channel::<ChatEvent>(8);
+        let backlog: Arc<std::sync::Mutex<std::collections::VecDeque<ChatEvent>>> = Default::default();
+
+        let turn = {
+            let out = from_turn.clone();
+            async move {
+                let _ = out.send(ChatEvent::Text { text: "the work".into() });
+                let _ = out.send(ChatEvent::Cancelled);
+            }
+        };
+        drop(from_turn);
+
+        everything_it_says(turn, events, said, backlog.clone(), vec![]).await;
+
+        let watched: Vec<ChatEvent> = std::iter::from_fn(|| watching.try_recv().ok()).collect();
+        assert_eq!(watched.len(), 2, "the window watching saw {watched:?}");
+        assert!(matches!(watched.last(), Some(ChatEvent::Cancelled)), "it ended on {watched:?}");
+
+        let kept: Vec<ChatEvent> = backlog.lock().unwrap().iter().cloned().collect();
+        assert!(
+            matches!(kept.last(), Some(ChatEvent::Cancelled)),
+            "a window attaching afterwards reads {kept:?} and would wait for an ending that had passed"
+        );
+    }
+
+    /// A turn that ends badly says why in the session, not only to the window.
+    ///
+    /// The reason used to be one message to whoever was watching, and a message
+    /// can be lost — one was. What it left behind was a session of two hundred
+    /// and eighteen events that simply stopped: no ending, no error, and
+    /// nothing in `session show` to say the model host had gone quiet. A
+    /// failure nobody can read is the same as no failure at all.
+    #[tokio::test]
+    async fn a_turn_that_ends_badly_says_why_in_the_session_and_not_only_to_the_window() {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let store = rook_store::Store::open(home.path().join("store")).unwrap();
+        let mut config = rook_core::Config::default();
+        // No provider answers to this, so the turn cannot start and says so
+        // without a network in the test.
+        config.agent.model = "no-such-provider/no-such-model".into();
+        let rook = rook_core::Rook::from_parts(
+            store,
+            config,
+            rook_skills::Environment::bare("linux", "x86_64", "0.1.0"),
+            rook_skills::SkillIndex::discover(&[]).0,
+            workspace.path().to_path_buf(),
+        );
+        let session = rook.start_session("a turn that cannot start").unwrap();
+
+        let (outbound, mut heard) = mpsc::unbounded_channel::<ChatEvent>();
+        let (approver, _relay) = approver(outbound.clone(), std::time::Duration::from_secs(1));
+        let (asker, _ask_relay) = asker(outbound.clone(), std::time::Duration::from_secs(1));
+        let engine = Arc::new(tokio::sync::RwLock::new(rook));
+        turn(
+            engine.clone(),
+            Connection {
+                approver,
+                asker,
+                settings: Arc::new(Settings::for_test()),
+                interjections: Default::default(),
+            },
+            Default::default(),
+            outbound,
+            session,
+            "find the leak".into(),
+        )
+        .await;
+
+        let said: Vec<ChatEvent> = std::iter::from_fn(|| heard.try_recv().ok()).collect();
+        let told = said.iter().find_map(|e| match e {
+            ChatEvent::Error { message } => Some(message.clone()),
+            _ => None,
+        });
+        let told = told.unwrap_or_else(|| panic!("the window was told nothing: {said:?}"));
+
+        let events = engine.read().await.store.events(session, 0, 100).unwrap();
+        let written = events.iter().find(|e| e.record.label == "failed");
+        let written = written.unwrap_or_else(|| {
+            let kinds: Vec<_> = events.iter().map(|e| (e.seq, e.record.label.clone())).collect();
+            panic!("the session stops without saying why: {kinds:?}")
+        });
+        assert_eq!(
+            engine.read().await.store.get(&written.record.body).unwrap(),
+            told.as_bytes(),
+            "what the window was told and what the session records are the same reason"
+        );
     }
 }
