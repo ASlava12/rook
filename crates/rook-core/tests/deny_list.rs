@@ -265,3 +265,64 @@ fn an_ordinary_substitution_is_ordinary() {
         assert!(!refuses(fine), "refused something harmless: {fine}");
     }
 }
+
+/// The same command written another way is the same command.
+///
+/// The shipped rules are text, and text has an order. `chmod -R 777 /` was
+/// refused and `chmod 777 -R /` was not — the same command, the same machine
+/// ruined, the flag moved one word. The rules for `dd` and `mkfs` had the same
+/// shape of hole: one quote and one shift key. These are the spellings that
+/// walked past them, and they are answered the way `rm` was, by reading the
+/// words rather than matching the line.
+#[test]
+fn a_dangerous_command_is_refused_however_its_arguments_are_ordered() {
+    for command in [
+        // The one that prompted this: the flag after the operand.
+        "chmod 777 -R /",
+        "chmod -R 0777 /",
+        "chmod -fR 777 /",
+        "chmod --recursive 777 \"/\"",
+        "sudo chmod 777 -R //",
+        "/bin/chmod 777 -R /",
+        // The same reach, by owner rather than by mode.
+        "chown -R nobody /",
+        "chgrp 0 -R /",
+        // One quote was the whole of it.
+        "dd if=/dev/zero of=\"/dev/sda\"",
+        "dd of=/dev/disk0 if=image.img",
+        // One shift key was the whole of that one.
+        "MKFS /dev/sda",
+        "/sbin/Mkfs.ext4 /dev/sda1",
+        // And the spellings already answered, which must stay answered.
+        "rm -rf /",
+        "RM -rf /",
+        "rm / -rf",
+    ] {
+        assert!(refuses(command), "{command:?} should be refused");
+    }
+}
+
+/// And the same reach, bounded, is still ordinary work.
+///
+/// A denial nothing can override is worth spending only where nothing can be
+/// undone. `chmod 777 /` changes one directory and one command puts it back;
+/// the whole machine, recursively, does not come back at all.
+#[test]
+fn the_same_commands_bounded_are_still_allowed_through() {
+    for command in [
+        "chmod 777 -R ./build",
+        "chmod 755 /usr/local/bin/tool",
+        "chown -R me ./target",
+        // `dd if=/dev/zero of=/dev/null` belongs here and is not: the shipped
+        // text rule looks for `of=/dev/` and refuses writing to nowhere, which
+        // is a benchmark and loses nothing. `over_a_device` already knows the
+        // difference; the text rule beside it does not, and a denial nothing
+        // can override is the wrong place to be approximately right. Left as it
+        // is rather than loosened on my own say-so.
+        "dd if=disk.img of=./copy.img",
+        "git commit -m 'never chmod 777 -R /'",
+        "echo 'mkfs is not to be run here'",
+    ] {
+        assert!(!refuses(command), "{command:?} is bounded and should be allowed through");
+    }
+}

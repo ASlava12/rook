@@ -450,34 +450,84 @@ fn past_path(part: &str) -> Option<String> {
     Some(std::iter::once(name.to_string()).chain(words[1..].iter().cloned()).collect::<Vec<_>>().join(" "))
 }
 
-/// Whether a line is `rm` pointed at the root of the filesystem.
+/// What a line would do to the machine, said in the words a person means.
 ///
 /// Asked of the parsed words rather than matched in the text, because a regex
 /// over text cannot answer it and was not answering it. Measured against the
-/// shipped rule: `rm -rf /`, `rm / -rf`, `rm -r -f /` and `rm -fr /` were
-/// refused, and `rm --recursive --force /`, `rm -rf --no-preserve-root /`,
-/// `rm -rf "/"`, `rm -rf //` and `/bin/rm -rf /` were not. Six spellings of one
-/// command, and the rule they walked past is the one nothing can override.
+/// shipped rules, one command at a time:
 ///
-/// The flags are not read at all. `rm /` without `-r` fails harmlessly and was
-/// already refused by the rule this stands beside; what decides is the operand,
-/// which is the part a person means.
-fn wipes_the_root(line: &str) -> bool {
-    line.split([';', '&', '|', '\n']).any(|part| {
-        let words = words(part.trim());
-        // `sudo` and `doas` run what follows them; `env` has been taken apart
-        // before this, and so has a shell.
-        let at = words.iter().position(|w| !matches!(w.as_str(), "sudo" | "doas"));
-        let Some(program) = at.and_then(|at| words.get(at)) else { return false };
-        // By its own name, wherever it was spelled from: `/bin/rm` is `rm`.
-        // Case-insensitively, because a deny list a shift key defeats is not
-        // one — and on a case-insensitive filesystem `RM` is what runs.
-        let name = program.rsplit(['/', '\\']).next().unwrap_or(program);
-        if !name.eq_ignore_ascii_case("rm") {
-            return false;
+/// `rm` — `rm -rf /`, `rm / -rf`, `rm -r -f /` and `rm -fr /` were refused, and
+/// `rm --recursive --force /`, `rm -rf --no-preserve-root /`, `rm -rf "/"`,
+/// `rm -rf //` and `/bin/rm -rf /` were not.
+///
+/// `chmod` — the rule is written `chmod -R 777 /`, a fixed order of words, so
+/// `chmod 777 -R /` walked past it, and so did `chmod -R 0777 /`, `chmod -fR
+/// 777 /` and `chmod --recursive 777 "/"`.
+///
+/// `dd` — the rule looks for the text `of=/dev/`, so `dd of="/dev/sda"` walked
+/// past it on one quote.
+///
+/// `mkfs` — the rule looks for `mkfs` followed by a dot or a space, so `MKFS
+/// /dev/sda` walked past it on a shift key.
+///
+/// Six spellings of one command became eleven of four, and the rules they walk
+/// past are the ones nothing can override.
+fn ruinous(line: &str) -> Option<&'static str> {
+    line.split([';', '&', '|', '\n']).find_map(|part| what_it_does(part.trim()))
+}
+
+/// One statement, read as a program and its arguments.
+fn what_it_does(part: &str) -> Option<&'static str> {
+    let words = words(part);
+    // `sudo` and `doas` run what follows them; `env` has been taken apart
+    // before this, and so has a shell.
+    let at = words.iter().position(|w| !matches!(w.as_str(), "sudo" | "doas"))?;
+    let program = words.get(at)?;
+    // By its own name, wherever it was spelled from: `/bin/rm` is `rm`.
+    // Case-insensitively, because a deny list a shift key defeats is not one —
+    // and on a case-insensitive filesystem `RM` is what runs.
+    let name = program.rsplit(['/', '\\']).next().unwrap_or(program).to_ascii_lowercase();
+    let args = &words[at + 1..];
+    let at_the_root = || args.iter().any(|word| is_the_root(word));
+
+    match name.as_str() {
+        // The flags are not read at all. `rm /` without `-r` fails harmlessly
+        // and was already refused by the rule this stands beside; what decides
+        // is the operand, which is the part a person means.
+        "rm" if at_the_root() => Some("this deletes the root of the filesystem"),
+        // Here the flag does decide. `chmod 777 /` changes one directory and is
+        // undone by one command; `chmod -R 777 /` is the whole machine and is
+        // not undone at all. A denial nothing can override is worth spending
+        // only on the second.
+        "chmod" | "chown" | "chgrp" if at_the_root() && args.iter().any(|w| recursively(w)) => {
+            Some("this rewrites every file on the machine")
         }
-        words[at.unwrap_or(0) + 1..].iter().any(|word| is_the_root(word))
-    })
+        "dd" if args.iter().any(|w| over_a_device(w)) => Some("this writes over a device"),
+        _ if name == "mkfs" || name.starts_with("mkfs.") => Some("this formats a filesystem"),
+        _ => None,
+    }
+}
+
+/// A recursive flag, however it was spelled: `-R`, `--recursive`, or bundled
+/// into `-fR`. Only the capital, because `-r` is not one for any of these
+/// commands and a denial that cannot be overridden is not worth guessing with.
+fn recursively(word: &str) -> bool {
+    match word.strip_prefix("--") {
+        Some(long) => long == "recursive",
+        None => word.strip_prefix('-').is_some_and(|flags| flags.contains('R')),
+    }
+}
+
+/// `dd`'s output pointed at a device. The quotes are already gone by here,
+/// which is the whole of what `of="/dev/sda"` needed to walk past the text.
+///
+/// `/dev/null` and `/dev/zero` are not devices anything is lost to, and a deny
+/// list that refuses a benchmark is one that gets turned off.
+fn over_a_device(word: &str) -> bool {
+    let Some(target) = word.split_once('=').filter(|(key, _)| key.eq_ignore_ascii_case("of")) else {
+        return false;
+    };
+    target.1.starts_with("/dev/") && !matches!(target.1, "/dev/null" | "/dev/zero")
 }
 
 /// A path made of nothing but separators, with or without the glob that makes
@@ -641,11 +691,11 @@ impl Policy {
         if let Some(rule) = self.deny.iter().find(|r| running.iter().any(|line| r.matches(line))) {
             return Decision::Deny(format!("matches the deny rule {rule:?}"));
         }
-        // The same question the first rule in the shipped list is trying to
-        // ask, asked of the words instead of the text — see `wipes_the_root`
-        // for the six spellings that walked past the text.
-        if running.iter().any(|line| wipes_the_root(line)) {
-            return Decision::Deny("this deletes the root of the filesystem".into());
+        // The same questions the shipped rules are trying to ask, asked of the
+        // words instead of the text — see `ruinous` for the eleven spellings
+        // that walked past them.
+        if let Some(why) = running.iter().find_map(|line| ruinous(line)) {
+            return Decision::Deny(why.into());
         }
         // Asked even at read-only: asking for more is the one thing a stance
         // that changes nothing is still allowed to do.
