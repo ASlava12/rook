@@ -3818,7 +3818,7 @@ impl<'a> AgentLoop<'a> {
                         "{name} wanted to {}, and nobody was here to say",
                         risk.describe()
                     )));
-                    Some(format!("refused: {why}"))
+                    Some(rook_tools::policy::no_one_answered(&why))
                 }
             },
         }

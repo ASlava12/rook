@@ -56,7 +56,10 @@ async fn a_question_nobody_answers_gives_up_and_says_how_long_it_waited() {
     let (approver, _requests) = approver(Duration::from_millis(50));
 
     let decided = approver.ask("run_command", &Risk::Execute("rm -rf /tmp/x".into()), None).await;
-    let Approval::Deny(why) = decided else { panic!("silence is not consent") };
+    // Unanswered rather than denied: silence is not consent, and it is not a
+    // refusal either. Collapsing the two told a model `refused: no answer
+    // within 600s`, which reads as the command timing out.
+    let Approval::Unanswered(why) = decided else { panic!("silence is not consent: {decided:?}") };
     assert!(why.contains("no answer within"), "{why}");
 }
 
@@ -67,6 +70,9 @@ async fn a_front_end_that_is_not_there_is_refused_at_once_rather_than_waited_out
 
     let started = std::time::Instant::now();
     let decided = approver.ask("run_command", &Risk::Execute("ls".into()), None).await;
-    assert!(matches!(decided, Approval::Deny(_)), "nothing can answer, so nothing will");
+    assert!(
+        matches!(decided, Approval::Unanswered(_)),
+        "nothing can answer, so nothing will — and nobody refused it either: {decided:?}"
+    );
     assert!(started.elapsed() < Duration::from_secs(1), "and it did not wait the hour out");
 }

@@ -701,6 +701,19 @@ impl Policy {
     }
 }
 
+/// What the model is told when a call needed a person and found none.
+///
+/// Distinct from a refusal, in its words as well as in its variant. Both used
+/// to arrive as `refused: {why}`, and `refused: no answer within 600s` reads
+/// exactly like the command itself having run out of time. A model read it that
+/// way — "the command is timing out even for a simple `pwd`; this might be an
+/// environment issue" — and spent two more attempts, and twenty more minutes of
+/// the same wait, proving an environment that was never at fault. Nothing ran
+/// and nothing was slow: it was asked of a person, and no window was open.
+pub fn no_one_answered(why: &str) -> String {
+    format!("not run: {why}")
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Approval {
     Once,
@@ -821,7 +834,67 @@ impl Approver for ChannelApprover {
         };
         match self.0.ask(request).await {
             Ok(approval) => approval,
-            Err(unanswered) => Approval::Deny(unanswered.to_string()),
+            // Not `Deny`. The two variants exist because they are different
+            // things — a person decided, or no person was there — and this
+            // arm collapsed them, so every front end reported a window nobody
+            // had open as a deliberate refusal. `Unanswered` was constructed
+            // nowhere and the branches written for it were unreachable.
+            //
+            // Said in full, in the shape `Unattended` uses, because the model
+            // is what reads it: `refused: no answer within 600s` was read as
+            // the command running out of time — "the command is timing out
+            // even for a simple `pwd`; this might be an environment issue" —
+            // and two more attempts, and twenty more minutes of the same wait,
+            // went into an environment that was never at fault.
+            Err(unanswered) => Approval::Unanswered(format!(
+                "`{}` needs someone to approve it and {unanswered} — no window was open to \
+                 answer. Nothing ran and nothing timed out, so there is no fault to look for in \
+                 the command or in the environment. Carry on with whatever needs no approval, or \
+                 stop and say what you were about to do; no other tool and no sub-agent can get \
+                 past this.",
+                risk.describe()
+            )),
         }
+    }
+}
+
+#[cfg(test)]
+mod waiting {
+    use super::*;
+
+    /// A call nobody was there to approve is not reported as a refusal.
+    ///
+    /// It was. `ChannelApprover` turned every unanswered request into
+    /// `Approval::Deny`, so the `Unanswered` branches in the agent loop and the
+    /// MCP server were unreachable and the model was told `refused: no answer
+    /// within 600s`. It read that as the command running out of time — "the
+    /// command is timing out even for a simple `pwd`; this might be an
+    /// environment issue" — and spent two more attempts, and twenty more
+    /// minutes of the same wait, proving an environment that was never at
+    /// fault.
+    #[tokio::test]
+    async fn a_call_nobody_was_there_to_approve_is_not_reported_as_a_refusal() {
+        let (requests, _held) = tokio::sync::mpsc::unbounded_channel::<ApprovalRequest>();
+        // Whole seconds, because that is the unit the message is written in.
+        let approver = ChannelApprover::new(requests, std::time::Duration::from_secs(1));
+        let risk = Risk::Execute("pwd".into());
+
+        let answer = approver.ask("run_command", &risk, None).await;
+        let Approval::Unanswered(why) = answer else {
+            panic!("nobody answered and it came back as {answer:?}");
+        };
+
+        assert!(why.contains("within 1s"), "it still says how long it waited: {why}");
+        let said = no_one_answered(&why);
+        assert!(said.starts_with("not run"), "it says the call did not happen: {said}");
+        assert!(said.contains("approve it"), "and names what was missing: {said}");
+        assert!(
+            said.contains("nothing timed out"),
+            "and rules out the reading that cost twenty minutes: {said}"
+        );
+        assert!(
+            !said.contains("refused"),
+            "a refusal is a decision somebody took, and this was not one: {said}"
+        );
     }
 }

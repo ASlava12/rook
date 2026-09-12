@@ -152,7 +152,8 @@ async fn refused(offered: &Offered, name: &str, risk: Risk, preview: Option<&str
                 offered.policy.grant_kind_for_run(&risk);
                 None
             }
-            Approval::Deny(why) | Approval::Unanswered(why) => Some(format!("refused: {why}")),
+            Approval::Deny(why) => Some(format!("refused: {why}")),
+            Approval::Unanswered(why) => Some(rook_tools::policy::no_one_answered(&why)),
         },
     }
 }

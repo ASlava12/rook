@@ -565,7 +565,10 @@ impl Approver for EditorApprover {
         let Some(answer) =
             self.peer.request_within("session/request_permission", params, Some(self.patience)).await
         else {
-            return Approval::Deny(format!(
+            // Unanswered, not denied: nobody decided anything. Told apart so
+            // the model is not sent looking for a fault in a call that never
+            // ran.
+            return Approval::Unanswered(format!(
                 "the editor did not answer within {}s — raise `[agent] answer_timeout_secs` if that \
                  is too short",
                 self.patience.as_secs()
@@ -579,7 +582,7 @@ impl Approver for EditorApprover {
                 Some("always") => Approval::ForRun,
                 _ => Approval::Deny("the user rejected it".into()),
             },
-            _ => Approval::Deny("the request was cancelled".into()),
+            _ => Approval::Unanswered("the request was cancelled".into()),
         }
     }
 }

@@ -1684,8 +1684,10 @@ async fn an_unattended_run_refuses_what_it_cannot_get_approved() {
     assert!(!target.exists(), "nothing may run unreviewed when nothing can review it");
     let entries = f.rook.transcript(session, 0, usize::MAX, 4096).unwrap();
     let refusal = entries.iter().find(|e| e.kind == "tool-result").unwrap();
-    assert!(refusal.body.contains("refused"), "{}", refusal.body);
-    assert!(refusal.body.contains("--yes"), "the refusal must say how to proceed: {}", refusal.body);
+    // "not run", not "refused": nobody decided anything, and a model told it was
+    // refused goes looking for the fault in the call.
+    assert!(refusal.body.starts_with("not run"), "{}", refusal.body);
+    assert!(refusal.body.contains("--yes"), "and it must say how to proceed: {}", refusal.body);
 }
 
 #[tokio::test]
