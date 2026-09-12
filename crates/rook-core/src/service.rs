@@ -1648,6 +1648,34 @@ impl Rook {
     }
 
     /// A copy of a session's first `at` events, under a new id.
+    /// Move a session to another workspace, deliberately.
+    ///
+    /// A session's turns run where it was started, which is what stops one
+    /// project's audit being carried out inside another. That rule leaves a
+    /// gap it has to answer for: a session started one directory too deep —
+    /// `xVeil` for work that spans `veil`, `hidden-volume` and `xVeil`
+    /// alongside it — is then refused every path it needs, forever, with no
+    /// way out but starting again and losing the transcript. So there is a way
+    /// out, and it is a command with a name rather than a side effect of
+    /// connecting from somewhere else.
+    ///
+    /// Checkpoints record the root they were taken against, so the ones
+    /// already written keep restoring where they came from. What moves is
+    /// where the next turn runs.
+    pub fn move_session(&self, session: u128, to: &std::path::Path) -> Result<rook_store::SessionMeta> {
+        let home = to.canonicalize().map_err(|e| CoreError::Other(format!("{}: {e}", to.display())))?;
+        if !home.is_dir() {
+            return Err(CoreError::Other(format!("{} is not a directory", home.display())));
+        }
+        let moved = self.store.update_session(session, |meta| {
+            meta.workspace = home.display().to_string();
+        })?;
+        if !moved {
+            return Err(CoreError::Other("no such session".into()));
+        }
+        self.store.get_session(session)?.ok_or_else(|| CoreError::Other("no such session".into()))
+    }
+
     pub fn fork_session(&self, session: u128, at: u64) -> Result<rook_store::SessionMeta> {
         let meta =
             self.store.get_session(session)?.ok_or_else(|| CoreError::Other("no such session".into()))?;

@@ -30,6 +30,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/sessions/{id}/context", get(context))
         .route("/api/sessions/{id}/goal", post(set_goal))
         .route("/api/sessions/{id}/rewind", post(rewind))
+        .route("/api/sessions/{id}/move", post(move_session))
         .route("/api/memory", get(memory).post(forget))
         .route("/api/memory/search", get(memory_search))
         .route("/api/memory/add", post(remember))
@@ -591,6 +592,23 @@ struct RewindBody {
 
 /// Forks rather than truncating, so the rewound-past turns stay readable —
 /// which is why this is a POST that answers with a new session id.
+/// Move a session to another workspace. See `Rook::move_session` for why this
+/// is a named act and not something a connection can do by standing elsewhere.
+async fn move_session(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+    Json(body): Json<MoveBody>,
+) -> ApiResult<rook_store::SessionMeta> {
+    let rook = s.rook.read().await;
+    Ok(Json(rook.move_session(session_id(&id)?, std::path::Path::new(&body.to))?))
+}
+
+#[derive(Deserialize)]
+struct MoveBody {
+    /// Where the session's turns should run from now on.
+    to: String,
+}
+
 async fn rewind(
     State(s): State<Shared>,
     Path(id): Path<String>,
@@ -1959,5 +1977,53 @@ mod tests {
             why.contains(&path.display().to_string()),
             "the refusal has to name the workspace it could not reach: {why}"
         );
+    }
+
+    /// A session moved runs its next turn where it was moved to.
+    ///
+    /// The rule that a session's turns run where it started has to answer for
+    /// the case where that directory was the wrong one. A session started in
+    /// `xVeil`, for work spanning the two projects beside it, is otherwise
+    /// refused every path it needs for as long as it exists, and the only way
+    /// out is to lose two hundred events and begin again. Moving it is a
+    /// command with a name; what runs afterwards is the point of it.
+    #[tokio::test]
+    async fn a_session_moved_runs_its_next_turn_where_it_was_moved_to() {
+        let f = fixture();
+        let was = tempfile::tempdir().unwrap();
+        let now = tempfile::tempdir().unwrap();
+        let engine = f.state.engine_for(Some(was.path())).await.unwrap();
+        let session = engine.read().await.start_session("started one directory too deep").unwrap();
+
+        let meta = f.state.rook.read().await.move_session(session, now.path()).unwrap();
+        assert_eq!(
+            std::path::Path::new(&meta.workspace),
+            now.path().canonicalize().unwrap(),
+            "it says where it put it"
+        );
+
+        let found = crate::chat::where_it_belongs(&f.state, session).await.unwrap();
+        let (moved, _) = found.expect("a moved session still belongs somewhere");
+        assert_eq!(
+            moved.read().await.workspace.canonicalize().unwrap(),
+            now.path().canonicalize().unwrap(),
+            "the next turn would have run in {} instead",
+            was.path().display()
+        );
+    }
+
+    /// And a workspace that is not there is refused by name.
+    #[tokio::test]
+    async fn a_session_is_not_moved_somewhere_that_is_not_a_directory() {
+        let f = fixture();
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("not-a-workspace");
+        std::fs::write(&file, b"a file").unwrap();
+        let rook = f.state.rook.read().await;
+
+        let refused = rook.move_session(f.session, &file).unwrap_err().to_string();
+        assert!(refused.contains("not a directory"), "{refused}");
+        let missing = rook.move_session(f.session, &dir.path().join("nowhere")).unwrap_err().to_string();
+        assert!(missing.contains("nowhere"), "the refusal names the path it could not reach: {missing}");
     }
 }

@@ -361,6 +361,17 @@ enum SessionCmd {
         /// Leave empty to show the current goal.
         goal: Vec<String>,
     },
+    /// Move a session to another workspace, so its next turn runs there.
+    ///
+    /// A session's turns run where it was started, on purpose. This is the way
+    /// to change that when the directory was the wrong one — one project deep
+    /// for work that spans the projects beside it — rather than losing the
+    /// transcript and beginning again.
+    Move {
+        id: String,
+        /// The workspace its turns should run in from now on.
+        to: std::path::PathBuf,
+    },
     /// Fork a session at a sequence number, keeping the original intact.
     Fork {
         id: String,
@@ -1756,6 +1767,11 @@ fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, json: bool) -
         | SessionCmd::Context { .. }
         | SessionCmd::Goal { .. }
         | SessionCmd::Rewind { .. } => unreachable!("routed above"),
+        SessionCmd::Move { id, to } => {
+            let session = source.session_named(&id, workspace)?;
+            let home = source.move_session(session, &to)?;
+            println!("this session's turns now run in {home}");
+        }
         SessionCmd::Fork { id, at } => {
             let (forked, events) = source.fork_session(source.session_named(&id, workspace)?, at)?;
             println!("forked {events} events into {forked}");

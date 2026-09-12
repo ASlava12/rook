@@ -754,6 +754,20 @@ impl Source {
         }
     }
 
+    pub fn move_session(&self, session: u128, to: &std::path::Path) -> Result<String> {
+        match self {
+            Self::Local(rook) => Ok(rook.move_session(session, to)?.workspace),
+            Self::Daemon(d) => {
+                let id = rook_store::format_session_id(session);
+                let said: serde_json::Value = d.post(
+                    &format!("/api/sessions/{id}/move"),
+                    &serde_json::json!({ "to": to.display().to_string() }),
+                )?;
+                Ok(said["workspace"].as_str().unwrap_or_default().to_string())
+            }
+        }
+    }
+
     pub fn delete_session(&self, session: u128) -> Result<u64> {
         match self {
             Self::Local(rook) => Ok(rook.delete_session(session)?),

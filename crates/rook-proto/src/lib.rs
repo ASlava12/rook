@@ -115,8 +115,12 @@ pub enum ClientMessage {
         id: String,
         answers: Vec<Vec<String>>,
     },
-    /// Change a session setting for the rest of the connection: `mode` takes
-    /// auto/ask/readonly, `effort` takes low…max.
+    /// Change a setting for the turn in flight, or for this connection's next
+    /// one when none is running: `mode` takes a stance, `effort` takes low…max.
+    ///
+    /// The turn's, not the connection's. They were the connection's, so a
+    /// second window joining a turn showed its own stance over one running
+    /// under another, and could change that one underneath it.
     Setting {
         name: String,
         value: String,
