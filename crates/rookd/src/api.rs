@@ -1966,7 +1966,11 @@ mod tests {
     async fn a_session_whose_workspace_is_gone_is_refused_rather_than_run_elsewhere() {
         let f = fixture();
         let gone = tempfile::tempdir().unwrap();
-        let path = gone.path().to_path_buf();
+        // Canonical before it is gone, because that is the spelling the engine
+        // records and the refusal quotes — and on Windows it is `\\?\C:\…`,
+        // which is not what `tempdir()` handed out. Asked for rather than
+        // assumed; assuming cost a red Windows run.
+        let path = gone.path().canonicalize().unwrap();
         let engine = f.state.engine_for(Some(&path)).await.unwrap();
         let orphan = engine.read().await.start_session("a project since deleted").unwrap();
         drop(gone);

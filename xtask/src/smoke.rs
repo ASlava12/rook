@@ -206,6 +206,8 @@ pub fn smoke(model: Option<String>) -> Result<()> {
 
     println!("{:<34} {}\n{}", "scenario", model, "─".repeat(60));
     let mut failed = 0;
+    // Failures that are the server having gone away rather than the model.
+    let mut lost = 0usize;
     for scenario in SCENARIOS {
         let home = tempfile::tempdir()?;
         let workspace = tempfile::tempdir()?;
@@ -233,6 +235,9 @@ pub fn smoke(model: Option<String>) -> Result<()> {
             Ok(()) => println!("{:<34} ok", scenario.name),
             Err(e) => {
                 failed += 1;
+                if no_model_behind_it(&e.to_string()) {
+                    lost += 1;
+                }
                 println!("{:<34} FAILED — {e}", scenario.name);
                 // What the turn actually did: the verdict names the symptom and
                 // the transcript names the cause — which tool, with what
@@ -245,13 +250,34 @@ pub fn smoke(model: Option<String>) -> Result<()> {
     }
 
     println!("{}", "─".repeat(60));
-    match failed {
-        0 => {
+    match (failed, lost) {
+        (0, _) => {
             println!("smoke: ok");
             Ok(())
         }
-        n => bail!("{n} of {} scenarios failed against {model}", SCENARIOS.len()),
+        // Said before the count, because it changes what the count means. A run
+        // where the server went away halfway printed five failures, four of them
+        // scenarios that had passed an hour earlier, and read as five product
+        // bugs — which is the one thing this job exists not to do.
+        (n, lost) if lost > 0 => bail!(
+            "the model server stopped answering partway through: {lost} of these {n} failures say \
+             so outright, and every scenario after it ran without a model behind it. This is not a \
+             verdict on {model} — re-run it when the server is back."
+        ),
+        (n, _) => bail!("{n} of {} scenarios failed against {model}", SCENARIOS.len()),
     }
+}
+
+/// Whether a failure is the model server having gone away, rather than the
+/// model having got the task wrong.
+///
+/// The two are the same colour on the summary line and nothing else tells them
+/// apart, so a run that lost its server read as a sudden collapse in a model
+/// that had not changed.
+fn no_model_behind_it(why: &str) -> bool {
+    ["cannot reach", "connection refused", "operation timed out", "error sending request"]
+        .iter()
+        .any(|said| why.contains(said))
 }
 
 /// The tool calls and results of the one session in `home`, bounded.
@@ -334,7 +360,7 @@ fn turn_from(printed: &serde_json::Value) -> Result<Turn> {
 
 #[cfg(test)]
 mod tests {
-    use super::turn_from;
+    use super::{no_model_behind_it, turn_from};
 
     /// The contract with `rook run --json`, pinned: the outcome is nested,
     /// and a print with none is an error rather than an empty turn.
@@ -360,5 +386,28 @@ mod tests {
             turn_from(&flat).is_err(),
             "the top-level shape is not the CLI's, and reading it is how every field came back empty"
         );
+    }
+
+    /// A run that lost its model server says so, rather than reporting it as
+    /// the model failing five tasks.
+    ///
+    /// One did: Ollama stopped answering partway through, and the summary read
+    /// `5 of 8 scenarios failed against ollama/qwen2.5-coder:3b` — four of them
+    /// scenarios that had passed an hour earlier against the same model. The
+    /// only thing in the whole report that said otherwise was one scenario's
+    /// error text, three lines up.
+    #[test]
+    fn a_run_that_lost_its_model_server_is_not_read_as_the_model_failing() {
+        // Verbatim from the run that prompted this.
+        assert!(no_model_behind_it(
+            "reading the turn: Error: cannot reach http://127.0.0.1:11434: operation timed out"
+        ));
+        assert!(no_model_behind_it("error sending request for url (http://127.0.0.1:11434/api/chat)"));
+
+        // And the ordinary verdicts, which are the model's work and must not be
+        // excused as the server's.
+        assert!(!no_model_behind_it("the answer is in the file, not in the model"));
+        assert!(!no_model_behind_it("and only a command reaches it"));
+        assert!(!no_model_behind_it("it ran out of steps rather than finishing"));
     }
 }
