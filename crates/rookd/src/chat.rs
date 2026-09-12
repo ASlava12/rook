@@ -244,7 +244,7 @@ async fn serve(
 ///
 /// A workspace that is gone is a refusal rather than a fallback. Falling back
 /// to the window's is exactly the thing above, arrived at politely.
-async fn where_it_belongs(
+pub(crate) async fn where_it_belongs(
     state: &Arc<AppState>,
     session: u128,
 ) -> Result<Option<(Arc<tokio::sync::RwLock<rook_core::Rook>>, Arc<tokio::sync::OnceCell<Shared>>)>, String> {

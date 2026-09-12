@@ -1903,4 +1903,61 @@ mod tests {
         assert!(body["gc"].is_object(), "{body}");
         assert!(body["over_budget_by"].is_number(), "{body}");
     }
+
+    /// A session continues in the workspace it was started in, or not at all.
+    ///
+    /// Continuing one ran it wherever the window happened to be standing. An
+    /// audit of one project, resumed from a connection that named no project,
+    /// got the daemon's own: it was refused the paths it had been reading for
+    /// two hundred events, asked for more latitude to get past the refusals,
+    /// and was given it. A session's checkpoints were taken where it started
+    /// and a rewind restores there, so a turn anywhere else is a conversation
+    /// about one project carried out in another.
+    #[tokio::test]
+    async fn a_session_continues_in_its_own_workspace_or_it_does_not_continue() {
+        let f = fixture();
+        let theirs = tempfile::tempdir().unwrap();
+        let elsewhere = f.state.engine_for(Some(theirs.path())).await.unwrap();
+        let session = elsewhere.read().await.start_session("an audit of the other project").unwrap();
+        assert_ne!(
+            theirs.path().canonicalize().unwrap(),
+            f.state.rook.read().await.workspace.canonicalize().unwrap(),
+            "the session has to belong somewhere else or this proves nothing"
+        );
+
+        let found = crate::chat::where_it_belongs(&f.state, session).await.unwrap();
+        let (engine, _) = found.expect("a session this daemon knows belongs somewhere");
+        assert_eq!(
+            engine.read().await.workspace.canonicalize().unwrap(),
+            theirs.path().canonicalize().unwrap(),
+            "the turn would have run in {} instead",
+            f.state.rook.read().await.workspace.display()
+        );
+
+        // A session nothing here has seen is a new one, and a new one starts
+        // where the window is standing.
+        let unknown = crate::chat::where_it_belongs(&f.state, 1).await.unwrap();
+        assert!(unknown.is_none(), "an unknown session is not a session somewhere else");
+    }
+
+    /// And a workspace that has gone is a refusal, not a quiet fallback.
+    ///
+    /// Falling back to the window's is the same bug arrived at politely: the
+    /// turn runs, reads the wrong tree, and only its transcript says so.
+    #[tokio::test]
+    async fn a_session_whose_workspace_is_gone_is_refused_rather_than_run_elsewhere() {
+        let f = fixture();
+        let gone = tempfile::tempdir().unwrap();
+        let path = gone.path().to_path_buf();
+        let engine = f.state.engine_for(Some(&path)).await.unwrap();
+        let orphan = engine.read().await.start_session("a project since deleted").unwrap();
+        drop(gone);
+
+        let refused = crate::chat::where_it_belongs(&f.state, orphan).await;
+        let why = refused.err().unwrap_or_else(|| panic!("it was continued somewhere else instead"));
+        assert!(
+            why.contains(&path.display().to_string()),
+            "the refusal has to name the workspace it could not reach: {why}"
+        );
+    }
 }
