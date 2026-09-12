@@ -540,6 +540,11 @@ fn symbol(value: &serde_json::Value) -> Option<Symbol> {
 /// The alternative is asking the model for a line and column, which it does not
 /// reliably know and cannot check — a name it can read off the source is the
 /// thing it actually has.
+/// Every index here is a `find` result or a `find` result plus the length of
+/// what was found, so all of them are where a character starts. Sliced by byte
+/// on that reasoning, said out loud because the reasoning is the whole of what
+/// makes it safe.
+#[allow(clippy::string_slice)]
 pub fn locate(text: &str, symbol: &str) -> Option<Position> {
     for (line, content) in text.lines().enumerate() {
         let mut from = 0;

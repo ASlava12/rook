@@ -141,6 +141,23 @@ fn short_hash_prefixes_resolve_like_git() {
     assert_eq!(s.resolve_prefix("ffffffffff").unwrap(), None);
 }
 
+/// A mistyped id is an answer of nothing, not a panic.
+///
+/// An odd number of digits decodes as one byte fewer, and that was done by
+/// slicing off the last *byte* of whatever was passed in. One byte back from
+/// the `é` in `café` is inside it, so a hash prefix somebody typed in their own
+/// alphabet took down the process that was asked about it — in a library, on an
+/// argument. Found by `clippy::string_slice`, which is on in the crates that
+/// read text from outside and was off everywhere when this shipped.
+#[test]
+fn a_hash_prefix_that_is_not_hex_resolves_to_nothing_rather_than_panicking() {
+    let (_d, s) = tmp_store();
+    s.put(Kind::Message, &message(7)).unwrap();
+    for typed in ["café", "п", "ffff…", "日本語", "abcdé"] {
+        assert_eq!(s.resolve_prefix(typed).unwrap(), None, "{typed:?} names no object");
+    }
+}
+
 #[test]
 fn gc_collects_only_unreachable_objects() {
     let (_d, s) = tmp_store();
@@ -513,7 +530,9 @@ fn history_keys_do_not_tie_when_the_clock_does() {
 
     // The precondition, stated exactly: a ULID's first ten characters are its
     // millisecond, so keys sharing them are keys the old scheme would have
-    // collided on.
+    // collided on. Sliced by byte because a ULID is Crockford base32, which is
+    // ASCII, so ten bytes are ten characters.
+    #[allow(clippy::string_slice)]
     let same_millisecond = keys.windows(2).filter(|pair| pair[0][..10] == pair[1][..10]).count();
     assert!(same_millisecond > 0, "the keys have to outrun the clock or this proves nothing");
 

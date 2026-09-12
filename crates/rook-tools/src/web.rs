@@ -11,6 +11,12 @@
 //! where the text came from, so what follows can be weighed as a quotation
 //! rather than read as a fact.
 
+#![warn(clippy::string_slice)]
+//
+// HTML off the open web is the most foreign text this agent reads, and a `&str`
+// indexed by a computed byte panics when the byte is inside a character — the
+// whole process, under `panic = "abort"`. The stripper below was written
+// carefully; the lint is what keeps the next edit to it careful too.
 use async_trait::async_trait;
 use serde_json::json;
 
@@ -275,6 +281,11 @@ fn host_of(url: &str) -> &str {
 /// binary. Script and style are dropped whole because their contents are not
 /// text anybody wants read aloud; everything else keeps only what was between
 /// the tags.
+/// Every index here is a `find` result or one byte past an ASCII `<`, which is
+/// where a character starts. The reasoning is written into the body already,
+/// beside the byte comparisons it depends on; this says out loud that it is the
+/// reasoning, and not a slice nobody thought about.
+#[allow(clippy::string_slice)]
 fn readable(html: &str) -> String {
     let mut out = String::with_capacity(html.len() / 2);
     let mut rest = html;
@@ -327,6 +338,9 @@ fn readable(html: &str) -> String {
     collapse(&out)
 }
 
+/// Sliced at the `find` result it was handed, which is where a character
+/// starts.
+#[allow(clippy::string_slice)]
 fn find_close(rest: &str, tag: &str) -> Option<usize> {
     let closing = format!("</{tag}");
     let at = rest.to_ascii_lowercase().find(&closing)?;
@@ -546,6 +560,9 @@ fn escaped(query: &str) -> String {
 /// the size of the rest of this binary. Their markup can change under this —
 /// that is the price of an engine that needs nothing set up, and it is why the
 /// answer says who could not be read rather than coming back empty.
+/// Sliced at `match_indices` and `rfind` results, all of them where a character
+/// starts.
+#[allow(clippy::string_slice)]
 fn links_in(html: &str, limit: usize) -> Vec<String> {
     let mut found = Vec::new();
     let mut snippets = html.split("result-snippet").skip(1);
@@ -589,6 +606,8 @@ fn links_in(html: &str, limit: usize) -> Vec<String> {
 }
 
 /// The value of an attribute in a tag, however it is quoted.
+/// Sliced at `find` results and past the ASCII quote that follows them.
+#[allow(clippy::string_slice)]
 fn attribute(tag: &str, name: &str) -> Option<String> {
     let at = tag.find(&format!("{name}="))? + name.len() + 1;
     let rest = &tag[at..];
@@ -602,6 +621,8 @@ fn attribute(tag: &str, name: &str) -> Option<String> {
 /// Where a result actually points. Theirs are sometimes wrapped in a redirect
 /// of their own — `//duckduckgo.com/l/?uddg=<the real one>` — and what a model
 /// is given to read should be the page, not the hop.
+/// Sliced at a `find` result and past the ASCII marker it points at.
+#[allow(clippy::string_slice)]
 fn direct(href: &str) -> String {
     let Some(at) = href.find("uddg=") else { return href.to_string() };
     let encoded = href[at + 5..].split('&').next().unwrap_or_default();

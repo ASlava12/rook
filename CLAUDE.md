@@ -285,7 +285,15 @@ inevitabilities — a poisoned lock is read through with
 back instead of asserting, and a daemon that cannot install a signal handler
 says so and keeps running. Slicing a `&str` by a computed byte index is the same
 class of bug and is already answered by `at_boundary`, `boundary_at_or_after`
-and `char_boundary_at_or_before`; use them rather than an index.
+and `char_boundary_at_or_before`; use them rather than an index. That rule was
+written and then broken twice in one crate, because nothing asked the compiler.
+`clippy::string_slice` is on in `rook-llm`, `rook-mcp` and `web.rs` — the three
+places text arrives from outside, and so the three where characters wider than a
+byte turn up. Not workspace-wide: the workspace slices its own ASCII in eighty
+places, and a warning allowed eighty times is decoration. When it fires, use a
+helper or say in a sentence why the index is where a character starts — usually
+"it is a `find` result", which is worth writing down because the next edit will
+not know it.
 
 ## Storage changes
 

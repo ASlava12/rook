@@ -202,8 +202,7 @@ async fn read_event_stream(
     timeout: Duration,
 ) -> Result<Incoming> {
     let mut bytes = response.bytes_stream();
-    let mut buffer = String::new();
-    let mut scanned = 0usize;
+    let mut frames = rook_llm::Frames::new();
 
     loop {
         let chunk = match tokio::time::timeout(timeout, bytes.next()).await {
@@ -220,18 +219,15 @@ async fn read_event_stream(
                 chunk.map_err(|e| McpError::Transport { server: server.into(), message: e.to_string() })?
             }
         };
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-        if buffer.len() > MAX_FRAME_BYTES {
+        frames.feed(&chunk);
+        if frames.held() > MAX_FRAME_BYTES {
             return Err(McpError::Transport {
                 server: server.into(),
                 message: format!("an event passed {MAX_FRAME_BYTES} bytes with no separator"),
             });
         }
 
-        while let Some(offset) = buffer[scanned..].find("\n\n") {
-            let end = scanned + offset;
-            scanned = 0;
-            let frame: String = buffer.drain(..end + 2).collect();
+        for frame in frames.ready() {
             for line in frame.lines() {
                 let Some(data) = line.strip_prefix("data:") else { continue };
                 let Ok(message) = serde_json::from_str::<Incoming>(data.trim()) else { continue };
@@ -240,7 +236,6 @@ async fn read_event_stream(
                 }
             }
         }
-        scanned = buffer.len().saturating_sub(1);
     }
 }
 
@@ -249,5 +244,9 @@ fn truncate(text: &str, max: usize) -> String {
         return text.to_string();
     }
     let cut = (0..=max).rev().find(|i| text.is_char_boundary(*i)).unwrap_or(0);
-    format!("{}…", &text[..cut])
+    // The line above is the boundary search, which is the whole point of this
+    // function: `cut` is a boundary because nothing else was accepted.
+    #[allow(clippy::string_slice)]
+    let head = &text[..cut];
+    format!("{head}…")
 }

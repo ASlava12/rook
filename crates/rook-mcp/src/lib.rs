@@ -6,6 +6,21 @@
 //! pulling in the full SDK, which would add 21 crates for a fraction of its
 //! surface. See `docs/adr/0008-hand-written-mcp-client.md`.
 
+#![warn(clippy::string_slice)]
+//
+// Indexing a `&str` by a computed byte panics when the byte is inside a
+// character, and under `panic = "abort"` that is the whole process. One did:
+// `start byte index 8185 is not a char boundary; it is inside 'т'` ended a
+// daemon and the half-hour turn it was holding. CLAUDE.md had the rule and
+// nothing asked the compiler, which knows the types and can tell a `String`
+// from a `Vec` where a guard reading the text never could.
+//
+// On here rather than for the whole workspace, because the workspace slices its
+// own ASCII in eighty places and a warning allowed eighty times is decoration.
+// This is where the text comes from outside — a model, a server, the web — and
+// so where the characters wider than a byte actually arrive. A slice here
+// either uses an index the code just found, and says so, or it is a crash
+// waiting for somebody who does not write in English.
 pub mod http;
 pub mod protocol;
 pub mod stdio;

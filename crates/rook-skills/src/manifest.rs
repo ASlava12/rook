@@ -230,6 +230,11 @@ impl SkillManifest {
     }
 }
 
+/// Sliced by byte at a line start: `offset` is the sum of whole lines from
+/// `split_inclusive`, so it is always where one ends and the next begins, and a
+/// line never ends inside a character. Said out loud because that reasoning is
+/// the whole of what makes it safe.
+#[allow(clippy::string_slice)]
 pub fn split_frontmatter<'a>(text: &'a str, path: &Path) -> Result<(&'a str, &'a str)> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let rest = text

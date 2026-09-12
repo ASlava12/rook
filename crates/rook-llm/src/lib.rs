@@ -10,13 +10,29 @@
 //! Everything here is provider-agnostic on purpose: the agent loop must never
 //! contain a branch on which vendor is answering.
 
+#![warn(clippy::string_slice)]
+//
+// Indexing a `&str` by a computed byte panics when the byte is inside a
+// character, and under `panic = "abort"` that is the whole process. One did:
+// `start byte index 8185 is not a char boundary; it is inside 'т'` ended a
+// daemon and the half-hour turn it was holding. CLAUDE.md had the rule and
+// nothing asked the compiler, which knows the types and can tell a `String`
+// from a `Vec` where a guard reading the text never could.
+//
+// On here rather than for the whole workspace, because the workspace slices its
+// own ASCII in eighty places and a warning allowed eighty times is decoration.
+// This is where the text comes from outside — a model, a server, the web — and
+// so where the characters wider than a byte actually arrive. A slice here
+// either uses an index the code just found, and says so, or it is a crash
+// waiting for somebody who does not write in English.
 /// Server-sent event frames, reassembled from transport chunks.
 ///
-/// One of these rather than three. Each provider had its own copy of the same
+/// One of these rather than four. Each provider had its own copy of the same
 /// dozen lines, so each carried the same two bugs, and fixing one would have
 /// left the other two to be found the same way this one was: a daemon gone,
 /// half an hour of work with it, and a session that "stopped working".
-pub(crate) struct Frames {
+#[derive(Default)]
+pub struct Frames {
     /// Whole characters, waiting for their frame to end.
     text: String,
     /// The tail of a chunk that is not yet a whole character.
@@ -26,8 +42,8 @@ pub(crate) struct Frames {
 }
 
 impl Frames {
-    pub(crate) fn new() -> Self {
-        Self { text: String::new(), partial: Vec::new(), scanned: 0 }
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Takes one transport chunk.
@@ -38,7 +54,7 @@ impl Frames {
     /// network happened to cut. Bytes are held until they are a whole
     /// character; at most three ever are, since a UTF-8 sequence is at most
     /// four long.
-    pub(crate) fn feed(&mut self, chunk: &[u8]) {
+    pub fn feed(&mut self, chunk: &[u8]) {
         self.partial.extend_from_slice(chunk);
         // Until the end, not once: a chunk can hold a bad byte and then a
         // kilobyte of perfectly good text, and stopping at the bad byte left
@@ -72,7 +88,7 @@ impl Frames {
     }
 
     /// How much is being held, for the caller's frame cap.
-    pub(crate) fn held(&self) -> usize {
+    pub fn held(&self) -> usize {
         self.text.len()
     }
 
@@ -84,7 +100,7 @@ impl Frames {
     /// from a Cyrillic letter is inside it — `start byte index 8185 is not a
     /// char boundary`. Release builds abort on a panic, so that took the whole
     /// daemon and the turn it was running.
-    pub(crate) fn ready(&mut self) -> Vec<String> {
+    pub fn ready(&mut self) -> Vec<String> {
         let mut done = Vec::new();
         while let Some(offset) =
             self.text.as_bytes()[self.scanned..].windows(2).position(|pair| pair == b"\n\n")
@@ -330,7 +346,11 @@ pub(crate) fn truncate(text: &str, max: usize) -> String {
         return text.to_string();
     }
     let cut = (0..=max).rev().find(|i| text.is_char_boundary(*i)).unwrap_or(0);
-    format!("{}…", &text[..cut])
+    // The line above is the boundary search, which is the whole point of this
+    // function: `cut` is a boundary because nothing else was accepted.
+    #[allow(clippy::string_slice)]
+    let head = &text[..cut];
+    format!("{head}…")
 }
 
 /// The innermost cause. An HTTP client's own message is the url again and never

@@ -17,6 +17,15 @@
 //! There the object is adopted only when it names a tool that was offered — a
 //! reply that is JSON because JSON was asked for is not a call.
 
+#![allow(clippy::string_slice)]
+//
+// This module is nothing but byte slicing of model output, which is exactly
+// where the characters that are not one byte wide live. Every index in it is a
+// `find` or `match_indices` result, or one of those plus the length of an ASCII
+// marker the dialect is made of, or what `serde_json` consumed — all of them
+// where a character starts. Said once here rather than at each of the dozen
+// sites, and said at all because the other place in this crate that indexed
+// model output by a computed byte took the daemon down mid-turn, on a `т`.
 use crate::{Response, StopReason, ToolCall, ToolSpec};
 
 static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

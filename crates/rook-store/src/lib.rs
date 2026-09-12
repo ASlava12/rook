@@ -224,6 +224,9 @@ impl Store {
         self.level = level;
     }
 
+    /// Sliced by byte because the name is hex: `to_hex` writes nothing but
+    /// ASCII, so every byte is a character and the fan-out cannot cut one.
+    #[allow(clippy::string_slice)]
     fn object_path(&self, id: &ObjectId) -> PathBuf {
         let hex = id.to_hex();
         self.root.join("objects").join(&hex[0..2]).join(&hex[2..4]).join(&hex)
@@ -339,8 +342,19 @@ impl Store {
         if let Some(id) = ObjectId::from_hex(prefix) {
             return Ok(self.has(&id)?.then_some(id));
         }
-        let Ok(raw) = hex::decode(if prefix.len() % 2 == 1 { &prefix[..prefix.len() - 1] } else { prefix })
-        else {
+        // A hash prefix is hex, so it is ASCII, and anything else resolves to
+        // nothing. Asked before the byte below rather than left to `hex::decode`
+        // afterwards: `prefix.len() - 1` is a byte index into whatever a person
+        // typed, and one byte back from the `é` in `café` is inside it. That is
+        // a panic on an argument, in a library, from a mistyped id.
+        if !prefix.is_ascii() {
+            return Ok(None);
+        }
+        // Now a byte is a character. An odd number of hex digits decodes as one
+        // fewer byte, and the range narrows by the last digit below.
+        #[allow(clippy::string_slice)]
+        let head = if prefix.len() % 2 == 1 { &prefix[..prefix.len() - 1] } else { prefix };
+        let Ok(raw) = hex::decode(head) else {
             return Ok(None);
         };
         let txn = self.db.begin_read()?;

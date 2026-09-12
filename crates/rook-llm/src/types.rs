@@ -131,6 +131,10 @@ impl ToolSpec {
 /// first, `v1.2. Then` the second, while `.gitignore. Output` and
 /// ``a file. `old` `` are real boundaries. Cutting in the wrong place truncates
 /// a stub, so the rule keeps too much rather than too little.
+/// Sliced by byte at `match_indices(". ")`, which is where a character starts,
+/// and `i + 2` is past two ASCII bytes from there. Said out loud because a
+/// computed byte index into a `&str` is what took the daemon down mid-turn.
+#[allow(clippy::string_slice)]
 fn first_sentence(description: &str) -> &str {
     let ends_sentence = |i: &usize| {
         let word = description[..*i].rsplit(char::is_whitespace).next().unwrap_or("");
