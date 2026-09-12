@@ -1317,7 +1317,19 @@ impl App {
             return;
         };
         self.chat.asked_if_alive = true;
-        let _ = remote.send(ClientMessage::Attach { session: rook_store::format_session_id(session) });
+        // A send that fails is the answer: the connection carrying this turn is
+        // gone, so nothing will ever arrive on it and no question can be put to
+        // it either. Without this the window asked into a closed channel and
+        // went on drawing `working…` — which is the failure this whole check
+        // exists to end, reached by a different road.
+        if remote.send(ClientMessage::Attach { session: rook_store::format_session_id(session) }).is_err() {
+            self.chat.push(
+                "err",
+                "[lost the connection to the daemon — it may have been restarted, and this turn \
+                 may still be running there. `^p` → sessions → this one rejoins it]",
+            );
+            self.chat.ended();
+        }
     }
 
     fn drain_turn_events(&mut self) {
@@ -4479,6 +4491,15 @@ mod tests {
         assert!(
             !chat.worth_asking_if_alive(patience),
             "an ordinary pause between tokens is not a reason to ask"
+        );
+
+        // And a window whose daemon has gone is not left asking a closed
+        // channel: the send fails, which is itself the answer.
+        let (dead, gone) = mpsc::unbounded_channel::<ClientMessage>();
+        drop(gone);
+        assert!(
+            dead.send(ClientMessage::Attach { session: "x".into() }).is_err(),
+            "the precondition is a channel nobody is reading"
         );
 
         let mut quiet = Chat { busy: true, heard: Some(long_ago), session: Some(1), ..Chat::default() };
