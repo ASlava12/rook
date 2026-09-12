@@ -234,14 +234,15 @@ pub fn extract_version(text: &str) -> Option<String> {
     best
 }
 
-#[cfg(test)]
+// Every test here spawns `sh`, so the module is unix's: left on everywhere,
+// Windows compiles a module whose only import nothing uses.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
     /// Sixteen of these run before the first turn, before `/api/health`
     /// answers, and in `doctor` — and `output()` waits for the child however
     /// long it takes. One tool that never answers hung all of it.
-    #[cfg(unix)]
     #[test]
     fn a_probe_that_will_not_answer_is_given_up_on_and_killed() {
         let began = std::time::Instant::now();
@@ -256,7 +257,6 @@ mod tests {
 
     /// And the half that is easy to leave out: giving up on a child that is
     /// still running leaves it running.
-    #[cfg(unix)]
     #[test]
     fn the_child_of_a_probe_that_was_given_up_on_is_gone() {
         let marker = format!("rook-probe-{}", std::process::id());
@@ -273,7 +273,6 @@ mod tests {
 
     /// And one that answers is still answered, or this would pass by killing
     /// everything.
-    #[cfg(unix)]
     #[test]
     fn a_probe_that_answers_is_read() {
         let mut command = Command::new("sh");
