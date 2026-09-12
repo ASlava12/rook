@@ -544,6 +544,29 @@ struct Chat {
     /// approvals, answers and a cancellation. `None` when the turn is this
     /// process's own.
     remote: Option<mpsc::UnboundedSender<ClientMessage>>,
+    /// Whether this window has already asked the daemon whether the turn it is
+    /// drawing is still running. Asked once per silence, and forgotten the
+    /// moment anything is heard.
+    asked_if_alive: bool,
+}
+
+/// The configuration a window shows, whether or not it holds a store of its own.
+///
+/// The comment here used to say that a window with no store still knows its
+/// settings because the configuration is a file — and the code beside it fell
+/// back to the built-in defaults instead of reading that file. So a window
+/// routed through a daemon drew a footer saying the turn would give up on a
+/// silent model after ninety seconds while the daemon running it was waiting
+/// twenty minutes, as the file said. A number a person reads to decide whether
+/// to keep waiting is worse wrong than absent.
+///
+/// A daemon on another machine reads its own file and this one cannot see it.
+/// The local file is still the closer answer of the two.
+fn config_seen_by(here: Option<&rook_core::Rook>, file: std::path::PathBuf) -> rook_core::Config {
+    match here {
+        Some(rook) => rook.config.clone(),
+        None => rook_core::Config::load_from(file).unwrap_or_default(),
+    }
 }
 
 /// Reasoning, which is read rather than glanced at.
@@ -812,6 +835,7 @@ impl Chat {
         self.since = Some(std::time::Instant::now());
         self.step = None;
         self.heard = self.since;
+        self.asked_if_alive = false;
     }
 
     /// A turn is over, however it ended.
@@ -830,6 +854,21 @@ impl Chat {
         if waiting {
             self.push("stat", "  the turn ended, so what it was waiting for is gone");
         }
+    }
+
+    /// Whether this window has been drawing `working…` long enough to be worth
+    /// asking the daemon whether there is still a turn behind it.
+    ///
+    /// Only a turn the daemon is running can be asked about — a turn this
+    /// process runs itself cannot get lost on the way here — and only once per
+    /// silence, so a slow model is asked about once rather than sixteen times a
+    /// second.
+    fn worth_asking_if_alive(&self, patience: std::time::Duration) -> bool {
+        self.busy
+            && !self.asked_if_alive
+            && self.remote.is_some()
+            && self.session.is_some()
+            && self.heard.is_some_and(|at| at.elapsed() > patience)
     }
 
     /// The tool the turn is in the middle of, read from the log the person is
@@ -1035,9 +1074,7 @@ impl App {
             }
         });
 
-        // The configuration is a file, so a window with no store of its own
-        // still knows the stance, the effort and the servers it would use.
-        let config = source.here().map(|rook| rook.config.clone()).unwrap_or_default();
+        let config = config_seen_by(source.here().map(|r| &**r), rook_core::paths::config_file());
         let workspace = source.workspace().to_path_buf();
         // Connected only where turns run here: a routed window's tools are the
         // daemon's, and spawning a second copy of every server to leave them
@@ -1227,6 +1264,7 @@ impl App {
         while !self.quit {
             terminal.draw(|f| self.draw(f))?;
             self.drain_turn_events();
+            self.still_running();
             // Poll rather than block: a streaming turn has to keep redrawing
             // even while nobody is typing.
             if event::poll(TICK)? {
@@ -1257,6 +1295,29 @@ impl App {
         self.chat.push("stat", "[stopped]");
         self.chat.ended();
         self.status = "turn stopped".into();
+    }
+
+    /// Asks the daemon whether the turn this window is drawing is still
+    /// running — once, after a silence longer than the turn itself would wait
+    /// for the model.
+    ///
+    /// A window is told when a turn ends and should not have to ask. But being
+    /// told is one message, and one message can be lost: a turn's ending was
+    /// put in a queue and the task that emptied the queue was aborted in the
+    /// same breath, so a window that had streamed eleven minutes of work went
+    /// on drawing `working…` over a turn the daemon had already finished. That
+    /// particular race is fixed. Asking is for the next one, because the
+    /// failure it produces — patience — is the one a person cannot tell from
+    /// the thing working.
+    fn still_running(&mut self) {
+        if !self.chat.worth_asking_if_alive(self.patience) {
+            return;
+        }
+        let (Some(remote), Some(session)) = (self.chat.remote.clone(), self.chat.session) else {
+            return;
+        };
+        self.chat.asked_if_alive = true;
+        let _ = remote.send(ClientMessage::Attach { session: rook_store::format_session_id(session) });
     }
 
     fn drain_turn_events(&mut self) {
@@ -1293,6 +1354,10 @@ impl App {
                 }
                 TurnEvent::FromDaemon(event) => self.heard_from_daemon(*event),
             }
+            // After the event has been read, not before: the answer to "is it
+            // still running?" is one of these, and clearing the question first
+            // would leave the answer looking like somebody else's.
+            self.chat.asked_if_alive = false;
         }
     }
 
@@ -1311,12 +1376,26 @@ impl App {
             // for a second, like a window answering something you did not ask.
             ChatEvent::Attached { session, running } => {
                 self.chat.session = rook_store::parse_session_id(&session);
-                match running {
-                    true => {
+                // A window that asked because it had been drawing `working…`
+                // over a long silence is answering a different question, and
+                // only one of the two answers is news.
+                let worried = self.chat.asked_if_alive && self.chat.busy;
+                match (running, worried) {
+                    (true, true) => {}
+                    (false, true) => {
+                        self.chat.push(
+                            "stat",
+                            "[this turn is over — the daemon has nothing running in this session. \
+                             Its ending never reached this window, so what is above may be short of \
+                             where it stopped; `session show` has the whole of it]",
+                        );
+                        self.chat.ended();
+                    }
+                    (true, false) => {
                         self.chat.push("stat", "[joined a turn already running here]");
                         self.chat.began();
                     }
-                    false => self.chat.push("stat", "[nothing is running in this session]"),
+                    (false, false) => self.chat.push("stat", "[nothing is running in this session]"),
                 }
             }
             ChatEvent::Text { text } => self.chat.push("text", &text),
@@ -4363,5 +4442,77 @@ mod tests {
         let lines = screen(&a, 40);
         assert!(lines[0].contains("question 2 of 2"), "{lines:?}");
         assert!(lines[1].contains("second"), "{lines:?}");
+    }
+
+    /// A window drawing `working…` over a long silence asks the daemon whether
+    /// the turn is still there, and asks once.
+    ///
+    /// Being told a turn has ended is one message, and the message was lost:
+    /// the turn's ending went into a queue and the task that emptied the queue
+    /// was aborted in the same breath, so a window that had streamed eleven
+    /// minutes of work went on drawing `working…` over a finished turn while
+    /// the daemon beside it answered `turns_running: 0`. The race is fixed;
+    /// this is the window noticing for itself, because the shape that failure
+    /// takes — patience — is the one nobody can tell from work.
+    #[test]
+    fn a_window_left_drawing_working_asks_the_daemon_whether_the_turn_is_still_there() {
+        let patience = std::time::Duration::from_secs(90);
+        let long_ago = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(600))
+            .unwrap_or_else(std::time::Instant::now);
+        let (remote, _held) = mpsc::unbounded_channel::<ClientMessage>();
+
+        let mut chat = Chat {
+            busy: true,
+            heard: Some(long_ago),
+            session: Some(1),
+            remote: Some(remote),
+            ..Chat::default()
+        };
+        assert!(chat.worth_asking_if_alive(patience), "ten minutes of silence is worth one question");
+
+        chat.asked_if_alive = true;
+        assert!(!chat.worth_asking_if_alive(patience), "and the question is asked once, not every frame");
+
+        chat.asked_if_alive = false;
+        chat.heard = Some(std::time::Instant::now());
+        assert!(
+            !chat.worth_asking_if_alive(patience),
+            "an ordinary pause between tokens is not a reason to ask"
+        );
+
+        let mut quiet = Chat { busy: true, heard: Some(long_ago), session: Some(1), ..Chat::default() };
+        assert!(
+            !quiet.worth_asking_if_alive(patience),
+            "a turn this process runs itself has no daemon to ask and cannot lose the ending on the way"
+        );
+        quiet.busy = false;
+        assert!(!quiet.worth_asking_if_alive(patience), "and a window with no turn in flight asks nothing");
+    }
+
+    /// A window routed through a daemon reads the configuration file, not the
+    /// built-in defaults.
+    ///
+    /// It read the defaults, under a comment saying it read the file. The
+    /// visible cost was a footer promising to give up on a silent model after
+    /// ninety seconds while the daemon behind it waited the twenty minutes the
+    /// file asked for — and a local model filling a two-hundred-thousand-token
+    /// prompt is silent for minutes at a time, so the number a person reads to
+    /// decide whether to keep waiting was the wrong one by a factor of
+    /// thirteen.
+    #[test]
+    fn a_window_with_no_store_of_its_own_still_reads_the_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("config.toml");
+        std::fs::write(&file, "[agent]\nstream_idle_timeout_secs = 1200\n").unwrap();
+
+        let built_in = rook_core::Config::default().agent.stream_idle_timeout_secs;
+        assert_ne!(built_in, 1200, "the file has to say something the default does not");
+
+        let seen = config_seen_by(None, file);
+        assert_eq!(
+            seen.agent.stream_idle_timeout_secs, 1200,
+            "the window would have drawn a patience of {built_in}s over a turn waiting twenty minutes"
+        );
     }
 }
