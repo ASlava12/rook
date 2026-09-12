@@ -70,6 +70,27 @@ impl Default for Config {
 /// The Agent Skills repository, which is where the format's own examples live.
 /// Replace it or add to it; it is a starting point rather than a blessing, and
 /// installing from anywhere means reading what you installed.
+/// Every key in `written` that `known` has no name for, dotted.
+fn unread(written: &toml::Value, known: &toml::Value, at: &str, out: &mut Vec<String>) {
+    let (Some(written), Some(known)) = (written.as_table(), known.as_table()) else { return };
+    for (key, value) in written {
+        // Omitted from a written config when empty and settings all the same:
+        // `[[mcp]]`, `[[hooks]]`, `[[lsp]]`. Their own contents are not walked,
+        // because an empty default carries no shape to compare against.
+        if at.is_empty() && matches!(key.as_str(), "mcp" | "hooks" | "lsp") {
+            continue;
+        }
+        let path = match at.is_empty() {
+            true => key.clone(),
+            false => format!("{at}.{key}"),
+        };
+        match known.get(key) {
+            None => out.push(path),
+            Some(known) => unread(value, known, &path, out),
+        }
+    }
+}
+
 fn default_skill_sources() -> Vec<String> {
     vec!["https://github.com/anthropics/skills".into()]
 }
@@ -634,6 +655,45 @@ impl Config {
             Err(source) => return Err(ConfigError::Read { path, source }),
         };
         toml::from_str(&text).map_err(|e| ConfigError::Parse { path, message: e.to_string() })
+    }
+
+    /// Keys in the file that nothing reads, deepest name first.
+    ///
+    /// serde ignores what it does not recognise, so a misspelled setting is a
+    /// setting that does nothing and says nothing about it: `max_turn_sec`
+    /// beside `max_turn_secs` leaves a person certain they raised a limit they
+    /// never touched. The mirror of `every_config_field_is_read_somewhere`,
+    /// which asks the same question of the fields this code declares.
+    ///
+    /// Read off codex's *warn about ignored configuration settings*.
+    ///
+    /// A file that will not parse at all is somebody else's error to report,
+    /// and an unreadable one is not this question — both answer with nothing.
+    pub fn ignored_in(path: &std::path::Path) -> Vec<String> {
+        let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
+        let Ok(written) = toml::from_str::<toml::Value>(&text) else { return Vec::new() };
+        let Ok(known) = toml::Value::try_from(Config::default()) else { return Vec::new() };
+        let mut out = Vec::new();
+        unread(&written, &known, "", &mut out);
+        out.sort();
+        out
+    }
+
+    /// The known name closest to one that is not, where there is an obvious
+    /// one: a truncation or an extra character, which is what a typo usually
+    /// is. Nothing rather than a guess when nothing is close.
+    pub fn nearest_to(ignored: &str) -> Option<String> {
+        let (table, key) = ignored.rsplit_once('.').unwrap_or(("", ignored));
+        let known = toml::Value::try_from(Config::default()).ok()?;
+        let siblings = match table.is_empty() {
+            true => known.as_table()?.clone(),
+            false => known.get(table)?.as_table()?.clone(),
+        };
+        let shared = |a: &str, b: &str| a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count();
+        let (name, common) =
+            siblings.keys().map(|name| (name.clone(), shared(name, key))).max_by_key(|(_, n)| *n)?;
+        // Four characters of agreement is a typo; less is a different setting.
+        (common >= 4 && common + 2 >= key.len()).then_some(name)
     }
 
     pub fn save(&self) -> std::io::Result<()> {

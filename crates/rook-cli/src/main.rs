@@ -666,6 +666,21 @@ fn cmd_doctor(workspace: &Path, json: bool) -> Result<()> {
     }
 
     println!();
+    // A setting nothing reads is a setting that did nothing and said nothing
+    // about it, which is how an afternoon goes into measuring a limit that was
+    // never raised. Said where a person looks when something did not take.
+    let ignored = rook_core::Config::ignored_in(&rook_core::paths::config_file());
+    if !ignored.is_empty() {
+        println!();
+        println!("settings nothing reads:");
+        for key in &ignored {
+            match rook_core::Config::nearest_to(key) {
+                Some(near) => println!("  {key} — did you mean {near}?"),
+                None => println!("  {key}"),
+            }
+        }
+    }
+
     println!("model:");
     match probe_provider(&config) {
         Ok(note) => println!("  {note}"),

@@ -39,6 +39,39 @@ fn rust_sources(root: &Path) -> Vec<(PathBuf, String)> {
         .collect()
 }
 
+/// The mirror of the test below it: that one asks whether a field this code
+/// declares is read anywhere, and this asks whether a key somebody wrote is a
+/// field at all. serde ignores what it does not recognise, so `max_turn_sec`
+/// beside `max_turn_secs` is a limit raised in a file and not in the agent,
+/// with nothing anywhere saying so. Read off codex's *warn about ignored
+/// configuration settings*.
+#[test]
+fn a_setting_nothing_reads_is_named_rather_than_ignored() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "skill_sources = []\n\n[agent]\nmodel = \"x/y\"\nmax_turn_sec = 100\nmax_steps = 7\n\n\
+         [sandbox]\nstanse = \"assist\"\n\n[nowhere]\nthing = 1\n",
+    )
+    .unwrap();
+
+    let ignored = rook_core::Config::ignored_in(&path);
+    assert!(ignored.contains(&"agent.max_turn_sec".to_string()), "a misspelled field: {ignored:?}");
+    assert!(ignored.contains(&"sandbox.stanse".to_string()), "in any table: {ignored:?}");
+    assert!(ignored.contains(&"nowhere".to_string()), "and a table that is not one: {ignored:?}");
+    // The precondition: the real ones beside them are not named, or this would
+    // pass by calling everything ignored.
+    assert!(!ignored.contains(&"agent.model".to_string()), "a real field is not: {ignored:?}");
+    assert!(!ignored.contains(&"agent.max_steps".to_string()), "{ignored:?}");
+    assert!(!ignored.contains(&"skill_sources".to_string()), "{ignored:?}");
+
+    assert_eq!(rook_core::Config::nearest_to("agent.max_turn_sec").as_deref(), Some("max_turn_secs"));
+    assert_eq!(rook_core::Config::nearest_to("sandbox.stanse").as_deref(), Some("stance"));
+    // And nothing rather than a guess when nothing is close.
+    assert_eq!(rook_core::Config::nearest_to("nowhere"), None);
+}
+
 #[test]
 fn every_config_field_is_read_somewhere() {
     let root = repo_root();
