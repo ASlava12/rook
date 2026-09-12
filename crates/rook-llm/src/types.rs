@@ -338,6 +338,21 @@ pub struct ModelInfo {
     /// Reported context length, where the endpoint gives one. Most do not.
     #[serde(default)]
     pub context_window: Option<usize>,
+    /// Whether the endpoint has it in memory, where it says.
+    ///
+    /// The difference between a model that answers in a second and one that
+    /// answers in a minute, on a machine that holds one at a time — and the
+    /// question `rook models` was most often being opened to answer without
+    /// being able to.
+    #[serde(default)]
+    pub loaded: Option<bool>,
+    /// How it is quantised, where the endpoint says: `Q4_K_M`.
+    ///
+    /// The difference between a model that fits on the card and one that runs
+    /// from system memory at a tenth of the speed, which is not visible in a
+    /// name and is the first thing to look at when a local model is slow.
+    #[serde(default)]
+    pub quantization: Option<String>,
 }
 
 #[cfg(test)]

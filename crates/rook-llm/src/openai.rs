@@ -165,7 +165,15 @@ impl Provider for OpenAiCompatible {
         let mut models: Vec<crate::ModelInfo> = listing
             .data
             .into_iter()
-            .map(|e| crate::ModelInfo { id: e.id, owned_by: e.owned_by, context_window: e.context_window })
+            .map(|e| crate::ModelInfo {
+                id: e.id,
+                owned_by: e.owned_by,
+                context_window: e.context_window,
+                // The compatible listing says neither; LM Studio's own does,
+                // and is asked below.
+                loaded: None,
+                quantization: None,
+            })
             .collect();
         // The OpenAI shape has no context length, and only some servers add
         // one. LM Studio is not among them — it answers that on an endpoint of
@@ -177,11 +185,18 @@ impl Provider for OpenAiCompatible {
         // Only where that endpoint exists. Everywhere else it is a 404 paid
         // for on every process, and a fixture that answers `/models` twice is
         // a server nothing resembles — which is how this was found.
+        //
+        // The same answer carries two more things the compatible listing has
+        // no room for and a person choosing a local model needs: whether it is
+        // resident, and how it is quantised. A model that fits on the card and
+        // one that runs from system memory at a tenth of the speed differ in
+        // neither their name nor their window.
         if self.id.starts_with("lmstudio") && models.iter().all(|m| m.context_window.is_none()) {
-            for (id, window) in self.windows_lm_studio_reports().await {
-                if let Some(model) = models.iter_mut().find(|m| m.id == id) {
-                    model.context_window = Some(window);
-                }
+            for said in self.what_lm_studio_reports().await {
+                let Some(model) = models.iter_mut().find(|m| m.id == said.id) else { continue };
+                model.context_window = said.context_window;
+                model.loaded = said.loaded;
+                model.quantization = said.quantization;
             }
         }
         Ok(models)
@@ -289,14 +304,15 @@ impl Provider for OpenAiCompatible {
 }
 
 impl OpenAiCompatible {
-    /// What LM Studio says each model will hold, by its own API rather than the
-    /// compatible one.
+    /// What LM Studio says about each model, by its own API rather than the
+    /// compatible one: how much it will hold, whether it is resident, and how
+    /// it is quantised.
     ///
     /// `loaded_context_length` first: a model that supports 262144 may have
     /// been loaded with 8192, and the number worth budgeting against is the one
     /// it will actually serve. Failures are silence — this is a guess being
     /// improved, and a server that is not LM Studio simply answers 404.
-    async fn windows_lm_studio_reports(&self) -> Vec<(String, usize)> {
+    async fn what_lm_studio_reports(&self) -> Vec<crate::ModelInfo> {
         #[derive(serde::Deserialize)]
         struct Listing {
             #[serde(default)]
@@ -309,6 +325,11 @@ impl OpenAiCompatible {
             loaded_context_length: Option<usize>,
             #[serde(default)]
             max_context_length: Option<usize>,
+            /// `loaded` or `not-loaded`.
+            #[serde(default)]
+            state: Option<String>,
+            #[serde(default)]
+            quantization: Option<String>,
         }
 
         let root = self.config.base_url.trim_end_matches('/').trim_end_matches("/v1");
@@ -328,7 +349,13 @@ impl OpenAiCompatible {
         listing
             .data
             .into_iter()
-            .filter_map(|e| Some((e.id, e.loaded_context_length.or(e.max_context_length)?)))
+            .map(|e| crate::ModelInfo {
+                id: e.id,
+                owned_by: None,
+                context_window: e.loaded_context_length.or(e.max_context_length),
+                loaded: e.state.map(|state| state == "loaded"),
+                quantization: e.quantization,
+            })
             .collect()
     }
 

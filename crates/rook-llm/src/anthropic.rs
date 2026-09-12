@@ -138,7 +138,14 @@ impl Provider for Anthropic {
         Ok(listing
             .data
             .into_iter()
-            .map(|e| ModelInfo { id: e.id, owned_by: e.display_name, context_window: e.max_input_tokens })
+            .map(|e| ModelInfo {
+                id: e.id,
+                owned_by: e.display_name,
+                context_window: e.max_input_tokens,
+                // A hosted model is neither loaded nor quantised from here.
+                loaded: None,
+                quantization: None,
+            })
             .collect())
     }
 

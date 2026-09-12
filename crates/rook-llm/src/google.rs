@@ -142,6 +142,8 @@ impl Provider for Google {
                 id: e.name.trim_start_matches("models/").to_string(),
                 owned_by: e.display_name,
                 context_window: e.input_token_limit,
+                loaded: None,
+                quantization: None,
             })
             .collect())
     }

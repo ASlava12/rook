@@ -80,6 +80,47 @@ async fn a_window_the_compatible_listing_omits_is_asked_for_where_it_is_kept() {
     );
 }
 
+/// The same answer carries what decides whether a local model is usable, and
+/// neither half is visible in its name. Three were tried here in one evening —
+/// a 27B that ran from system memory at three tokens a second, a 9B whose file
+/// would not load at all, a 35B MoE that served fifty — and each wall was found
+/// only after switching to it.
+#[tokio::test]
+async fn a_local_listing_says_what_is_resident_and_how_it_is_quantised() {
+    let url = serving(vec![
+        ("200 OK", r#"{"object":"list","data":[{"id":"big"},{"id":"small"}]}"#),
+        (
+            "200 OK",
+            r#"{"data":[
+                {"id":"big","max_context_length":262144,"state":"loaded","quantization":"Q4_K_S"},
+                {"id":"small","max_context_length":131072,"state":"not-loaded","quantization":"Q4_K_M"}
+            ]}"#,
+        ),
+    ])
+    .await;
+
+    let models = OpenAiCompatible::new("lmstudio/model", "big", Config::new(url, None, 8192))
+        .unwrap()
+        .models()
+        .await
+        .unwrap();
+
+    assert_eq!(models[0].loaded, Some(true), "the one in memory answers in a second");
+    assert_eq!(models[1].loaded, Some(false), "and the one that is not takes a minute to start");
+    assert_eq!(models[0].quantization.as_deref(), Some("Q4_K_S"));
+    assert_eq!(models[1].quantization.as_deref(), Some("Q4_K_M"));
+}
+
+/// And said by nobody else, rather than guessed at. A hosted model is neither
+/// resident nor quantised from here, and a blank column is the honest answer.
+#[tokio::test]
+async fn a_listing_that_says_neither_claims_neither() {
+    let url = serve("200 OK", r#"{"data":[{"id":"m","context_length":128000}]}"#).await;
+    let models = provider(url).models().await.unwrap();
+    assert_eq!(models[0].loaded, None, "not `false`, which would be a claim");
+    assert_eq!(models[0].quantization, None);
+}
+
 /// Not asked when the compatible listing already answered: a server that says
 /// it properly pays no second round trip.
 #[tokio::test]

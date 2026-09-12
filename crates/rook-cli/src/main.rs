@@ -1153,6 +1153,11 @@ fn cmd_models(workspace: Option<PathBuf>, json: bool) -> Result<()> {
             println!("the endpoint does not list its models");
             return anyhow::Ok(());
         }
+        // Resident and quantisation where the endpoint says, and blank where it
+        // does not — which is every hosted one. They are what decides whether a
+        // local model answers in a second or a minute, and neither is visible
+        // in a name: three models were tried here in an evening, and each wall
+        // was found only after switching to it.
         let rows: Vec<Vec<String>> = models
             .iter()
             .map(|m| {
@@ -1160,11 +1165,17 @@ fn cmd_models(workspace: Option<PathBuf>, json: bool) -> Result<()> {
                     if m.id.eq_ignore_ascii_case(configured) { "▸".into() } else { " ".into() },
                     m.id.clone(),
                     m.context_window.map(|w| format!("{w}")).unwrap_or_default(),
+                    m.quantization.clone().unwrap_or_default(),
+                    match m.loaded {
+                        Some(true) => "loaded".into(),
+                        Some(false) => String::new(),
+                        None => String::new(),
+                    },
                     m.owned_by.clone().unwrap_or_default(),
                 ]
             })
             .collect();
-        print!("{}", fmt::table(&["", "model", "context", "owner"], &rows));
+        print!("{}", fmt::table(&["", "model", "context", "quant", "", "owner"], &rows));
         if offered(&models, configured).is_none() {
             println!("\n{configured:?} is configured but not offered here");
         }
@@ -2623,7 +2634,13 @@ mod tests {
     use super::offered;
 
     fn model(id: &str) -> rook_llm::ModelInfo {
-        rook_llm::ModelInfo { id: id.into(), owned_by: None, context_window: Some(262_144) }
+        rook_llm::ModelInfo {
+            id: id.into(),
+            owned_by: None,
+            context_window: Some(262_144),
+            loaded: None,
+            quantization: None,
+        }
     }
 
     /// An endpoint that answers in a spelling of its own is the ordinary case
