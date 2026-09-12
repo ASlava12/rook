@@ -1556,9 +1556,8 @@ impl<'a> AgentLoop<'a> {
             name: WRITE_SKILL.into(),
             description: "Write down a repeatable procedure so a later session does not work it \
                           out again. For what took real effort — a build incantation, a platform \
-                          quirk — not for what this conversation already says. A script the body \
-                          runs goes in `files`, with the tools it needs; `requires` scopes it to \
-                          where it holds."
+                          quirk — not for what this conversation already says. `requires` scopes \
+                          it to where it holds."
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -1651,21 +1650,34 @@ impl<'a> AgentLoop<'a> {
                         "tasks": {
                             "type": "array",
                             "items": { "type": "string" },
-                            "description": "One assignment per entry, run at the same time. A sub-agent cannot see this conversation, so each has to stand alone. Use this rather than calling delegate repeatedly."
+                            "description": "One assignment per entry, run at the same time. A sub-agent cannot see this conversation, so each must stand alone."
                         },
                         "context": {
                             "type": "string",
                             "default": "none",
                             "description": "What it starts with. `recent` is the last few \
-                                            exchanges; anything else is passed verbatim, which is \
-                                            where a file it would otherwise go and read belongs."
+                                            exchanges; anything else is passed verbatim — put \
+                                            here what it would otherwise read."
                         },
                         "max_steps": { "type": "integer" },
+                        // One word rather than a model and an effort, which
+                        // are never chosen apart: the question a caller can
+                        // actually answer is whether this is legwork or
+                        // judgement, and the two knobs follow from it. Two
+                        // fields also cost eighty tokens on every eager
+                        // request, which is most of what the whole list has
+                        // left.
+                        "care": {
+                            "type": "string",
+                            "enum": ["quick", "careful"],
+                            "description": "`careful` gives it this turn's model and reasoning. \
+                                            Default: legwork."
+                        },
                         "wait": {
                             "type": "boolean",
                             "default": true,
-                            "description": "False answers at once and leaves them running; \
-                                            `subagents` reads and steers them."
+                            "description": "False answers at once and leaves them running, for \
+                                            `subagents` to read."
                         }
                     }
                 }),
@@ -2865,6 +2877,14 @@ impl<'a> AgentLoop<'a> {
         // task needs — a call, a look at what came back, an answer: a model
         // wrote `max_steps: 1`, and its sub-agent read the file and had no
         // step left to say what it read.
+        // What this call asked to run on, and how hard. The configuration sets
+        // the default and a call may ask upward: `careful` is the turn's own
+        // model, which is the way round that fails safely — a call that asks
+        // for nothing gets what the operator chose, and a bad guess by the
+        // model costs speed rather than the answer.
+        let careful = args.get("care").and_then(|m| m.as_str()).map(str::trim) == Some("careful");
+        let provider = (!careful).then(|| self.errand_provider());
+        let effort = careful.then_some(self.effort);
         let max_steps = args
             .get("max_steps")
             .and_then(|s| s.as_u64())
@@ -2891,8 +2911,10 @@ impl<'a> AgentLoop<'a> {
         // Started and left to run: the turn goes on, and `subagents` is how the
         // parent looks at them, redirects one, and takes their results.
         if !args.get("wait").and_then(|w| w.as_bool()).unwrap_or(true) {
-            let names: Vec<String> =
-                tasks.iter().map(|task| nursery.start(crew, task, inherited.clone(), max_steps)).collect();
+            let names: Vec<String> = tasks
+                .iter()
+                .map(|task| nursery.start(crew, task, inherited.clone(), max_steps, provider.clone(), effort))
+                .collect();
             return format!(
                 "started: {}. `{SUBAGENTS}` says where they got to, passes one a remark, and \
                  hands back what they answer.",
@@ -2927,9 +2949,10 @@ impl<'a> AgentLoop<'a> {
                 let inherited = inherited.clone();
                 let doing = doing.clone();
                 let said = relayed[i].clone();
+                let provider = provider.clone();
                 async move {
                     let _permit = limit.acquire().await;
-                    let bounds = Bounds { steps: max_steps, by: self.by, tokens: each };
+                    let bounds = Bounds { steps: max_steps, by: self.by, tokens: each, provider, effort };
                     (i, crew.run_subtask(task, inherited.as_deref(), bounds, doing, i, said).await)
                 }
             })
@@ -4109,6 +4132,32 @@ impl AgentLoop<'_> {
     ///
     /// A configured model that cannot be built is not a reason to fail the
     /// compaction: the turn goes on with the model it has, and says so once.
+    /// What a delegated errand runs on.
+    ///
+    /// The same shape as [`Self::summariser`], and the same reasoning: an
+    /// errand is bounded work to get through rather than the judgement the turn
+    /// was asked for, and a smaller model on the same endpoint gets through it
+    /// faster. A call that says `careful` is given the turn's own instead —
+    /// the configuration sets the default and the model may ask upward, which
+    /// is the way round that fails safely.
+    fn errand_provider(&self) -> std::sync::Arc<dyn Provider> {
+        let config = &self.rook.config.agent;
+        let spec = config.errand_model.trim();
+        if spec.is_empty() || spec == config.model {
+            return self.provider.clone();
+        }
+        match rook_llm::from_spec_with(spec, config.stream_idle(), config.context_window) {
+            Ok(provider) => std::sync::Arc::from(provider),
+            Err(e) => {
+                tracing::warn!(
+                    "`[agent] errand_model` {spec:?} could not be built ({e}); using {}",
+                    config.model
+                );
+                self.provider.clone()
+            }
+        }
+    }
+
     fn summariser(&self) -> std::sync::Arc<dyn Provider> {
         if let Some(chosen) = &self.summariser {
             return chosen.clone();
@@ -4163,7 +4212,7 @@ impl AgentLoop<'_> {
 /// Together because they are one question — how far this may go — and apart
 /// they were two arguments among eight, which is where a caller starts passing
 /// them in the wrong order.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Bounds {
     steps: Option<u32>,
     /// The turn's deadline, passed down unchanged: every sub-agent of a turn
@@ -4173,6 +4222,13 @@ struct Bounds {
     /// the same time, and each taking the remainder is the multiplication the
     /// ceiling exists to stop.
     tokens: u64,
+    /// What this errand runs on, and how hard it thinks.
+    ///
+    /// Not a bound, and here because this is what a child is handed: a second
+    /// struct beside this one would be two things to keep in step at the same
+    /// four call sites. `None` is the configured default either way.
+    provider: Option<std::sync::Arc<dyn Provider>>,
+    effort: Option<rook_llm::Effort>,
 }
 
 struct Crew<'a> {
@@ -4210,7 +4266,9 @@ impl Crew<'_> {
             self.rook.log(session, EventKind::Note, "inherited", context).ok();
         }
 
-        let mut child = AgentLoop::new(self.rook, self.provider.clone(), session);
+        // What the call asked for, or what the turn is using.
+        let chosen = bounds.provider.clone().unwrap_or_else(|| self.provider.clone());
+        let mut child = AgentLoop::new(self.rook, chosen, session);
         child.depth = self.depth + 1;
         child.tools = self.tools.clone();
         child.tool_ctx = self.tool_ctx.clone();
@@ -4228,7 +4286,7 @@ impl Crew<'_> {
         child.interjections = said;
         // A sub-task is a bounded errand, and lower effort means fewer and more
         // consolidated tool calls rather than a worse answer.
-        child.effort = rook_llm::Effort::Low;
+        child.effort = bounds.effort.unwrap_or(rook_llm::Effort::Low);
         child.max_steps = bounds.steps.unwrap_or(self.max_steps);
         child.max_turn_tokens = bounds.tokens;
         child.by = bounds.by;
@@ -4302,6 +4360,8 @@ impl<'f> Nursery<'f> {
         task: &str,
         inherited: Option<String>,
         max_steps: Option<u32>,
+        provider: Option<std::sync::Arc<dyn Provider>>,
+        effort: Option<rook_llm::Effort>,
     ) -> String {
         let at = self.tasks.len();
         let said: std::sync::Arc<Interjections> = Default::default();
@@ -4322,7 +4382,7 @@ impl<'f> Nursery<'f> {
         let by = crew.by;
         self.running.push(Box::pin(async move {
             let _permit = limit.acquire().await;
-            let bounds = Bounds { steps: max_steps, by, tokens: share };
+            let bounds = Bounds { steps: max_steps, by, tokens: share, provider, effort };
             (at, crew.run_subtask(&task, inherited.as_deref(), bounds, doing, at, said).await)
         }));
         name_of(at)

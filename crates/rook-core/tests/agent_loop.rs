@@ -1569,6 +1569,65 @@ async fn a_delegated_task_runs_in_its_own_session_and_returns_only_its_conclusio
     assert!(!child_request.messages.iter().any(|m| m.content.contains("how big is big.txt?")));
 }
 
+/// An errand is bounded work to get through; the judgement is the turn's. A
+/// sub-agent ran at `low` whatever it had been given, and on whatever the turn
+/// was using — so a sub-task that was judgement got no more of either than a
+/// wide file survey did.
+#[tokio::test]
+async fn a_delegated_task_asked_to_be_careful_gets_the_turns_own_reasoning() {
+    let f = fixture();
+    let parent = f.rook.start_session("parent").unwrap();
+
+    let provider = ScriptedProvider::new(vec![
+        call("delegate", serde_json::json!({ "tasks": ["weigh whether this is safe"], "care": "careful" })),
+        reply("it is safe"),
+        reply("the check says it is safe"),
+    ]);
+    let seen = provider.share();
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), parent);
+    agent.effort = rook_llm::Effort::High;
+    agent.run("is it safe?").await.unwrap();
+
+    let asked = seen.lock().unwrap().clone();
+    let child = asked.get(1).expect("the child made a request");
+    assert_eq!(
+        child.effort,
+        Some(rook_llm::Effort::High),
+        "`careful` hands it the turn's own reasoning: {:?}",
+        child.effort
+    );
+    // The precondition, without which this passes on an errand that ran at the
+    // default: the default is not what was asserted.
+    assert_ne!(rook_llm::Effort::Low, rook_llm::Effort::High, "an errand's default is not high");
+}
+
+/// And without one it is still legwork, which is what it was before and what a
+/// call that says nothing should keep getting.
+#[tokio::test]
+async fn a_delegated_task_that_asks_for_nothing_is_still_legwork() {
+    let f = fixture();
+    let parent = f.rook.start_session("parent").unwrap();
+
+    let provider = ScriptedProvider::new(vec![
+        call("delegate", serde_json::json!({ "tasks": ["list the files"] })),
+        reply("there are three"),
+        reply("three files"),
+    ]);
+    let seen = provider.share();
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), parent);
+    agent.effort = rook_llm::Effort::High;
+    agent.run("how many files?").await.unwrap();
+
+    let asked = seen.lock().unwrap().clone();
+    assert_eq!(asked[0].effort, Some(rook_llm::Effort::High), "the turn is thinking hard");
+    assert_eq!(
+        asked[1].effort,
+        Some(rook_llm::Effort::Low),
+        "and its errand is not, which is what it was before: {:?}",
+        asked[1].effort
+    );
+}
+
 #[tokio::test]
 async fn delegation_stops_nesting_at_the_depth_limit() {
     let f = fixture();

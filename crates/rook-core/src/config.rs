@@ -178,6 +178,17 @@ pub struct AgentConfig {
     /// being asked for is plainly not judgement. The rest wait for numbers;
     /// `cargo xtask bench` is where they come from.
     pub compaction_model: String,
+    /// What a delegated errand runs on, when the call does not ask for better.
+    /// Empty is the turn's own model.
+    ///
+    /// The same shape as [`Self::compaction_model`] and for the same reason: an
+    /// errand is bounded work to get through, not the judgement the turn was
+    /// asked for. On a machine serving both, the difference is threefold —
+    /// 126 tokens a second against 45, measured on one endpoint serving a small
+    /// model and a large one. A spec that will not build is warned about once
+    /// and the turn's model is used, because an errand that cannot start is
+    /// worse than a slow one.
+    pub errand_model: String,
     /// How much of what the model was thinking is carried into the next
     /// request, per thought. A model handed back its answer and its calls but
     /// never its reasoning works the same thing out again every step; handed
@@ -439,6 +450,7 @@ impl Default for AgentConfig {
             answer_timeout_secs: 600,
             decide_alone_after_secs: 1800,
             compaction_model: String::new(),
+            errand_model: String::new(),
             max_reasoning_tokens: 800,
             // Four kilobytes or so: above the median result by a factor of
             // five, so the ordinary ones are untouched, and well under the
