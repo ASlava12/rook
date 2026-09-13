@@ -835,6 +835,30 @@ mod saying_what_it_is_doing {
     /// a wedge, and quiet for four minutes is the same two until you know it
     /// has been running for four — so the line carries the silence only when
     /// the silence is most of the run, and says just the time when it is not.
+    /// A command that timed out says whether it was working or waiting.
+    ///
+    /// The advice differs and they are not both true at once: a command still
+    /// printing wants a larger `timeout_secs`, and one that had gone quiet
+    /// would spend the larger number on the same wait. The sentence used to end
+    /// with the invitation whatever had happened.
+    #[test]
+    fn a_timeout_advises_on_what_the_command_was_actually_doing() {
+        use super::timed_out;
+        let limit = Duration::from_secs(120);
+
+        let working = timed_out(limit, true, "compiling", Duration::from_secs(2));
+        assert!(working.contains("still printing"), "{working}");
+        assert!(working.contains("larger `timeout_secs`"), "which is the right answer: {working}");
+
+        let waiting = timed_out(limit, true, "", Duration::from_secs(119));
+        assert!(waiting.contains("printed nothing for the last 119s"), "{waiting}");
+        assert!(waiting.contains("buys the same wait again"), "{waiting}");
+        assert!(
+            waiting.contains("background: true"),
+            "and says what to do instead of waiting blind: {waiting}"
+        );
+    }
+
     #[test]
     fn a_call_in_flight_names_its_silence_only_when_the_silence_is_the_story() {
         let busy = still_going(Duration::from_secs(300), Duration::from_secs(2));

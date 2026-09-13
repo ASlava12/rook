@@ -493,6 +493,11 @@ async fn the_askpass_helper_holds_no_value_and_does_not_outlive_the_command() {
 /// large crate compiles for minutes without printing a line, and a mechanism
 /// that cannot tell that from a wedge would kill real work. The judgement is
 /// put to the agent, with what it needs to make it.
+// The shell here is a POSIX one: `sleep` and `for … done` are not commands
+// on Windows, so the command fails at once and times out for no reason worth
+// asserting. What is claimed is asserted portably in the unit tests beside the
+// code; this is the part that needs a real command to be running.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_command_that_timed_out_says_whether_it_was_working_or_waiting() {
     let (_d, ctx) = ctx();
@@ -529,6 +534,11 @@ async fn a_command_that_timed_out_says_whether_it_was_working_or_waiting() {
 /// work. Only the tool knows how long it has been running and how long since it
 /// printed, so this is where it has to be said, and it has to be said while the
 /// call is still in flight rather than in the report afterwards.
+// The shell here is a POSIX one: `sleep` and `for … done` are not commands
+// on Windows, so the command fails at once and times out for no reason worth
+// asserting. What is claimed is asserted portably in the unit tests beside the
+// code; this is the part that needs a real command to be running.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_command_that_takes_a_while_says_so_while_it_takes_it() {
     let (_d, mut ctx) = ctx();
