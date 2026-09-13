@@ -842,8 +842,10 @@ impl Ends {
         }
     }
 
+    /// Decoded at the end and not as it arrives, because both ends are cut to a
+    /// byte cap and a character does not respect one.
     fn text(&self) -> String {
-        let head = String::from_utf8_lossy(&self.head);
+        let head = rook_contain::printed(&self.head);
         if self.tail.is_empty() {
             return head.into_owned();
         }
@@ -853,7 +855,7 @@ impl Ends {
             0 => String::new(),
             n => format!("\n[{n} bytes elided from the middle]\n"),
         };
-        format!("{head}{gap}{}", String::from_utf8_lossy(&tail))
+        format!("{head}{gap}{}", rook_contain::printed(&tail))
     }
 }
 

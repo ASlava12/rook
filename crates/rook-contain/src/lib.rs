@@ -130,6 +130,93 @@ unsafe impl Send for Started {}
 #[cfg(windows)]
 unsafe impl Sync for Started {}
 
+/// What a command printed, as text.
+///
+/// Everywhere else a command's bytes are UTF-8 and this is `from_utf8_lossy`.
+/// On Windows they are usually not: a console program writing to a pipe emits
+/// the machine's OEM code page, which on a Russian install is 866. So `ping`
+/// reached the model as eight lines of mojibake, and the model spent a
+/// reasoning step calling its own tool output garbled rather than reading it.
+/// Every localized message from `git`, `net`, `sc`, `tasklist` and the MSVC
+/// linker arrived the same way — which is to say the agent could act on none of
+/// them, and neither could the person watching.
+///
+/// UTF-8 is tried first because much of what a turn runs — cargo, rustc, node —
+/// emits it whatever the code page says, and the two agree on ASCII anyway.
+pub fn printed(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
+    #[cfg(windows)]
+    if !is_utf8(bytes) {
+        // Safety: a call that reads a machine setting and takes no arguments.
+        let page = unsafe { windows_sys::Win32::Globalization::GetOEMCP() };
+        return std::borrow::Cow::Owned(from_code_page(bytes, page));
+    }
+    String::from_utf8_lossy(bytes)
+}
+
+/// Whether these bytes are UTF-8, forgiving a sequence that is merely cut off
+/// at the end.
+///
+/// The distinction is the whole safety of guessing. Output is decoded a read at
+/// a time and kept up to a byte cap, so a multi-byte character lands across the
+/// boundary routinely — and calling that "not UTF-8" would push a whole chunk
+/// of perfectly good UTF-8 through the OEM table and produce the very mojibake
+/// this exists to remove. `error_len` tells the two apart: `None` is a sequence
+/// that was valid until the bytes ran out, `Some` is a byte that could not
+/// appear there at all.
+#[cfg(windows)]
+fn is_utf8(bytes: &[u8]) -> bool {
+    match std::str::from_utf8(bytes) {
+        Ok(_) => true,
+        Err(e) => e.error_len().is_none(),
+    }
+}
+
+/// The same bytes read through a named code page.
+///
+/// The page is `GetOEMCP` and not `GetConsoleOutputCP`, which was the first
+/// answer and was wrong twice over. A console output page belongs to a console,
+/// and the command whose bytes these are has no console — it was handed pipes,
+/// and a program writing to a pipe encodes in the machine's OEM page. Worse, a
+/// console page is shared mutable state: every process on the same console can
+/// set it, and under `cargo test --workspace` something else on that console
+/// did, so this decoded the same bytes correctly alone and into mojibake beside
+/// the rest of the suite. `GetOEMCP` is a machine setting that nothing else is
+/// racing to change.
+///
+/// Taken as an argument rather than read here, so the test can name 866 instead
+/// of assuming the machine it runs on has it — on a US runner the OEM page is
+/// 437 and the same bytes are box drawing.
+#[cfg(windows)]
+fn from_code_page(bytes: &[u8], page: u32) -> String {
+    use windows_sys::Win32::Globalization::MultiByteToWideChar;
+
+    // It reports a zero length as an error rather than as an empty string, and
+    // takes the length as an `i32`.
+    let Ok(len) = i32::try_from(bytes.len()) else {
+        return String::from_utf8_lossy(bytes).into_owned();
+    };
+    if len == 0 {
+        return String::new();
+    }
+    // Safety: the documented two-step — ask for the length, then write exactly
+    // that many `u16`s into a buffer of exactly that size. Every failure falls
+    // back to the lossy read rather than asserting: unreadable text is worth
+    // more than no text, and this runs on whatever a command happened to print.
+    unsafe {
+        let wide_len = MultiByteToWideChar(page, 0, bytes.as_ptr(), len, std::ptr::null_mut(), 0);
+        if wide_len <= 0 {
+            return String::from_utf8_lossy(bytes).into_owned();
+        }
+        let mut wide = vec![0u16; wide_len as usize];
+        let written = MultiByteToWideChar(page, 0, bytes.as_ptr(), len, wide.as_mut_ptr(), wide_len);
+        if written <= 0 {
+            return String::from_utf8_lossy(bytes).into_owned();
+        }
+        wide.truncate(written as usize);
+        String::from_utf16_lossy(&wide)
+    }
+}
+
 /// Run as a launcher if started as one, and never return; otherwise say that
 /// this binary can be one, and return at once. The first thing a rook
 /// binary's `main` does, before anything that could write or start a thread.
@@ -342,7 +429,77 @@ mod windows {
 
 #[cfg(all(test, windows))]
 mod tests {
-    use super::Started;
+    use super::{Started, from_code_page, printed};
+
+    /// The bytes a console program actually writes to a pipe on a Russian
+    /// Windows. Read as UTF-8 they were eight lines of mojibake in the model's
+    /// context, and the model said so instead of reading them.
+    ///
+    /// 866 is named rather than read from the machine, twice over. A runner
+    /// whose OEM page is 437 would decode the same bytes to box drawing and
+    /// fail a test about neither. And the page this first asked the machine for
+    /// was `GetConsoleOutputCP`, which any process sharing the console can set —
+    /// so this passed alone and failed under `cargo test --workspace`, where
+    /// something else on that console had changed it.
+    #[test]
+    fn output_in_the_machines_code_page_arrives_as_text_and_not_as_mojibake() {
+        // `Ошибка` in code page 866, which is what `ping` and `net` emit here.
+        let said = [0x8Eu8, 0xE8, 0xA8, 0xA1, 0xAA, 0xA0];
+        // The precondition and the failure being fixed, in one line: these are
+        // the bytes the old read turned into replacement characters. Asserting
+        // only that they are not UTF-8 says less and is folded away anyway,
+        // because the compiler can see the literal.
+        let was = String::from_utf8_lossy(&said);
+        assert!(was.contains(char::REPLACEMENT_CHARACTER), "read as UTF-8 this is mojibake: {was:?}");
+
+        let text = from_code_page(&said, 866);
+        assert_eq!(text, "Ошибка", "read through the code page rather than replaced: {text:?}");
+    }
+
+    /// The risk the other way, and the worse one: output that was UTF-8 all
+    /// along, cut by a read boundary or a byte cap in the middle of a character.
+    /// Calling that "not UTF-8" would push a whole chunk of good text through
+    /// the OEM table — mojibake made by the thing that exists to remove it.
+    #[test]
+    fn utf8_cut_short_by_a_read_boundary_is_still_read_as_utf8() {
+        let whole = "привет".as_bytes();
+        // One byte short of the last character, which is where a 16 KiB read
+        // lands on a long stream often enough to matter.
+        let cut = &whole[..whole.len() - 1];
+        assert!(std::str::from_utf8(cut).is_err(), "the precondition: it is cut mid-character");
+
+        let text = printed(cut);
+        assert!(text.starts_with("приве"), "the valid part survived as itself: {text:?}");
+    }
+
+    /// And the wiring above it: bytes that are not UTF-8 go through the code
+    /// page rather than being replaced, and the page comes from the machine.
+    ///
+    /// Which page is the whole of what this pins. The two calls agree on a
+    /// quiet machine and diverge exactly when something has changed the
+    /// console — which is when it mattered, and is not a state a test can ask
+    /// for. So the claim is made against the source rather than against a
+    /// value: whatever `GetOEMCP` says, that is what `printed` used.
+    #[test]
+    fn printed_reads_what_is_not_utf8_through_the_machines_page() {
+        let said = [0x8Eu8, 0xE8, 0xA8, 0xA1, 0xAA, 0xA0];
+        // Safety: a call that reads a machine setting and takes no arguments.
+        let page = unsafe { windows_sys::Win32::Globalization::GetOEMCP() };
+
+        let text = printed(&said);
+        assert_eq!(text, from_code_page(&said, page), "the machine's page, not the console's: {text:?}");
+        assert_ne!(text, String::from_utf8_lossy(&said), "and not the lossy read it used to be");
+    }
+
+    /// ASCII is the same in both tables, and is most of what a turn runs.
+    #[test]
+    fn ascii_is_untouched_whichever_table_is_in_force() {
+        assert_eq!(
+            printed(b"error: could not compile `rook-tools`"),
+            "error: could not compile `rook-tools`"
+        );
+        assert_eq!(printed(b""), "");
+    }
 
     /// A job holds a running command, counts what is in it, and ends all of it.
     ///

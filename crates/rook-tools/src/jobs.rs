@@ -294,7 +294,11 @@ async fn drain(
         if n == 0 {
             return;
         }
-        into.lock().unwrap_or_else(|e| e.into_inner()).push(&String::from_utf8_lossy(&chunk[..n]), cap);
+        // Decoded a read at a time, which is what this has to be: a background
+        // command is read for hours and what it printed is asked for while it
+        // runs. `printed` forgives a character split across the boundary rather
+        // than reading the chunk as the wrong encoding because of it.
+        into.lock().unwrap_or_else(|e| e.into_inner()).push(&rook_contain::printed(&chunk[..n]), cap);
     }
 }
 
