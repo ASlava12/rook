@@ -4507,6 +4507,24 @@ const TOO_MUCH_COMPACTION: u32 = 3;
 /// and a third spelling of the word would be a third answer.
 pub const WROTE: &str = "wrote";
 
+/// Whether a note is prose somebody reads, rather than a record a program does.
+///
+/// Almost all of them are prose, and they are where a session says what
+/// happened to it: that the process running a turn died before the turn did,
+/// why a turn stopped, what the goal check made of it, that the model was asked
+/// to answer in words. The window showed none of them — it drew a recalled
+/// session from `user`, `assistant` and `tool-call` and dropped the rest — so a
+/// session that died read as a session that simply stopped, in the one place a
+/// person would go to ask. The browser had been showing them all along, which
+/// makes it the rule about three front ends and one engine as well.
+///
+/// `WROTE` is the exception and the reason this is a question rather than a
+/// constant: it is JSON for `changes` to read, and it belongs on a screen no
+/// more than a row of a database does.
+pub fn note_is_for_a_person(label: &str) -> bool {
+    label != WROTE
+}
+
 const SAY_IT: &str = "\
 You ended the turn without saying anything. Answer now, in words: what you found, or what \
 you did and what is left.";

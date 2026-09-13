@@ -2087,6 +2087,11 @@ impl App {
                 "tool-call" => {
                     self.chat.push("tool", &format!("  · {}", rook_core::calls::within(&entry.doing, 72)))
                 }
+                // What the session says happened to it, which is what somebody
+                // reopening one has come to find out.
+                "note" if rook_core::agent::note_is_for_a_person(&entry.label) => {
+                    self.chat.push("stat", &format!("  [{}] {}", entry.label, entry.body.trim()))
+                }
                 _ => {}
             }
         }

@@ -1229,3 +1229,51 @@ fn the_mouse_can_be_handed_to_the_terminal_so_a_line_can_be_selected() {
     let taken = pty.screen_showing(100, 30, "select").join("\n");
     assert!(taken.contains("select"), "back to holding it:\n{taken}");
 }
+
+/// Reopening a session shows what the session says happened to it.
+///
+/// The window drew a recalled conversation from `user`, `assistant` and
+/// `tool-call` and dropped everything else — so the notes that say a turn ran
+/// out of steps, that the goal check disagreed, or that the process running a
+/// turn died before the turn did were invisible in the one place somebody would
+/// go to ask. A session that had crashed read as a session that simply stopped.
+/// The browser had been showing them all along.
+#[test]
+fn reopening_a_session_shows_the_notes_that_say_what_happened_to_it() {
+    let _one = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_rook"))
+        .env("ROOK_HOME", home.path())
+        .env("ROOK_LOG", "error")
+        .args(["--workspace", workspace.path().to_str().unwrap(), "chat"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child.stdin.take().unwrap().write_all(b"audit the three projects\n/quit\n").unwrap();
+    child.wait().unwrap();
+
+    // A note, written the way anything else writes one.
+    let noted = std::process::Command::new(env!("CARGO_BIN_EXE_rook"))
+        .env("ROOK_HOME", home.path())
+        .env("ROOK_LOG", "error")
+        .args(["--workspace", workspace.path().to_str().unwrap()])
+        .args(["session", "goal", "last", "finish the report"])
+        .status()
+        .unwrap();
+    assert!(noted.success(), "the session has to carry a note or this proves nothing");
+
+    let mut pty = tui(home.path(), workspace.path());
+    pty.screen(100, 30);
+    pty.send("\u{10}");
+    pty.screen_showing(100, 30, "what would you like to do");
+    pty.send("sessions\r");
+    pty.screen_showing(100, 30, "events");
+    pty.send("\r");
+    let screen = pty.screen_showing(100, 30, "finish the report").join("\n");
+
+    assert!(screen.contains("finish the report"), "the note is on the screen:\n{screen}");
+}

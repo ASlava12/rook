@@ -292,7 +292,9 @@ export async function resume(session) {
       else if (e.kind === 'assistant') { current = null; saidByModel(e.body); current = null; }
       else if (e.kind === 'tool-call') say('tool', `· ${e.doing || e.label}`);
       else if (e.kind === 'tool-result') say('stat', e.body.split('\n').slice(0, 3).join('\n'));
-      else if (e.kind === 'note') say('stat', `${e.label}: ${e.body}`);
+      // `wrote` is JSON for `changes` to read, not prose for anybody. The same
+      // question is `note_is_for_a_person` in rook-core, which the window asks.
+      else if (e.kind === 'note' && e.label !== 'wrote') say('stat', `${e.label}: ${e.body}`);
     }
     say('stat', `— ${items.length} earlier entries; the next prompt continues this session —`);
   } catch (e) {
