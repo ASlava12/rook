@@ -679,6 +679,9 @@ fn as_event(progress: Progress<'_>, workspace: &std::path::Path) -> Option<ChatE
         Progress::Delegating { at, doing } => {
             ChatEvent::Agent { text: format!("    {}", rook_core::calls::delegating(at, doing)) }
         }
+        Progress::Working { call, said } => {
+            ChatEvent::ToolWorking { name: call.to_string(), said: said.to_string() }
+        }
         Progress::ToolDone { name, failed } => ChatEvent::ToolDone { name: name.to_string(), failed },
         Progress::Step { at, of } => ChatEvent::Step { at, of },
         Progress::Spent { input, output, cached } => {

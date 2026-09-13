@@ -521,3 +521,32 @@ async fn a_command_that_timed_out_says_whether_it_was_working_or_waiting() {
     );
     assert!(talking.contains("working"), "and what it printed is in the message: {talking}");
 }
+
+/// A command that takes a while says so while it takes it.
+///
+/// From outside, a long command and a wedged one are the same await and the
+/// same unchanging line — which is the shape of failure nobody can tell from
+/// work. Only the tool knows how long it has been running and how long since it
+/// printed, so this is where it has to be said, and it has to be said while the
+/// call is still in flight rather than in the report afterwards.
+#[tokio::test]
+async fn a_command_that_takes_a_while_says_so_while_it_takes_it() {
+    let (_d, mut ctx) = ctx();
+    let (say, mut said) = tokio::sync::mpsc::unbounded_channel::<String>();
+    ctx.watching = Some(say);
+
+    // Long enough to outlast the first interval and one of the ones after it,
+    // and silent throughout — which is the case worth hearing about. Kept as
+    // short as that: this runs beside every other suite under the gate, and a
+    // test that idles for a quarter of a minute is load somebody else's
+    // deadline pays for.
+    let out = run(&ctx, serde_json::json!({ "command": "sleep 8", "timeout_secs": 30 })).await;
+    assert!(out.content.contains("exit"), "{}", out.content);
+
+    let heard: Vec<String> = std::iter::from_fn(|| said.try_recv().ok()).collect();
+    assert!(heard.len() > 1, "it spoke more than once while running: {heard:?}");
+    assert!(
+        heard.iter().any(|s| s.contains("quiet for")),
+        "and said the thing only it knows — how long since it printed: {heard:?}"
+    );
+}

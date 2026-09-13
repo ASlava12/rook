@@ -494,6 +494,16 @@ pub enum Progress<'a> {
         at: usize,
         doing: &'a str,
     },
+    /// A call that is taking a while, saying what is happening while it does.
+    ///
+    /// A long command and a wedged one are the same await from outside and drew
+    /// the same unchanging line. The tool is the only thing that knows which —
+    /// how long it has been running, and how long since it printed anything —
+    /// and this is where it says so.
+    Working {
+        call: &'a str,
+        said: &'a str,
+    },
     /// A step of the turn, as it begins. What a person watching wants to know
     /// is not only that it is still going but how much of the budget is left:
     /// a turn at step 190 of 200 is about to stop whatever it is in the middle
@@ -2764,7 +2774,26 @@ impl<'a> AgentLoop<'a> {
         let will_write = self.will_write(call);
         let unseen: Vec<_> = will_write.iter().filter(|p| self.unseen(p)).cloned().collect();
         let _ = self.what_this_broke(&unseen).await;
-        let outcome = match self.tools.call(&self.tool_ctx, &call.name, &call.arguments).await {
+        // A call that takes a while says so while it takes it, and whoever is
+        // watching hears it as it happens. Without this a long command and a
+        // wedged one are the same await and the same unchanging line: the tool
+        // knows which, and had nowhere to say it.
+        let (say, mut said) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let ctx = rook_tools::ToolContext { watching: Some(say), ..self.tool_ctx.clone() };
+        let calling = self.tools.call(&ctx, &call.name, &call.arguments);
+        tokio::pin!(calling);
+        let outcome = loop {
+            tokio::select! {
+                // What it says goes out before the call is noticed to have
+                // ended, so its last word is not lost to the ending.
+                biased;
+                Some(word) = said.recv() => {
+                    on_progress(Progress::Working { call: &call.name, said: &word });
+                }
+                done = &mut calling => break done,
+            }
+        };
+        let outcome = match outcome {
             Ok(o) => o,
             Err(e) => rook_tools::ToolOutcome::error(format!("tool error: {e}")),
         };

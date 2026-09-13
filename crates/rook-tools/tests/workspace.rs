@@ -157,3 +157,51 @@ async fn a_leading_slash_is_told_from_an_attempt_to_leave_the_workspace() {
     let nowhere = read(&ctx, "/app/absent.sh").await.unwrap_err().to_string();
     assert!(!nowhere.contains("drop the leading slash"), "no file to point at: {nowhere}");
 }
+
+/// A resolved path has already been through its symlinks, so swapping one
+/// afterwards has nothing left to redirect.
+///
+/// This is the question an audit left open and could not settle: the check and
+/// the open are two moments, and something can change underneath between them.
+/// What makes that window narrow is here — `resolve` hands back the canonical
+/// path, the link is followed once, and the open that follows never sees it. It
+/// mattered more once the sandbox arrived: a command can no longer write
+/// outside the workspace, so redirecting a write that goes around the sandbox
+/// would have been worth the race.
+///
+/// What is left is narrower still: a real directory in that canonical path
+/// would have to be replaced by a symlink between these two lines. Written down
+/// rather than defended against, because defending against it means opening
+/// every component by descriptor, on three platforms, in the hot path.
+#[cfg(unix)]
+#[test]
+fn a_resolved_path_has_already_been_through_its_symlinks() {
+    let dirs = dirs();
+    let inside = dirs.workspace.join("real");
+    std::fs::create_dir_all(&inside).unwrap();
+    link(&inside, &dirs.workspace.join("link"));
+
+    let ctx = ToolContext::new(dirs.workspace.clone());
+    let resolved = ctx.resolve("link/notes.md").unwrap();
+
+    assert!(
+        !resolved.components().any(|c| c.as_os_str() == "link"),
+        "the link is gone from what was handed back: {}",
+        resolved.display()
+    );
+    assert!(
+        resolved.starts_with(inside.canonicalize().unwrap()),
+        "and what is left is where it pointed: {}",
+        resolved.display()
+    );
+
+    // Swapped now, which is the race: it cannot reach a path that no longer
+    // mentions it.
+    std::fs::remove_file(dirs.workspace.join("link")).unwrap();
+    link(&dirs.outside, &dirs.workspace.join("link"));
+    assert!(
+        !resolved.starts_with(dirs.outside.canonicalize().unwrap()),
+        "the swap has nothing to act on: {}",
+        resolved.display()
+    );
+}

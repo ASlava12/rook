@@ -162,7 +162,7 @@ impl Tool for RunCommand {
         // as one that never finished. So both are waited for, and whichever
         // arrives first decides.
         let mut exited = None;
-        let ended = tokio::time::timeout(timeout, async {
+        let running = async {
             tokio::select! {
                 _ = capture!() => Ended::Drained,
                 status = child.wait() => {
@@ -170,9 +170,42 @@ impl Tool for RunCommand {
                     Ended::Exited
                 }
             }
-        })
-        .await
-        .unwrap_or(Ended::TimedOut);
+        };
+        // Waited for in slices rather than in one go, so that a command taking
+        // a while can say whether it is doing anything while it takes it. From
+        // outside, a long command and a wedged one are the same await and the
+        // same line on the screen; what separates them is whether it has
+        // printed lately, and only this side knows.
+        //
+        // The future is pinned and polled again across the slices: dropping it
+        // would throw away a drain that is holding what the command has said.
+        // Sooner the first time, because the first sign that a call is slow is
+        // the one worth showing soonest — a screen that says nothing for five
+        // seconds and then starts talking is five seconds of the thing this is
+        // here to prevent. After that the numbers change slowly and so does the
+        // line.
+        const FIRST_AFTER: std::time::Duration = std::time::Duration::from_secs(2);
+        const THEN_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+        let mut next = FIRST_AFTER;
+        // Scoped, so the future is dropped here and the pipes it was draining
+        // are free for the grace drain below. Held past this block, it is a
+        // borrow of both streams that nothing else can have.
+        let ended = {
+            tokio::pin!(running);
+            loop {
+                let left = timeout.saturating_sub(started.elapsed());
+                if left.is_zero() {
+                    break Ended::TimedOut;
+                }
+                match tokio::time::timeout(next.min(left), &mut running).await {
+                    Ok(ended) => break ended,
+                    Err(_) => {
+                        next = THEN_EVERY;
+                        ctx.watching(still_going(started.elapsed(), quiet_for(&heard, started)));
+                    }
+                }
+            }
+        };
 
         // Exited first: ordinarily the pipes close microseconds later and this
         // is the same drain finishing.
@@ -223,10 +256,7 @@ impl Tool for RunCommand {
             // How long it had been quiet when the clock ran out. Zero heard at
             // all means it never printed anything, and the whole allowance is
             // the silence.
-            let silent_for = match heard.load(std::sync::atomic::Ordering::Relaxed) {
-                0 => started.elapsed(),
-                at => started.elapsed().saturating_sub(std::time::Duration::from_millis(at)),
-            };
+            let silent_for = quiet_for(&heard, started);
             // A command that ran until the timeout is the one whose output is
             // most worth having, and the ends of it are the least of it.
             let printed = joined(&out, &err);
@@ -594,6 +624,30 @@ fn settle(
     Some((spill.note(), spill.path.display().to_string()))
 }
 
+/// How long a command has been quiet, from the clock the drains share.
+///
+/// Zero heard at all means it has printed nothing since it started, and then
+/// the whole of the run is the silence.
+fn quiet_for(heard: &std::sync::atomic::AtomicU64, started: std::time::Instant) -> std::time::Duration {
+    match heard.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => started.elapsed(),
+        at => started.elapsed().saturating_sub(std::time::Duration::from_millis(at)),
+    }
+}
+
+/// What a command in flight says about itself.
+///
+/// Both numbers, because neither alone answers anything: running for four
+/// minutes is a build or a wedge, and quiet for four minutes is the same two
+/// until you know it has been running for four. Together they are a reading
+/// somebody can act on without asking the operating system anything.
+fn still_going(running: std::time::Duration, quiet: std::time::Duration) -> String {
+    match quiet.as_secs() {
+        quiet if quiet * 4 < running.as_secs() => format!("running {}s", running.as_secs()),
+        quiet => format!("running {}s, quiet for {quiet}s", running.as_secs()),
+    }
+}
+
 /// The same sentence wherever a command ran out of time: what it had printed is
 /// the part worth reading, and a model told only that it timed out retries the
 /// same command against the same limit.
@@ -612,20 +666,27 @@ fn timed_out(
     printed: &str,
     silent_for: std::time::Duration,
 ) -> String {
-    let quiet = match silent_for.as_secs() {
+    // One piece of advice, not two: the sentence that follows used to end with
+    // "pass a larger `timeout_secs`" whatever had happened, so a command that
+    // had plainly been waiting on something was told in the same breath that a
+    // larger allowance would not help and that it should ask for one.
+    let advice = match silent_for.as_secs() {
         // Under a tenth of its allowance is a command that was still going.
-        quiet if quiet * 10 < limit.as_secs() => String::new(),
+        quiet if quiet * 10 < limit.as_secs() => {
+            "It was still printing when the clock ran out, so pass a larger `timeout_secs` if it \
+             needs longer."
+                .to_string()
+        }
         quiet => format!(
-            " It printed nothing for the last {quiet}s of that, so it was waiting on something \
+            "It printed nothing for the last {quiet}s of that, so it was waiting on something \
              rather than working, and a larger `timeout_secs` buys the same wait again. To watch \
              one instead of waiting blind on it: `background: true` starts it and returns at once, \
              `job` says how long it has been running and how long it has been quiet, and anything \
-             you run in between can look at the process itself."
+             you run in between can ask the operating system about the processes themselves."
         ),
     };
     format!(
-        "command timed out after {}s{}.{quiet} Pass a larger `timeout_secs` if it needs longer. \
-         What it printed first:\n{printed}",
+        "command timed out after {}s{}. {advice} What it printed first:\n{printed}",
         limit.as_secs(),
         if killed { " and was killed" } else { " and could not be killed" },
     )
@@ -759,5 +820,30 @@ impl Ends {
             n => format!("\n[{n} bytes elided from the middle]\n"),
         };
         format!("{head}{gap}{}", String::from_utf8_lossy(&tail))
+    }
+}
+
+#[cfg(test)]
+mod saying_what_it_is_doing {
+    use super::still_going;
+    use std::time::Duration;
+
+    /// What a call in flight says answers the question the window cannot.
+    ///
+    /// The window can time its own silence; only the call knows whether
+    /// anything is happening inside it. Running for four minutes is a build or
+    /// a wedge, and quiet for four minutes is the same two until you know it
+    /// has been running for four — so the line carries the silence only when
+    /// the silence is most of the run, and says just the time when it is not.
+    #[test]
+    fn a_call_in_flight_names_its_silence_only_when_the_silence_is_the_story() {
+        let busy = still_going(Duration::from_secs(300), Duration::from_secs(2));
+        assert_eq!(busy, "running 300s", "a command printing as it goes says how long, and no more");
+
+        let wedged = still_going(Duration::from_secs(300), Duration::from_secs(295));
+        assert_eq!(
+            wedged, "running 300s, quiet for 295s",
+            "and one that has said nothing for almost all of it says that instead"
+        );
     }
 }

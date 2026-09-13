@@ -202,6 +202,17 @@ pub enum ChatEvent {
         #[serde(default)]
         doing: String,
     },
+    /// The call named by the most recent [`ChatEvent::Tool`] is still going,
+    /// and here is what it is doing: how long it has run, and how long since it
+    /// printed anything.
+    ///
+    /// A long command and a wedged one are the same await from outside and drew
+    /// the same unchanging line, which is the shape of failure nobody can tell
+    /// from work.
+    ToolWorking {
+        name: String,
+        said: String,
+    },
     /// The call named by the most recent [`ChatEvent::Tool`] has finished.
     ToolDone {
         name: String,

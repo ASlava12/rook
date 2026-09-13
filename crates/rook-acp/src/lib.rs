@@ -403,6 +403,14 @@ async fn prompt(
                     &format!("  {}\n", rook_core::calls::delegating(at, doing)),
                     &part(1),
                 ),
+                // The editor has the call open already; this says it is still
+                // going and whether anything is happening in it, which is the
+                // one thing an open call does not say by itself.
+                Progress::Working { call, said } => protocol::agent_thought_chunk(
+                    &request.session_id,
+                    &format!("  {call}: {said}\n"),
+                    &part(1),
+                ),
                 Progress::ToolDone { failed, .. } => protocol::tool_call_done(
                     &request.session_id,
                     &format!("call_{}", finished.fetch_add(1, Ordering::Relaxed)),

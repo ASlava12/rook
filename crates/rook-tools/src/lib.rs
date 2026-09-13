@@ -160,6 +160,25 @@ pub struct ToolContext {
     /// where nothing set it, and then a call naming a secret is refused rather
     /// than run without it.
     pub secrets: Option<Arc<dyn Secrets>>,
+    /// Where a call that takes a while says so, while it takes it.
+    ///
+    /// A tool call is one await from outside, and a long one is indisputable
+    /// from a wedged one: the screen shows the same line either way. What
+    /// separates them is whether anything is happening, which only the tool
+    /// knows. A sender rather than a callback because the loop's own progress
+    /// is `FnMut` and this crosses into a spawned future; set per call by the
+    /// loop, and `None` anywhere nobody is listening.
+    pub watching: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+}
+
+impl ToolContext {
+    /// Say what is happening, to whoever is watching this call. Nothing when
+    /// nobody is.
+    pub fn watching(&self, said: impl Into<String>) {
+        if let Some(watching) = &self.watching {
+            let _ = watching.send(said.into());
+        }
+    }
 }
 
 impl std::fmt::Debug for ToolContext {
@@ -223,6 +242,7 @@ impl ToolContext {
             max_spill_bytes: 0,
             max_files_searched: 20_000,
             secrets: None,
+            watching: None,
         }
     }
 

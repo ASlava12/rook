@@ -57,6 +57,13 @@ function working() {
   if (stop) stop.hidden = false;
 }
 
+// The one line a call in flight keeps, rewritten rather than repeated.
+let callStatus = null;
+function stillGoing(text) {
+  if (callStatus && callStatus.isConnected) callStatus.textContent = text;
+  else callStatus = say('stat', text);
+}
+
 function done() {
   state.chat.busy = false;
   state.chat.waiting = false;
@@ -96,8 +103,14 @@ export function connect() {
       case 'agent': say('agent', e.text); break;
       // `doing` says which file, which command; a daemon older than the
       // field sends nothing and the name is what it always said.
-      case 'tool': say('tool', `· ${e.doing || e.name}`); break;
+      case 'tool': callStatus = null; say('tool', `· ${e.doing || e.name}`); break;
+      // A call taking a while, saying whether anything is happening in it. On
+      // the same line each time, because it is a state and not a log: a call
+      // that runs for ten minutes would otherwise leave a hundred and twenty
+      // lines saying the same thing in different numbers.
+      case 'tool_working': stillGoing(`  ${e.name}: ${e.said}`); break;
       case 'tool_done': {
+        callStatus = null;
         const last = chatOut() && chatOut().lastElementChild;
         if (last && last.className === 'tool') last.append(e.failed ? ' ✗' : ' ✓');
         current = null;

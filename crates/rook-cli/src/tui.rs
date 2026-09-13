@@ -264,6 +264,8 @@ enum TurnEvent {
     Agent(String),
     /// Which step of the budget the turn is on.
     Step(u32, u32),
+    /// What the call in flight says about itself while it runs.
+    Working(String),
     Spent {
         input: u32,
         output: u32,
@@ -567,6 +569,9 @@ struct Chat {
     /// approvals, answers and a cancellation. `None` when the turn is this
     /// process's own.
     remote: Option<mpsc::UnboundedSender<ClientMessage>>,
+    /// What the call in flight last said about itself, while it is in flight.
+    /// Cleared when it ends, because a finished call says nothing.
+    working: Option<String>,
     /// Whether this window has already asked the daemon whether the turn it is
     /// drawing is still running. Asked once per silence, and forgotten the
     /// moment anything is heard.
@@ -680,8 +685,20 @@ fn inline(text: &str, base: Style, code: Style) -> Vec<Span<'static>> {
 
 /// What a long pause is waiting on, in the words of the log being read: the
 /// tool that is still running, or the model that has sent nothing.
-fn waiting_on(quiet: std::time::Duration, running: Option<&str>, patience: std::time::Duration) -> String {
+fn waiting_on(
+    quiet: std::time::Duration,
+    running: Option<&str>,
+    patience: std::time::Duration,
+    working: Option<&str>,
+) -> String {
     match running {
+        // What the call says about itself, where it says anything: how long it
+        // has been running and how long since it printed. The window's own
+        // elapsed time cannot answer the second, and the second is the whole
+        // difference between a build and something stuck.
+        Some(tool) if working.is_some() => {
+            format!(" · {tool} {}", working.unwrap_or_default())
+        }
         // A tool has its own timeout and its own line; this one is about the
         // model, and naming a deadline that is not this wait's would be worse
         // than naming none.
@@ -814,6 +831,7 @@ impl Chat {
     /// runs. They finish in the order they were announced, so a queue per name
     /// pairs each finish with the line it belongs to.
     fn tool_started(&mut self, name: &str, said: &str) {
+        self.working = None;
         self.push("tool", &format!("  · {said}"));
         self.running_calls.started(name, said);
     }
@@ -859,6 +877,7 @@ impl Chat {
         self.step = None;
         self.heard = self.since;
         self.asked_if_alive = false;
+        self.working = None;
     }
 
     /// A turn is over, however it ended.
@@ -908,7 +927,7 @@ impl Chat {
     /// more thing to ignore.
     fn silence(&self, patience: std::time::Duration) -> String {
         match self.heard.map(|at| at.elapsed()).filter(|d| *d >= QUIET) {
-            Some(quiet) => waiting_on(quiet, self.running(), patience),
+            Some(quiet) => waiting_on(quiet, self.running(), patience, self.working.as_deref()),
             None => String::new(),
         }
     }
@@ -1379,6 +1398,7 @@ impl App {
                 TurnEvent::Reasoning(text) => self.chat.push("think", &text),
                 TurnEvent::Tool { name, said } => self.chat.tool_started(&name, &said),
                 TurnEvent::Agent(line) => self.chat.push("agent", &line),
+                TurnEvent::Working(said) => self.chat.working = Some(said),
                 TurnEvent::Step(at, of) => self.chat.step = Some((at, of)),
                 TurnEvent::ToolDone(name, failed) => self.chat.tool_done(&name, failed),
                 TurnEvent::Spent { input, output, cached } => {
@@ -1449,6 +1469,7 @@ impl App {
                 }
             }
             ChatEvent::Text { text } => self.chat.push("text", &text),
+            ChatEvent::ToolWorking { said, .. } => self.chat.working = Some(said),
             ChatEvent::Reasoning { text } => self.chat.push("think", &text),
             // The same kind a turn run here uses, so a sub-agent's work reads
             // the same whichever side of the socket it happens on.
@@ -2289,6 +2310,7 @@ impl App {
                         Progress::Delegating { at, doing } => {
                             TurnEvent::Agent(format!("    {}", rook_core::calls::delegating(at, doing)))
                         }
+                        Progress::Working { said, .. } => TurnEvent::Working(said.to_string()),
                         Progress::Step { at, of } => TurnEvent::Step(at, of),
                         Progress::ToolDone { name, failed } => TurnEvent::ToolDone(name.to_string(), failed),
                         Progress::Spent { input, output, cached } => {
@@ -4392,19 +4414,28 @@ mod tests {
         let patience = std::time::Duration::from_secs(1200);
         let mut chat = Chat::default();
         assert_eq!(
-            waiting_on(a_while, chat.running(), patience),
+            waiting_on(a_while, chat.running(), patience, None),
             " · nothing from the model for 1m30s of 20m00s"
         );
 
         // A tool has a timeout of its own, so the model's would be the wrong
         // number to put beside it.
         chat.push("tool", "  · run_command");
-        assert_eq!(waiting_on(a_while, chat.running(), patience), " · run_command running 1m30s");
+        assert_eq!(waiting_on(a_while, chat.running(), patience, None), " · run_command running 1m30s");
+
+        // What the call says about itself displaces the window's own count of
+        // the seconds, because it answers the question the count cannot: the
+        // window can time a silence and only the call knows whether anything is
+        // happening inside it.
+        assert_eq!(
+            waiting_on(a_while, chat.running(), patience, Some("running 300s, quiet for 295s")),
+            " · run_command running 300s, quiet for 295s"
+        );
 
         // A call that has finished is not what the turn is waiting on.
         chat.push("tool", "  · run_command ✓");
         assert_eq!(
-            waiting_on(a_while, chat.running(), patience),
+            waiting_on(a_while, chat.running(), patience, None),
             " · nothing from the model for 1m30s of 20m00s"
         );
 
