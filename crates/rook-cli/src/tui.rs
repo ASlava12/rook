@@ -1320,6 +1320,21 @@ impl App {
         self.status = "turn stopped".into();
     }
 
+    /// How long the turn will wait for the model before giving up, which is not
+    /// the number in the config once there is a context to read.
+    ///
+    /// A model cannot answer until it has read the prompt, so the wait for a
+    /// first token grows with the prompt — and a footer quoting the configured
+    /// patience over a turn that will wait far longer is the same lie as the
+    /// one that quoted ninety seconds over a turn waiting twenty minutes, told
+    /// the other way round. The same function the provider uses, so the two
+    /// cannot drift; before the first reply there is no size to ask about and
+    /// the configured number is the whole answer.
+    fn waiting_for(&self) -> std::time::Duration {
+        const BYTES_A_TOKEN: usize = 4;
+        rook_llm::first_token_patience(self.patience, self.chat.carried as usize * BYTES_A_TOKEN)
+    }
+
     /// Asks the daemon whether the turn this window is drawing is still
     /// running — once, after a silence longer than the turn itself would wait
     /// for the model.
@@ -1333,7 +1348,7 @@ impl App {
     /// failure it produces — patience — is the one a person cannot tell from
     /// the thing working.
     fn still_running(&mut self) {
-        if !self.chat.worth_asking_if_alive(self.patience) {
+        if !self.chat.worth_asking_if_alive(self.waiting_for()) {
             return;
         }
         let (Some(remote), Some(session)) = (self.chat.remote.clone(), self.chat.session) else {
@@ -2832,7 +2847,7 @@ impl App {
                     Some((at, of)) => format!(" · step {at}/{of}"),
                     None => String::new(),
                 },
-                self.chat.silence(self.patience)
+                self.chat.silence(self.waiting_for())
             ),
             (true, None) => "  working… ".to_string(),
             _ => "› ".to_string(),
@@ -4600,5 +4615,30 @@ mod tests {
             text: "audit the three projects".into()
         }));
         assert!(!this_window_decides(&ClientMessage::Attach { session: "01M26DDB".into() }));
+    }
+
+    /// The wait the footer names is the wait the turn will take.
+    ///
+    /// It quoted the configured patience, and a turn waiting for a first token
+    /// waits longer than that in proportion to the context it sent — so the
+    /// number was wrong again, the other way round from the last time it was
+    /// wrong. Both sides now ask the same function.
+    #[test]
+    fn the_wait_the_footer_names_grows_with_the_context_the_turn_sent() {
+        let configured = std::time::Duration::from_secs(90);
+
+        let fresh = rook_llm::first_token_patience(configured, 0);
+        assert_eq!(fresh, configured, "before there is a context, the config is the whole answer");
+
+        // A context the size this was reported on: two hundred thousand tokens.
+        let long = rook_llm::first_token_patience(configured, 200_000 * 4);
+        assert!(
+            long > configured * 10,
+            "a model reading two hundred thousand tokens is given longer than ninety seconds: {long:?}"
+        );
+        assert!(
+            long < std::time::Duration::from_secs(4 * 3600),
+            "and not so long that a dead stream is never noticed: {long:?}"
+        );
     }
 }
