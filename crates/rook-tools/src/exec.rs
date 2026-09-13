@@ -111,7 +111,7 @@ impl Tool for RunCommand {
             env.extend(helper.env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
         }
         let mut child = spawn_shell(&command, &cwd, &env, isolation)?;
-        let group = child.id();
+        let group = Group::holding(child.id());
         let mut stdout = child.stdout.take();
         let mut stderr = child.stderr.take();
 
@@ -233,7 +233,7 @@ impl Tool for RunCommand {
         // `child.wait()` is what produced `Exited`, and waiting reaps — so the
         // shell is gone from the group by the time this asks, and a member left
         // is a member the command started.
-        let still = group_alive(group);
+        let still = group.alive();
         // Short where the wait cannot end and long where it can. A drain that
         // something is holding open never finishes, but what the command
         // already printed is in the pipe and reading it is immediate — skipping
@@ -252,7 +252,7 @@ impl Tool for RunCommand {
         if ended == Ended::TimedOut {
             // The whole group, not the shell: `sh -c` may fork rather than
             // exec, and killing the shell alone leaves the real work running.
-            let killed = kill_group(group);
+            let killed = group.end();
             // How long it had been quiet when the clock ran out. Zero heard at
             // all means it never printed anything, and the whole allowance is
             // the silence.
@@ -708,45 +708,71 @@ fn joined(out: &Ends, err: &Ends) -> String {
 /// The only place that difference is spelled out: a caller says "stop this" and
 /// gets an answer, rather than each one branching on the platform.
 pub(crate) async fn kill_tree(child: &mut tokio::process::Child) -> bool {
-    #[cfg(unix)]
-    if kill_group(child.id()) {
+    // Both platforms can say so now. The `cfg(unix)` that used to be here left
+    // Windows killing the shell and nothing it had started, which is the case
+    // this function exists for.
+    if Group::holding(child.id()).end() {
         return true;
     }
     child.kill().await.is_ok()
 }
 
-/// SIGKILL to the whole group. Windows has no equivalent that is not a job
-/// object, so there `kill_on_drop` takes the shell and its children are left —
-/// the timeout still reports what happened rather than claiming otherwise.
-/// Whether anything is left in the command's process group.
+/// Everything one command started, whatever the platform calls it.
 ///
-/// Signal 0 is the question rather than an answer: it performs the permission
-/// and existence checks and delivers nothing. The command's own shell is in
-/// this group and has been reaped by the time this is asked, so a member left
-/// is one the command started and did not wait for.
-///
-/// Elsewhere there is no group to ask about, and the caller's wait is all there
-/// is — which is what it was everywhere before this.
-/// `None` where there is no group to ask about, which is not the same as an
-/// empty one — saying `false` there would claim nothing was left behind, and
-/// `true` would claim every command leaves something.
-fn group_alive(pid: Option<u32>) -> Option<bool> {
-    match pid {
-        #[cfg(unix)]
-        Some(pid) => Some(unsafe { libc::kill(-(pid as i32), 0) == 0 }),
-        #[cfg(not(unix))]
-        Some(_) => None,
-        None => None,
-    }
+/// A process group on unix, where the command is put in its own and one signal
+/// reaches whatever it left behind. A job object on Windows, which is the
+/// nearest thing and is exact — and which nothing used, so `kill_group` there
+/// returned `false` without trying and a command that ran past its timeout went
+/// on running while the message said it could not be killed.
+pub(crate) struct Group {
+    /// The number to point a question at, and what a person is shown.
+    pid: Option<u32>,
+    #[cfg(windows)]
+    job: Option<rook_contain::Started>,
 }
 
-pub(crate) fn kill_group(pid: Option<u32>) -> bool {
-    match pid {
+impl Group {
+    /// Takes hold of a command that has just started.
+    pub(crate) fn holding(pid: Option<u32>) -> Self {
+        #[cfg(windows)]
+        return Self { pid, job: pid.and_then(rook_contain::Started::holding) };
+        #[cfg(not(windows))]
+        Self { pid }
+    }
+
+    /// Whoever is asking about this command, by number.
+    pub(crate) fn pid(&self) -> Option<u32> {
+        self.pid
+    }
+
+    /// Whether anything is still running in it.
+    ///
+    /// Signal 0 is the question rather than an answer: it performs the
+    /// permission and existence checks and delivers nothing. The command's own
+    /// shell is in this group and has been reaped by the time this is asked, so
+    /// a member left is one the command started and did not wait for. The job
+    /// object answers the same question by counting.
+    ///
+    /// `None` where there is nothing to ask, which is not the same as an empty
+    /// one — `false` there would claim nothing was left behind, and `true` that
+    /// every command leaves something.
+    pub(crate) fn alive(&self) -> Option<bool> {
         #[cfg(unix)]
-        Some(pid) => unsafe { libc::kill(-(pid as i32), libc::SIGKILL) == 0 },
-        #[cfg(not(unix))]
-        Some(_) => false,
-        None => false,
+        return self.pid.map(|pid| unsafe { libc::kill(-(pid as i32), 0) == 0 });
+        #[cfg(windows)]
+        return self.job.as_ref().and_then(rook_contain::Started::alive);
+        #[cfg(not(any(unix, windows)))]
+        None
+    }
+
+    /// Ends all of it. `true` when the call was made.
+    pub(crate) fn end(&self) -> bool {
+        #[cfg(unix)]
+        return self.pid.is_some_and(|pid| unsafe { libc::kill(-(pid as i32), libc::SIGKILL) == 0 });
+        #[cfg(windows)]
+        return self.job.as_ref().is_some_and(rook_contain::Started::end);
+        #[cfg(not(any(unix, windows)))]
+        false
     }
 }
 

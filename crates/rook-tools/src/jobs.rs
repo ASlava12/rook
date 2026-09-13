@@ -49,8 +49,9 @@ struct Running {
     /// how anyone else reaches it — and it works where a process group is not a
     /// thing that can be signalled.
     stop: Arc<tokio::sync::Notify>,
-    /// The same thing without waiting, for `Drop`, which cannot.
-    group: Option<u32>,
+    /// The same thing without waiting, for `Drop`, which cannot. A process
+    /// group on unix and a job object on Windows, where there is no group.
+    group: crate::exec::Group,
     printed: Arc<Mutex<Printed>>,
     exit: Arc<Mutex<Option<i32>>>,
 }
@@ -113,7 +114,7 @@ impl Jobs {
         let printed = Arc::new(Mutex::new(Printed::default()));
         let exit = Arc::new(Mutex::new(None));
         let stop = Arc::new(tokio::sync::Notify::new());
-        let group = child.id();
+        let group = crate::exec::Group::holding(child.id());
 
         let (into, code, cap, stopped) = (printed.clone(), exit.clone(), self.max_output_bytes, stop.clone());
         tokio::spawn(async move {
@@ -203,7 +204,7 @@ impl Running {
             output,
             exit_code: *self.exit.lock().unwrap_or_else(|e| e.into_inner()),
             quiet_for_secs: quiet.map(|d| d.as_secs()),
-            group: self.group,
+            group: self.group.pid(),
         }
     }
 }
@@ -219,7 +220,7 @@ impl Drop for Jobs {
             // would answer the signal may never be scheduled again. Killing the
             // group needs nobody's cooperation; where there is no group to kill,
             // the signal is all there is.
-            crate::exec::kill_group(job.group);
+            job.group.end();
             job.stop.notify_one();
         }
     }

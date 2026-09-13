@@ -23,6 +23,113 @@ pub const ENV_SCRATCH: &str = "ROOK_CONTAIN_SCRATCH";
 /// must not be started as one: it would run whatever it was instead.
 pub const LAUNCHER: &str = "ROOK_LAUNCHER";
 
+/// Everything one command started, held as one thing that can be asked about
+/// and ended.
+///
+/// Unix has a process group: put the command in its own, and one signal reaches
+/// whatever it left behind. Windows has nothing of the kind, so `kill_group`
+/// there did nothing at all and said so — a command that ran past its timeout
+/// was reported as killed-or-not and went on running, and a build left behind
+/// by a turn outlived the agent that started it.
+///
+/// A job object is the nearest thing and is exact: a process is assigned to
+/// one, everything it starts after that inherits it, and the job can be asked
+/// how many are still in it and told to end them all.
+///
+/// The assignment happens just after the command starts rather than before,
+/// because the command is spawned by the standard library and there is no hook
+/// between creation and the first instruction. A grandchild started in that
+/// gap is outside the job. The gap is one process creation wide, and closing it
+/// means spawning suspended and resuming by hand — which is a rewrite of the
+/// spawn path for a case nobody has reported.
+#[cfg(windows)]
+pub struct Started(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl Started {
+    /// Put a running process, and everything it starts from now on, in a job of
+    /// its own. `None` when the process is already gone or the job cannot be
+    /// made, which is not the same as an empty one.
+    pub fn holding(pid: u32) -> Option<Self> {
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW};
+        use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE};
+
+        // Safety: documented Win32 calls. Every handle opened here is closed on
+        // the path that does not return it, and the job's own handle is closed
+        // by `Drop`.
+        unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() || job == INVALID_HANDLE_VALUE {
+                return None;
+            }
+            let process = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid);
+            if process.is_null() {
+                CloseHandle(job);
+                return None;
+            }
+            let assigned = AssignProcessToJobObject(job, process) != 0;
+            CloseHandle(process);
+            match assigned {
+                true => Some(Self(job)),
+                false => {
+                    CloseHandle(job);
+                    None
+                }
+            }
+        }
+    }
+
+    /// Whether anything is still running in it.
+    pub fn alive(&self) -> Option<bool> {
+        use windows_sys::Win32::System::JobObjects::{
+            JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JobObjectBasicAccountingInformation,
+            QueryInformationJobObject,
+        };
+
+        let mut counted: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32;
+        // Safety: the buffer is the size the call is told it is, and the type is
+        // the one the class names.
+        let asked = unsafe {
+            QueryInformationJobObject(
+                self.0,
+                JobObjectBasicAccountingInformation,
+                (&raw mut counted).cast(),
+                size,
+                std::ptr::null_mut(),
+            )
+        };
+        (asked != 0).then_some(counted.ActiveProcesses > 0)
+    }
+
+    /// End everything in it. `true` when the call was made, which is as much as
+    /// the unix side claims for a signal.
+    pub fn end(&self) -> bool {
+        use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+        // Safety: a job handle this type owns, and an exit code.
+        unsafe { TerminateJobObject(self.0, 1) != 0 }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for Started {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        // Safety: a handle this type owns and has not closed. Closing it does
+        // not end what is in the job: the limit that would is not set, on
+        // purpose — a command left running on purpose outlives the handle.
+        unsafe { CloseHandle(self.0) };
+    }
+}
+
+// Safety: a job handle is not bound to the thread that made it, and every use
+// of it here is a call that takes it by value.
+#[cfg(windows)]
+unsafe impl Send for Started {}
+#[cfg(windows)]
+unsafe impl Sync for Started {}
+
 /// Run as a launcher if started as one, and never return; otherwise say that
 /// this binary can be one, and return at once. The first thing a rook
 /// binary's `main` does, before anything that could write or start a thread.
@@ -230,5 +337,39 @@ mod windows {
                 126
             }
         }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::Started;
+
+    /// A job holds a running command, counts what is in it, and ends all of it.
+    ///
+    /// This is the whole of what Windows had missing. `kill_group` there
+    /// returned `false` without trying, so a command that ran past its timeout
+    /// was reported as unkillable and went on running — and the check for
+    /// whatever it had left behind returned "cannot say", which reads the same
+    /// as "nothing".
+    ///
+    /// Written on a machine that is not Windows, so this is the test that
+    /// checks it rather than the author.
+    #[test]
+    fn a_job_holds_a_running_command_counts_it_and_ends_it() {
+        // `ping` to the loopback is the portable way to make a Windows process
+        // that lives for a while without a shell builtin.
+        let mut child = std::process::Command::new("cmd")
+            .args(["/c", "ping -n 30 127.0.0.1 > nul"])
+            .spawn()
+            .expect("a command to hold");
+
+        let held = Started::holding(child.id()).expect("a running process can be put in a job");
+        assert_eq!(held.alive(), Some(true), "it is in the job and running");
+
+        assert!(held.end(), "the job ends what is in it");
+        // Reaped, so the count has somewhere to settle: a terminated process is
+        // still in the job until somebody waits for it.
+        let _ = child.wait();
+        assert_eq!(held.alive(), Some(false), "and nothing is left in it");
     }
 }
