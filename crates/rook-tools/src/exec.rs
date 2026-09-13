@@ -707,11 +707,19 @@ fn joined(out: &Ends, err: &Ends) -> String {
 ///
 /// The only place that difference is spelled out: a caller says "stop this" and
 /// gets an answer, rather than each one branching on the platform.
-pub(crate) async fn kill_tree(child: &mut tokio::process::Child) -> bool {
+///
+/// The group is passed in rather than taken from the child here, and it has to
+/// be the one taken when the command started. On unix either would do — a
+/// process group is the same group whenever it is asked for. On Windows a job
+/// holds the process it is given and everything that process starts *after*
+/// the assignment, so a job made at this moment holds the shell alone and
+/// whatever it had already started is outside it. Building one here compiled,
+/// ran, returned `true`, and left the grandchild running.
+pub(crate) async fn kill_tree(child: &mut tokio::process::Child, group: &Group) -> bool {
     // Both platforms can say so now. The `cfg(unix)` that used to be here left
     // Windows killing the shell and nothing it had started, which is the case
     // this function exists for.
-    if Group::holding(child.id()).end() {
+    if group.end() {
         return true;
     }
     child.kill().await.is_ok()

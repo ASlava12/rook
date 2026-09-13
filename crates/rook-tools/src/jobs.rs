@@ -51,7 +51,11 @@ struct Running {
     stop: Arc<tokio::sync::Notify>,
     /// The same thing without waiting, for `Drop`, which cannot. A process
     /// group on unix and a job object on Windows, where there is no group.
-    group: crate::exec::Group,
+    ///
+    /// Shared with the task that owns the child rather than copied to it: on
+    /// Windows the job has to be the one taken when the command started, so
+    /// that what the command started since is inside it.
+    group: Arc<crate::exec::Group>,
     printed: Arc<Mutex<Printed>>,
     exit: Arc<Mutex<Option<i32>>>,
 }
@@ -114,9 +118,10 @@ impl Jobs {
         let printed = Arc::new(Mutex::new(Printed::default()));
         let exit = Arc::new(Mutex::new(None));
         let stop = Arc::new(tokio::sync::Notify::new());
-        let group = crate::exec::Group::holding(child.id());
+        let group = Arc::new(crate::exec::Group::holding(child.id()));
 
         let (into, code, cap, stopped) = (printed.clone(), exit.clone(), self.max_output_bytes, stop.clone());
+        let held = group.clone();
         tokio::spawn(async move {
             let mut out = child.stdout.take();
             let mut err = child.stderr.take();
@@ -129,7 +134,7 @@ impl Jobs {
             tokio::select! {
                 _ = reading => {}
                 _ = stopped.notified() => {
-                    crate::exec::kill_tree(&mut child).await;
+                    crate::exec::kill_tree(&mut child, &held).await;
                 }
             }
             let status = child.wait().await.ok().and_then(|s| s.code()).unwrap_or(-1);

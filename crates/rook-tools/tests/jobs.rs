@@ -1,7 +1,11 @@
 //! Commands left running. The guards here are the ones that stop a turn from
 //! filling the machine with processes nobody is waiting on.
-
-#![cfg(unix)]
+//!
+//! `#[cfg(unix)]` sits on the tests that spell a command in `sh` — `sleep`,
+//! `seq`, `;` between two of them — and not on the file, which is where it used
+//! to be. What is claimed here is about processes and not about unix, and with
+//! the whole file excluded nothing checked that stopping a background command
+//! stops it on Windows. Nothing did, and the test below is what found it.
 
 use std::sync::Arc;
 
@@ -19,6 +23,7 @@ fn ctx(most: usize) -> (tempfile::TempDir, ToolContext) {
 /// command has no moment at which it is done, so there is nothing else to wait
 /// for — and a fixed sleep is a guess about scheduling that a loaded machine
 /// makes wrong.
+#[cfg(unix)]
 async fn until(ctx: &ToolContext, id: &str, wanted: &str) -> String {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     loop {
@@ -31,6 +36,7 @@ async fn until(ctx: &ToolContext, id: &str, wanted: &str) -> String {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_background_command_answers_at_once_and_keeps_printing() {
     let (_d, ctx) = ctx(4);
@@ -53,6 +59,7 @@ async fn a_background_command_answers_at_once_and_keeps_printing() {
 /// The signal has to be kept rather than delivered to whoever happens to be
 /// listening: a job stopped in the same breath as it was started has a task that
 /// is not waiting yet.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_background_command_stopped_at_once_still_stops() {
     let (_d, ctx) = ctx(4);
@@ -67,6 +74,7 @@ async fn a_background_command_stopped_at_once_still_stops() {
 
 /// Each one is a process nobody is waiting on, so what stops a turn filling the
 /// machine is a cap and not good sense.
+#[cfg(unix)]
 #[tokio::test]
 async fn more_background_commands_than_the_cap_are_refused_by_name() {
     let (_d, ctx) = ctx(2);
@@ -83,6 +91,7 @@ async fn more_background_commands_than_the_cap_are_refused_by_name() {
 
 /// A dev server that outlived the agent that started it is one nobody knows to
 /// stop.
+#[cfg(unix)]
 #[tokio::test]
 async fn the_registry_going_away_takes_the_processes_with_it() {
     let dir = tempfile::tempdir().unwrap();
@@ -121,6 +130,7 @@ async fn the_registry_going_away_takes_the_processes_with_it() {
 
 /// A turn that starts a thousand short commands would otherwise keep all
 /// thousand, which is the accumulator the cap exists to prevent.
+#[cfg(unix)]
 #[tokio::test]
 async fn finished_background_commands_do_not_pile_up() {
     let (_d, ctx) = ctx(2);
@@ -144,6 +154,7 @@ async fn finished_background_commands_do_not_pile_up() {
 /// The point of the wait: three commands run at once and the turn spends four
 /// tool calls, not one per check. Polling costs a whole model round trip each
 /// time.
+#[cfg(unix)]
 #[tokio::test]
 async fn several_commands_run_at_once_and_the_turn_waits_for_them() {
     let (dir, ctx) = ctx(4);
@@ -178,6 +189,7 @@ async fn several_commands_run_at_once_and_the_turn_waits_for_them() {
 
 /// A wait that outlives what it is waiting for would hold the turn as surely as
 /// a command with no timeout.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_wait_gives_up_and_says_it_is_still_running() {
     let (_d, mut ctx) = ctx(4);
@@ -198,6 +210,7 @@ async fn a_wait_gives_up_and_says_it_is_still_running() {
 
 /// A front end with nowhere to keep one says so rather than running it in the
 /// foreground and appearing to hang.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_front_end_that_keeps_none_refuses_rather_than_blocking() {
     let dir = tempfile::tempdir().unwrap();
@@ -214,6 +227,7 @@ async fn a_front_end_that_keeps_none_refuses_rather_than_blocking() {
 /// `cargo test` lost the first error — the one line anybody wants — and kept
 /// the summary that says a test failed. `run_command` keeps both ends; this
 /// does too, and over a run that never ends rather than one that has finished.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_job_that_prints_more_than_it_may_keep_still_has_its_first_line() {
     let dir = tempfile::tempdir().unwrap();
@@ -249,6 +263,7 @@ async fn a_job_that_prints_more_than_it_may_keep_still_has_its_first_line() {
 /// asks a background command. How long it has been quiet, beside how long it
 /// has been running, is what separates the two — and it is a reading the agent
 /// can act on: stop it, look at the process, or leave it alone.
+#[cfg(unix)]
 #[tokio::test]
 async fn asking_after_a_background_command_says_whether_it_is_doing_anything() {
     let jobs = std::sync::Arc::new(Jobs::new(4, 64 * 1024));
@@ -276,4 +291,63 @@ async fn asking_after_a_background_command_says_whether_it_is_doing_anything() {
     // they are stuck. Those answers differ by platform and the judgement is not
     // this crate's; the number to ask about is.
     assert!(quiet.group.is_some(), "a running command says where to look: {quiet:?}");
+}
+
+/// Stopping a background command takes what it started, and not only the shell.
+///
+/// `kill_tree` carried a `cfg(unix)` that made it, on Windows, a kill of the
+/// shell and nothing else — a dev server started through `npm start` left the
+/// node behind, running and holding the port, with the job reporting an exit.
+/// Putting the command in a job object was supposed to answer that, and did not
+/// quite: the job it reached for was made at the moment of the kill, and a job
+/// takes the process it is given plus whatever that process starts *afterwards*
+/// — so a grandchild already running was outside it. The job to end is the one
+/// taken when the command started.
+///
+/// Asked through a file rather than a process list: Windows will not delete a
+/// file anything holds open, so a delete that succeeds is a handle gone, which
+/// is the process gone.
+#[cfg(windows)]
+#[tokio::test]
+async fn stopping_a_background_command_takes_the_grandchild_and_not_only_the_shell() {
+    let (dir, ctx) = ctx(4);
+    let held = dir.path().join("held-open-by-the-grandchild.txt");
+
+    // `start /b` so the grandchild is running before anything asks to stop, and
+    // detached, so killing the shell leaves it. The second `ping` keeps the
+    // shell itself alive, or stopping it would prove nothing.
+    let started = RunCommand
+        .call(
+            &ctx,
+            &serde_json::json!({
+                "command": "start /b ping -n 771771 127.0.0.1 > held-open-by-the-grandchild.txt & \
+                            ping -n 771771 127.0.0.1",
+                "background": true
+            }),
+        )
+        .await
+        .unwrap();
+    let id = started.meta.get("job").and_then(|j| j.as_str()).unwrap().to_string();
+
+    // The precondition, asserted and not assumed. The file existing only says
+    // `cmd` opened it; what is wanted is a live grandchild holding it, and the
+    // proof of that is the same one used below — a delete Windows refuses. A
+    // test that stopped at `exists` would pass on a grandchild that never ran.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !held.exists() || std::fs::remove_file(&held).is_ok() {
+        assert!(std::time::Instant::now() < deadline, "nothing ever held {} open", held.display());
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    JobTool.call(&ctx, &serde_json::json!({"id": id, "stop": true})).await.unwrap();
+
+    // Generous, and only to tell "dead" from "still dying": ending a job returns
+    // before the kernel has finished running its processes down.
+    for _ in 0..200 {
+        if std::fs::remove_file(&held).is_ok() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("the grandchild outlived the stop, which the job reported as done");
 }

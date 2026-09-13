@@ -560,3 +560,55 @@ async fn a_command_that_takes_a_while_says_so_while_it_takes_it() {
         "and said the thing only it knows — how long since it printed: {heard:?}"
     );
 }
+
+/// The Windows sibling of the claim above, and the whole point of putting a
+/// command in a job object: `start /b` detaches a grandchild that `cmd` is not
+/// waiting for, and killing the shell alone leaves it running. Before the job
+/// nothing was killed at all — the timeout said "could not be killed" and meant
+/// it.
+///
+/// The grandchild is asked about through the file it is holding open rather
+/// than through the process list: Windows refuses to delete a file with a live
+/// handle on it, so a delete that succeeds is the handle gone, which is the
+/// process gone. `tasklist` would have needed a command line to tell this
+/// `ping` from any other on the machine, and that costs a `Get-CimInstance` per
+/// attempt.
+#[cfg(windows)]
+#[tokio::test]
+async fn a_timeout_takes_the_grandchild_the_shell_detached_and_not_only_the_shell() {
+    let (dir, ctx) = ctx();
+    let held = dir.path().join("held-open-by-the-grandchild.txt");
+    // `start /b` so `cmd` spawns it and moves on rather than waiting: killing
+    // the shell alone would leave this one running. The second `ping` is what
+    // keeps the shell itself alive past the timeout, so the kill path is the
+    // one under test and not the ordinary exit.
+    let out = run(
+        &ctx,
+        serde_json::json!({
+            "command": "start /b ping -n 771771 127.0.0.1 > held-open-by-the-grandchild.txt & \
+                        ping -n 771771 127.0.0.1",
+            "timeout_secs": 2
+        }),
+    )
+    .await;
+
+    assert!(out.is_error);
+    assert_eq!(out.meta["timed_out"], true, "{}", out.content);
+    assert!(out.content.contains("was killed"), "{}", out.content);
+    // The precondition, asserted rather than assumed: a test that never started
+    // a grandchild would pass every line below it. Existing is not enough —
+    // that only says `cmd` opened the file — so the check is the one used
+    // below, which is that something alive is holding it.
+    assert!(held.exists(), "the grandchild was started and wrote to {}", held.display());
+
+    // Generously, and only to tell "dead" from "still dying": terminating a job
+    // returns before the kernel has finished running the processes down, and
+    // the handle is released somewhere in there.
+    for _ in 0..100 {
+        if std::fs::remove_file(&held).is_ok() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("the grandchild outlived the timeout that said the command had been killed");
+}
