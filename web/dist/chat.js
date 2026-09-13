@@ -92,6 +92,8 @@ export function connect() {
         break;
       case 'text': saidByModel(e.text); break;
       case 'reasoning': say('think', e.text); break;
+      // A sub-agent working, which is not the model thinking.
+      case 'agent': say('agent', e.text); break;
       // `doing` says which file, which command; a daemon older than the
       // field sends nothing and the name is what it always said.
       case 'tool': say('tool', `· ${e.doing || e.name}`); break;

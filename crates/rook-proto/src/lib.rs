@@ -181,6 +181,15 @@ pub enum ChatEvent {
     Reasoning {
         text: String,
     },
+    /// A sub-agent's progress: which of them is working, and on what.
+    ///
+    /// Its own event because it is its own thing. A turn run here sent it as
+    /// one, and a turn run through the daemon folded it into `Reasoning` — so
+    /// the same work read as the model thinking when it was watched through a
+    /// socket, and as a child working when it was not. It is a child working.
+    Agent {
+        text: String,
+    },
     Tool {
         name: String,
         /// What the call is doing, in the words a person would use — `read

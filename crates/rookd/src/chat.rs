@@ -625,29 +625,9 @@ async fn turn(
     let workspace = rook.workspace.clone();
     let result = agent
         .run_with(&prompt, |progress| {
-            let event = match progress {
-                Progress::Delta(Delta::Text(text)) => ChatEvent::Text { text: text.clone() },
-                Progress::Delta(Delta::Reasoning(text)) => ChatEvent::Reasoning { text: text.clone() },
-                Progress::Delta(Delta::ToolCall(call)) => ChatEvent::Tool {
-                    name: call.name.clone(),
-                    doing: rook_core::calls::doing(&call.name, Some(&call.arguments), &workspace),
-                },
-                Progress::Delegated { task, done, total } => {
-                    ChatEvent::Reasoning { text: format!("\n  [{done}/{total}] {task}") }
-                }
-                // Counted from one, because the reader is a person and the
-                // first sub-agent is the first, not the zeroth.
-                Progress::Delegating { at, doing } => ChatEvent::Reasoning {
-                    text: format!("\n    {}", rook_core::calls::delegating(at, doing)),
-                },
-                Progress::ToolDone { name, failed } => ChatEvent::ToolDone { name: name.to_string(), failed },
-                Progress::Step { at, of } => ChatEvent::Step { at, of },
-                Progress::Spent { input, output, cached } => {
-                    ChatEvent::Spent { input_tokens: input, output_tokens: output, cached_tokens: cached }
-                }
-                Progress::Delta(Delta::Done { .. } | Delta::ReasoningDone(_)) => return,
-            };
-            let _ = emit.send(event);
+            if let Some(event) = as_event(progress, &workspace) {
+                let _ = emit.send(event);
+            }
         })
         .await;
 
@@ -673,6 +653,39 @@ async fn turn(
         }
         Err(e) => ended_badly(&rook, session, &outbound, e.to_string()),
     }
+}
+
+/// What a window is told about one step of a turn.
+///
+/// `None` for the two deltas that only mark the end of a stream the window has
+/// already been given.
+fn as_event(progress: Progress<'_>, workspace: &std::path::Path) -> Option<ChatEvent> {
+    Some(match progress {
+        Progress::Delta(Delta::Text(text)) => ChatEvent::Text { text: text.clone() },
+        Progress::Delta(Delta::Reasoning(text)) => ChatEvent::Reasoning { text: text.clone() },
+        Progress::Delta(Delta::ToolCall(call)) => ChatEvent::Tool {
+            name: call.name.clone(),
+            doing: rook_core::calls::doing(&call.name, Some(&call.arguments), workspace),
+        },
+        // A sub-agent working is not the model thinking. Both of these were
+        // `Reasoning` over the socket and `Agent` when the turn ran in the
+        // window itself, so the same work read as two different things
+        // depending on which side of a socket somebody was watching from.
+        Progress::Delegated { task, done, total } => {
+            ChatEvent::Agent { text: format!("  [{done}/{total}] {task}") }
+        }
+        // Counted from one, because the reader is a person and the first
+        // sub-agent is the first, not the zeroth.
+        Progress::Delegating { at, doing } => {
+            ChatEvent::Agent { text: format!("    {}", rook_core::calls::delegating(at, doing)) }
+        }
+        Progress::ToolDone { name, failed } => ChatEvent::ToolDone { name: name.to_string(), failed },
+        Progress::Step { at, of } => ChatEvent::Step { at, of },
+        Progress::Spent { input, output, cached } => {
+            ChatEvent::Spent { input_tokens: input, output_tokens: output, cached_tokens: cached }
+        }
+        Progress::Delta(Delta::Done { .. } | Delta::ReasoningDone(_)) => return None,
+    })
 }
 
 /// A turn ending badly, said to whoever is watching and written into the
@@ -1080,5 +1093,32 @@ mod tests {
             told.as_bytes(),
             "what the window was told and what the session records are the same reason"
         );
+    }
+
+    /// A sub-agent working is told apart from the model thinking.
+    ///
+    /// A turn run in the window itself said `Agent` and a turn run through the
+    /// daemon said `Reasoning`, so the same work was styled as the model's own
+    /// thoughts for anybody watching over a socket — which is everybody now
+    /// that a turn belongs to the daemon. One engine, and the front ends were
+    /// being told two different stories about it.
+    #[tokio::test]
+    async fn a_sub_agent_working_is_not_reported_as_the_model_thinking() {
+        let here = std::path::Path::new("/tmp");
+        let working = as_event(rook_core::agent::Progress::Delegating { at: 0, doing: "run pwd" }, here);
+        let Some(ChatEvent::Agent { text }) = working else {
+            panic!("a sub-agent's step came back as {working:?}");
+        };
+        assert!(text.contains("run pwd"), "and it says what the sub-agent is doing: {text:?}");
+        assert!(text.contains('1'), "counted from one, for a person: {text:?}");
+
+        let counted =
+            as_event(rook_core::agent::Progress::Delegated { task: "audit", done: 2, total: 3 }, here);
+        assert!(matches!(counted, Some(ChatEvent::Agent { .. })), "and so is the count of them: {counted:?}");
+
+        // The model's own thinking stays what it is.
+        let thought = rook_llm::Delta::Reasoning("let me see".into());
+        let thinking = as_event(rook_core::agent::Progress::Delta(&thought), here);
+        assert!(matches!(thinking, Some(ChatEvent::Reasoning { .. })), "{thinking:?}");
     }
 }

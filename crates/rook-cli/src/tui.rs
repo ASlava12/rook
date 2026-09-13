@@ -1435,6 +1435,9 @@ impl App {
             }
             ChatEvent::Text { text } => self.chat.push("text", &text),
             ChatEvent::Reasoning { text } => self.chat.push("think", &text),
+            // The same kind a turn run here uses, so a sub-agent's work reads
+            // the same whichever side of the socket it happens on.
+            ChatEvent::Agent { text } => self.chat.push("agent", &text),
             ChatEvent::Tool { name, doing } => {
                 let said = from_daemon(&name, &doing);
                 self.chat.tool_started(&name, &said)
