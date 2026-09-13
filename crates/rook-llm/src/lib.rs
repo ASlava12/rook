@@ -616,12 +616,8 @@ fn build(
 ) -> Result<Box<dyn Provider>> {
     let (provider, model) = split_spec(spec);
     let mut cfg = match provider {
-        "ollama" => {
-            openai::Config::new(env_or("OLLAMA_HOST", "http://127.0.0.1:11434") + "/v1", None, 32_768)
-        }
-        "lmstudio" => {
-            openai::Config::new(env_or("LMSTUDIO_HOST", "http://127.0.0.1:1234") + "/v1", None, 32_768)
-        }
+        "ollama" => openai::Config::new(local_endpoint("OLLAMA_HOST", 11434) + "/v1", None, 32_768),
+        "lmstudio" => openai::Config::new(local_endpoint("LMSTUDIO_HOST", 1234) + "/v1", None, 32_768),
         "anthropic" | "claude" => {
             let key = required_key(&["ANTHROPIC_API_KEY"])?;
             let base = env_or("ANTHROPIC_BASE_URL", "https://api.anthropic.com");
@@ -677,6 +673,64 @@ fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).ok().filter(|v| !v.is_empty()).unwrap_or_else(|| default.to_string())
 }
 
+/// Where a local provider is listening, from the variable its own instructions
+/// tell people to set.
+///
+/// Ollama's answer to "let another machine reach it" is
+/// `OLLAMA_HOST=0.0.0.0:11434`, and that value went straight into a request
+/// with `/v1` on the end. `0.0.0.0:11434/v1` is not a URL, so every command
+/// failed with `cannot reach 0.0.0.0:11434: relative URL without a base` — and
+/// then advised checking the API key, because the test for "is this endpoint
+/// local" looks for `://0.0.0.0` and there was no scheme for it to find. One
+/// variable set the way its own documentation spells it, and the first thing a
+/// new user runs says nothing they can act on.
+fn local_endpoint(key: &str, port: u16) -> String {
+    match std::env::var(key).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) {
+        Some(said) => dialled(&said, port),
+        None => format!("http://127.0.0.1:{port}"),
+    }
+}
+
+/// One host, however it was spelled, as a URL with nothing on the end.
+///
+/// Three things are being fixed and they are one question: what address does a
+/// client dial. A scheme is optional because Ollama accepts it that way; a port
+/// is optional for the same reason; and a wildcard is not an address to dial at
+/// all. `0.0.0.0` and `::` say "bind to every interface", and Linux quietly
+/// routes a connection to them to the loopback — which is why using them as a
+/// destination reads as working on the machine this was written on. Windows
+/// refuses outright: measured here, `http://0.0.0.0:1234` is unreachable on the
+/// machine where `http://127.0.0.1:1234` answers.
+fn dialled(said: &str, default_port: u16) -> String {
+    let (scheme, rest) = match said.split_once("://") {
+        Some((scheme, rest)) => (scheme, rest),
+        None => ("http", said),
+    };
+    // Whatever came after the host is kept, without its trailing slash: the
+    // caller appends `/v1`, and `http://host:11434//v1` is a different path.
+    let (authority, path) = match rest.split_once('/') {
+        Some((authority, path)) => (authority, path.trim_end_matches('/')),
+        None => (rest, ""),
+    };
+    let (host, port) = match authority.rsplit_once(':') {
+        // Not every last colon is a port: `[::1]` has two and neither is one.
+        Some((host, port)) if !port.is_empty() && !port.contains(']') => (host, port.to_string()),
+        _ => (authority, default_port.to_string()),
+    };
+    // The loopback of the same family, not just any loopback: a server bound to
+    // `::` on Windows is v6-only unless it asked otherwise, so answering an IPv6
+    // wildcard with an IPv4 address trades one unreachable address for another.
+    let host = match host {
+        "0.0.0.0" => "127.0.0.1",
+        "::" | "[::]" => "[::1]",
+        host => host,
+    };
+    match path {
+        "" => format!("{scheme}://{host}:{port}"),
+        path => format!("{scheme}://{host}:{port}/{path}"),
+    }
+}
+
 /// `ring` rather than rustls' default `aws-lc-rs`: the latter needs cmake and a
 /// full C toolchain, which is the usual blocker for the FreeBSD target.
 pub fn init_tls() {
@@ -688,6 +742,54 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    /// The spelling Ollama's own instructions give for letting another machine
+    /// in. It went into a request whole, with `/v1` appended, and
+    /// `0.0.0.0:11434/v1` is not a URL — so `rook models` on a machine that had
+    /// followed those instructions failed with `relative URL without a base`,
+    /// which names nothing the user can go and change.
+    #[test]
+    fn a_host_spelled_the_way_ollama_documents_it_is_a_url_that_can_be_dialled() {
+        for said in ["0.0.0.0:11434", "0.0.0.0", "http://0.0.0.0:11434"] {
+            let url = dialled(said, 11434);
+            assert_eq!(url, "http://127.0.0.1:11434", "from {said}");
+            assert!(reqwest::Url::parse(&url).is_ok(), "and parses: {url}");
+        }
+    }
+
+    /// A wildcard is an address to bind to, not one to dial. Linux routes a
+    /// connection to `0.0.0.0` to the loopback, so using it as a destination
+    /// reads as working there; Windows refuses it, measured on the machine
+    /// where the loopback answered the same port.
+    #[test]
+    fn a_wildcard_becomes_the_loopback_of_its_own_family() {
+        assert_eq!(dialled("0.0.0.0:11434", 11434), "http://127.0.0.1:11434");
+        assert_eq!(dialled("[::]:11434", 11434), "http://[::1]:11434");
+        assert_eq!(dialled("::", 11434), "http://[::1]:11434");
+    }
+
+    /// And an address that was already an address is left alone — the point is
+    /// to accept one more spelling, not to rewrite the ones that worked.
+    #[test]
+    fn an_endpoint_that_was_already_a_url_is_left_as_it_was() {
+        for said in ["http://192.168.1.46:1234", "https://box.local:8443", "http://[::1]:11434"] {
+            assert_eq!(dialled(said, 11434), said, "{said} was already dialable");
+        }
+        // A port that was not given comes from the provider's own default, and
+        // a trailing slash is dropped because the caller appends `/v1` to this.
+        assert_eq!(dialled("desk.local", 11434), "http://desk.local:11434");
+        assert_eq!(dialled("http://desk.local:1234/", 11434), "http://desk.local:1234");
+    }
+
+    /// The advice depends on knowing the endpoint is a local one, and it asks
+    /// the address in text. An endpoint that never became a URL failed that
+    /// test and was answered with "check that the provider's API key is set" —
+    /// about a server on the same machine, which has no key.
+    #[test]
+    fn a_local_endpoint_is_recognised_as_local_once_it_is_a_url() {
+        let said = advice(&dialled("0.0.0.0:11434", 11434), "connection refused");
+        assert!(said.contains("Start the server"), "{said}");
+    }
 
     /// The smoke job said it twice in one run, against an ollama that was
     /// answering every other request and merely busy with a long one: `cannot
