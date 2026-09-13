@@ -280,6 +280,17 @@ impl CacheTtl {
 }
 
 impl Request {
+    /// Roughly how much this asks a model to read, in bytes.
+    ///
+    /// Roughly is enough: it decides how long to wait for a first token, and the
+    /// difference between a good estimate and an exact count is a wait somebody
+    /// can see rather than a failure they cannot.
+    pub fn prompt_bytes(&self) -> usize {
+        let said: usize = self.messages.iter().map(|m| m.content.len()).sum();
+        let tools: usize = self.tools.iter().map(|t| t.name.len() + t.description.len()).sum();
+        said + tools
+    }
+
     pub fn new(messages: Vec<Message>) -> Self {
         Self {
             messages: joined_user_turns(messages),

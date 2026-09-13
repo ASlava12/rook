@@ -16,6 +16,33 @@ async fn serve(pieces: Vec<&'static str>, gap: Duration, then_hang: bool) -> Str
     serve_bytes(pieces.into_iter().map(str::as_bytes).collect(), gap, then_hang).await
 }
 
+/// Serve one request after a pause, which is what a model reading a long prompt
+/// looks like from here: the connection is open and nothing comes back.
+async fn serve_after(pause: Duration, pieces: Vec<&'static str>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut scratch = [0u8; 8192];
+        let _ = socket.read(&mut scratch).await;
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        socket.flush().await.unwrap();
+        tokio::time::sleep(pause).await;
+        for piece in pieces {
+            socket.write_all(piece.as_bytes()).await.unwrap();
+            socket.flush().await.unwrap();
+        }
+        // Held open: dropping the socket here resets the connection while the
+        // bytes are still in flight, and the client reads the reset instead of
+        // the answer. The client stops itself at `[DONE]`.
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    });
+    format!("http://{addr}/v1")
+}
+
 /// The same, in bytes, so a write can end in the middle of a character. It is
 /// where the network cuts that matters here, and a `&str` cannot be cut there.
 async fn serve_bytes(pieces: Vec<&'static [u8]>, gap: Duration, then_hang: bool) -> String {
@@ -492,4 +519,65 @@ async fn a_letter_split_across_two_transport_chunks_arrives_whole() {
         }
     }
     assert_eq!(text, "привет", "the letter the network cut in half came back as {text:?}");
+}
+
+const READY: [&str; 2] = [
+    "data: {\"choices\":[{\"delta\":{\"content\":\"ready\"},\"finish_reason\":\"stop\"}]}\n\n",
+    "data: [DONE]\n\n",
+];
+
+/// A model still reading a long prompt is not given up on.
+///
+/// Before the first token there is nothing to read from the connection, and the
+/// configured patience was spent waiting for it — so a local model filling a
+/// large context was cut off mid-prefill, every step, and the turn that had
+/// done the work went with it. What the model has to read is the one thing
+/// known about how long that takes.
+#[tokio::test]
+async fn a_model_still_reading_a_long_prompt_is_not_given_up_on() {
+    let long = "context ".repeat(2_000);
+    let request = Request::new(vec![Message::user(&long)]);
+    let idle = Duration::from_millis(300);
+    let pause = Duration::from_millis(1_500);
+    assert!(
+        rook_llm::first_token_patience(idle, request.prompt_bytes()) > pause,
+        "the allowance has to outlast the pause or this proves nothing"
+    );
+
+    let url = serve_after(pause, READY.to_vec()).await;
+    let mut stream = provider(url, idle).stream(request).await.unwrap();
+    let mut text = String::new();
+    while let Some(delta) = stream.next().await {
+        if let Delta::Text(t) = delta.unwrap() {
+            text.push_str(&t);
+        }
+    }
+    assert_eq!(text, "ready", "it waited out the reading and got the answer");
+}
+
+/// And the allowance is what saved it: the same pause, a short prompt, and the
+/// stream is cut off as before. Silence after a small prompt is a stall, not a
+/// model reading.
+#[tokio::test]
+async fn the_same_pause_after_a_short_prompt_is_still_given_up_on() {
+    let request = Request::new(vec![Message::user("hi")]);
+    let idle = Duration::from_millis(300);
+    assert!(
+        rook_llm::first_token_patience(idle, request.prompt_bytes()) < Duration::from_millis(1_400),
+        "a short prompt buys no allowance worth the name"
+    );
+
+    let url = serve_after(Duration::from_millis(1_500), READY.to_vec()).await;
+    let mut stream = provider(url, idle).stream(request).await.unwrap();
+    let ended = loop {
+        match stream.next().await {
+            Some(Err(e)) => break Some(e),
+            Some(Ok(_)) => continue,
+            None => break None,
+        }
+    };
+    assert!(
+        matches!(ended, Some(LlmError::Stalled { .. })),
+        "a stall after a short prompt is still a stall: {ended:?}"
+    );
 }

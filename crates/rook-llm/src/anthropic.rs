@@ -222,12 +222,19 @@ impl Provider for Anthropic {
         }
 
         let idle = self.config.stream_idle_timeout;
+        // The first token waits longer, in proportion to what the model has to
+        // read before it can say anything. See `first_token_patience`.
+        let first = crate::first_token_patience(idle, request.prompt_bytes());
         let endpoint = self.config.base_url.clone();
         let fallback_model = self.model.clone();
 
         Ok(Box::pin(async_stream::try_stream! {
             let mut bytes = response.bytes_stream();
             let mut frames = crate::Frames::new();
+            // Whether anything has come back yet: until it has, the model is
+            // still reading, and reading is the part that scales with the
+            // prompt.
+            let mut said_anything = false;
             let mut model = fallback_model;
             let mut usage = Usage::default();
             let mut stop = None;
@@ -241,11 +248,16 @@ impl Provider for Anthropic {
             let mut thinking: std::collections::BTreeMap<usize, (String, String)> = Default::default();
 
             'outer: loop {
-                let chunk = match tokio::time::timeout(idle, bytes.next()).await {
-                    Err(_) => Err(LlmError::Stalled { secs: idle.as_secs() })?,
+                let patience = match said_anything {
+                    false => first,
+                    true => idle,
+                };
+                let chunk = match tokio::time::timeout(patience, bytes.next()).await {
+                    Err(_) => Err(LlmError::Stalled { secs: patience.as_secs() })?,
                     Ok(None) => break,
                     Ok(Some(chunk)) => chunk.map_err(|e| LlmError::unreachable(&endpoint, e))?,
                 };
+                said_anything = true;
                 frames.feed(&chunk);
                 if frames.held() > MAX_FRAME_BYTES {
                     Err(LlmError::Decode("an event exceeded the frame cap".into()))?;

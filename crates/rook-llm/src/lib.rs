@@ -25,6 +25,34 @@
 // so where the characters wider than a byte actually arrive. A slice here
 // either uses an index the code just found, and says so, or it is a crash
 // waiting for somebody who does not write in English.
+/// How long to wait for the first token of a reply, given how much was sent.
+///
+/// The configured patience is the right question for every chunk after the
+/// first and the wrong one for the first: a model has to read the whole prompt
+/// before it can say anything, and reading is work in proportion to the prompt.
+/// A local model filling a two-hundred-thousand-token context is silent for
+/// minutes by design — measured at about 290 tokens a second on the machine
+/// this was written against — so ninety seconds of patience gave up on work
+/// that would have finished, threw away the turn that had done it, and read
+/// from outside as a hang.
+///
+/// The asymmetry decides the number. Giving up early destroys everything the
+/// turn has done; waiting too long costs a wait that the window names to the
+/// second and `^c` ends. So the floor is pessimistic — a third of what was
+/// measured — and every step pays it, since a turn re-reads its whole context
+/// after each tool call unless the provider cached it.
+pub fn first_token_patience(idle: std::time::Duration, prompt_bytes: usize) -> std::time::Duration {
+    /// Tokens a second, well under anything measured, because the cost of being
+    /// wrong is not symmetric.
+    const SLOWEST_PREFILL: u64 = 100;
+    /// English prose and code both sit near this, and being out by half costs a
+    /// wait rather than a failure.
+    const BYTES_A_TOKEN: usize = 4;
+
+    let tokens = (prompt_bytes / BYTES_A_TOKEN) as u64;
+    idle.saturating_add(std::time::Duration::from_secs(tokens / SLOWEST_PREFILL))
+}
+
 /// Server-sent event frames, reassembled from transport chunks.
 ///
 /// One of these rather than four. Each provider had its own copy of the same
