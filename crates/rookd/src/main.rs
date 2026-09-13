@@ -300,11 +300,17 @@ fn about(rook: &Rook) -> About {
 /// all.
 ///
 /// `fs::write` creates the file and then fills it, and a window that catches it
-/// between the two reads an empty address, concludes nothing is answering, and
-/// starts a second daemon of its own on another port. The windows are then
-/// split across two processes that cannot see each other's turns — which is a
-/// day's work looking for a session that "stopped working" in the window that
-/// did not have it. The gate caught it first, as an empty read.
+/// between the two reads an empty address and concludes that nothing is
+/// answering. What follows is not a second daemon — the store takes one writer
+/// and the second `rookd` refuses to start, saying so plainly — but a window
+/// that cannot open at all: it tries to start a daemon, fails on the lock, and
+/// falls back to taking the store itself, which the daemon already holds. A
+/// running agent and a window that will not open, from one interrupted write.
+///
+/// The gate caught it, as `left: "http://127.0.0.1:54322", right: ""` under
+/// load and green on a rerun. The claim first written here — that it splits the
+/// windows across two daemons — was wrong, and checked afterwards by starting a
+/// second `rookd` on one store to see what it actually does.
 fn publish_address(path: &std::path::Path, address: &str) {
     let beside = path.with_extension("addr.incoming");
     if std::fs::write(&beside, address).is_err() {
@@ -523,10 +529,10 @@ mod tests {
     /// A window never reads a half-written address.
     ///
     /// `fs::write` creates the file and then fills it. A window that reads it
-    /// in between finds nothing, decides no daemon is answering, and starts a
-    /// second one on another port — and then two sets of windows hold turns
-    /// neither can see. The gate caught the empty read; the split daemon is the
-    /// cost of not fixing it.
+    /// in between finds nothing and decides no daemon is answering — and then
+    /// cannot open at all, because starting one fails on the store lock the
+    /// running daemon holds, and so does falling back to taking the store
+    /// itself. The gate caught the empty read.
     #[test]
     fn the_address_a_window_reads_is_whole_or_it_is_the_old_one() {
         let dir = tempfile::tempdir().unwrap();
