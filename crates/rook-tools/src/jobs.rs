@@ -25,6 +25,21 @@ pub struct Job {
     pub output: String,
     /// `None` while it runs.
     pub exit_code: Option<i32>,
+    /// Seconds since it last printed anything, while it runs. `None` when it
+    /// has printed nothing at all, or has finished.
+    pub quiet_for_secs: Option<u64>,
+    /// What to point a question at while it runs: on unix the process group,
+    /// because the command is put in its own and so the number reaches the
+    /// children too; on Windows the process id, which is all there is.
+    ///
+    /// Given out because the agent can ask the operating system things this
+    /// code should not try to ask portably: what state the processes are in —
+    /// an uninterruptible wait is almost always I/O that is not coming back,
+    /// and a stopped process is one nobody meant to stop — whether any of them
+    /// is using the processor, and where they are stuck. `ps`, `/proc` and
+    /// `tasklist` answer that in three different spellings, none of which
+    /// belongs in here; the number to ask about does.
+    pub group: Option<u32>,
 }
 
 struct Running {
@@ -177,12 +192,18 @@ impl Running {
     }
 
     fn seen_as(&self, id: &str) -> Job {
+        let printed = self.printed.lock().unwrap_or_else(|e| e.into_inner());
+        let quiet = printed.quiet_for();
+        let output = printed.seen();
+        drop(printed);
         Job {
             id: id.to_string(),
             command: self.command.clone(),
             started_at: self.started_at,
-            output: self.printed.lock().unwrap_or_else(|e| e.into_inner()).seen(),
+            output,
             exit_code: *self.exit.lock().unwrap_or_else(|e| e.into_inner()),
+            quiet_for_secs: quiet.map(|d| d.as_secs()),
+            group: self.group,
         }
     }
 }
@@ -213,13 +234,24 @@ pub struct Printed {
     head: String,
     tail: String,
     elided: usize,
+    /// When anything was last added, so somebody asking after a background
+    /// command can tell one that is working from one that is stuck. "Running
+    /// for three hundred seconds" says nothing either way; "and quiet for two
+    /// hundred and ninety of them" is the whole question.
+    heard: Option<std::time::Instant>,
 }
 
 impl Printed {
     /// Public because the language-server installer runs `npm` and `go` and
     /// has the same problem: a failed install explains itself at the end of a
     /// long output, and a reader that keeps the head reports the noise.
+    /// How long since anything was printed, or `None` if nothing ever was.
+    pub fn quiet_for(&self) -> Option<std::time::Duration> {
+        self.heard.map(|at| at.elapsed())
+    }
+
     pub fn push(&mut self, text: &str, cap: usize) {
+        self.heard = Some(std::time::Instant::now());
         let head_room = cap / 3;
         match head_room.checked_sub(self.head.len()) {
             Some(room) => {
@@ -283,7 +315,11 @@ impl crate::Tool for JobTool {
     fn spec(&self) -> rook_llm::ToolSpec {
         rook_llm::ToolSpec {
             name: "job".into(),
-            description: "Read what a background command has printed, or stop it. No id lists them.".into(),
+            description: "Read what a background command has printed, or stop it. No id lists them. \
+                          Says how long each has been running, how long it has been quiet, and its \
+                          process id — enough to tell a build from something stuck, and to ask the \
+                          operating system about it yourself when it is not obvious."
+                .into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -328,10 +364,39 @@ impl crate::Tool for JobTool {
     }
 }
 
+/// A job in one line, as somebody deciding what to do about it reads it.
+///
+/// "Running for three hundred seconds" says nothing about whether it is working
+/// — which is the only thing anybody asks a background command. So it says how
+/// long it has been quiet as well, and the two together answer it: a build
+/// prints as it goes, and a command waiting on a prompt nobody is at, a lock,
+/// or a host that will not reply has been quiet for as long as it has been
+/// running. This is the reading the agent can act on: stop it, look at the
+/// process, or leave it alone.
 fn describe(job: &Job) -> String {
     let state = match job.exit_code {
         Some(code) => format!("exit {code}"),
-        None => format!("running for {}s", now().saturating_sub(job.started_at)),
+        None => {
+            let running = now().saturating_sub(job.started_at);
+            match job.quiet_for_secs {
+                // Said as a share of the run, because that is what makes it
+                // mean something: quiet for two seconds of two hundred is a
+                // build between crates, and quiet for all of them is a wedge.
+                Some(quiet) => format!("running for {running}s, quiet for {quiet}s"),
+                None => format!("running for {running}s, has printed nothing at all"),
+            }
+        }
     };
-    format!("{} [{state}] {}", job.id, job.command)
+    // What to point the next question at, so it can go to the operating system
+    // rather than be guessed from silence: what state its processes are in,
+    // whether any is using the processor, where they are stuck. Named for what
+    // it actually is on this platform — a group on unix, where the command is
+    // put in its own, and a single process id on Windows, where there is no
+    // such thing to name.
+    let group = match (job.exit_code, job.group) {
+        (None, Some(group)) if cfg!(unix) => format!(" (process group {group})"),
+        (None, Some(pid)) => format!(" (process {pid})"),
+        _ => String::new(),
+    };
+    format!("{} [{state}]{group} {}", job.id, job.command)
 }

@@ -479,3 +479,45 @@ async fn the_askpass_helper_holds_no_value_and_does_not_outlive_the_command() {
     assert!(!at.is_empty(), "{}", out.content);
     assert!(!std::path::Path::new(&at).exists(), "the helper outlived the command: {at}");
 }
+
+/// A command that timed out while still printing and one that timed out in
+/// silence are told apart.
+///
+/// The message invites the model to pass a larger `timeout_secs`, and for a
+/// command that was working that is the right answer. For one waiting on a
+/// prompt nobody is at, a lock, or a host that will not reply, it buys the same
+/// wait a second time — and a model told only "it timed out" takes the
+/// invitation either way.
+///
+/// The quiet one is not killed early on that evidence, on purpose: a single
+/// large crate compiles for minutes without printing a line, and a mechanism
+/// that cannot tell that from a wedge would kill real work. The judgement is
+/// put to the agent, with what it needs to make it.
+#[tokio::test]
+async fn a_command_that_timed_out_says_whether_it_was_working_or_waiting() {
+    let (_d, ctx) = ctx();
+
+    let quiet = run(&ctx, serde_json::json!({ "command": "sleep 30", "timeout_secs": 2 })).await;
+    let quiet = quiet.content;
+    assert!(quiet.contains("timed out"), "{quiet}");
+    assert!(
+        quiet.contains("printed nothing"),
+        "a command that said nothing at all was waiting, and the message says so: {quiet}"
+    );
+
+    let talking = run(
+        &ctx,
+        serde_json::json!({
+            "command": "for i in 1 2 3 4 5 6; do echo working; sleep 0.3; done",
+            "timeout_secs": 1
+        }),
+    )
+    .await;
+    let talking = talking.content;
+    assert!(talking.contains("timed out"), "{talking}");
+    assert!(
+        !talking.contains("printed nothing"),
+        "a command still printing when the clock ran out was working: {talking}"
+    );
+    assert!(talking.contains("working"), "and what it printed is in the message: {talking}");
+}

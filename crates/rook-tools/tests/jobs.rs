@@ -240,3 +240,40 @@ async fn a_job_that_prints_more_than_it_may_keep_still_has_its_first_line() {
     assert!(printed.trim_end().ends_with(&last.to_string()), "the tail is gone");
     assert!(printed.len() < cap * 2, "kept {} bytes against a cap of {cap}", printed.len());
 }
+
+/// Asking after a background command says whether it is doing anything, not
+/// only that it is running.
+///
+/// "Running for three hundred seconds" is the same sentence for a build and for
+/// a command waiting on a prompt nobody is at, and it is the only thing anybody
+/// asks a background command. How long it has been quiet, beside how long it
+/// has been running, is what separates the two — and it is a reading the agent
+/// can act on: stop it, look at the process, or leave it alone.
+#[tokio::test]
+async fn asking_after_a_background_command_says_whether_it_is_doing_anything() {
+    let jobs = std::sync::Arc::new(Jobs::new(4, 64 * 1024));
+
+    let quiet = jobs.start("sleep 30", std::path::Path::new("."), None).unwrap();
+    let talking =
+        jobs.start("for i in 1 2 3; do echo tick; sleep 0.2; done", std::path::Path::new("."), None).unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+
+    let quiet = jobs.get(&quiet).expect("it is still running");
+    assert_eq!(quiet.exit_code, None, "the precondition: it has not finished");
+    assert_eq!(
+        quiet.quiet_for_secs, None,
+        "a command that has printed nothing at all says so rather than reporting a silence of zero"
+    );
+
+    let talking = jobs.get(&talking).expect("it is still running or just finished");
+    assert!(
+        talking.quiet_for_secs.is_some(),
+        "a command that has printed says when it last did: {talking:?}"
+    );
+
+    // And the group, so the next question goes to the operating system — what
+    // state the processes are in, whether any is using the processor, where
+    // they are stuck. Those answers differ by platform and the judgement is not
+    // this crate's; the number to ask about is.
+    assert!(quiet.group.is_some(), "a running command says where to look: {quiet:?}");
+}

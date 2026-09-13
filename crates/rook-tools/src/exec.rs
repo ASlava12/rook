@@ -126,8 +126,12 @@ impl Tool for RunCommand {
             .as_deref()
             .and_then(|dir| Spill::open(dir, ctx.max_spill_bytes))
             .map(|s| std::sync::Arc::new(std::sync::Mutex::new(s)));
-        let mut out = Ends::new(keep, spill.clone());
-        let mut err = Ends::new(keep, spill.clone());
+        // Shared by both streams: what matters is whether the command said
+        // anything, not which pipe it came down.
+        let started = std::time::Instant::now();
+        let heard: std::sync::Arc<std::sync::atomic::AtomicU64> = Default::default();
+        let mut out = Ends::new(keep, spill.clone(), heard.clone(), started);
+        let mut err = Ends::new(keep, spill.clone(), heard.clone(), started);
         // Together, not one after the other: a pipe holds about 64 KiB, and a
         // command that fills stderr while stdout is being drained blocks on the
         // write — so it never finishes stdout and the drain never ends. Any
@@ -216,13 +220,20 @@ impl Tool for RunCommand {
             // The whole group, not the shell: `sh -c` may fork rather than
             // exec, and killing the shell alone leaves the real work running.
             let killed = kill_group(group);
+            // How long it had been quiet when the clock ran out. Zero heard at
+            // all means it never printed anything, and the whole allowance is
+            // the silence.
+            let silent_for = match heard.load(std::sync::atomic::Ordering::Relaxed) {
+                0 => started.elapsed(),
+                at => started.elapsed().saturating_sub(std::time::Duration::from_millis(at)),
+            };
             // A command that ran until the timeout is the one whose output is
             // most worth having, and the ends of it are the least of it.
             let printed = joined(&out, &err);
             let kept = settle(spill, out.seen + err.seen > printed.len());
             let outcome = ToolOutcome::error(format!(
                 "{}{}",
-                timed_out(timeout, killed, &printed),
+                timed_out(timeout, killed, &printed, silent_for),
                 kept.as_ref().map(|(note, _)| note.as_str()).unwrap_or("")
             ))
             .with("timed_out", true);
@@ -376,7 +387,10 @@ async fn elsewhere(
 ) -> Result<ToolOutcome> {
     let ran = terminals.run(command, cwd, ctx.max_output_bytes).await?;
     if ran.timed_out {
-        return Ok(ToolOutcome::error(timed_out(timeout, true, &ran.output)).with("timed_out", true));
+        // A terminal somebody else owns does not report when it last printed,
+        // so nothing is claimed about it.
+        return Ok(ToolOutcome::error(timed_out(timeout, true, &ran.output, std::time::Duration::ZERO))
+            .with("timed_out", true));
     }
     Ok(ToolOutcome {
         content: format!("exit {}\n{}", ran.exit_code, ran.output),
@@ -583,9 +597,34 @@ fn settle(
 /// The same sentence wherever a command ran out of time: what it had printed is
 /// the part worth reading, and a model told only that it timed out retries the
 /// same command against the same limit.
-fn timed_out(limit: std::time::Duration, killed: bool, printed: &str) -> String {
+///
+/// `silent_for` is what makes the retry a decision rather than a reflex. A
+/// command still printing when the clock ran out was working and wants a larger
+/// `timeout_secs`; one that had said nothing for most of its allowance was
+/// waiting on something — a prompt nobody is at, a lock, a host that will not
+/// answer — and running it again with a bigger number buys the same wait twice.
+/// Automatically killing the quiet one is the thing not done here, deliberately:
+/// a single large crate compiles for minutes without printing a line, and a
+/// mechanism that cannot tell that from a wedge would kill real work.
+fn timed_out(
+    limit: std::time::Duration,
+    killed: bool,
+    printed: &str,
+    silent_for: std::time::Duration,
+) -> String {
+    let quiet = match silent_for.as_secs() {
+        // Under a tenth of its allowance is a command that was still going.
+        quiet if quiet * 10 < limit.as_secs() => String::new(),
+        quiet => format!(
+            " It printed nothing for the last {quiet}s of that, so it was waiting on something \
+             rather than working, and a larger `timeout_secs` buys the same wait again. To watch \
+             one instead of waiting blind on it: `background: true` starts it and returns at once, \
+             `job` says how long it has been running and how long it has been quiet, and anything \
+             you run in between can look at the process itself."
+        ),
+    };
     format!(
-        "command timed out after {}s{} — pass a larger `timeout_secs` if it needs longer. \
+        "command timed out after {}s{}.{quiet} Pass a larger `timeout_secs` if it needs longer. \
          What it printed first:\n{printed}",
         limit.as_secs(),
         if killed { " and was killed" } else { " and could not be killed" },
@@ -664,11 +703,24 @@ struct Ends {
     /// Shared with the other stream, so the file holds both in the order they
     /// arrived — which is the order a terminal would have shown them.
     spill: Option<std::sync::Arc<std::sync::Mutex<Spill>>>,
+    /// Milliseconds since the command started, at the last byte either stream
+    /// produced. Shared with the other stream and read from outside the drain,
+    /// which is why it is an atomic and not a field: the drain holds `&mut
+    /// self` for as long as the command runs, and the question "has it printed
+    /// anything lately" has to be answerable while it does.
+    heard: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// When the command started, so `heard` is a duration and not a clock.
+    started: std::time::Instant,
 }
 
 impl Ends {
-    fn new(cap: usize, spill: Option<std::sync::Arc<std::sync::Mutex<Spill>>>) -> Self {
-        Self { head: Vec::new(), tail: Default::default(), seen: 0, cap, spill }
+    fn new(
+        cap: usize,
+        spill: Option<std::sync::Arc<std::sync::Mutex<Spill>>>,
+        heard: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        started: std::time::Instant,
+    ) -> Self {
+        Self { head: Vec::new(), tail: Default::default(), seen: 0, cap, spill, heard, started }
     }
 
     async fn drain(&mut self, reader: &mut (impl tokio::io::AsyncRead + Unpin)) {
@@ -681,6 +733,7 @@ impl Ends {
                 spill.lock().unwrap_or_else(|e| e.into_inner()).write(&chunk[..n]);
             }
             self.seen += n;
+            self.heard.store(self.started.elapsed().as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
             for &byte in &chunk[..n] {
                 if self.head.len() < self.cap {
                     self.head.push(byte);
