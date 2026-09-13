@@ -327,7 +327,10 @@ async fn a_stalled_stream_gives_up() {
             break;
         }
     }
-    assert!(matches!(failure, Some(LlmError::Stalled { .. })), "{failure:?}");
+    // Nothing arrived at all, which is its own answer: a stream that never
+    // began is not a stream that broke, and only one of the two has the size of
+    // the context as a candidate explanation to rule out.
+    assert!(matches!(failure, Some(LlmError::NeverAnswered { .. })), "{failure:?}");
 }
 
 #[tokio::test]

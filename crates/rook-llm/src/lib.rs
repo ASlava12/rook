@@ -186,6 +186,19 @@ pub enum LlmError {
     UnknownProvider { name: String },
     #[error("the model stopped sending for {secs}s; giving up on the stream")]
     Stalled { secs: u64 },
+    /// Told apart from `Stalled` because they are different questions. A stream
+    /// that broke halfway is a broken stream; one that never began may be a
+    /// model still reading, and the wait for it already allows for that — so
+    /// the size of the context is the one explanation this rules out, and
+    /// saying so is what stops the next hour going into it. A turn spent two
+    /// more attempts and twenty minutes proving an environment was fine, on a
+    /// message that did not say which of the two had happened.
+    #[error(
+        "the model sent nothing at all in {secs}s. The wait already allowed for reading a prompt \
+         of about {tokens} tokens, so the size of the context is not the reason: the server is \
+         loading a model, overloaded, or gone"
+    )]
+    NeverAnswered { secs: u64, tokens: usize },
     #[error("no model {model:?} on the server at {endpoint} — {}", offers(available))]
     NoSuchModel { model: String, endpoint: String, available: Vec<String> },
     #[error("{0}")]

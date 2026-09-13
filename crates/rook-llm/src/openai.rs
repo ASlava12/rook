@@ -214,6 +214,9 @@ impl Provider for OpenAiCompatible {
         // The first token waits longer, in proportion to what the model has to
         // read before it can say anything. See `first_token_patience`.
         let first = crate::first_token_patience(idle, request.prompt_bytes());
+        // Roughly, and said as such: it is here to rule the context out as the
+        // explanation, not to be a token count anybody bills from.
+        let asked_to_read = request.prompt_bytes() / 4;
         let endpoint = self.config.base_url.clone();
         let fallback_model = self.model.clone();
 
@@ -235,7 +238,11 @@ impl Provider for OpenAiCompatible {
                     true => idle,
                 };
                 let chunk = match tokio::time::timeout(patience, bytes.next()).await {
-                    Err(_) => Err(LlmError::Stalled { secs: patience.as_secs() })?,
+                    Err(_) if said_anything => Err(LlmError::Stalled { secs: patience.as_secs() })?,
+                    Err(_) => Err(LlmError::NeverAnswered {
+                        secs: patience.as_secs(),
+                        tokens: asked_to_read,
+                    })?,
                     Ok(None) => break,
                     Ok(Some(chunk)) => chunk.map_err(|e| LlmError::unreachable(&endpoint, e))?,
                 };

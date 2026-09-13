@@ -218,9 +218,11 @@ async fn a_stalled_stream_gives_up_instead_of_hanging() {
             break;
         }
     }
+    // `Stalled` and not `NeverAnswered`: this stream said "start" and then went
+    // quiet, which is a stream that broke rather than a model still reading.
     assert!(
         matches!(error, Some(LlmError::Stalled { .. })),
-        "a silent connection must surface as a stall, not as a hang: {error:?}"
+        "a stream that went quiet must surface as a stall, not as a hang: {error:?}"
     );
 }
 
@@ -577,7 +579,7 @@ async fn the_same_pause_after_a_short_prompt_is_still_given_up_on() {
         }
     };
     assert!(
-        matches!(ended, Some(LlmError::Stalled { .. })),
-        "a stall after a short prompt is still a stall: {ended:?}"
+        matches!(ended, Some(LlmError::NeverAnswered { .. })),
+        "a short prompt buys no allowance, so the silence is still given up on: {ended:?}"
     );
 }
