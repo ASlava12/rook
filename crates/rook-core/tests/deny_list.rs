@@ -313,12 +313,11 @@ fn the_same_commands_bounded_are_still_allowed_through() {
         "chmod 777 -R ./build",
         "chmod 755 /usr/local/bin/tool",
         "chown -R me ./target",
-        // `dd if=/dev/zero of=/dev/null` belongs here and is not: the shipped
-        // text rule looks for `of=/dev/` and refuses writing to nowhere, which
-        // is a benchmark and loses nothing. `over_a_device` already knows the
-        // difference; the text rule beside it does not, and a denial nothing
-        // can override is the wrong place to be approximately right. Left as it
-        // is rather than loosened on my own say-so.
+        // Writing to nowhere, which is how anybody measures a disk. The text
+        // rule that refused this is gone: it looked for `of=/dev/` and could
+        // not tell nowhere from a disk, and a denial nothing can override is
+        // the wrong place to be approximately right.
+        "dd if=/dev/zero of=/dev/null bs=1M count=64",
         "dd if=disk.img of=./copy.img",
         "git commit -m 'never chmod 777 -R /'",
         "echo 'mkfs is not to be run here'",

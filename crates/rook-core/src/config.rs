@@ -534,10 +534,17 @@ impl Default for SandboxConfig {
             // argument is anchored — a substring rule for `rm -rf /` would also
             // block `rm -rf /tmp/scratch` — and so is the command, or `grep -r
             // mkfs docs/` is refused for saying the word.
+            //
+            // `dd` had a rule here and does not now. It looked for the text
+            // `of=/dev/` and so refused `dd if=/dev/zero of=/dev/null`, which
+            // writes nowhere and is how anybody measures a disk — the crying
+            // wolf this comment warns about, in the list it warns in.
+            // `over_a_device` asks the same question of the words instead: it
+            // knows `/dev/null` and `/dev/zero` from a disk, and it is not
+            // fooled by the quote in `of="/dev/sda"` that walked past the text.
             deny: [
                 &format!(r"/{COMMAND}rm\s+(-[a-zA-Z]+\s+)*\/(\s|\*|$)/"),
                 &format!(r"/{COMMAND}mkfs(\.|\s)/"),
-                &format!(r"/{COMMAND}dd\s+[^|]*\bof=\/dev\//"),
                 r"/>\s*\/dev\/(sd|nvme|disk)/",
                 r"/:\(\)\s*\{.*\|.*&.*\}\s*;\s*:/",
                 &format!(r"/{COMMAND}chmod\s+-R\s+777\s+\/\s*$/"),
