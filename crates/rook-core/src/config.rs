@@ -67,12 +67,22 @@ impl Default for Config {
     }
 }
 
-/// The Agent Skills repository, which is where the format's own examples live.
-/// Replace it or add to it; it is a starting point rather than a blessing, and
-/// installing from anywhere means reading what you installed.
+/// Every name this configuration has, as a tree to look names up in.
+///
+/// JSON and not TOML, which is the whole of the fix. TOML has no null, so
+/// serialising a default drops every field that is `None` — and the one such
+/// field, `[agent] context_window`, was then a name nothing knew, so `doctor`
+/// reported a setting that six places read as one nothing reads. Told to delete
+/// it, a person would have dropped their window from what they set to what gets
+/// assumed. JSON keeps the key and writes the value as null, which is all this
+/// is asked for: the names.
+fn every_key() -> Option<serde_json::Value> {
+    serde_json::to_value(Config::default()).ok()
+}
+
 /// Every key in `written` that `known` has no name for, dotted.
-fn unread(written: &toml::Value, known: &toml::Value, at: &str, out: &mut Vec<String>) {
-    let (Some(written), Some(known)) = (written.as_table(), known.as_table()) else { return };
+fn unread(written: &serde_json::Value, known: &serde_json::Value, at: &str, out: &mut Vec<String>) {
+    let (Some(written), Some(known)) = (written.as_object(), known.as_object()) else { return };
     for (key, value) in written {
         // Omitted from a written config when empty and settings all the same:
         // `[[mcp]]`, `[[hooks]]`, `[[lsp]]`. Their own contents are not walked,
@@ -91,6 +101,9 @@ fn unread(written: &toml::Value, known: &toml::Value, at: &str, out: &mut Vec<St
     }
 }
 
+/// The Agent Skills repository, which is where the format's own examples live.
+/// Replace it or add to it; it is a starting point rather than a blessing, and
+/// installing from anywhere means reading what you installed.
 fn default_skill_sources() -> Vec<String> {
     vec!["https://github.com/anthropics/skills".into()]
 }
@@ -679,7 +692,8 @@ impl Config {
     pub fn ignored_in(path: &std::path::Path) -> Vec<String> {
         let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
         let Ok(written) = toml::from_str::<toml::Value>(&text) else { return Vec::new() };
-        let Ok(known) = toml::Value::try_from(Config::default()) else { return Vec::new() };
+        let Ok(written) = serde_json::to_value(written) else { return Vec::new() };
+        let Some(known) = every_key() else { return Vec::new() };
         let mut out = Vec::new();
         unread(&written, &known, "", &mut out);
         out.sort();
@@ -691,10 +705,13 @@ impl Config {
     /// is. Nothing rather than a guess when nothing is close.
     pub fn nearest_to(ignored: &str) -> Option<String> {
         let (table, key) = ignored.rsplit_once('.').unwrap_or(("", ignored));
-        let known = toml::Value::try_from(Config::default()).ok()?;
+        // The same source as `ignored_in`, and for the same reason: a name it
+        // cannot see is a name this would not suggest either, so a typo for
+        // `context_window` would be reported with no "did you mean".
+        let known = every_key()?;
         let siblings = match table.is_empty() {
-            true => known.as_table()?.clone(),
-            false => known.get(table)?.as_table()?.clone(),
+            true => known.as_object()?.clone(),
+            false => known.get(table)?.as_object()?.clone(),
         };
         let shared = |a: &str, b: &str| a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count();
         let (name, common) =

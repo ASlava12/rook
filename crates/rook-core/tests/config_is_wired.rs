@@ -72,6 +72,28 @@ fn a_setting_nothing_reads_is_named_rather_than_ignored() {
     assert_eq!(rook_core::Config::nearest_to("nowhere"), None);
 }
 
+/// A field that is `None` until somebody sets it is still a field.
+///
+/// The names were read off a default serialised to TOML, which has no null, so
+/// a `None` was not written and its key was not there to be found. `[agent]
+/// context_window` is the only such field and `doctor` called it a setting
+/// nothing reads — to a person who had set it deliberately, with a comment
+/// beside it saying why. Deleting it, which is what that advice means, drops
+/// the window from what they chose to what gets assumed.
+#[test]
+fn a_field_that_is_unset_by_default_is_still_a_name_this_knows() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "[agent]\nmodel = \"x/y\"\ncontext_window = 262144\ncontext_windo = 1\n").unwrap();
+
+    let ignored = rook_core::Config::ignored_in(&path);
+    assert!(!ignored.contains(&"agent.context_window".to_string()), "six places read it: {ignored:?}");
+    // The precondition, or this passes by having stopped naming anything: the
+    // typo beside it is still caught, and still gets its suggestion.
+    assert!(ignored.contains(&"agent.context_windo".to_string()), "a typo is still named: {ignored:?}");
+    assert_eq!(rook_core::Config::nearest_to("agent.context_windo").as_deref(), Some("context_window"));
+}
+
 #[test]
 fn every_config_field_is_read_somewhere() {
     let root = repo_root();
