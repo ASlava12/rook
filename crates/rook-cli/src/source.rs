@@ -1050,6 +1050,30 @@ pub struct Daemon {
     http: reqwest::Client,
 }
 
+/// How long to wait for the daemon to say it is there.
+///
+/// Short, because that is the whole question: a file left behind by a crash
+/// must not send every command into a long wait. Nothing is listening in the
+/// ordinary case and the connection is refused at once; this covers the other
+/// one, where something else took the port and will never answer.
+const PROBE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long a routed command may take.
+///
+/// It was `PROBE` for everything, because one `timeout` on the client is
+/// inherited by every request made with it — so `store train`, `store verify`,
+/// `skills install` and a skill search that fetches from a remote source were
+/// all given the patience of a health check, and answered `operation timed out`
+/// while doing exactly what was asked. It took a hosted runner to show it:
+/// `skills ls` on two cores under the rest of the suite went past ten seconds
+/// and `test windows-latest` went red, which read as a broken daemon.
+///
+/// Generous because it is a wait and not a question. The work is local and
+/// there is no number that is past what a loaded machine can cost; what this is
+/// for is telling a daemon that is wedged from one that is busy, and ten
+/// minutes tells them apart.
+const ROUTED: std::time::Duration = std::time::Duration::from_secs(600);
+
 impl Daemon {
     /// The address `rookd` wrote when it started, if something still answers
     /// there: a file left behind by a crash must not send every command into a
@@ -1063,7 +1087,8 @@ impl Daemon {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().ok()?;
         // reqwest panics on build without one, even for plain HTTP to loopback.
         rook_llm::init_tls();
-        let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(10)).build().ok()?;
+        // The default every request inherits; the probe below asks for less.
+        let http = reqwest::Client::builder().timeout(ROUTED).build().ok()?;
         let mut daemon =
             Self { base, replaced: false, workspace: std::path::PathBuf::from("."), runtime, http };
         // The same request that proves it is alive answers what it is running,
@@ -1076,7 +1101,7 @@ impl Daemon {
     }
 
     pub fn health(&self) -> Result<rook_proto::Health> {
-        self.get("/api/health")
+        self.get_within("/api/health", PROBE)
     }
 
     /// Ask it to stop. It refuses while a turn is running unless told to end
@@ -1114,9 +1139,16 @@ impl Daemon {
     }
 
     fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        self.get_within(path, ROUTED)
+    }
+
+    /// The same, for the one request that is a question about the daemon rather
+    /// than work asked of it.
+    fn get_within<T: DeserializeOwned>(&self, path: &str, patience: std::time::Duration) -> Result<T> {
         let url = format!("{}{path}", self.base);
         self.runtime.block_on(async {
-            let response = self.http.get(&url).send().await.with_context(|| format!("GET {url}"))?;
+            let response =
+                self.http.get(&url).timeout(patience).send().await.with_context(|| format!("GET {url}"))?;
             let status = response.status();
             let body = response.text().await.with_context(|| format!("reading {url}"))?;
             if !status.is_success() {
@@ -1130,6 +1162,66 @@ impl Daemon {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Work asked of the daemon gets longer than the question "are you there".
+    ///
+    /// Both were one `timeout` on the client, so `store train`, `store verify`,
+    /// `skills install` and a refreshing skill search were each given a health
+    /// check's patience and answered `operation timed out` while working. The
+    /// hosted runner is what showed it — `skills ls` on two cores went past the
+    /// ceiling and `test windows-latest` went red.
+    ///
+    /// The stub answers the probe at once and the work slowly, because that is
+    /// the shape being asserted: a daemon this side has already found, taking a
+    /// while over one command. Twelve seconds is not a measurement of anything
+    /// — it is comfortably past the ten the client used to allow, so a global
+    /// timeout put back would fail this rather than pass it.
+    #[test]
+    fn work_asked_of_the_daemon_outlives_the_probe_that_found_it() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+        let port = listener.local_addr().expect("an address").port();
+        let slow = std::time::Duration::from_secs(12);
+
+        std::thread::spawn(move || {
+            let reply = |mut sock: std::net::TcpStream, body: &str| {
+                let mut buf = [0u8; 2048];
+                let _ = sock.read(&mut buf);
+                let _ = sock.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+                let _ = sock.flush();
+            };
+            let health = r#"{"ok":true,"version":"0.3.0","api_version":1,"store_root":"/s",
+                "workspace":"/w","os":"windows","arch":"x86_64","uptime_secs":99999}"#;
+            if let Ok((sock, _)) = listener.accept() {
+                reply(sock, health);
+            }
+            // The work, and it is slow on purpose.
+            if let Ok((sock, _)) = listener.accept() {
+                std::thread::sleep(slow);
+                reply(sock, r#"{"ok":true}"#);
+            }
+        });
+
+        let dir = tempfile::tempdir().expect("a directory");
+        let address = dir.path().join("address");
+        std::fs::write(&address, format!("http://127.0.0.1:{port}")).expect("an address file");
+
+        let daemon = Daemon::at(&address).expect("the probe found it, which is the precondition");
+
+        let began = std::time::Instant::now();
+        let answered: serde_json::Value = daemon.get("/api/store/stats").expect("work is not cut short");
+        assert_eq!(answered["ok"], serde_json::json!(true));
+        // The precondition for the claim: it really did take longer than the
+        // ceiling that used to be there, or this passes without proving it.
+        assert!(began.elapsed() >= slow, "the stub answered early, so nothing was waited out");
+    }
 
     /// A route this build knows and the daemon does not is a version skew, and
     /// "404: no such endpoint" is the one answer that sends nobody anywhere.
