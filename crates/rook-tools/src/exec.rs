@@ -295,11 +295,20 @@ impl Tool for RunCommand {
         // that reads as one says so, and what would widen it. Only that kind —
         // a note on every failure would have a missing Cargo.toml blamed on
         // the sandbox.
-        let held = match code != 0 && isolation.is_some() && denied(&combined) {
-            true => {
+        let held = match (code != 0 && isolation.is_some(), denied(&combined), needs_a_raw_socket(&command)) {
+            (true, true, _) => {
                 "\n(ran contained: writes only to the workspace and scratch — `[sandbox] writable` adds a directory)"
             }
-            false => "",
+            // The one failure that is not about writing. Containment on Windows
+            // is a low integrity level, and a raw socket is not something low
+            // integrity may open — so this fails whatever the network allows,
+            // and says so rather than leaving `General failure` to be read as a
+            // broken machine.
+            (true, false, true) => {
+                "\n(ran contained: at a low integrity level, which cannot open the raw socket this \
+                 needs — `[sandbox] isolate = \"off\"` runs it uncontained)"
+            }
+            _ => "",
         };
         // Said, because the difference matters to whoever reads the answer: the
         // command is over, and something it started is not — so what is above
@@ -435,6 +444,25 @@ async fn elsewhere(
 /// Whether output reads as a refusal by the operating system. Text, because
 /// the kernel's answer reaches us as text: the shell prints it, and the exit
 /// code says only that something failed.
+/// Whether this command needs a raw socket, which a contained one cannot open.
+///
+/// Asked of the command rather than of what it printed, and that is the point.
+/// Windows contains a command by running it at low integrity, and `ping` there
+/// fails with `PING: transmit failed. General failure.` — measured, the same
+/// `ping` answers when it is not contained. That sentence is not
+/// permission-shaped, so the note below about writes never fired for it; and it
+/// is localized, so matching it would work in English and nowhere else. The
+/// name of the program is the same in every language.
+fn needs_a_raw_socket(command: &str) -> bool {
+    // The last component of the first word: a command may name the program by
+    // its path, and the first segment of `C:\Windows\System32\ping.exe` asks
+    // whether `C:` needs a socket.
+    let word = command.split_whitespace().next().unwrap_or_default();
+    let program = word.rsplit(['/', '\\']).next().unwrap_or(word).to_ascii_lowercase();
+    let program = program.trim_end_matches(".exe");
+    ["ping", "tracert", "traceroute", "pathping", "arp"].contains(&program)
+}
+
 fn denied(output: &str) -> bool {
     let lower = output.to_ascii_lowercase();
     [
@@ -862,6 +890,40 @@ impl Ends {
             n => format!("\n[{n} bytes elided from the middle]\n"),
         };
         format!("{head}{gap}{}", rook_contain::printed(&tail))
+    }
+}
+
+#[cfg(test)]
+mod what_a_contained_command_cannot_do {
+    use super::needs_a_raw_socket;
+
+    /// Asked of the program's name, because the alternative does not work.
+    ///
+    /// A contained command runs at low integrity on Windows and `ping` there
+    /// fails with `PING: transmit failed. General failure.` while the same
+    /// `ping` uncontained replies — run both ways through the launcher to be
+    /// sure. That sentence is not permission-shaped, so the note about writes
+    /// never fired for it, and it is localized, so matching it would work in
+    /// English and nowhere else. A program's name is the same in every
+    /// language.
+    ///
+    /// Only the predicate is tested, and that is the whole of what can be:
+    /// containment on Windows needs the running process to be a rook binary,
+    /// deliberately — a test binary started as the launcher would run whatever
+    /// it was — so nothing in a test can be contained and reach the message.
+    #[test]
+    fn a_program_that_needs_a_raw_socket_is_recognised_however_it_is_named() {
+        assert!(needs_a_raw_socket("ping -n 2 127.0.0.1"));
+        assert!(needs_a_raw_socket("  tracert example.com"), "leading space");
+        assert!(needs_a_raw_socket("PING.EXE -t host"), "as Windows spells it");
+        assert!(needs_a_raw_socket(r"C:\Windows\System32\ping.exe -n 1 ::1"), "named by its path");
+        assert!(needs_a_raw_socket("/usr/bin/traceroute host"), "and the other separator");
+
+        // A name that merely starts the same is a different program, and the
+        // note would be wrong rather than merely unhelpful.
+        assert!(!needs_a_raw_socket("pingpong --serve"));
+        assert!(!needs_a_raw_socket("cargo test ping"), "the word elsewhere is not the program");
+        assert!(!needs_a_raw_socket(""), "and nothing at all is not a program");
     }
 }
 

@@ -38,10 +38,22 @@ pub const LAUNCHER: &str = "ROOK_LAUNCHER";
 ///
 /// The assignment happens just after the command starts rather than before,
 /// because the command is spawned by the standard library and there is no hook
-/// between creation and the first instruction. A grandchild started in that
-/// gap is outside the job. The gap is one process creation wide, and closing it
-/// means spawning suspended and resuming by hand — which is a rewrite of the
-/// spawn path for a case nobody has reported.
+/// between creation and the first instruction. A grandchild started in that gap
+/// is outside the job.
+///
+/// Measured here rather than left as "rare", because a decision taken on how
+/// wide it feels is not a decision. From `spawn` returning to the assignment
+/// being done is 23µs on average and 77µs at its worst over two hundred runs;
+/// the soonest a `cmd` handed `start /b` got a grandchild running at all was
+/// 9.2ms, and over forty runs none was ever outside the job. The window is a
+/// hundred and twenty times narrower than the fastest a child can act, because
+/// a child has to be loaded and started before it can start anything.
+///
+/// So it stays open. Closing it means spawning suspended and resuming by hand,
+/// which is `CreateProcess` in place of the standard library — losing the pipe
+/// plumbing and `kill_on_drop` that come with it — to cover a hundred and
+/// twentieth of a millisecond. To re-measure: hold a command in a job and time
+/// the call, against how long until the job counts two processes.
 #[cfg(windows)]
 pub struct Started(windows_sys::Win32::Foundation::HANDLE);
 
