@@ -263,6 +263,11 @@ async fn turn(
             print!("{}", calls.finished(name, failed));
             let _ = out.flush();
         }
+        // The same line the TUI shows, in the front end that had none.
+        Progress::Working { said, .. } => {
+            print!("{}", calls.working(said));
+            let _ = out.flush();
+        }
         _ => {}
     });
 

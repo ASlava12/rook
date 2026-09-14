@@ -163,6 +163,27 @@ impl Calls {
         line
     }
 
+    /// A call that is taking a while, saying what it is doing while it does.
+    ///
+    /// The CLI showed none of this. A long command and a wedged one are the
+    /// same await from outside, and the tool is the only thing that knows which
+    /// — `Progress::Working` is where it says so, and the TUI, the ACP server
+    /// and the daemon all render it while `rook run` and `rook chat` dropped it
+    /// into a catch-all arm. Twenty-five seconds of a silent command looked
+    /// exactly like a hang, which is the one thing this was built to prevent.
+    ///
+    /// On its own line rather than rewritten in place, which is how the
+    /// sub-agent lines beside it already read, and which survives being piped
+    /// into a file: a carriage return is a terminal's trick and this output is
+    /// not always going to one. The call's own line is no longer the last, so
+    /// the mark that follows names what it belongs to.
+    pub fn working(&mut self, said: &str) -> String {
+        let line = format!("{}    {said}\n", if self.open { "\n" } else { "" });
+        self.announced = None;
+        self.open = false;
+        line
+    }
+
     pub fn finished(&mut self, name: &str, failed: bool) -> String {
         let (said, took) = self.running.finished(name);
         // A call worth having waited for says how long it was. `working…`
@@ -187,6 +208,36 @@ impl Calls {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A command that goes quiet says so, and the mark still finds its call.
+    ///
+    /// The CLI rendered none of this: `Progress::Working` fell into a catch-all
+    /// arm in both `rook run` and `rook chat`, while the TUI, the ACP server and
+    /// the daemon all showed it. Twenty-five seconds of a silent `ping` looked
+    /// exactly like a hang — the one thing the line exists to prevent — and it
+    /// looked that way on every platform, which is what checking it on Windows
+    /// turned up.
+    #[test]
+    fn a_command_that_goes_quiet_says_so_and_is_still_marked_by_name() {
+        let mut calls = Calls::default();
+        let mut screen = String::new();
+
+        screen.push_str(&calls.started("run_command", "run ping -n 25 127.0.0.1"));
+        screen.push_str(&calls.working("running 2s, quiet for 2s"));
+        screen.push_str(&calls.working("running 7s, quiet for 7s"));
+        screen.push_str(&calls.finished("run_command", false));
+
+        let expected = concat!(
+            "  · run ping -n 25 127.0.0.1\n",
+            "    running 2s, quiet for 2s\n",
+            "    running 7s, quiet for 7s\n",
+            "  ✓ run ping -n 25 127.0.0.1\n",
+        );
+        assert_eq!(
+            screen, expected,
+            "the waiting is visible, and the mark names the call rather than landing on the last note"
+        );
+    }
 
     /// Two calls announced before either finishes. The mark used to go where
     /// the cursor was, so the listing's tick landed on the read's line and the

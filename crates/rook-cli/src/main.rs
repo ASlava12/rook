@@ -1094,6 +1094,14 @@ fn cmd_run(
                     let _ = write!(out, "{}", calls.finished(name, failed));
                     let _ = out.flush();
                 }
+                // What the tool knows and nobody else does: how long it has
+                // been running and how long since it printed. Dropped here
+                // until now, so a quarter of a minute of a silent command read
+                // as a hang in the one front end people script with.
+                Progress::Working { said, .. } => {
+                    let _ = write!(out, "{}", calls.working(said));
+                    let _ = out.flush();
+                }
                 _ => {}
             })
             .await?;
