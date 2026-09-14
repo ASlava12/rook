@@ -196,6 +196,25 @@ fn is_cloned(path: &str) -> bool {
     std::path::Path::new(path).join(".git").exists()
 }
 
+/// The `rook` that was just built, by the name this platform gives it.
+///
+/// Spelled `target/debug/rook` in two places, which is the unix name and no
+/// file at all on Windows: `canonicalize` answered "cannot find the file
+/// specified", so neither `xtask smoke` nor `xtask bench` had ever run there —
+/// on the platform where a bare `rook` is exactly what does not exist. The same
+/// mistake is already written down about `npx` against `npx.CMD` and
+/// `rust-analyzer` against `rust-analyzer.exe`.
+///
+/// One place, because two spellings of one path drift, and the answer is the
+/// same question both callers are asking.
+pub fn built_rook() -> Result<std::path::PathBuf> {
+    let named = std::path::Path::new("target/debug").join(match cfg!(windows) {
+        true => "rook.exe",
+        false => "rook",
+    });
+    named.canonicalize().with_context(|| format!("finding the built rook at {}", named.display()))
+}
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,

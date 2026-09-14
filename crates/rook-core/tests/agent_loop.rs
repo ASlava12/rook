@@ -5876,6 +5876,14 @@ async fn the_goal_check_is_shown_what_the_turn_did_and_not_only_what_it_left() {
     // The argument, which is the whole point: `a + b` is on disk either way, and
     // what the disk cannot say is that this turn is what put it there.
     assert!(check.contains("a + b"), "and what it was called with: {check}");
+    // And not the undo log's bookkeeping. A checkpoint records the store's
+    // object id for each path, which is sixty-four hex digits beside a
+    // filename and reads as a content hash. A checker hashed a renamed file,
+    // found it did not match, and reported the contents altered — of a file
+    // that had not changed a byte. What reaches a model is one question with
+    // one answer, and this asks it.
+    assert!(!check.contains("checkpoint"), "the undo log is not what the turn did: {check}");
+    assert!(!check.contains("captured_at"), "{check}");
     // The precondition, and the reason the span starts where the prompt was
     // logged rather than at the session: the turn before this one is not in it.
     // A sentence that appears nowhere would have asserted nothing.

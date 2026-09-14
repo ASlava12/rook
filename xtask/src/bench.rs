@@ -248,7 +248,7 @@ pub fn bench(model: Option<String>, repeats: usize, only: Option<String>) -> Res
     if !built.success() {
         bail!("rook did not build");
     }
-    let rook = Path::new("target/debug/rook").canonicalize().context("finding the built rook")?;
+    let rook = crate::built_rook()?;
     let arms: Vec<&Arm> = match &only {
         Some(want) => ARMS.iter().filter(|a| want.split(',').any(|w| w.trim() == a.name)).collect(),
         None => ARMS.iter().collect(),

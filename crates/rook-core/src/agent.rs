@@ -3381,6 +3381,21 @@ impl<'a> AgentLoop<'a> {
         else {
             return String::new();
         };
+        // What reaches a model is one question and it has one answer, which
+        // this did not ask the first time: the whole transcript went in,
+        // bookkeeping and all. A checkpoint carries, under a key called
+        // `files`, the store's object id for each path — sixty-four hex digits
+        // beside a filename, which is what a content hash looks like and is
+        // not one. A checker read the checkpoint taken before a rename, hashed
+        // the moved file, found the two did not agree and reported that the
+        // contents had been altered; the turn then spent every step it had
+        // left hunting a difference that was not there. Measured afterwards:
+        // the file was byte-identical throughout, and its plain SHA256 is the
+        // one the file has now, not the id the checkpoint recorded.
+        let entries: Vec<_> = entries
+            .into_iter()
+            .filter(|e| rook_store::EventKind::named(&e.kind).is_some_and(crate::context::reaches_the_model))
+            .collect();
         let span = render_span(&entries, BUDGET_TOKENS);
         if span.trim().is_empty() {
             return String::new();
@@ -4703,11 +4718,23 @@ worth more than prose.";
 /// Flatten a span of the transcript for summarising, keeping the most recent
 /// part when it will not all fit — a summarisation request that overflows is
 /// how compaction fails exactly when it is needed most.
+///
+/// The label goes in because without it a call is its arguments and nothing
+/// else: `tool-call: {"path":"lib.rs","content":"…"}` does not say whether the
+/// file was read, written or deleted, and both readers of this — the
+/// summariser and the checker — need to know which. It was missing and went
+/// unnoticed because the checkpoint beside each write happened to name the
+/// tool inside its own body, so the name was there by accident until the
+/// bookkeeping stopped being shown.
 fn render_span(entries: &[crate::TranscriptEntry], budget_tokens: usize) -> String {
     let mut lines = Vec::new();
     let mut used = 0;
     for entry in entries.iter().rev() {
-        let line = format!("[{}] {}: {}", entry.seq, entry.kind, entry.body);
+        let named = match entry.label.is_empty() {
+            true => entry.kind.clone(),
+            false => format!("{} {}", entry.kind, entry.label),
+        };
+        let line = format!("[{}] {named}: {}", entry.seq, entry.body);
         used += estimate_tokens(&line);
         if used > budget_tokens && !lines.is_empty() {
             lines.push("[earlier still, elided]".to_string());

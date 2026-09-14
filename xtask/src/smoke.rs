@@ -196,7 +196,7 @@ pub fn smoke(model: Option<String>) -> Result<()> {
     if !built.success() {
         bail!("rook did not build");
     }
-    let rook = Path::new("target/debug/rook").canonicalize().context("finding the built rook")?;
+    let rook = crate::built_rook()?;
 
     // Once, before four turns each fail with the same sentence: whether anything
     // is listening is one question, and `rook models` is the command the failure
