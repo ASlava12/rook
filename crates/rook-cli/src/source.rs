@@ -1185,27 +1185,44 @@ mod tests {
         let slow = std::time::Duration::from_secs(12);
 
         std::thread::spawn(move || {
-            let reply = |mut sock: std::net::TcpStream, body: &str| {
-                let mut buf = [0u8; 2048];
-                let _ = sock.read(&mut buf);
-                let _ = sock.write_all(
-                    format!(
-                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
-                        body.len()
-                    )
-                    .as_bytes(),
-                );
-                let _ = sock.flush();
-            };
             let health = r#"{"ok":true,"version":"0.3.0","api_version":1,"store_root":"/s",
                 "workspace":"/w","os":"windows","arch":"x86_64","uptime_secs":99999}"#;
-            if let Ok((sock, _)) = listener.accept() {
-                reply(sock, health);
-            }
-            // The work, and it is slow on purpose.
-            if let Ok((sock, _)) = listener.accept() {
-                std::thread::sleep(slow);
-                reply(sock, r#"{"ok":true}"#);
+            // Counted across connections rather than per connection, and served
+            // in a loop, because the client keeps one alive and reuses it. A
+            // stub that answered one request per connection passed on its own
+            // and, under the rest of the suite, answered the second request
+            // never: the socket had been dropped after the first, and what came
+            // back was a closed connection in two seconds rather than the
+            // twelve this is here to measure.
+            let mut served = 0;
+            for sock in listener.incoming() {
+                let Ok(mut sock) = sock else { continue };
+                loop {
+                    let mut buf = [0u8; 2048];
+                    match sock.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                    served += 1;
+                    // The probe at once, the work slowly: the shape asserted.
+                    let body = match served {
+                        1 => health,
+                        _ => {
+                            std::thread::sleep(slow);
+                            r#"{"ok":true}"#
+                        }
+                    };
+                    let sent = sock.write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    );
+                    if sent.is_err() || sock.flush().is_err() {
+                        break;
+                    }
+                }
             }
         });
 

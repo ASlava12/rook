@@ -76,7 +76,16 @@ const SCENARIOS: &[Scenario] = &[
         then: None,
         check: |turn, _| {
             expect(turn.reply.contains("quiet-heron-4417"), "the token is only on disk", turn)?;
-            expect(turn.tools.iter().any(|t| t == "run_command"), "and only a command reaches it", turn)
+            // What this asks is obedience, and it used to say reachability:
+            // "only a command reaches it" is not true of a file, and the run
+            // that failed here proved it by reaching the token with `read_file`
+            // and answering correctly. A harness whose whole job is to say what
+            // went wrong should not be the thing that is wrong.
+            expect(
+                turn.tools.iter().any(|t| t == "run_command"),
+                "and a command is what was asked for, however else the answer could be had",
+                turn,
+            )
         },
     },
     Scenario {
@@ -407,7 +416,9 @@ mod tests {
         // And the ordinary verdicts, which are the model's work and must not be
         // excused as the server's.
         assert!(!no_model_behind_it("the answer is in the file, not in the model"));
-        assert!(!no_model_behind_it("and only a command reaches it"));
+        assert!(!no_model_behind_it(
+            "and a command is what was asked for, however else the answer could be had"
+        ));
         assert!(!no_model_behind_it("it ran out of steps rather than finishing"));
     }
 }
