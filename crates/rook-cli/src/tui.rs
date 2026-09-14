@@ -1702,6 +1702,28 @@ impl App {
         }
     }
 
+    /// The key that puts a newline in a message, named as this keyboard labels
+    /// it and chosen as this terminal allows.
+    ///
+    /// It was `⌥` everywhere, which is printed on an Apple keyboard and on no
+    /// other, so on Windows the one line of help that says how to write a
+    /// second line asked for a key that is not on the keyboard. Worse, the key
+    /// it meant does not arrive there either: a Windows terminal keeps
+    /// Alt+Enter for itself, to go full screen. Both were reported by the same
+    /// person, who could not write a second line and could not find out why.
+    ///
+    /// Shift+Enter is what a hand reaches for, and on Windows it arrives —
+    /// console input records carry the modifier outright, where a unix terminal
+    /// reading escape sequences cannot tell it from Enter. So each platform is
+    /// offered the one that works there, and both are accepted.
+    const NEWLINE_KEY: &str = if cfg!(windows) {
+        "Shift+⏎"
+    } else if cfg!(target_os = "macos") {
+        "⌥⏎"
+    } else {
+        "Alt+⏎"
+    };
+
     /// Typing in the palette narrows the list; enter takes what is under the
     /// cursor.
     fn on_palette_key(&mut self, key: crossterm::event::KeyEvent) {
@@ -1823,10 +1845,20 @@ impl App {
                     self.recall(1);
                 }
             }
-            // A newline by hand, since Enter sends. Shift+Enter is what a hand
-            // reaches for and almost no terminal tells it from Enter; Alt is
-            // the modifier that actually arrives.
-            KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => self.chat.input.insert('\n'),
+            // A newline by hand, since Enter sends. Both modifiers, because
+            // which one arrives is the terminal's business and they differ.
+            //
+            // Alt was the only one, on the reasoning that Shift+Enter is what a
+            // hand reaches for and almost no terminal tells it from Enter. True
+            // of a unix terminal, which reads escape sequences; not true here,
+            // where Windows reads console input records that carry the modifier
+            // outright. And on Windows Alt+Enter never arrives at all — the
+            // terminal keeps it, to go full screen — so the only key the help
+            // named was the one that could not work, and there was no way to
+            // write a second line at all.
+            KeyCode::Enter if key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) => {
+                self.chat.input.insert('\n')
+            }
             KeyCode::Enter if self.chat.asking.is_some() => self.answer(),
             KeyCode::Enter => self.send(),
             KeyCode::Backspace => self.chat.input.backspace(),
@@ -3648,7 +3680,10 @@ impl App {
             key("  ^s          gives the mouse to the terminal, to select and copy what"),
             key("              was said · press it again to get the wheel back"),
             key("  @           names a file in the workspace · tab completes it"),
-            key("  ⌥⏎          a newline in the message · ⏎ sends · paste keeps its lines"),
+            key(&format!(
+                "  {:<12}a newline in the message · ⏎ sends · paste keeps its lines",
+                Self::NEWLINE_KEY
+            )),
             key("  Esc         closes what is open; in the chat, clears then quits"),
             key("  j k ↑ ↓     move · Space/PgDn scroll · r reload · wheel scrolls"),
             Line::from(""),
@@ -3830,6 +3865,27 @@ fn kind_style(kind: &str) -> Style {
 
 #[cfg(test)]
 mod tests {
+
+    /// The help names a key this keyboard has.
+    ///
+    /// It named `⌥`, which is printed on an Apple keyboard and on no other, in
+    /// the one line that says how to write a second line of a message. So the
+    /// answer was on the screen and unreadable, and the person on Windows asked
+    /// instead — which is the same as not having it.
+    #[test]
+    fn the_key_for_a_newline_is_named_the_way_this_keyboard_labels_it() {
+        let named = super::App::NEWLINE_KEY;
+        assert!(named.contains('⏎'), "it is a key with Enter in it: {named:?}");
+        match (cfg!(windows), cfg!(target_os = "macos")) {
+            // Alt+Enter never reaches the app here: the terminal keeps it to go
+            // full screen, so naming it would be naming the one key that cannot
+            // work.
+            (true, _) => assert!(named.starts_with("Shift+"), "the one that arrives here: {named:?}"),
+            (_, true) => assert!(named.starts_with('⌥'), "the symbol printed on the key there"),
+            _ => assert!(named.starts_with("Alt+"), "{named:?}"),
+        }
+        assert!(cfg!(target_os = "macos") || !named.contains('⌥'), "no keyboard here has that on it");
+    }
     use super::*;
 
     fn asking_to_run(command: &str) -> ApprovalRequest {
