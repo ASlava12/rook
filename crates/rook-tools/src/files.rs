@@ -53,7 +53,11 @@ impl Tool for ReadFile {
 
     async fn call(&self, ctx: &ToolContext, args: &serde_json::Value) -> Result<ToolOutcome> {
         let path = ctx.resolve(&arg_str(args, self.name(), "path")?)?;
-        if let Some(refused) = not_a_file(&path, "`list_files` shows what is in it") {
+        // `list_dir`, which is what the tool is called. It said `list_files`,
+        // which is a tool nobody has: a model reading that calls it, is told
+        // there is no such tool, and spends a step finding its way back from a
+        // message that was meant to save it one.
+        if let Some(refused) = not_a_file(&path, "`list_dir` shows what is in it") {
             return Ok(refused);
         }
         let offset = arg_usize(args, "offset", 0);

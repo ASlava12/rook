@@ -332,3 +332,77 @@ async fn a_large_file_is_paged_without_being_held() {
         out.meta
     );
 }
+
+/// A file that is not there is answered in the words of what was asked for.
+///
+/// The smoke job read this one out of a real transcript: `tool error: io error
+/// at /tmp/.tmpf6N7wt/status.txt: No such file or directory (os error 2)` — one
+/// fact said three times, in the kernel's sentence, naming nothing to do. The
+/// caller had passed `status.txt` and the tool resolved it somewhere the caller
+/// could not see, and which directory that was is the half worth having.
+#[tokio::test]
+async fn a_file_that_is_not_there_says_where_it_looked_and_what_to_do() {
+    let w = Workspace::new();
+    w.file("status-ok.txt", "done\n");
+
+    let out = files::ReadFile
+        .call(&w.ctx, &serde_json::json!({ "path": "status.txt" }))
+        .await
+        .expect_err("a missing file is an error");
+    let said = out.to_string();
+
+    assert!(said.contains("there is no \"status.txt\""), "it names what was asked for: {said}");
+    assert!(said.contains("list_dir"), "and what reaches the answer: {said}");
+    // The precondition and the fix in one: the kernel's phrasing is what this
+    // replaced, so its presence would mean nothing had changed.
+    assert!(!said.contains("os error"), "and not the operating system's sentence: {said}");
+    assert!(!said.contains("io error at"), "{said}");
+}
+
+/// A tool that is handed a directory says what to use instead, and names a
+/// tool that exists.
+///
+/// `read_file` said "`list_files` shows what is in it" and the tool is called
+/// `list_dir`. A model reading that calls `list_files`, is told there is no
+/// such tool, and spends a step finding its way back from a sentence that was
+/// there to save it one. Every file tool answers a directory this way, so the
+/// check is of all of them rather than of the one that was wrong.
+#[tokio::test]
+async fn a_tool_handed_a_directory_names_a_tool_that_exists() {
+    let w = Workspace::new();
+    std::fs::create_dir_all(w.dir.path().join("somewhere")).unwrap();
+    let known = rook_tools::ToolBox::standard().names().iter().map(|n| n.to_string()).collect::<Vec<_>>();
+    // The precondition: the name that was wrong is not quietly a tool now, or
+    // this passes by having nothing to catch.
+    assert!(!known.contains(&"list_files".to_string()), "there is no such tool: {known:?}");
+
+    let dir = serde_json::json!("somewhere");
+    let asked: Vec<(&str, serde_json::Value)> = vec![
+        ("read_file", serde_json::json!({ "path": dir })),
+        ("write_file", serde_json::json!({ "path": dir, "contents": "x" })),
+        ("delete_file", serde_json::json!({ "path": dir })),
+        ("move_file", serde_json::json!({ "from": dir, "to": "elsewhere.txt" })),
+        ("edit_file", serde_json::json!({ "path": dir, "edits": [{ "from": "a", "to": "b" }] })),
+    ];
+
+    let mut seen = 0;
+    for (name, args) in asked {
+        let tool = rook_tools::ToolBox::standard().get(name).expect("a registered tool").clone();
+        let said = match tool.call(&w.ctx, &args).await {
+            Ok(out) => out.content,
+            Err(e) => e.to_string(),
+        };
+        if !said.contains("is a directory") {
+            continue;
+        }
+        seen += 1;
+        for quoted in said.split('`').skip(1).step_by(2) {
+            assert!(
+                !quoted.contains('_') || known.contains(&quoted.to_string()),
+                "{name} sends the model to `{quoted}`, which is not a tool: {said}"
+            );
+        }
+    }
+    // Or the loop proved nothing: every arm may have skipped.
+    assert!(seen >= 4, "the directory message was reached by {seen} tools, which is too few");
+}

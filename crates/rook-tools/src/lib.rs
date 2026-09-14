@@ -38,7 +38,7 @@ pub enum ToolError {
     Unknown { name: String, nearest: Vec<String> },
     #[error("{tool}: {message}")]
     Invalid { tool: String, message: String },
-    #[error("io error at {path}: {source}")]
+    #[error("{}", io_at(path, source))]
     Io {
         path: PathBuf,
         #[source]
@@ -46,6 +46,42 @@ pub enum ToolError {
     },
     #[error("{0}")]
     Denied(String),
+}
+
+/// What went wrong at a path, in the words of what was asked for rather than
+/// the kernel's.
+///
+/// `io error at /tmp/x/status.txt: No such file or directory (os error 2)` says
+/// one fact three times and names nothing to do about it. A file that is not
+/// there is not an I/O failure — it is the ordinary answer to asking for
+/// something that does not exist, and the half worth having is which directory
+/// was looked in, because the caller passed a relative name and the tool
+/// resolved it somewhere the caller cannot see.
+///
+/// `Is a directory` is the same shape and is the one already written down: a
+/// tool handed a directory answered with the operating system's `os error 21`,
+/// and the checkpoint taken before it failed on the same path, so an ordinary
+/// bad argument was reported as work that could not be undone.
+///
+/// Everything else keeps the kernel's sentence, which is the right one when
+/// nobody here has a better.
+fn io_at(path: &std::path::Path, source: &std::io::Error) -> String {
+    use std::io::ErrorKind;
+    let named = path.file_name().map(|n| n.to_string_lossy().into_owned());
+    let directory = path.parent().filter(|p| !p.as_os_str().is_empty());
+    match (source.kind(), named, directory) {
+        (ErrorKind::NotFound, Some(name), Some(dir)) => {
+            format!("there is no {name:?} in {} — `list_dir` there says what is", dir.display())
+        }
+        (ErrorKind::NotFound, _, _) => format!("{} is not there", path.display()),
+        (ErrorKind::IsADirectory, _, _) => {
+            format!("{} is a directory, not a file", path.display())
+        }
+        (ErrorKind::PermissionDenied, _, _) => {
+            format!("{} cannot be read or written: permission denied", path.display())
+        }
+        _ => format!("io error at {}: {source}", path.display()),
+    }
 }
 
 pub type Result<T> = std::result::Result<T, ToolError>;
