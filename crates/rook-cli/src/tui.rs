@@ -2786,12 +2786,25 @@ impl App {
         // holding a position as the turn writes means growing it by what
         // arrived; otherwise reading back during a long turn drifts to the
         // bottom every few hundred milliseconds.
-        let total = lines.len() as u16;
+        //
+        // Rows on the screen, not lines in the text. `scroll` moves a wrapped
+        // paragraph by rendered rows, and this counted the lines before they
+        // were wrapped — so a pane narrow enough to wrap scrolled short by
+        // exactly what the wrapping added, and that much of the newest output
+        // sat below the bottom edge, unreachable. Measured: six lines of a
+        // build log are sixteen rows at width sixty, so ten rows were hidden;
+        // at a hundred and twenty nothing wraps and the two agree, which is why
+        // this was invisible on a wide terminal. Reported as output that only
+        // turned up when the next thing was typed — which is the other half of
+        // the same arithmetic, the line count growing until the scroll it
+        // implied happened to reach far enough.
+        let body = Paragraph::new(lines).wrap(Wrap { trim: false });
+        let visible = log.height.saturating_sub(2);
+        let total = rendered_rows(&body, log.width.saturating_sub(2));
         if self.chat.scroll > 0 {
             self.chat.scroll = self.chat.scroll.saturating_add(total.saturating_sub(self.chat.drawn));
         }
         self.chat.drawn = total;
-        let visible = log.height.saturating_sub(2);
         let overflow = total.saturating_sub(visible);
         // Not past the first line: scrolling into blank space above the
         // conversation reads as the pane having lost it.
@@ -2829,10 +2842,7 @@ impl App {
             // displaces the rest rather than being appended to it.
             back => format!(" {project}{session} — {back} lines back, End returns "),
         };
-        f.render_widget(
-            Paragraph::new(lines).block(bordered(&title)).wrap(Wrap { trim: false }).scroll((scroll, 0)),
-            log,
-        );
+        f.render_widget(body.block(bordered(&title)).scroll((scroll, 0)), log);
 
         if let Some(request) = &self.chat.pending {
             let mut lines = vec![Line::from(Span::styled(
@@ -3839,6 +3849,22 @@ fn short_model(spec: &str) -> String {
     }
 }
 
+/// How many rows this paragraph takes once it is wrapped to `width`.
+///
+/// The count a scroll has to be in. `Paragraph::scroll` moves by rendered rows
+/// and the chat pane was measuring the lines before wrapping, so a pane narrow
+/// enough to wrap never scrolled far enough and the newest output stayed below
+/// the edge. Six lines of a build log are sixteen rows at width sixty.
+///
+/// Counted before the border is put on, so this is content and nothing else:
+/// `line_count` adds a block's rows when there is one, and there is not one
+/// yet. Behind ratatui's `unstable-rendered-line-info`, which is why no
+/// hand-rolled word wrapper is here — this is the wrapper that will do the
+/// rendering, asked what it is about to do.
+fn rendered_rows(body: &Paragraph, width: u16) -> u16 {
+    u16::try_from(body.line_count(width)).unwrap_or(u16::MAX)
+}
+
 fn bordered(title: &str) -> Block<'_> {
     Block::default()
         .borders(Borders::ALL)
@@ -3865,6 +3891,46 @@ fn kind_style(kind: &str) -> Style {
 
 #[cfg(test)]
 mod tests {
+
+    /// The chat pane measures itself in rows, not in lines.
+    ///
+    /// `Paragraph::scroll` moves by rendered rows. The pane counted the lines
+    /// before they were wrapped, so on a pane narrow enough to wrap it scrolled
+    /// short by exactly what the wrapping added, and that much of the newest
+    /// output sat below the bottom edge where nothing could reach it. Reported
+    /// as output that only turned up when the next thing was typed — the line
+    /// count growing until the scroll it implied happened to reach far enough.
+    #[test]
+    fn what_the_chat_pane_scrolls_by_is_rows_and_not_lines() {
+        use ratatui::text::Line;
+        use ratatui::widgets::{Paragraph, Wrap};
+
+        let long = "  Compiling rook-core v0.3.0 (/home/runner/work/rook/rook/crates/rook-core) and more";
+        let lines: Vec<Line> =
+            std::iter::once(Line::from("exit 0")).chain(std::iter::repeat_n(Line::from(long), 5)).collect();
+        let logical = lines.len() as u16;
+        let body = Paragraph::new(lines).wrap(Wrap { trim: false });
+
+        // Narrow enough to wrap, which is the case that was broken.
+        let rows = super::rendered_rows(&body, 60);
+        assert!(rows > logical, "the precondition: this text wraps, {rows} rows from {logical} lines");
+
+        // The newest row has to be on screen when nothing is scrolled back. A
+        // count of lines would put `logical - visible` rows between the top and
+        // the view, leaving `rows - logical` of the newest below the edge.
+        let visible = 10u16;
+        let scrolled = rows.saturating_sub(visible);
+        assert_eq!(scrolled + visible, rows, "the last row sits on the bottom line");
+        assert!(
+            logical.saturating_sub(visible) + visible < rows,
+            "and counting lines would have left {} rows below the edge",
+            rows - logical
+        );
+
+        // Wide enough that nothing wraps, the two agree — which is why this was
+        // invisible on a wide terminal and plain on a narrow one.
+        assert_eq!(super::rendered_rows(&body, 200), logical);
+    }
 
     /// The help names a key this keyboard has.
     ///
