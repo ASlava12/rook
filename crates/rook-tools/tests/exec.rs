@@ -616,11 +616,16 @@ async fn a_timeout_takes_the_grandchild_the_shell_detached_and_not_only_the_shel
             // Room for `cmd` to start a grandchild before the clock takes it,
             // not a measurement of anything: what is claimed below is that the
             // grandchild dies, and it cannot die if it never ran. Two seconds
-            // was enough on a machine with twenty-four cores and is a race on a
-            // runner with two — and a precondition lost to that race reads as a
-            // product failure, which is the shape of the three CI failures
-            // CLAUDE.md already records.
-            "timeout_secs": 15
+            // is that race on a machine slower than this one, and a precondition
+            // lost to it reads as a product failure.
+            //
+            // Six and not fifteen: fifteen was picked while this was the
+            // suspect in a red `test windows-latest`, and it was not — the log
+            // named a daemon request cut off by a timeout meant for a health
+            // check. The margin is still thirty times what starting a process
+            // costs here, and the suite pays four seconds for it rather than
+            // thirteen.
+            "timeout_secs": 6
         }),
     )
     .await;
