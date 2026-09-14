@@ -112,6 +112,31 @@ impl Started {
     }
 }
 
+/// End one process, for the case where it could never be put in a job.
+///
+/// `Group::end` on Windows had nothing to fall back on: where the job could not
+/// be made it answered `false` and killed nothing at all — not even the shell —
+/// while unix's `kill(-pid, SIGKILL)` at least always reaches the command
+/// itself. A job that cannot be made is rare, and "rare" is what the message
+/// "could not be killed" was covering for while the command went on running.
+#[cfg(windows)]
+pub fn end_process(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
+
+    // Safety: documented calls, and the handle opened here is closed on every
+    // path that does not return early without one.
+    unsafe {
+        let process = OpenProcess(PROCESS_TERMINATE, 0, pid);
+        if process.is_null() {
+            return false;
+        }
+        let ended = TerminateProcess(process, 1) != 0;
+        CloseHandle(process);
+        ended
+    }
+}
+
 #[cfg(windows)]
 impl Drop for Started {
     fn drop(&mut self) {
@@ -528,5 +553,23 @@ mod tests {
         // still in the job until somebody waits for it.
         let _ = child.wait();
         assert_eq!(held.alive(), Some(false), "and nothing is left in it");
+    }
+
+    /// The fallback, for a command no job would take. It is the difference
+    /// between killing the shell and killing nothing at all, which is what a
+    /// timeout did on that path.
+    #[test]
+    fn a_command_no_job_would_take_is_still_ended() {
+        let mut child = std::process::Command::new("cmd")
+            .args(["/c", "ping -n 30 127.0.0.1 > nul"])
+            .spawn()
+            .expect("a command to end");
+
+        // It has to be running, or "it is gone afterwards" is about nothing.
+        assert!(child.try_wait().expect("a child answers").is_none(), "it was over before this began");
+
+        assert!(super::end_process(child.id()), "the call was not made");
+        let status = child.wait().expect("a killed command still reports");
+        assert!(!status.success(), "it finished on its own, so it was not ended: {status:?}");
     }
 }

@@ -778,7 +778,13 @@ impl Group {
         #[cfg(unix)]
         return self.pid.is_some_and(|pid| unsafe { libc::kill(-(pid as i32), libc::SIGKILL) == 0 });
         #[cfg(windows)]
-        return self.job.as_ref().is_some_and(rook_contain::Started::end);
+        return match &self.job {
+            Some(job) => job.end(),
+            // Not even the shell, otherwise: a job that could not be made left
+            // this answering `false` and killing nothing, where unix's signal
+            // always at least reaches the command itself.
+            None => self.pid.is_some_and(rook_contain::end_process),
+        };
         #[cfg(not(any(unix, windows)))]
         false
     }
