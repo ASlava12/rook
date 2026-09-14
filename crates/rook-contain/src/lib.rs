@@ -23,6 +23,95 @@ pub const ENV_SCRATCH: &str = "ROOK_CONTAIN_SCRATCH";
 /// must not be started as one: it would run whatever it was instead.
 pub const LAUNCHER: &str = "ROOK_LAUNCHER";
 
+/// `CREATE_NO_WINDOW`: start a child without giving it a console.
+///
+/// Windows hands every process it starts a console unless told not to, and a
+/// console is a window on somebody's desktop. Nothing here wants one — every
+/// child is handed pipes — so each is a window that opens and shuts for no
+/// reason. Reported from a real desktop: `rook tui` throws up a swarm of them
+/// before it draws a frame, because starting up probes sixteen toolchains, and
+/// every turn throws up more, because a turn runs a shell, a language server
+/// and whatever else it needs.
+///
+/// The number rather than a `windows-sys` import: this is the whole of what is
+/// wanted, and it is what the flag has been since it was documented. Exported
+/// as well as applied, because a `tokio::process::Command` takes it by its own
+/// method and does not want the standard library's extension trait.
+#[cfg(windows)]
+pub const NO_WINDOW: u32 = 0x0800_0000;
+
+/// Start this child without a console of its own.
+///
+/// Does nothing off Windows, where a process has no window to begin with.
+pub fn quietly(command: &mut std::process::Command) -> &mut std::process::Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(NO_WINDOW);
+    }
+    command
+}
+
+/// What this Windows calls a refusal, in the language it is speaking.
+///
+/// A contained command that tries to write outside its workspace fails with the
+/// operating system's own sentence, and the note that explains it was reached
+/// by looking for `access is denied` and a handful of neighbours — English,
+/// every one. On a Russian install the twenty-one bytes `cmd` writes to stderr
+/// are `Отказано в доступе.`, so the note had never fired for anything, and the
+/// model was left with an exit code and a sentence it could do nothing with.
+///
+/// Asked of the system rather than listed here, because a list of translations
+/// is a list to keep in step and there are a hundred of them. `FormatMessage`
+/// returns the same text the command printed, because it is where the command
+/// got it.
+///
+/// Empty off Windows, where the refusals are already in the list that is there.
+#[cfg(windows)]
+pub fn refusals() -> Vec<String> {
+    /// The codes a sandbox refusal actually arrives as: denied outright, a
+    /// volume that cannot be written, and a file somebody else is holding.
+    const CODES: [u32; 3] = [5, 19, 32];
+    CODES.iter().filter_map(|code| message_for(*code)).collect()
+}
+
+#[cfg(not(windows))]
+pub fn refusals() -> Vec<String> {
+    Vec::new()
+}
+
+/// One system error code as this machine words it.
+#[cfg(windows)]
+fn message_for(code: u32) -> Option<String> {
+    use windows_sys::Win32::System::Diagnostics::Debug::{
+        FORMAT_MESSAGE_FROM_SYSTEM, FORMAT_MESSAGE_IGNORE_INSERTS, FormatMessageW,
+    };
+
+    let mut buffer = [0u16; 512];
+    // Safety: the call is told the buffer's length, and writes no more than
+    // that many `u16`s into it. `IGNORE_INSERTS` is what makes the message
+    // safe to ask for without argument list.
+    let written = unsafe {
+        FormatMessageW(
+            FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+            std::ptr::null(),
+            code,
+            0,
+            buffer.as_mut_ptr(),
+            buffer.len() as u32,
+            std::ptr::null(),
+        )
+    };
+    if written == 0 {
+        return None;
+    }
+    let said = String::from_utf16_lossy(&buffer[..written as usize]);
+    // `FormatMessage` ends its sentences with a full stop and a line break, and
+    // what is wanted is something to look for inside a command's output.
+    let said = said.trim().trim_end_matches('.').trim().to_string();
+    (!said.is_empty()).then_some(said)
+}
+
 /// Everything one command started, held as one thing that can be asked about
 /// and ended.
 ///

@@ -267,7 +267,8 @@ impl Vault {
 /// nowhere but back to the caller.
 fn from_command(line: &str) -> Option<String> {
     #[cfg(windows)]
-    let out = std::process::Command::new("cmd").args(["/C", line]).output().ok()?;
+    let out =
+        rook_contain::quietly(&mut std::process::Command::new("cmd")).args(["/C", line]).output().ok()?;
     #[cfg(not(windows))]
     let out = std::process::Command::new("/bin/sh").arg("-c").arg(line).output().ok()?;
     if !out.status.success() {

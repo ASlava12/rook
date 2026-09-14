@@ -2357,6 +2357,7 @@ dependencies = [
  "hex",
  "ignore",
  "reqwest",
+ "rook-contain",
  "rook-llm",
  "rook-lsp",
  "rook-mcp",
@@ -2402,6 +2403,7 @@ name = "rook-lsp"
 version = "0.3.0"
 dependencies = [
  "async-trait",
+ "rook-contain",
  "serde",
  "serde_json",
  "tempfile",
@@ -2417,6 +2419,7 @@ dependencies = [
  "async-trait",
  "futures-util",
  "reqwest",
+ "rook-contain",
  "rook-llm",
  "serde",
  "serde_json",
@@ -2439,6 +2442,7 @@ dependencies = [
 name = "rook-skills"
 version = "0.3.0"
 dependencies = [
+ "rook-contain",
  "semver",
  "serde",
  "serde_json",

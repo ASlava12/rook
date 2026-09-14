@@ -463,9 +463,17 @@ fn needs_a_raw_socket(command: &str) -> bool {
     ["ping", "tracert", "traceroute", "pathping", "arp"].contains(&program)
 }
 
+/// Whether this output is a refusal, in any language the machine speaks.
+///
+/// The list below is English and was all there was, so on a Windows speaking
+/// anything else this answered `false` for every refusal there has ever been —
+/// measured here, a contained write is refused with the twenty-one bytes
+/// `Отказано в доступе.` and not one of these words. The machine's own wording
+/// is asked for rather than translated: `FormatMessage` returns the same
+/// sentence the command printed, because it is where the command got it.
 fn denied(output: &str) -> bool {
-    let lower = output.to_ascii_lowercase();
-    [
+    let lower = output.to_lowercase();
+    const IN_ENGLISH: [&str; 7] = [
         "permission denied",
         "operation not permitted",
         "read-only file system",
@@ -473,9 +481,17 @@ fn denied(output: &str) -> bool {
         "eacces",
         "eperm",
         "erofs",
-    ]
-    .iter()
-    .any(|word| lower.contains(word))
+    ];
+    if IN_ENGLISH.iter().any(|word| lower.contains(word)) {
+        return true;
+    }
+    // Asked once: it is three calls into the operating system and the answer
+    // cannot change while the process runs.
+    static IN_THIS_LANGUAGE: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    IN_THIS_LANGUAGE
+        .get_or_init(|| rook_contain::refusals().iter().map(|r| r.to_lowercase()).collect())
+        .iter()
+        .any(|said| lower.contains(said.as_str()))
 }
 
 /// Start `command` the way the machine's shell would, with `env` added to
@@ -529,6 +545,11 @@ pub fn spawn_shell(
         // Detach from the terminal's process group where the platform allows it,
         // so a runaway child does not inherit the TUI's signals.
         .kill_on_drop(true);
+    // And no console: Windows gives one to every process it starts unless told
+    // not to, and a console is a window. A turn that runs three commands threw
+    // up three windows that opened and shut on the person's desktop.
+    #[cfg(windows)]
+    cmd.creation_flags(rook_contain::NO_WINDOW);
     #[cfg(unix)]
     // Its own process group, so a timeout can take the whole tree and a runaway
     // child does not inherit the TUI's terminal signals.
@@ -911,6 +932,34 @@ mod what_a_contained_command_cannot_do {
     /// containment on Windows needs the running process to be a rook binary,
     /// deliberately — a test binary started as the launcher would run whatever
     /// it was — so nothing in a test can be contained and reach the message.
+    /// A refusal is recognised in whatever language the machine speaks.
+    ///
+    /// The list was English and that was all, so on a Windows speaking anything
+    /// else this had never once been true: a contained write here is refused
+    /// with `Отказано в доступе.` and the note that explains containment was
+    /// never reached. The test that covered it passed all the while by being
+    /// skipped — `available()` caches its probe in a `OnceLock`, and whichever
+    /// of the parallel tests asked first decided for all of them.
+    ///
+    /// Asserted against what the machine says rather than against a translation
+    /// written here, or this would be a test about which desktop it runs on.
+    #[test]
+    fn a_refusal_is_recognised_in_the_language_this_machine_speaks() {
+        assert!(super::denied("touch: cannot touch 'x': Permission denied"), "English, as before");
+
+        let named = rook_contain::refusals();
+        // The precondition: there is something to have asked. Off Windows the
+        // list is empty on purpose, because the English one already covers it.
+        assert!(!cfg!(windows) || !named.is_empty(), "the system named no refusal at all");
+        for said in &named {
+            assert!(super::denied(&format!("cmd: {said}.")), "and the machine's own wording: {said}");
+        }
+
+        // And an ordinary failure is still not a refusal, or the note would be
+        // on everything and mean nothing.
+        assert!(!super::denied("error: could not find `Cargo.toml` in this directory"));
+    }
+
     #[test]
     fn a_program_that_needs_a_raw_socket_is_recognised_however_it_is_named() {
         assert!(needs_a_raw_socket("ping -n 2 127.0.0.1"));

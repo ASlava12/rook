@@ -8,6 +8,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+rook-contain = { path = "../rook-contain" }
 async-trait = "0.1.92"
 futures-util = "0.3.34"
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "json", "stream", "charset", "http2"] }

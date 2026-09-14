@@ -181,7 +181,10 @@ fn resolved(command: &str, path: &std::ffi::OsStr, exts: &str) -> std::path::Pat
 
 impl Server {
     pub async fn start(config: &ServerConfig, root: &Path) -> Result<Self> {
-        let mut child = tokio::process::Command::new(program(&config.command, Some(root)))
+        let mut command = tokio::process::Command::new(program(&config.command, Some(root)));
+        #[cfg(windows)]
+        command.creation_flags(rook_contain::NO_WINDOW);
+        let mut child = command
             .args(&config.args)
             .current_dir(root)
             .stdin(Stdio::piped())

@@ -144,6 +144,8 @@ impl Stdio {
             &config.command,
             config.cwd.as_ref().map(std::path::Path::new),
         ));
+        #[cfg(windows)]
+        command.creation_flags(rook_contain::NO_WINDOW);
         command
             .args(&config.args)
             .envs(&config.env)

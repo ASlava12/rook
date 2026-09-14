@@ -377,6 +377,8 @@ pub(crate) fn contained(command: &str, isolation: &Isolation) -> std::io::Result
     let launcher = std::env::var_os(rook_contain::LAUNCHER)
         .ok_or_else(|| std::io::Error::other("no launcher: this process is not a rook binary"))?;
     let mut cmd = tokio::process::Command::new(launcher);
+    #[cfg(windows)]
+    cmd.creation_flags(rook_contain::NO_WINDOW);
     cmd.env(rook_contain::ENV, command).env(rook_contain::ENV_SCRATCH, &scratch);
     Ok(cmd)
 }

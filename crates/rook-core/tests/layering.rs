@@ -15,20 +15,24 @@ fn layers() -> BTreeMap<&'static str, u8> {
     BTreeMap::from([
         // Nothing internal: each is a thing in itself, and the store must never
         // learn what a skill or a checkpoint is.
-        ("rook-llm", 0),
-        ("rook-lsp", 0),
+        // Below everything: platform glue with no dependencies of its own, and
+        // the one place Win32 lives. Anything may reach for it — a language
+        // server and a toolchain probe both start processes, and starting one
+        // without a console window is its answer — and it reaches for nothing.
         ("rook-contain", 0),
-        ("rook-proto", 0),
-        ("rook-skills", 0),
-        ("rook-store", 0),
+        ("rook-llm", 1),
+        ("rook-lsp", 1),
+        ("rook-proto", 1),
+        ("rook-skills", 1),
+        ("rook-store", 1),
         // Speaks to somebody else's tools, in the shapes `rook-llm` defines.
-        ("rook-mcp", 1),
-        ("rook-tools", 2),
+        ("rook-mcp", 2),
+        ("rook-tools", 3),
         // The engine. Everything above it is a way of driving it.
-        ("rook-core", 3),
-        ("rook-acp", 4),
-        ("rookd", 4),
-        ("rook-cli", 5),
+        ("rook-core", 4),
+        ("rook-acp", 5),
+        ("rookd", 5),
+        ("rook-cli", 6),
     ])
 }
 
@@ -119,4 +123,61 @@ fn an_internal_crate_is_never_a_dependency_of_one_platform_only() {
     }
 
     assert_eq!(checked, layers().len(), "every crate is checked, and only crates that exist");
+}
+
+/// A file that starts a process says how it is to be started.
+///
+/// Windows hands every process it starts a console unless told otherwise, and a
+/// console is a window. Nothing here wants one — every child is handed pipes —
+/// so each was a window that opened and shut on somebody's desktop: sixteen at
+/// startup for the toolchain probes, more per turn for the shell, the language
+/// server and the MCP server. Reported from a real desktop as a swarm of them,
+/// and invisible to every test, because a window is not something a test sees.
+///
+/// So it is asked of the source instead: a file that spawns says, somewhere in
+/// it, which flags it spawns with. Coarse on purpose — what this catches is the
+/// next file that starts a process and says nothing, which is how this got here.
+#[test]
+fn every_file_that_starts_a_process_says_how() {
+    // `DETACHED_PROCESS` for the daemon, which wants no console at all and its
+    // own process group; `quietly` or `NO_WINDOW` for everything else.
+    const SAYS_HOW: [&str; 3] = ["creation_flags", "quietly", "NO_WINDOW"];
+    let mut checked = 0;
+
+    for entry in walk(&crates_dir()) {
+        let Ok(text) = std::fs::read_to_string(&entry) else { continue };
+        if !text.contains("Command::new") {
+            continue;
+        }
+        checked += 1;
+        assert!(
+            SAYS_HOW.iter().any(|said| text.contains(said)),
+            "{} starts a process and never says with what flags — on Windows that is a console \
+             window opening and shutting for each one. `rook_contain::quietly` is the answer for \
+             a `std` command, `creation_flags(rook_contain::NO_WINDOW)` for a `tokio` one",
+            entry.display()
+        );
+    }
+    // Or the loop found nothing and proved nothing.
+    assert!(checked >= 6, "only {checked} files were found to start a process, which is too few");
+}
+
+/// Every `src` file under `crates/`, without pulling in a directory walker.
+fn walk(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else { return out };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // `src` only: a test may spawn a bare command to check something about
+        // spawning, and what is being guarded is what ships.
+        if path.is_dir() && path.file_name().is_some_and(|n| n == "tests") {
+            continue;
+        }
+        match path.is_dir() {
+            true => out.extend(walk(&path)),
+            false if path.extension().is_some_and(|e| e == "rs") => out.push(path),
+            false => {}
+        }
+    }
+    out
 }

@@ -191,6 +191,11 @@ fn probe_version(probe: &Probe) -> Option<String> {
 /// deadline that only stops waiting leaves the child holding whatever it was
 /// holding, and sixteen of those is a startup that gets slower every time.
 fn ran_within(command: &mut Command, patience: std::time::Duration) -> Option<std::process::Output> {
+    // Windows gives a process it starts a console unless told otherwise, and a
+    // console is a window. Sixteen probes at startup is sixteen windows that
+    // open and shut on the person's desktop before the first frame is drawn —
+    // reported from a real one as a swarm of them.
+    rook_contain::quietly(command);
     let mut child = command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())

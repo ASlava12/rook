@@ -99,7 +99,7 @@ fn installed(command: &str) -> Option<String> {
 /// was the whole of what it learned. Bounded, because an unknown binary asked
 /// a question may not answer it.
 fn starts(command: &str) -> bool {
-    let Ok(mut child) = std::process::Command::new(command)
+    let Ok(mut child) = rook_contain::quietly(&mut std::process::Command::new(command))
         .arg("--version")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())

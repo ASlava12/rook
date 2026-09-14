@@ -177,6 +177,7 @@ impl Hooks {
 fn shell(command: &str) -> tokio::process::Command {
     use std::os::windows::process::CommandExt;
     let mut c = tokio::process::Command::new("cmd");
+    c.creation_flags(rook_contain::NO_WINDOW);
     c.as_std_mut().raw_arg(format!("/C {command}"));
     c
 }

@@ -173,6 +173,7 @@ fn cache_name(source: &str) -> String {
 
 fn git(args: &[&str], cwd: Option<&Path>) -> Result<()> {
     let mut command = std::process::Command::new("git");
+    rook_contain::quietly(&mut command);
     command.args(args);
     if let Some(cwd) = cwd {
         command.current_dir(cwd);

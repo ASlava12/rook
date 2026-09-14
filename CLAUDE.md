@@ -37,9 +37,10 @@ ROOK_HOME=/tmp/rook-scratch cargo run -p rook-cli -- store stat
 Dependencies run one way. Do not add an edge that reverses them.
 
 ```
-rook-store  rook-skills  rook-llm  rook-lsp  rook-proto   ──►  (nothing internal)
-rook-mcp                                                 ──►  llm
-rook-tools                                               ──►  llm, mcp, proto
+rook-contain                                             ──►  (nothing internal)
+rook-store  rook-skills  rook-llm  rook-lsp  rook-proto   ──►  contain
+rook-mcp                                                 ──►  llm, contain
+rook-tools                                               ──►  llm, mcp, proto, contain
 rook-core                                                ──►  everything below it
 rookd  rook-acp                                          ──►  core and below
 rook-cli                                                 ──►  acp, core and below
@@ -49,6 +50,11 @@ rook-cli                                                 ──►  acp, core an
 fails the build rather than being noticed later. It is ranks rather than a list
 of edges: adding an ordinary dependency needs no edit there, and adding a crate
 needs one line.
+
+`rook-contain` is the floor: platform glue with no dependencies of its own, and
+the one place Win32 lives. Anything may reach for it — starting a process
+without a console window is its answer as much as containing one is — and it
+reaches for nothing.
 
 `rook-store` must not learn what a skill or a checkpoint is. When GC needs to know
 that a manifest keeps files alive, the caller passes an expander.
