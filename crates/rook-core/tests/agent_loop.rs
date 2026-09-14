@@ -5881,3 +5881,73 @@ async fn the_goal_check_is_shown_what_the_turn_did_and_not_only_what_it_left() {
     // A sentence that appears nowhere would have asserted nothing.
     assert!(!check.contains("ancient-marker-42"), "and this turn only, not the session: {check}");
 }
+
+/// A turn told its check failed may answer that the check is wrong.
+///
+/// It could not, and the words it was given presumed the goal was a state the
+/// workspace could be put into: "Put it right, and say what was wrong." Asked to
+/// *check* a claim, a turn read `lib.rs`, found the claim false, said so — and
+/// the goal check called that a failure because on disk the claim was still
+/// false. Told to put it right, the turn edited the very function it had been
+/// asked to judge, writing in its own reasoning that the instruction had changed
+/// and it would follow the newer one. Two models did it, the larger with its
+/// eyes open, and the workspace ended up saying what the claim wanted.
+///
+/// Both halves are fixed and both are asserted here: the checker is told that a
+/// task which is answered rather than built is met by the answering, and the
+/// turn is told it may disagree.
+#[tokio::test]
+async fn a_turn_may_say_the_check_is_mistaken_rather_than_make_it_true() {
+    let f = fixture();
+    let session = f.rook.start_session("s").unwrap();
+    std::fs::write(f.workspace.path().join("lib.rs"), "pub fn add(a: i32, b: i32) -> i32 { a - b }\n")
+        .unwrap();
+
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("read_file", serde_json::json!({ "path": "lib.rs" })),
+        reply("the claim is false: it subtracts"),
+        // The checker reaches for something: a verdict from one that read
+        // nothing is reported as `unproven` whatever it said, and `unproven`
+        // does not put anything back to the turn.
+        call("read_file", serde_json::json!({ "path": "lib.rs" })),
+        reply("VERDICT: fails — on disk it still subtracts"),
+        reply("the check is mistaken: I was asked to check, and I did"),
+    ]));
+    let seen = provider.share();
+
+    let mut agent = AgentLoop::new(&f.rook, provider, session);
+    agent.allow_everything_not_denied();
+    agent.run("check whether add returns the sum").await.unwrap();
+
+    let asked: Vec<String> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|r| r.messages.last().map(|m| m.content.clone()).unwrap_or_default())
+        .collect();
+
+    let claim = asked
+        .iter()
+        .find(|m| m.contains("has just finished a turn"))
+        .unwrap_or_else(|| panic!("the goal check never ran: {asked:?}"));
+    assert!(
+        claim.contains("answered rather than built"),
+        "the checker is told to judge the answering: {claim}"
+    );
+
+    let after = asked
+        .iter()
+        .find(|m| m.contains("Checked against the goal before finishing"))
+        .unwrap_or_else(|| panic!("the failed check was never put to the turn: {asked:?}"));
+    assert!(after.contains("the check is mistaken"), "and the turn may say so: {after}");
+    // The precondition: the old words are what made a turn falsify its own
+    // finding, so their absence is the change and not a coincidence of wording.
+    assert!(!after.contains("Put it right, and say what was wrong."), "{after}");
+
+    // And the file it was asked to judge is as it was.
+    assert_eq!(
+        std::fs::read_to_string(f.workspace.path().join("lib.rs")).unwrap(),
+        "pub fn add(a: i32, b: i32) -> i32 { a - b }\n",
+        "the thing under question was not edited to make the claim pass"
+    );
+}

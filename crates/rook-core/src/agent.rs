@@ -2288,9 +2288,25 @@ impl<'a> AgentLoop<'a> {
                         self.rook.log(self.session, EventKind::Note, "goal check", &report).ok();
                         match verdict {
                             Some("fails") => {
+                                // "Put it right" was the whole of this, and it
+                                // presumes the goal is a state the workspace
+                                // can be put into. Asked to *check* a claim, a
+                                // turn reported truthfully that the claim was
+                                // false, was told the check failed and to put
+                                // it right, and edited the very function it had
+                                // been asked to judge — writing in its own
+                                // reasoning that the instruction had changed
+                                // and it would follow the newer one. Two models
+                                // did it, the larger one with its eyes open.
+                                // A checker is a second opinion and not an
+                                // order, so disagreeing with it is a move the
+                                // turn is allowed to have.
                                 let told = format!(
                                     "Checked against the goal before finishing, and the check \
-                                     fails:\n\n{report}\n\nPut it right, and say what was wrong."
+                                     fails:\n\n{report}\n\nEither put it right and say what was \
+                                     wrong, or say why the check is mistaken — if what you were \
+                                     asked for was a finding, the finding standing is the work, \
+                                     and making it come out otherwise would not be."
                                 );
                                 messages.push(carried.clone());
                                 messages.push(Message::user(&told));
@@ -3318,7 +3334,13 @@ impl<'a> AgentLoop<'a> {
              is the goal met now, and was anything the person asked not to do done anyway? \
              `holds` means both are as they should be. `fails` means the goal is not met, or \
              something the person forbade was done — say which, and what would put it right. \
-             Whether the task was worth doing is not one of the questions.{}",
+             Whether the task was worth doing is not one of the questions.\n\nSome tasks are \
+             answered rather than built. Where the person asked a question, for a check, for a \
+             review, the goal is that they were answered truthfully — not that the answer came \
+             out one way. A claim the agent was asked to check and found false is the work done, \
+             and the claim still being false is not the goal unmet: judge the answering, and \
+             treat any change to the thing under question as the thing that would have been \
+             forbidden.{}",
             self.what_happened()
         );
         self.check(&claim, "", outcome, on_progress).await
