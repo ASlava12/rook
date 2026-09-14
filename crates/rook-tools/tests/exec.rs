@@ -13,6 +13,17 @@ async fn run(ctx: &ToolContext, args: serde_json::Value) -> ToolOutcome {
     RunCommand.call(ctx, &args).await.unwrap()
 }
 
+/// One `sleep`, started directly, so the counter below can be asked about a
+/// process that is certainly running. Without it the test passes when
+/// `sleepers` is broken and answers nothing at all — "none are left" and "the
+/// counter sees nothing" read the same, and making the filter return zero
+/// proved it: the test still passed. The Windows sibling asks its question
+/// before the kill as well as after, for this reason.
+#[cfg(unix)]
+fn one_sleeper(marker: &str) -> std::process::Child {
+    std::process::Command::new("sleep").arg(marker).spawn().unwrap()
+}
+
 /// Counts only real `sleep` processes: matching a whole command line would also
 /// match this test's own, which is how the first attempt at this fooled itself.
 #[cfg(unix)]
@@ -53,6 +64,21 @@ async fn a_failing_command_is_an_error_with_its_stderr() {
 #[tokio::test]
 async fn a_timeout_kills_the_whole_process_tree_not_just_the_shell() {
     let (_d, ctx) = ctx();
+
+    // A different marker, so this one is not what the count below is about.
+    let mut canary = one_sleeper("881881");
+    let mut seen = 0;
+    for _ in 0..50 {
+        seen = sleepers("881881");
+        if seen > 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+    }
+    let _ = canary.kill();
+    let _ = canary.wait();
+    assert!(seen > 0, "the counter never saw a process this test had started itself");
+
     // Backgrounded so the shell forks rather than execs: killing the shell alone
     // would leave this running, which is what the claim "was killed" would then
     // be lying about.
