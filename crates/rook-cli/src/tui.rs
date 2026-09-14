@@ -2230,9 +2230,35 @@ impl App {
         // where it was taken, so watching one go the wrong way left nothing to
         // do but stop it and start again.
         if self.chat.busy {
-            self.shared.interjections.say(&prompt);
             self.chat.push("you", &prompt);
-            self.chat.push("stat", "  (the turn will see this at its next step)");
+            // A slash command typed here used to be queued as its own text and
+            // nothing else, so `/goal …` set no goal: the line went to the model
+            // as a sentence beginning with a slash, and the window answered
+            // "the turn will see this", which reads as the command having been
+            // taken. Reported by somebody who set a goal that was never set.
+            //
+            // It runs now, and it is still queued, so nothing is lost: the
+            // setting takes effect at once and the turn hears about it at its
+            // next step, which is the soonest anything can reach a model whose
+            // request has already been sent.
+            match slash(&prompt) {
+                Some(command) => match while_running(command) {
+                    Some(why) => {
+                        self.chat.push("stat", &format!("  not while a turn is running: {why}"));
+                        self.chat.scroll = 0;
+                        return;
+                    }
+                    None => {
+                        self.command(command);
+                        self.shared.interjections.say(&prompt);
+                        self.chat.push("stat", "  (done · the turn hears it at its next step)");
+                    }
+                },
+                None => {
+                    self.shared.interjections.say(&prompt);
+                    self.chat.push("stat", "  (the turn will see this at its next step)");
+                }
+            }
             self.chat.scroll = 0;
             return;
         }
@@ -2249,9 +2275,7 @@ impl App {
             true => rook_core::agent::CARRY_ON.to_string(),
             false => prompt,
         };
-        if let Some(command) =
-            prompt.strip_prefix('/').filter(|c| !c.starts_with("btw ") && !c.contains('\n'))
-        {
+        if let Some(command) = slash(&prompt) {
             self.chat.push("you", &prompt);
             return self.command(command);
         }
@@ -3849,6 +3873,33 @@ fn short_model(spec: &str) -> String {
     }
 }
 
+/// The command in a line, if it is one.
+///
+/// `/btw` is not: it is a turn without tools and goes down the ordinary path.
+/// A line with a newline in it is not either — pasted text that happens to
+/// begin with a path is not a command, and reading it as one answers a paste
+/// with "no such command".
+fn slash(prompt: &str) -> Option<&str> {
+    prompt.strip_prefix('/').filter(|c| !c.starts_with("btw ") && !c.contains('\n'))
+}
+
+/// Why this command cannot run while a turn is running, if it cannot.
+///
+/// Named rather than allow-listed, and the four of them are one thing: each
+/// moves the ground the running turn is standing on. Everything else — the
+/// goal, the stance, the effort, and every command that only reads — is either
+/// what the turn is run under, and better changed now than after it finishes,
+/// or does not touch it at all.
+fn while_running(command: &str) -> Option<&'static str> {
+    match command.split_whitespace().next().unwrap_or_default() {
+        "session" | "new" => {
+            Some("it would move this window to another session, and the turn is in this one")
+        }
+        "undo" | "rewind" => Some("it restores files the turn may be writing · stop the turn first (^c)"),
+        _ => None,
+    }
+}
+
 /// How many rows this paragraph takes once it is wrapped to `width`.
 ///
 /// The count a scroll has to be in. `Paragraph::scroll` moves by rendered rows
@@ -3891,6 +3942,46 @@ fn kind_style(kind: &str) -> Style {
 
 #[cfg(test)]
 mod tests {
+
+    /// A command typed while a turn runs is a command, not a sentence.
+    ///
+    /// It was queued as its own text and nothing else, so `/goal …` set no
+    /// goal: the line went to the model as a sentence beginning with a slash,
+    /// while the window answered "the turn will see this", which reads as the
+    /// command having been taken. Reported by somebody who set a goal that was
+    /// never set.
+    #[test]
+    fn a_slash_command_is_told_from_a_sentence_and_from_a_paste() {
+        assert_eq!(super::slash("/goal ship the prototype"), Some("goal ship the prototype"));
+        assert_eq!(super::slash("/context"), Some("context"));
+        // Not a command: a turn without tools, which goes the ordinary way.
+        assert_eq!(super::slash("/btw what is the port"), None);
+        // Not a command: a paste that happens to begin with a path. Reading it
+        // as one answers a paste with "no such command".
+        assert_eq!(
+            super::slash(
+                "/etc/hosts
+and the next line"
+            ),
+            None
+        );
+        assert_eq!(super::slash("just a sentence"), None);
+    }
+
+    /// The few that cannot run while a turn is running, and why.
+    ///
+    /// Named rather than allow-listed: each moves the ground the turn is
+    /// standing on. Everything else is either what the turn is run under —
+    /// better changed now than after it finishes — or does not touch it.
+    #[test]
+    fn what_cannot_run_under_a_turn_is_what_would_move_it() {
+        for refused in ["session 01ABC", "new", "undo", "rewind"] {
+            assert!(super::while_running(refused).is_some(), "{refused} moves the turn");
+        }
+        for allowed in ["goal ship it", "stance autonomous", "effort high", "context", "jobs", "diff"] {
+            assert!(super::while_running(allowed).is_none(), "{allowed} is safe under a turn");
+        }
+    }
 
     /// The chat pane measures itself in rows, not in lines.
     ///
