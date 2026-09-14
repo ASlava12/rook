@@ -613,7 +613,14 @@ async fn a_timeout_takes_the_grandchild_the_shell_detached_and_not_only_the_shel
         serde_json::json!({
             "command": "start /b ping -n 771771 127.0.0.1 > held-open-by-the-grandchild.txt & \
                         ping -n 771771 127.0.0.1",
-            "timeout_secs": 2
+            // Room for `cmd` to start a grandchild before the clock takes it,
+            // not a measurement of anything: what is claimed below is that the
+            // grandchild dies, and it cannot die if it never ran. Two seconds
+            // was enough on a machine with twenty-four cores and is a race on a
+            // runner with two — and a precondition lost to that race reads as a
+            // product failure, which is the shape of the three CI failures
+            // CLAUDE.md already records.
+            "timeout_secs": 15
         }),
     )
     .await;
