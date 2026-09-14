@@ -411,6 +411,17 @@ async fn prompt(
                     &format!("  {call}: {said}\n"),
                     &part(1),
                 ),
+                // What the person said while it ran, at the moment it is taken
+                // up. Until now a message typed mid-turn was queued with no end
+                // to the wait in sight.
+                Progress::Heard { text } => protocol::agent_thought_chunk(
+                    &request.session_id,
+                    &format!(
+                        "  ✓ taken up: {text}
+"
+                    ),
+                    &part(1),
+                ),
                 Progress::ToolDone { failed, .. } => protocol::tool_call_done(
                     &request.session_id,
                     &format!("call_{}", finished.fetch_add(1, Ordering::Relaxed)),

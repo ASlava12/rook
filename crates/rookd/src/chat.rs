@@ -682,6 +682,8 @@ fn as_event(progress: Progress<'_>, workspace: &std::path::Path) -> Option<ChatE
         Progress::Working { call, said } => {
             ChatEvent::ToolWorking { name: call.to_string(), said: said.to_string() }
         }
+        // What the person said while it ran, at the moment it is taken up.
+        Progress::Heard { text } => ChatEvent::Agent { text: format!("  ✓ taken up: {text}") },
         Progress::ToolDone { name, failed } => ChatEvent::ToolDone { name: name.to_string(), failed },
         Progress::Step { at, of } => ChatEvent::Step { at, of },
         Progress::Spent { input, output, cached } => {

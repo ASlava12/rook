@@ -258,6 +258,13 @@ enum TurnEvent {
         said: String,
     },
     ToolDone(String, bool),
+    /// Something typed while the turn ran, at the moment the turn took it up.
+    ///
+    /// The window said "the turn will see this at its next step" and then said
+    /// nothing more, so the person was left watching a queue with no visible
+    /// end: a request already sent cannot be added to, and how long that step
+    /// has left is not something this side knows. This is the end of that wait.
+    Heard(String),
     /// A sub-agent's progress. Its own kind rather than more reasoning: work
     /// happening in another agent is not the model thinking out loud, and it
     /// was drawn in the same grey as the thoughts it was buried in.
@@ -814,6 +821,32 @@ impl Chat {
     /// token as well, and unmerged it rendered a word to a line with a blank
     /// line between — a page of `I` / `'ll` / `just` / `do`, which is what a
     /// model thinking out loud looked like in the terminal.
+    /// What the window says under a line typed while a turn is running, and
+    /// what it says once the turn has taken that line up.
+    ///
+    /// Two states rather than one, because the first is a promise and the
+    /// second is the news: a message typed mid-turn cannot reach a request that
+    /// has already been sent, so it waits for the next step — and how long that
+    /// is, this side has no way to know. Saying only "the turn will see this"
+    /// left a queue with no visible end.
+    const QUEUED: &'static str = "  (the turn will see this at its next step)";
+    const RAN: &'static str = "  (done · the turn hears it at its next step)";
+    const TAKEN: &'static str = "  ✓ taken up";
+
+    /// Mark the oldest line still waiting as taken up.
+    ///
+    /// Oldest first, because the turn takes them in the order they were said,
+    /// so the ticks land on the same lines the queue emptied.
+    fn taken_up(&mut self, _text: &str) {
+        let waiting = self
+            .log
+            .iter_mut()
+            .find(|(kind, body)| *kind == "stat" && (body == Self::QUEUED || body == Self::RAN));
+        if let Some((_, body)) = waiting {
+            *body = Self::TAKEN.to_string();
+        }
+    }
+
     fn push(&mut self, kind: &'static str, text: &str) {
         let streams = matches!(kind, "text" | "think");
         match self.log.last_mut() {
@@ -1399,6 +1432,7 @@ impl App {
                 TurnEvent::Tool { name, said } => self.chat.tool_started(&name, &said),
                 TurnEvent::Agent(line) => self.chat.push("agent", &line),
                 TurnEvent::Working(said) => self.chat.working = Some(said),
+                TurnEvent::Heard(text) => self.chat.taken_up(&text),
                 TurnEvent::Step(at, of) => self.chat.step = Some((at, of)),
                 TurnEvent::ToolDone(name, failed) => self.chat.tool_done(&name, failed),
                 TurnEvent::Spent { input, output, cached } => {
@@ -2251,12 +2285,12 @@ impl App {
                     None => {
                         self.command(command);
                         self.shared.interjections.say(&prompt);
-                        self.chat.push("stat", "  (done · the turn hears it at its next step)");
+                        self.chat.push("stat", Chat::RAN);
                     }
                 },
                 None => {
                     self.shared.interjections.say(&prompt);
-                    self.chat.push("stat", "  (the turn will see this at its next step)");
+                    self.chat.push("stat", Chat::QUEUED);
                 }
             }
             self.chat.scroll = 0;
@@ -2367,6 +2401,7 @@ impl App {
                             TurnEvent::Agent(format!("    {}", rook_core::calls::delegating(at, doing)))
                         }
                         Progress::Working { said, .. } => TurnEvent::Working(said.to_string()),
+                        Progress::Heard { text } => TurnEvent::Heard(text.to_string()),
                         Progress::Step { at, of } => TurnEvent::Step(at, of),
                         Progress::ToolDone { name, failed } => TurnEvent::ToolDone(name.to_string(), failed),
                         Progress::Spent { input, output, cached } => {
@@ -3942,6 +3977,37 @@ fn kind_style(kind: &str) -> Style {
 
 #[cfg(test)]
 mod tests {
+
+    /// A line typed while a turn runs is marked when the turn takes it up.
+    ///
+    /// The window promised "the turn will see this at its next step" and then
+    /// said nothing more, so the person was left watching a queue with no
+    /// visible end — and there is a real wait there, because a request that has
+    /// already been sent cannot be added to.
+    #[test]
+    fn a_line_said_during_a_turn_is_ticked_when_the_turn_takes_it_up() {
+        let mut chat = super::Chat::default();
+        chat.push("you", "/goal ship the prototype");
+        chat.push("stat", super::Chat::RAN);
+        chat.push("you", "and hurry");
+        chat.push("stat", super::Chat::QUEUED);
+
+        // Oldest first, because the turn takes them in the order they were
+        // said, so the ticks land on the lines the queue emptied.
+        chat.taken_up("/goal ship the prototype");
+        let marks: Vec<&str> =
+            chat.log.iter().filter(|(k, _)| *k == "stat").map(|(_, b)| b.as_str()).collect();
+        assert_eq!(marks, vec![super::Chat::TAKEN, super::Chat::QUEUED], "the first one only");
+
+        chat.taken_up("and hurry");
+        let marks: Vec<&str> =
+            chat.log.iter().filter(|(k, _)| *k == "stat").map(|(_, b)| b.as_str()).collect();
+        assert_eq!(marks, vec![super::Chat::TAKEN, super::Chat::TAKEN], "and then the second");
+
+        // Nothing left waiting, and nothing else is disturbed.
+        chat.taken_up("a third nobody queued");
+        assert_eq!(chat.log.iter().filter(|(k, _)| *k == "you").count(), 2, "the messages are untouched");
+    }
 
     /// A command typed while a turn runs is a command, not a sentence.
     ///

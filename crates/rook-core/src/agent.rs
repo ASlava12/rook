@@ -520,6 +520,18 @@ pub enum Progress<'a> {
         output: u32,
         cached: u32,
     },
+    /// Something the person said while the turn ran, at the moment the turn
+    /// takes it up.
+    ///
+    /// Said once it is in the request rather than when it was typed, because
+    /// those are different moments and only the second one is news. A window
+    /// that says "the turn will see this" and never says more leaves the person
+    /// watching a queue they cannot see the end of — and a model's request is
+    /// already sent when they type, so the wait is real and worth marking the
+    /// end of.
+    Heard {
+        text: &'a str,
+    },
 }
 
 /// Answer a tool call the log never answered.
@@ -1963,6 +1975,7 @@ impl<'a> AgentLoop<'a> {
             // steerable instead of only stoppable.
             for said in self.interjections.take() {
                 self.rook.log(self.session, EventKind::UserMessage, "while running", &said).ok();
+                on_progress(Progress::Heard { text: &said });
                 messages.push(Message::user(&said));
             }
 
@@ -2350,6 +2363,7 @@ impl<'a> AgentLoop<'a> {
                 messages.push(carried.clone());
                 for text in said {
                     self.rook.log(self.session, EventKind::UserMessage, "while running", &text).ok();
+                    on_progress(Progress::Heard { text: &text });
                     messages.push(Message::user(&text));
                 }
                 continue;
