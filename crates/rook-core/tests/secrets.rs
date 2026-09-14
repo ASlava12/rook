@@ -198,7 +198,12 @@ async fn a_command_naming_a_secret_nobody_set_is_refused_before_it_runs() {
         seen.lock().unwrap().iter().flat_map(|r| r.messages.clone()).map(|m| m.content).collect();
     assert!(handed.contains("no secret"), "it says which:\n{handed}");
     assert!(handed.contains("rook secrets ls"), "and where to look:\n{handed}");
-    assert!(!handed.contains("hello"), "and the command did not run:\n{handed}");
+    // What a command that ran leaves, rather than a word out of its own text.
+    // `hello` was the test for this and stopped being one when the goal check
+    // began to be shown the turn's own record: the call is in that record, so
+    // the word is there whether or not anything ran. `exit ` is the first line
+    // of every result `run_command` returns and appears nowhere else.
+    assert!(!handed.contains("exit 0"), "and the command did not run:\n{handed}");
 }
 
 #[test]

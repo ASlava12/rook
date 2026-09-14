@@ -741,6 +741,11 @@ pub struct AgentLoop<'a> {
     pub summariser: Option<std::sync::Arc<dyn Provider>>,
     /// What the `session_start` hooks contributed, computed once.
     session_context: std::sync::Mutex<Option<String>>,
+    /// Where this turn's events begin, so what the goal check is shown is this
+    /// turn and not the session. Set when the prompt is logged; zero until
+    /// then, which is a whole session and is what a loop that has not run yet
+    /// should say.
+    began_at_seq: u64,
     /// A language server being fetched while the turn runs. It is a minute of
     /// npm or a release download, it serves from the next session on, and it
     /// used to be paid for before the first request — a person's first turn in
@@ -859,6 +864,7 @@ impl<'a> AgentLoop<'a> {
             servers,
             summariser: None,
             session_context: std::sync::Mutex::new(None),
+            began_at_seq: 0,
             problems_before: Default::default(),
             installing: Default::default(),
             wrote_paths: Default::default(),
@@ -1860,6 +1866,10 @@ impl<'a> AgentLoop<'a> {
             return Err(CoreError::Other(format!("the turn was refused before it began: {why}")));
         }
 
+        // Before the prompt is logged, so this turn's span starts at the prompt
+        // itself and carries no part of an earlier one.
+        self.began_at_seq =
+            self.rook.store.get_session(self.session).ok().flatten().map(|m| m.next_seq).unwrap_or(0);
         self.rook.log(self.session, EventKind::UserMessage, "", prompt)?;
         // From here until the turn ends, this session is marked as having one in
         // flight. Only the turn a person asked for: a sub-agent's session ends
@@ -3308,9 +3318,59 @@ impl<'a> AgentLoop<'a> {
              is the goal met now, and was anything the person asked not to do done anyway? \
              `holds` means both are as they should be. `fails` means the goal is not met, or \
              something the person forbade was done — say which, and what would put it right. \
-             Whether the task was worth doing is not one of the questions."
+             Whether the task was worth doing is not one of the questions.{}",
+            self.what_happened()
         );
         self.check(&claim, "", outcome, on_progress).await
+    }
+
+    /// This turn, compressed, for the checker to read beside the workspace.
+    ///
+    /// It had only the end state, and that is not enough to tell work from a
+    /// world bent to fit the claim. The smoke job showed both halves of it in
+    /// one run. An agent asked to check a claim was told by `verify` that the
+    /// claim was false — and that editing what was checked answers a different
+    /// question — then edited the file until it passed, and the goal check read
+    /// the mended file and said `holds`. Another agent never answered its
+    /// question at all, left no file to look at, and was told the goal was met.
+    /// Three failing scenarios, three verdicts of `holds`, two of them word for
+    /// word the same sentence.
+    ///
+    /// What the disk cannot hold is the order things happened in: `verify:
+    /// fails` followed by an edit to the file it judged is the whole of that
+    /// finding, and it is one line of history. So the history goes in, and the
+    /// framing with it — this is what happened, the disk is still what says
+    /// whether the goal is met, and a tool's result is the tool's word rather
+    /// than the agent's.
+    ///
+    /// Bounded, and by the same function compaction uses to fit a span into a
+    /// request: newest first, and what will not fit is said to have been
+    /// elided rather than dropped silently.
+    fn what_happened(&self) -> String {
+        /// Enough for the shape of a turn — the calls, their arguments, what
+        /// came back — and not so much that the check costs more than the turn.
+        /// A step is a few hundred tokens, so this is tens of steps.
+        const BUDGET_TOKENS: usize = 6_000;
+        /// Per entry, before the budget above is applied. A tool result of a
+        /// megabyte is a turn nobody can read either.
+        const PER_ENTRY_BYTES: usize = 2_000;
+
+        let Ok(entries) = self.rook.transcript(self.session, self.began_at_seq, usize::MAX, PER_ENTRY_BYTES)
+        else {
+            return String::new();
+        };
+        let span = render_span(&entries, BUDGET_TOKENS);
+        if span.trim().is_empty() {
+            return String::new();
+        }
+        format!(
+            "\n\nThis is what the turn did, in order. It is evidence of how the workspace came \
+             to be as it is, not of whether the goal is met — that is still what is on disk and \
+             what runs. Read it for the question the disk cannot answer: whether the agent \
+             reached the goal or moved it. A tool's result is that tool's word and not the \
+             agent's; the agent's own sentences are its account of itself and carry no weight \
+             beyond what they can be checked against.\n\n{span}"
+        )
     }
 
     async fn run_checker(

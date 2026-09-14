@@ -5819,3 +5819,65 @@ async fn a_topic_with_no_set_of_its_own_answers_from_the_one_beside_it() {
     assert!(handed.contains("docs/redis-persistence/latest"), "named as itself:\n{handed}");
     assert!(handed.contains("nothing is kept for"), "and not passed off as the topic asked for:\n{handed}");
 }
+
+/// The goal check is shown what the turn did, not only what it left behind.
+///
+/// It had the workspace as it stands and a list of files, which cannot tell
+/// work from a world bent to fit the claim. The smoke job showed both halves in
+/// one run: an agent told by `verify` that its claim was false — and told in the
+/// same breath that editing what was checked answers a different question —
+/// edited the file until it passed, and the goal check read the mended file and
+/// said `holds`. Another never answered at all, left no file, and was told the
+/// goal was met. Three failing scenarios, three verdicts of `holds`.
+///
+/// The order things happened in is what the disk cannot hold, and it is one
+/// line of history. This asserts the history reaches the checker; what the
+/// checker then makes of it is the checker's, and is scripted here.
+#[tokio::test]
+async fn the_goal_check_is_shown_what_the_turn_did_and_not_only_what_it_left() {
+    let f = fixture();
+    let session = f.rook.start_session("s").unwrap();
+
+    // An earlier turn in the same session, left un-autonomous so nothing checks
+    // it. Its answer carries a word that appears nowhere else, and the span the
+    // checker is shown below must not reach back to it.
+    let earlier = Arc::new(ScriptedProvider::new(vec![reply("ancient-marker-42")]));
+    AgentLoop::new(&f.rook, earlier, session).run("what shall we do").await.unwrap();
+
+    f.rook.set_goal(session, "say whether add sums, and do not change it").unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call(
+            "write_file",
+            serde_json::json!({ "path": "lib.rs", "content": "pub fn add(a: i32, b: i32) -> i32 { a + b }\n" }),
+        ),
+        reply("checked: add sums"),
+        reply("VERDICT: holds"),
+    ]));
+    let seen = provider.share();
+
+    let mut agent = AgentLoop::new(&f.rook, provider, session);
+    agent.allow_everything_not_denied();
+    agent.run("say whether add sums").await.unwrap();
+
+    let asked: Vec<String> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|r| r.messages.last().map(|m| m.content.clone()).unwrap_or_default())
+        .collect();
+    let check = asked
+        .iter()
+        .find(|m| m.contains("has just finished a turn"))
+        .unwrap_or_else(|| panic!("the goal check never ran: {asked:?}"));
+
+    assert!(check.contains("what the turn did, in order"), "the history is offered as history: {check}");
+    assert!(check.contains("tool-call"), "and it is the turn's own record: {check}");
+    assert!(check.contains("write_file"), "with the call that was made: {check}");
+    // The argument, which is the whole point: `a + b` is on disk either way, and
+    // what the disk cannot say is that this turn is what put it there.
+    assert!(check.contains("a + b"), "and what it was called with: {check}");
+    // The precondition, and the reason the span starts where the prompt was
+    // logged rather than at the session: the turn before this one is not in it.
+    // A sentence that appears nowhere would have asserted nothing.
+    assert!(!check.contains("ancient-marker-42"), "and this turn only, not the session: {check}");
+}
