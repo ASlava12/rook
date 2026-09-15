@@ -537,7 +537,7 @@ impl Api {
 ///
 /// The environment fills this in for the provider names [`from_spec_with`]
 /// knows; a `[models]` table in the configuration fills it in directly. Both
-/// go through [`from_endpoint_with`], so a configured endpoint and one
+/// go through [`from_endpoints_with`], so a configured endpoint and one
 /// assembled from variables are the same thing to everything past this point.
 /// That is the whole reason this type exists rather than a second builder: two
 /// ways to make a provider is two places for the retry wrapper, the proxy
@@ -560,6 +560,9 @@ pub struct Endpoint {
     /// turn, sub-agent and compaction in the process. `None` is no limit, which
     /// is what the `provider/model` spelling has always had and keeps.
     pub parallel: Option<usize>,
+    /// Send the key over plain http to this endpoint even though it is not on
+    /// this machine. Only as far as this network — see [`in_the_clear`].
+    pub key_in_the_clear: bool,
 }
 
 /// Build a provider for several endpoints in preference order.
@@ -581,7 +584,15 @@ pub fn from_endpoints_with(
     for (at, endpoint) in endpoints.into_iter().enumerate() {
         let name = endpoint.name.clone();
         match endpoint_provider(endpoint, stream_idle) {
-            Ok(provider) => built.push(provider),
+            // Each candidate carries its own retries, so "later" is answered
+            // where it was said: a 429 from the preferred endpoint is waited
+            // out there, rather than becoming a reason to use a worse model,
+            // and only an endpoint that has spent its attempts hands over.
+            //
+            // Outside the failover it did the opposite. It retried the whole
+            // selection, so a 503 from the preferred endpoint was asked of the
+            // preferred endpoint four more times and of the next one never.
+            Ok(provider) => built.push(Box::new(retry::Retrying::new(provider))),
             Err(why) if at == 0 => return Err(why),
             Err(why) => tracing::warn!("{name} cannot be built, so it is not a fallback: {why}"),
         }
@@ -597,10 +608,7 @@ pub fn from_endpoints_with(
         },
         _ => Box::new(failover::Failover::new(built)),
     };
-    // Outside the failover rather than inside: a 429 means "ask this endpoint
-    // again", not "ask a different one", and retrying within each candidate
-    // would spend four tries on a rate limit before looking at the next.
-    Ok(Box::new(retry::Retrying::new(provider)))
+    Ok(provider)
 }
 
 /// The endpoint a `provider/model` spec names, so that a spec and a configured
@@ -609,17 +617,9 @@ pub fn endpoint_from_spec(spec: &str, context_window: Option<usize>) -> Result<E
     from_environment(spec, context_window)
 }
 
-/// Build a provider for an endpoint that is already fully described.
-///
-/// Wrapped in [`retry::Retrying`] for the reason [`from_spec_with`] is: a rate
-/// limit or an overloaded endpoint is waited out rather than ending the turn.
-pub fn from_endpoint_with(endpoint: Endpoint, stream_idle: std::time::Duration) -> Result<Box<dyn Provider>> {
-    Ok(Box::new(retry::Retrying::new(endpoint_provider(endpoint, stream_idle)?)))
-}
-
 fn endpoint_provider(endpoint: Endpoint, stream_idle: std::time::Duration) -> Result<Box<dyn Provider>> {
-    let Endpoint { name, api, url, key, model, context_window, parallel } = endpoint;
-    in_the_clear(&url, key.as_deref())?;
+    let Endpoint { name, api, url, key, model, context_window, parallel, key_in_the_clear } = endpoint;
+    in_the_clear(&url, key.as_deref(), key_in_the_clear)?;
     let built: Box<dyn Provider> = match api {
         Api::Anthropic => {
             let mut config = anthropic::Config::new(url, key.unwrap_or_default(), &model);
@@ -686,7 +686,7 @@ pub fn from_spec_with(
 ///
 /// Traced from goose's "require HTTPS for Snowflake" — see
 /// [references/PORTED.md](../../../references/PORTED.md).
-fn in_the_clear(base: &str, key: Option<&str>) -> Result<()> {
+fn in_the_clear(base: &str, key: Option<&str>, permitted: bool) -> Result<()> {
     if key.is_none() || !base.trim().to_ascii_lowercase().starts_with("http://") {
         return Ok(());
     }
@@ -698,10 +698,38 @@ fn in_the_clear(base: &str, key: Option<&str>) -> Result<()> {
     if local {
         return Ok(());
     }
-    Err(LlmError::Other(format!(
-        "{base} is http and an API key is set, so the key would cross the network in clear text. \
-         Use https, or unset the key if {host} does not need one."
-    )))
+    // The one way past this, and only as far as our own network.
+    //
+    // Refusing outright reads as the safe answer and is not always: the endpoint
+    // is usually on the same network the key would cross, so somebody able to
+    // listen to that network can talk to the endpoint directly and the key
+    // protects nothing against them. What the refusal then achieves is to push
+    // people into turning the endpoint's own key off, which leaves it open to
+    // everyone rather than to eavesdroppers — a rule that makes things worse by
+    // firing is a rule with an escape hatch missing.
+    //
+    // The hatch stops at the network's edge. Whether a private address is a
+    // model on the next desk or a proxy forwarding to a paid API with a key
+    // worth stealing is not something this can tell, so it is a decision to be
+    // written down per endpoint; a key crossing the public internet in clear
+    // text is not a decision anybody should be offered.
+    if permitted && beside_us(base) {
+        tracing::warn!("sending an API key to {host} over plain http, because the source says so");
+        return Ok(());
+    }
+    Err(LlmError::Other(match permitted {
+        true => format!(
+            "{base} is http and an API key is set. `key_in_the_clear` reaches this machine and \
+             this network, and {host} is on neither — so the key would cross the internet in \
+             clear text. Use https."
+        ),
+        false => format!(
+            "{base} is http and an API key is set, so the key would cross the network in clear \
+             text. Use https, unset the key if {host} does not need one, or — where {host} is on \
+             your own network and you have weighed it — set `key_in_the_clear = true` on this \
+             source."
+        ),
+    }))
 }
 
 /// The host an endpoint names. The brackets an IPv6 host is written in are not
@@ -832,9 +860,11 @@ fn from_environment(spec: &str, context_window: Option<usize>) -> Result<Endpoin
         model: model.to_string(),
         // The override first, because it is the one somebody set on purpose.
         context_window: context_window.or(assumed),
-        // No variable spells this, so there is nothing to read and nothing to
-        // change: a configuration written before `[models]` behaves as it did.
+        // No variable spells either of these, so there is nothing to read and
+        // nothing to change: a configuration written before `[models]` behaves
+        // exactly as it did.
         parallel: None,
+        key_in_the_clear: false,
     })
 }
 
@@ -993,16 +1023,36 @@ mod tests {
     /// request is too late to say so — by then the key has gone.
     #[test]
     fn a_key_is_refused_over_plain_http_to_another_machine() {
-        assert!(in_the_clear("http://127.0.0.1:1234/v1", Some("sk-x")).is_ok(), "loopback is the local case");
-        assert!(in_the_clear("http://localhost:8080/v1", Some("sk-x")).is_ok(), "by name as well");
-        assert!(in_the_clear("http://[::1]:8080/v1", Some("sk-x")).is_ok(), "and in the other family");
-        assert!(in_the_clear("https://gateway.example/v1", Some("sk-x")).is_ok(), "https is what to do");
-        assert!(in_the_clear("http://gateway.example/v1", None).is_ok(), "no key, nothing to leak");
+        assert!(
+            in_the_clear("http://127.0.0.1:1234/v1", Some("sk-x"), false).is_ok(),
+            "loopback is the local case"
+        );
+        assert!(in_the_clear("http://localhost:8080/v1", Some("sk-x"), false).is_ok(), "by name as well");
+        assert!(in_the_clear("http://[::1]:8080/v1", Some("sk-x"), false).is_ok(), "and in the other family");
+        assert!(
+            in_the_clear("https://gateway.example/v1", Some("sk-x"), false).is_ok(),
+            "https is what to do"
+        );
+        assert!(in_the_clear("http://gateway.example/v1", None, false).is_ok(), "no key, nothing to leak");
 
-        let refused = in_the_clear("http://gateway.example/v1", Some("sk-x")).unwrap_err().to_string();
+        let refused = in_the_clear("http://gateway.example/v1", Some("sk-x"), false).unwrap_err().to_string();
         assert!(refused.contains("clear text"), "it says what would happen: {refused}");
         assert!(refused.contains("https"), "and what to do instead: {refused}");
         assert!(refused.contains("gateway.example"), "and to whom: {refused}");
+
+        // The hatch, and where it stops. A key to the machine on the next desk
+        // is a decision somebody can weigh; a key to the public internet in
+        // clear text is not one anybody should be offered.
+        assert!(
+            in_the_clear("http://192.168.1.100:8080/v1", Some("sk-x"), true).is_ok(),
+            "an address on this network, said out loud"
+        );
+        assert!(
+            in_the_clear("http://192.168.1.100:8080/v1", Some("sk-x"), false).is_err(),
+            "and not without saying it"
+        );
+        let too_far = in_the_clear("http://gateway.example/v1", Some("sk-x"), true).unwrap_err();
+        assert!(too_far.to_string().contains("neither"), "the hatch does not reach the internet: {too_far}");
     }
 
     /// The address that started this was `192.168.1.46` — a model two rooms

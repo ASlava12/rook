@@ -123,6 +123,21 @@ pub struct ModelSource {
     /// reachable endpoints and one configuration file, which is the whole of
     /// what this is for.
     pub priority: Option<u32>,
+    /// Send the key to this endpoint over plain http, where it is on this
+    /// network rather than this machine. Off, and it reaches no further than
+    /// this network whatever it is set to.
+    ///
+    /// The refusal it lifts reads as the safe answer and is not always. The
+    /// endpoint is usually on the same network the key would cross, so anybody
+    /// able to listen to that network can talk to the endpoint directly and the
+    /// key protects nothing from them — and what the refusal then achieves is
+    /// to push people into turning the endpoint's own key off, leaving it open
+    /// to everyone rather than to eavesdroppers.
+    ///
+    /// Whether a private address is a model on the next desk or a proxy
+    /// forwarding to a paid API is not something the code can tell, which is
+    /// why this is written down per endpoint rather than assumed.
+    pub key_in_the_clear: bool,
 }
 
 impl Default for Config {

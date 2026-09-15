@@ -368,3 +368,34 @@ fn a_wrapped_context_refusal_is_still_read_as_one() {
     };
     assert!(rook_llm::retry::names_the_context(&wrapped), "a compaction is the answer to this");
 }
+
+/// An empty wallet is *no* wearing the clothes of *later*. OpenAI answers 429,
+/// which is the rate limiter's status and is waited out by default — so four
+/// attempts and seven seconds were spent discovering that the account still had
+/// no money, before an error that nothing about waiting could have helped.
+#[tokio::test]
+async fn an_account_out_of_credit_is_not_waited_out() {
+    let (url, seen) = always("429 Too Many Requests", r#"{"error":{"code":"insufficient_quota"}}"#).await;
+
+    let refused = provider(url).complete(Request::new(Vec::new())).await.unwrap_err();
+
+    assert_eq!(seen.load(Ordering::SeqCst), 1, "waiting cannot add money");
+    assert!(refused.to_string().contains("insufficient_quota"), "and it says why: {refused}");
+}
+
+/// The other spelling of it, which arrives as a 400 the retry already declines
+/// to repeat — asserted so that the two stay told apart by what they say rather
+/// than by which of the rules happens to catch them.
+#[tokio::test]
+async fn the_other_spelling_of_an_empty_wallet_is_not_waited_out_either() {
+    let (url, seen) = always(
+        "400 Bad Request",
+        r#"{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API."}"#,
+    )
+    .await;
+
+    let refused = provider(url).complete(Request::new(Vec::new())).await.unwrap_err();
+
+    assert_eq!(seen.load(Ordering::SeqCst), 1);
+    assert!(refused.to_string().contains("credit balance"), "{refused}");
+}

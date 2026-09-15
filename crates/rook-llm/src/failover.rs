@@ -13,12 +13,15 @@
 //! candidate is asked, and where the answer is that there is nothing there, the
 //! next one is.
 //!
-//! Only that answer. A 401 or a 400 is a configuration that is wrong, and
-//! moving to another endpoint on one of those hides it — where the next
-//! endpoint is somebody's paid gateway, expensively. `NeverAnswered` is left
-//! out for the opposite reason: its own message says the server may be loading
-//! a model, and a local server loading ninety gigabytes is the case this whole
-//! feature is for, not a case to route around.
+//! What counts is one thing said four ways: this endpoint cannot serve this
+//! request. It could not be reached; it has no money left; it is overloaded or
+//! broken and has already spent its retries; or it took the connection and
+//! then said nothing at all, which is what a hung API looks like from here.
+//!
+//! And not a request that is wrong. A 400, a 401, a model that is not there —
+//! those answer the same from every endpoint, and moving to the next hides the
+//! message that says what to fix. Where the next one is a paid gateway, it
+//! hides it expensively.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -69,6 +72,32 @@ fn note_answering(name: &str) {
     }
 }
 
+/// Whether this answer means to ask somebody else.
+///
+/// The statuses are the same list the retry wrapper waits out, and that is not
+/// a coincidence: each candidate carries its own retries, so an error reaching
+/// here has already been given its chances on the endpoint that gave it. An
+/// empty wallet skips the waiting entirely — there is nothing for a backoff to
+/// wait for — which is why it is asked about before the status is looked at,
+/// and why it has to be: Anthropic sends it as a 400 that every other rule
+/// would read as a request that is wrong.
+fn somewhere_else(error: &LlmError) -> bool {
+    match error {
+        LlmError::Unreachable { .. } => true,
+        // It accepted the connection and then said nothing for the whole
+        // patience, which already allows for the size of the prompt. A local
+        // server loading a large model looks like this too and is put out for
+        // only a minute, by which time it has loaded.
+        LlmError::NeverAnswered { .. } => true,
+        _ if crate::retry::out_of_credit(error) => true,
+        LlmError::Status { status, .. } => {
+            matches!(status, 408 | 429 | 500 | 502 | 503 | 504 | 529)
+                && !crate::retry::names_a_wrong_request(error)
+        }
+        _ => false,
+    }
+}
+
 /// Several endpoints in preference order, of which the first that answers is
 /// used.
 pub(crate) struct Failover {
@@ -109,13 +138,12 @@ macro_rules! first_that_answers {
                     note_answering($provider.id());
                     return Ok(answer);
                 }
-                // The only failure that means "ask somebody else". Everything
-                // else is this endpoint's answer, and it is the answer.
-                Err(LlmError::Unreachable { endpoint, detail }) => {
-                    note_missing($provider.id(), &detail);
-                    refused.push(format!("{} ({endpoint}): {detail}", $provider.id()));
+                Err(why) if somewhere_else(&why) => {
+                    note_missing($provider.id(), &why.to_string());
+                    refused.push(format!("{}: {why}", $provider.id()));
                 }
-                Err(other) => return Err(other),
+                // This endpoint's answer, and it is the answer.
+                Err(theirs) => return Err(theirs),
             }
         }
         Err(LlmError::Other(format!(
@@ -189,11 +217,29 @@ mod tests {
     use super::*;
     use crate::{Message, StopReason, Usage};
 
+    /// The shapes of refusal that matter, spelled as the providers spell them.
     enum Says {
         Answer,
         Unreachable,
-        Refused,
+        Status(u16, &'static str),
+        Silent,
     }
+
+    const REFUSED: Says = Says::Status(401, r#"{"error":{"type":"invalid_api_key"}}"#);
+    /// OpenAI's empty wallet: a code, and a status the retry wrapper would
+    /// otherwise wait out.
+    const NO_QUOTA: Says = Says::Status(429, r#"{"error":{"code":"insufficient_quota"}}"#);
+    /// Anthropic's, which every other rule here reads as a request that is
+    /// wrong: the type is `invalid_request_error` and the reason is prose.
+    const NO_CREDIT: Says = Says::Status(
+        400,
+        r#"{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API."}"#,
+    );
+    const OVERLOADED: Says = Says::Status(503, r#"{"type":"overloaded_error"}"#);
+    /// A request that is wrong, in the same envelope as the empty wallet above,
+    /// so the two are told apart by what they say and not by their shape.
+    const TOO_LARGE: Says =
+        Says::Status(400, r#"{"type":"invalid_request_error","message":"max_tokens is too large"}"#);
 
     struct Fake {
         id: String,
@@ -225,9 +271,10 @@ mod tests {
                     endpoint: format!("http://{}", self.id),
                     detail: "connection refused".into(),
                 }),
-                Says::Refused => {
-                    Err(LlmError::Status { status: 401, body: "invalid_api_key".into(), retry_after: None })
+                Says::Status(status, body) => {
+                    Err(LlmError::Status { status, body: body.into(), retry_after: None })
                 }
+                Says::Silent => Err(LlmError::NeverAnswered { secs: 90, tokens: 4_000 }),
             }
         }
     }
@@ -247,23 +294,47 @@ mod tests {
         runtime.block_on(over.complete(Request::new(vec![])))
     }
 
-    #[test]
-    fn an_endpoint_that_cannot_be_reached_hands_over_to_the_next() {
-        let (gone, _) = saying("gone", Says::Unreachable);
-        let (here, _) = saying("here", Says::Answer);
-        let here_id = here.id().to_string();
-
-        let answered = asking(&Failover::new(vec![gone, here])).expect("the second answered");
-
-        assert_eq!(answered.model, here_id);
+    /// Whether the first endpoint's answer sent the request on to the second.
+    fn handed_over(first: Says) -> bool {
+        let (refusing, _) = saying("first", first);
+        let (second, reached) = saying("second", Says::Answer);
+        let _ = asking(&Failover::new(vec![refusing, second]));
+        reached.load(Ordering::Relaxed) == 1
     }
 
-    /// The one that matters. A wrong key is a configuration that is wrong, and
-    /// moving to the next endpoint on it hides that — where the next endpoint
-    /// is a paid gateway, expensively.
+    #[test]
+    fn an_endpoint_that_cannot_be_reached_hands_over_to_the_next() {
+        assert!(handed_over(Says::Unreachable));
+    }
+
+    /// Both spellings of it. Asking again does not add money, and another
+    /// endpoint may have some — but Anthropic says so in a 400 whose type is
+    /// `invalid_request_error`, which every other rule here reads as a request
+    /// that is wrong and refuses to move on from.
+    #[test]
+    fn an_endpoint_with_no_money_left_hands_over_however_it_says_so() {
+        assert!(handed_over(NO_QUOTA), "the code OpenAI sends");
+        assert!(handed_over(NO_CREDIT), "the sentence Anthropic sends");
+    }
+
+    #[test]
+    fn an_overloaded_endpoint_hands_over_once_it_has_spent_its_attempts() {
+        assert!(handed_over(OVERLOADED));
+    }
+
+    /// It took the connection and then said nothing for the whole patience,
+    /// which already allowed for the size of the prompt. That is a hung API.
+    #[test]
+    fn an_endpoint_that_answers_with_silence_hands_over() {
+        assert!(handed_over(Says::Silent));
+    }
+
+    /// The one that matters most. A wrong key is a configuration that is wrong,
+    /// and moving to the next endpoint on it hides that — where the next
+    /// endpoint is a paid gateway, expensively.
     #[test]
     fn a_key_that_is_wrong_is_the_answer_rather_than_a_reason_to_try_elsewhere() {
-        let (refusing, _) = saying("refusing", Says::Refused);
+        let (refusing, _) = saying("refusing", REFUSED);
         let (here, asked) = saying("here", Says::Answer);
 
         let why = asking(&Failover::new(vec![refusing, here])).unwrap_err();
@@ -272,11 +343,18 @@ mod tests {
         assert_eq!(asked.load(Ordering::Relaxed), 0, "the second endpoint was never asked");
     }
 
+    /// And the same envelope as an empty wallet, to show the two are told apart
+    /// by what they say rather than by their shape.
+    #[test]
+    fn a_request_that_is_wrong_is_wrong_at_every_endpoint() {
+        assert!(!handed_over(TOO_LARGE));
+    }
+
     #[test]
     fn with_nothing_answering_the_error_names_every_endpoint_tried() {
         let (first, _) = saying("gone", Says::Unreachable);
         let (second, _) = saying("also-gone", Says::Unreachable);
-        let (names, _) = (vec![first.id().to_string(), second.id().to_string()], ());
+        let names = [first.id().to_string(), second.id().to_string()];
 
         let why = asking(&Failover::new(vec![first, second])).unwrap_err().to_string();
 

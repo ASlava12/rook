@@ -41,6 +41,34 @@ const FIRST_WAIT: Duration = Duration::from_secs(1);
 fn worth_asking_again(error: &LlmError) -> bool {
     matches!(error, LlmError::Status { status, .. } if matches!(status, 408 | 429 | 500 | 502 | 503 | 504 | 529))
         && !names_a_wrong_request(error)
+        && !out_of_credit(error)
+}
+
+/// Whether a refusal is an empty wallet.
+///
+/// Its own kind of permanent. Asking again in a second does not add money, so
+/// there is nothing here for the backoff to wait out — and it is not the
+/// request being wrong either, so a different endpoint may well answer it.
+/// Both of those matter, which is why this is one question with one answer
+/// rather than a condition written twice.
+///
+/// There is no single thing to look for, because the two providers do not
+/// agree. OpenAI sends `insufficient_quota`, which is a code and is matched as
+/// one. Anthropic sends `invalid_request_error` and puts the reason only in the
+/// message, so that one is matched on the sentence. Prose, and knowingly:
+/// matching a whole phrase that means exactly one thing is not the mistake of
+/// reading the word "timeout" in a field named `timeout`, and here there is
+/// nothing else to read.
+pub(crate) fn out_of_credit(error: &LlmError) -> bool {
+    let LlmError::Status { status, body, .. } = error else { return false };
+    if *status == 402 {
+        return true;
+    }
+    let said = body.to_ascii_lowercase();
+    ["insufficient_quota", "insufficient_credits", "billing_not_active", "payment_required"]
+        .iter()
+        .any(|code| said.contains(code))
+        || said.contains("credit balance is too low")
 }
 
 /// Whether a refusal carries a code that means *no* rather than *later*.
@@ -51,7 +79,7 @@ fn worth_asking_again(error: &LlmError) -> bool {
 /// would be the mistake openclaw made in the other direction — a message
 /// containing the word "timeout" read as a transient failure when it was a
 /// parameter named `timeout` being rejected.
-fn names_a_wrong_request(error: &LlmError) -> bool {
+pub(crate) fn names_a_wrong_request(error: &LlmError) -> bool {
     let LlmError::Status { body, .. } = error else { return false };
     let said = body.to_ascii_lowercase();
     [

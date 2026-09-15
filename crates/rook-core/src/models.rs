@@ -158,6 +158,7 @@ pub fn endpoint_for(config: &Config, vault: &Vault, name: &str) -> Result<Option
         // nowhere to say it and so has no limit, which is how it has always
         // behaved; a table that can say it defaults to the safe answer.
         parallel: Some(source.parallel.unwrap_or(1)),
+        key_in_the_clear: source.key_in_the_clear,
     }))
 }
 
