@@ -1665,11 +1665,20 @@ impl<'a> AgentLoop<'a> {
                     "required": ["claim"]
                 }),
             });
-            push(ToolSpec {
-                name: DELEGATE.into(),
-                description: "Hand a self-contained sub-task to a fresh agent and get back only its conclusion. Use it when a step would otherwise fill this conversation with detail you do not need to keep — a wide search, a long file survey, an independent verification."
-                    .into(),
-                parameters: json!({
+            // The endpoints are named in the argument they constrain, and not
+            // in the system prompt: the prompt is the front of every request
+            // and prompt caching is a prefix match, so a list that moved with
+            // the configuration would invalidate everything behind it on the
+            // turn somebody edited a file.
+            //
+            // Not in this tool's own description either, which was the first
+            // attempt. Under lazy loading only the first sentence of that is
+            // advertised, so the names were dropped exactly where they would
+            // have been read — and put back in the full schema, which is what
+            // a model fetches before it calls. Here they arrive with the field
+            // and only where the field exists.
+            let endpoints: Vec<&str> = self.rook.config.models.keys().map(String::as_str).collect();
+            let mut delegate_args = json!({
                     "type": "object",
                     "properties": {
                         // A bare `task` is still accepted, and deliberately not
@@ -1708,7 +1717,28 @@ impl<'a> AgentLoop<'a> {
                                             `subagents` to read."
                         }
                     }
-                }),
+            });
+            // Only offered where there is a choice to make. One endpoint, or
+            // none named, and this field is a question with one answer that
+            // costs tokens on every request to ask.
+            if !endpoints.is_empty()
+                && let Some(properties) = delegate_args["properties"].as_object_mut()
+            {
+                properties.insert(
+                    "model".into(),
+                    json!({
+                        "type": "string",
+                        "enum": endpoints,
+                        "description": "Which configured endpoint to run it on. Left out, it \
+                                        goes to whichever has room."
+                    }),
+                );
+            }
+            push(ToolSpec {
+                name: DELEGATE.into(),
+                description: "Hand a self-contained sub-task to a fresh agent and get back only its conclusion. Use it when a step would otherwise fill this conversation with detail you do not need to keep — a wide search, a long file survey, an independent verification."
+                    .into(),
+                parameters: delegate_args,
             });
             // Only where there is more to ask for.
             if self.policy.stance() < Stance::Free {
@@ -2952,7 +2982,19 @@ impl<'a> AgentLoop<'a> {
         // for nothing gets what the operator chose, and a bad guess by the
         // model costs speed rather than the answer.
         let careful = args.get("care").and_then(|m| m.as_str()).map(str::trim) == Some("careful");
-        let provider = (!careful).then(|| self.errand_provider());
+        // An endpoint the call named, where the configuration offers a choice.
+        // `careful` still wins: it asks for the turn's own model, which is a
+        // statement about how much judgement the task needs rather than about
+        // which machine is free.
+        let named = args.get("model").and_then(|m| m.as_str()).map(str::trim).filter(|m| !m.is_empty());
+        let provider = match (careful, named) {
+            (true, _) => None,
+            (false, None) => Some(self.errand_provider()),
+            (false, Some(named)) => match self.errand_on(named).await {
+                Ok(chosen) => Some(chosen),
+                Err(why) => return why,
+            },
+        };
         let effort = careful.then_some(self.effort);
         let max_steps = args
             .get("max_steps")
@@ -4272,6 +4314,66 @@ impl AgentLoop<'_> {
     ///
     /// A configured model that cannot be built is not a reason to fail the
     /// compaction: the turn goes on with the model it has, and says so once.
+    /// A sub-task on the endpoint the call asked for by name.
+    ///
+    /// Refused rather than quietly given another: a model that named an
+    /// endpoint and silently got a different one has been told its choice was
+    /// honoured when it was not, and the answer it comes back with is about a
+    /// model nobody thinks it used.
+    ///
+    /// Who decides is the stance, and the line it draws here is the one it
+    /// draws everywhere else. Up to `assist` the person is asked, because
+    /// running this workspace's work through a particular endpoint is a
+    /// decision with a cost — somebody's tokens, or content leaving for a host
+    /// they did not pick for this. Past it the agent decides alone and says
+    /// which and why, rather than proceeding quietly.
+    async fn errand_on(&self, named: &str) -> std::result::Result<std::sync::Arc<dyn Provider>, String> {
+        let config = &self.rook.config;
+        if !config.models.contains_key(named) {
+            return Err(match config.models.is_empty() {
+                true => format!(
+                    "{named:?} is not an endpoint: nothing is configured under `[models]`, so \
+                     there is nothing to choose between. Leave `model` out."
+                ),
+                false => format!(
+                    "{named:?} is not one of the configured endpoints. There is: {}.",
+                    config.models.keys().cloned().collect::<Vec<_>>().join(", ")
+                ),
+            });
+        }
+        // The address rather than the name, because that is what a rule in the
+        // policy can match and what a person reading the question needs: the
+        // name says nothing about where the work would go.
+        let going_to = crate::models::endpoint_for(config, &self.vault, named)
+            .ok()
+            .flatten()
+            .map(|endpoint| endpoint.url)
+            .unwrap_or_else(|| named.to_string());
+
+        if self.policy.stance() <= Stance::Assist {
+            let risk = rook_tools::policy::Risk::Network(going_to.clone());
+            let asking = format!("a sub-task would run on {named}, at {going_to}");
+            match self.approver.ask(DELEGATE, &risk, Some(&asking)).await {
+                rook_tools::policy::Approval::Once => {}
+                rook_tools::policy::Approval::ForRun => self.policy.grant_for_run(&risk.subject()),
+                rook_tools::policy::Approval::KindForRun => self.policy.grant_kind_for_run(&risk),
+                rook_tools::policy::Approval::Deny(why) => return Err(format!("refused: {why}")),
+                rook_tools::policy::Approval::Unanswered(why) => {
+                    return Err(rook_tools::policy::no_one_answered(&why));
+                }
+            }
+        } else {
+            self.report(Reported::Decision(format!(
+                "a sub-task on {named}, at {going_to} — asked for by the call"
+            )));
+        }
+
+        match crate::models::errand_provider_for(config, &self.vault, named) {
+            Ok(chosen) => Ok(std::sync::Arc::from(chosen)),
+            Err(why) => Err(format!("{named:?} cannot be used: {why}")),
+        }
+    }
+
     /// What a delegated errand runs on.
     ///
     /// The same shape as [`Self::summariser`], and the same reasoning: an

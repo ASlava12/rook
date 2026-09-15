@@ -204,6 +204,10 @@ fn redirect_home() {
 }
 
 fn fixture() -> Fixture {
+    fixture_with(Config::default())
+}
+
+fn fixture_with(config: Config) -> Fixture {
     redirect_home();
     let store_dir = tempfile::tempdir().unwrap();
     let skill_dir = tempfile::tempdir().unwrap();
@@ -232,7 +236,7 @@ fn fixture() -> Fixture {
 
     let store = Store::open(store_dir.path()).unwrap();
     let env = Environment::bare("linux", "x86_64", "0.1.0").with_language("rust", "1.97.1");
-    let rook = Rook::from_parts(store, Config::default(), env, skills, PathBuf::from(workspace.path()));
+    let rook = Rook::from_parts(store, config, env, skills, PathBuf::from(workspace.path()));
     Fixture { _store_dir: store_dir, _skill_dir: skill_dir, workspace, rook }
 }
 
@@ -5958,4 +5962,32 @@ async fn a_turn_may_say_the_check_is_mistaken_rather_than_make_it_true() {
         "pub fn add(a: i32, b: i32) -> i32 { a - b }\n",
         "the thing under question was not edited to make the claim pass"
     );
+}
+
+/// A model that named an endpoint and silently got a different one has been
+/// told its choice was honoured when it was not — and the answer it brings back
+/// is about a model nobody thinks it used.
+#[tokio::test]
+async fn a_sub_task_sent_to_an_endpoint_nobody_configured_is_refused_by_name() {
+    let mut models = std::collections::BTreeMap::new();
+    models.insert(
+        "next-door".to_string(),
+        rook_core::ModelSource {
+            model: "qwen3-coder:30b".into(),
+            api: "openai".into(),
+            url: "http://127.0.0.1:1234/v1".into(),
+            ..Default::default()
+        },
+    );
+    let f = fixture_with(Config { models, ..Default::default() });
+    let session = f.rook.start_session("s").unwrap();
+    let provider = Arc::new(ByPrompt(vec![
+        ("look it up", call("delegate", serde_json::json!({ "tasks": ["look"], "model": "nextdoor" }))),
+        ("not one of the configured endpoints", reply("I will do it here then")),
+    ]));
+
+    let outcome = AgentLoop::new(&f.rook, provider, session).run("look it up").await.unwrap();
+
+    assert_eq!(outcome.reply, "I will do it here then");
+    assert!(outcome.delegated.is_empty(), "nothing ran on an endpoint nobody has");
 }

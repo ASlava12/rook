@@ -399,3 +399,57 @@ impl rook_llm::Provider for Nothing {
         Err(rook_llm::LlmError::Other("not asked".into()))
     }
 }
+
+/// A choice the model cannot see is one it cannot make, and a choice that does
+/// not exist is a question asked in every request that has one answer. So the
+/// endpoints appear where there are some and nowhere else — and with the
+/// argument they constrain rather than in the system prompt, which is the front
+/// of every request and where prompt caching matches.
+#[test]
+fn the_endpoints_a_sub_task_may_be_sent_to_are_named_only_where_there_are_some() {
+    let delegate = |models: std::collections::BTreeMap<String, rook_core::ModelSource>| {
+        let dir = tempfile::tempdir().unwrap();
+        // The full schema, which is what a model fetches before it calls.
+        // Lazily, a spec is cut to its first sentence and a stub of its
+        // arguments — the first attempt at this put the names in the tool's
+        // description and they were dropped exactly there.
+        let config = rook_core::Config {
+            models,
+            agent: rook_core::config::AgentConfig { lazy_tools: false, ..Default::default() },
+            ..Default::default()
+        };
+        let rook = rook_core::Rook::from_parts(
+            rook_store::Store::open(dir.path()).unwrap(),
+            config,
+            rook_skills::Environment::bare("linux", "x86_64", "0.1.0"),
+            rook_skills::SkillIndex::default(),
+            dir.path().to_path_buf(),
+        );
+        let session = rook.start_session("endpoints").unwrap();
+        let agent = rook_core::agent::AgentLoop::new(&rook, std::sync::Arc::new(Nothing), session);
+        agent
+            .tool_specs()
+            .into_iter()
+            .find(|spec| spec.name == "delegate")
+            .expect("delegate is always offered")
+    };
+
+    let bare = delegate(Default::default());
+    assert!(bare.parameters["properties"].get("model").is_none(), "nothing to choose between");
+
+    let mut named = std::collections::BTreeMap::new();
+    named.insert(
+        "next-door".to_string(),
+        rook_core::ModelSource {
+            model: "qwen3-coder:30b".into(),
+            api: "openai".into(),
+            url: "http://127.0.0.1:1234/v1".into(),
+            ..Default::default()
+        },
+    );
+    let offered = delegate(named);
+
+    let choice = &offered.parameters["properties"]["model"];
+    assert!(choice.is_object(), "the field is there");
+    assert_eq!(choice["enum"], serde_json::json!(["next-door"]), "and it names what there is");
+}
