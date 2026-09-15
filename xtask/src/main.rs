@@ -512,9 +512,39 @@ fn cargo(args: &[&str]) -> Result<()> {
         .status()
         .with_context(|| format!("running cargo {}", args.join(" ")))?;
     if !status.success() {
-        bail!("cargo {} failed", args.join(" "));
+        bail!("cargo {} {}", args.join(" "), how_it_ended(status));
     }
     Ok(())
+}
+
+/// How a tool ended, in words that tell the two cases apart.
+///
+/// "failed" reads the same for both and they are not the same thing at all. A
+/// non-zero exit code is the tool's own verdict on the work; a signal is
+/// something outside the tool having stopped it mid-sentence, and the work it
+/// was doing reached no verdict either way.
+///
+/// Four gate runs here reported `cargo test --workspace failed` with every
+/// `test result:` line in the log reading `ok`, a different suite each time,
+/// and each of those suites passing when run on its own straight afterwards.
+/// The message gave no way to tell whether the suite had failed or the runner
+/// had been shot, and two wrong diagnoses were reached before the question was
+/// even asked. It costs one line to ask it.
+fn how_it_ended(status: std::process::ExitStatus) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            return format!(
+                "was killed by signal {signal} — nothing in it decided to fail, so read the log \
+                 for where it stopped rather than for what went wrong"
+            );
+        }
+    }
+    match status.code() {
+        Some(code) => format!("failed with exit {code}"),
+        None => "ended without an exit code".to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -524,6 +554,22 @@ mod tests {
     fn workflow() -> String {
         std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../.github/workflows/ci.yml"))
             .expect("the workflow the target matrix claims to describe")
+    }
+
+    /// The gate's verdict is its exit status, and a status has two kinds of
+    /// bad news in it. Reporting them with one word is how four runs were read
+    /// as a failing suite when the suite had never been allowed to finish.
+    #[cfg(unix)]
+    #[test]
+    fn a_tool_stopped_by_a_signal_is_not_reported_as_one_that_failed() {
+        let refused = Command::new("/bin/sh").args(["-c", "exit 3"]).status().unwrap();
+        let said = how_it_ended(refused);
+        assert!(said.contains("exit 3"), "a verdict names the code: {said}");
+
+        let shot = Command::new("/bin/sh").args(["-c", "kill -9 $$"]).status().unwrap();
+        let said = how_it_ended(shot);
+        assert!(said.contains("signal 9"), "and a signal names the signal: {said}");
+        assert!(said.contains("decided to fail"), "and says the difference: {said}");
     }
 
     #[test]
