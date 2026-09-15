@@ -38,11 +38,27 @@ use crate::{ModelInfo, Provider, Request, Response, ResponseStream, Result};
 /// takes a restart, which is worth saying because the alternative — resizing a
 /// semaphore somebody is already waiting on — is a way to let more through than
 /// either number allowed.
-fn permits(name: &str, parallel: usize) -> Arc<Semaphore> {
+fn held_permits() -> &'static Mutex<HashMap<String, Arc<Semaphore>>> {
     static HELD: OnceLock<Mutex<HashMap<String, Arc<Semaphore>>>> = OnceLock::new();
-    let held = HELD.get_or_init(Default::default);
-    let mut held = held.lock().unwrap_or_else(|e| e.into_inner());
+    HELD.get_or_init(Default::default)
+}
+
+fn permits(name: &str, parallel: usize) -> Arc<Semaphore> {
+    let mut held = held_permits().lock().unwrap_or_else(|e| e.into_inner());
     held.entry(name.to_string()).or_insert_with(|| Arc::new(Semaphore::new(parallel))).clone()
+}
+
+/// How many requests this endpoint could take right now without waiting.
+///
+/// `None` where nothing has claimed a limit for it — an endpoint with no
+/// `parallel` set, or one nothing has built a provider for yet — which is not
+/// the same as busy and must not be read as it. The answer is a moment old by
+/// the time it is used, and that is fine for what it is for: choosing which of
+/// several endpoints to hand an errand to, where being wrong costs a wait and
+/// not a failure.
+pub(crate) fn free_at(name: &str) -> Option<usize> {
+    let held = held_permits().lock().unwrap_or_else(|e| e.into_inner());
+    held.get(name).map(|permits| permits.available_permits())
 }
 
 /// A provider that lets only so many requests through at a time.

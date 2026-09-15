@@ -18,8 +18,33 @@ use crate::secrets::Vault;
 /// this table existed is — so nothing already working changes, and the two
 /// spellings can sit side by side in one file.
 pub fn provider_for(config: &Config, vault: &Vault, name: &str) -> Result<Box<dyn Provider>, LlmError> {
+    built(config, vault, name, rook_llm::Prefer::AsConfigured)
+}
+
+/// The same, for work that has no conversation to keep.
+///
+/// A turn stays on the endpoint it was pointed at: moving part-way through
+/// throws away the cached prefix of everything it has sent, and hands the next
+/// step to a model that did not write the last one. An errand has neither of
+/// those to lose, and queueing it behind a turn on one endpoint while another
+/// sits idle costs exactly the time this saves — so it goes to whichever has
+/// room, and the configured order decides between equals.
+pub fn errand_provider_for(
+    config: &Config,
+    vault: &Vault,
+    name: &str,
+) -> Result<Box<dyn Provider>, LlmError> {
+    built(config, vault, name, rook_llm::Prefer::WhicheverIsFree)
+}
+
+fn built(
+    config: &Config,
+    vault: &Vault,
+    name: &str,
+    prefer: rook_llm::Prefer,
+) -> Result<Box<dyn Provider>, LlmError> {
     let endpoints = endpoints_for(config, vault, name)?;
-    rook_llm::from_endpoints_with(endpoints, config.agent.stream_idle())
+    rook_llm::from_endpoints_with(endpoints, config.agent.stream_idle(), prefer)
 }
 
 /// Every endpoint worth trying for this setting, the one asked for first.

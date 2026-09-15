@@ -144,6 +144,7 @@ impl Frames {
 
 pub mod anthropic;
 mod failover;
+pub use failover::Prefer;
 pub mod google;
 mod limit;
 pub mod openai;
@@ -579,6 +580,7 @@ pub struct Endpoint {
 pub fn from_endpoints_with(
     endpoints: Vec<Endpoint>,
     stream_idle: std::time::Duration,
+    prefer: Prefer,
 ) -> Result<Box<dyn Provider>> {
     let mut built: Vec<Box<dyn Provider>> = Vec::new();
     for (at, endpoint) in endpoints.into_iter().enumerate() {
@@ -606,7 +608,7 @@ pub fn from_endpoints_with(
             Some(only) => only,
             None => return Err(LlmError::Other("the one endpoint went missing".into())),
         },
-        _ => Box::new(failover::Failover::new(built)),
+        _ => Box::new(failover::Failover::new(built, prefer)),
     };
     Ok(provider)
 }

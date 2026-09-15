@@ -4286,7 +4286,7 @@ impl AgentLoop<'_> {
         if spec.is_empty() || spec == config.model {
             return self.provider.clone();
         }
-        match crate::models::provider_for(&self.rook.config, &self.vault, spec) {
+        match crate::models::errand_provider_for(&self.rook.config, &self.vault, spec) {
             Ok(provider) => std::sync::Arc::from(provider),
             Err(e) => {
                 tracing::warn!(

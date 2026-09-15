@@ -98,17 +98,35 @@ fn somewhere_else(error: &LlmError) -> bool {
     }
 }
 
-/// Several endpoints in preference order, of which the first that answers is
-/// used.
+/// Which of several endpoints to ask first, when more than one would answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Prefer {
+    /// The order the configuration gave.
+    ///
+    /// What a turn wants. It was pointed at a model, and the rest are there for
+    /// when that one is not — moving a turn between endpoints part-way through
+    /// throws away the cached prefix of every request it has sent, and hands
+    /// the next step to a model that did not write the last one.
+    AsConfigured,
+    /// Whichever has room right now, and the configured order between equals.
+    ///
+    /// What an errand wants. It is bounded work to get through, it has no
+    /// conversation worth caching, and there is nothing to be said for queueing
+    /// behind a turn on one endpoint while another sits idle.
+    WhicheverIsFree,
+}
+
+/// Several endpoints, of which the first that answers is used.
 pub(crate) struct Failover {
     /// Never empty: the caller has one it could have used on its own, and this
     /// only exists because there is more than that.
     candidates: Vec<Box<dyn Provider>>,
+    prefer: Prefer,
 }
 
 impl Failover {
-    pub(crate) fn new(candidates: Vec<Box<dyn Provider>>) -> Self {
-        Self { candidates }
+    pub(crate) fn new(candidates: Vec<Box<dyn Provider>>, prefer: Prefer) -> Self {
+        Self { candidates, prefer }
     }
 
     /// The ones worth asking, preferred first.
@@ -119,11 +137,22 @@ impl Failover {
     /// leave the agent with nothing to talk to while the machine was back.
     fn worth_asking(&self) -> Vec<&dyn Provider> {
         let all = || self.candidates.iter().map(Box::as_ref);
-        let answering: Vec<&dyn Provider> = all().filter(|p| !is_missing(p.id())).collect();
-        match answering.is_empty() {
-            true => all().collect(),
-            false => answering,
+        let mut answering: Vec<&dyn Provider> = all().filter(|p| !is_missing(p.id())).collect();
+        if answering.is_empty() {
+            answering = all().collect();
         }
+        if self.prefer == Prefer::WhicheverIsFree {
+            // Stable, so the configured order survives as the tiebreak: two
+            // endpoints with the same room are still asked in the order
+            // somebody wrote them in.
+            //
+            // An endpoint nothing has claimed a limit for sorts with the
+            // freest, because that is what it is — no limit is not busy, and
+            // reading it as busy would send every errand to the one server that
+            // had bothered to say how much it could take.
+            answering.sort_by_key(|p| std::cmp::Reverse(crate::limit::free_at(p.id()).unwrap_or(usize::MAX)));
+        }
+        answering
     }
 }
 
@@ -298,7 +327,7 @@ mod tests {
     fn handed_over(first: Says) -> bool {
         let (refusing, _) = saying("first", first);
         let (second, reached) = saying("second", Says::Answer);
-        let _ = asking(&Failover::new(vec![refusing, second]));
+        let _ = asking(&Failover::new(vec![refusing, second], Prefer::AsConfigured));
         reached.load(Ordering::Relaxed) == 1
     }
 
@@ -337,7 +366,7 @@ mod tests {
         let (refusing, _) = saying("refusing", REFUSED);
         let (here, asked) = saying("here", Says::Answer);
 
-        let why = asking(&Failover::new(vec![refusing, here])).unwrap_err();
+        let why = asking(&Failover::new(vec![refusing, here], Prefer::AsConfigured)).unwrap_err();
 
         assert!(matches!(why, LlmError::Status { status: 401, .. }), "{why}");
         assert_eq!(asked.load(Ordering::Relaxed), 0, "the second endpoint was never asked");
@@ -356,7 +385,7 @@ mod tests {
         let (second, _) = saying("also-gone", Says::Unreachable);
         let names = [first.id().to_string(), second.id().to_string()];
 
-        let why = asking(&Failover::new(vec![first, second])).unwrap_err().to_string();
+        let why = asking(&Failover::new(vec![first, second], Prefer::AsConfigured)).unwrap_err().to_string();
 
         for name in names {
             assert!(why.contains(&name), "{name} is missing from: {why}");
@@ -369,7 +398,7 @@ mod tests {
     fn an_endpoint_that_did_not_answer_is_not_asked_again_straight_away() {
         let (gone, tried) = saying("gone", Says::Unreachable);
         let (here, _) = saying("here", Says::Answer);
-        let over = Failover::new(vec![gone, here]);
+        let over = Failover::new(vec![gone, here], Prefer::AsConfigured);
 
         asking(&over).expect("the second answered");
         asking(&over).expect("and again");
@@ -384,6 +413,46 @@ mod tests {
         let (small, _) = saying("small", Says::Unreachable);
         let (large, _) = saying("large", Says::Answer);
 
-        assert_eq!(Failover::new(vec![large, small]).context_window(), 8_192);
+        assert_eq!(Failover::new(vec![large, small], Prefer::AsConfigured).context_window(), 8_192);
+    }
+
+    /// An errand has no conversation to keep, so there is nothing to be said
+    /// for queueing it behind a turn on one endpoint while another sits idle.
+    ///
+    /// Asserted on the order rather than by sending a request, because a
+    /// candidate with no room left would block rather than answer — a test that
+    /// proved the point by hanging would prove it once and cost the suite for
+    /// ever after.
+    #[test]
+    fn an_errand_prefers_whichever_endpoint_has_room() {
+        let (full, _) = saying("full", Says::Answer);
+        let (room, _) = saying("room", Says::Answer);
+        let (full_id, room_id) = (full.id().to_string(), room.id().to_string());
+        // Claiming a limit is what puts a name in the register at all, and none
+        // left is the plainest way to be busy without holding anything open.
+        let full: Box<dyn Provider> = Box::new(crate::limit::Limited::new(full, &full_id, 0));
+        let room: Box<dyn Provider> = Box::new(crate::limit::Limited::new(room, &room_id, 4));
+
+        let asked = Failover::new(vec![full, room], Prefer::WhicheverIsFree);
+        let order: Vec<&str> = asked.worth_asking().iter().map(|p| p.id()).collect();
+
+        assert_eq!(order, [room_id.as_str(), full_id.as_str()], "the one with room goes first");
+    }
+
+    /// And the precondition for the test above: without the preference the
+    /// order is the one the file gave, so what moved it was the room and not
+    /// something else about these two.
+    #[test]
+    fn a_turn_stays_in_the_order_it_was_configured_in_however_busy() {
+        let (full, _) = saying("full", Says::Answer);
+        let (room, _) = saying("room", Says::Answer);
+        let (full_id, room_id) = (full.id().to_string(), room.id().to_string());
+        let full: Box<dyn Provider> = Box::new(crate::limit::Limited::new(full, &full_id, 0));
+        let room: Box<dyn Provider> = Box::new(crate::limit::Limited::new(room, &room_id, 4));
+
+        let asked = Failover::new(vec![full, room], Prefer::AsConfigured);
+        let order: Vec<&str> = asked.worth_asking().iter().map(|p| p.id()).collect();
+
+        assert_eq!(order, [full_id.as_str(), room_id.as_str()], "moving a turn costs its cache");
     }
 }
