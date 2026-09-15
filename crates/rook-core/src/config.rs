@@ -44,6 +44,73 @@ pub struct Config {
     /// way of adding the first server.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub mcp: Vec<rook_mcp::ServerConfig>,
+    /// Endpoints the agent can be pointed at, by name, as `[models.<name>]`
+    /// tables. Empty is not a lack of models — it is the older way of saying
+    /// it, where `[agent] model` is a `provider/model` spec and the address and
+    /// key come from the environment.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub models: std::collections::BTreeMap<String, ModelSource>,
+}
+
+/// One endpoint the agent can be pointed at, named in `[models]`.
+///
+/// This is what the `provider/model` spelling cannot do: two endpoints of the
+/// same kind. Two openai-compatible gateways with different keys, a small model
+/// on the machine next door and a large one on this one — the shorthands read
+/// one variable per provider kind, so there was exactly one of each and no way
+/// to write down the second.
+///
+/// `[agent] model`, `compaction_model` and `errand_model` each take either a
+/// name from here or the older spelling, so nothing already written stops
+/// working.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModelSource {
+    /// The model to ask for, as this endpoint spells it.
+    pub model: String,
+    /// Which api it speaks: `openai`, `anthropic` or `google`.
+    ///
+    /// Not the vendor. An Anthropic-shaped gateway in front of something else
+    /// is `anthropic`, because what this decides is how a request is written
+    /// and how a reply is read.
+    pub api: String,
+    /// Where it is, path included. Most openai-compatible servers want `/v1` on
+    /// the end and this is not the place to guess which do: a URL that is wrong
+    /// by a path segment answers with a 404 that names it, and one this code
+    /// invented would be wrong silently.
+    pub url: String,
+    /// The key to send, where one is needed. Three spellings, so a key can stay
+    /// where it already lives:
+    ///
+    /// - `secret:name` — from `rook secrets`, which keeps a value at 0600 or
+    ///   refers it out to a keychain, a password manager or a command.
+    /// - `env:NAME` — a variable of this process's environment, which is where
+    ///   every key was before this table existed.
+    /// - anything else — the value itself.
+    ///
+    /// The value itself is the third and not the first on purpose. It works,
+    /// and `config.toml` is not `secrets.toml`: it is not 0600, it is the file
+    /// people paste into an issue, and it is the one that ends up in a dotfiles
+    /// repository.
+    pub key: String,
+    /// Overrides what the api assumes. Guesswork for anything self-hosted: a
+    /// local model may serve 8k or a million.
+    pub context_window: Option<usize>,
+    /// How many agents may be asking this endpoint at once. One unless it says
+    /// otherwise, and 0 lifts the limit.
+    ///
+    /// A hosted API serves whatever it is sent. A machine in the next room does
+    /// not: llama.cpp and LM Studio hold one model and serve a second request
+    /// by interleaving it with the first, so two sub-agents against one local
+    /// server finish later than the same two run one after the other. There is
+    /// no status for that — the request just takes minutes, which reads as a
+    /// hung turn.
+    ///
+    /// Counted across the whole process rather than per turn, which is what
+    /// `[agent] max_parallel_subagents` cannot do: that bounds the errands one
+    /// turn starts and says nothing about the turn itself, the compaction
+    /// running beside it, or a second window pointed at the same endpoint.
+    pub parallel: Option<usize>,
 }
 
 impl Default for Config {
@@ -61,6 +128,7 @@ impl Default for Config {
             server: Default::default(),
             lsp: Vec::new(),
             mcp: Vec::new(),
+            models: std::collections::BTreeMap::new(),
             hooks: Vec::new(),
             skill_sources: default_skill_sources(),
         }
@@ -87,7 +155,11 @@ fn unread(written: &serde_json::Value, known: &serde_json::Value, at: &str, out:
         // Omitted from a written config when empty and settings all the same:
         // `[[mcp]]`, `[[hooks]]`, `[[lsp]]`. Their own contents are not walked,
         // because an empty default carries no shape to compare against.
-        if at.is_empty() && matches!(key.as_str(), "mcp" | "hooks" | "lsp") {
+        // `models` joins them for a different reason: its keys are names
+        // somebody chose, so there is no shape here to compare a written one
+        // against. What is inside each is checked by `rook config check`,
+        // which is the command that knows what a model source has to have.
+        if at.is_empty() && matches!(key.as_str(), "mcp" | "hooks" | "lsp" | "models") {
             continue;
         }
         let path = match at.is_empty() {

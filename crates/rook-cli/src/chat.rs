@@ -66,12 +66,8 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let asked_for_a_workspace = workspace.is_some();
     let rook = Rook::open(workspace)?;
-    let provider = rook_llm::from_spec_with(
-        &rook.config.agent.model,
-        rook.config.agent.stream_idle(),
-        rook.config.agent.context_window,
-    )
-    .with_context(|| format!("configuring model {:?}", rook.config.agent.model))?;
+    let provider = rook_core::models::configured(&rook.config)
+        .with_context(|| format!("configuring model {:?}", rook.config.agent.model))?;
 
     let mut session = match resume {
         Some(id) => rook.session_named(&id)?,
@@ -137,11 +133,7 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
                     false => line.trim().to_string(),
                 };
                 if let Some(question) = line.strip_prefix("/btw ") {
-                    let provider = rook_llm::from_spec_with(
-                        &rook.config.agent.model,
-                        rook.config.agent.stream_idle(),
-                        rook.config.agent.context_window,
-                    )?;
+                    let provider = rook_core::models::configured(&rook.config)?;
                     runtime.block_on(aside(&rook, provider, session, question.trim()));
                     continue;
                 }
@@ -157,11 +149,7 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
                     }
                     continue;
                 }
-                let provider = rook_llm::from_spec_with(
-                    &rook.config.agent.model,
-                    rook.config.agent.stream_idle(),
-                    rook.config.agent.context_window,
-                )?;
+                let provider = rook_core::models::configured(&rook.config)?;
                 runtime.block_on(turn(&rook, provider, session, &shared, &line));
             }
             // Ctrl-C at the prompt clears the line rather than leaving; the

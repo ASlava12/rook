@@ -909,7 +909,8 @@ fn offered<'a>(
 
 fn probe_provider(config: &rook_core::Config) -> Result<String> {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-    let (_, configured) = rook_llm::split_spec(&config.agent.model);
+    let configured = rook_core::models::model_named(config, &config.agent.model);
+    let configured = configured.as_str();
     let provider = provider(config)?;
     let models = runtime.block_on(provider.models())?;
 
@@ -1027,12 +1028,8 @@ fn cmd_run(
     let unfinished = runtime.block_on(async move {
         let asked_for_a_workspace = workspace.is_some();
         let rook = Rook::open(workspace)?;
-        let provider = rook_llm::from_spec_with(
-            &rook.config.agent.model,
-            rook.config.agent.stream_idle(),
-            rook.config.agent.context_window,
-        )
-        .with_context(|| format!("configuring model {:?}", rook.config.agent.model))?;
+        let provider = rook_core::models::configured(&rook.config)
+            .with_context(|| format!("configuring model {:?}", rook.config.agent.model))?;
         let prompt = with_piped_input(&asked, provider.context_window())?;
         let session = match session {
             Some(s) => rook.session_named(&s)?,
@@ -1191,7 +1188,8 @@ fn cmd_models(workspace: Option<PathBuf>, json: bool) -> Result<()> {
     runtime.block_on(async move {
         let _ = workspace;
         let config = rook_core::Config::load()?;
-        let (_, configured) = rook_llm::split_spec(&config.agent.model);
+        let configured = rook_core::models::model_named(&config, &config.agent.model);
+        let configured = configured.as_str();
         let models = provider(&config)?.models().await?;
         if json {
             println!("{}", serde_json::to_string_pretty(&models)?);
@@ -1235,7 +1233,7 @@ fn cmd_models(workspace: Option<PathBuf>, json: bool) -> Result<()> {
 /// that only want to ask a provider a question — `doctor` and `models` — do
 /// not have to open a store to do it, and answer while `rookd` holds one.
 fn provider(config: &rook_core::Config) -> Result<Box<dyn rook_llm::Provider>> {
-    rook_llm::from_spec_with(&config.agent.model, config.agent.stream_idle(), config.agent.context_window)
+    rook_core::models::configured(config)
         .with_context(|| format!("configuring model {:?}", config.agent.model))
 }
 

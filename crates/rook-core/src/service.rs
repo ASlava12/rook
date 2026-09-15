@@ -931,9 +931,7 @@ impl Rook {
     /// session read as two different fractions depending on where it was asked.
     pub fn context_window(&self) -> usize {
         self.config.agent.context_window.unwrap_or_else(|| {
-            rook_llm::from_spec_with(&self.config.agent.model, self.config.agent.stream_idle(), None)
-                .map(|p| p.context_window())
-                .unwrap_or(128_000)
+            crate::models::configured(&self.config).map(|p| p.context_window()).unwrap_or(128_000)
         })
     }
 

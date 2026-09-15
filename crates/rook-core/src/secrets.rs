@@ -237,6 +237,27 @@ impl Vault {
         Some(value)
     }
 
+    /// Remember a value that came from somewhere else, so the redaction covers
+    /// it too.
+    ///
+    /// A model endpoint's key is the case this exists for. It is written in
+    /// `config.toml` or read from a variable, so it never passes through
+    /// [`Self::value`] and the vault would not know it — and a turn that runs
+    /// `cat ~/.rook/config.toml`, or prints its own environment, puts it in the
+    /// transcript. One rule for every credential, reached from the one other
+    /// place a credential now comes from.
+    pub fn also_hide(&self, value: &str) {
+        let value = value.trim();
+        if value.is_empty() {
+            return;
+        }
+        if let Ok(mut handed) = self.handed_out.lock()
+            && !handed.iter().any(|held| held == value)
+        {
+            handed.push(value.to_string());
+        }
+    }
+
     /// Whatever a tool answered, with every value this vault has handed out
     /// taken back out of it.
     ///

@@ -29,6 +29,7 @@ pub mod lsp;
 pub mod mcp_server;
 pub mod memory;
 pub mod mention;
+pub mod models;
 pub mod paths;
 pub mod plugins;
 pub mod script;
@@ -37,7 +38,7 @@ pub mod secrets;
 pub mod service;
 pub mod telemetry;
 
-pub use config::{Config, ConfigError};
+pub use config::{Config, ConfigError, ModelSource};
 pub use docs::{DocSet, Kept};
 pub use error::{CoreError, Result};
 pub use fileset::{CaptureLimits, Change, FileSet};

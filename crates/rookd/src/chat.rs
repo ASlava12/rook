@@ -600,11 +600,7 @@ async fn turn(
     // it is already running cannot be joined while it does so.
     let _ = outbound.send(ChatEvent::Started { session: rook_store::format_session_id(session) });
 
-    let provider = match rook_llm::from_spec_with(
-        &rook.config.agent.model,
-        rook.config.agent.stream_idle(),
-        rook.config.agent.context_window,
-    ) {
+    let provider = match rook_core::models::configured(&rook.config) {
         Ok(provider) => provider,
         Err(e) => return ended_badly(&rook, session, &outbound, e.to_string()),
     };

@@ -4286,7 +4286,7 @@ impl AgentLoop<'_> {
         if spec.is_empty() || spec == config.model {
             return self.provider.clone();
         }
-        match rook_llm::from_spec_with(spec, config.stream_idle(), config.context_window) {
+        match crate::models::provider_for(&self.rook.config, &self.vault, spec) {
             Ok(provider) => std::sync::Arc::from(provider),
             Err(e) => {
                 tracing::warn!(
@@ -4307,7 +4307,7 @@ impl AgentLoop<'_> {
         if spec.is_empty() || spec == config.model {
             return self.provider.clone();
         }
-        match rook_llm::from_spec_with(spec, config.stream_idle(), config.context_window) {
+        match crate::models::provider_for(&self.rook.config, &self.vault, spec) {
             Ok(provider) => std::sync::Arc::from(provider),
             Err(e) => {
                 tracing::warn!(

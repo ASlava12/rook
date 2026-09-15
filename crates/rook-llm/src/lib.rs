@@ -144,6 +144,7 @@ impl Frames {
 
 pub mod anthropic;
 pub mod google;
+mod limit;
 pub mod openai;
 pub mod prompted;
 pub mod retry;
@@ -497,6 +498,118 @@ pub fn split_spec(spec: &str) -> (&str, &str) {
     }
 }
 
+/// The wire protocol an endpoint speaks.
+///
+/// Not the vendor. An Anthropic-shaped gateway in front of something else is
+/// `anthropic` here, because what this decides is how a request is written and
+/// how a reply is read — and that is the only question a client has to answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Api {
+    OpenAi,
+    Anthropic,
+    Google,
+}
+
+impl Api {
+    /// Every name a configuration may use, so an error can list them.
+    pub const ALL: [Api; 3] = [Api::OpenAi, Api::Anthropic, Api::Google];
+
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "openai" | "openai-compatible" => Some(Api::OpenAi),
+            "anthropic" | "claude" => Some(Api::Anthropic),
+            "google" | "gemini" => Some(Api::Google),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Api::OpenAi => "openai",
+            Api::Anthropic => "anthropic",
+            Api::Google => "google",
+        }
+    }
+}
+
+/// One endpoint to talk to, with nothing left to look up.
+///
+/// The environment fills this in for the provider names [`from_spec_with`]
+/// knows; a `[models]` table in the configuration fills it in directly. Both
+/// go through [`from_endpoint_with`], so a configured endpoint and one
+/// assembled from variables are the same thing to everything past this point.
+/// That is the whole reason this type exists rather than a second builder: two
+/// ways to make a provider is two places for the retry wrapper, the proxy
+/// decision and the clear-text check to drift apart, and the one built past
+/// this function would quietly be the one that gives up.
+#[derive(Clone, Debug)]
+pub struct Endpoint {
+    /// What this is called where a person reads it — the configured name, or
+    /// the `provider/model` spec it was built from.
+    pub name: String,
+    pub api: Api,
+    pub url: String,
+    pub key: Option<String>,
+    /// The model to ask for, as the endpoint spells it.
+    pub model: String,
+    /// Overrides what the api assumes, which is guesswork for anything
+    /// self-hosted: a local model may serve 8k or a million.
+    pub context_window: Option<usize>,
+    /// How many requests this endpoint is asked for at a time, across every
+    /// turn, sub-agent and compaction in the process. `None` is no limit, which
+    /// is what the `provider/model` spelling has always had and keeps.
+    pub parallel: Option<usize>,
+}
+
+/// Build a provider for an endpoint that is already fully described.
+///
+/// Wrapped in [`retry::Retrying`] for the reason [`from_spec_with`] is: a rate
+/// limit or an overloaded endpoint is waited out rather than ending the turn.
+pub fn from_endpoint_with(endpoint: Endpoint, stream_idle: std::time::Duration) -> Result<Box<dyn Provider>> {
+    Ok(Box::new(retry::Retrying::new(endpoint_provider(endpoint, stream_idle)?)))
+}
+
+fn endpoint_provider(endpoint: Endpoint, stream_idle: std::time::Duration) -> Result<Box<dyn Provider>> {
+    let Endpoint { name, api, url, key, model, context_window, parallel } = endpoint;
+    in_the_clear(&url, key.as_deref())?;
+    let built: Box<dyn Provider> = match api {
+        Api::Anthropic => {
+            let mut config = anthropic::Config::new(url, key.unwrap_or_default(), &model);
+            config.stream_idle_timeout = stream_idle;
+            if let Some(window) = context_window {
+                config.context_window = window;
+            }
+            Box::new(anthropic::Anthropic::new(&name, &model, config)?)
+        }
+        Api::Google => {
+            let mut config = google::Config::new(url, key.unwrap_or_default(), &model);
+            config.stream_idle_timeout = stream_idle;
+            if let Some(window) = context_window {
+                config.context_window = window;
+            }
+            Box::new(google::Google::new(&name, &model, config)?)
+        }
+        // The smallest of the assumed windows where nothing said, for the
+        // reason each api picks a small one: budgeting against a window the
+        // model does not have fails the request, budgeting low wastes some of
+        // it.
+        Api::OpenAi => {
+            let mut config = openai::Config::new(url, key, context_window.unwrap_or(32_768));
+            config.stream_idle_timeout = stream_idle;
+            Box::new(openai::OpenAiCompatible::new(&name, &model, config)?)
+        }
+    };
+    // Inside the retry wrapper rather than outside it: a request waiting out a
+    // 429 is not using the endpoint, and holding a turn through its backoff
+    // would keep everything else queued behind work that is not happening.
+    //
+    // Zero lifts the limit, as it does everywhere else here.
+    Ok(match parallel.filter(|at_once| *at_once > 0) {
+        Some(at_once) => Box::new(limit::Limited::new(built, &name, at_once)),
+        None => built,
+    })
+}
+
 /// Endpoints and keys come from environment variables, so neither the store nor
 /// the config file ever holds a credential.
 /// `context_window` overrides the provider's assumed default, which is guesswork
@@ -614,59 +727,67 @@ fn build(
     stream_idle: std::time::Duration,
     context_window: Option<usize>,
 ) -> Result<Box<dyn Provider>> {
+    endpoint_provider(from_environment(spec, context_window)?, stream_idle)
+}
+
+/// The endpoint a `provider/model` spec names, as the environment describes it.
+///
+/// The provider names are shorthands: each says which api to speak and where to
+/// look for the address and the key. A `[models]` table says those three things
+/// outright, which is why both end at the same builder.
+fn from_environment(spec: &str, context_window: Option<usize>) -> Result<Endpoint> {
     let (provider, model) = split_spec(spec);
-    let mut cfg = match provider {
-        "ollama" => openai::Config::new(local_endpoint("OLLAMA_HOST", 11434) + "/v1", None, 32_768),
-        "lmstudio" => openai::Config::new(local_endpoint("LMSTUDIO_HOST", 1234) + "/v1", None, 32_768),
-        "anthropic" | "claude" => {
-            let key = required_key(&["ANTHROPIC_API_KEY"])?;
-            let base = env_or("ANTHROPIC_BASE_URL", "https://api.anthropic.com");
-            in_the_clear(&base, Some(&key))?;
-            let mut config = anthropic::Config::new(base, key, model);
-            config.stream_idle_timeout = stream_idle;
-            if let Some(window) = context_window {
-                config.context_window = window;
-            }
-            return Ok(Box::new(anthropic::Anthropic::new(spec, model, config)?));
-        }
-        "google" | "gemini" => {
-            let key = required_key(&["GEMINI_API_KEY", "GOOGLE_API_KEY"])?;
-            let base = env_or("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta");
-            in_the_clear(&base, Some(&key))?;
-            let mut config = google::Config::new(base, key, model);
-            config.stream_idle_timeout = stream_idle;
-            if let Some(window) = context_window {
-                config.context_window = window;
-            }
-            return Ok(Box::new(google::Google::new(spec, model, config)?));
-        }
-        "openai" => {
-            let base = env_or("OPENAI_BASE_URL", "https://api.openai.com/v1");
-            let key = std::env::var("OPENAI_API_KEY").ok();
-            in_the_clear(&base, key.as_deref())?;
-            openai::Config::new(base, key, 128_000)
-        }
-        "openai-compatible" => {
-            let base = std::env::var("ROOK_LLM_BASE_URL").ok().filter(|u| !u.trim().is_empty()).ok_or_else(
-                || {
-                    LlmError::Other(
-                        "ROOK_LLM_BASE_URL is not set, and `openai-compatible` has no default \
-                         endpoint to fall back to."
-                            .into(),
-                    )
-                },
-            )?;
-            let key = std::env::var("ROOK_LLM_API_KEY").ok();
-            in_the_clear(&base, key.as_deref())?;
-            openai::Config::new(base, key, 32_768)
-        }
+    // The window each shorthand assumes when nothing overrides it. `None` where
+    // the api reads it from the model's own name, which anthropic and google
+    // both do.
+    let (api, url, key, assumed) = match provider {
+        "ollama" => (Api::OpenAi, local_endpoint("OLLAMA_HOST", 11434) + "/v1", None, Some(32_768)),
+        "lmstudio" => (Api::OpenAi, local_endpoint("LMSTUDIO_HOST", 1234) + "/v1", None, Some(32_768)),
+        "anthropic" | "claude" => (
+            Api::Anthropic,
+            env_or("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
+            Some(required_key(&["ANTHROPIC_API_KEY"])?),
+            None,
+        ),
+        "google" | "gemini" => (
+            Api::Google,
+            env_or("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta"),
+            Some(required_key(&["GEMINI_API_KEY", "GOOGLE_API_KEY"])?),
+            None,
+        ),
+        "openai" => (
+            Api::OpenAi,
+            env_or("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+            std::env::var("OPENAI_API_KEY").ok(),
+            Some(128_000),
+        ),
+        "openai-compatible" => (
+            Api::OpenAi,
+            std::env::var("ROOK_LLM_BASE_URL").ok().filter(|u| !u.trim().is_empty()).ok_or_else(|| {
+                LlmError::Other(
+                    "ROOK_LLM_BASE_URL is not set, and `openai-compatible` has no default \
+                         endpoint to fall back to. Name an endpoint under `[models]` in \
+                         config.toml instead, or set the variable."
+                        .into(),
+                )
+            })?,
+            std::env::var("ROOK_LLM_API_KEY").ok(),
+            Some(32_768),
+        ),
         other => return Err(LlmError::UnknownProvider { name: other.to_string() }),
     };
-    cfg.stream_idle_timeout = stream_idle;
-    if let Some(window) = context_window {
-        cfg.context_window = window;
-    }
-    Ok(Box::new(openai::OpenAiCompatible::new(spec, model, cfg)?))
+    Ok(Endpoint {
+        name: spec.to_string(),
+        api,
+        url,
+        key,
+        model: model.to_string(),
+        // The override first, because it is the one somebody set on purpose.
+        context_window: context_window.or(assumed),
+        // No variable spells this, so there is nothing to read and nothing to
+        // change: a configuration written before `[models]` behaves as it did.
+        parallel: None,
+    })
 }
 
 fn env_or(key: &str, default: &str) -> String {

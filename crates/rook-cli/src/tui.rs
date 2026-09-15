@@ -2345,11 +2345,7 @@ impl App {
                 },
             };
 
-            let provider = match rook_llm::from_spec_with(
-                &rook.config.agent.model,
-                rook.config.agent.stream_idle(),
-                rook.config.agent.context_window,
-            ) {
+            let provider = match rook_core::models::configured(&rook.config) {
                 Ok(provider) => provider,
                 Err(e) => return fail(&to_loop, e.to_string()),
             };
