@@ -18,10 +18,66 @@ use crate::secrets::Vault;
 /// this table existed is — so nothing already working changes, and the two
 /// spellings can sit side by side in one file.
 pub fn provider_for(config: &Config, vault: &Vault, name: &str) -> Result<Box<dyn Provider>, LlmError> {
-    let agent = &config.agent;
-    match endpoint_for(config, vault, name)? {
-        Some(endpoint) => rook_llm::from_endpoint_with(endpoint, agent.stream_idle()),
-        None => rook_llm::from_spec_with(name, agent.stream_idle(), agent.context_window),
+    let endpoints = endpoints_for(config, vault, name)?;
+    rook_llm::from_endpoints_with(endpoints, config.agent.stream_idle())
+}
+
+/// Every endpoint worth trying for this setting, the one asked for first.
+///
+/// Then each source carrying a `priority`, in that order. A source without one
+/// is not here: it is used when it is named and at no other time, so a paid
+/// gateway does not quietly become what the agent reaches for when the machine
+/// at home stops answering.
+///
+/// Ties break on the name so the list is the same on every build. It reaches
+/// logs and, before long, a tool description, and an order that shuffles is an
+/// order nobody can read twice.
+pub fn endpoints_for(config: &Config, vault: &Vault, name: &str) -> Result<Vec<Endpoint>, LlmError> {
+    let asked = match endpoint_for(config, vault, name)? {
+        Some(endpoint) => endpoint,
+        None => {
+            // A bare word is not a spec, and `split_spec` does not say so: it
+            // reads `home-lmstudio` as an openai-compatible provider serving a
+            // model of that name, which becomes whatever `ROOK_LLM_BASE_URL`
+            // points at. That is how a mistyped source name became a request to
+            // a paid gateway, with no error at all and a listing of the wrong
+            // server's models to show for it.
+            if !name.contains('/') && !config.models.is_empty() {
+                return Err(LlmError::Other(format!(
+                    "{name:?} is not one of the endpoints in `[models]`, and it is not a \
+                     `provider/model` spec either. Configured: {}.",
+                    named_sources(config)
+                )));
+            }
+            rook_llm::endpoint_from_spec(name, config.agent.context_window)?
+        }
+    };
+
+    let mut after: Vec<(u32, &str)> = config
+        .models
+        .iter()
+        .filter(|(named, _)| named.as_str() != asked.name)
+        .filter_map(|(named, source)| source.priority.map(|order| (order, named.as_str())))
+        .collect();
+    after.sort_unstable();
+
+    let mut endpoints = vec![asked];
+    for (_, named) in after {
+        match endpoint_for(config, vault, named) {
+            Ok(Some(endpoint)) => endpoints.push(endpoint),
+            Ok(None) => {}
+            // Half a fallback is still better than none of the rest of them.
+            Err(why) => tracing::warn!("`[models.{named}]` cannot be a fallback: {why}"),
+        }
+    }
+    Ok(endpoints)
+}
+
+/// The configured names, for an error that can name them.
+fn named_sources(config: &Config) -> String {
+    match config.models.is_empty() {
+        true => "none".to_string(),
+        false => config.models.keys().cloned().collect::<Vec<_>>().join(", "),
     }
 }
 

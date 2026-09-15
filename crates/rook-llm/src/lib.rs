@@ -143,6 +143,7 @@ impl Frames {
 }
 
 pub mod anthropic;
+mod failover;
 pub mod google;
 mod limit;
 pub mod openai;
@@ -559,6 +560,53 @@ pub struct Endpoint {
     /// turn, sub-agent and compaction in the process. `None` is no limit, which
     /// is what the `provider/model` spelling has always had and keeps.
     pub parallel: Option<usize>,
+}
+
+/// Build a provider for several endpoints in preference order.
+///
+/// The first is what was configured. The rest are what to use when it cannot be
+/// reached — see [`failover`] for why that is discovered at the request rather
+/// than probed for, and why only "cannot be reached" counts.
+///
+/// A fallback that cannot even be built is a warning and not a failure: a
+/// second endpoint whose key has gone missing must not stop the first one, and
+/// the point of a list is that some of it may be unusable today. The preferred
+/// one is different — it is what was asked for, and whoever asked wants to hear
+/// why it cannot be had.
+pub fn from_endpoints_with(
+    endpoints: Vec<Endpoint>,
+    stream_idle: std::time::Duration,
+) -> Result<Box<dyn Provider>> {
+    let mut built: Vec<Box<dyn Provider>> = Vec::new();
+    for (at, endpoint) in endpoints.into_iter().enumerate() {
+        let name = endpoint.name.clone();
+        match endpoint_provider(endpoint, stream_idle) {
+            Ok(provider) => built.push(provider),
+            Err(why) if at == 0 => return Err(why),
+            Err(why) => tracing::warn!("{name} cannot be built, so it is not a fallback: {why}"),
+        }
+    }
+    let provider: Box<dyn Provider> = match built.len() {
+        0 => return Err(LlmError::Other("no endpoint was given to build a provider from".into())),
+        // One is the ordinary case and goes straight through. Failing over
+        // costs a copy of the request, which is a copy of the conversation, and
+        // there is no reason to pay it where there is nowhere to fail over to.
+        1 => match built.pop() {
+            Some(only) => only,
+            None => return Err(LlmError::Other("the one endpoint went missing".into())),
+        },
+        _ => Box::new(failover::Failover::new(built)),
+    };
+    // Outside the failover rather than inside: a 429 means "ask this endpoint
+    // again", not "ask a different one", and retrying within each candidate
+    // would spend four tries on a rate limit before looking at the next.
+    Ok(Box::new(retry::Retrying::new(provider)))
+}
+
+/// The endpoint a `provider/model` spec names, so that a spec and a configured
+/// source can sit in one list of things to try.
+pub fn endpoint_from_spec(spec: &str, context_window: Option<usize>) -> Result<Endpoint> {
+    from_environment(spec, context_window)
 }
 
 /// Build a provider for an endpoint that is already fully described.

@@ -111,6 +111,18 @@ pub struct ModelSource {
     /// turn starts and says nothing about the turn itself, the compaction
     /// running beside it, or a second window pointed at the same endpoint.
     pub parallel: Option<usize>,
+    /// Where this sits in the order the agent falls through when the endpoint
+    /// it was asked for cannot be reached. Lower is preferred.
+    ///
+    /// Absent means it is not a fallback at all and is used only when named
+    /// outright. Joining the rotation is a decision rather than a default: an
+    /// endpoint that costs money per token should not become what the agent
+    /// reaches for because the machine at home is switched off.
+    ///
+    /// Home, work, and that machine being off are three different sets of
+    /// reachable endpoints and one configuration file, which is the whole of
+    /// what this is for.
+    pub priority: Option<u32>,
 }
 
 impl Default for Config {

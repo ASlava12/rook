@@ -172,3 +172,98 @@ fn the_model_a_source_names_is_the_one_a_listing_looks_for() {
         "and the older spelling still answers the same thing"
     );
 }
+
+/// Home, work, and the machine at home switched off are three sets of reachable
+/// endpoints and one file. The order it falls through is the file's to state.
+#[test]
+fn the_one_asked_for_comes_first_and_the_rest_follow_their_priority() {
+    let mut config = Config::default();
+    for (name, order) in [("gw", Some(3)), ("next-door", Some(1)), ("upstairs", Some(2))] {
+        let mut source = serving("openai", &format!("http://127.0.0.1:1234/{name}"), "");
+        source.priority = order;
+        config.models.insert(name.into(), source);
+    }
+
+    let tried = rook_core::models::endpoints_for(&config, &Vault::empty(), "upstairs").unwrap();
+    let order: Vec<&str> = tried.iter().map(|e| e.name.as_str()).collect();
+
+    assert_eq!(order, ["upstairs", "next-door", "gw"], "the named one first, then by priority");
+}
+
+/// An endpoint that costs money per token must not become what the agent
+/// reaches for because the machine at home is off. Being in the rotation is a
+/// decision, so it is spelled.
+#[test]
+fn a_source_with_no_priority_is_only_ever_used_when_it_is_named() {
+    let mut config = Config::default();
+    let mut local = serving("openai", "http://127.0.0.1:9998/v1", "");
+    local.priority = Some(1);
+    config.models.insert("next-door".into(), local);
+    config.models.insert("paid".into(), serving("openai", "https://gw.example/v1", ""));
+
+    let tried = rook_core::models::endpoints_for(&config, &Vault::empty(), "next-door").unwrap();
+    let order: Vec<&str> = tried.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(order, ["next-door"], "nothing was told to stand behind it");
+
+    let named = rook_core::models::endpoints_for(&config, &Vault::empty(), "paid").unwrap();
+    assert_eq!(named[0].name, "paid", "and naming it outright still works");
+}
+
+/// The older spelling is not a second-class citizen: a spec can be the
+/// preferred endpoint and still have configured ones behind it.
+#[test]
+fn a_provider_model_spec_can_have_configured_endpoints_behind_it() {
+    let mut config = Config::default();
+    let mut local = serving("openai", "http://127.0.0.1:9998/v1", "");
+    local.priority = Some(1);
+    config.models.insert("next-door".into(), local);
+
+    let tried = rook_core::models::endpoints_for(&config, &Vault::empty(), "ollama/qwen3:8b").unwrap();
+    let order: Vec<&str> = tried.iter().map(|e| e.name.as_str()).collect();
+
+    assert_eq!(order, ["ollama/qwen3:8b", "next-door"]);
+}
+
+/// A list exists because some of it may be unusable today. One fallback whose
+/// key has gone missing must not take the working endpoint down with it.
+#[test]
+fn a_fallback_that_cannot_be_built_is_left_out_rather_than_fatal() {
+    let mut config = Config::default();
+    let mut broken = serving("openai", "https://gw.example/v1", "secret:nobody-kept-this");
+    broken.priority = Some(1);
+    config.models.insert("broken".into(), broken);
+    let mut fine = serving("openai", "http://127.0.0.1:9998/v1", "");
+    fine.priority = Some(2);
+    config.models.insert("fine".into(), fine);
+    config.models.insert("asked".into(), serving("openai", "http://127.0.0.1:9999/v1", ""));
+
+    let tried = rook_core::models::endpoints_for(&config, &Vault::empty(), "asked").unwrap();
+    let order: Vec<&str> = tried.iter().map(|e| e.name.as_str()).collect();
+
+    assert_eq!(order, ["asked", "fine"], "the broken one is skipped and the rest stand");
+}
+
+/// How a mistyped source name became a request to a paid gateway: `split_spec`
+/// reads a bare word as an openai-compatible provider serving a model of that
+/// name, which is whatever `ROOK_LLM_BASE_URL` points at. Silently.
+#[test]
+fn a_bare_name_that_is_not_a_configured_source_is_refused_by_name() {
+    let config = naming("next-door", serving("openai", "http://127.0.0.1:9998/v1", ""));
+
+    let why = rook_core::models::endpoints_for(&config, &Vault::empty(), "nextdoor").unwrap_err().to_string();
+
+    assert!(why.contains("nextdoor"), "it has to quote what was written: {why}");
+    assert!(why.contains("next-door"), "and list what there is: {why}");
+}
+
+/// With no table at all, a bare word means what it has always meant. Somebody
+/// who has not configured `[models]` is not making this mistake.
+#[test]
+fn a_bare_name_still_means_what_it_did_where_nothing_is_configured() {
+    let config = Config::default();
+
+    let tried = rook_core::models::endpoints_for(&config, &Vault::empty(), "ollama/qwen3:8b").unwrap();
+
+    assert_eq!(tried.len(), 1);
+    assert_eq!(tried[0].name, "ollama/qwen3:8b");
+}
