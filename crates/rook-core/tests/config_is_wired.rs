@@ -489,3 +489,58 @@ fn a_typo_inside_a_model_source_is_named_like_any_other() {
     // so a source could never be suggested for at all.
     assert_eq!(rook_core::Config::nearest_to("models.next-door.mode").as_deref(), Some("model"));
 }
+
+/// A configuration people keep is half comments — why a setting is off, which
+/// machine an address belongs to, what to do when travelling. Writing the
+/// loaded struct back deletes every one of them, which is why this edits the
+/// document instead.
+#[test]
+fn setting_one_value_leaves_the_rest_of_the_file_where_it_was() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let written = concat!(
+        "# Why this file looks the way it does.\n",
+        "[agent]\n",
+        "# Left off deliberately: this LM Studio keeps one model resident.\n",
+        "# errand_model = \"lmstudio/gemma\"\n",
+        "model = \"home-llama\"\n",
+        "max_steps = 200\n",
+        "\n",
+        "[models.home-llama]\n",
+        "# In secrets.toml at 0600, not here: this file is in a repository.\n",
+        "key = \"secret:home-llama\"\n",
+    );
+    std::fs::write(&path, written).unwrap();
+
+    rook_core::Config::set_in(&path, "agent.max_steps", "7").unwrap();
+    let after = std::fs::read_to_string(&path).unwrap();
+
+    assert!(after.contains("max_steps = 7"), "the value changed: {after}");
+    for kept in [
+        "# Why this file looks the way it does.",
+        "# Left off deliberately: this LM Studio keeps one model resident.",
+        "# errand_model = \"lmstudio/gemma\"",
+        "# In secrets.toml at 0600, not here: this file is in a repository.",
+    ] {
+        assert!(after.contains(kept), "{kept:?} was lost:\n{after}");
+    }
+    // And a whole number rather than the text of one, which is what a command
+    // line hands over: the shape comes from the defaults, not from the look of
+    // the value.
+    assert!(!after.contains("max_steps = \"7\""), "written as a string:\n{after}");
+    assert_eq!(rook_core::Config::load_from(path.clone()).unwrap().agent.max_steps, 7);
+
+    // A name that is not a setting is refused before the file is touched, and
+    // the file is the proof: a check that only reported would leave a typo
+    // written down.
+    let before = std::fs::read_to_string(&path).unwrap();
+    let why = rook_core::Config::set_in(&path, "agent.max_step", "9").unwrap_err();
+    assert!(why.contains("max_steps"), "it suggests the real one: {why}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "and changed nothing");
+
+    // So is a value the setting cannot hold, and by the code that will read it
+    // rather than by a second opinion about types.
+    let why = rook_core::Config::set_in(&path, "agent.max_steps", "lots").unwrap_err();
+    assert!(why.contains("max_steps"), "{why}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "and changed nothing");
+}

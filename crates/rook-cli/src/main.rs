@@ -262,6 +262,14 @@ enum ConfigCmd {
     /// Read the file, name what is wrong in it, and ask every endpoint whether
     /// it is there.
     Check,
+    /// Change one setting, leaving the rest of the file — comments included —
+    /// exactly as it was.
+    Set {
+        /// Dotted, as `config show` prints it: `agent.model`, `agent.effort`,
+        /// `models.home-llama.priority`.
+        key: String,
+        value: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1427,6 +1435,19 @@ fn cmd_config(cmd: ConfigCmd, json: bool) -> Result<()> {
                 false => print!("{}", config.as_written()?),
             }
             Ok(())
+        }
+        ConfigCmd::Set { key, value } => {
+            let path = rook_core::paths::config_file();
+            match rook_core::Config::set_in(&path, &key, &value) {
+                Ok(_) => {
+                    println!("{key} = {value}");
+                    // Said because it is the one thing a person cannot see from
+                    // here: a turn already running was built with the old one.
+                    println!("in {} — the next turn reads it", path.display());
+                    Ok(())
+                }
+                Err(why) => anyhow::bail!("{why}"),
+            }
         }
         ConfigCmd::Check => {
             let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;

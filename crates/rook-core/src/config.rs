@@ -209,6 +209,40 @@ fn unread(written: &serde_json::Value, known: &serde_json::Value, at: &str, out:
     }
 }
 
+/// The shape a setting has, by its dotted name, from the tree of every key.
+fn at_key<'a>(known: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+    let mut at = known;
+    for part in key.split('.') {
+        at = at.get(part)?;
+    }
+    Some(at)
+}
+
+/// One typed value, read the way the setting beside it is written.
+///
+/// TOML is typed and a command line is not, so `max_steps 7` has to become an
+/// integer and `model home-llama` a string. The shape comes from the defaults
+/// rather than from guessing at the text: `effort "7"` is a string because
+/// effort is one, and a number that happens to look like a count is not.
+fn as_written(shape: &serde_json::Value, value: &str) -> Result<toml_edit::Value, String> {
+    let said = value.trim();
+    match shape {
+        serde_json::Value::Bool(_) => {
+            said.parse::<bool>().map(Into::into).map_err(|_| format!("{said:?} is not true or false"))
+        }
+        serde_json::Value::Number(n) if n.is_f64() && !n.is_u64() && !n.is_i64() => {
+            said.parse::<f64>().map(Into::into).map_err(|_| format!("{said:?} is not a number"))
+        }
+        serde_json::Value::Number(_) => {
+            said.parse::<i64>().map(Into::into).map_err(|_| format!("{said:?} is not a whole number"))
+        }
+        // A field that is `None` by default says nothing about its type, and
+        // neither does an array or a table: a string round-trips through serde
+        // for the first, and the load below refuses it for the others.
+        _ => Ok(said.into()),
+    }
+}
+
 /// The Agent Skills repository, which is where the format's own examples live.
 /// Replace it or add to it; it is a starting point rather than a blessing, and
 /// installing from anywhere means reading what you installed.
@@ -848,6 +882,68 @@ impl Config {
     /// translate before they can paste any of it back.
     pub fn as_written(&self) -> std::io::Result<String> {
         toml::to_string_pretty(self).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+
+    /// Set one dotted setting in the file, leaving the rest of it alone.
+    ///
+    /// Through `toml_edit` rather than by writing the loaded configuration
+    /// back: a file people actually keep is half comments — why a setting is
+    /// off, which machine an address belongs to, what to do when travelling —
+    /// and a serialiser that rebuilds it from the struct deletes every one of
+    /// them. Nothing here rewrites a line it was not asked about.
+    ///
+    /// Refused rather than written where the name is not a setting, so a typo
+    /// is answered while somebody is still looking at what they typed; and the
+    /// result is loaded before it is saved, so a value of the wrong shape is
+    /// answered by the code that will have to read it rather than by a second
+    /// opinion about types.
+    pub fn set_in(path: &std::path::Path, key: &str, value: &str) -> Result<String, String> {
+        let known = every_key().ok_or("this build cannot describe its own settings")?;
+        let shape = at_key(&known, key)
+            .ok_or_else(|| match Self::nearest_to(key) {
+                Some(meant) => format!("{key} is not a setting — did you mean {meant}?"),
+                None => format!("{key} is not a setting"),
+            })?
+            .clone();
+
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(format!("could not read {}: {e}", path.display())),
+        };
+        let mut doc = text
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|e| format!("{} is not valid TOML, so nothing was changed: {e}", path.display()))?;
+
+        let mut at: &mut toml_edit::Item = doc.as_item_mut();
+        let mut parts = key.split('.').peekable();
+        while let Some(part) = parts.next() {
+            if parts.peek().is_none() {
+                // Named, because the shape came from the setting and the
+                // complaint is about the pair: "not a whole number" on its own
+                // leaves somebody looking for which of the two was wrong.
+                let typed = as_written(&shape, value).map_err(|why| format!("{key}: {why}"))?;
+                at[part] = toml_edit::value(typed);
+                break;
+            }
+            // A table the file does not have yet is made implicit, so it is
+            // written as `[agent]` with the setting under it rather than as a
+            // dotted line nobody else in the file uses.
+            at = &mut at[part];
+            if at.is_none() {
+                *at = toml_edit::Item::Table(toml_edit::Table::new());
+            }
+        }
+
+        let written = doc.to_string();
+        // Loaded before it is saved, so what is checked is what will be read.
+        toml::from_str::<Self>(&written)
+            .map_err(|e| format!("{key} = {value:?} is not something this can read: {e}"))?;
+        if let Some(parent) = path.parent() {
+            crate::paths::private_dir(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+        }
+        std::fs::write(path, &written).map_err(|e| format!("could not write {}: {e}", path.display()))?;
+        Ok(written)
     }
 
     pub fn save(&self) -> std::io::Result<()> {

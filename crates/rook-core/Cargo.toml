@@ -32,6 +32,7 @@ similar = { version = "3.2.0", default-features = false, features = ["text"] }
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "process", "io-std"] }
 toml = "1.1.4"
+toml_edit = { version = "0.25.15", default-features = false, features = ["parse", "display"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 ulid = "3.0.0"
