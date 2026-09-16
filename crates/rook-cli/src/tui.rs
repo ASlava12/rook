@@ -52,14 +52,16 @@ enum Overlay {
     Store,
     Checkpoints,
     Docs,
+    Models,
     Help,
 }
 
 impl Overlay {
     /// The panes the palette offers, in the order somebody reaches for them.
-    const PANES: [Overlay; 8] = [
+    const PANES: [Overlay; 9] = [
         Overlay::Calls,
         Overlay::Sessions,
+        Overlay::Models,
         Overlay::Docs,
         Overlay::Memory,
         Overlay::Skills,
@@ -78,6 +80,7 @@ impl Overlay {
             Overlay::Store => "store",
             Overlay::Checkpoints => "checkpoints",
             Overlay::Docs => "docs",
+            Overlay::Models => "models",
             Overlay::Help => "help",
         }
     }
@@ -93,6 +96,7 @@ impl Overlay {
             Overlay::Store => "what memory costs, per kind of object",
             Overlay::Checkpoints => "snapshots of the workspace, and putting one back",
             Overlay::Docs => "documentation gathered here, with its sources",
+            Overlay::Models => "the endpoints configured here, and which is answering",
             Overlay::Help => "the keys and the commands",
         }
     }
@@ -116,8 +120,18 @@ impl Overlay {
             Overlay::Store => &[("r ", "reload  ")],
             Overlay::Checkpoints => &[("j/k ", "move  "), ("c ", "take one  "), ("R ", "restore  ")],
             Overlay::Docs => &[("j/k ", "move  "), ("d ", "drop  "), ("r ", "reload  ")],
+            Overlay::Models => &[("j/k ", "move  "), ("⏎ ", "run on it  "), ("r ", "ask them  ")],
             Overlay::Help => &[("esc ", "close  ")],
         }
+    }
+}
+
+/// What an endpoint that answered is serving, in the width a list has for it.
+fn what_it_serves(said: &rook_core::models::Answered) -> String {
+    match said.serving.len() {
+        0 => "answers, lists no models".to_string(),
+        1 => said.serving[0].clone(),
+        n => format!("{n} models"),
     }
 }
 
@@ -1119,6 +1133,18 @@ struct App {
     docs_state: ListState,
     doc_set: Option<rook_core::DocSet>,
     docs_note: String,
+    /// The endpoints this window can switch between: from `[models]` where it
+    /// holds the store, and from what the daemon says it has where it does not.
+    endpoints: Vec<String>,
+    endpoint_state: ListState,
+    /// What each said when it was last asked, by name. Empty until somebody
+    /// asks: asking is a request per endpoint, and the panes are redrawn on a
+    /// sixty-millisecond tick — a list that probed four machines every time it
+    /// was drawn would be one nobody could leave open.
+    endpoint_says: std::collections::HashMap<String, rook_core::models::Answered>,
+    endpoint_note: String,
+    /// Said once. A line repeated on every refresh is one nobody reads twice.
+    asked_which: bool,
     objects: Vec<(String, String, u64, u64)>,
     stats: Option<StoreStats>,
     status: String,
@@ -1220,6 +1246,11 @@ impl App {
             skill_note: String::new(),
             checkpoints: Vec::new(),
             docs: Vec::new(),
+            endpoints: Vec::new(),
+            endpoint_state: ListState::default(),
+            endpoint_says: std::collections::HashMap::new(),
+            endpoint_note: String::new(),
+            asked_which: false,
             docs_state: ListState::default(),
             doc_set: None,
             docs_note: String::new(),
@@ -1253,6 +1284,37 @@ impl App {
             (!self.checkpoints.is_empty()).then(|| self.checkpoint_state.selected().unwrap_or(0).min(last)),
         );
         self.load_calls();
+        // From the file where this window holds the store. Where it does not,
+        // the names arrive in the daemon's settings message instead and this
+        // must not overwrite them with an empty list.
+        if let Some(rook) = self.source.here() {
+            self.endpoints = rook.config.models.keys().cloned().collect();
+        }
+        let last = self.endpoints.len().saturating_sub(1);
+        self.endpoint_state.select(
+            (!self.endpoints.is_empty()).then(|| self.endpoint_state.selected().unwrap_or(0).min(last)),
+        );
+        // Asked once, on the first read: where nobody has chosen a model, the
+        // setting is a guess at a local Ollama and the first turn fails against
+        // a machine that was never there — while the endpoints somebody did
+        // write down sit in the same file. Put to the person rather than
+        // decided here: which of their machines to work on is not ours to pick.
+        if !self.asked_which && self.shared.model.borrow().is_none() {
+            self.asked_which = true;
+            if let Some(rook) = self.source.here()
+                && let Some(named) =
+                    rook_core::models::unchosen(&rook.config, &rook_core::paths::config_file())
+            {
+                self.endpoint_note = "nobody has chosen one yet".into();
+                self.chat.push(
+                    "stat",
+                    &format!(
+                        "  no model is chosen — ^p models, or `/model {}`",
+                        named.first().map(String::as_str).unwrap_or("<name>")
+                    ),
+                );
+            }
+        }
         self.docs = self.source.docs_kept().unwrap_or_default();
         let last = self.docs.len().saturating_sub(1);
         self.docs_state
@@ -1553,7 +1615,17 @@ impl App {
             // reported before, so a window that joined an `autonomous` turn drew
             // `assist` over it and the person reading the footer had no way to
             // know which of the two was true.
-            ChatEvent::Settings { mode, effort, .. } => {
+            ChatEvent::Settings { mode, effort, model, models, .. } => {
+                // Kept for the pane that lists them. A window on a daemon has
+                // no config of its own to read: the names it can switch between
+                // are the ones the engine says it has, which is the same rule
+                // the stance and effort lists already follow.
+                if !models.is_empty() {
+                    self.endpoints = models;
+                }
+                if !model.is_empty() {
+                    *self.shared.model.borrow_mut() = Some(model);
+                }
                 let ours = (self.shared.policy.stance().as_str(), self.shared.effort.get().as_str());
                 if (mode.as_str(), effort.as_str()) != ours {
                     self.chat.push("stat", &format!("  running at {mode} · {effort}"));
@@ -1716,6 +1788,25 @@ impl App {
             };
             self.reload();
             return;
+        }
+        if overlay == Overlay::Models {
+            match key.code {
+                // Asked here rather than on opening, because asking reaches
+                // every endpoint and the pane is redrawn on a tick.
+                KeyCode::Char('r') => {
+                    self.ask_the_endpoints();
+                    return;
+                }
+                KeyCode::Enter => {
+                    if let Some(name) =
+                        self.endpoint_state.selected().and_then(|at| self.endpoints.get(at)).cloned()
+                    {
+                        self.run_on(&name);
+                    }
+                    return;
+                }
+                _ => {}
+            }
         }
         match key.code {
             // The session under the cursor, taken up in the chat — and the
@@ -2219,6 +2310,39 @@ impl App {
         self.chat.push("stat", &format!("  stance: {}", next.as_str()));
     }
 
+    /// Run the next turn on the endpoint under the cursor.
+    ///
+    /// Both halves, as every setting here has: this window's own, for the turns
+    /// it runs itself, and the daemon's, for the turns it runs. The name came
+    /// from the list the engine gave, so there is nothing to check that the
+    /// engine has not already checked.
+    fn run_on(&mut self, name: &str) {
+        *self.shared.model.borrow_mut() = Some(name.to_string());
+        self.tell_the_daemon("model", name);
+        self.endpoint_note = format!("the next turn runs on {name}");
+        self.chat.push("stat", &format!("  the next turn runs on {name}"));
+    }
+
+    /// Put every endpoint back in the rotation and ask each one.
+    ///
+    /// Blocking, because it is a key somebody pressed and the answer is the
+    /// whole of what they pressed it for — a pane that redrew immediately and
+    /// filled in later would be a pane whose `r` looked like it did nothing.
+    fn ask_the_endpoints(&mut self) {
+        let Some(rook) = self.source.here().cloned() else {
+            // A window on a daemon would clear its own empty register and
+            // leave the agent's untouched, which is worse than not asking:
+            // the table would be true and the rotation unchanged.
+            self.endpoint_note = "`rook models --recheck` asks the daemon holding the store".into();
+            return;
+        };
+        let vault = rook_core::Vault::load().unwrap_or_else(|_| rook_core::Vault::empty());
+        let answers = self.runtime.block_on(rook_core::models::recheck(&rook.config, &vault));
+        let answering = answers.iter().filter(|a| a.answering()).count();
+        self.endpoint_note = format!("{answering} of {} answering", answers.len());
+        self.endpoint_says = answers.into_iter().map(|a| (a.name.clone(), a)).collect();
+    }
+
     fn cycle_effort(&mut self) {
         use rook_llm::Effort::*;
         let next = match self.shared.effort.get() {
@@ -2591,6 +2715,7 @@ impl App {
             Some(Overlay::Memory) => (&mut self.fact_state, self.facts.len()),
             Some(Overlay::Checkpoints) => (&mut self.checkpoint_state, self.checkpoints.len()),
             Some(Overlay::Docs) => (&mut self.docs_state, self.docs.len()),
+            Some(Overlay::Models) => (&mut self.endpoint_state, self.endpoints.len()),
             Some(Overlay::Skills) => (&mut self.skill_state, self.skills.len()),
             _ => {
                 self.transcript_scroll = self.transcript_scroll.saturating_add_signed(delta as i16 * 3);
@@ -2641,6 +2766,7 @@ impl App {
                 Overlay::Store => self.draw_store(f, area),
                 Overlay::Checkpoints => self.draw_checkpoints(f, area),
                 Overlay::Docs => self.draw_docs(f, area),
+                Overlay::Models => self.draw_models(f, area),
                 Overlay::Help => self.draw_help(f, area),
             }
         }
@@ -3477,6 +3603,84 @@ impl App {
             .selected()
             .and_then(|at| self.docs.get(at))
             .and_then(|kept| self.source.docs(&kept.topic, Some(&kept.version)).ok().flatten());
+    }
+
+    /// The endpoints, and what each said when it was last asked.
+    ///
+    /// Nothing is asked on opening. Every other pane here reads the store,
+    /// which is local and costs nothing to redraw; this one would reach four
+    /// machines, and the panes are redrawn on a tick. So the state arrives only
+    /// when somebody asks for it, and until then the list says what the file
+    /// says — which is the half that is true without asking anybody.
+    fn draw_models(&mut self, f: &mut Frame, area: Rect) {
+        let running_on = self.shared.model.borrow().clone().unwrap_or_else(|| self.model.clone());
+        let title = match self.endpoint_note.is_empty() {
+            true => format!(" models ({}) ", self.endpoints.len()),
+            false => format!(" models ({}) — {} ", self.endpoints.len(), self.endpoint_note),
+        };
+        if self.endpoints.is_empty() {
+            f.render_widget(
+                Paragraph::new(vec![
+                    Line::from(format!("running on {running_on}")),
+                    Line::from(""),
+                    Line::from("no endpoints are named under `[models]` in config.toml, so there"),
+                    Line::from("is nothing here to switch between. One is a table with an address,"),
+                    Line::from("an api and the model to ask for; `rook config check` reads them"),
+                    Line::from("back and says which answer."),
+                ])
+                .style(Style::default().fg(Color::DarkGray))
+                .block(bordered(&title)),
+                area,
+            );
+            return;
+        }
+
+        let items: Vec<ListItem> = self
+            .endpoints
+            .iter()
+            .map(|name| {
+                let here = name == &running_on;
+                let mut spans = vec![
+                    Span::styled(
+                        match here {
+                            true => "▸ ",
+                            false => "  ",
+                        },
+                        Style::default().fg(Color::Green),
+                    ),
+                    Span::styled(
+                        format!("{name:<18}"),
+                        match here {
+                            true => Style::default().add_modifier(Modifier::BOLD),
+                            false => Style::default(),
+                        },
+                    ),
+                ];
+                match self.endpoint_says.get(name) {
+                    Some(said) if said.answering() => spans.push(Span::styled(
+                        format!("{:>6} ms   {}", said.took_ms, what_it_serves(said)),
+                        Style::default().fg(Color::Green),
+                    )),
+                    Some(said) => spans.push(Span::styled(
+                        said.refused.as_deref().unwrap_or("refused").lines().next().unwrap_or("").to_string(),
+                        Style::default().fg(Color::Red),
+                    )),
+                    // Not "no", which is what an empty column reads as. Nobody
+                    // has asked, and that is a different thing from an endpoint
+                    // that did not answer.
+                    None => spans.push(Span::styled("not asked — r", Style::default().fg(Color::DarkGray))),
+                }
+                ListItem::new(Line::from(spans))
+            })
+            .collect();
+
+        f.render_stateful_widget(
+            List::new(items)
+                .block(bordered(&title))
+                .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
+            area,
+            &mut self.endpoint_state,
+        );
     }
 
     fn draw_docs(&mut self, f: &mut Frame, area: Rect) {

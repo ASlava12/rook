@@ -119,6 +119,14 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
         yes,
     };
 
+    // Where nobody has chosen a model, `[agent] model` is a guess at a local
+    // Ollama rather than a decision, and the first turn fails against a machine
+    // that was never there. Said here, once, because which of somebody's own
+    // machines to work on is theirs to pick.
+    if let Some(named) = rook_core::models::unchosen(&rook.config, &rook_core::paths::config_file()) {
+        println!("no model is chosen. `/model <name>` picks one: {}", named.join(", "));
+    }
+
     let mut editor = rustyline::DefaultEditor::new()?;
     let history = rook_core::paths::home().join("history");
     let _ = editor.load_history(&history);

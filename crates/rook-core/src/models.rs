@@ -316,3 +316,35 @@ pub async fn recheck(config: &Config, vault: &Vault) -> Vec<Answered> {
     });
     futures_util::future::join_all(asking).await
 }
+
+/// The endpoints to offer where nobody has chosen one, and nothing otherwise.
+///
+/// `[agent] model` always says something, because an unconfigured install is
+/// still meant to work — but what it says then is a guess at a local Ollama,
+/// not a decision. On a machine without one the first turn fails with `cannot
+/// reach 127.0.0.1:11434` while the endpoints somebody did write down sit in
+/// the same file, unasked about.
+///
+/// So the question is whether the file names a model, not whether the setting
+/// has a value: the difference between a choice and a default is not visible
+/// in the loaded configuration, and it is the whole of what this is for.
+/// `None` where there is nothing to offer — an install with no `[models]` has
+/// only the guess, and the error it produces is already the right one.
+pub fn unchosen(config: &Config, path: &std::path::Path) -> Option<Vec<String>> {
+    if config.models.is_empty() || names_a_model(path) {
+        return None;
+    }
+    Some(config.models.keys().cloned().collect())
+}
+
+/// Whether the file says which model to run on.
+///
+/// Read from the file rather than from the loaded configuration, for the reason
+/// above. A file that will not parse is somebody else's error to report and
+/// answers `true` here, so this stays quiet rather than adding a second
+/// complaint about the same file.
+fn names_a_model(path: &std::path::Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else { return false };
+    let Ok(written) = toml::from_str::<toml::Value>(&text) else { return true };
+    written.get("agent").and_then(|agent| agent.get("model")).is_some()
+}

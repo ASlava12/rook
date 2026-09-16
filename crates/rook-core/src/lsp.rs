@@ -119,12 +119,26 @@ fn starts(command: &str) -> bool {
             Ok(None) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
-            // Still running by then is not a version check; it is a server
-            // that started serving, which is as good an answer.
+            // The deadline has passed, which is not the same as the process
+            // having outlived it: this loop asks the clock on every turn, so a
+            // thread that did not get scheduled reads a deadline long gone and
+            // would answer "still running" about something that exited in
+            // milliseconds. It measured the observer rather than the observed,
+            // and under a full `cargo xtask ci` beside another build it read a
+            // shim that exits as a server.
+            //
+            // So the last word is the status rather than the timer. Killing a
+            // process that has already exited changes nothing, and `wait` then
+            // hands back what it really did.
             _ => {
                 let _ = child.kill();
-                let _ = child.wait();
-                return true;
+                return match child.wait() {
+                    // No exit code is our own signal: it was still running,
+                    // which is a server that started serving rather than a
+                    // version check, and that is as good an answer.
+                    Ok(status) => status.code().is_none_or(|code| code == 0),
+                    Err(_) => true,
+                };
             }
         }
     }

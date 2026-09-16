@@ -267,3 +267,40 @@ fn a_bare_name_still_means_what_it_did_where_nothing_is_configured() {
     assert_eq!(tried.len(), 1);
     assert_eq!(tried[0].name, "ollama/qwen3:8b");
 }
+
+/// `[agent] model` always says something, because an unconfigured install is
+/// still meant to work — so the difference between a choice and the shipped
+/// guess is not visible in the loaded configuration at all. It is visible in
+/// the file, and that is the only place to look.
+#[test]
+fn a_model_nobody_chose_is_told_apart_from_one_somebody_did() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let with_sources = concat!(
+        "[models.next-door]\n",
+        "model = \"qwen3-coder:30b\"\n",
+        "api = \"openai\"\n",
+        "url = \"http://127.0.0.1:1234/v1\"\n",
+    );
+
+    std::fs::write(&path, with_sources).unwrap();
+    let config = rook_core::Config::load_from(path.clone()).unwrap();
+    assert_eq!(
+        rook_core::models::unchosen(&config, &path).as_deref(),
+        Some(["next-door".to_string()].as_slice()),
+        "the file names endpoints and no model, so there is something to ask about"
+    );
+
+    // Named, and the question does not arise however little the name resembles
+    // a considered choice.
+    std::fs::write(&path, format!("[agent]\nmodel = \"next-door\"\n\n{with_sources}")).unwrap();
+    let config = rook_core::Config::load_from(path.clone()).unwrap();
+    assert!(rook_core::models::unchosen(&config, &path).is_none(), "somebody chose");
+
+    // And nothing to offer is nothing to ask: an install with no `[models]` has
+    // only the guess, and the error that guess produces is already the right
+    // one. A second complaint about the same file is noise.
+    std::fs::write(&path, "[agent]\nmax_steps = 7\n").unwrap();
+    let config = rook_core::Config::load_from(path.clone()).unwrap();
+    assert!(rook_core::models::unchosen(&config, &path).is_none(), "nothing to choose between");
+}
