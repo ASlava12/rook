@@ -30,6 +30,7 @@ pub mod schema;
 pub mod stats;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use redb::{Database, ReadableDatabase, ReadableTable, WriteTransaction};
 
@@ -147,6 +148,45 @@ pub struct Store {
     root: PathBuf,
     dicts: codec::DictSet,
     level: i32,
+    /// Events committed since the last one that was flushed to disk.
+    ///
+    /// Not a queue of anything: redb makes an `Immediate` commit durable along
+    /// with everything committed before it, so this counts how much a power cut
+    /// could take rather than how much is waiting to be written.
+    unflushed: AtomicU64,
+}
+
+/// How many events may ride on the next durable commit.
+///
+/// A flush costs about eight milliseconds on an ordinary disk, and paying it
+/// per event cost a two-hundred-step turn four seconds of doing nothing but
+/// writing down what it had just done — measured by `cargo xtask load`, which
+/// found appending an event two orders of magnitude dearer than anything else a
+/// turn does.
+///
+/// So the flush moved to the points a turn can be returned to rather than
+/// happening between every pair of them: a checkpoint, a compaction, and the
+/// end of a turn. This bounds what is lost when none of those has come round
+/// for a while — a long autonomous run that takes no checkpoints is the case —
+/// and a flush every two hundred and fifty-six events is thirty microseconds an
+/// event, which is nothing beside the work an event records.
+const EVENTS_PER_FLUSH: u64 = 256;
+
+/// The last flush, for a process that ends between turns rather than at one.
+///
+/// `rook run` is one turn and then an exit, and a daemon told to stop is a
+/// store dropped with whatever the turn before left behind. Neither goes
+/// through [`Store::flush`] on its own, and without this the events would be in
+/// the page cache when the machine lost power.
+///
+/// A release build aborts on panic, so this does not run then. That is the
+/// right way round: a process that is already wrong should not be writing.
+impl Drop for Store {
+    fn drop(&mut self) {
+        // Nothing to say and nowhere to say it — the store is going away, and a
+        // logger may already have.
+        let _ = self.flush();
+    }
 }
 
 impl Store {
@@ -182,7 +222,7 @@ impl Store {
         txn.commit()?;
 
         let dicts = codec::DictSet::load(root.join("dicts"))?;
-        Ok(Self { db, root, dicts, level: codec::DEFAULT_LEVEL })
+        Ok(Self { db, root, dicts, level: codec::DEFAULT_LEVEL, unflushed: Default::default() })
     }
 
     fn check_format(root: &Path) -> Result<()> {
@@ -540,7 +580,21 @@ impl Store {
     /// Append one event. The body is stored as an object, so a repeated payload
     /// costs only the ~50-byte log record.
     pub fn append_event(&self, session: u128, event: NewEvent<'_>) -> Result<u64> {
-        let txn = self.db.begin_write()?;
+        // A checkpoint and a compaction are the two events a session can be
+        // returned to, so they are the two that have to be on the disk rather
+        // than in the page cache — and because an `Immediate` commit carries
+        // everything before it, making these durable makes the turn that led up
+        // to them durable too. Everything else rides along.
+        let ordinary = !matches!(event.kind, EventKind::Checkpoint | EventKind::Compaction)
+            && self.unflushed.load(Ordering::Relaxed) < EVENTS_PER_FLUSH;
+
+        let mut txn = self.db.begin_write()?;
+        if ordinary {
+            // The error is "a write is already in flight on this transaction",
+            // which cannot be: nothing has been written to it yet. Nothing to
+            // handle, and the cost of being wrong is a flush we did not need.
+            let _ = txn.set_durability(redb::Durability::None);
+        }
         let body_id = self.put_tx(&txn, event.body_kind, event.body)?;
 
         let seq;
@@ -576,7 +630,41 @@ impl Store {
         }
 
         txn.commit()?;
+        match ordinary {
+            true => self.unflushed.fetch_add(1, Ordering::Relaxed),
+            false => self.unflushed.swap(0, Ordering::Relaxed),
+        };
         Ok(seq)
+    }
+
+    /// How many events are not on the disk yet.
+    ///
+    /// A seam, because the alternative is cutting the power: which events are
+    /// durable is not observable from inside the process that wrote them, and
+    /// the rule — a checkpoint and a compaction are, the steps between them
+    /// ride along — is exactly the sort that is quietly lost in a later edit.
+    #[doc(hidden)]
+    pub fn not_on_disk_yet(&self) -> u64 {
+        self.unflushed.load(Ordering::Relaxed)
+    }
+
+    /// Put everything written so far beyond the reach of a power cut.
+    ///
+    /// Called at the end of a turn, which is the unit a person would miss: a
+    /// turn interrupted by the machine losing power is not one that resumes,
+    /// and what has to survive is the record of the turns that finished.
+    ///
+    /// Cheap when there is nothing to do, and about eight milliseconds when
+    /// there is, which is why it is a turn's cost rather than an event's.
+    pub fn flush(&self) -> Result<()> {
+        if self.unflushed.load(Ordering::Relaxed) == 0 {
+            return Ok(());
+        }
+        // An empty transaction at the default durability, which persists itself
+        // and every commit behind it. There is nothing to write into it.
+        self.db.begin_write()?.commit()?;
+        self.unflushed.store(0, Ordering::Relaxed);
+        Ok(())
     }
 
     pub fn events(&self, session: u128, from_seq: u64, limit: usize) -> Result<Vec<Event>> {

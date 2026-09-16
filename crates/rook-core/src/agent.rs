@@ -3724,6 +3724,18 @@ impl<'a> AgentLoop<'a> {
     async fn end_of_turn(&self, outcome: &mut TurnOutcome) {
         self.collect_install().await;
         self.settle_reports(outcome);
+        // A turn is the unit somebody would miss. Its events were written
+        // without waiting for the disk — eight milliseconds each, which a
+        // two-hundred-step turn paid four seconds for — and this is where they
+        // are made to survive a power cut, once rather than four hundred times.
+        //
+        // Not fatal, and not silent: the turn is over and its work is on disk
+        // in the workspace either way, but a store that cannot write is a
+        // session about to be lost and the next thing to go wrong will be
+        // stranger than this.
+        if let Err(why) = self.rook.store.flush() {
+            tracing::warn!("the session log is not on disk yet: {why}");
+        }
         self.finish(outcome).await;
     }
 

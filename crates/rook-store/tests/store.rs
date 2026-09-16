@@ -572,3 +572,66 @@ fn changing_one_field_does_not_undo_what_landed_meanwhile() {
 
     assert!(!s.update_session(rook_store::new_session_id(), |_| {}).unwrap(), "a session that is not there");
 }
+
+/// Events are no longer flushed to disk one at a time — a flush is eight
+/// milliseconds and a two-hundred-step turn writes four hundred events — so
+/// something else has to put them there. Closing the store is that something,
+/// and this is the claim that it happens: `rook run` is one turn and then an
+/// exit, and nothing else would have.
+#[test]
+fn a_session_is_on_disk_after_the_store_is_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = rook_store::new_session_id();
+    // Past the count that forces one anyway, so what is being tested is the
+    // close and not a flush that had already happened for another reason.
+    let events = 300;
+    assert!(events < 2 * 256, "and not so far past it that most of them were flushed regardless");
+
+    {
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .create_session(&SessionMeta::new(session, "closing", "/tmp/ws", rook_store::now_unix()))
+            .unwrap();
+        for i in 0..events {
+            store
+                .append_event(session, NewEvent::new(EventKind::AssistantMessage, Kind::Message, &message(i)))
+                .unwrap();
+        }
+    }
+
+    let reopened = Store::open(dir.path()).unwrap();
+    let read_back = reopened.events(session, 0, usize::MAX).unwrap();
+    assert_eq!(read_back.len(), events, "every event written before the close is still there");
+    let meta = reopened.get_session(session).unwrap().expect("the session itself survived");
+    assert_eq!(meta.event_count, events as u64, "and the session's own count agrees");
+}
+
+/// The other half of the same claim, and the one a person would feel: a
+/// checkpoint is what a rewind returns to, so it is on the disk before the work
+/// that follows it. redb makes an immediate commit durable along with
+/// everything committed before it, so this also puts the turn that led up to
+/// the checkpoint beyond a power cut.
+#[test]
+fn a_checkpoint_does_not_wait_for_anything_to_be_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = rook_store::new_session_id();
+    let store = Store::open(dir.path()).unwrap();
+    store
+        .create_session(&SessionMeta::new(session, "checkpointing", "/tmp/ws", rook_store::now_unix()))
+        .unwrap();
+
+    for i in 0..10 {
+        store
+            .append_event(session, NewEvent::new(EventKind::AssistantMessage, Kind::Message, &message(i)))
+            .unwrap();
+    }
+    // The precondition, and it is the whole point: these ten are what a power
+    // cut would take. Without it the assertion below passes on a store that
+    // flushes everything, which is the behaviour being changed.
+    assert_eq!(store.not_on_disk_yet(), 10, "ordinary events wait");
+
+    store.append_event(session, NewEvent::new(EventKind::Checkpoint, Kind::Message, b"{}")).unwrap();
+    assert_eq!(store.not_on_disk_yet(), 0, "and a checkpoint takes them all with it");
+
+    assert_eq!(store.events(session, 0, usize::MAX).unwrap().len(), 11, "ten steps and the checkpoint");
+}

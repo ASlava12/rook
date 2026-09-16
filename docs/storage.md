@@ -185,6 +185,34 @@ conversation, and a hit in a file names the path and the capture it came from.
   committed only afterwards. A crash in between leaves an orphan file, which the
   next `gc` reclaims.
 
+### What a power cut can take
+
+The index is never inconsistent: every commit is atomic, and a machine that
+loses power comes back to a store that opens. What it can lose is the tail of
+an unfinished turn.
+
+Flushing to disk costs about eight milliseconds, and one event at a time it was
+the most expensive thing the agent did — `cargo xtask load` measured nine
+milliseconds to append an event against a hundred and fifty microseconds to read
+one back, so a two-hundred-step turn spent four seconds writing down what it had
+just done. The flush now happens at the points a session can be returned to
+rather than between every pair of steps:
+
+- a **checkpoint**, which is what a rewind restores;
+- a **compaction**, which is a durable marker by design;
+- the **end of a turn**;
+- **closing the store**, which is what `rook run` does after its one turn;
+- and every 256 events regardless, so a long autonomous run that takes no
+  checkpoints still bounds what it could lose.
+
+redb makes a durable commit persist everything committed before it, so each of
+those carries the whole span behind it. What is at risk is therefore the events
+since the most recent of them — a turn that was still running when the power
+went, which is not a turn that resumes, and whose effects on the workspace are
+on disk in the workspace either way.
+
+Appending an event costs 397 µs now rather than 9 ms, measured the same way.
+
 ## Concurrency
 
 redb allows one writer process at a time. `rookd` normally holds it, and the
