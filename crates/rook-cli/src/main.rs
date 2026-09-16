@@ -75,6 +75,15 @@ enum Command {
     /// Read the configuration, fill in what it does not say, and check it.
     #[command(subcommand)]
     Config(ConfigCmd),
+    /// Run the checks this project is judged by, from `.rook/evaluation.toml`.
+    ///
+    /// The harness runs them, not the model — an agent that could run its own
+    /// evaluation could run it until it passed.
+    Eval {
+        /// Print the report as JSON, for something else to read.
+        #[arg(long)]
+        json: bool,
+    },
     /// List the models the configured provider says it can serve.
     Models {
         /// Put every configured endpoint back in the rotation and ask each one.
@@ -527,6 +536,7 @@ fn main() -> Result<()> {
         Some(Command::Run { prompt, session }) => cmd_run(cli.workspace, prompt, session, cli.yes, cli.json),
         Some(Command::Models { recheck, source }) => cmd_models(cli.workspace, cli.json, recheck, source),
         Some(Command::Config(cmd)) => cmd_config(cmd, cli.json),
+        Some(Command::Eval { json }) => cmd_eval(cli.workspace, json || cli.json),
         Some(Command::Acp) => cmd_acp(cli.workspace),
         Some(Command::Serve { port }) => cmd_serve(port),
         Some(Command::Daemon(c)) => cmd_daemon(c, cli.json),
@@ -1781,6 +1791,64 @@ fn show_stats(s: &StoreStats, json: bool) -> Result<()> {
 /// The same rule `last` follows: sessions belong to the workspace they ran in,
 /// and a project's list is what you meant. What is hidden is said, so nobody
 /// concludes their history is gone.
+/// Run the checks this project declares and print what they said.
+///
+/// Outside any turn and reachable only from here: the model never calls this.
+/// An agent that could run its own evaluation could run it until it passed,
+/// which is the whole reason the scorecard is declared rather than asked for.
+fn cmd_eval(workspace: Option<PathBuf>, json: bool) -> Result<()> {
+    let here = workspace_of(&workspace);
+    let Some(card) = rook_core::evaluation::read(&here).map_err(anyhow::Error::msg)? else {
+        anyhow::bail!(
+            "{} declares no checks, so there is nothing to measure. A scorecard is a list of              `[[check]]` tables, each with a `name` and something to `run`.",
+            rook_core::evaluation::scorecard_path(&here).display()
+        );
+    };
+
+    // Taken now and compared with now, so a plain `rook eval` reports no
+    // change: what a run of the loop passes in is the witness from before the
+    // turn, and that is where "this was rewritten while it was measured" comes
+    // from. Asked the same way in both places rather than two functions.
+    let before = rook_core::evaluation::witness(&here, &card);
+    let report = rook_core::evaluation::run(&here, &card, &before);
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+    let rows: Vec<Vec<String>> = report
+        .checks
+        .iter()
+        .map(|c| {
+            vec![
+                if c.passed { "✓".into() } else { "✗".into() },
+                c.name.clone(),
+                match c.status {
+                    Some(code) => format!("exit {code}"),
+                    None => "did not finish".into(),
+                },
+                format!("{:.1}s", c.took_ms as f64 / 1000.0),
+                match c.measured {
+                    Some(n) => format!("{} {n}", c.measures),
+                    None => String::new(),
+                },
+            ]
+        })
+        .collect();
+    print!("{}", fmt::table(&["", "check", "", "took", ""], &rows));
+    println!();
+    println!("{}", report.summary());
+    for check in report.checks.iter().filter(|c| !c.passed) {
+        println!("\n── {} ──\n{}", check.name, check.said.trim_end());
+    }
+    // The exit status is the verdict, the way the gate's is: something that
+    // runs this in a loop reads the status, not the table.
+    match report.clean() {
+        true => Ok(()),
+        false => std::process::exit(1),
+    }
+}
+
 fn workspace_of(given: &Option<PathBuf>) -> PathBuf {
     given.clone().or_else(|| std::env::current_dir().ok()).unwrap_or_else(|| PathBuf::from("."))
 }

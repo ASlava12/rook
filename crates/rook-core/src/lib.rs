@@ -21,6 +21,7 @@ pub mod config;
 pub mod context;
 pub mod docs;
 pub mod error;
+pub mod evaluation;
 pub mod fileset;
 pub mod hooks;
 pub mod install;
