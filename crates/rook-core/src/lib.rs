@@ -38,7 +38,7 @@ pub mod secrets;
 pub mod service;
 pub mod telemetry;
 
-pub use config::{Config, ConfigError, ModelSource};
+pub use config::{ApiEndpoint, Config, ConfigError, ModelSource};
 pub use docs::{DocSet, Kept};
 pub use error::{CoreError, Result};
 pub use fileset::{CaptureLimits, Change, FileSet};

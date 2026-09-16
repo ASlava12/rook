@@ -575,6 +575,15 @@ pub struct Endpoint {
     /// Send the key over plain http to this endpoint even though it is not on
     /// this machine. Only as far as this network — see [`in_the_clear`].
     pub key_in_the_clear: bool,
+    /// The queue this waits in, where that is not a queue of its own.
+    ///
+    /// One server usually serves more than one model, and `parallel` is a fact
+    /// about the server: llama.cpp holds one model and interleaves a second
+    /// request with the first whether or not the two asked for the same thing.
+    /// Two endpoints that differ only in `model` therefore have to share a
+    /// queue, and `None` — a queue named after this endpoint — is the answer
+    /// only when nothing else is pointed at the same place.
+    pub queue: Option<String>,
 }
 
 /// Build a provider for several endpoints in preference order.
@@ -631,7 +640,8 @@ pub fn endpoint_from_spec(spec: &str, context_window: Option<usize>) -> Result<E
 }
 
 fn endpoint_provider(endpoint: Endpoint, stream_idle: std::time::Duration) -> Result<Box<dyn Provider>> {
-    let Endpoint { name, api, url, key, model, context_window, parallel, key_in_the_clear } = endpoint;
+    let Endpoint { name, api, url, key, model, context_window, parallel, key_in_the_clear, queue } = endpoint;
+    let queue = queue.unwrap_or_else(|| name.clone());
     in_the_clear(&url, key.as_deref(), key_in_the_clear)?;
     let built: Box<dyn Provider> = match api {
         Api::Anthropic => {
@@ -666,7 +676,7 @@ fn endpoint_provider(endpoint: Endpoint, stream_idle: std::time::Duration) -> Re
     //
     // Zero lifts the limit, as it does everywhere else here.
     Ok(match parallel.filter(|at_once| *at_once > 0) {
-        Some(at_once) => Box::new(limit::Limited::new(built, &name, at_once)),
+        Some(at_once) => Box::new(limit::Limited::new(built, &queue, at_once)),
         None => built,
     })
 }
@@ -699,6 +709,14 @@ pub fn from_spec_with(
 ///
 /// Traced from goose's "require HTTPS for Snowflake" — see
 /// [references/PORTED.md](../../../references/PORTED.md).
+/// Whether this host still needs saying — and after asking, it does not.
+fn not_said_yet(host: &str) -> bool {
+    static SAID: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    let mut said = SAID.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    said.insert(host.to_string())
+}
+
 fn in_the_clear(base: &str, key: Option<&str>, permitted: bool) -> Result<()> {
     if key.is_none() || !base.trim().to_ascii_lowercase().starts_with("http://") {
         return Ok(());
@@ -727,7 +745,13 @@ fn in_the_clear(base: &str, key: Option<&str>, permitted: bool) -> Result<()> {
     // written down per endpoint; a key crossing the public internet in clear
     // text is not a decision anybody should be offered.
     if permitted && beside_us(base) {
-        tracing::warn!("sending an API key to {host} over plain http, because the source says so");
+        // Once per host. It is a fact about the network between here and that
+        // address rather than about any one model, and a server serving four of
+        // them said it four times at startup — which is how a line worth
+        // reading becomes one nobody reads.
+        if not_said_yet(&host) {
+            tracing::warn!("sending an API key to {host} over plain http, because it is set to");
+        }
         return Ok(());
     }
     Err(LlmError::Other(match permitted {
@@ -739,8 +763,8 @@ fn in_the_clear(base: &str, key: Option<&str>, permitted: bool) -> Result<()> {
         false => format!(
             "{base} is http and an API key is set, so the key would cross the network in clear \
              text. Use https, unset the key if {host} does not need one, or — where {host} is on \
-             your own network and you have weighed it — set `key_in_the_clear = true` on this \
-             source."
+             your own network and you have weighed it — set `key_in_the_clear = true` beside \
+             the address."
         ),
     }))
 }
@@ -873,11 +897,12 @@ fn from_environment(spec: &str, context_window: Option<usize>) -> Result<Endpoin
         model: model.to_string(),
         // The override first, because it is the one somebody set on purpose.
         context_window: context_window.or(assumed),
-        // No variable spells either of these, so there is nothing to read and
+        // No variable spells any of these, so there is nothing to read and
         // nothing to change: a configuration written before `[models]` behaves
         // exactly as it did.
         parallel: None,
         key_in_the_clear: false,
+        queue: None,
     })
 }
 

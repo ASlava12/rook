@@ -1466,6 +1466,7 @@ fn checked(runtime: &tokio::runtime::Runtime, json: bool) -> Result<()> {
     let path = rook_core::paths::config_file();
     let config = rook_core::Config::load()?;
     let ignored = rook_core::Config::ignored_in(&path);
+    let unpointed = rook_core::models::unpointed(&config);
     let answers = {
         let vault = rook_core::Vault::load().unwrap_or_else(|_| rook_core::Vault::empty());
         runtime.block_on(rook_core::models::recheck(&config, &vault))
@@ -1477,6 +1478,7 @@ fn checked(runtime: &tokio::runtime::Runtime, json: bool) -> Result<()> {
             serde_json::to_string_pretty(&serde_json::json!({
                 "config": path,
                 "ignored": ignored,
+                "unpointed": unpointed,
                 "models": answers,
             }))?
         );
@@ -1499,9 +1501,15 @@ fn checked(runtime: &tokio::runtime::Runtime, json: bool) -> Result<()> {
         }
     }
 
+    for name in &unpointed {
+        // Inert rather than wrong, so it is a line and not a failure — but an
+        // address nothing uses looks exactly like one something does.
+        println!("  · [endpoints.{name}] is described and no `[models]` source asks for it");
+    }
+
     println!();
     if answers.is_empty() {
-        println!("no endpoints are named under `[models]`");
+        println!("no models are named under `[models]`");
         return Ok(());
     }
     let rows: Vec<Vec<String>> = answers
@@ -1521,7 +1529,10 @@ fn checked(runtime: &tokio::runtime::Runtime, json: bool) -> Result<()> {
             ]
         })
         .collect();
-    print!("{}", fmt::table(&["", "endpoint", "answered in", "what it says"], &rows));
+    // "model" rather than "endpoint": the rows are `[models]` names, and since
+    // `[endpoints]` became a table of its own the older word named the wrong
+    // one of the two.
+    print!("{}", fmt::table(&["", "model", "answered in", "what it says"], &rows));
     Ok(())
 }
 
@@ -1574,7 +1585,10 @@ fn rechecked(runtime: &tokio::runtime::Runtime, json: bool) -> Result<()> {
             ]
         })
         .collect();
-    print!("{}", fmt::table(&["", "endpoint", "answered in", "what it says"], &rows));
+    // "model" rather than "endpoint": the rows are `[models]` names, and since
+    // `[endpoints]` became a table of its own the older word named the wrong
+    // one of the two.
+    print!("{}", fmt::table(&["", "model", "answered in", "what it says"], &rows));
     Ok(())
 }
 

@@ -44,12 +44,53 @@ pub struct Config {
     /// way of adding the first server.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub mcp: Vec<rook_mcp::ServerConfig>,
-    /// Endpoints the agent can be pointed at, by name, as `[models.<name>]`
+    /// Models the agent can be pointed at, by name, as `[models.<name>]`
     /// tables. Empty is not a lack of models — it is the older way of saying
     /// it, where `[agent] model` is a `provider/model` spec and the address and
     /// key come from the environment.
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub models: std::collections::BTreeMap<String, ModelSource>,
+    /// Places to send a request, as `[endpoints.<name>]` tables, for the
+    /// ordinary case of one server serving several models. Optional: a source
+    /// that carries its own address is its own endpoint, and every
+    /// configuration written before this table existed is exactly that.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub endpoints: std::collections::BTreeMap<String, ApiEndpoint>,
+}
+
+/// One place to send a request, named in `[endpoints]` and pointed at from
+/// `[models]`.
+///
+/// Written apart from the model because one server serves several. A machine
+/// running llama.cpp has one address, one key and one queue; what changes
+/// between the small model on it and the large one is the name to ask for and
+/// how much context it has. Before this table the two halves were written
+/// together, so the address, the key and the parallelism were copied per model
+/// and a moved server was a file to edit in four places.
+///
+/// The queue is the reason it is not merely tidier. `parallel` is a fact about
+/// the process, not about the model: a local runtime interleaves a second
+/// request with the first whether or not they asked for the same thing, so two
+/// models written as two independent sources each allowing one request meant
+/// two at the server and a turn that looked hung.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ApiEndpoint {
+    /// Which api it speaks: `openai`, `anthropic` or `google`. Not the vendor —
+    /// see [`ModelSource::api`], which means the same thing.
+    pub api: String,
+    /// Where it is, path included. Most openai-compatible servers want `/v1` on
+    /// the end and this is not the place to guess which do.
+    pub url: String,
+    /// The key to send. `secret:name`, `env:NAME`, or the value itself — see
+    /// [`ModelSource::key`] for why the value is the last of the three.
+    pub key: String,
+    /// How many agents may be asking this server at once, across every model on
+    /// it. One unless it says otherwise, and 0 lifts the limit.
+    pub parallel: Option<usize>,
+    /// Send the key to this endpoint over plain http, where it is on this
+    /// network rather than this machine — see [`ModelSource::key_in_the_clear`].
+    pub key_in_the_clear: bool,
 }
 
 /// One endpoint the agent can be pointed at, named in `[models]`.
@@ -68,6 +109,17 @@ pub struct Config {
 pub struct ModelSource {
     /// The model to ask for, as this endpoint spells it.
     pub model: String,
+    /// A name from `[endpoints]` to ask, where the address is written down once
+    /// and several models share it.
+    ///
+    /// Empty means this source carries its own address in the fields below,
+    /// which is what every configuration written before `[endpoints]` existed
+    /// does — so both spellings work and neither has to be migrated.
+    ///
+    /// Naming one and also setting an address here is refused rather than
+    /// resolved. Either the line above or the line below is being ignored, and
+    /// which one is not something to leave to a rule nobody would remember.
+    pub endpoint: String,
     /// Which api it speaks: `openai`, `anthropic` or `google`.
     ///
     /// Not the vendor. An Anthropic-shaped gateway in front of something else
@@ -156,6 +208,7 @@ impl Default for Config {
             lsp: Vec::new(),
             mcp: Vec::new(),
             models: std::collections::BTreeMap::new(),
+            endpoints: std::collections::BTreeMap::new(),
             hooks: Vec::new(),
             skill_sources: default_skill_sources(),
         }
@@ -185,16 +238,17 @@ fn unread(written: &serde_json::Value, known: &serde_json::Value, at: &str, out:
         if at.is_empty() && matches!(key.as_str(), "mcp" | "hooks" | "lsp") {
             continue;
         }
-        // `models` cannot be walked like the rest: its keys are names somebody
-        // chose, so a written one is never in the template. What is inside each
-        // is an ordinary struct though, and a typo there is the same mistake
-        // this exists to catch — `ur1` instead of `url` is a source with no
-        // address, silently, because serde fills the rest from defaults and
-        // says nothing about the leftover.
-        if at.is_empty() && key == "models" {
-            let Some(shape) = serde_json::to_value(ModelSource::default()).ok() else { continue };
-            for (named, source) in value.as_object().into_iter().flatten() {
-                unread(source, &shape, &format!("models.{named}"), out);
+        // `[models]` and `[endpoints]` cannot be walked like the rest: their
+        // keys are names somebody chose, so a written one is never in the
+        // template. What is inside each is an ordinary struct though, and a
+        // typo there is the same mistake this exists to catch — `ur1` instead
+        // of `url` is a source with no address, silently, because serde fills
+        // the rest from defaults and says nothing about the leftover.
+        if at.is_empty()
+            && let Some(shape) = under_a_chosen_name(key)
+        {
+            for (named, entry) in value.as_object().into_iter().flatten() {
+                unread(entry, &shape, &format!("{key}.{named}"), out);
             }
             continue;
         }
@@ -209,38 +263,96 @@ fn unread(written: &serde_json::Value, known: &serde_json::Value, at: &str, out:
     }
 }
 
+/// How many single-character edits turn one name into the other.
+///
+/// Two rows of the usual table rather than the whole of it, because the whole
+/// of it is a name against a name: nothing here is longer than a setting.
+fn edits_apart(a: &str, b: &str) -> usize {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, from) in a.iter().enumerate() {
+        // The cell diagonally up-left, kept as the row is overwritten in place.
+        let mut corner = row[0];
+        row[0] = i + 1;
+        for (j, to) in b.iter().enumerate() {
+            let substituted = corner + usize::from(from != to);
+            corner = row[j + 1];
+            row[j + 1] = substituted.min(row[j] + 1).min(corner + 1);
+        }
+    }
+    row[b.len()]
+}
+
+/// The shape under a table whose keys are names somebody chose, or `None` where
+/// the name is an ordinary setting.
+///
+/// `[models.home-llama]` and `[endpoints.desk]` are not settings: the middle
+/// segment is the user's word, so it is never in the template and everything
+/// that walks the template has to step over it. Three do — the search for a key
+/// nothing reads, the suggestion for a key with a typo in it, and the lookup
+/// that types a value for `config set` — and they read it from here rather than
+/// each carrying its own list of table names. Two of the three knew about
+/// `[models]` and the third did not, which is how `config set
+/// models.home-llama.priority 1` came to answer "is not a setting" about a
+/// setting its own help text gives as the example.
+fn under_a_chosen_name(table: &str) -> Option<serde_json::Value> {
+    match table {
+        "models" => serde_json::to_value(ModelSource::default()).ok(),
+        "endpoints" => serde_json::to_value(ApiEndpoint::default()).ok(),
+        _ => None,
+    }
+}
+
 /// The shape a setting has, by its dotted name, from the tree of every key.
-fn at_key<'a>(known: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
-    let mut at = known;
-    for part in key.split('.') {
-        at = at.get(part)?;
+fn at_key(known: &serde_json::Value, key: &str) -> Option<serde_json::Value> {
+    let mut parts = key.split('.').peekable();
+    let mut at = match parts.peek().copied().and_then(under_a_chosen_name) {
+        // `models.home-llama.priority`: the table, then the name, then the
+        // setting — and the setting is read against one entry rather than
+        // against the table of entries, which holds nothing until somebody
+        // writes something in it.
+        Some(shape) => {
+            parts.next();
+            parts.next()?;
+            shape
+        }
+        None => known.clone(),
+    };
+    for part in parts {
+        at = at.get(part)?.clone();
     }
     Some(at)
 }
 
-/// One typed value, read the way the setting beside it is written.
+/// Every TOML value one piece of command-line text could be, most particular
+/// first.
 ///
 /// TOML is typed and a command line is not, so `max_steps 7` has to become an
-/// integer and `model home-llama` a string. The shape comes from the defaults
-/// rather than from guessing at the text: `effort "7"` is a string because
-/// effort is one, and a number that happens to look like a count is not.
-fn as_written(shape: &serde_json::Value, value: &str) -> Result<toml_edit::Value, String> {
-    let said = value.trim();
-    match shape {
-        serde_json::Value::Bool(_) => {
-            said.parse::<bool>().map(Into::into).map_err(|_| format!("{said:?} is not true or false"))
-        }
-        serde_json::Value::Number(n) if n.is_f64() && !n.is_u64() && !n.is_i64() => {
-            said.parse::<f64>().map(Into::into).map_err(|_| format!("{said:?} is not a number"))
-        }
-        serde_json::Value::Number(_) => {
-            said.parse::<i64>().map(Into::into).map_err(|_| format!("{said:?} is not a whole number"))
-        }
-        // A field that is `None` by default says nothing about its type, and
-        // neither does an array or a table: a string round-trips through serde
-        // for the first, and the load below refuses it for the others.
-        _ => Ok(said.into()),
+/// integer and `model home-llama` a string. Which it is is not decided here:
+/// each of these is written into the file in turn and the first one the
+/// configuration loads from is the one kept, so the answer comes from the code
+/// that will have to read the setting.
+///
+/// It was decided here once, from the shape the same setting has in the
+/// defaults, and that shape is `null` for every field that is `None` by
+/// default — so `context_window 8192` and `models.<name>.priority 1` were
+/// written as the strings `"8192"` and `"1"` and then refused by the load, on
+/// a complaint about a type nobody had chosen.
+fn could_be(said: &str) -> Vec<toml_edit::Value> {
+    let mut all: Vec<toml_edit::Value> = Vec::new();
+    if let Ok(yes_or_no) = said.parse::<bool>() {
+        all.push(yes_or_no.into());
     }
+    if let Ok(whole) = said.parse::<i64>() {
+        all.push(whole.into());
+    }
+    if let Ok(number) = said.parse::<f64>() {
+        all.push(number.into());
+    }
+    // Last, so a setting that can hold a number holds one: `"7"` loads for a
+    // string field and nothing else, which is exactly when it is right.
+    all.push(said.into());
+    all
 }
 
 /// The Agent Skills repository, which is where the format's own examples live.
@@ -855,24 +967,31 @@ impl Config {
         // dotted string asks for one key with dots in its name, which nothing
         // has — so every nested table answered `None`, and a source under
         // `[models]` could never be suggested for at all.
-        let mut at = &known;
-        for segment in table.split('.').filter(|s| !s.is_empty()) {
-            at = match segment {
-                // Its keys are names somebody chose, so the shape to compare
-                // against is one source rather than the table of them.
-                _ if std::ptr::eq(at, &known) && segment == "models" => break,
-                other => at.get(other)?,
-            };
-        }
-        let siblings = match table.starts_with("models") {
-            true => serde_json::to_value(ModelSource::default()).ok()?.as_object()?.clone(),
-            false => at.as_object()?.clone(),
+        let first = table.split('.').next().unwrap_or_default();
+        let siblings = match under_a_chosen_name(first) {
+            // Its keys are names somebody chose, so the shape to compare
+            // against is one entry rather than the table of them.
+            Some(shape) => shape.as_object()?.clone(),
+            None => {
+                let mut at = &known;
+                for segment in table.split('.').filter(|s| !s.is_empty()) {
+                    at = at.get(segment)?;
+                }
+                at.as_object()?.clone()
+            }
         };
-        let shared = |a: &str, b: &str| a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count();
-        let (name, common) =
-            siblings.keys().map(|name| (name.clone(), shared(name, key))).max_by_key(|(_, n)| *n)?;
-        // Four characters of agreement is a typo; less is a different setting.
-        (common >= 4 && common + 2 >= key.len()).then_some(name)
+        let (name, apart) =
+            siblings.keys().map(|name| (name.clone(), edits_apart(name, key))).min_by_key(|(_, n)| *n)?;
+        // Two edits at most, and no more than one for every three characters
+        // written: `ur1` is `url` and `stanse` is `stance`, while `cwd` is not
+        // any of `api`, `key` or `url` however close the shortest of them is.
+        //
+        // Counted as edits rather than as a shared prefix, which was the first
+        // rule and could not see a typo in a short name at all: agreement to
+        // four characters is something `url` does not have with anything, so
+        // `ur1` — one keystroke out, on the field most often written by hand —
+        // was reported as a setting that does not exist and left at that.
+        (apart <= 2 && apart * 3 <= key.chars().count()).then_some(name)
     }
 
     /// These settings as a file would hold them, defaults and all.
@@ -897,53 +1016,74 @@ impl Config {
     /// result is loaded before it is saved, so a value of the wrong shape is
     /// answered by the code that will have to read it rather than by a second
     /// opinion about types.
-    pub fn set_in(path: &std::path::Path, key: &str, value: &str) -> Result<String, String> {
+    pub fn set_in(path: &std::path::Path, key: &str, value: &str) -> Result<(), String> {
         let known = every_key().ok_or("this build cannot describe its own settings")?;
-        let shape = at_key(&known, key)
-            .ok_or_else(|| match Self::nearest_to(key) {
-                Some(meant) => format!("{key} is not a setting — did you mean {meant}?"),
-                None => format!("{key} is not a setting"),
-            })?
-            .clone();
+        at_key(&known, key).ok_or_else(|| match Self::nearest_to(key) {
+            Some(meant) => format!("{key} is not a setting — did you mean {meant}?"),
+            None => format!("{key} is not a setting"),
+        })?;
 
         let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(e) => return Err(format!("could not read {}: {e}", path.display())),
         };
-        let mut doc = text
+        let doc = text
             .parse::<toml_edit::DocumentMut>()
             .map_err(|e| format!("{} is not valid TOML, so nothing was changed: {e}", path.display()))?;
 
-        let mut at: &mut toml_edit::Item = doc.as_item_mut();
+        // Each typing the text admits, written into its own copy of the
+        // document and loaded — the first that loads is the one kept. The
+        // decision belongs to the code that will read the setting: nothing here
+        // knows that `max_steps` is a count and `effort` is not, and the tree
+        // of defaults does not know either for any field that is `None`.
+        let mut refused = None;
+        for typed in could_be(value.trim()) {
+            let mut doc = doc.clone();
+            Self::written_at(doc.as_item_mut(), key, typed);
+            let written = doc.to_string();
+            match toml::from_str::<Self>(&written) {
+                Ok(_) => {
+                    if let Some(parent) = path.parent() {
+                        crate::paths::private_dir(parent)
+                            .map_err(|e| format!("{}: {e}", parent.display()))?;
+                    }
+                    return std::fs::write(path, &written)
+                        .map_err(|e| format!("could not write {}: {e}", path.display()));
+                }
+                // The first refusal and not the last, because the candidates
+                // run most particular first: told `max_steps true`, "expected
+                // usize, found a boolean" is the complaint somebody can act on
+                // and "expected usize, found a string" is about a guess this
+                // made after that one failed.
+                Err(e) => refused = refused.or(Some(e)),
+            }
+        }
+        Err(match refused {
+            Some(e) => format!("{key}: {value:?} is not something this setting can hold — {e}"),
+            None => format!("{key}: {value:?} could not be written"),
+        })
+    }
+
+    /// Put one typed value at a dotted path, making the tables above it as it
+    /// goes.
+    ///
+    /// A table the file does not have yet is written as `[agent]` with the
+    /// setting under it rather than as a dotted line nobody else in the file
+    /// uses.
+    fn written_at(root: &mut toml_edit::Item, key: &str, value: toml_edit::Value) {
+        let mut at = root;
         let mut parts = key.split('.').peekable();
         while let Some(part) = parts.next() {
             if parts.peek().is_none() {
-                // Named, because the shape came from the setting and the
-                // complaint is about the pair: "not a whole number" on its own
-                // leaves somebody looking for which of the two was wrong.
-                let typed = as_written(&shape, value).map_err(|why| format!("{key}: {why}"))?;
-                at[part] = toml_edit::value(typed);
-                break;
+                at[part] = toml_edit::value(value);
+                return;
             }
-            // A table the file does not have yet is made implicit, so it is
-            // written as `[agent]` with the setting under it rather than as a
-            // dotted line nobody else in the file uses.
             at = &mut at[part];
             if at.is_none() {
                 *at = toml_edit::Item::Table(toml_edit::Table::new());
             }
         }
-
-        let written = doc.to_string();
-        // Loaded before it is saved, so what is checked is what will be read.
-        toml::from_str::<Self>(&written)
-            .map_err(|e| format!("{key} = {value:?} is not something this can read: {e}"))?;
-        if let Some(parent) = path.parent() {
-            crate::paths::private_dir(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
-        }
-        std::fs::write(path, &written).map_err(|e| format!("could not write {}: {e}", path.display()))?;
-        Ok(written)
     }
 
     pub fn save(&self) -> std::io::Result<()> {

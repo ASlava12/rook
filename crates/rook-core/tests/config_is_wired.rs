@@ -544,3 +544,54 @@ fn setting_one_value_leaves_the_rest_of_the_file_where_it_was() {
     assert!(why.contains("max_steps"), "{why}");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "and changed nothing");
 }
+
+/// `[models.<name>]` and `[endpoints.<name>]` have a name in the middle that
+/// nobody but the user knows, so the template has nothing under it — and the
+/// lookup that types a value walked the template. `config set
+/// models.home-llama.priority 1` answered "is not a setting" about the example
+/// its own help text gives.
+#[test]
+fn a_setting_inside_a_table_of_chosen_names_can_be_set_like_any_other() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+
+    rook_core::Config::set_in(&path, "models.home-llama.priority", "2").unwrap();
+    rook_core::Config::set_in(&path, "models.home-llama.model", "qwen3-30b").unwrap();
+    rook_core::Config::set_in(&path, "endpoints.desk.url", "http://192.168.1.100:8080/v1").unwrap();
+
+    let config = rook_core::Config::load_from(path.clone()).unwrap();
+    let source = config.models.get("home-llama").expect("the source was written");
+    assert_eq!(source.priority, Some(2), "and typed as a number, not as the text of one");
+    assert_eq!(source.model, "qwen3-30b");
+    assert_eq!(config.endpoints.get("desk").map(|e| e.url.as_str()), Some("http://192.168.1.100:8080/v1"));
+
+    // The same walk decides what a typo means, so it is asserted here too: a
+    // field under a chosen name is compared against one entry rather than
+    // against the empty table of them.
+    let why = rook_core::Config::set_in(&path, "endpoints.desk.ur1", "x").unwrap_err();
+    assert!(why.contains("url"), "it suggests the real field: {why}");
+}
+
+/// The typing came from the tree of defaults, where every field that is `None`
+/// is `null` and so says nothing about its type at all. Both of these were
+/// written as the text of a number and then refused by the load that checks
+/// them — a complaint about a type nobody had chosen.
+#[test]
+fn a_setting_that_is_unset_by_default_still_gets_the_type_it_wants() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+
+    rook_core::Config::set_in(&path, "agent.context_window", "8192").unwrap();
+    rook_core::Config::set_in(&path, "models.desk.parallel", "2").unwrap();
+    // And a string field keeps a value that merely looks like a number, which
+    // is the case the typing existed to protect.
+    rook_core::Config::set_in(&path, "agent.model", "7").unwrap();
+
+    let config = rook_core::Config::load_from(path.clone()).unwrap();
+    assert_eq!(config.agent.context_window, Some(8192));
+    assert_eq!(config.models.get("desk").and_then(|s| s.parallel), Some(2));
+    assert_eq!(config.agent.model, "7", "a string field holds the text, not a number");
+
+    let why = rook_core::Config::set_in(&path, "agent.context_window", "wide").unwrap_err();
+    assert!(why.contains("context_window"), "and a value it cannot hold is still refused: {why}");
+}

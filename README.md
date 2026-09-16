@@ -594,7 +594,72 @@ conversation outlives five minutes — a person thinking between turns. It is no
 the default because a scripted `rook run` never reads the cache its one turn
 wrote, and would simply pay more for it.
 
-Keys come from the environment, never from the config file or the store.
+One variable per provider means one endpoint per provider, which is not how a
+machine with a model on it and a paid API behind it is actually set up. Endpoints
+can be named instead, and then `model` is a name from that table:
+
+```toml
+[agent]
+model = "desk-large"               # a name below, or a provider/model spec
+
+# Where to send a request. One server usually serves several models, so the
+# address, the key and the queue are written once.
+[endpoints.desk]
+api = "openai"                     # openai | anthropic | google — the dialect
+url = "http://192.168.1.100:8080/v1"
+key = "secret:desk"                # secret:<name> | env:<VAR> | the value itself
+parallel = 2                       # requests at this server at a time; 0 for no limit
+key_in_the_clear = true            # this one is on our network, not on the internet
+
+# What to ask it for.
+[models.desk-large]
+endpoint = "desk"
+model = "qwen3-30b"
+context_window = 120000            # guesswork for anything self-hosted
+priority = 1                       # where it sits in the fall-through; absent means never
+
+[models.desk-small]
+endpoint = "desk"                  # the same queue: what interleaves is
+model = "qwen3-4b"                 # requests at the process, not at a model
+priority = 2
+
+# A source may carry its own address instead, which is one server one model.
+[models.laptop]
+api = "openai"
+url = "http://127.0.0.1:1234/v1"
+model = "qwen3-coder:30b"
+priority = 3
+```
+
+`parallel` is the reason the two halves are apart, and it defaults to one. A
+hosted API serves whatever it is sent; llama.cpp and LM Studio hold one model and
+serve a second request by interleaving it with the first, so two sub-agents
+against one local server finish later than the same two run in turn — and there
+is no status for that, only a request that takes minutes and reads as a hung
+turn. It is counted across the process, so a sub-agent, a compaction and a second
+window all queue in the same line.
+
+An endpoint that cannot be reached is dropped from the rotation with a line in the
+log and the next `priority` is used; `rook models --recheck` puts it back, for a
+balance topped up or a server switched on. Home, work, and the machine at home
+being off are three sets of reachable endpoints and one file — which is what
+`priority` is for, and why a source without one is used only when it is named
+outright: a paid gateway should not become what the agent reaches for because the
+desk machine is asleep.
+
+Keys can stay out of the file. `secret:<name>` reads `rook secrets`, which keeps a
+value at 0600 or refers it out to a keychain, a password manager or a command;
+`env:<VAR>` reads this process's environment, which is where every key was before
+this table existed. The value itself is allowed and is the last of the three on
+purpose: `config.toml` is not `secrets.toml` — it is not 0600, it is the file
+people paste into an issue, and it is the one that ends up in a dotfiles
+repository. A `provider/model` spec still reads its key from the environment and
+nothing about it has changed.
+
+`rook config check` reads the file, names anything in it that is not a setting,
+and asks every endpoint whether it is there. `rook config set agent.model
+desk-small` changes one line and leaves the comments around it alone.
+
 `rook models` asks the endpoint what it serves. Effort applies where the provider
 has the notion; sub-agents and `/btw` run at `low` regardless, since a bounded
 errand does not need the depth the main turn does.

@@ -8,7 +8,7 @@
 
 use rook_llm::{Api, Endpoint, LlmError, Provider};
 
-use crate::config::Config;
+use crate::config::{Config, ModelSource};
 use crate::secrets::Vault;
 
 /// Build the provider a setting names.
@@ -98,6 +98,19 @@ pub fn endpoints_for(config: &Config, vault: &Vault, name: &str) -> Result<Vec<E
     Ok(endpoints)
 }
 
+/// Endpoints the file describes that no source asks for.
+///
+/// Inert rather than wrong, and worth saying for the reason a config field
+/// nothing reads is worth failing a build over: it looks like a working
+/// address. The two ways to get one are a source deleted and its endpoint
+/// left behind, and a `[models.<name>] endpoint` that does not quite spell
+/// it — and the second is a typo the agent has already refused a turn over.
+pub fn unpointed(config: &Config) -> Vec<String> {
+    let asked: std::collections::BTreeSet<&str> =
+        config.models.values().map(|source| source.endpoint.trim()).filter(|at| !at.is_empty()).collect();
+    config.endpoints.keys().filter(|name| !asked.contains(name.as_str())).cloned().collect()
+}
+
 /// The configured names, for an error that can name them.
 fn named_sources(config: &Config) -> String {
     match config.models.is_empty() {
@@ -163,21 +176,23 @@ pub fn model_named(config: &Config, name: &str) -> String {
 pub fn endpoint_for(config: &Config, vault: &Vault, name: &str) -> Result<Option<Endpoint>, LlmError> {
     let name = name.trim();
     let Some(source) = config.models.get(name) else { return Ok(None) };
+    let address = address_of(config, name, source)?;
+    let at = &address.at;
 
-    let api = Api::parse(&source.api).ok_or_else(|| {
+    let api = Api::parse(address.api).ok_or_else(|| {
         let known = Api::ALL.map(Api::as_str).join(", ");
-        LlmError::Other(match source.api.trim().is_empty() {
-            true => format!("`[models.{name}] api` is not set. It has to be one of: {known}."),
+        LlmError::Other(match address.api.trim().is_empty() {
+            true => format!("`[{at}] api` is not set. It has to be one of: {known}."),
             false => format!(
-                "`[models.{name}] api` is {:?}, which is not an api this speaks. It has to be \
-                 one of: {known}.",
-                source.api
+                "`[{at}] api` is {:?}, which is not an api this speaks. It has to be one of: \
+                 {known}.",
+                address.api
             ),
         })
     })?;
-    if source.url.trim().is_empty() {
+    if address.url.trim().is_empty() {
         return Err(LlmError::Other(format!(
-            "`[models.{name}] url` is not set, so there is nowhere to send the request. Most \
+            "`[{at}] url` is not set, so there is nowhere to send the request. Most \
              openai-compatible servers want `/v1` on the end of it."
         )));
     }
@@ -185,15 +200,15 @@ pub fn endpoint_for(config: &Config, vault: &Vault, name: &str) -> Result<Option
         return Err(LlmError::Other(format!(
             "`[models.{name}] model` is not set, so there is nothing to ask {} for. \
              `rook models --source {name}` lists what it serves.",
-            source.url.trim()
+            address.url.trim()
         )));
     }
 
     Ok(Some(Endpoint {
         name: name.to_string(),
         api,
-        url: source.url.trim().to_string(),
-        key: key_for(name, &source.key, vault)?,
+        url: address.url.trim().to_string(),
+        key: key_for(at, address.key, vault)?,
         model: source.model.trim().to_string(),
         // The source's own first: `[agent] context_window` is one number for
         // whatever the agent is pointed at, and a file naming three endpoints
@@ -202,9 +217,87 @@ pub fn endpoint_for(config: &Config, vault: &Vault, name: &str) -> Result<Option
         // One unless the file says otherwise. The `provider/model` spelling has
         // nowhere to say it and so has no limit, which is how it has always
         // behaved; a table that can say it defaults to the safe answer.
-        parallel: Some(source.parallel.unwrap_or(1)),
-        key_in_the_clear: source.key_in_the_clear,
+        parallel: Some(address.parallel.unwrap_or(1)),
+        key_in_the_clear: address.key_in_the_clear,
+        queue: address.queue,
     }))
+}
+
+/// Where a source's requests go, from wherever the file wrote it down.
+struct Address<'a> {
+    /// `models.home-llama` or `endpoints.desk`, whichever table the address is
+    /// actually in, so a complaint about it names the line somebody has to
+    /// open — and so does the secret it looks for.
+    at: String,
+    api: &'a str,
+    url: &'a str,
+    key: &'a str,
+    parallel: Option<usize>,
+    key_in_the_clear: bool,
+    /// The queue, where it is shared. A source carrying its own address has one
+    /// of its own and says `None`; several sources naming one endpoint all say
+    /// that endpoint, and so wait in one line at the server.
+    queue: Option<String>,
+}
+
+/// Either the endpoint a source names or the one it spells out itself.
+fn address_of<'a>(config: &'a Config, name: &str, source: &'a ModelSource) -> Result<Address<'a>, LlmError> {
+    let named = source.endpoint.trim();
+    if named.is_empty() {
+        return Ok(Address {
+            at: format!("models.{name}"),
+            api: &source.api,
+            url: &source.url,
+            key: &source.key,
+            parallel: source.parallel,
+            key_in_the_clear: source.key_in_the_clear,
+            queue: None,
+        });
+    }
+
+    let Some(endpoint) = config.endpoints.get(named) else {
+        let known = match config.endpoints.keys().cloned().collect::<Vec<_>>() {
+            names if names.is_empty() => "there are no `[endpoints]` in this file".to_string(),
+            names => format!("the ones there are: {}", names.join(", ")),
+        };
+        return Err(LlmError::Other(format!(
+            "`[models.{name}] endpoint` is {named:?}, and no `[endpoints.{named}]` says where that \
+             is — {known}."
+        )));
+    };
+
+    // Both halves written is refused rather than resolved: one of the two is
+    // being ignored, and a rule about which would be a rule nobody remembers
+    // when the request goes to the wrong machine.
+    let also: Vec<&str> = [
+        (!source.api.trim().is_empty()).then_some("api"),
+        (!source.url.trim().is_empty()).then_some("url"),
+        (!source.key.trim().is_empty()).then_some("key"),
+        source.parallel.is_some().then_some("parallel"),
+        source.key_in_the_clear.then_some("key_in_the_clear"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if !also.is_empty() {
+        let these = also.join(", ");
+        return Err(LlmError::Other(format!(
+            "`[models.{name}]` names `endpoint = {named:?}` and also sets {these}. The address is \
+             in one place or the other, and this way one of them is silently unused — move \
+             {these} into `[endpoints.{named}]`, or drop `endpoint` and let this source carry its \
+             own address."
+        )));
+    }
+
+    Ok(Address {
+        at: format!("endpoints.{named}"),
+        api: &endpoint.api,
+        url: &endpoint.url,
+        key: &endpoint.key,
+        parallel: endpoint.parallel,
+        key_in_the_clear: endpoint.key_in_the_clear,
+        queue: Some(named.to_string()),
+    })
 }
 
 /// Where a source's key comes from.
@@ -217,7 +310,7 @@ pub fn endpoint_for(config: &Config, vault: &Vault, name: &str) -> Result<Option
 /// variable is a key a turn can print by reading that file or its own
 /// environment, and every other credential is already taken back out of what a
 /// tool answers.
-fn key_for(source: &str, written: &str, vault: &Vault) -> Result<Option<String>, LlmError> {
+fn key_for(at: &str, written: &str, vault: &Vault) -> Result<Option<String>, LlmError> {
     let written = written.trim();
     if written.is_empty() {
         return Ok(None);
@@ -230,7 +323,7 @@ fn key_for(source: &str, written: &str, vault: &Vault) -> Result<Option<String>,
         return match vault.value(secret) {
             Some(value) => Ok(Some(value)),
             None => Err(LlmError::Other(format!(
-                "`[models.{source}] key` names the secret {secret:?}, which is not one \
+                "`[{at}] key` names the secret {secret:?}, which is not one \
                  `rook secrets ls` has. Add it with `rook secrets add {secret}`, or point the \
                  key somewhere else."
             ))),
@@ -244,7 +337,7 @@ fn key_for(source: &str, written: &str, vault: &Vault) -> Result<Option<String>,
                 Ok(Some(value))
             }
             None => Err(LlmError::Other(format!(
-                "`[models.{source}] key` names the variable {variable:?}, which is not set in \
+                "`[{at}] key` names the variable {variable:?}, which is not set in \
                  this process. Set it, or keep the value with `rook secrets add` and write \
                  `secret:<name>` here instead."
             ))),

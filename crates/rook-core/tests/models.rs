@@ -304,3 +304,139 @@ fn a_model_nobody_chose_is_told_apart_from_one_somebody_did() {
     let config = rook_core::Config::load_from(path.clone()).unwrap();
     assert!(rook_core::models::unchosen(&config, &path).is_none(), "nothing to choose between");
 }
+
+/// One server serves several models. Written apart, the address, the key and
+/// the queue are stated once and a moved server is one line to edit rather than
+/// four.
+#[test]
+fn several_models_on_one_server_name_the_address_once() {
+    let mut config = Config::default();
+    config.endpoints.insert(
+        "desk".into(),
+        rook_core::ApiEndpoint {
+            api: "openai".into(),
+            url: "http://192.168.1.100:8080/v1".into(),
+            key: "sk-desk".into(),
+            parallel: Some(2),
+            ..Default::default()
+        },
+    );
+    config.models.insert(
+        "desk-small".into(),
+        ModelSource { model: "qwen3-4b".into(), endpoint: "desk".into(), ..Default::default() },
+    );
+    config.models.insert(
+        "desk-large".into(),
+        ModelSource {
+            model: "qwen3-30b".into(),
+            endpoint: "desk".into(),
+            context_window: Some(120_000),
+            ..Default::default()
+        },
+    );
+
+    let vault = Vault::empty();
+    let small = rook_core::models::endpoint_for(&config, &vault, "desk-small").unwrap().unwrap();
+    let large = rook_core::models::endpoint_for(&config, &vault, "desk-large").unwrap().unwrap();
+
+    assert_eq!(small.url, large.url, "one address");
+    assert_eq!(small.key.as_deref(), Some("sk-desk"), "and one key");
+    assert_eq!(small.model, "qwen3-4b");
+    assert_eq!(large.model, "qwen3-30b", "what differs is what to ask for");
+    assert_eq!(large.context_window, Some(120_000), "and how much of it the model has");
+    // The reason the split is not merely tidier: `parallel` is a fact about the
+    // process, and a local runtime interleaves a second request with the first
+    // whether or not the two asked for the same model. Two sources each
+    // allowing one would put two at the server.
+    assert_eq!(small.queue.as_deref(), Some("desk"), "both wait in the server's queue");
+    assert_eq!(large.queue.as_deref(), Some("desk"));
+    assert_eq!(small.parallel, Some(2), "which is as wide as the server says");
+}
+
+/// A source that spells its own address is its own endpoint, which is every
+/// configuration written before `[endpoints]` existed.
+#[test]
+fn a_source_carrying_its_own_address_still_does() {
+    let config = naming("next-door", serving("openai", "http://192.168.1.46:1234/v1", ""));
+    let endpoint = rook_core::models::endpoint_for(&config, &Vault::empty(), "next-door").unwrap().unwrap();
+
+    assert_eq!(endpoint.url, "http://192.168.1.46:1234/v1");
+    assert!(endpoint.queue.is_none(), "a queue of its own, named after itself");
+}
+
+/// Both halves written is one of them silently unused, and which one would be a
+/// rule nobody remembers when the request goes to the wrong machine.
+#[test]
+fn an_address_written_in_both_places_is_refused_naming_both() {
+    let mut config = Config::default();
+    config.endpoints.insert(
+        "desk".into(),
+        rook_core::ApiEndpoint {
+            api: "openai".into(),
+            url: "http://192.168.1.100:8080/v1".into(),
+            ..Default::default()
+        },
+    );
+    config.models.insert(
+        "stale".into(),
+        ModelSource {
+            model: "qwen3-4b".into(),
+            endpoint: "desk".into(),
+            // Left behind by a move to `[endpoints]` — the case this is for.
+            url: "http://127.0.0.1:9999/v1".into(),
+            ..Default::default()
+        },
+    );
+
+    let why = rook_core::models::endpoint_for(&config, &Vault::empty(), "stale").unwrap_err().to_string();
+    assert!(why.contains("[models.stale]"), "it names the source: {why}");
+    assert!(why.contains("endpoints.desk"), "and the endpoint it was pointed at: {why}");
+    assert!(why.contains("url"), "and which setting is in both places: {why}");
+}
+
+/// A name with nothing behind it is the ordinary typo, and the answer is the
+/// names that are there rather than a 404 from wherever the request went.
+#[test]
+fn an_endpoint_no_table_describes_is_named_along_with_the_ones_that_are() {
+    let mut config = Config::default();
+    config.endpoints.insert("desk".into(), rook_core::ApiEndpoint::default());
+    config.models.insert(
+        "typo".into(),
+        ModelSource { model: "qwen3-4b".into(), endpoint: "dsek".into(), ..Default::default() },
+    );
+
+    let why = rook_core::models::endpoint_for(&config, &Vault::empty(), "typo").unwrap_err().to_string();
+    assert!(why.contains("\"dsek\""), "it quotes what was written: {why}");
+    assert!(why.contains("desk"), "and lists the ones that exist: {why}");
+}
+
+/// The complaint has to name the table the setting is actually in. Said about
+/// `[models.x]` when the address is in `[endpoints.y]`, it sends somebody to
+/// edit a line that is not there.
+#[test]
+fn a_shared_endpoint_missing_what_it_needs_names_its_own_table() {
+    let mut config = Config::default();
+    config
+        .endpoints
+        .insert("desk".into(), rook_core::ApiEndpoint { api: "openai".into(), ..Default::default() });
+    config.models.insert(
+        "small".into(),
+        ModelSource { model: "qwen3-4b".into(), endpoint: "desk".into(), ..Default::default() },
+    );
+
+    let why = rook_core::models::endpoint_for(&config, &Vault::empty(), "small").unwrap_err().to_string();
+    assert!(why.contains("[endpoints.desk] url"), "the address is theirs to fix: {why}");
+
+    // And the model stays the source's own, because that is where it is written.
+    config.endpoints.insert(
+        "desk".into(),
+        rook_core::ApiEndpoint {
+            api: "openai".into(),
+            url: "http://127.0.0.1:1234/v1".into(),
+            ..Default::default()
+        },
+    );
+    config.models.insert("small".into(), ModelSource { endpoint: "desk".into(), ..Default::default() });
+    let why = rook_core::models::endpoint_for(&config, &Vault::empty(), "small").unwrap_err().to_string();
+    assert!(why.contains("[models.small] model"), "and the model is the source's: {why}");
+}

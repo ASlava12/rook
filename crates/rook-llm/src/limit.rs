@@ -13,6 +13,11 @@
 //! bounds the errands one turn starts, and says nothing about the turn itself,
 //! the compaction running beside it, or another window on the same machine
 //! pointed at the same endpoint.
+//!
+//! Of the server, which is why the queue is named separately from the endpoint
+//! waiting in it. One llama.cpp serving a small model and a large one is two
+//! endpoints and one queue: what interleaves is requests at that process, not
+//! requests for a model.
 
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -26,9 +31,9 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use crate::stream::Delta;
 use crate::{ModelInfo, Provider, Request, Response, ResponseStream, Result};
 
-/// The permits for one endpoint, shared by everything that talks to it.
+/// The permits for one server, shared by everything that talks to it.
 ///
-/// Held for the life of the process and keyed by the endpoint's name, because a
+/// Held for the life of the process and keyed by the queue's name, because a
 /// provider is not: the loop builds a fresh one every turn, and each sub-agent
 /// and each compaction builds its own. A count that lived on the provider would
 /// be a new count per turn, which is no limit at all — the thing being counted
@@ -43,9 +48,21 @@ fn held_permits() -> &'static Mutex<HashMap<String, Arc<Semaphore>>> {
     HELD.get_or_init(Default::default)
 }
 
-fn permits(name: &str, parallel: usize) -> Arc<Semaphore> {
+fn permits(queue: &str, parallel: usize) -> Arc<Semaphore> {
     let mut held = held_permits().lock().unwrap_or_else(|e| e.into_inner());
-    held.entry(name.to_string()).or_insert_with(|| Arc::new(Semaphore::new(parallel))).clone()
+    held.entry(queue.to_string()).or_insert_with(|| Arc::new(Semaphore::new(parallel))).clone()
+}
+
+/// A second name for a queue that already exists, pointing at the same permits.
+///
+/// [`free_at`] is asked about a provider, and a provider knows its own name
+/// rather than the name of the queue it waits in. Without this, two models on
+/// one server would be looked up under names the table has never seen — and
+/// `None` there means "no limit", so an endpoint with no room left would read
+/// as the freest one there is and every errand would be sent to it.
+fn also_called(name: &str, permits: &Arc<Semaphore>) {
+    let mut held = held_permits().lock().unwrap_or_else(|e| e.into_inner());
+    held.entry(name.to_string()).or_insert_with(|| permits.clone());
 }
 
 /// How many requests this endpoint could take right now without waiting.
@@ -68,8 +85,14 @@ pub(crate) struct Limited {
 }
 
 impl Limited {
-    pub(crate) fn new(inner: Box<dyn Provider>, name: &str, parallel: usize) -> Self {
-        Self { inner, permits: permits(name, parallel) }
+    /// `queue` is the server, which is not always this endpoint: several models
+    /// on one machine share one.
+    pub(crate) fn new(inner: Box<dyn Provider>, queue: &str, parallel: usize) -> Self {
+        let permits = permits(queue, parallel);
+        if inner.id() != queue {
+            also_called(inner.id(), &permits);
+        }
+        Self { inner, permits }
     }
 
     /// Waits for a turn. The error is the one a closed semaphore gives, which
@@ -228,5 +251,40 @@ mod tests {
         let overlapped = three_requests("three", 3);
         assert_ne!(overlapped, "+-+-+-", "nothing ran alongside anything");
         assert!(overlapped.starts_with("+++"), "all three were in flight together: {overlapped}");
+    }
+
+    /// Two models on one server are two endpoints and one queue: what a local
+    /// runtime interleaves is requests at the process, not requests for a
+    /// model, so asking the small one while the large one is answering is the
+    /// same mistake as asking the large one twice.
+    #[test]
+    fn two_models_on_one_server_wait_in_the_same_queue() {
+        let queue = "desk";
+        let log = Arc::new(Mutex::new(String::new()));
+        let small: Arc<dyn Provider> =
+            Arc::new(Limited::new(Box::new(Noting { id: "desk-small".into(), log: log.clone() }), queue, 1));
+        let large: Arc<dyn Provider> =
+            Arc::new(Limited::new(Box::new(Noting { id: "desk-large".into(), log: log.clone() }), queue, 1));
+
+        // Under each endpoint's own name, which is what `free_at` is given:
+        // one queue with one permit, reachable by either name. Asserted before
+        // the requests, because a lookup that missed would answer `None` — no
+        // limit — and send every errand to whichever was busiest.
+        assert_eq!(free_at("desk-small"), Some(1), "the small model's name finds the queue");
+        assert_eq!(free_at("desk-large"), Some(1), "and so does the large one's");
+
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let asked: Vec<_> = [small, large]
+                .into_iter()
+                .map(|provider| tokio::spawn(async move { provider.complete(Request::new(vec![])).await }))
+                .collect();
+            for one in asked {
+                one.await.unwrap().unwrap();
+            }
+        });
+
+        let ran = log.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert_eq!(ran, "+-+-", "one finished before the other started: {ran}");
     }
 }
