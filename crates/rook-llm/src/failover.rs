@@ -124,6 +124,12 @@ fn somewhere_else(error: &LlmError) -> bool {
         // only a minute, by which time it has loaded.
         LlmError::NeverAnswered { .. } => true,
         _ if crate::retry::out_of_credit(error) => true,
+        // A model that will not load is not a request that is wrong, whatever
+        // status it arrives under — and it arrives under a 400 from LM Studio,
+        // which every other rule here reads as the request's fault. Running it
+        // found this: a turn died at an endpoint whose server could not load
+        // the model, while the next in the list was answering.
+        LlmError::Status { body, .. } if crate::could_not_load(body) => true,
         LlmError::Status { status, .. } => {
             matches!(status, 408 | 429 | 500 | 502 | 503 | 504 | 529)
                 && !crate::retry::names_a_wrong_request(error)
@@ -301,6 +307,13 @@ mod tests {
         r#"{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API."}"#,
     );
     const OVERLOADED: Says = Says::Status(503, r#"{"type":"overloaded_error"}"#);
+    /// What a local server says when it lists a model it cannot load. LM Studio
+    /// sends it as a 400 whose type is `invalid_request_error`, which is the
+    /// same envelope as a request that really is wrong.
+    const WILL_NOT_LOAD: Says = Says::Status(
+        400,
+        r#"{"error":{"type":"invalid_request_error","message":"Failed to load model \"big-one\". Error: Engine protocol startup was aborted."}}"#,
+    );
     /// A request that is wrong, in the same envelope as the empty wallet above,
     /// so the two are told apart by what they say and not by their shape.
     const TOO_LARGE: Says =
@@ -510,9 +523,22 @@ mod tests {
             "and says so, with the time it has left"
         );
 
-        crate::answering_again(None);
+        // This one by name, not all of them. What is missing is remembered for
+        // the life of the process and shared by every test in it, so clearing
+        // the lot took another test's endpoint back out of the rotation
+        // underneath it — which is how this was found.
+        crate::answering_again(Some(&name));
         asking(&over).expect("still answered");
 
         assert_eq!(tried.load(Ordering::Relaxed), 2, "and is asked again once put back");
+    }
+
+    /// Found by running it: a turn died at an endpoint whose server could not
+    /// load the model, while the next in the list was answering the whole time.
+    /// A model that will not load is not a request that is wrong — the same
+    /// request is fine anywhere else — so it is a reason to ask elsewhere.
+    #[test]
+    fn a_model_the_server_cannot_load_is_a_reason_to_ask_elsewhere() {
+        assert!(handed_over(WILL_NOT_LOAD));
     }
 }

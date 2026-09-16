@@ -240,12 +240,23 @@ const MOST_PATIENCE_SECS: u64 = 120;
 /// whether the name, the machine or the file was at fault. It was the file: a
 /// 9B refused to load on a machine that had just loaded a 27B, and the reason
 /// was in the server's log and nowhere else.
+/// Whether the endpoint said it could not load the model.
+///
+/// One place because two things read it. A person is told the fault is on the
+/// server's side rather than in their configuration; and the failover is told
+/// that this endpoint cannot serve this request, which is what it is — a model
+/// that will not load is not a request that is wrong, and reading it as one
+/// left a turn dead at an endpoint while the next in the list was answering.
+pub(crate) fn could_not_load(body: &str) -> bool {
+    body.to_ascii_lowercase().contains("failed to load")
+}
+
 fn what_to_try(status: u16, body: &str) -> &'static str {
     let said = body.to_ascii_lowercase();
     // Checked before the request is blamed, and at any status: LM Studio says
     // this with a 400 and llama.cpp's server with a 500, and it means the same
     // either way.
-    if said.contains("failed to load") {
+    if could_not_load(body) {
         return "\nThe server lists this model but could not load it, so the fault is on that side \
                 rather than in `[agent] model`: the reason is in the server's own log and not in \
                 this reply. A quantisation its build has no kernels for and a download that did \

@@ -1049,9 +1049,31 @@ fn cmd_run(
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     // The exit code is decided inside and taken here, after the store has been
     // dropped: exiting from within would skip closing it cleanly.
+    let asked_for_a_workspace = workspace.is_some();
+    // Both of these outside the runtime, and that is not tidiness. `Rook::open`
+    // is synchronous and `Daemon::running` blocks for its answer, and blocking
+    // a thread that is driving the runtime it blocks on is a panic rather than
+    // a wait — which this found twice in one day.
+    //
+    // The store takes one writer, and where `rookd` holds it the daemon is the
+    // same engine: its chat socket is this conversation from the other side. So
+    // the turn goes there rather than failing, which is what it used to do,
+    // with advice the person had already taken — "start rookd before them",
+    // said to somebody whose rookd was running.
+    let opened = Rook::open(workspace.clone());
+    if let Err(locked) = &opened
+        && crate::source::is_locked(locked)
+        && let Some(daemon) = crate::source::Daemon::running()
+    {
+        let here = crate::source::asked_about(workspace);
+        let elsewhere = runtime.block_on(through_the_daemon(&daemon, &here, &asked, session, yes, json))?;
+        if elsewhere {
+            std::process::exit(2);
+        }
+        return Ok(());
+    }
+    let rook = opened?;
     let unfinished = runtime.block_on(async move {
-        let asked_for_a_workspace = workspace.is_some();
-        let rook = Rook::open(workspace)?;
         let provider = rook_core::models::configured(&rook.config)
             .with_context(|| format!("configuring model {:?}", rook.config.agent.model))?;
         let prompt = with_piped_input(&asked, provider.context_window())?;
@@ -1191,6 +1213,147 @@ fn cmd_run(
 /// Whether the caller should hear that the work was not done. stdout is the
 /// machine channel — under `--json` the object already carries `stopped` — so
 /// the sentence goes to stderr either way.
+/// One turn, run by the daemon and printed here.
+///
+/// Only the socket is shared with the window that does the same thing: what the
+/// events mean to a front end is the front end's business, and this front end
+/// is a command whose output may be going into a pipe.
+async fn through_the_daemon(
+    daemon: &crate::source::Daemon,
+    workspace: &std::path::Path,
+    asked: &str,
+    session: Option<String>,
+    yes: bool,
+    json: bool,
+) -> Result<bool> {
+    use rook_proto::{ApprovalDecision, ChatEvent, ClientMessage};
+
+    eprintln!("using the running rookd at {}", daemon.base);
+    let (to_daemon, mut outgoing) = tokio::sync::mpsc::unbounded_channel();
+    let (incoming, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let (base, here) = (daemon.base.clone(), workspace.to_path_buf());
+    let socket =
+        tokio::spawn(async move { crate::remote::hold(&base, &here, &mut outgoing, incoming).await });
+    to_daemon.send(ClientMessage::Prompt { session, text: asked.to_string() })?;
+
+    let mut out = std::io::stdout();
+    let mut calls = crate::fmt::Calls::default();
+    let mut started = String::new();
+    let mut said = String::new();
+    // Counted here rather than asked of the formatter, which does not keep a
+    // tally and does not draw one under `--json`.
+    let mut tools = 0usize;
+    let mut ended = None;
+    while let Some(event) = events.recv().await {
+        match event {
+            ChatEvent::Started { session } => started = session,
+            ChatEvent::Text { text } => {
+                said.push_str(&text);
+                if !json {
+                    let _ = write!(out, "{text}");
+                    calls.said(&text);
+                    let _ = out.flush();
+                }
+            }
+            ChatEvent::Tool { name, doing } => {
+                tools += 1;
+                if json {
+                    continue;
+                }
+                let shown = match doing.is_empty() {
+                    true => name.clone(),
+                    false => doing,
+                };
+                let _ = write!(out, "{}", calls.started(&name, &shown));
+                let _ = out.flush();
+            }
+            // The same rule the local path follows, answered here because the
+            // daemon asks the socket rather than the terminal: `run` is scripted
+            // more often than watched, so it refuses what it cannot get approved
+            // rather than prompting into a pipe.
+            ChatEvent::Approval { id, tool, action, .. } => {
+                let decision = match yes {
+                    true => ApprovalDecision::ForRun,
+                    false => {
+                        eprintln!(
+                            "refused {tool}: {action} — `--yes` allows what the deny list does not forbid"
+                        );
+                        ApprovalDecision::Deny
+                    }
+                };
+                to_daemon.send(ClientMessage::Approval { id, decision })?;
+            }
+            ChatEvent::Error { message } => {
+                socket.abort();
+                anyhow::bail!("{message}");
+            }
+            ChatEvent::Done { .. } => {
+                ended = Some(event);
+                break;
+            }
+            _ => {}
+        }
+    }
+    // Dropping it closes the socket, which is what tells the daemon this
+    // connection has gone. The turn is the daemon's and outlives it either way.
+    drop(to_daemon);
+    let _ = socket.await;
+
+    let Some(ChatEvent::Done {
+        steps,
+        input_tokens,
+        output_tokens,
+        delegated,
+        compactions,
+        decisions,
+        open_questions,
+        files_changed,
+        stopped,
+    }) = ended
+    else {
+        anyhow::bail!("the daemon closed the connection before the turn finished");
+    };
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "session": started,
+                "reply": said,
+                "steps": steps,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "delegated": delegated,
+                "compactions": compactions,
+                "decisions": decisions,
+                "open_questions": open_questions,
+                "files_changed": files_changed,
+                "stopped": stopped,
+            }))?
+        );
+        return Ok(unfinished(!said.trim().is_empty(), &stopped));
+    }
+    let _ = writeln!(out);
+    for text in &decisions {
+        eprintln!("decided: {text}");
+    }
+    for text in &open_questions {
+        eprintln!("open question: {text}");
+    }
+    if !files_changed.is_empty() {
+        eprintln!("{} files changed — `rook session diff {started}`", files_changed.len());
+    }
+    eprintln!(
+        "\n[session {started} · {steps} steps · {input_tokens} in / {output_tokens} out tokens · \
+         {} tool calls{}]",
+        tools,
+        match compactions {
+            0 => String::new(),
+            n => format!(" · {n} compactions"),
+        }
+    );
+    Ok(unfinished(!said.trim().is_empty(), &stopped))
+}
+
 fn unfinished(finished: bool, stopped: &str) -> bool {
     if finished {
         return false;

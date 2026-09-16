@@ -850,7 +850,7 @@ impl Source {
 }
 
 /// The project a command is about: what was asked for, else where it was run.
-fn asked_about(workspace: Option<std::path::PathBuf>) -> std::path::PathBuf {
+pub(crate) fn asked_about(workspace: Option<std::path::PathBuf>) -> std::path::PathBuf {
     workspace.or_else(|| std::env::current_dir().ok()).unwrap_or_else(|| std::path::PathBuf::from("."))
 }
 
@@ -1033,10 +1033,18 @@ fn refused(url: &str, status: reqwest::StatusCode, body: &str) -> String {
     }
 }
 
-fn is_locked(e: &rook_core::CoreError) -> bool {
+pub(crate) fn is_locked(e: &rook_core::CoreError) -> bool {
     matches!(e, rook_core::CoreError::Store(rook_store::StoreError::Locked { .. }))
 }
 
+/// A `rookd` answering on this machine, talked to synchronously.
+///
+/// Every method here blocks for its answer, and that is a property callers have
+/// to know: blocking a thread that is driving a tokio runtime is a panic rather
+/// than a wait, and the message is about runtimes rather than about anything
+/// anybody did. It has cost twice — `models --recheck` and `run` both reached
+/// for one of these from inside `block_on`. Decide whether to use a daemon
+/// before entering a runtime, and give the runtime only the work.
 pub struct Daemon {
     pub base: String,
     /// From the health check that proved it was answering: whether the `rookd`
