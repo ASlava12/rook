@@ -1215,9 +1215,15 @@ fn cmd_run(
 /// the sentence goes to stderr either way.
 /// One turn, run by the daemon and printed here.
 ///
-/// Only the socket is shared with the window that does the same thing: what the
-/// events mean to a front end is the front end's business, and this front end
-/// is a command whose output may be going into a pipe.
+/// What it shows and what it answers is [`crate::remote::Watching`], shared
+/// with the REPL: a turn watched from a terminal looks the same whichever
+/// command started it.
+///
+/// Takes the runtime rather than running inside one, which running it found:
+/// the daemon client blocks for its answer, and blocking a thread that is
+/// driving the runtime it blocks on is a panic rather than a wait. So the
+/// choice between the two is made out here, and only the local half is given
+/// to the runtime.
 async fn through_the_daemon(
     daemon: &crate::source::Daemon,
     workspace: &std::path::Path,
@@ -1226,7 +1232,7 @@ async fn through_the_daemon(
     yes: bool,
     json: bool,
 ) -> Result<bool> {
-    use rook_proto::{ApprovalDecision, ChatEvent, ClientMessage};
+    use rook_proto::{ChatEvent, ClientMessage};
 
     eprintln!("using the running rookd at {}", daemon.base);
     let (to_daemon, mut outgoing) = tokio::sync::mpsc::unbounded_channel();
@@ -1236,62 +1242,12 @@ async fn through_the_daemon(
         tokio::spawn(async move { crate::remote::hold(&base, &here, &mut outgoing, incoming).await });
     to_daemon.send(ClientMessage::Prompt { session, text: asked.to_string() })?;
 
-    let mut out = std::io::stdout();
-    let mut calls = crate::fmt::Calls::default();
-    let mut started = String::new();
-    let mut said = String::new();
-    // Counted here rather than asked of the formatter, which does not keep a
-    // tally and does not draw one under `--json`.
-    let mut tools = 0usize;
+    let mut watching = crate::remote::Watching::new(yes, json);
     let mut ended = None;
     while let Some(event) = events.recv().await {
-        match event {
-            ChatEvent::Started { session } => started = session,
-            ChatEvent::Text { text } => {
-                said.push_str(&text);
-                if !json {
-                    let _ = write!(out, "{text}");
-                    calls.said(&text);
-                    let _ = out.flush();
-                }
-            }
-            ChatEvent::Tool { name, doing } => {
-                tools += 1;
-                if json {
-                    continue;
-                }
-                let shown = match doing.is_empty() {
-                    true => name.clone(),
-                    false => doing,
-                };
-                let _ = write!(out, "{}", calls.started(&name, &shown));
-                let _ = out.flush();
-            }
-            // The same rule the local path follows, answered here because the
-            // daemon asks the socket rather than the terminal: `run` is scripted
-            // more often than watched, so it refuses what it cannot get approved
-            // rather than prompting into a pipe.
-            ChatEvent::Approval { id, tool, action, .. } => {
-                let decision = match yes {
-                    true => ApprovalDecision::ForRun,
-                    false => {
-                        eprintln!(
-                            "refused {tool}: {action} — `--yes` allows what the deny list does not forbid"
-                        );
-                        ApprovalDecision::Deny
-                    }
-                };
-                to_daemon.send(ClientMessage::Approval { id, decision })?;
-            }
-            ChatEvent::Error { message } => {
-                socket.abort();
-                anyhow::bail!("{message}");
-            }
-            ChatEvent::Done { .. } => {
-                ended = Some(event);
-                break;
-            }
-            _ => {}
+        if let Some(over) = watching.saw(event, &to_daemon) {
+            ended = Some(over);
+            break;
         }
     }
     // Dropping it closes the socket, which is what tells the daemon this
@@ -1299,7 +1255,10 @@ async fn through_the_daemon(
     drop(to_daemon);
     let _ = socket.await;
 
-    let Some(ChatEvent::Done {
+    let Some(over) = ended else {
+        anyhow::bail!("the daemon closed the connection before the turn finished");
+    };
+    let ChatEvent::Done {
         steps,
         input_tokens,
         output_tokens,
@@ -1309,10 +1268,11 @@ async fn through_the_daemon(
         open_questions,
         files_changed,
         stopped,
-    }) = ended
+    } = over.done
     else {
-        anyhow::bail!("the daemon closed the connection before the turn finished");
+        anyhow::bail!("a turn ends with `done` and nothing else");
     };
+    let (started, said, tools) = (over.session, over.said, over.tools);
     if json {
         println!(
             "{}",
@@ -1332,7 +1292,7 @@ async fn through_the_daemon(
         );
         return Ok(unfinished(!said.trim().is_empty(), &stopped));
     }
-    let _ = writeln!(out);
+    println!();
     for text in &decisions {
         eprintln!("decided: {text}");
     }
@@ -1344,8 +1304,7 @@ async fn through_the_daemon(
     }
     eprintln!(
         "\n[session {started} · {steps} steps · {input_tokens} in / {output_tokens} out tokens · \
-         {} tool calls{}]",
-        tools,
+         {tools} tool calls{}]",
         match compactions {
             0 => String::new(),
             n => format!(" · {n} compactions"),

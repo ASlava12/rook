@@ -66,7 +66,20 @@ fn help_text() -> String {
 pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: bool) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let asked_for_a_workspace = workspace.is_some();
-    let rook = Rook::open(workspace)?;
+    // The store takes one writer, and where `rookd` holds it the daemon is the
+    // same engine: its chat socket is this conversation from the other side.
+    // Both of these outside the runtime, because `Rook::open` is synchronous
+    // and `Daemon::running` blocks — blocking a thread that is driving the
+    // runtime it blocks on is a panic rather than a wait.
+    let opened = Rook::open(workspace.clone());
+    if let Err(locked) = &opened
+        && crate::source::is_locked(locked)
+        && let Some(daemon) = crate::source::Daemon::running()
+    {
+        let here = crate::source::asked_about(workspace);
+        return runtime.block_on(through_the_daemon(&daemon, &here, resume, yes));
+    }
+    let rook = opened?;
     let provider = rook_core::models::configured(&rook.config)
         .with_context(|| format!("configuring model {:?}", rook.config.agent.model))?;
 
@@ -177,6 +190,109 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
     runtime.block_on(shared.servers.shutdown());
     drop(provider);
     println!("session {}", rook_store::format_session_id(session));
+    Ok(())
+}
+
+/// The REPL, with the daemon running the turns.
+///
+/// One socket for the whole session rather than one per line: the daemon keeps
+/// what a connection has set — the stance, the effort, the endpoint — and a
+/// connection per prompt would forget all three between one line and the next.
+///
+/// The slash commands are not here. They read and write this process's store
+/// directly, and a window over a socket has none: the three that are settings
+/// go over as settings, and the rest say so rather than half-working, which is
+/// the same answer the TUI gives.
+async fn through_the_daemon(
+    daemon: &crate::source::Daemon,
+    workspace: &std::path::Path,
+    resume: Option<String>,
+    yes: bool,
+) -> Result<()> {
+    use rook_proto::{ChatEvent, ClientMessage};
+
+    eprintln!("using the running rookd at {}", daemon.base);
+    let (to_daemon, mut outgoing) = tokio::sync::mpsc::unbounded_channel();
+    let (incoming, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let (base, here) = (daemon.base.clone(), workspace.to_path_buf());
+    let socket =
+        tokio::spawn(async move { crate::remote::hold(&base, &here, &mut outgoing, incoming).await });
+
+    let mut editor = rustyline::DefaultEditor::new()?;
+    let history = rook_core::paths::home().join("history");
+    let _ = editor.load_history(&history);
+    let mut watching = crate::remote::Watching::new(yes, false);
+    let mut session = resume;
+
+    loop {
+        // Blocking on stdin inside an async function, which is what a REPL is:
+        // nothing else here is waiting on anything, and the socket's own task
+        // is the thing that has to keep running.
+        let line = match editor.readline("› ") {
+            Ok(line) if line.trim().is_empty() => continue,
+            Ok(line) => line,
+            Err(ReadlineError::Interrupted) => continue,
+            Err(ReadlineError::Eof) => break,
+            Err(e) => return Err(e.into()),
+        };
+        let _ = editor.add_history_entry(line.as_str());
+        let line = match rook_core::agent::carrying_on(&line) {
+            true => rook_core::agent::CARRY_ON.to_string(),
+            false => line.trim().to_string(),
+        };
+        if let Some(command) = line.strip_prefix('/') {
+            let (name, rest) = command.split_once(' ').unwrap_or((command, ""));
+            match name {
+                "quit" | "exit" => break,
+                // The three the engine keeps per connection. Sent rather than
+                // set here: the turn runs there, and a setting kept on this
+                // side would be one the turn never reads.
+                "model" | "stance" | "mode" | "effort" if !rest.trim().is_empty() => {
+                    let name = match name {
+                        "stance" => "mode",
+                        other => other,
+                    };
+                    let _ = to_daemon
+                        .send(ClientMessage::Setting { name: name.into(), value: rest.trim().into() });
+                }
+                other => println!(
+                    "`/{other}` reads this process's store, and the daemon at {} is holding it. \
+                     `/model`, `/stance` and `/effort` work here; the rest work in `rook tui` or \
+                     with the daemon stopped.",
+                    daemon.base
+                ),
+            }
+            continue;
+        }
+        to_daemon.send(ClientMessage::Prompt { session: session.clone(), text: line })?;
+        while let Some(event) = events.recv().await {
+            if let Some(over) = watching.saw(event, &to_daemon) {
+                let ChatEvent::Done { steps, input_tokens, output_tokens, compactions, .. } = over.done
+                else {
+                    break;
+                };
+                // Kept, so the next line lands in the same conversation rather
+                // than starting one beside it.
+                session = Some(over.session.clone());
+                println!();
+                eprintln!(
+                    "[session {} · {steps} steps · {input_tokens} in / {output_tokens} out tokens \
+                     · {} tool calls{}]",
+                    over.session,
+                    over.tools,
+                    match compactions {
+                        0 => String::new(),
+                        n => format!(" · {n} compactions"),
+                    }
+                );
+                break;
+            }
+        }
+    }
+
+    let _ = editor.save_history(&history);
+    drop(to_daemon);
+    let _ = socket.await;
     Ok(())
 }
 

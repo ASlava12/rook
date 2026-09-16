@@ -76,3 +76,108 @@ fn escaped(value: &str) -> String {
         })
         .collect()
 }
+
+/// What a command shows while the daemon runs a turn, and what it has to
+/// answer while it does.
+///
+/// One of these rather than one per command: `run` and `chat` are the same
+/// front end with two entry points, a turn watched from a terminal looks the
+/// same whichever started it, and two copies of that drift. What differs is
+/// only how the command got here — one line and out, or a prompt that comes
+/// back.
+pub struct Watching {
+    /// What `--yes` decided. The daemon asks the socket rather than the
+    /// terminal asking a person, and the rule is the local path's: a command
+    /// is scripted more often than watched, so it refuses what it cannot get
+    /// approved rather than prompting into a pipe.
+    pub yes: bool,
+    /// Under `--json` the one output is the object at the end, so the stream a
+    /// person would watch would only corrupt it.
+    pub json: bool,
+    calls: crate::fmt::Calls,
+    said: String,
+    tools: usize,
+    session: String,
+}
+
+/// A turn the daemon has finished, as a command reports it.
+pub struct Ended {
+    pub session: String,
+    pub said: String,
+    pub tools: usize,
+    pub done: ChatEvent,
+}
+
+impl Watching {
+    pub fn new(yes: bool, json: bool) -> Self {
+        Self {
+            yes,
+            json,
+            calls: crate::fmt::Calls::default(),
+            said: String::new(),
+            tools: 0,
+            session: String::new(),
+        }
+    }
+
+    /// Takes one event. `Some` when the turn is over, and the caller decides
+    /// what to do with a turn that has ended — print and leave, or ask for the
+    /// next line.
+    pub fn saw(
+        &mut self,
+        event: ChatEvent,
+        to_daemon: &mpsc::UnboundedSender<ClientMessage>,
+    ) -> Option<Ended> {
+        use std::io::Write;
+        let mut out = std::io::stdout();
+        match event {
+            ChatEvent::Started { session } | ChatEvent::Attached { session, .. } => {
+                self.session = session;
+            }
+            ChatEvent::Text { text } => {
+                self.said.push_str(&text);
+                if !self.json {
+                    let _ = write!(out, "{text}");
+                    self.calls.said(&text);
+                    let _ = out.flush();
+                }
+            }
+            ChatEvent::Tool { name, doing } => {
+                self.tools += 1;
+                if !self.json {
+                    let shown = match doing.is_empty() {
+                        true => name.clone(),
+                        false => doing,
+                    };
+                    let _ = write!(out, "{}", self.calls.started(&name, &shown));
+                    let _ = out.flush();
+                }
+            }
+            ChatEvent::Approval { id, tool, action, .. } => {
+                let decision = match self.yes {
+                    true => rook_proto::ApprovalDecision::ForRun,
+                    false => {
+                        eprintln!(
+                            "refused {tool}: {action} — `--yes` allows what the deny list does not forbid"
+                        );
+                        rook_proto::ApprovalDecision::Deny
+                    }
+                };
+                let _ = to_daemon.send(ClientMessage::Approval { id, decision });
+            }
+            ChatEvent::Error { message } => {
+                eprintln!("{message}");
+            }
+            done @ ChatEvent::Done { .. } => {
+                return Some(Ended {
+                    session: std::mem::take(&mut self.session),
+                    said: std::mem::take(&mut self.said),
+                    tools: std::mem::replace(&mut self.tools, 0),
+                    done,
+                });
+            }
+            _ => {}
+        }
+        None
+    }
+}

@@ -616,6 +616,18 @@ async fn a_server_that_cannot_answer_its_version_is_not_offered() {
     std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     let _first = ToolsFirst::new(tools.path());
+    // What `rook lsp install` fetched wins over PATH, so this asserts nothing
+    // about the shim unless there is no installed copy to win. A machine with
+    // one — and the machine this was written on has one — offers rust whatever
+    // the shim does, and the failure then reads as the shim being accepted
+    // when the truth is that `ROOK_HOME` stopped isolating. Two different
+    // faults, and they were telling the same story.
+    let ours = rook_core::install::current("rust-analyzer");
+    assert!(
+        !ours.is_file(),
+        "this is about PATH, and something is installed at {} — ROOK_HOME is not isolating",
+        ours.display()
+    );
     let offered: Vec<String> = rook_core::lsp::detected().into_iter().map(|c| c.language).collect();
     assert!(!offered.contains(&"rust".to_string()), "a shim that exits is not a server: {offered:?}");
 
