@@ -79,11 +79,18 @@ impl Http {
         name: &str,
         url: &str,
         headers: &std::collections::HashMap<String, String>,
+        proxy: &rook_llm::Proxy,
     ) -> Result<Self> {
         rook_llm::init_tls();
         let client = reqwest::Client::builder()
             .user_agent(concat!("rook/", env!("CARGO_PKG_VERSION")))
-            .connect_timeout(Duration::from_secs(15))
+            .connect_timeout(Duration::from_secs(15));
+        // One server, one address: a server inside the building takes no proxy
+        // whatever is configured, the same as a model endpoint on this network.
+        let client = proxy
+            .on(client, Some(url))
+            .map_err(|message| McpError::Transport { server: name.into(), message })?;
+        let client = client
             .build()
             .map_err(|e| McpError::Transport { server: name.into(), message: e.to_string() })?;
         Ok(Self {

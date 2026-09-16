@@ -57,7 +57,7 @@ async fn bounded_body(mut response: reqwest::Response, most: usize) -> std::resu
 }
 
 impl Fetch {
-    pub fn new(timeout: std::time::Duration) -> Result<Self> {
+    pub fn new(timeout: std::time::Duration, proxy: &rook_llm::Proxy) -> Result<Self> {
         // The same provider the model client installs, for the same reason: the
         // rustls default needs cmake and a full C toolchain, which is the usual
         // blocker for FreeBSD. Installing twice is a no-op.
@@ -70,12 +70,22 @@ impl Fetch {
             // stopping surfaces as an ordinary send failure with nothing in it
             // about where the redirect pointed — which is the useful half.
             .redirect(reqwest::redirect::Policy::none())
-            .user_agent(concat!("rook/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(|e| ToolError::Invalid {
-                tool: "web_fetch".into(),
-                message: format!("could not build an HTTP client: {e}"),
-            })?;
+            .user_agent(concat!("rook/", env!("CARGO_PKG_VERSION")));
+        // Against a scheme and host rather than a URL, because the client is
+        // built once and every page it will be asked for is different. What
+        // the address decides — never a proxy for this network — is decided
+        // per request by the proxy's own `no_proxy` rules, which reqwest
+        // applies from the pattern this installs.
+        // No fixed address: this client is built once and then asked for
+        // whatever page a turn names. The bypass for this network rides on the
+        // proxy itself, per request.
+        let client = proxy
+            .on(client, None)
+            .map_err(|message| ToolError::Invalid { tool: "web_fetch".into(), message })?;
+        let client = client.build().map_err(|e| ToolError::Invalid {
+            tool: "web_fetch".into(),
+            message: format!("could not build an HTTP client: {e}"),
+        })?;
         Ok(Self { client })
     }
 }
@@ -424,8 +434,8 @@ pub struct Search {
 }
 
 impl Search {
-    pub fn new(engine: Engine, timeout: std::time::Duration) -> Result<Self> {
-        Ok(Self { client: Fetch::new(timeout)?.client, engine })
+    pub fn new(engine: Engine, timeout: std::time::Duration, proxy: &rook_llm::Proxy) -> Result<Self> {
+        Ok(Self { client: Fetch::new(timeout, proxy)?.client, engine })
     }
 }
 

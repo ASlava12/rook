@@ -93,7 +93,7 @@ async fn a_server_is_fetched_checked_against_the_listed_digest_and_put_in_place(
     let api = github("rust-analyzer-x86_64-unknown-linux-gnu.gz", gz.clone(), sha256_of(&gz)).await;
     let into = tempfile::tempdir().unwrap();
 
-    let done = Installer::at(api, into.path().to_path_buf())
+    let done = Installer::at(api, into.path().to_path_buf(), &Default::default())
         .unwrap()
         .install(&RUST_ANALYZER, &here())
         .await
@@ -119,7 +119,7 @@ async fn a_download_that_does_not_match_the_listed_digest_installs_nothing() {
     let api = github("rust-analyzer-x86_64-unknown-linux-gnu.gz", gz, "0".repeat(64)).await;
     let into = tempfile::tempdir().unwrap();
 
-    let refused = Installer::at(api, into.path().to_path_buf())
+    let refused = Installer::at(api, into.path().to_path_buf(), &Default::default())
         .unwrap()
         .install(&RUST_ANALYZER, &here())
         .await
@@ -137,7 +137,7 @@ async fn a_release_that_lists_no_digest_is_not_fetched_at_all() {
     let api = github("rust-analyzer-x86_64-unknown-linux-gnu.gz", gz, String::new()).await;
     let into = tempfile::tempdir().unwrap();
 
-    let refused = Installer::at(api, into.path().to_path_buf())
+    let refused = Installer::at(api, into.path().to_path_buf(), &Default::default())
         .unwrap()
         .install(&RUST_ANALYZER, &here())
         .await
@@ -441,7 +441,8 @@ async fn a_node_server_is_installed_under_our_prefix_with_no_scripts_run() {
     let into = tempfile::tempdir().unwrap();
     let env = rook_skills::Environment::bare("linux", "x86_64", "0.1.0").with_tool("npm", "10");
 
-    let installer = Installer::at("http://127.0.0.1:1".into(), into.path().to_path_buf()).unwrap();
+    let installer =
+        Installer::at("http://127.0.0.1:1".into(), into.path().to_path_buf(), &Default::default()).unwrap();
     let _first = ToolsFirst::new(tools.path());
     let done = installer.install(&rook_core::install::TYPESCRIPT, &env).await.unwrap();
     let current = into.path().join("typescript-language-server").join("current");
@@ -462,7 +463,8 @@ async fn a_go_server_is_built_into_our_directory() {
     let into = tempfile::tempdir().unwrap();
     let env = rook_skills::Environment::bare("linux", "x86_64", "0.1.0").with_language("go", "1.25");
 
-    let installer = Installer::at("http://127.0.0.1:1".into(), into.path().to_path_buf()).unwrap();
+    let installer =
+        Installer::at("http://127.0.0.1:1".into(), into.path().to_path_buf(), &Default::default()).unwrap();
     let _first = ToolsFirst::new(tools.path());
     let done = installer.install(&rook_core::install::GOPLS, &env).await.unwrap();
     let current = into.path().join("gopls").join("current");
@@ -477,7 +479,8 @@ async fn a_go_server_is_built_into_our_directory() {
 async fn a_recipe_whose_toolchain_is_missing_says_which_one() {
     let into = tempfile::tempdir().unwrap();
     let env = rook_skills::Environment::bare("linux", "x86_64", "0.1.0");
-    let installer = Installer::at("http://127.0.0.1:1".into(), into.path().to_path_buf()).unwrap();
+    let installer =
+        Installer::at("http://127.0.0.1:1".into(), into.path().to_path_buf(), &Default::default()).unwrap();
     let refused = installer.install(&rook_core::install::GOPLS, &env).await.unwrap_err();
     assert!(refused.contains("`go`"), "{refused}");
     assert!(!into.path().join("gopls").exists(), "and nothing was made");
@@ -528,7 +531,8 @@ async fn a_failed_install_reports_the_reason_at_the_end_of_what_it_printed() {
     let into = tempfile::tempdir().unwrap();
     let env = rook_skills::Environment::bare("linux", "x86_64", "0.1.0").with_tool("npm", "10");
 
-    let installer = Installer::at("http://127.0.0.1:1".into(), into.path().to_path_buf()).unwrap();
+    let installer =
+        Installer::at("http://127.0.0.1:1".into(), into.path().to_path_buf(), &Default::default()).unwrap();
     let _first = ToolsFirst::new(tools.path());
     let refused = installer.install(&rook_core::install::TYPESCRIPT, &env).await.unwrap_err();
 
@@ -558,7 +562,7 @@ async fn a_zipped_server_is_picked_by_prefix_unpacked_whole_and_put_in_place() {
     let api = github("clangd-linux-22.1.6.zip", bytes.clone(), sha256_of(&bytes)).await;
     let into = tempfile::tempdir().unwrap();
 
-    let done = Installer::at(api, into.path().to_path_buf())
+    let done = Installer::at(api, into.path().to_path_buf(), &Default::default())
         .unwrap()
         .install(&rook_core::install::CLANGD, &here())
         .await
@@ -583,7 +587,7 @@ async fn update_fetches_again_what_is_in_place_and_says_what_moved() {
     let gz = Arc::new(gzipped(&payload));
     let api = github("rust-analyzer-x86_64-unknown-linux-gnu.gz", gz.clone(), sha256_of(&gz)).await;
     let into = tempfile::tempdir().unwrap();
-    let installer = Installer::at(api, into.path().to_path_buf()).unwrap();
+    let installer = Installer::at(api, into.path().to_path_buf(), &Default::default()).unwrap();
     installer.install(&RUST_ANALYZER, &here()).await.unwrap();
     assert_eq!(installer.installed().len(), 1, "one server in place, with its tag on record");
 
@@ -644,7 +648,7 @@ async fn a_server_fetched_long_ago_is_stale_and_a_fresh_one_is_not() {
     let gz = Arc::new(gzipped(&payload));
     let api = github("rust-analyzer-x86_64-unknown-linux-gnu.gz", gz.clone(), sha256_of(&gz)).await;
     let into = tempfile::tempdir().unwrap();
-    let installer = Installer::at(api, into.path().to_path_buf()).unwrap();
+    let installer = Installer::at(api, into.path().to_path_buf(), &Default::default()).unwrap();
     installer.install(&RUST_ANALYZER, &here()).await.unwrap();
 
     let month = std::time::Duration::from_secs(30 * 86_400);
@@ -678,7 +682,7 @@ async fn an_autonomous_turn_refetches_a_server_past_its_age() {
     let home = tempfile::tempdir().unwrap();
     let (_workspace, rook) = a_rust_workspace_with(home.path(), rook_core::Config::default());
     let servers = rook_core::paths::servers_dir();
-    let installer = Installer::at(api.clone(), servers.clone()).unwrap();
+    let installer = Installer::at(api.clone(), servers.clone(), &Default::default()).unwrap();
     installer.install(&RUST_ANALYZER, rook.env()).await.unwrap();
     let tag = servers.join("rust-analyzer").join("current").join(".tag");
     backdate(&tag, 40);
@@ -716,7 +720,7 @@ async fn at_read_only_a_stale_server_is_an_open_question() {
     let home = tempfile::tempdir().unwrap();
     let (_workspace, rook) = a_rust_workspace_with(home.path(), rook_core::Config::default());
     let servers = rook_core::paths::servers_dir();
-    let installer = Installer::at(api, servers.clone()).unwrap();
+    let installer = Installer::at(api, servers.clone(), &Default::default()).unwrap();
     installer.install(&RUST_ANALYZER, rook.env()).await.unwrap();
     backdate(&servers.join("rust-analyzer").join("current").join(".tag"), 40);
 

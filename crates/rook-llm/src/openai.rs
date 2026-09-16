@@ -27,11 +27,21 @@ pub struct Config {
     /// abandoned. Without this a dropped connection looks like a model that is
     /// merely thinking, and the turn hangs until the overall timeout.
     pub stream_idle_timeout: Duration,
+    /// How a request to this base leaves the machine — see [`crate::Proxy`].
+    /// The default is whatever the environment says, which is what every
+    /// provider did before an endpoint could say otherwise.
+    pub proxy: crate::Proxy,
 }
 
 impl Config {
     pub fn new(base_url: String, api_key: Option<String>, context_window: usize) -> Self {
-        Self { base_url, api_key, context_window, stream_idle_timeout: Duration::from_secs(90) }
+        Self {
+            base_url,
+            api_key,
+            context_window,
+            stream_idle_timeout: Duration::from_secs(90),
+            proxy: Default::default(),
+        }
     }
 }
 
@@ -44,7 +54,7 @@ pub struct OpenAiCompatible {
 
 impl OpenAiCompatible {
     pub fn new(id: &str, model: &str, config: Config) -> Result<Self> {
-        let http = crate::client_for(&config.base_url)?;
+        let http = crate::client_for(&config.base_url, &config.proxy)?;
         Ok(Self { id: id.to_string(), model: model.to_string(), config, http })
     }
 }

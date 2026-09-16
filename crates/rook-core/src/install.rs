@@ -314,15 +314,15 @@ impl Installer {
     /// `ROOK_RELEASE_API` overrides where GitHub is, which is a seam and says
     /// so: a test of the agent deciding to install must not reach GitHub, and
     /// the loop builds this itself rather than taking it as an argument.
-    pub fn new(into: PathBuf) -> Result<Self, String> {
+    pub fn new(into: PathBuf, proxy: &rook_llm::Proxy) -> Result<Self, String> {
         let api = std::env::var("ROOK_RELEASE_API").unwrap_or_else(|_| "https://api.github.com".into());
-        Self::at(api, into)
+        Self::at(api, into, proxy)
     }
 
     /// Against whatever answers like GitHub's API at `api`, which is how a
     /// test stands in for it: the alternative is a test that reaches GitHub.
     #[doc(hidden)]
-    pub fn at(api: String, into: PathBuf) -> Result<Self, String> {
+    pub fn at(api: String, into: PathBuf, proxy: &rook_llm::Proxy) -> Result<Self, String> {
         // The same provider the model client installs, for the same reason:
         // the rustls default needs a C toolchain, which is the FreeBSD blocker.
         rook_llm::init_tls();
@@ -333,9 +333,9 @@ impl Installer {
             // to go through: an approval named an address, and a redirect
             // elsewhere is how that becomes a request nobody agreed to.
             .redirect(reqwest::redirect::Policy::none())
-            .user_agent(concat!("rook/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(|e| format!("could not build an HTTP client: {e}"))?;
+            .user_agent(concat!("rook/", env!("CARGO_PKG_VERSION")));
+        let client = proxy.on(client, Some(&api))?;
+        let client = client.build().map_err(|e| format!("could not build an HTTP client: {e}"))?;
         Ok(Self { client, api, into })
     }
 

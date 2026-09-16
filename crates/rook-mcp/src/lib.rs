@@ -145,6 +145,9 @@ pub struct Server {
     transport: tokio::sync::RwLock<Box<dyn Transport>>,
     call_timeout: Duration,
     config: ServerConfig,
+    /// How this server is reached, kept for the restart that builds the
+    /// transport again.
+    proxy: rook_llm::Proxy,
     restarts: std::sync::atomic::AtomicU32,
 }
 
@@ -155,8 +158,8 @@ const MOST_RESTARTS: u32 = 3;
 impl Server {
     /// Connect and complete the MCP handshake, over whichever transport the
     /// configuration describes.
-    pub async fn connect(config: &ServerConfig) -> Result<Self> {
-        let transport = Self::transport_for(config)?;
+    pub async fn connect(config: &ServerConfig, proxy: &rook_llm::Proxy) -> Result<Self> {
+        let transport = Self::transport_for(config, proxy)?;
         let info = Self::handshake(transport.as_ref(), config).await?;
         Ok(Self {
             name: config.name.clone(),
@@ -164,15 +167,22 @@ impl Server {
             transport: tokio::sync::RwLock::new(transport),
             call_timeout: Duration::from_secs(config.call_timeout_secs),
             config: config.clone(),
+            // Kept because a restart builds the transport again, and a server
+            // that came back without its proxy would be one nobody could reach
+            // after the first crash.
+            proxy: proxy.clone(),
             restarts: std::sync::atomic::AtomicU32::new(0),
         })
     }
 
-    fn transport_for(config: &ServerConfig) -> Result<Box<dyn Transport>> {
+    fn transport_for(config: &ServerConfig, proxy: &rook_llm::Proxy) -> Result<Box<dyn Transport>> {
         match config.url.as_deref() {
             Some(url) if !url.is_empty() => {
-                Ok(Box::new(http::Http::new(&config.name, url, &config.headers)?))
+                Ok(Box::new(http::Http::new(&config.name, url, &config.headers, proxy)?))
             }
+            // A server this machine starts and talks to over its own pipes has
+            // no network between the two, so there is nothing for a proxy to
+            // sit in.
             _ if !config.command.trim().is_empty() => Ok(Box::new(stdio::Stdio::spawn(config)?)),
             _ => Err(McpError::NotConfigured { server: config.name.clone() }),
         }
@@ -255,7 +265,7 @@ impl Server {
         if self.restarts.fetch_add(1, Ordering::Relaxed) >= MOST_RESTARTS {
             return false;
         }
-        let Ok(fresh) = Self::transport_for(&self.config) else { return false };
+        let Ok(fresh) = Self::transport_for(&self.config, &self.proxy) else { return false };
         if Self::handshake(fresh.as_ref(), &self.config).await.is_err() {
             return false;
         }

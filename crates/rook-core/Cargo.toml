@@ -14,7 +14,7 @@ futures-util = "0.3.34"
 ignore = "0.4.33"
 # The installer: fetching a release, checking it against the digest its
 # publisher listed, and opening the one archive shape rust-analyzer ships.
-reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "charset", "http2", "gzip"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "charset", "http2", "gzip", "socks"] }
 flate2 = "1.1.9"
 sha2 = "0.10.9"
 hex = "0.4.3"

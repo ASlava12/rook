@@ -111,7 +111,7 @@ fn config(url: String) -> ServerConfig {
 
 #[tokio::test]
 async fn a_json_answer_round_trips() {
-    let server = Server::connect(&config(spawn("json").await)).await.unwrap();
+    let server = Server::connect(&config(spawn("json").await), &Default::default()).await.unwrap();
     assert_eq!(server.info().server.name, "over-http");
     assert_eq!(server.list_tools().await.unwrap()[0].name, "ping");
     let result = server.call_tool("ping", &serde_json::json!({})).await.unwrap();
@@ -120,7 +120,7 @@ async fn a_json_answer_round_trips() {
 
 #[tokio::test]
 async fn an_event_stream_answer_round_trips_and_skips_what_is_not_the_reply() {
-    let server = Server::connect(&config(spawn("sse").await)).await.unwrap();
+    let server = Server::connect(&config(spawn("sse").await), &Default::default()).await.unwrap();
     assert_eq!(server.info().server.version, "2.0.0");
     let result = server.call_tool("ping", &serde_json::json!({})).await.unwrap();
     assert_eq!(result.to_text(), "pong", "the notification before it must not be mistaken for the answer");
@@ -130,7 +130,7 @@ async fn an_event_stream_answer_round_trips_and_skips_what_is_not_the_reply() {
 async fn the_session_id_from_initialize_is_carried_on_later_requests() {
     // The mock rejects anything after initialize that arrives without it, so a
     // successful tools/list is the assertion.
-    let server = Server::connect(&config(spawn("json").await)).await.unwrap();
+    let server = Server::connect(&config(spawn("json").await), &Default::default()).await.unwrap();
     assert!(server.list_tools().await.is_ok(), "the session header was not echoed back");
 }
 
@@ -142,7 +142,9 @@ async fn a_url_that_refuses_connections_fails_with_the_server_named() {
         startup_timeout_secs: 3,
         ..Default::default()
     };
-    let Err(err) = Server::connect(&config).await else { panic!("a dead endpoint must not connect") };
+    let Err(err) = Server::connect(&config, &Default::default()).await else {
+        panic!("a dead endpoint must not connect")
+    };
     assert!(matches!(err, McpError::Transport { .. }), "{err}");
     assert!(err.to_string().contains("dead"), "{err}");
 }
@@ -150,7 +152,9 @@ async fn a_url_that_refuses_connections_fails_with_the_server_named() {
 #[tokio::test]
 async fn a_server_with_neither_command_nor_url_says_so() {
     let config = ServerConfig { name: "empty".into(), ..Default::default() };
-    let Err(err) = Server::connect(&config).await else { panic!("nothing to connect to") };
+    let Err(err) = Server::connect(&config, &Default::default()).await else {
+        panic!("nothing to connect to")
+    };
     assert!(matches!(err, McpError::NotConfigured { .. }), "{err}");
 }
 
@@ -167,7 +171,9 @@ async fn a_slow_endpoint_times_out_rather_than_hanging() {
 
     let mut config = config(format!("http://{addr}/mcp"));
     config.startup_timeout_secs = 1;
-    let Err(err) = Server::connect(&config).await else { panic!("it should not have connected") };
+    let Err(err) = Server::connect(&config, &Default::default()).await else {
+        panic!("it should not have connected")
+    };
     assert!(matches!(err, McpError::Timeout { .. }), "{err}");
 }
 
@@ -199,9 +205,10 @@ async fn a_server_that_never_stops_answering_is_refused_rather_than_held() {
         startup_timeout_secs: 30,
         ..Default::default()
     };
-    let answered = tokio::time::timeout(Duration::from_secs(120), Server::connect(&config))
-        .await
-        .expect("a body with no end must not be read to the end");
+    let answered =
+        tokio::time::timeout(Duration::from_secs(120), Server::connect(&config, &Default::default()))
+            .await
+            .expect("a body with no end must not be read to the end");
     let Err(refused) = answered else { panic!("a server sending for ever must not connect") };
     let refused = refused.to_string();
 
@@ -238,7 +245,7 @@ async fn refusing() -> String {
 /// end: the challenge is gone and nothing says credentials are the answer.
 #[tokio::test]
 async fn a_server_that_wants_authentication_says_so_and_keeps_every_challenge() {
-    let Err(refused) = Server::connect(&config(refusing().await)).await else {
+    let Err(refused) = Server::connect(&config(refusing().await), &Default::default()).await else {
         panic!("a server that answers 401 cannot have connected")
     };
 

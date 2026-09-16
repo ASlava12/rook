@@ -34,7 +34,7 @@ fn ctx() -> ToolContext {
 }
 
 async fn fetch(url: &str) -> rook_tools::ToolOutcome {
-    Fetch::new(std::time::Duration::from_secs(5))
+    Fetch::new(std::time::Duration::from_secs(5), &Default::default())
         .unwrap()
         .call(&ctx(), &serde_json::json!({ "url": url }))
         .await
@@ -91,7 +91,7 @@ async fn plain_text_is_left_alone_and_a_non_http_address_is_refused() {
 /// going, so an allow rule can name a host and mean it.
 #[test]
 fn the_risk_a_fetch_reports_is_the_address() {
-    let fetch = Fetch::new(std::time::Duration::from_secs(5)).unwrap();
+    let fetch = Fetch::new(std::time::Duration::from_secs(5), &Default::default()).unwrap();
     let risk = fetch.risk(&serde_json::json!({ "url": "https://docs.rs/serde" }));
 
     assert_eq!(risk, Risk::Network("https://docs.rs/serde".into()));
@@ -167,9 +167,12 @@ async fn a_search_lists_what_the_engine_returned_with_its_summaries_marked_as_su
     .await;
     let base = base.trim_end_matches("/page").to_string();
 
-    let search =
-        rook_tools::web::Search::new(rook_tools::web::Engine::Searx(base), std::time::Duration::from_secs(5))
-            .unwrap();
+    let search = rook_tools::web::Search::new(
+        rook_tools::web::Engine::Searx(base),
+        std::time::Duration::from_secs(5),
+        &Default::default(),
+    )
+    .unwrap();
     let out = search.call(&ctx(), &serde_json::json!({ "query": "serde json" })).await.unwrap();
 
     assert!(!out.is_error, "{}", out.content);
@@ -203,6 +206,7 @@ async fn the_keyless_engine_reads_its_results_out_of_the_page() {
     let search = rook_tools::web::Search::new(
         rook_tools::web::Engine::DuckDuckGo(base),
         std::time::Duration::from_secs(5),
+        &Default::default(),
     )
     .unwrap();
     let out = search.call(&ctx(), &serde_json::json!({ "query": "redis docs" })).await.unwrap();
@@ -248,6 +252,7 @@ async fn every_result_on_the_page_reports_its_own_address_and_not_the_last_one()
     let search = rook_tools::web::Search::new(
         rook_tools::web::Engine::DuckDuckGo(base),
         std::time::Duration::from_secs(5),
+        &Default::default(),
     )
     .unwrap();
     let found = search.hits("redis", 5).await.unwrap();
@@ -268,11 +273,13 @@ fn the_risk_a_search_reports_is_the_engine_not_the_query() {
     let local = rook_tools::web::Search::new(
         rook_tools::web::Engine::Searx("http://127.0.0.1:8888".into()),
         std::time::Duration::from_secs(5),
+        &Default::default(),
     )
     .unwrap();
     let hosted = rook_tools::web::Search::new(
         rook_tools::web::Engine::Brave("a-key".into()),
         std::time::Duration::from_secs(5),
+        &Default::default(),
     )
     .unwrap();
     let asking = serde_json::json!({ "query": "anything at all" });
@@ -366,7 +373,7 @@ async fn a_page_far_larger_than_a_page_is_stopped_while_it_arrives() {
 
     let url = format!("http://{addr}/endless");
     let ctx = ToolContext::new(std::env::temp_dir());
-    let fetch = Fetch::new(std::time::Duration::from_secs(20)).unwrap();
+    let fetch = Fetch::new(std::time::Duration::from_secs(20), &Default::default()).unwrap();
     let out = fetch.call(&ctx, &serde_json::json!({ "url": url })).await.unwrap();
 
     assert!(out.is_error, "{}", out.content);

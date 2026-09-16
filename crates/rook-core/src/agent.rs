@@ -844,7 +844,8 @@ impl<'a> AgentLoop<'a> {
         // this agent's point is that it runs here.
         if rook.config.web.enabled {
             let patience = std::time::Duration::from_secs(rook.config.web.timeout_secs);
-            match rook_tools::web::Fetch::new(patience) {
+            let through = rook.config.proxy.for_web();
+            match rook_tools::web::Fetch::new(patience, &through) {
                 Ok(fetch) => tools.register(std::sync::Arc::new(fetch)),
                 Err(e) => tracing::warn!("web is enabled but unusable: {e}"),
             }
@@ -853,7 +854,7 @@ impl<'a> AgentLoop<'a> {
             // worse than never having offered it.
             let engine = rook_tools::web::Engine::named(&rook.config.web.search, &rook.config.web.search_url);
             if let Some(engine) = engine
-                && let Ok(search) = rook_tools::web::Search::new(engine, patience)
+                && let Ok(search) = rook_tools::web::Search::new(engine, patience, &through)
             {
                 tools.register(std::sync::Arc::new(search));
             }
@@ -1009,8 +1010,15 @@ impl<'a> AgentLoop<'a> {
                 return;
             }
             let env = self.rook.env().clone();
+            // Resolved here rather than inside the future: the future outlives
+            // this borrow of `self`, and a proxy read through it would not
+            // compile — which is the right way round, since what it must carry
+            // is the setting as it was when the download was approved.
+            let proxy = self.rook.config.proxy.for_install();
             let fetching = tokio::spawn(async move {
-                crate::install::Installer::new(crate::paths::servers_dir())?.install(recipe, &env).await
+                crate::install::Installer::new(crate::paths::servers_dir(), &proxy)?
+                    .install(recipe, &env)
+                    .await
             });
             if let Ok(mut slot) = self.installing.lock() {
                 *slot = Some((recipe, fetching));
@@ -1079,7 +1087,10 @@ impl<'a> AgentLoop<'a> {
         if let Some(refusal) = self.gate_risk("lsp install", &args, risk, Shown::Nothing).await {
             return Err(refusal);
         }
-        let installer = crate::install::Installer::new(crate::paths::servers_dir())?;
+        let installer = crate::install::Installer::new(
+            crate::paths::servers_dir(),
+            &self.rook.config.proxy.for_install(),
+        )?;
         installer.install(recipe, self.rook.env()).await
     }
 

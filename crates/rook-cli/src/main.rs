@@ -2510,7 +2510,8 @@ fn cmd_lsp(workspace: Option<PathBuf>, cmd: LspCmd, json: bool) -> Result<()> {
         let env = rook_skills::Environment::detect(AGENT_VERSION);
         if let LspCmd::Update = &cmd {
             let into = rook_core::paths::servers_dir();
-            let installer = rook_core::install::Installer::new(into).map_err(anyhow::Error::msg)?;
+            let installer = rook_core::install::Installer::new(into, &config.proxy.for_install())
+                .map_err(anyhow::Error::msg)?;
             let report = installer.update(&env).await;
             if report.is_empty() {
                 println!("nothing installed under {}", rook_core::paths::servers_dir().display());
@@ -2532,7 +2533,8 @@ fn cmd_lsp(workspace: Option<PathBuf>, cmd: LspCmd, json: bool) -> Result<()> {
                 );
             };
             let into = rook_core::paths::servers_dir();
-            let installer = rook_core::install::Installer::new(into).map_err(anyhow::Error::msg)?;
+            let installer = rook_core::install::Installer::new(into, &config.proxy.for_install())
+                .map_err(anyhow::Error::msg)?;
             let done = installer.install(recipe, &env).await.map_err(anyhow::Error::msg)?;
             println!("installed {} {} at {}", done.command, done.tag, done.path.display());
             println!("verified:     {}", done.verified);

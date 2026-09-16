@@ -50,12 +50,82 @@ pub struct Config {
     /// key come from the environment.
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub models: std::collections::BTreeMap<String, ModelSource>,
+    /// How requests leave this machine, as `[proxy]`. Empty everywhere is the
+    /// environment's business, which is what it always was.
+    pub proxy: ProxyConfig,
     /// Places to send a request, as `[endpoints.<name>]` tables, for the
     /// ordinary case of one server serving several models. Optional: a source
     /// that carries its own address is its own endpoint, and every
     /// configuration written before this table existed is exactly that.
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub endpoints: std::collections::BTreeMap<String, ApiEndpoint>,
+}
+
+/// Where each part of the agent goes on its way out.
+///
+/// Four things here reach the network for four different reasons, and on a
+/// machine behind a proxy they do not all need the same answer: an API that is
+/// only reachable through one, a documentation site that is only reachable
+/// without it, an MCP server inside the building, a release download from
+/// GitHub. So `url` is what everything does unless it says otherwise, and each
+/// part may say otherwise — including `direct`, which is how one part opts out
+/// of a proxy the others need.
+///
+/// Empty is not "no proxy". It is "nothing said here", and then the machine's
+/// own `http_proxy` and `no_proxy` decide, exactly as they did before any of
+/// this existed. `direct` is how to mean no proxy.
+///
+/// Whatever any of them says, a request to this machine or this network goes
+/// straight out: a proxy is a way to the internet, and sent through one a
+/// request to the desk next door comes back as whatever the tunnel makes of an
+/// address it cannot route to.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProxyConfig {
+    /// The one every part below inherits. `http://`, `https://`, `socks5://`
+    /// or `socks5h://`, with credentials in it where the proxy wants them —
+    /// and then it belongs in `secrets.toml` rather than here, which is what
+    /// the `secret:` and `env:` spellings are for.
+    pub url: String,
+    /// Requests to the model APIs. An endpoint may still name its own, which
+    /// wins over this.
+    pub models: String,
+    /// `web_fetch` and `web_search`.
+    pub web: String,
+    /// MCP servers reached over http.
+    pub mcp: String,
+    /// Downloading a language server.
+    pub install: String,
+}
+
+impl ProxyConfig {
+    /// What one part uses: what it says itself, then what was said for
+    /// everything, then the machine's own variables.
+    fn narrowed(&self, part: &str) -> rook_llm::Proxy {
+        rook_llm::Proxy::parse(part).or(rook_llm::Proxy::parse(&self.url))
+    }
+
+    /// For the model APIs. An endpoint may still name its own, which wins over
+    /// this — see [`crate::models::endpoint_for`].
+    pub fn for_models(&self) -> rook_llm::Proxy {
+        self.narrowed(&self.models)
+    }
+
+    /// For `web_fetch` and `web_search`.
+    pub fn for_web(&self) -> rook_llm::Proxy {
+        self.narrowed(&self.web)
+    }
+
+    /// For MCP servers reached over http. A server this machine starts and
+    /// talks to over pipes has no network between the two and never sees this.
+    pub fn for_mcp(&self) -> rook_llm::Proxy {
+        self.narrowed(&self.mcp)
+    }
+
+    /// For downloading a language server.
+    pub fn for_install(&self) -> rook_llm::Proxy {
+        self.narrowed(&self.install)
+    }
 }
 
 /// One place to send a request, named in `[endpoints]` and pointed at from
@@ -91,6 +161,10 @@ pub struct ApiEndpoint {
     /// Send the key to this endpoint over plain http, where it is on this
     /// network rather than this machine — see [`ModelSource::key_in_the_clear`].
     pub key_in_the_clear: bool,
+    /// How a request to this one leaves the machine, where it differs from
+    /// `[proxy] models`. `direct` reaches it without a proxy on a machine that
+    /// uses one for everything else.
+    pub proxy: String,
 }
 
 /// One endpoint the agent can be pointed at, named in `[models]`.
@@ -190,6 +264,10 @@ pub struct ModelSource {
     /// forwarding to a paid API is not something the code can tell, which is
     /// why this is written down per endpoint rather than assumed.
     pub key_in_the_clear: bool,
+    /// How a request to this source leaves the machine, where it differs from
+    /// `[proxy] models` — see [`ApiEndpoint::proxy`], which means the same
+    /// thing for a source that names an endpoint instead of carrying one.
+    pub proxy: String,
 }
 
 impl Default for Config {
@@ -209,6 +287,7 @@ impl Default for Config {
             mcp: Vec::new(),
             models: std::collections::BTreeMap::new(),
             endpoints: std::collections::BTreeMap::new(),
+            proxy: ProxyConfig::default(),
             hooks: Vec::new(),
             skill_sources: default_skill_sources(),
         }

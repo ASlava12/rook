@@ -149,6 +149,8 @@ pub mod google;
 mod limit;
 pub mod openai;
 pub mod prompted;
+pub mod proxy;
+pub use proxy::Proxy;
 pub mod retry;
 pub mod stream;
 pub mod types;
@@ -575,6 +577,10 @@ pub struct Endpoint {
     /// Send the key over plain http to this endpoint even though it is not on
     /// this machine. Only as far as this network — see [`in_the_clear`].
     pub key_in_the_clear: bool,
+    /// How a request to this endpoint leaves the machine. An API reachable
+    /// only through a proxy says so here; one on this network never takes one
+    /// whatever this says.
+    pub proxy: Proxy,
     /// The queue this waits in, where that is not a queue of its own.
     ///
     /// One server usually serves more than one model, and `parallel` is a fact
@@ -640,13 +646,15 @@ pub fn endpoint_from_spec(spec: &str, context_window: Option<usize>) -> Result<E
 }
 
 fn endpoint_provider(endpoint: Endpoint, stream_idle: std::time::Duration) -> Result<Box<dyn Provider>> {
-    let Endpoint { name, api, url, key, model, context_window, parallel, key_in_the_clear, queue } = endpoint;
+    let Endpoint { name, api, url, key, model, context_window, parallel, key_in_the_clear, queue, proxy } =
+        endpoint;
     let queue = queue.unwrap_or_else(|| name.clone());
     in_the_clear(&url, key.as_deref(), key_in_the_clear)?;
     let built: Box<dyn Provider> = match api {
         Api::Anthropic => {
             let mut config = anthropic::Config::new(url, key.unwrap_or_default(), &model);
             config.stream_idle_timeout = stream_idle;
+            config.proxy = proxy;
             if let Some(window) = context_window {
                 config.context_window = window;
             }
@@ -655,6 +663,7 @@ fn endpoint_provider(endpoint: Endpoint, stream_idle: std::time::Duration) -> Re
         Api::Google => {
             let mut config = google::Config::new(url, key.unwrap_or_default(), &model);
             config.stream_idle_timeout = stream_idle;
+            config.proxy = proxy;
             if let Some(window) = context_window {
                 config.context_window = window;
             }
@@ -667,6 +676,7 @@ fn endpoint_provider(endpoint: Endpoint, stream_idle: std::time::Duration) -> Re
         Api::OpenAi => {
             let mut config = openai::Config::new(url, key, context_window.unwrap_or(32_768));
             config.stream_idle_timeout = stream_idle;
+            config.proxy = proxy;
             Box::new(openai::OpenAiCompatible::new(&name, &model, config)?)
         }
     };
@@ -797,7 +807,7 @@ fn host_of(base: &str) -> String {
 /// A different question from the one [`in_the_clear`] answers, and deliberately
 /// broader: a key must not cross even a LAN in clear text, but a request to a
 /// LAN has no business going through a proxy.
-fn beside_us(base: &str) -> bool {
+pub(crate) fn beside_us(base: &str) -> bool {
     let host = host_of(base);
     // Both resolve on this machine or this network, or not at all.
     if host == "localhost" || host.ends_with(".localhost") || host.ends_with(".local") {
@@ -821,17 +831,18 @@ fn beside_us(base: &str) -> bool {
 /// One function because all three have to answer the same two questions the
 /// same way, and three copies of a builder is three places for the answers to
 /// drift apart.
-fn client_for(base: &str) -> Result<reqwest::Client> {
+fn client_for(base: &str, proxy: &Proxy) -> Result<reqwest::Client> {
     init_tls();
-    let mut client = reqwest::Client::builder()
+    let client = reqwest::Client::builder()
         .user_agent(concat!("rook/", env!("CARGO_PKG_VERSION")))
         // A long-running agent turn can legitimately take minutes on a local
         // model; a short default timeout would look like a provider bug.
         .timeout(std::time::Duration::from_secs(600))
         .connect_timeout(std::time::Duration::from_secs(15));
-    if beside_us(base) {
-        client = client.no_proxy();
-    }
+    // The address still decides first — a request to this network never takes
+    // a proxy, which is what `beside_us` was written for and is now asked
+    // inside [`Proxy::on`] so all four callers get the same answer.
+    let client = proxy.on(client, Some(base)).map_err(LlmError::Other)?;
     client.build().map_err(|e| LlmError::unreachable(base, e))
 }
 
@@ -903,6 +914,9 @@ fn from_environment(spec: &str, context_window: Option<usize>) -> Result<Endpoin
         parallel: None,
         key_in_the_clear: false,
         queue: None,
+        // No variable spells one either, so the environment keeps deciding,
+        // which is what it did before there was anywhere to say otherwise.
+        proxy: Proxy::default(),
     })
 }
 

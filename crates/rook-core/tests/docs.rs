@@ -74,9 +74,13 @@ async fn served(pages: Vec<(&'static str, String)>, tag: Option<&'static str>) -
 fn sources(base: &str, pages: usize, bytes: usize) -> Sources {
     let patience = std::time::Duration::from_secs(5);
     Sources {
-        search: rook_tools::web::Search::new(rook_tools::web::Engine::DuckDuckGo(base.into()), patience)
-            .unwrap(),
-        fetch: rook_tools::web::Fetch::new(patience).unwrap(),
+        search: rook_tools::web::Search::new(
+            rook_tools::web::Engine::DuckDuckGo(base.into()),
+            patience,
+            &Default::default(),
+        )
+        .unwrap(),
+        fetch: rook_tools::web::Fetch::new(patience, &Default::default()).unwrap(),
         pages,
         bytes,
     }

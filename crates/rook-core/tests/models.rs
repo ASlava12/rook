@@ -440,3 +440,87 @@ fn a_shared_endpoint_missing_what_it_needs_names_its_own_table() {
     let why = rook_core::models::endpoint_for(&config, &Vault::empty(), "small").unwrap_err().to_string();
     assert!(why.contains("[models.small] model"), "and the model is the source's: {why}");
 }
+
+/// An API reachable only through a proxy, on a machine where the model next
+/// door must not go near one. The endpoint's own setting wins; `[proxy] models`
+/// covers the rest; `[proxy] url` covers everything that said nothing.
+#[test]
+fn a_proxy_can_be_set_for_everything_for_the_models_or_for_one_endpoint() {
+    use rook_llm::Proxy;
+
+    let mut config = Config::default();
+    config.proxy.url = "http://gateway:3128".into();
+    config.endpoints.insert(
+        "paid".into(),
+        rook_core::ApiEndpoint {
+            api: "openai".into(),
+            url: "https://api.example.com/v1".into(),
+            proxy: "socks5://127.0.0.1:1080".into(),
+            ..Default::default()
+        },
+    );
+    config.endpoints.insert(
+        "other".into(),
+        rook_core::ApiEndpoint {
+            api: "openai".into(),
+            url: "https://other.example.com/v1".into(),
+            ..Default::default()
+        },
+    );
+    config.models.insert(
+        "paid".into(),
+        ModelSource { model: "gpt".into(), endpoint: "paid".into(), ..Default::default() },
+    );
+    config.models.insert(
+        "other".into(),
+        ModelSource { model: "gpt".into(), endpoint: "other".into(), ..Default::default() },
+    );
+
+    let vault = Vault::empty();
+    let named = rook_core::models::endpoint_for(&config, &vault, "paid").unwrap().unwrap();
+    assert_eq!(named.proxy, Proxy::Through("socks5://127.0.0.1:1080".into()), "the endpoint's own wins");
+
+    let inherited = rook_core::models::endpoint_for(&config, &vault, "other").unwrap().unwrap();
+    assert_eq!(inherited.proxy, Proxy::Through("http://gateway:3128".into()), "the rest take the wider one");
+
+    // `[proxy] models` sits between the two, and `direct` is how the models opt
+    // out of a proxy the web tools still need.
+    config.proxy.models = "direct".into();
+    let opted_out = rook_core::models::endpoint_for(&config, &vault, "other").unwrap().unwrap();
+    assert_eq!(opted_out.proxy, Proxy::Direct, "models said direct, so this one is");
+    let still_named = rook_core::models::endpoint_for(&config, &vault, "paid").unwrap().unwrap();
+    assert_eq!(
+        still_named.proxy,
+        Proxy::Through("socks5://127.0.0.1:1080".into()),
+        "and the named one is not"
+    );
+    assert_eq!(
+        config.proxy.for_web(),
+        Proxy::Through("http://gateway:3128".into()),
+        "the web tools still have it"
+    );
+}
+
+/// The address is in one place or the other. A proxy beside `endpoint = "…"` is
+/// the same mistake as a url beside it, and says so the same way.
+#[test]
+fn a_proxy_written_beside_a_named_endpoint_is_refused_like_any_other_address() {
+    let mut config = Config::default();
+    config.endpoints.insert(
+        "desk".into(),
+        rook_core::ApiEndpoint { api: "openai".into(), url: "http://h/v1".into(), ..Default::default() },
+    );
+    config.models.insert(
+        "stale".into(),
+        ModelSource {
+            model: "qwen".into(),
+            endpoint: "desk".into(),
+            proxy: "socks5://127.0.0.1:1080".into(),
+            ..Default::default()
+        },
+    );
+
+    let why = rook_core::models::endpoint_for(&config, &Vault::empty(), "stale").unwrap_err().to_string();
+    assert!(why.contains("proxy"), "it names the setting that is in both places: {why}");
+    assert!(why.contains("endpoints.desk"), "and where it belongs: {why}");
+}

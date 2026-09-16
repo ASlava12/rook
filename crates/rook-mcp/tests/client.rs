@@ -38,7 +38,7 @@ fn mock(mode: &str) -> ServerConfig {
 #[tokio::test]
 async fn handshake_reports_what_the_server_is() {
     let _one = one_at_a_time().await;
-    let server = Server::connect(&mock("ok")).await.unwrap();
+    let server = Server::connect(&mock("ok"), &Default::default()).await.unwrap();
     assert_eq!(server.info().server.name, "mock");
     assert_eq!(server.info().server.version, "1.2.3");
     assert_eq!(server.info().protocol_version, "2025-06-18");
@@ -48,7 +48,7 @@ async fn handshake_reports_what_the_server_is() {
 #[tokio::test]
 async fn tools_are_listed_with_their_schemas_intact() {
     let _one = one_at_a_time().await;
-    let server = Server::connect(&mock("ok")).await.unwrap();
+    let server = Server::connect(&mock("ok"), &Default::default()).await.unwrap();
     let tools = server.list_tools().await.unwrap();
     assert_eq!(tools.len(), 2);
 
@@ -67,7 +67,7 @@ async fn tools_are_listed_with_their_schemas_intact() {
 #[tokio::test]
 async fn a_tool_call_round_trips() {
     let _one = one_at_a_time().await;
-    let server = Server::connect(&mock("ok")).await.unwrap();
+    let server = Server::connect(&mock("ok"), &Default::default()).await.unwrap();
     let result = server.call_tool("echo", &serde_json::json!({ "text": "hello" })).await.unwrap();
     assert!(!result.is_error);
     assert_eq!(result.to_text(), "echo: hello");
@@ -77,7 +77,7 @@ async fn a_tool_call_round_trips() {
 #[tokio::test]
 async fn binary_content_is_described_rather_than_inlined() {
     let _one = one_at_a_time().await;
-    let server = Server::connect(&mock("ok")).await.unwrap();
+    let server = Server::connect(&mock("ok"), &Default::default()).await.unwrap();
     let result = server.call_tool("picture", &serde_json::json!({})).await.unwrap();
     assert_eq!(result.to_text(), "[image/png image, 4 bytes base64]");
     server.shutdown().await;
@@ -86,7 +86,7 @@ async fn binary_content_is_described_rather_than_inlined() {
 #[tokio::test]
 async fn concurrent_calls_get_their_own_answers() {
     let _one = one_at_a_time().await;
-    let server = Server::connect(&mock("ok")).await.unwrap();
+    let server = Server::connect(&mock("ok"), &Default::default()).await.unwrap();
     let args: Vec<_> = (0..12).map(|i| serde_json::json!({ "text": format!("m{i}") })).collect();
     let calls = args.iter().map(|a| server.call_tool("echo", a));
     for (i, result) in futures_util::future::join_all(calls).await.into_iter().enumerate() {
@@ -98,7 +98,7 @@ async fn concurrent_calls_get_their_own_answers() {
 #[tokio::test]
 async fn notifications_and_junk_lines_do_not_disturb_a_call() {
     let _one = one_at_a_time().await;
-    let server = Server::connect(&mock("noise")).await.unwrap();
+    let server = Server::connect(&mock("noise"), &Default::default()).await.unwrap();
     let result = server.call_tool("echo", &serde_json::json!({ "text": "x" })).await.unwrap();
     assert_eq!(result.to_text(), "echo: x");
     server.shutdown().await;
@@ -107,7 +107,7 @@ async fn notifications_and_junk_lines_do_not_disturb_a_call() {
 #[tokio::test]
 async fn a_server_error_names_the_method_and_the_code() {
     let _one = one_at_a_time().await;
-    let server = Server::connect(&mock("error")).await.unwrap();
+    let server = Server::connect(&mock("error"), &Default::default()).await.unwrap();
     let err = server.call_tool("nope", &serde_json::json!({})).await.unwrap_err();
     let message = err.to_string();
     assert!(matches!(err, McpError::Rpc { .. }), "{message}");
@@ -120,7 +120,7 @@ async fn a_hung_server_times_out_rather_than_blocking_the_agent() {
     let _one = one_at_a_time().await;
     let mut config = mock("slow");
     config.call_timeout_secs = 1;
-    let server = Server::connect(&config).await.unwrap();
+    let server = Server::connect(&config, &Default::default()).await.unwrap();
     let err = server.call_tool("echo", &serde_json::json!({})).await.unwrap_err();
     assert!(matches!(err, McpError::Timeout { .. }), "{err}");
     server.shutdown().await;
@@ -129,7 +129,7 @@ async fn a_hung_server_times_out_rather_than_blocking_the_agent() {
 #[tokio::test]
 async fn a_server_that_dies_mid_call_fails_the_call_instead_of_hanging() {
     let _one = one_at_a_time().await;
-    let server = Server::connect(&mock("crash")).await.unwrap();
+    let server = Server::connect(&mock("crash"), &Default::default()).await.unwrap();
     // Only long enough to tell "failed" from "hung": the call's own timeout is
     // thirty seconds, so anything under that and over a loaded spawn will do.
     let err = tokio::time::timeout(Duration::from_secs(20), server.call_tool("echo", &serde_json::json!({})))
@@ -146,7 +146,7 @@ async fn a_server_that_dies_mid_call_fails_the_call_instead_of_hanging() {
 #[tokio::test]
 async fn a_server_that_dies_complaining_says_what_it_complained_about() {
     let _one = one_at_a_time().await;
-    let server = Server::connect(&mock("last-words")).await.unwrap();
+    let server = Server::connect(&mock("last-words"), &Default::default()).await.unwrap();
     let err = tokio::time::timeout(Duration::from_secs(20), server.call_tool("echo", &serde_json::json!({})))
         .await
         .expect("a dead server must not leave the call pending")
@@ -163,7 +163,7 @@ async fn a_missing_command_fails_with_the_command_in_the_message() {
         command: "definitely-not-installed-anywhere".into(),
         ..Default::default()
     };
-    let Err(err) = Server::connect(&config).await else {
+    let Err(err) = Server::connect(&config, &Default::default()).await else {
         panic!("a missing command must not appear to connect");
     };
     assert!(matches!(err, McpError::Spawn { .. }));
@@ -179,7 +179,7 @@ async fn dropping_a_server_takes_its_child_process_with_it() {
         std::process::Command::new("kill").args(["-0", &pid.to_string()]).status().is_ok_and(|s| s.success())
     };
 
-    let server = Server::connect(&mock("ok")).await.unwrap();
+    let server = Server::connect(&mock("ok"), &Default::default()).await.unwrap();
     let pid = server.child_pid().await.expect("a stdio server has a child");
     assert!(alive(pid), "the server should be running while it is connected");
 
@@ -207,7 +207,7 @@ async fn a_server_that_dies_once_is_restarted_and_the_call_answered() {
     let mut config = mock("crash-once");
     config.env.insert("MCP_MOCK_MARKER".into(), marker.display().to_string());
 
-    let server = Server::connect(&config).await.unwrap();
+    let server = Server::connect(&config, &Default::default()).await.unwrap();
     let result = server.call_tool("echo", &serde_json::json!({ "text": "still here" })).await;
 
     assert!(marker.exists(), "the server has to have died for this to be about anything");
@@ -220,7 +220,7 @@ async fn a_server_that_dies_once_is_restarted_and_the_call_answered() {
 #[tokio::test]
 async fn restarts_are_capped_and_the_last_error_is_the_real_one() {
     let _one = one_at_a_time().await;
-    let server = Server::connect(&mock("crash")).await.unwrap();
+    let server = Server::connect(&mock("crash"), &Default::default()).await.unwrap();
 
     for _ in 0..6 {
         let err = server.call_tool("echo", &serde_json::json!({})).await.unwrap_err();
@@ -245,7 +245,7 @@ async fn a_call_to_a_server_that_has_gone_fails_now_rather_than_at_the_timeout()
     // Long enough that waiting for it would be unmistakable in the elapsed
     // time, rather than something a slow machine could produce.
     config.call_timeout_secs = 120;
-    let server = Server::connect(&config).await.unwrap();
+    let server = Server::connect(&config, &Default::default()).await.unwrap();
 
     for _ in 0..3 {
         let _ = server.call_tool("echo", &serde_json::json!({})).await;

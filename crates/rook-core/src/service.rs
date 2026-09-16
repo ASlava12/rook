@@ -647,9 +647,11 @@ impl Rook {
                 web.search
             )));
         };
-        let search =
-            rook_tools::web::Search::new(engine, patience).map_err(|e| CoreError::Other(e.to_string()))?;
-        let fetch = rook_tools::web::Fetch::new(patience).map_err(|e| CoreError::Other(e.to_string()))?;
+        let through = self.config.proxy.for_web();
+        let search = rook_tools::web::Search::new(engine, patience, &through)
+            .map_err(|e| CoreError::Other(e.to_string()))?;
+        let fetch =
+            rook_tools::web::Fetch::new(patience, &through).map_err(|e| CoreError::Other(e.to_string()))?;
         Ok(crate::docs::Sources { search, fetch, pages: web.docs_pages, bytes: web.docs_bytes })
     }
 
@@ -1331,7 +1333,7 @@ impl Rook {
     pub async fn connect_mcp(&self) -> McpSession {
         let enabled = self.mcp_servers();
         let connections = enabled.iter().map(|config| async move {
-            match rook_mcp::Server::connect(config).await {
+            match rook_mcp::Server::connect(config, &self.config.proxy.for_mcp()).await {
                 Ok(server) => {
                     let server = std::sync::Arc::new(server);
                     match server.list_tools().await {

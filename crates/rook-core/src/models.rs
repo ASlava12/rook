@@ -219,6 +219,14 @@ pub fn endpoint_for(config: &Config, vault: &Vault, name: &str) -> Result<Option
         // behaved; a table that can say it defaults to the safe answer.
         parallel: Some(address.parallel.unwrap_or(1)),
         key_in_the_clear: address.key_in_the_clear,
+        // What this one says, then what `[proxy] models` says, then what
+        // `[proxy] url` says — and where none of them says anything, the
+        // machine's own variables, which is what every build did before there
+        // was anywhere to write this down.
+        // Through `for_models` rather than reading the two fields again here:
+        // what a part inherits is one rule, and a second copy of it is a second
+        // place for it to drift.
+        proxy: rook_llm::Proxy::parse(address.proxy).or(config.proxy.for_models()),
         queue: address.queue,
     }))
 }
@@ -234,6 +242,9 @@ struct Address<'a> {
     key: &'a str,
     parallel: Option<usize>,
     key_in_the_clear: bool,
+    /// How a request to it leaves the machine, before `[proxy]` is consulted
+    /// for whatever this did not say.
+    proxy: &'a str,
     /// The queue, where it is shared. A source carrying its own address has one
     /// of its own and says `None`; several sources naming one endpoint all say
     /// that endpoint, and so wait in one line at the server.
@@ -251,6 +262,7 @@ fn address_of<'a>(config: &'a Config, name: &str, source: &'a ModelSource) -> Re
             key: &source.key,
             parallel: source.parallel,
             key_in_the_clear: source.key_in_the_clear,
+            proxy: &source.proxy,
             queue: None,
         });
     }
@@ -275,6 +287,7 @@ fn address_of<'a>(config: &'a Config, name: &str, source: &'a ModelSource) -> Re
         (!source.key.trim().is_empty()).then_some("key"),
         source.parallel.is_some().then_some("parallel"),
         source.key_in_the_clear.then_some("key_in_the_clear"),
+        (!source.proxy.trim().is_empty()).then_some("proxy"),
     ]
     .into_iter()
     .flatten()
@@ -296,6 +309,7 @@ fn address_of<'a>(config: &'a Config, name: &str, source: &'a ModelSource) -> Re
         key: &endpoint.key,
         parallel: endpoint.parallel,
         key_in_the_clear: endpoint.key_in_the_clear,
+        proxy: &endpoint.proxy,
         queue: Some(named.to_string()),
     })
 }
