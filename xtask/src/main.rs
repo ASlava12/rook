@@ -7,6 +7,7 @@ mod bench;
 mod smoke;
 
 use std::process::{Command, ExitCode};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -241,13 +242,7 @@ fn main() -> ExitCode {
 
 fn run() -> Result<()> {
     match Cli::parse().task {
-        Task::Ci => {
-            cargo(&["fmt", "--all", "--check"])?;
-            cargo(&["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"])?;
-            cargo(&["test", "--workspace"])?;
-            println!("\nci: ok");
-            Ok(())
-        }
+        Task::Ci => ci(),
         Task::Targets => {
             println!("{:<32} {:<16} ci", "target", "platform");
             println!("{}", "─".repeat(58));
@@ -519,6 +514,44 @@ fn upstream(r: &Reference) -> Result<(String, String)> {
 
 fn short(sha: &str) -> String {
     sha.chars().take(9).collect()
+}
+
+/// fmt, then clippy, then the tests — and how long each took.
+///
+/// The timing is the point of it being here rather than three commands in a
+/// shell. "The gate got slower" was a feeling for a week, and the answer turned
+/// out to be neither the tests nor the code: `target/debug/deps` had
+/// accumulated over a million files, so every run was a cold one. Incrementally
+/// this is about five minutes — sixteen seconds of clippy, seventy of building
+/// the test binaries, and the rest running them — and a run far off that is a
+/// question worth asking rather than a day to sit through.
+fn ci() -> Result<()> {
+    let mut timings: Vec<(&str, Duration)> = Vec::new();
+    let timed = |what: &'static str, args: &[&str], timings: &mut Vec<(&str, Duration)>| {
+        let began = Instant::now();
+        let outcome = cargo(args);
+        timings.push((what, began.elapsed()));
+        outcome
+    };
+
+    // Each stage is timed whether or not it passes, and the timings are printed
+    // either way: a gate that failed after four minutes of building and one
+    // second of clippy is a different morning from one that failed at once.
+    let outcome = timed("fmt", &["fmt", "--all", "--check"], &mut timings)
+        .and_then(|()| {
+            timed("clippy", &["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"], &mut timings)
+        })
+        .and_then(|()| timed("test", &["test", "--workspace"], &mut timings));
+
+    let whole: Duration = timings.iter().map(|(_, d)| *d).sum();
+    println!();
+    for (what, took) in &timings {
+        println!("{what:>8}: {:>6.1}s", took.as_secs_f64());
+    }
+    println!("{:>8}: {:>6.1}s", "whole", whole.as_secs_f64());
+    outcome?;
+    println!("\nci: ok");
+    Ok(())
 }
 
 /// Time the parts of a turn, or put one of them under a profiler.

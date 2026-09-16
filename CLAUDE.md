@@ -199,6 +199,15 @@ A test of such a path asks the code that made it (`install::current`), or
 spells both answers under `cfg!(windows)`. A name that exists on no PATH is the
 way to assert that a lookup fell through.
 
+**The gate says how long it took.** Five minutes incrementally on this
+machine — fmt under a second, clippy about twenty, and the rest building and
+running the tests, of which `tui_pty` alone is a hundred seconds and is
+serialized on purpose. A run far off that is a question rather than a day to sit
+through: "the gate got slower" was a feeling for a week, and the answer was
+neither the tests nor the code but `target/debug/deps` holding over a million
+files, so every run was a cold one. `cargo xtask clean --all` is what reclaims
+that, at the cost of one full rebuild.
+
 **Slow is measured before it is fixed.** `cargo xtask load` times the parts a
 turn pays for again every step — appending to the log, replaying it, the
 catalog, the prompt, a search — against a synthetic session, and prints a cost
