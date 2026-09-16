@@ -72,6 +72,9 @@ enum Command {
         #[arg(long)]
         alone: bool,
     },
+    /// Read the configuration, fill in what it does not say, and check it.
+    #[command(subcommand)]
+    Config(ConfigCmd),
     /// List the models the configured provider says it can serve.
     Models {
         /// Put every configured endpoint back in the rotation and ask each one.
@@ -79,6 +82,10 @@ enum Command {
         /// answer wanted is "does it work now" rather than "in a minute".
         #[arg(long)]
         recheck: bool,
+        /// One endpoint from `[models]` rather than the configured one. For
+        /// seeing what a machine serves before pointing anything at it.
+        #[arg(long)]
+        source: Option<String>,
     },
     /// Speak the Agent Client Protocol on stdio, for editors.
     Acp,
@@ -245,6 +252,16 @@ enum DocsCmd {
         #[arg(long)]
         version: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum ConfigCmd {
+    /// Every setting in force, with the ones the file does not name filled in
+    /// from the defaults. What the agent reads, rather than what was written.
+    Show,
+    /// Read the file, name what is wrong in it, and ask every endpoint whether
+    /// it is there.
+    Check,
 }
 
 #[derive(Subcommand)]
@@ -500,7 +517,8 @@ fn main() -> Result<()> {
         Some(Command::Doctor) => cmd_doctor(&workspace_of(&cli.workspace), cli.json),
         Some(Command::Chat { session }) => chat::run(cli.workspace, session, cli.yes),
         Some(Command::Run { prompt, session }) => cmd_run(cli.workspace, prompt, session, cli.yes, cli.json),
-        Some(Command::Models { recheck }) => cmd_models(cli.workspace, cli.json, recheck),
+        Some(Command::Models { recheck, source }) => cmd_models(cli.workspace, cli.json, recheck, source),
+        Some(Command::Config(cmd)) => cmd_config(cmd, cli.json),
         Some(Command::Acp) => cmd_acp(cli.workspace),
         Some(Command::Serve { port }) => cmd_serve(port),
         Some(Command::Daemon(c)) => cmd_daemon(c, cli.json),
@@ -1189,7 +1207,7 @@ pub fn cached(tokens: u32) -> String {
     if tokens == 0 { String::new() } else { format!(" ({tokens} cached)") }
 }
 
-fn cmd_models(workspace: Option<PathBuf>, json: bool, recheck: bool) -> Result<()> {
+fn cmd_models(workspace: Option<PathBuf>, json: bool, recheck: bool, source: Option<String>) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     if recheck {
         return rechecked(&runtime, json);
@@ -1197,6 +1215,34 @@ fn cmd_models(workspace: Option<PathBuf>, json: bool, recheck: bool) -> Result<(
     runtime.block_on(async move {
         let _ = workspace;
         let config = rook_core::Config::load()?;
+        // Named, so the question is about that machine rather than about
+        // whatever the agent happens to be pointed at. The list it comes back
+        // with is what `[models.<name>] model` has to be one of, which is the
+        // thing nobody can know before asking.
+        if let Some(named) = source {
+            let vault = rook_core::Vault::load().unwrap_or_else(|_| rook_core::Vault::empty());
+            let provider = rook_core::models::provider_for(&config, &vault, &named)
+                .with_context(|| format!("asking {named:?}"))?;
+            let models = provider.models().await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&models)?);
+                return anyhow::Ok(());
+            }
+            let wanted = rook_core::models::model_named(&config, &named);
+            let rows: Vec<Vec<String>> = models
+                .iter()
+                .map(|m| {
+                    vec![
+                        if m.id == wanted { "▸".into() } else { " ".into() },
+                        m.id.clone(),
+                        m.context_window.map(|w| format!("{w}")).unwrap_or_default(),
+                        m.quantization.clone().unwrap_or_default(),
+                    ]
+                })
+                .collect();
+            print!("{}", fmt::table(&["", "model", "context", "quant"], &rows));
+            return anyhow::Ok(());
+        }
         let configured = rook_core::models::model_named(&config, &config.agent.model);
         let configured = configured.as_str();
         let models = provider(&config)?.models().await?;
@@ -1247,6 +1293,95 @@ fn cmd_models(workspace: Option<PathBuf>, json: bool, recheck: bool) -> Result<(
 /// terminal that rechecked on its own would clear its own empty set, print a
 /// perfectly true table, and leave the agent believing what it believed a
 /// minute ago.
+fn cmd_config(cmd: ConfigCmd, json: bool) -> Result<()> {
+    match cmd {
+        ConfigCmd::Show => {
+            let config = rook_core::Config::load()?;
+            match json {
+                true => println!("{}", serde_json::to_string_pretty(&config)?),
+                // The same shape the file has, so what is printed can be
+                // pasted back into it — a listing in another format is one
+                // somebody has to translate before they can act on it.
+                false => print!("{}", config.as_written()?),
+            }
+            Ok(())
+        }
+        ConfigCmd::Check => {
+            let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+            checked(&runtime, json)
+        }
+    }
+}
+
+/// What is wrong with the file, and what the endpoints in it say.
+///
+/// Two questions rather than one, because they fail apart: a setting nobody
+/// reads is a typo that changes nothing, and an endpoint that will not answer
+/// is a machine that is off. Reporting them together is what makes the answer
+/// worth reading — the file is the only place both are decided.
+fn checked(runtime: &tokio::runtime::Runtime, json: bool) -> Result<()> {
+    let path = rook_core::paths::config_file();
+    let config = rook_core::Config::load()?;
+    let ignored = rook_core::Config::ignored_in(&path);
+    let answers = {
+        let vault = rook_core::Vault::load().unwrap_or_else(|_| rook_core::Vault::empty());
+        runtime.block_on(rook_core::models::recheck(&config, &vault))
+    };
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "config": path,
+                "ignored": ignored,
+                "models": answers,
+            }))?
+        );
+        return Ok(());
+    }
+
+    println!("{}", path.display());
+    match ignored.is_empty() {
+        true => println!("  ✓ every setting in it is one this reads"),
+        false => {
+            for name in &ignored {
+                // The nearest known name where there is an obvious one, because
+                // "not a setting" sends somebody to the documentation and "did
+                // you mean" sends them to the line they typed.
+                match rook_core::Config::nearest_to(name) {
+                    Some(meant) => println!("  ✗ {name} is not a setting — did you mean {meant}?"),
+                    None => println!("  ✗ {name} is not a setting"),
+                }
+            }
+        }
+    }
+
+    println!();
+    if answers.is_empty() {
+        println!("no endpoints are named under `[models]`");
+        return Ok(());
+    }
+    let rows: Vec<Vec<String>> = answers
+        .iter()
+        .map(|answer| {
+            vec![
+                if answer.answering() { "✓".into() } else { "✗".into() },
+                answer.name.clone(),
+                format!("{} ms", answer.took_ms),
+                match &answer.refused {
+                    Some(why) => why.lines().next().unwrap_or(why).to_string(),
+                    None => match answer.serving.len() {
+                        1 => answer.serving[0].clone(),
+                        n => format!("{n} models"),
+                    },
+                },
+            ]
+        })
+        .collect();
+    print!("{}", fmt::table(&["", "endpoint", "answered in", "what it says"], &rows));
+    Ok(())
+}
+
 /// Takes the runtime rather than running inside one, which running it found:
 /// the daemon client blocks for its answer, and blocking a thread that is
 /// driving the runtime it blocks on is a panic rather than a wait. So the

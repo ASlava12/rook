@@ -182,11 +182,20 @@ fn unread(written: &serde_json::Value, known: &serde_json::Value, at: &str, out:
         // Omitted from a written config when empty and settings all the same:
         // `[[mcp]]`, `[[hooks]]`, `[[lsp]]`. Their own contents are not walked,
         // because an empty default carries no shape to compare against.
-        // `models` joins them for a different reason: its keys are names
-        // somebody chose, so there is no shape here to compare a written one
-        // against. What is inside each is checked by `rook config check`,
-        // which is the command that knows what a model source has to have.
-        if at.is_empty() && matches!(key.as_str(), "mcp" | "hooks" | "lsp" | "models") {
+        if at.is_empty() && matches!(key.as_str(), "mcp" | "hooks" | "lsp") {
+            continue;
+        }
+        // `models` cannot be walked like the rest: its keys are names somebody
+        // chose, so a written one is never in the template. What is inside each
+        // is an ordinary struct though, and a typo there is the same mistake
+        // this exists to catch — `ur1` instead of `url` is a source with no
+        // address, silently, because serde fills the rest from defaults and
+        // says nothing about the leftover.
+        if at.is_empty() && key == "models" {
+            let Some(shape) = serde_json::to_value(ModelSource::default()).ok() else { continue };
+            for (named, source) in value.as_object().into_iter().flatten() {
+                unread(source, &shape, &format!("models.{named}"), out);
+            }
             continue;
         }
         let path = match at.is_empty() {
@@ -808,9 +817,22 @@ impl Config {
         // cannot see is a name this would not suggest either, so a typo for
         // `context_window` would be reported with no "did you mean".
         let known = every_key()?;
-        let siblings = match table.is_empty() {
-            true => known.as_object()?.clone(),
-            false => known.get(table)?.as_object()?.clone(),
+        // Walked a segment at a time rather than looked up whole. `get` on a
+        // dotted string asks for one key with dots in its name, which nothing
+        // has — so every nested table answered `None`, and a source under
+        // `[models]` could never be suggested for at all.
+        let mut at = &known;
+        for segment in table.split('.').filter(|s| !s.is_empty()) {
+            at = match segment {
+                // Its keys are names somebody chose, so the shape to compare
+                // against is one source rather than the table of them.
+                _ if std::ptr::eq(at, &known) && segment == "models" => break,
+                other => at.get(other)?,
+            };
+        }
+        let siblings = match table.starts_with("models") {
+            true => serde_json::to_value(ModelSource::default()).ok()?.as_object()?.clone(),
+            false => at.as_object()?.clone(),
         };
         let shared = |a: &str, b: &str| a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count();
         let (name, common) =
@@ -819,13 +841,21 @@ impl Config {
         (common >= 4 && common + 2 >= key.len()).then_some(name)
     }
 
+    /// These settings as a file would hold them, defaults and all.
+    ///
+    /// The same rendering `save` writes, so what a person is shown is what
+    /// would be written — a listing in some other shape is one they have to
+    /// translate before they can paste any of it back.
+    pub fn as_written(&self) -> std::io::Result<String> {
+        toml::to_string_pretty(self).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+
     pub fn save(&self) -> std::io::Result<()> {
         let path = crate::paths::config_file();
         if let Some(parent) = path.parent() {
             crate::paths::private_dir(parent)?;
         }
-        let text = toml::to_string_pretty(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let text = self.as_written()?;
         std::fs::write(&path, text)?;
         // An MCP server's headers and environment live in here, and that is
         // where its API key goes — the field says so. Model keys are read from

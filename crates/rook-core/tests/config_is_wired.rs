@@ -453,3 +453,39 @@ fn the_endpoints_a_sub_task_may_be_sent_to_are_named_only_where_there_are_some()
     assert!(choice.is_object(), "the field is there");
     assert_eq!(choice["enum"], serde_json::json!(["next-door"]), "and it names what there is");
 }
+
+/// A source is a table whose name somebody chose, so the walk that names unread
+/// settings cannot compare it to a template — and skipping it whole meant
+/// `ur1 = "http://…"` was a source with no address, silently, because serde
+/// fills the rest from defaults and says nothing about the leftover. What is
+/// inside one is an ordinary struct, and a typo there is the same mistake this
+/// exists to catch.
+#[test]
+fn a_typo_inside_a_model_source_is_named_like_any_other() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let written = concat!(
+        "[models.next-door]\n",
+        "mode = \"qwen3-coder:30b\"\n",
+        "api = \"openai\"\n",
+        "ur1 = \"http://127.0.0.1:1234/v1\"\n",
+        "parallel = 2\n",
+    );
+    std::fs::write(&path, written).unwrap();
+
+    let ignored = rook_core::Config::ignored_in(&path);
+
+    assert!(ignored.contains(&"models.next-door.ur1".to_string()), "{ignored:?}");
+    assert!(ignored.contains(&"models.next-door.mode".to_string()), "{ignored:?}");
+    // The precondition: the real ones beside them are not named, or this would
+    // pass by calling every source wrong.
+    assert!(!ignored.contains(&"models.next-door.api".to_string()), "{ignored:?}");
+    assert!(!ignored.contains(&"models.next-door.parallel".to_string()), "{ignored:?}");
+    // And the name of the source itself is not a setting to be reported.
+    assert!(!ignored.iter().any(|name| name == "models" || name == "models.next-door"), "{ignored:?}");
+
+    // Suggested for, which needed the lookup to walk the path a segment at a
+    // time: asking for a key literally named `models.next-door` found nothing,
+    // so a source could never be suggested for at all.
+    assert_eq!(rook_core::Config::nearest_to("models.next-door.mode").as_deref(), Some("model"));
+}
