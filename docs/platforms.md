@@ -1,5 +1,7 @@
 # Platforms
 
+[English](platforms.md) · [Русский](ru/platforms.md)
+
 Linux, macOS, Windows and FreeBSD are supported targets. `cargo xtask targets`
 prints the current matrix.
 

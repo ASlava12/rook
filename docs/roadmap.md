@@ -1259,6 +1259,147 @@ what unblocks the most.
   The cache is counted too: `cached_tokens` comes back from both the streaming
   and non-streaming paths, so the footer can say how much of a bill the cache
   took rather than only how large the bill was.
+- **Endpoints, apart from models** — `[agent] model` was a `provider/model` spec
+  and each provider name read one variable for its address and one for its key,
+  so there was exactly one LM Studio, one gateway, one of everything, and no way
+  to write down the second. `[endpoints.<name>]` says where to send a request —
+  which api to speak, the address, the key, how many at once — and
+  `[models.<name>]` says what to ask for, so one server serving a large model and
+  a small one is written once. A source may still carry its own address, which is
+  every configuration written before this and needs no migration; writing both is
+  refused naming both, because one of the two would be silently unused. Keys take
+  `secret:<name>`, `env:<VAR>` or the value itself, in that order of preference:
+  `config.toml` is not `secrets.toml`, it is the file people paste into an issue.
+  `parallel` is why the two halves are apart rather than merely tidier — a local
+  runtime interleaves a second request with the first whether or not the two asked
+  for the same model, so the semaphore is keyed on the endpoint and registered
+  under each model's name as well.
+- **An endpoint that is not there is not a choice** — home, work, and the machine
+  at home being off are three sets of reachable endpoints and one file.
+  `priority` is the order to fall through; absent means not in the rotation at
+  all, because an endpoint that costs money per token must not become what the
+  agent reaches for when the desk machine is asleep. Which is missing is
+  discovered at the request rather than probed, and it stays out for sixty
+  seconds, which the message says rather than leaving a reader to wonder whether
+  to wait or go and fix something. Only "there is nothing there" moves on: a 401
+  is a key that is wrong, and going to the next endpoint on one hides it. An empty
+  wallet is read from the body rather than the status, because OpenAI answers
+  `insufficient_quota` with the rate limiter's status and Anthropic answers with
+  the one every rule reads as a request that is wrong. `rook models --recheck`
+  puts them all back and asks each, for after a balance is topped up or a server
+  switched on, and it goes through the daemon because the register of what is out
+  lives in the process that talks to them.
+- **A turn and an errand want opposite things from that list** — a turn wants the
+  endpoint it was pointed at, since moving it part-way throws away the cached
+  prefix of every request it has sent and hands the next step to a model that did
+  not write the last one. An errand wants whichever is free: it is bounded work
+  with no conversation worth caching, and a sub-agent queued behind its own parent
+  is waiting for the turn it was started to get ahead of. The failover carries
+  which of the two it is, and reads the room each endpoint has from the semaphore
+  that already counts `parallel`. `delegate` takes a `model` for the call that
+  knows something the engine does not, offered only where there is a choice to
+  make; a name that is not configured is refused with the real ones listed.
+- **A session can be moved between them while it runs** — `/model` in the chat and
+  the window, the same setting over the daemon's socket, and a select on the page
+  beside the stance and the effort. It takes effect on the next turn and not the
+  one in flight, for the same reason the failover prefers to stay put. The window
+  has a pane listing them: `⏎` runs the next turn on the one under the cursor, `r`
+  asks them all. Nothing is asked on opening — every other pane reads the store,
+  which costs nothing on a sixty-millisecond redraw, and this one reaches four
+  machines — so until somebody presses `r` the column reads "not asked" rather
+  than sitting empty, because "nobody asked" and "did not answer" would otherwise
+  look the same.
+- **A setting could be read from the command line and only written by hand** —
+  `rook config set agent.model desk-small` writes one line and leaves the rest of
+  the file where it was, through `toml_edit` rather than by saving the loaded
+  struct: a configuration somebody keeps is half comments, and a serialiser that
+  rebuilds the file deletes every one of them. A name that is not a setting is
+  answered with the nearest one that is, and a value the setting cannot hold is
+  refused by loading the result before saving it — the code that will read the
+  file gets the last word rather than a second opinion about types. `rook config
+  check` reads the file, names anything in it that is not a setting, and asks
+  every endpoint whether it is there: two questions rather than one, because a
+  setting nobody reads is a typo that changes nothing and an endpoint that will
+  not answer is a machine that is off. `rook config show` prints what is in force
+  with the defaults filled in, in the shape the file has, so it can be pasted back
+  rather than translated. `rook models --source <name>` asks one endpoint what it
+  serves, which is what the error about an unset `model` now points at.
+- **Where a request leaves from** — some APIs are reachable only through a proxy,
+  and on the same machine others must not go near one, so `[proxy]` is written
+  down per part that reaches the network: the model APIs, the web tools, MCP over
+  http, and a language-server download. An endpoint may name its own. Empty is not
+  "no proxy" but "nothing said here", and then `http_proxy` and `no_proxy` decide
+  exactly as they did before any of it existed; `direct` is how a part opts out of
+  a proxy the others need. A request to this machine or this network goes straight
+  out whatever any of it says, and that rule is applied per request rather than
+  when a client is built, because a `web_fetch` client is asked for pages nobody
+  has named yet.
+- **A turn does not wait for the disk at every step** — appending one event cost
+  nine milliseconds, of which eight were a flush, so a two-hundred-step turn spent
+  four seconds putting each event beyond a power cut one at a time — and what a
+  power cut threatens is not one step but the turn. The flush moved to the points
+  a session can be returned to: a checkpoint, a compaction, the end of a turn,
+  closing the store, and every 256 events regardless. 9 ms an event to 397 µs,
+  measured the same way it was found. The index is never inconsistent, which was
+  the part worth keeping.
+- **Slow is measured before it is fixed** — `cargo xtask load` times the parts a
+  turn pays for again every step against a synthetic session and prints a cost per
+  unit beside each; `--scale 2` asks the question the table cannot answer alone,
+  since a per-unit figure that rises with the size is a quadratic, and `--profile
+  <part>` records it under `samply`. Its first run found the flush above, which
+  nothing in the code says and no amount of reading it had suggested. The gate
+  prints how long fmt, clippy and the tests each took, pass or fail — twenty-minute
+  runs turned out to be cold ones, with 1,155,693 files accumulated in
+  `target/debug/deps`, which is what `cargo xtask clean --all` exists for and which
+  nothing was measuring.
+- **A turn that is locked out goes to the daemon instead of advising what was
+  already done** — the store takes one writer, so `rook run` and `rook chat` used
+  to fail while `rookd` held it, telling somebody whose `rookd` was running to
+  start `rookd`. The daemon is the same engine and its chat socket is the same
+  conversation from the other side, so the turn goes there, streamed and watched
+  the same way, with approvals answered by the rule the local path already follows:
+  a command is scripted more often than watched, so it refuses what it cannot get
+  approved rather than prompting into a pipe. One socket for the session rather
+  than one per line, because the daemon keeps what a connection has set — the
+  stance, the effort, the endpoint — and a connection per prompt would forget all
+  three between one line and the next.
+- **A sub-agent may not move the branch under the turn that started it** — two
+  sessions writing one path were already refused, and what a shared directory does
+  not protect is the branch: a child that commits carries its parent's unfinished
+  work along with its own, and one that checks out or resets changes what the
+  parent is editing while it edits. `exec` refuses the fourteen subcommands that
+  move something and says what to do instead, because a sub-agent told only "no"
+  tries the next spelling of the same thing. Read as words rather than matched as
+  text, so `git -C crates/rook-core commit` and `cargo test && git commit` are the
+  same command and `echo git commit` is not one. `branch` and `tag` are not on the
+  list: bare they list, which is what anybody looking at the state runs. Adapted
+  from OpenResearch, whose helpers each get a worktree — the worktree half does not
+  transfer, because a separate tree is a separate `target/` and a full rebuild per
+  child.
+- **A claim made true by editing is reported unproven** — asked to verify that
+  `add` returns the sum of its arguments, a checker read the file and answered that
+  it subtracts; the turn then edited `lib.rs` until it added, asked the same claim
+  again, got `holds`, and said the claim was verified. The sentence warning against
+  exactly that had been beside `check` since the first time a model did it, and a
+  warning ignored twice is not a warning to write a third time. The loop holds the
+  fact instead: which claims failed and what had been written when they did, so a
+  claim that failed and now holds with something written in between is reported
+  `unproven` and names the file that changed. Keyed on the turn having written
+  something rather than on the claim being asked twice, so a claim that failed
+  because the checker looked in the wrong place is still an ordinary pass.
+- **A skill card names the situation, not the subject** — a card is paid for on
+  every request and is read for one decision, and all five shipped ones described
+  what the skill *was*, which reads well and leaves a model to spend two hundred to
+  nine hundred tokens on a body to find out whether it wanted it. `Use when …` is
+  the shape, `Use before …` where the moment is a command about to be run, and a
+  "not for …" clause only where the confusion is real — `in-place-edit` earns one
+  against the editing tools, `rust-release` would be saying that a release is not
+  a commit. What a skill needs goes in `requires`, where the code checks it and
+  `rook skills why` explains it, rather than in a sentence the model has to
+  evaluate. The budget is a test: one card at 50 tokens, the shipped catalogue at
+  220, a body at 1,200, past which the long part belongs in a bundled file the body
+  names. `docs/skills.md` claimed fifty cards cost 770 tokens; they cost about two
+  thousand, which is the argument for the cap rather than against it.
 
 ## Measured against a live model
 

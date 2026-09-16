@@ -1,5 +1,7 @@
 # Storage
 
+[English](storage.md) · [Русский](ru/storage.md)
+
 ## The problem
 
 Agent transcripts are the most redundant data a developer tool produces. The same
@@ -220,6 +222,12 @@ CLI routes over the daemon's API instead of refusing — every subcommand of
 `store`, `session`, `skills`, `memory` and `checkpoint`, reads and writes
 alike. `rookd` writes its address to `$ROOK_HOME/rookd.addr` on start and
 removes it on shutdown, and a file left behind by a crash is ignored because
-nothing answers there. What cannot route is a turn, which writes as it runs:
-`run`, `chat` and `acp` want the store itself. Why one writer rather than
-several is [ADR-0006](adr/0006-single-writer-store.md).
+nothing answers there.
+
+A turn cannot route the same way, because it writes as it runs. `rook run` and
+`rook chat` go to the daemon's chat socket instead — the same engine and the
+same conversation from the other side — and say which daemon they are using.
+They used to fail here with advice the person had already taken: "start rookd
+before them", said to somebody whose `rookd` was running, because it was
+running. `rook acp` is the one that still meets the lock. Why one writer rather
+than several is [ADR-0006](adr/0006-single-writer-store.md).

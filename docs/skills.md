@@ -1,5 +1,7 @@
 # Skills
 
+[English](skills.md) · [Русский](ru/skills.md)
+
 A skill is a directory containing a `SKILL.md`: YAML frontmatter plus a Markdown
 body. This is the [Agent Skills](https://www.webfuse.com/agent-skills-cheat-sheet)
 format, so a skill written for another agent loads here unchanged, and a skill

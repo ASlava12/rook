@@ -96,8 +96,11 @@ jobs:
 
   # Real turns against a real model: does the agent read the file rather than
   # answer from memory, land the edit it was asked for, use what a command
-  # printed, and refuse to settle a claim it did not check. A small model on a
-  # CPU runner, pulled into a service container, so no key is needed.
+  # printed, refuse to settle a claim it did not check, hand work to a
+  # sub-agent and use what came back, move a file rather than retyping it,
+  # write a skill and follow it later, and carry a fact into the next session.
+  # A small model on a CPU runner, pulled into a service container, so no key
+  # is needed. `xtask/src/smoke.rs` is where they are written down.
   #
   # Not a gate. A model this size is a source of failures that are not ours,
   # and a job that goes red on a coin-flip teaches everyone to stop reading
@@ -107,7 +110,7 @@ jobs:
     name: smoke ollama
     runs-on: ubuntu-latest
     continue-on-error: true
-    # Sized for the work, not for a hang: five scenarios against a 3b model on
+    # Sized for the work, not for a hang: eight scenarios against a 3b model on
     # a CPU runner, and every autonomous turn now ends with a goal check, which
     # is a whole extra turn. Runs have taken 16 to 39 minutes.
     timeout-minutes: 60

@@ -101,7 +101,8 @@ builds and tests in CI and has no published binary yet: build it from a clone.
 ```sh
 rook init                                  # create ~/.rook, config, store
 rook doctor                                # environment, what contains a command, model reachability
-rook models                                # what the configured provider serves
+rook config check                          # what the file says that is not a setting, and which endpoints answer
+rook models                                # what the configured endpoint serves
 
 rook                                       # talk to it
 rook run "summarise what changed in src/"  # one turn, streamed, for scripts
@@ -133,11 +134,13 @@ In a conversation, slash commands reach the same engine the subcommands do:
 ```
 /btw <question> ask about the work without joining the conversation
 /goal [text]    what this session is for; the agent is told
+/model [name]   which endpoint from `[models]` the next turn runs on
+/stance [name]  how much latitude: readonly, assist or autonomous
 /context        what this conversation costs, and of what
 /skills [name]  what applies here, or one skill's body
 /undo           rewind past the last exchange, files included
 /rewind <seq>   rewind to a point in the transcript
-/session  /mcp  /new  /help  /quit
+/session  /mcp  /jobs  /diff  /new  /help  /quit
 ```
 
 `/btw` answers from what the agent already knows — no tools, one call — and its
@@ -148,8 +151,12 @@ already did stays in the log.
 Typing while a turn runs steers it rather than waiting for it: what you send
 reaches the model at its next step, so a turn heading the wrong way can be
 corrected without throwing away what it has already done — and if the turn has
-work out with sub-tasks, every one of them hears it too. In the TUI and in the
-browser, which are the two front ends that can take input while one is running.
+work out with sub-tasks, every one of them hears it too. The line is marked
+`✓ taken up` when the turn actually puts it in a request, because a request
+already sent cannot be added to and how much of a step is left is not something
+the window knows: without the tick the wait has no visible end. In the TUI and
+in the browser, which are the two front ends that can take input while one is
+running.
 
 ### Reading what the agent remembers
 
@@ -397,6 +404,17 @@ its writer argues. And the rule that makes either of them worth anything — a
 verdict from a checker that ran nothing and read nothing is reported as unproven
 however sure it sounded. Reaching for nothing is what a fabricated check looks
 like, and it is what asking a second agent was supposed to get past.
+
+A claim that failed, and holds once the turn has written something, is reported
+`unproven` too, naming the file that changed. Asked to verify that `add` returns
+the sum of its arguments, a model read the file, was told it subtracts, edited
+until it added, asked again, and called the claim verified — which answers a
+different question from the one that was put. The loop remembers which claims
+failed and what had been written when they did, so the second verdict is weighed
+against the first rather than replacing it. A claim that failed because the
+checker looked in the wrong place, and holds once it looks properly, is an
+ordinary pass: what disqualifies the second answer is the turn having written
+something in between.
 
 ### When a small model wanders
 
@@ -656,6 +674,35 @@ people paste into an issue, and it is the one that ends up in a dotfiles
 repository. A `provider/model` spec still reads its key from the environment and
 nothing about it has changed.
 
+Some APIs are reachable only through a proxy, and on the same machine others
+must not go near one, so it is written down per part rather than set once:
+
+```toml
+[proxy]
+url = "socks5://127.0.0.1:1080"    # http:// | https:// | socks5:// | socks5h://
+
+# Each part takes the line above unless it says otherwise. `direct` is how one
+# part opts out of a proxy the others need.
+models  = ""                       # the model APIs
+web     = "direct"                 # web_fetch and web_search
+mcp     = ""                       # MCP servers reached over http
+install = ""                       # downloading a language server
+
+[endpoints.paid]
+url   = "https://api.example.com/v1"
+proxy = "http://gateway:3128"      # this one endpoint, whatever `models` says
+```
+
+Empty is not "no proxy" — it is "nothing said here", and then `http_proxy` and
+`no_proxy` decide, exactly as they did before any of this existed. `direct` is
+how to mean no proxy.
+
+Whatever any of it says, a request to this machine or this network goes
+straight out: a proxy is a way to the internet, and sent through one a request
+to the desk next door comes back as whatever the tunnel makes of an address it
+cannot route to. An MCP server this machine starts and talks to over pipes has
+no network between the two and never sees a proxy at all.
+
 `rook config check` reads the file, names anything in it that is not a setting,
 and asks every endpoint whether it is there. `rook config set agent.model
 desk-small` changes one line and leaves the comments around it alone.
@@ -799,6 +846,16 @@ rook session show <child>    # everything the sub-agent actually did
 Nesting stops at two levels, because past that the token cost compounds faster
 than the work gets done.
 
+Where `[models]` names more than one endpoint, an errand goes to whichever is
+free rather than to the one the turn was pointed at. A turn wants the endpoint
+it started on — moving it part-way throws away the cached prefix of every request
+it has sent — and an errand is bounded work with no conversation worth caching,
+so a sub-agent queued behind its own parent on a server that takes one request at
+a time is waiting for the turn it was started to get ahead of. `delegate` also
+takes a `model`, for the sub-task that wants the large one or must not go through
+the paid one; the field is offered only where there is a choice to make, and a
+name that is not configured is refused with the real ones listed.
+
 A sub-agent works in the same directory as the turn that started it, and two
 sessions are already refused a write to the same file at the same time — the
 second is told which session holds it. What a shared directory does not protect
@@ -935,6 +992,7 @@ crowds out the conversation on every request.
 
 ```
 crates/
+  rook-contain  platform glue with no dependencies of its own, and the one place Win32 lives
   rook-store    content-addressed store: redb index, zstd dictionaries, gc, retention
   rook-skills   SKILL.md parsing, environment detection, version + variant resolution
   rook-core     the engine: config, agent loop, context budget, file captures
@@ -968,22 +1026,28 @@ more than CI actually does. Details: [docs/platforms.md](docs/platforms.md).
 Being explicit, because a roadmap presented as a feature list is how these projects
 lose people's trust:
 
-- **A capable model has driven it once, locally.** Five scenarios against a
-  27-billion-parameter model in LM Studio pass on the first attempt — reading,
-  editing, using what a command printed, delegating, and refusing to settle a
-  false claim from memory — with none of the nudges the loop keeps for smaller
-  models needed. CI runs the same five against a 3-billion-parameter model on
-  every push, where they mostly fail for the model's own reasons; reading those
-  transcripts has found a dozen defects here that no scripted answer would have.
-  What is still unwatched is long work: five short scenarios are not an
-  afternoon, and nothing here has run against a hosted model at all.
-- **A turn needs the store to itself.** `rookd` holds the store's single write
-  lock, and every `store`, `session`, `skills`, `memory` and `checkpoint`
-  subcommand now routes over its API rather than refusing — the same call the
-  daemon makes on its own store, so there is one implementation and two ways
-  in. What cannot route is a turn: `run`, `chat` and `acp` write as they go.
-  A person who wants one while the daemon is up has the daemon's own chat,
-  which is the same engine from the other side
+- **A capable model has driven it once, locally.** Eight scenarios against a
+  capable model in LM Studio pass — reading, editing, using what a command
+  printed, delegating, refusing to settle a false claim from memory, moving a
+  file rather than retyping it, writing a skill and loading it in a later
+  session, and remembering a fact into one. The first five passed on the first
+  attempt with none of the nudges the loop keeps for smaller models needed, and
+  the three added since are the only live evidence that skills and memory
+  survive the session that wrote them. CI runs the same eight against a
+  3-billion-parameter model on every push, where they mostly fail for the
+  model's own reasons; reading those transcripts has found a dozen defects here
+  that no scripted answer would have. What is still unwatched is long work:
+  eight short scenarios are not an afternoon, and nothing here has run against a
+  hosted model at all.
+- **A turn needs the store to itself, and `acp` is the one that still says so.**
+  `rookd` holds the store's single write lock, and every `store`, `session`,
+  `skills`, `memory` and `checkpoint` subcommand routes over its API rather than
+  refusing — the same call the daemon makes on its own store, so there is one
+  implementation and two ways in. A turn cannot route the same way, because it
+  writes as it runs; `run` and `chat` go to the daemon's chat socket instead,
+  which is the same engine and the same conversation from the other side, and
+  say which daemon they are using. `rook acp` is what is left: an editor driving
+  it while `rookd` is up meets the lock and is told so
   ([ADR-0006](docs/adr/0006-single-writer-store.md)).
 - **Reasoning is carried across a tool call, and only for Anthropic.** It was
   not, and that was a turn Anthropic refuses outright: with extended thinking on,
@@ -1061,14 +1125,31 @@ being the platform's job, and
 ## Development
 
 ```sh
-cargo xtask ci             # fmt + clippy + test, the gate CI runs
+cargo xtask ci             # fmt + clippy + test, the gate CI runs; prints what each took
+cargo xtask dist           # release binaries, the skills beside them, and the sizes
 cargo xtask targets        # the supported target matrix
 cargo xtask compaction     # measure the storage claims above
+cargo xtask load           # time the per-turn work; --scale 2 asks whether it is linear
 cargo xtask clean          # report what target/ costs and reclaim it
 cargo xtask refs status    # how far the reference pointers have drifted
-cargo xtask smoke --model … # four real turns against a real model
+cargo xtask smoke --model … # eight real scenarios against a real model
+cargo xtask bench --model … # arms that differ by one variable, scored from the workspace
 cargo test --workspace
 ```
+
+The gate prints how long fmt, clippy and the tests each took, whether it passes
+or fails: a run that died after four minutes of building and one second of
+clippy is a different morning from one that died at once. A run far off the
+usual is a question rather than a day to sit through — twenty-minute runs here
+turned out to be cold ones, with over a million files accumulated in
+`target/debug/deps`, which is what `cargo xtask clean --all` exists for.
+
+`cargo xtask load` is the answer to "this feels slow": it times the parts a turn
+pays for again every step — appending to the log, replaying it, the catalog, the
+prompt, a search — against a synthetic session, and prints a cost per unit beside
+each. Its first run found appending one event costing nine milliseconds, of which
+eight were a flush to disk; nothing in the code says that, and reading it would
+not have.
 
 A full debug build with tests is about 800 MB of `target/`. Debug info is
 line-tables-only and dependencies carry none, because full DWARF for the

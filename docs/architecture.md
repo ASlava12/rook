@@ -1,5 +1,7 @@
 # Architecture
 
+[English](architecture.md) · [Русский](ru/architecture.md)
+
 ## The shape
 
 ```
@@ -43,8 +45,27 @@ only work against one storage backend would be much harder to reuse.
 
 **`rook-llm` has no branch on vendor.** One trait, one HTTP implementation of the
 chat-completions dialect that Ollama, LM Studio, llama.cpp, vLLM and OpenAI all
-accept. Providers with their own wire format get their own implementation of the
-same trait, and the agent loop never learns which is answering.
+accept. Providers with their own wire format — Anthropic's Messages API, Google's
+`generateContent` — get their own implementation of the same trait, and the agent
+loop never learns which is answering.
+
+The wrappers around that trait are the same trait again, which is what keeps the
+loop from having to know about any of them: `Retrying` waits out what means
+*later*, `Limited` counts how many requests one endpoint may have at once,
+`Failover` holds the list from `[models]` and moves on from an endpoint that is
+not there, and `Proxy` decides whether a request leaves through a proxy at all.
+The order matters and is the shape of what was meant — each candidate carries its
+own retries and the failover sits on top, so "later" is answered where it was
+said and only an endpoint that has run out of "later" hands over. Which endpoint
+a caller gets depends on what it is: a turn wants the one it was pointed at,
+because moving it part-way throws away its cached prefix, and an errand wants
+whichever has room.
+
+**`rook-contain` is the floor.** Platform glue with no dependencies of its own,
+internal or external, and the one place Win32 lives — which is why
+`cargo check --target x86_64-pc-windows-msvc -p rook-contain` works from a Mac
+while the rest of the workspace does not. Anything may reach for it: starting a
+process without a console window is its answer as much as containing one is.
 
 **`rookd` is a separate binary from `rook`.** A container, a headless box or an
 editor integration should be able to run the backend without linking a terminal UI
@@ -65,7 +86,10 @@ to read in one sitting. Per step:
 3. **Call the provider.**
 4. **Dispatch tool calls**, including the `load_skill` pseudo-tool that pulls a
    skill body into context on demand.
-5. **Append everything to the session log**, bodies stored by content hash.
+5. **Append everything to the session log**, bodies stored by content hash. The
+   flush to disk is not per event — see
+   [storage.md](storage.md#what-a-power-cut-can-take) for where it happens
+   instead, and what that cost before it moved.
 
 Two behaviours are structural rather than optional.
 
@@ -78,16 +102,26 @@ The two are not the same trade. A skill card defers the *whole body*, and
 `load_skill` fetches it — the model asks by name. A tool stub defers only the
 prose: the first sentence of the description, and every argument's name and type
 without the guidance around them. There is nothing to fetch, because a tool
-advertised without its shape could not be called at all. A test holds the whole advertised set — the six the loop adds included — under
-1,700 tokens a request, and stubs to under half of the full schemas; `cargo run
--p rook-core --example schema-cost` prints where they stand today. Both lived in
-`rook-tools` and could not see those six, so they guarded 729 tokens of a list
-that costs 1,476 and missed its two largest entries.
+advertised without its shape could not be called at all.
+`the_whole_advertised_tool_list_stays_within_a_budget` holds both numbers — the
+full schemas under 2,500 tokens a request, the stubs under 1,100, which is what
+is actually paid because lazy loading is the default — and asserts that stubs
+cost less than half of full, or the deferral buys nothing. It lives in
+`rook-core`, because the loop adds tools of its own on top of `rook-tools`, and
+the two largest advertised are among them: the test lived in `rook-tools` first
+and guarded 729 tokens of a list that cost 1,476. `cargo run -p rook-core
+--example schema-cost` prints where they stand today. Each time the cap was
+raised the commit says which tool did it and what was cut first.
 
 The skill catalog is capped by `agent.max_skill_cards`, and what does not fit is
 named as a count rather than dropped silently: `load_skill` answers an unknown
 name with the skills that match it, so a skill off the end of the list is still
-reachable by description.
+reachable by description. It is sorted by source, nearest first, with the name
+breaking ties — for two reasons that happen to agree. What the cap cut used to be
+whatever came last alphabetically, so a project's own skill lost to one Rook ships
+with, for no reason anybody chose; and the list is the front of the request, so an
+ordering that shuffles between turns invalidates the cached prefix of everything
+behind it.
 
 **The environment in the system prompt.** The model is told the OS, arch and
 userland it is operating in, and which toolchains exist. This is cheap and it stops
@@ -99,15 +133,27 @@ the most common cross-platform failure in agent transcripts — reaching for GNU
 ```
 ~/.rook/                 (or $ROOK_HOME)
   config.toml            everything tunable, with bounded defaults
+  secrets.toml           0600, and never in the store: a fork would copy it
   format.json            store format version; a newer one is refused, not corrupted
+  rookd.addr             where a running daemon is listening; removed on shutdown
   store/
     index.redb           metadata, session logs, refs, and inlined small objects
     objects/aa/bb/<hex>  payloads too large to inline
     dicts/<kind>.zdict   trained zstd dictionaries
     tmp/                 staging; anything left here is crash residue
   skills/<name>/SKILL.md user skills
+  plugins/<name>/        Agent Plugins: skills and MCP servers together
+  servers/<name>/        language servers `rook lsp install` fetched
+  running/               one file per turn in flight; one left behind is a turn that died
+  output/                the whole of a runaway command's output
+  cache/sources/         skill sources between searches; deleting it costs a download
   logs/
 ```
+
+`running/` and `output/` are outside the store deliberately. The store takes one
+writer and what is kept there has to outlive that writer's death, and a command's
+output is the agent's record rather than the project's — in the workspace it
+would be in every checkpoint and every `git status`.
 
 One root directory rather than the platform-idiomatic split across config, data
 and cache locations. An agent's state is one thing people back up, sync and
