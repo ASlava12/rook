@@ -6051,3 +6051,96 @@ async fn when_more_skills_apply_than_fit_the_shipped_ones_are_what_goes() {
     assert!(!prompt.contains("beetle"), "the other of ours is what goes");
     assert!(prompt.contains("1 more not shown"), "and it is counted rather than hidden");
 }
+
+/// Every `verify` result of a session, in the order they came back.
+fn checks_in(rook: &rook_core::Rook, session: u128) -> Vec<String> {
+    rook.transcript(session, 0, usize::MAX, 4096)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == "tool-result" && e.body.contains("checked in session"))
+        .map(|e| e.body)
+        .collect()
+}
+
+/// Told a claim is false, a model rewrote the thing the claim was about until
+/// the verdict flipped, and reported the claim verified. The failing result
+/// already says not to — "Editing what was checked until it passes answers a
+/// different question" — and a three-billion-parameter model read that sentence
+/// and did it anyway, twice in one recorded run. So the loop holds the fact
+/// instead: a claim that failed, and holds once this turn has rewritten
+/// something, is reported as unproven the way a checker that reached for
+/// nothing is.
+#[tokio::test]
+async fn a_claim_made_true_by_editing_is_not_reported_as_verified() {
+    let f = fixture();
+    let session = f.rook.start_session("flip").unwrap();
+    std::fs::write(f.workspace.path().join("lib.rs"), "fn add(a: i32, b: i32) -> i32 { a - b }\n").unwrap();
+
+    let script = vec![
+        call("verify", serde_json::json!({ "claim": "add in lib.rs returns the sum" })),
+        // The checker's turn: it reads, and commits to the true answer.
+        call("read_file", serde_json::json!({ "path": "lib.rs" })),
+        reply("it subtracts\n\nVERDICT: fails"),
+        // The parent's answer to being told no: rewrite the subject.
+        call(
+            "write_file",
+            serde_json::json!({ "path": "lib.rs", "content": "fn add(a: i32, b: i32) -> i32 { a + b }\n" }),
+        ),
+        // And ask again, word for word.
+        call("verify", serde_json::json!({ "claim": "add in lib.rs returns the sum" })),
+        call("read_file", serde_json::json!({ "path": "lib.rs" })),
+        reply("it adds\n\nVERDICT: holds"),
+        reply("verified"),
+    ];
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
+    agent.allow_everything_not_denied();
+    let outcome = agent.run("check it").await.unwrap();
+
+    let second = checks_in(&f.rook, session).into_iter().nth(1).expect("both checks ran");
+    let second = second.as_str();
+
+    // The precondition, and it is the whole test: the checker really did say
+    // `holds` the second time. Without it this passes on a loop that never got
+    // a second verdict at all.
+    assert!(second.contains("it adds"), "the checker held on the rewritten code: {second}");
+    assert!(
+        second.contains("VERDICT: unproven"),
+        "but a claim made true by rewriting its subject is not verified: {second}"
+    );
+    assert!(second.contains("lib.rs"), "and it names what changed in between: {second}");
+    assert!(
+        outcome.files_changed.iter().any(|p| p.contains("lib.rs")),
+        "the turn did write it: {:?}",
+        outcome.files_changed
+    );
+}
+
+/// The other way round, which must keep working: a claim that fails and then
+/// holds because the turn went and found out more — no write in between — is an
+/// ordinary pass. The rule keys on the turn having rewritten something, not on
+/// the claim having been asked twice.
+#[tokio::test]
+async fn asking_the_same_claim_twice_without_writing_anything_is_still_a_pass() {
+    let f = fixture();
+    let session = f.rook.start_session("twice").unwrap();
+    std::fs::write(f.workspace.path().join("lib.rs"), "fn add(a: i32, b: i32) -> i32 { a + b }\n").unwrap();
+
+    let script = vec![
+        call("verify", serde_json::json!({ "claim": "add in lib.rs returns the sum" })),
+        call("read_file", serde_json::json!({ "path": "lib.rs" })),
+        reply("looked at the wrong file\n\nVERDICT: fails"),
+        call("verify", serde_json::json!({ "claim": "add in lib.rs returns the sum" })),
+        call("read_file", serde_json::json!({ "path": "lib.rs" })),
+        reply("it adds\n\nVERDICT: holds"),
+        reply("checked"),
+    ];
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
+    agent.allow_everything_not_denied();
+    let outcome = agent.run("check it").await.unwrap();
+
+    let second = checks_in(&f.rook, session).into_iter().nth(1).expect("both checks ran");
+    let second = second.as_str();
+
+    assert!(outcome.files_changed.is_empty(), "nothing was written: {:?}", outcome.files_changed);
+    assert!(second.contains("VERDICT: holds"), "so the second verdict stands: {second}");
+}

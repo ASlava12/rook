@@ -768,6 +768,16 @@ pub struct AgentLoop<'a> {
     /// because the writing happens inside a call whose only answer is the
     /// text the model sees.
     wrote_paths: std::sync::Mutex<std::collections::BTreeSet<String>>,
+    /// Claims this turn has already checked that failed, and what it had
+    /// written when they did.
+    ///
+    /// So that a claim which fails, and then holds once the turn has rewritten
+    /// the thing it was about, is not reported as verified. The instruction not
+    /// to do that is already on a failing result and a three-billion-parameter
+    /// model read it and did it anyway — twice, in the same recorded run — so
+    /// what is needed here is a fact the loop holds rather than a sentence the
+    /// model weighs.
+    failed_claims: std::sync::Mutex<std::collections::HashMap<String, std::collections::BTreeSet<String>>>,
     /// What a language server said about a file before this turn last wrote
     /// to it. A write is answered with what it broke; everything already wrong
     /// in somebody's file is not this call's news, and on every write it is
@@ -880,6 +890,7 @@ impl<'a> AgentLoop<'a> {
             problems_before: Default::default(),
             installing: Default::default(),
             wrote_paths: Default::default(),
+            failed_claims: Default::default(),
             reported: Default::default(),
             asker: None,
             approver: std::sync::Arc::new(Unattended),
@@ -3288,6 +3299,20 @@ impl<'a> AgentLoop<'a> {
             on_progress(Progress::Delegating { at, doing: &doing });
         }
 
+        // Read before the verdict is acted on: what this turn has written, and
+        // what it had written the last time this same claim failed. A claim
+        // that failed, and holds now that the files under it have been
+        // rewritten, is a different claim.
+        let wrote_now = self.wrote_paths.lock().map(|w| w.clone()).unwrap_or_default();
+        let rewritten_since = self
+            .failed_claims
+            .lock()
+            .ok()
+            .and_then(|failed| failed.get(claim).cloned())
+            .map(|before| wrote_now.difference(&before).cloned().collect::<Vec<_>>())
+            .filter(|since| !since.is_empty())
+            .map(|since| since.join(", "));
+
         match checked {
             Ok((id, child)) => {
                 outcome.delegated.push(id.clone());
@@ -3320,14 +3345,41 @@ impl<'a> AgentLoop<'a> {
                     // on every request of every turn — the whole advertised list
                     // is 2,500 tokens and has a test holding it there — instead
                     // of in the one turn where a claim has just failed.
-                    Some("fails") => (
-                        format!(
-                            "checked in session {id}:\n{}\n\nThat is the answer to report. \
-                             Editing what was checked until it passes answers a different question.",
-                            child.reply
-                        ),
-                        Some("fails"),
-                    ),
+                    Some("fails") => {
+                        // Remembered against the files as they stand now, so a
+                        // later `holds` is compared with what was actually
+                        // checked rather than with the start of the turn.
+                        if let Ok(mut failed) = self.failed_claims.lock() {
+                            failed.insert(claim.to_string(), wrote_now);
+                        }
+                        (
+                            format!(
+                                "checked in session {id}:\n{}\n\nThat is the answer to report. \
+                                 Editing what was checked until it passes answers a different question.",
+                                child.reply
+                            ),
+                            Some("fails"),
+                        )
+                    }
+                    // The same claim, failing before and holding now, with the
+                    // turn having rewritten something in between. Reported as
+                    // unproven rather than as a pass, the way a checker that
+                    // reached for nothing is: both are a verdict about
+                    // something other than the question asked, and in both
+                    // cases saying so in prose has already been tried.
+                    Some("holds") if rewritten_since.is_some() => {
+                        let since = rewritten_since.unwrap_or_default();
+                        (
+                            format!(
+                                "checked in session {id}, and it holds now — but it failed earlier in \
+                                 this turn, and {since} changed in between, so what holds is the code \
+                                 as rewritten and not the claim that was made about it:\n{}\n\n\
+                                 VERDICT: unproven — what was checked changed between the two checks",
+                                without_verdict(&child.reply)
+                            ),
+                            Some("unproven"),
+                        )
+                    }
                     Some(verdict) => (format!("checked in session {id}:\n{}", child.reply), Some(verdict)),
                     // Not treated as passing: a check that would not commit is
                     // the outcome this exists to make visible.

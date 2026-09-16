@@ -245,6 +245,15 @@ sort the failures into ours and the model's, and fix ours at the mechanism:
 a nudge asked once, a shape read as what it plainly means, a message that
 names what was actually wrong.
 
+A sentence is not a mechanism, and the sixth pass proved it. A failing
+`verify` has said "Editing what was checked until it passes answers a
+different question" since the first time a model did exactly that — and the
+same model read that sentence and rewrote `add` anyway, then reported the
+claim verified. The loop holds the fact now: a claim that failed, and holds
+once the turn has written something since, is reported `unproven` and names
+what changed, the way a checker that reached for nothing already was. When a
+warning in prose has been ignored twice, the next version of it is not prose.
+
 The same applies to `cargo xtask bench`, which is why a failed run there now
 keeps its store and workspace and prints the `session show` that reads them.
 It used to delete both, so a red cell could only be rerun — and a rerun of a
