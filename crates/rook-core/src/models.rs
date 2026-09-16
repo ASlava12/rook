@@ -233,3 +233,66 @@ fn key_for(source: &str, written: &str, vault: &Vault) -> Result<Option<String>,
     vault.also_hide(written);
     Ok(Some(written.to_string()))
 }
+
+/// What one endpoint said when it was asked just now.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Answered {
+    pub name: String,
+    /// How long it took to answer, or to fail to. Milliseconds rather than a
+    /// `Duration`, because this crosses the daemon's api and a duration on the
+    /// wire is two fields nobody reads.
+    pub took_ms: u64,
+    /// The models it listed. Empty from an endpoint that answered but lists
+    /// none, which some do, so it is not the same question as whether it is
+    /// there.
+    pub serving: Vec<String>,
+    /// What went wrong, where something did.
+    pub refused: Option<String>,
+}
+
+impl Answered {
+    pub fn answering(&self) -> bool {
+        self.refused.is_none()
+    }
+}
+
+/// Put every endpoint back in the rotation, then ask each one.
+///
+/// The waiting in [`rook_llm`] answers the case where a laptop moved networks
+/// and nobody noticed. This answers the other one: somebody has topped up an
+/// account or started a server and wants to know whether it worked — now,
+/// rather than after a timer they cannot see. Clearing first is the whole
+/// point: an endpoint excluded a moment ago would otherwise be reported as out
+/// on the strength of the exclusion rather than on what it says, which is
+/// exactly the question being asked.
+///
+/// All at once, because the ones worth asking about are the ones that do not
+/// answer, and each of those costs the connect timeout. Four of them in a row
+/// is a minute of a person watching nothing.
+pub async fn recheck(config: &Config, vault: &Vault) -> Vec<Answered> {
+    rook_llm::answering_again(None);
+    let asking = config.models.keys().map(|name| async move {
+        let started = std::time::Instant::now();
+        let built = endpoint_for(config, vault, name).and_then(|found| match found {
+            Some(endpoint) => rook_llm::from_endpoints_with(
+                vec![endpoint],
+                config.agent.stream_idle(),
+                rook_llm::Prefer::AsConfigured,
+            ),
+            None => Err(LlmError::Other(format!("{name} describes no endpoint"))),
+        });
+        let (serving, refused) = match built {
+            // Its models rather than `reachable`, because the list is the
+            // useful half of the answer: an endpoint that is up and serving
+            // something other than what the file names is a different problem
+            // from one that is down, and they look the same otherwise.
+            Ok(provider) => match provider.models().await {
+                Ok(models) => (models.into_iter().map(|m| m.id).collect(), None),
+                Err(why) => (Vec::new(), Some(why.to_string())),
+            },
+            Err(why) => (Vec::new(), Some(why.to_string())),
+        };
+        Answered { name: name.clone(), took_ms: started.elapsed().as_millis() as u64, serving, refused }
+    });
+    futures_util::future::join_all(asking).await
+}

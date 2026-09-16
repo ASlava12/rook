@@ -144,7 +144,7 @@ impl Frames {
 
 pub mod anthropic;
 mod failover;
-pub use failover::Prefer;
+pub use failover::{Prefer, answering_again, not_answering};
 pub mod google;
 mod limit;
 pub mod openai;

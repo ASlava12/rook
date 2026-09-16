@@ -60,8 +60,42 @@ fn note_missing(name: &str, why: &str) {
     let fresh = held.get(name).is_none_or(|since| since.elapsed() >= RESTED);
     held.insert(name.to_string(), Instant::now());
     if fresh {
-        tracing::warn!("{name} is not answering, so it is out of the rotation for now: {why}");
+        // With the time it comes back. "For now" leaves whoever reads it
+        // wondering whether to wait or to go and fix something, which is the
+        // one thing the line is there to answer.
+        tracing::warn!(
+            "{name} is not answering, so it is out of the rotation for the next {}s: {why}",
+            RESTED.as_secs()
+        );
     }
+}
+
+/// Put an endpoint back in the rotation now, or all of them.
+///
+/// The waiting answers the case where a laptop moved networks and nobody
+/// noticed. This answers the other one: somebody has just topped up an account
+/// or started a server, and wants to know whether it worked — not in a minute,
+/// now. Waiting out a timer to find out is the same as not being told.
+pub fn answering_again(name: Option<&str>) {
+    let mut held = missing().lock().unwrap_or_else(|e| e.into_inner());
+    match name {
+        Some(one) => {
+            held.remove(one);
+        }
+        None => held.clear(),
+    }
+}
+
+/// Which endpoints are out, and how long each has left.
+///
+/// For a person asking what the agent is doing, and for the command that puts
+/// them back — a listing that says only "some are out" is one nobody can act
+/// on.
+pub fn not_answering() -> Vec<(String, Duration)> {
+    let held = missing().lock().unwrap_or_else(|e| e.into_inner());
+    held.iter()
+        .filter_map(|(name, since)| RESTED.checked_sub(since.elapsed()).map(|left| (name.clone(), left)))
+        .collect()
 }
 
 /// Note that it answered, and say so if it had been out.
@@ -176,8 +210,10 @@ macro_rules! first_that_answers {
             }
         }
         Err(LlmError::Other(format!(
-            "none of the endpoints configured for this answered:\n  {}",
-            refused.join("\n  ")
+            "none of the endpoints configured for this answered:\n  {}\n\
+             They are tried again in {}s, or at once with `rook models --recheck`.",
+            refused.join("\n  "),
+            RESTED.as_secs()
         )))
     }};
 }
@@ -454,5 +490,29 @@ mod tests {
         let order: Vec<&str> = asked.worth_asking().iter().map(|p| p.id()).collect();
 
         assert_eq!(order, [full_id.as_str(), room_id.as_str()], "moving a turn costs its cache");
+    }
+
+    /// The waiting answers a laptop that moved networks and nobody noticed.
+    /// This answers the other case: the server has just been started, and the
+    /// person wants to know now rather than after a timer they cannot see.
+    #[test]
+    fn an_endpoint_put_back_by_hand_is_asked_again_at_once() {
+        let (gone, tried) = saying("gone", Says::Unreachable);
+        let (here, _) = saying("here", Says::Answer);
+        let name = gone.id().to_string();
+        let over = Failover::new(vec![gone, here], Prefer::AsConfigured);
+
+        asking(&over).expect("the second answered");
+        asking(&over).expect("and again");
+        assert_eq!(tried.load(Ordering::Relaxed), 1, "it was out of the rotation");
+        assert!(
+            crate::not_answering().iter().any(|(out, left)| *out == name && !left.is_zero()),
+            "and says so, with the time it has left"
+        );
+
+        crate::answering_again(None);
+        asking(&over).expect("still answered");
+
+        assert_eq!(tried.load(Ordering::Relaxed), 2, "and is asked again once put back");
     }
 }

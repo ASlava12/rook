@@ -37,6 +37,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/memory/history", get(memory_history))
         .route("/api/memory/diff", get(memory_diff))
         .route("/api/memory/since", get(memory_since))
+        .route("/api/models/recheck", post(recheck_models))
         .route("/api/secrets", get(secrets).post(set_secret))
         .route("/api/secrets/forget", post(forget_secret))
         .route("/api/docs", get(docs_kept).post(gather_docs))
@@ -321,6 +322,18 @@ async fn memory(
         None => book.in_scope(&workspace).cloned().collect(),
     };
     Ok(Json(Page::new(facts)))
+}
+
+/// Put every configured endpoint back in the rotation and ask each one.
+///
+/// Here rather than only in the CLI because the set of endpoints that are out
+/// lives in the memory of the process that talks to them, and that process is
+/// this one: a terminal that rechecked on its own would clear its own empty
+/// set and leave the daemon believing what it believed a minute ago.
+async fn recheck_models(State(s): State<Shared>) -> ApiResult<Page<rook_core::models::Answered>> {
+    let vault = rook_core::Vault::load().unwrap_or_else(|_| rook_core::Vault::empty());
+    let config = s.rook.read().await.config.clone();
+    Ok(Json(Page::new(rook_core::models::recheck(&config, &vault).await)))
 }
 
 /// What is set and whether it answers. There is no endpoint that returns a

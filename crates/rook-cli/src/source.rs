@@ -1111,6 +1111,19 @@ impl Daemon {
         Ok(said["turns_interrupted"].as_u64().unwrap_or(0) as u32)
     }
 
+    /// Put every configured endpoint back in the rotation and ask each one.
+    ///
+    /// On `Daemon` rather than on `Source`, because this is the one command
+    /// that wants the daemon even where the store is free. The endpoints that
+    /// are out live in the memory of the process that talks to them, and that
+    /// is the daemon: a terminal that asked on its own would clear its own
+    /// empty set and leave the agent believing what it believed a minute ago.
+    pub fn recheck_models(&self) -> Result<Vec<rook_core::models::Answered>> {
+        let page: Page<rook_core::models::Answered> =
+            self.post("/api/models/recheck", &serde_json::json!({}))?;
+        Ok(page.items)
+    }
+
     fn post<T: DeserializeOwned>(&self, path: &str, body: &serde_json::Value) -> Result<T> {
         let url = format!("{}{path}", self.base);
         self.runtime.block_on(async {

@@ -73,7 +73,13 @@ enum Command {
         alone: bool,
     },
     /// List the models the configured provider says it can serve.
-    Models,
+    Models {
+        /// Put every configured endpoint back in the rotation and ask each one.
+        /// For after topping up an account or starting a server, when the
+        /// answer wanted is "does it work now" rather than "in a minute".
+        #[arg(long)]
+        recheck: bool,
+    },
     /// Speak the Agent Client Protocol on stdio, for editors.
     Acp,
     /// Start the HTTP backend and web UI.
@@ -494,7 +500,7 @@ fn main() -> Result<()> {
         Some(Command::Doctor) => cmd_doctor(&workspace_of(&cli.workspace), cli.json),
         Some(Command::Chat { session }) => chat::run(cli.workspace, session, cli.yes),
         Some(Command::Run { prompt, session }) => cmd_run(cli.workspace, prompt, session, cli.yes, cli.json),
-        Some(Command::Models) => cmd_models(cli.workspace, cli.json),
+        Some(Command::Models { recheck }) => cmd_models(cli.workspace, cli.json, recheck),
         Some(Command::Acp) => cmd_acp(cli.workspace),
         Some(Command::Serve { port }) => cmd_serve(port),
         Some(Command::Daemon(c)) => cmd_daemon(c, cli.json),
@@ -1183,11 +1189,14 @@ pub fn cached(tokens: u32) -> String {
     if tokens == 0 { String::new() } else { format!(" ({tokens} cached)") }
 }
 
-fn cmd_models(workspace: Option<PathBuf>, json: bool) -> Result<()> {
+fn cmd_models(workspace: Option<PathBuf>, json: bool, recheck: bool) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     runtime.block_on(async move {
         let _ = workspace;
         let config = rook_core::Config::load()?;
+        if recheck {
+            return rechecked(&config, json).await;
+        }
         let configured = rook_core::models::model_named(&config, &config.agent.model);
         let configured = configured.as_str();
         let models = provider(&config)?.models().await?;
@@ -1227,6 +1236,54 @@ fn cmd_models(workspace: Option<PathBuf>, json: bool) -> Result<()> {
         }
         anyhow::Ok(())
     })
+}
+
+/// Ask every configured endpoint whether it is there, and put back any that
+/// were out.
+///
+/// Through the daemon where one is running, which is the opposite of what every
+/// other command here does — and for a reason. The endpoints that are out live
+/// in the memory of the process that talks to them, and that is the daemon: a
+/// terminal that rechecked on its own would clear its own empty set, print a
+/// perfectly true table, and leave the agent believing what it believed a
+/// minute ago.
+async fn rechecked(config: &rook_core::Config, json: bool) -> Result<()> {
+    let answers: Vec<rook_core::models::Answered> = match crate::source::Daemon::running() {
+        Some(daemon) => daemon.recheck_models()?,
+        None => {
+            let vault = rook_core::Vault::load().unwrap_or_else(|_| rook_core::Vault::empty());
+            rook_core::models::recheck(config, &vault).await
+        }
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&answers)?);
+        return Ok(());
+    }
+    if answers.is_empty() {
+        println!("nothing is configured under `[models]`, so there is nothing to ask");
+        return Ok(());
+    }
+    let rows: Vec<Vec<String>> = answers
+        .iter()
+        .map(|answer| {
+            vec![
+                if answer.answering() { "✓".into() } else { "✗".into() },
+                answer.name.clone(),
+                format!("{} ms", answer.took_ms),
+                match &answer.refused {
+                    // The reason, cut to one line: a 401's body can be a page,
+                    // and what a person needs here is which of the four it was.
+                    Some(why) => why.lines().next().unwrap_or(why).to_string(),
+                    None => match answer.serving.len() {
+                        1 => answer.serving[0].clone(),
+                        n => format!("{n} models"),
+                    },
+                },
+            ]
+        })
+        .collect();
+    print!("{}", fmt::table(&["", "endpoint", "answered in", "what it says"], &rows));
+    Ok(())
 }
 
 /// Configured from the configuration and nothing else, so the two commands
