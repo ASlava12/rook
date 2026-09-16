@@ -25,6 +25,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("goal", "[text]", "what this session is for; the agent is told"),
     ("stance", "[name]", "how much latitude: readonly, assist or autonomous"),
     ("effort", "[name]", "how much the model may think: low … max"),
+    ("model", "[name]", "which endpoint from `[models]` the next turn runs on"),
     ("memory", "[query]", "what it remembers, or what matches"),
     ("docs", "[topic]", "documentation kept here, or gather a topic's"),
     ("secrets", "", "what the agent can use by name, never the values"),
@@ -114,6 +115,7 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
         jobs: rook_core::agent::jobs_for(&rook.config),
         interjections: Default::default(),
         effort: std::cell::Cell::new(rook.config.agent.effort()),
+        model: std::cell::RefCell::new(None),
         yes,
     };
 
@@ -133,7 +135,8 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
                     false => line.trim().to_string(),
                 };
                 if let Some(question) = line.strip_prefix("/btw ") {
-                    let provider = rook_core::models::configured(&rook.config)?;
+                    let named = shared.model.borrow().clone();
+                    let provider = rook_core::models::chosen(&rook.config, named.as_deref())?;
                     runtime.block_on(aside(&rook, provider, session, question.trim()));
                     continue;
                 }
@@ -149,7 +152,8 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
                     }
                     continue;
                 }
-                let provider = rook_core::models::configured(&rook.config)?;
+                let named = shared.model.borrow().clone();
+                let provider = rook_core::models::chosen(&rook.config, named.as_deref())?;
                 runtime.block_on(turn(&rook, provider, session, &shared, &line));
             }
             // Ctrl-C at the prompt clears the line rather than leaving; the
@@ -201,6 +205,13 @@ pub struct Session {
     /// The policy holds the mode; effort has nowhere else to live and is worth
     /// changing per task, so it sits beside it for the whole session.
     pub effort: std::cell::Cell<rook_llm::Effort>,
+    /// The endpoint this session runs on, where it is not the configured one.
+    ///
+    /// Beside the effort for the same reason, and taking effect on the next
+    /// turn rather than the one in flight: moving a turn between endpoints
+    /// part-way throws away the cached prefix of everything it has sent and
+    /// hands its next step to a model that did not write the last one.
+    pub model: std::cell::RefCell<Option<String>>,
     pub yes: bool,
 }
 
@@ -361,6 +372,26 @@ pub async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command
                 say!("{EFFORT_UNSPENT}");
             }
         }
+        // Says what it is running on and what else there is, because the
+        // names are in a file and nobody keeps a file in their head.
+        "model" if rest.is_empty() => {
+            let now = shared.model.borrow().clone();
+            say!("{}", now.as_deref().unwrap_or(&rook.config.agent.model));
+            let named: Vec<&str> = rook.config.models.keys().map(String::as_str).collect();
+            if !named.is_empty() {
+                say!("configured: {}", named.join(", "));
+            }
+        }
+        // Checked here rather than at the top of the next turn, and through the
+        // same function that will build it — a name with a typo in it should
+        // say so while somebody is still looking at what they typed.
+        "model" => match rook_core::models::usable(&rook.config, rest) {
+            Ok(()) => {
+                *shared.model.borrow_mut() = Some(rest.to_string());
+                say!("the next turn runs on {rest}");
+            }
+            Err(why) => say!("{why}"),
+        },
         "effort" => match rook_llm::Effort::parse(rest) {
             Some(effort) => {
                 shared.effort.set(effort);

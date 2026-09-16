@@ -600,7 +600,12 @@ async fn turn(
     // it is already running cannot be joined while it does so.
     let _ = outbound.send(ChatEvent::Started { session: rook_store::format_session_id(session) });
 
-    let provider = match rook_core::models::configured(&rook.config) {
+    // The connection's choice where it has made one, and the configured
+    // endpoint otherwise. Read here rather than carried in: a turn takes the
+    // setting as it stands when the turn starts, which is what "the next turn"
+    // means to somebody who has just switched.
+    let named = connection.settings.model();
+    let provider = match rook_core::models::chosen(&rook.config, named.as_deref()) {
         Ok(provider) => provider,
         Err(e) => return ended_badly(&rook, session, &outbound, e.to_string()),
     };
@@ -742,6 +747,18 @@ impl Shared {
 struct Settings {
     policy: Arc<rook_tools::policy::Policy>,
     effort: std::sync::RwLock<rook_llm::Effort>,
+    /// The endpoint this connection's next turn runs on, where it is not the
+    /// configured one.
+    ///
+    /// The next one, not the one in flight: moving a turn between endpoints
+    /// part-way throws away the cached prefix of everything it has sent and
+    /// hands its next step to a model that did not write the last one. So this
+    /// is the one setting here that a running turn does not take up.
+    model: std::sync::RwLock<Option<String>>,
+    /// The one this connection was opened against, for checking a name against
+    /// `[models]` without reaching back through the registry for a lock that
+    /// this is holding one side of.
+    config: rook_core::Config,
 }
 
 impl Settings {
@@ -749,6 +766,8 @@ impl Settings {
         Self {
             policy: rook_core::agent::policy_for(&rook.config),
             effort: std::sync::RwLock::new(rook.config.agent.effort()),
+            model: std::sync::RwLock::new(None),
+            config: rook.config.clone(),
         }
     }
 
@@ -758,11 +777,21 @@ impl Settings {
     fn for_test() -> Self {
         let (policy, _) =
             rook_tools::policy::Policy::compile(rook_tools::policy::Stance::ALL[0], &[], &[], &[]);
-        Self { policy: Arc::new(policy), effort: std::sync::RwLock::new(rook_llm::Effort::ALL[0]) }
+        Self {
+            policy: Arc::new(policy),
+            effort: std::sync::RwLock::new(rook_llm::Effort::ALL[0]),
+            model: std::sync::RwLock::new(None),
+            config: rook_core::Config::default(),
+        }
     }
 
     fn effort(&self) -> rook_llm::Effort {
         *self.effort.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The endpoint chosen here, where one has been.
+    fn model(&self) -> Option<String> {
+        self.model.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     fn describe(&self) -> ChatEvent {
@@ -771,6 +800,11 @@ impl Settings {
             effort: self.effort().as_str().into(),
             stances: rook_tools::policy::Stance::ALL.iter().map(|s| s.as_str().to_string()).collect(),
             efforts: rook_llm::Effort::ALL.iter().map(|e| e.as_str().to_string()).collect(),
+            // What it is running on and what else it could: a page that drew
+            // its own list would be drawing its memory of the file rather than
+            // the file, and the file is what the engine reads.
+            model: self.model().unwrap_or_else(|| self.config.agent.model.clone()),
+            models: self.config.models.keys().cloned().collect(),
         }
     }
 
@@ -782,6 +816,12 @@ impl Settings {
             "effort" => rook_llm::Effort::parse(value)
                 .map(|effort| *self.effort.write().unwrap_or_else(|e| e.into_inner()) = effort)
                 .ok_or_else(|| format!("no effort {value:?}")),
+            // Checked through the function that will build it, so a name with a
+            // typo in it says so while somebody is still looking at what they
+            // typed rather than at the top of the next turn.
+            "model" => rook_core::models::usable(&self.config, value).map(|()| {
+                *self.model.write().unwrap_or_else(|e| e.into_inner()) = Some(value.to_string());
+            }),
             other => Err(format!("no setting {other:?}")),
         }
     }
@@ -840,12 +880,16 @@ mod settings_tests {
     /// disappears rather than sitting in a menu as a choice that errors.
     #[test]
     fn the_settings_event_carries_the_engines_own_lists() {
-        let config = rook_core::Config::default();
+        let mut config = rook_core::Config::default();
+        config.models.insert("next-door".into(), rook_core::ModelSource::default());
         let settings = Settings {
             policy: rook_core::agent::policy_for(&config),
             effort: std::sync::RwLock::new(config.agent.effort()),
+            model: std::sync::RwLock::new(None),
+            config: config.clone(),
         };
-        let ChatEvent::Settings { mode, effort, stances, efforts } = settings.describe() else {
+        let ChatEvent::Settings { mode, effort, stances, efforts, model, models } = settings.describe()
+        else {
             panic!("describe() is the settings event");
         };
         let expected: Vec<String> =
@@ -854,6 +898,11 @@ mod settings_tests {
         assert!(stances.contains(&mode), "the current stance is one of the offered: {mode} in {stances:?}");
         assert_eq!(efforts, ["low", "medium", "high", "xhigh", "max"]);
         assert!(efforts.contains(&effort), "{effort} in {efforts:?}");
+        // The endpoints are the same kind of list and are read the same way: a
+        // window draws what the engine says it has rather than its own memory
+        // of the file.
+        assert_eq!(models, ["next-door"]);
+        assert_eq!(model, config.agent.model, "nothing switched yet, so it is the configured one");
     }
 }
 

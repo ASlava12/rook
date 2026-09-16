@@ -65,13 +65,25 @@ fn the_settings_the_browser_sends_and_receives_match_what_it_reads() {
         effort: "high".into(),
         stances: vec!["readonly".into(), "assist".into()],
         efforts: vec!["low".into(), "high".into()],
+        model: "next-door".into(),
+        models: vec!["next-door".into(), "gw".into()],
     };
     assert_eq!(
         serde_json::to_value(settings).unwrap(),
         serde_json::json!({
             "type": "settings", "mode": "assist", "effort": "high",
-            "stances": ["readonly", "assist"], "efforts": ["low", "high"]
+            "stances": ["readonly", "assist"], "efforts": ["low", "high"],
+            "model": "next-door", "models": ["next-door", "gw"]
         }),
         "the page branches on this tag by hand"
     );
+
+    // And a daemon that predates the endpoints still parses: the two are
+    // defaulted, so a client of this build reads an empty pair and offers no
+    // switch rather than failing to read the message at all.
+    let older = r#"{"type":"settings","mode":"assist","effort":"high","stances":[],"efforts":[]}"#;
+    let ChatEvent::Settings { model, models, .. } = serde_json::from_str(older).unwrap() else {
+        panic!("an older daemon's settings must still parse");
+    };
+    assert!(model.is_empty() && models.is_empty(), "nothing to switch between, and no error");
 }

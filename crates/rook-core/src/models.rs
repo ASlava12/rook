@@ -115,8 +115,28 @@ fn named_sources(config: &Config) -> String {
 /// to [`provider_for`], because that is the vault whose redaction the key needs
 /// to be in.
 pub fn configured(config: &Config) -> Result<Box<dyn Provider>, LlmError> {
+    chosen(config, None)
+}
+
+/// The same, for a session that has been switched to another endpoint.
+///
+/// `None` is the configured one, which is what every turn ran on before
+/// anything could be switched — so a front end that does not offer the switch
+/// passes it and behaves as it did.
+pub fn chosen(config: &Config, named: Option<&str>) -> Result<Box<dyn Provider>, LlmError> {
     let vault = Vault::load().unwrap_or_else(|_| Vault::empty());
-    provider_for(config, &vault, &config.agent.model)
+    provider_for(config, &vault, named.unwrap_or(&config.agent.model))
+}
+
+/// Whether a name can be run on, and why not where it cannot.
+///
+/// The same question `chosen` will ask when the turn starts, asked early so
+/// that switching to a name with a typo in it says so at once rather than at
+/// the top of the next turn — and asked through the same function, so there is
+/// one answer to what a usable endpoint is.
+pub fn usable(config: &Config, named: &str) -> Result<(), String> {
+    let vault = Vault::load().unwrap_or_else(|_| Vault::empty());
+    endpoints_for(config, &vault, named).map(|_| ()).map_err(|why| why.to_string())
 }
 
 /// The model a setting actually asks for, whatever spelling it used.

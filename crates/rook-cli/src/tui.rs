@@ -1183,6 +1183,7 @@ impl App {
             shared: crate::chat::Session {
                 policy: rook_core::agent::policy_for(&config),
                 effort: std::cell::Cell::new(config.agent.effort()),
+                model: std::cell::RefCell::new(None),
                 servers: rook_core::agent::servers_for(&config, &workspace),
                 jobs: rook_core::agent::jobs_for(&config),
                 interjections: Default::default(),
@@ -2326,6 +2327,9 @@ impl App {
         let asker = self.asker.clone();
         let policy = self.shared.policy.clone();
         let effort = self.shared.effort.get();
+        // Taken here rather than in the task, because the task owns none of
+        // this window and a `RefCell` does not cross into one.
+        let named = self.shared.model.borrow().clone();
         let servers = self.shared.servers.clone();
         let mcp = self.shared.mcp.clone();
         let jobs = self.shared.jobs.clone();
@@ -2345,7 +2349,7 @@ impl App {
                 },
             };
 
-            let provider = match rook_core::models::configured(&rook.config) {
+            let provider = match rook_core::models::chosen(&rook.config, named.as_deref()) {
                 Ok(provider) => provider,
                 Err(e) => return fail(&to_loop, e.to_string()),
             };

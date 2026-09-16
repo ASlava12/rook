@@ -265,6 +265,19 @@ function renderSettings() {
   bar.replaceChildren(
     pick('stance', s.stances && s.stances.length ? s.stances : [s.mode], s.mode),
     pick('effort', s.efforts && s.efforts.length ? s.efforts : [s.effort], s.effort),
+    // Only where there is a choice. A daemon with nothing under `[models]`
+    // sends an empty list, and so does one older than the field — a select with
+    // one option in it is a control that does nothing.
+    //
+    // The one in use goes in front where it is not among them, which is the
+    // ordinary case for a configuration still written as `provider/model`: a
+    // select that does not contain its own current value shows the wrong answer
+    // and changes it on the first click.
+    (() => {
+      const named = s.models || [];
+      const all = named.includes(s.model) ? named : [s.model, ...named];
+      return all.length > 1 ? pick('model', all, s.model) : null;
+    })(),
     // Beside the settings rather than in the transcript: it changes on every
     // step, and a running total that scrolled away would be no use.
     spent ? el('span', { class: 'sub' },

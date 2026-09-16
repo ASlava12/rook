@@ -267,6 +267,15 @@ pub enum ChatEvent {
         stances: Vec<String>,
         #[serde(default)]
         efforts: Vec<String>,
+        /// The endpoint the next turn on this connection runs on, and the names
+        /// under `[models]` it could be switched to. Defaulted for the reason
+        /// the two above are: a client talking to a daemon that predates them
+        /// reads an empty pair and offers no switch, rather than failing to
+        /// read the message at all.
+        #[serde(default)]
+        model: String,
+        #[serde(default)]
+        models: Vec<String>,
     },
     /// The turn was stopped before it finished. Sent instead of `Done`, so a
     /// client waiting on one of them is never left waiting.
