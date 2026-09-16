@@ -213,6 +213,37 @@ fn is_cloned(path: &str) -> bool {
 
 /// The `rook` that was just built, by the name this platform gives it.
 ///
+/// Where cargo puts what it builds, asked of cargo.
+///
+/// Spelled `target/` in five places until a build directory moved. With
+/// `CARGO_TARGET_DIR` set — to another volume, which is an ordinary thing to do
+/// when a workspace this size fills a disk — `dist` copied the built-in skills
+/// to a `target/release/skills` beside nothing, found no binaries to measure
+/// and printed an empty list of sizes, and the release it packaged carried no
+/// skills at all. The comment above that copy says a release without them is
+/// what it exists to prevent, and it prevented nothing, because the path it
+/// copied to was written down rather than asked for.
+///
+/// `cargo metadata` is the answer for all of it: `CARGO_TARGET_DIR`,
+/// `build.target-dir` in a config file, and a workspace root that is not the
+/// current directory are three ways for the guess to be wrong and one question
+/// to be right. Asked once — it costs a process — and falling back to the
+/// spelling only when cargo cannot be reached at all, which is a broken
+/// toolchain rather than a layout.
+pub fn target_dir() -> &'static std::path::Path {
+    static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let asked = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
+            .args(["metadata", "--format-version", "1", "--no-deps"])
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .and_then(|out| serde_json::from_slice::<serde_json::Value>(&out.stdout).ok())
+            .and_then(|meta| meta.get("target_directory")?.as_str().map(std::path::PathBuf::from));
+        asked.unwrap_or_else(|| std::path::PathBuf::from("target"))
+    })
+}
+
 /// Spelled `target/debug/rook` in two places, which is the unix name and no
 /// file at all on Windows: `canonicalize` answered "cannot find the file
 /// specified", so neither `xtask smoke` nor `xtask bench` had ever run there —
@@ -223,7 +254,7 @@ fn is_cloned(path: &str) -> bool {
 /// One place, because two spellings of one path drift, and the answer is the
 /// same question both callers are asking.
 pub fn built_rook() -> Result<std::path::PathBuf> {
-    let named = std::path::Path::new("target/debug").join(match cfg!(windows) {
+    let named = target_dir().join("debug").join(match cfg!(windows) {
         true => "rook.exe",
         false => "rook",
     });
@@ -279,24 +310,31 @@ fn run() -> Result<()> {
             }
             cargo(&args)?;
             let dir = match &target {
-                Some(t) => format!("target/{t}/release"),
-                None => "target/release".into(),
+                Some(t) => target_dir().join(t).join("release"),
+                None => target_dir().join("release"),
             };
 
             // Next to the binary, which is the first place `builtin_skills_dir`
             // looks. Without this a release ships an agent with no skills at
             // all, and nothing in a dev build would ever notice.
-            let skills = std::path::Path::new(&dir).join("skills");
+            let skills = dir.join("skills");
             let _ = std::fs::remove_dir_all(&skills);
             copy_tree(std::path::Path::new("skills"), &skills)?;
             println!("packaged {} built-in skill(s)", count_dirs(&skills));
 
             println!("\nbinary sizes:");
+            let mut measured = 0;
             for name in ["rook", "rookd", "rook.exe", "rookd.exe"] {
-                let path = format!("{dir}/{name}");
-                if let Ok(meta) = std::fs::metadata(&path) {
+                if let Ok(meta) = std::fs::metadata(dir.join(name)) {
                     println!("  {:<28} {:>8.1} MiB", name, meta.len() as f64 / (1024.0 * 1024.0));
+                    measured += 1;
                 }
+            }
+            // An empty list under a heading reads as "nothing to say" and meant
+            // "looked in the wrong place" for as long as the path was spelled
+            // rather than asked for.
+            if measured == 0 {
+                bail!("no binaries in {} — nothing was packaged", dir.display());
             }
             Ok(())
         }
@@ -330,14 +368,15 @@ fn count_dirs(path: &std::path::Path) -> usize {
 /// Incremental state and cross-target artifacts dominate `target/` and rebuild
 /// cheaply, so they go first; `--all` is for when the disk is actually full.
 fn clean(all: bool) -> Result<()> {
-    let before = dir_size(std::path::Path::new("target"));
+    let root = target_dir();
+    let before = dir_size(root);
     if all {
         cargo(&["clean"])?;
     } else {
-        for path in ["target/debug/incremental", "target/release/incremental"] {
-            let _ = std::fs::remove_dir_all(path);
+        for profile in ["debug", "release"] {
+            let _ = std::fs::remove_dir_all(root.join(profile).join("incremental"));
         }
-        for entry in std::fs::read_dir("target").into_iter().flatten().flatten() {
+        for entry in std::fs::read_dir(root).into_iter().flatten().flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
             if name.contains('-') && entry.path().is_dir() {
                 println!("removing cross-target artifacts: {name}");
@@ -345,8 +384,8 @@ fn clean(all: bool) -> Result<()> {
             }
         }
     }
-    let after = dir_size(std::path::Path::new("target"));
-    println!("target/: {} -> {} ({} reclaimed)", gib(before), gib(after), gib(before - after));
+    let after = dir_size(root);
+    println!("{}: {} -> {} ({} reclaimed)", root.display(), gib(before), gib(after), gib(before - after));
     if !all && after > 4 << 30 {
         println!("still large — `cargo xtask clean --all` removes the rest");
     }
@@ -575,7 +614,7 @@ fn load(part: Option<String>, scale: usize, profile: bool) -> Result<()> {
     // Built first and then recorded, so what the profile shows is the work
     // rather than three minutes of rustc.
     cargo(&["build", "--release", "-p", "rook-core", "--example", "load"])?;
-    let binary = std::path::Path::new("target/release/examples").join(match cfg!(windows) {
+    let binary = target_dir().join("release/examples").join(match cfg!(windows) {
         true => "load.exe",
         false => "load",
     });
