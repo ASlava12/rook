@@ -58,17 +58,57 @@ A skill can carry more than its `SKILL.md` — scripts to run, references to rea
 `scripts/check.sh` is not something the agent can act on otherwise. A skill that
 is only a `SKILL.md`, which is most of them, adds nothing to the reply.
 
+## Writing a card that earns its place
+
+The description is not a summary. It is read for one decision — load the body or
+not — and it is paid for on every request, by every skill in the catalog, whether
+or not anything reaches for it. So it names the *situation*, not the subject:
+
+```yaml
+description: Use when a Rook store has grown and the space is wanted back — and
+  before `gc` or `prune`, the two commands here that can lose history.
+```
+
+not
+
+```yaml
+description: Work out why a Rook store has grown, and reclaim space safely.
+```
+
+The second reads better and decides nothing. A model holding it has to load the
+body to find out whether this was the moment, and a body costs between two
+hundred and a thousand tokens.
+
+Three rules follow from that, and the shipped skills are held to all three by
+`crates/rook-skills/tests/builtin.rs`:
+
+- **`Use when …`**, or `Use before …` where the moment is a command about to be
+  run. One card is capped at 50 tokens and the five shipped ones at 220 together.
+- **A "not for …" clause only where the confusion is real.** `in-place-edit` says
+  it is not for the editing tools, because reaching for `sed` when `edit_file`
+  is right is the mistake it exists to catch. `rust-release` says nothing of the
+  kind, because "a release is not an ordinary commit" is not a mistake anybody
+  makes, and it would cost every request to say so.
+- **What the skill needs goes in `requires`**, not in the sentence. The code
+  checks it, `rook skills why` explains it, and a card that is not applicable is
+  never shown — a precondition written in prose is one the model has to evaluate
+  and can get wrong.
+
+A body is capped at 1,200 tokens. Past that the long part belongs in a bundled
+file the body names: `load_skill` reports those, and they are read only if they
+turn out to be needed.
+
 ## What ships with Rook
 
 Five skills come in the box, under `skills/` in the source tree:
 
-| skill | what it is for |
+| skill | reach for it when |
 |---|---|
-| `decision-matrix` | Working a fork out loud: options, weighted criteria, and whether the winner survives moving the weights |
-| `in-place-edit` | Editing files from the shell across GNU, BSD and Windows userlands |
-| `project-instructions` | Writing a project's `AGENTS.md`, and keeping it worth its cost |
-| `rust-release` | Cutting a release of a Rust workspace |
-| `store-triage` | Working out why a store has grown, and reclaiming space safely |
+| `decision-matrix` | A fork has several defensible answers and the reasoning will be questioned later |
+| `in-place-edit` | A file is about to be changed with `sed`, `awk` or a shell redirect, on more than one platform |
+| `project-instructions` | A project's `AGENTS.md` is being written or trimmed |
+| `rust-release` | A release of a Rust workspace is being cut |
+| `store-triage` | A store has grown, and `gc` or `prune` is about to be run on somebody's history |
 
 `cargo xtask dist` packages them next to the binary, which is the first place
 [`builtin_skills_dir`](../crates/rook-core/src/paths.rs) looks. A plain
@@ -175,10 +215,13 @@ body in when it decides it needs one.
 
 This matters more than it sounds. Full bodies for a large library cost thousands of
 tokens on every request, and on local models a tool-and-skill-heavy prompt is
-roughly an order of magnitude slower to process than plain text. A card is tiny next to the body it
-stands for — a test pins that at well under 100 tokens for a couple of them —
-and the catalog as a whole is what `agent.max_skill_cards` bounds: fifty cards
-cost roughly 770 tokens a request.
+roughly an order of magnitude slower to process than plain text. A card is small
+next to the body it stands for: the five Rook ships average about forty tokens
+each against bodies of two hundred to nine hundred, and a test caps one card at
+fifty and the five together at 220. Fifty cards of that size are around two
+thousand tokens on every request, which is what `agent.max_skill_cards` bounds
+— and why a card that describes its subject instead of naming its moment is
+worth rewriting rather than tolerating.
 
 The catalog itself is bounded by `agent.max_skill_cards` (50), because it is paid
 for on every request and a machine that has collected skills for a year would
@@ -191,8 +234,8 @@ describing what you need finds a skill the catalog did not name.
 ```
    name          version  source   tokens  description
 ─────────────────────────────────────────────────────────────────
-✓  in-place-edit  1.2.0   user      ~340   Edit files in place across platforms
-·  deploy         2.0.0   project   ~1200  Deploy the service to staging
+✓  in-place-edit  1.2.0   user      ~340   Use before changing a file with sed…
+·  deploy         2.0.0   project   ~1200  Use when a change is ready for staging…
 ```
 
 The `·` means blocked here; `--all` shows those and `why` explains them.

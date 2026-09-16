@@ -167,6 +167,23 @@ working. `every_config_field_is_read_somewhere` now fails the build for a field
 mentioned fewer than three times: its declaration, its default, and somebody
 using it.
 
+**A skill card names the situation, not the subject.** A card is paid for on
+every request and is read for exactly one decision: load the body or not. All
+five shipped ones described what the skill *was* — "Work a fork in the road out
+loud", "Edit files in place from the shell" — which reads well and leaves a
+model to spend 200 to 900 tokens on a body to find out whether it wanted it.
+`Use when …` is the shape, and `Use before …` where the moment is a command
+about to be run. A "not for …" clause earns its tokens only where the confusion
+is real and likely, as `in-place-edit`'s does with the editing tools; on
+`rust-release` it would be saying that a release is not a commit. What the skill
+needs goes in `requires`, where the code checks it and `rook skills why`
+explains it, rather than in a sentence the model has to evaluate. The budget is
+a test: `a_shipped_card_says_when_to_use_it_and_stays_small` caps one card at 50
+tokens and the shipped catalogue at 220, and
+`a_shipped_body_is_bounded_so_loading_one_is_affordable` caps a body at 1,200 —
+past that the long part belongs in a bundled file the body names, which
+`load_skill` reports and nobody reads unless they need it.
+
 **A tool description opens with a sentence that stands alone.** Under lazy
 loading only that first sentence is advertised; the rest is guidance on writing
 the arguments, which only matters once the model has decided to call the tool.

@@ -1,6 +1,6 @@
 ---
 name: decision-matrix
-description: Work a fork in the road out loud — the options, what separates them, a weighted score, and whether the winner survives moving the weights.
+description: Use when a fork has several defensible answers and the reasoning will be questioned later — competing criteria, no obvious default.
 version: 1.0.0
 license: MIT
 keywords: [decision, tradeoff, options, criteria, weighting]

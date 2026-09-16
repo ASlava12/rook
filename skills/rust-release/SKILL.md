@@ -1,6 +1,6 @@
 ---
 name: rust-release
-description: Cut a release of a Rust workspace — version bump, changelog, tag, and the pre-flight checks that catch a bad release before it is published.
+description: Use when cutting a release of a Rust workspace — a version to carry across crates, a changelog, a tag, and the checks that catch a bad one before it is published.
 version: 1.0.0
 license: MIT
 keywords: [rust, cargo, release, versioning]

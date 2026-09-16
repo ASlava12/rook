@@ -1,6 +1,6 @@
 ---
 name: project-instructions
-description: Write or revise a project's AGENTS.md — what belongs in standing instructions, what does not, and how to keep one worth its cost.
+description: Use when writing or trimming a project's AGENTS.md or CLAUDE.md — what earns a place in a file every request pays for.
 version: 1.0.0
 license: MIT
 keywords: [agents-md, conventions, onboarding, context]

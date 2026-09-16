@@ -1,6 +1,6 @@
 ---
 name: in-place-edit
-description: Edit files in place from the shell across platforms — sed, in-place flags, and the traps that differ between GNU, BSD and Windows.
+description: Use before changing a file with sed, awk or a shell redirect — `sed -i` differs on GNU, BSD and Windows, and silently. Not for the editing tools, which are the same everywhere.
 version: 1.0.0
 license: MIT
 keywords: [sed, shell, cross-platform, text]

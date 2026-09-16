@@ -5991,3 +5991,63 @@ async fn a_sub_task_sent_to_an_endpoint_nobody_configured_is_refused_by_name() {
     assert_eq!(outcome.reply, "I will do it here then");
     assert!(outcome.delegated.is_empty(), "nothing ran on an endpoint nobody has");
 }
+
+/// The catalogue is paid for on every request and so is capped, and what the
+/// cap used to cut was whatever came last alphabetically. A project's own skill
+/// lost to one Rook ships with for no reason anybody chose — and the shipped
+/// one is the one its owner can least afford to lose, because they wrote the
+/// other for this workspace.
+#[tokio::test]
+async fn when_more_skills_apply_than_fit_the_shipped_ones_are_what_goes() {
+    redirect_home();
+    let store_dir = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let ours = tempfile::tempdir().unwrap();
+    let theirs = tempfile::tempdir().unwrap();
+
+    // Named so that alphabetical order and precedence disagree: sorted by name
+    // alone, both of ours come first and theirs is the one cut.
+    let write = |root: &std::path::Path, name: &str| {
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: What {name} is for.\nversion: 1.0.0\n---\nbody\n"),
+        )
+        .unwrap();
+    };
+    write(ours.path(), "aardvark");
+    write(ours.path(), "beetle");
+    write(theirs.path(), "zebra");
+
+    let (skills, errors) = SkillIndex::discover(&[
+        (ours.path().to_path_buf(), SkillSource::Builtin),
+        (theirs.path().to_path_buf(), SkillSource::Project),
+    ]);
+    assert!(errors.is_empty(), "{errors:?}");
+
+    let config = Config {
+        agent: rook_core::config::AgentConfig { max_skill_cards: 2, ..Default::default() },
+        ..Default::default()
+    };
+    let rook = Rook::from_parts(
+        Store::open(store_dir.path()).unwrap(),
+        config,
+        Environment::bare("linux", "x86_64", "0.1.0"),
+        skills,
+        PathBuf::from(workspace.path()),
+    );
+
+    // The precondition, and it is not optional: with room for all three the cap
+    // never bites and the assertion below would pass with the ordering removed.
+    assert_eq!(rook.catalog().iter().filter(|c| c.applicable).count(), 3, "all three apply here");
+
+    let session = rook.start_session("cards").unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![reply("ok")]));
+    let prompt = AgentLoop::new(&rook, provider, session).system_prompt();
+
+    assert!(prompt.contains("zebra"), "the project's own skill survives the cap:\n{prompt}");
+    assert!(prompt.contains("aardvark"), "and one of ours fits beside it");
+    assert!(!prompt.contains("beetle"), "the other of ours is what goes");
+    assert!(prompt.contains("1 more not shown"), "and it is counted rather than hidden");
+}

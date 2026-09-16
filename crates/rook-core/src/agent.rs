@@ -1325,7 +1325,21 @@ impl<'a> AgentLoop<'a> {
         }
 
         let cards = self.rook.catalog();
-        let applicable: Vec<_> = cards.iter().filter(|c| c.applicable).collect();
+        let mut applicable: Vec<_> = cards.iter().filter(|c| c.applicable).collect();
+        // Nearest first, so that when there are more than fit, what goes is
+        // what we shipped rather than what somebody wrote for this workspace.
+        // Both lists below are cut short — one by a count, the other by a
+        // budget — and both took whatever came first, which was alphabetical:
+        // a project skill called `zip-release` lost to a builtin called
+        // `decision-matrix` for no reason anybody chose.
+        //
+        // The name breaks ties, so the list is the same on every turn. It is
+        // the front of the request, and a front that reorders invalidates the
+        // cached prefix of everything behind it.
+        applicable.sort_by(|a, b| {
+            let rank = |c: &rook_skills::SkillCard| rook_skills::SkillSource::from_label(&c.source).rank();
+            rank(b).cmp(&rank(a)).then_with(|| a.name.cmp(&b.name))
+        });
         if !applicable.is_empty() {
             s.push_str("\n## Skills\n");
             let listed = if self.rook.config.agent.lazy_skills {

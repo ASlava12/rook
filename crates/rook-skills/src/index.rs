@@ -53,6 +53,27 @@ impl SkillSource {
             SkillSource::Plugin(p) => format!("plugin:{p}"),
         }
     }
+
+    /// The inverse of [`label`](Self::label).
+    ///
+    /// A [`SkillCard`] carries where it came from as the label, because that is
+    /// what a person reads in `rook skills ls` — and the catalogue has to rank
+    /// cards by it when there are more than fit. Read back here rather than
+    /// carried twice: two fields for one fact are two fields to keep in step.
+    ///
+    /// An unknown label is `Builtin`, which is the lowest rank: something this
+    /// build does not recognise is not a reason to drop what the user put in
+    /// their own workspace.
+    pub fn from_label(label: &str) -> Self {
+        match label {
+            "user" => SkillSource::User,
+            "project" => SkillSource::Project,
+            _ => match label.strip_prefix("plugin:") {
+                Some(name) => SkillSource::Plugin(name.to_string()),
+                None => SkillSource::Builtin,
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

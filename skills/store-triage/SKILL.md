@@ -1,6 +1,6 @@
 ---
 name: store-triage
-description: Work out why a Rook store has grown, and reclaim space safely — read this before running gc or prune on someone's history.
+description: Use when a Rook store has grown and the space is wanted back — and before `gc` or `prune`, the two commands here that can lose history.
 version: 1.0.0
 license: MIT
 keywords: [storage, disk, gc, maintenance, rook]

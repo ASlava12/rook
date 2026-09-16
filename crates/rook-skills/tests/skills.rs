@@ -270,3 +270,20 @@ fn one_broken_skill_does_not_take_down_the_catalog() {
     assert_eq!(index.len(), 1);
     assert_eq!(errors.len(), 1);
 }
+
+/// A card carries where it came from as a label, and the catalogue ranks by it
+/// when there are more skills than fit — so the label has to read back. Carried
+/// twice instead, as a name and a rank, it would be two fields to keep in step.
+#[test]
+fn where_a_skill_came_from_reads_back_from_what_a_card_says() {
+    for source in
+        [SkillSource::Builtin, SkillSource::User, SkillSource::Project, SkillSource::Plugin("acme".into())]
+    {
+        let read_back = SkillSource::from_label(&source.label());
+        assert_eq!(read_back, source, "{:?} did not survive its own label", source);
+        assert_eq!(read_back.rank(), source.rank(), "and so neither did its precedence");
+    }
+    // Something a newer build wrote ranks lowest rather than highest: an
+    // unknown source is no reason to drop what the user put in their workspace.
+    assert_eq!(SkillSource::from_label("from-the-future").rank(), SkillSource::Builtin.rank());
+}
