@@ -12,6 +12,7 @@ public failure in another agent, and the ADRs cite them.
 cargo xtask ci             # fmt + clippy -D warnings + test — the CI gate
 cargo test --workspace
 cargo xtask compaction     # re-measure the storage claims in README/docs
+cargo xtask load           # time the per-turn work; --part one of them, --profile under samply
 cargo xtask dist           # release build; also prints the binary sizes README quotes
 cargo xtask targets        # supported target matrix
 cargo xtask smoke --model ollama/qwen3:8b   # real turns against a real model
@@ -197,6 +198,17 @@ where the installer had put `rust-analyzer.exe`, and the same again for a shim
 A test of such a path asks the code that made it (`install::current`), or
 spells both answers under `cfg!(windows)`. A name that exists on no PATH is the
 way to assert that a lookup fell through.
+
+**Slow is measured before it is fixed.** `cargo xtask load` times the parts a
+turn pays for again every step — appending to the log, replaying it, the
+catalog, the prompt, a search — against a synthetic session, and prints a cost
+per unit beside each. `--scale 2` is the question the table cannot answer on its
+own: a per-unit figure that rises with the size is a quadratic, and that is the
+finding worth having. `--profile <part>` records it under `samply` for where the
+time actually goes. Its first run found one event costing nine milliseconds to
+append, of which eight were a flush to disk — a two-hundred-step turn spending
+four seconds writing its own log, which no amount of reading the code had
+suggested.
 
 **A decision taken on somebody else's numbers is worth our own.** `cargo xtask
 bench --model …` is the harness for that: arms that differ by one variable,

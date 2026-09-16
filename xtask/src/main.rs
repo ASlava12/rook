@@ -101,6 +101,20 @@ enum Task {
     },
     /// Measure what the store's compaction actually achieves.
     Compaction,
+    /// Time the per-turn work as what it accumulates grows, and profile a part.
+    Load {
+        /// One of: append, discover, catalog, prompt, transcript, context,
+        /// search. Everything, where this is not given.
+        #[arg(long)]
+        part: Option<String>,
+        /// Multiply the sizes. A per-unit cost that rises with this is not
+        /// linear, which is the finding worth having.
+        #[arg(long, default_value_t = 1)]
+        scale: usize,
+        /// Record under `samply` and open the profile, rather than timing.
+        #[arg(long)]
+        profile: bool,
+    },
     /// Report what `target/` is costing and reclaim it.
     Clean {
         /// Remove everything, not just the parts that regenerate cheaply.
@@ -292,6 +306,7 @@ fn run() -> Result<()> {
             Ok(())
         }
         Task::Compaction => cargo(&["run", "--release", "-p", "rook-store", "--example", "compaction"]),
+        Task::Load { part, scale, profile } => load(part, scale, profile),
         Task::Clean { all } => clean(all),
         Task::Smoke { model } => smoke::smoke(model),
         Task::Bench { model, repeats, arms } => bench::bench(model, repeats, arms),
@@ -504,6 +519,49 @@ fn upstream(r: &Reference) -> Result<(String, String)> {
 
 fn short(sha: &str) -> String {
     sha.chars().take(9).collect()
+}
+
+/// Time the parts of a turn, or put one of them under a profiler.
+///
+/// Release, because a debug build measures the debug build: the store's
+/// compression and the skill parsing are both an order of magnitude apart
+/// between the two, and a table that says which part dominates would say the
+/// wrong one.
+fn load(part: Option<String>, scale: usize, profile: bool) -> Result<()> {
+    let scale = scale.to_string();
+    let mut args = vec!["--scale", &scale];
+    if let Some(part) = part.as_deref() {
+        args.extend_from_slice(&["--part", part]);
+    }
+    if !profile {
+        let mut run = vec!["run", "--release", "-p", "rook-core", "--example", "load", "--"];
+        run.extend_from_slice(&args);
+        return cargo(&run);
+    }
+
+    // Built first and then recorded, so what the profile shows is the work
+    // rather than three minutes of rustc.
+    cargo(&["build", "--release", "-p", "rook-core", "--example", "load"])?;
+    let binary = std::path::Path::new("target/release/examples").join(match cfg!(windows) {
+        true => "load.exe",
+        false => "load",
+    });
+    if !binary.exists() {
+        bail!("{} was not built, so there is nothing to record", binary.display());
+    }
+    let mut recorded = vec!["record", "--", binary.to_str().unwrap_or("target/release/examples/load")];
+    recorded.extend_from_slice(&args);
+    let status = Command::new("samply").args(&recorded).status();
+    match status {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => bail!("samply {}", how_it_ended(status)),
+        // Named rather than reported as a failure of the measurement: the
+        // profiler is a separate tool and not having it is the ordinary case.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!(
+            "samply is not on PATH. `cargo install samply` installs it;              `cargo xtask load` without --profile still prints the timings."
+        ),
+        Err(e) => bail!("running samply: {e}"),
+    }
 }
 
 fn cargo(args: &[&str]) -> Result<()> {
