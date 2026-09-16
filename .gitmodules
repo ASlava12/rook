@@ -46,3 +46,9 @@
 	branch = main
 	shallow = true
 	update = none
+[submodule "references/openresearch"]
+	path = references/openresearch
+	url = https://github.com/alphaXiv/OpenResearch.git
+	branch = main
+	shallow = true
+	update = none

@@ -21,6 +21,7 @@ cargo xtask refs init codex    # or just one
 | `hermes/` | [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) | MIT | Memory, skills and local-model handling. |
 | `openhands/` | [OpenHands/OpenHands](https://github.com/OpenHands/OpenHands) | MIT | Autonomous task execution and sandboxing. |
 | `openclaw/` | [openclaw/openclaw](https://github.com/openclaw/openclaw) | MIT | A persistent assistant reached through the channels people already use: one gateway, many transports, and a policy layer between them. |
+| `openresearch/` | [alphaXiv/OpenResearch](https://github.com/alphaXiv/OpenResearch) | MIT | Local-first, in Rust, and pointed at a different job — turning a coding agent into a research one. Its `agent-skills/` is the largest working set of the format [ADR-0003](../docs/adr/0003-agent-skills-format.md) adopted, and `orx-agent-delegation` answers the question `delegate` does. |
 
 `agent0ai/agent-zero` is deliberately absent: its repository declares no license,
 so there is nothing here that says reading it is fine.
