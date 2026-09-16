@@ -1191,12 +1191,12 @@ pub fn cached(tokens: u32) -> String {
 
 fn cmd_models(workspace: Option<PathBuf>, json: bool, recheck: bool) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    if recheck {
+        return rechecked(&runtime, json);
+    }
     runtime.block_on(async move {
         let _ = workspace;
         let config = rook_core::Config::load()?;
-        if recheck {
-            return rechecked(&config, json).await;
-        }
         let configured = rook_core::models::model_named(&config, &config.agent.model);
         let configured = configured.as_str();
         let models = provider(&config)?.models().await?;
@@ -1247,12 +1247,26 @@ fn cmd_models(workspace: Option<PathBuf>, json: bool, recheck: bool) -> Result<(
 /// terminal that rechecked on its own would clear its own empty set, print a
 /// perfectly true table, and leave the agent believing what it believed a
 /// minute ago.
-async fn rechecked(config: &rook_core::Config, json: bool) -> Result<()> {
+/// Takes the runtime rather than running inside one, which running it found:
+/// the daemon client blocks for its answer, and blocking a thread that is
+/// driving the runtime it blocks on is a panic rather than a wait. So the
+/// choice between the two is made out here, and only the local half is given
+/// to the runtime.
+fn rechecked(runtime: &tokio::runtime::Runtime, json: bool) -> Result<()> {
     let answers: Vec<rook_core::models::Answered> = match crate::source::Daemon::running() {
-        Some(daemon) => daemon.recheck_models()?,
+        Some(daemon) => {
+            // Which process was put back, because that is the whole of what
+            // this command does and the table alone does not say it: the same
+            // rows would be printed by a terminal that had cleared nothing the
+            // agent can see. On stderr, so `--json` stays machine-readable.
+            eprintln!("putting them back for the running rookd at {}", daemon.base);
+            daemon.recheck_models()?
+        }
         None => {
+            eprintln!("no rookd is running, so this asks the endpoints without putting any agent's back");
+            let config = rook_core::Config::load()?;
             let vault = rook_core::Vault::load().unwrap_or_else(|_| rook_core::Vault::empty());
-            rook_core::models::recheck(config, &vault).await
+            runtime.block_on(rook_core::models::recheck(&config, &vault))
         }
     };
     if json {
