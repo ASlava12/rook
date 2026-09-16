@@ -476,6 +476,91 @@ fn ruinous(line: &str) -> Option<&'static str> {
     line.split([';', '&', '|', '\n']).find_map(|part| what_it_does(part.trim()))
 }
 
+/// The git subcommand in this line that would move the branch, the index or the
+/// history, if there is one.
+///
+/// Asked only of a sub-agent, which shares its workspace with the turn that
+/// started it. These are the commands whose effect reaches past the files it
+/// was asked to change: a commit carries the parent's half-finished work along
+/// with the child's, a checkout changes what the parent is editing while it
+/// edits it, and a push is outward-facing and nobody's to do on somebody
+/// else's behalf.
+///
+/// Taken from OpenResearch, where each helper gets a worktree and is forbidden
+/// to overlap on branches. The worktree does not transfer — two sessions
+/// writing one path are already refused here, and a separate tree means a
+/// separate `target/` and a full rebuild per child — but this half is the same
+/// hazard and costs a list.
+pub fn moves_the_branch(line: &str) -> Option<String> {
+    line.split([';', '&', '|', '\n']).find_map(|part| branch_moving_git(part.trim()))
+}
+
+fn branch_moving_git(part: &str) -> Option<String> {
+    /// Subcommands that move something whatever their arguments are. Reading is
+    /// left alone — `status`, `diff`, `log`, `show`, `blame`, `rev-parse` — so a
+    /// child can still say what it found. Named rather than allowed by
+    /// omission: a list of what is permitted would refuse every subcommand git
+    /// grows next, and most of those will be reads.
+    ///
+    /// `branch` and `tag` are deliberately absent. They were here first, and
+    /// they do neither of the two things this is about: `git branch fix`
+    /// creates a name and leaves HEAD and the working tree exactly where they
+    /// were. Having them here would have refused `git branch` and `git tag`
+    /// bare — which list, and are what anybody looking at the state runs — and
+    /// a rule that refuses the ordinary reading of a thing teaches a sub-agent
+    /// that the tool is broken rather than that the line was.
+    const MOVES: &[&str] = &[
+        "am",
+        "apply",
+        "cherry-pick",
+        "checkout",
+        "clean",
+        "commit",
+        "merge",
+        "pull",
+        "push",
+        "rebase",
+        "reset",
+        "restore",
+        "revert",
+        "switch",
+    ];
+
+    let words = words(part);
+    let at = words.iter().position(|w| !matches!(w.as_str(), "sudo" | "doas"))?;
+    let program = words.get(at)?;
+    let name = program.rsplit(['/', '\\']).next().unwrap_or(program).to_ascii_lowercase();
+    if name != "git" && name != "git.exe" {
+        return None;
+    }
+    // `git -C somewhere commit` — the options before the subcommand may take a
+    // value of their own, and reading one of those as the subcommand would miss
+    // the command entirely. The `--opt=value` spelling carries its own and is
+    // skipped by the general case below it.
+    let mut rest = words[at + 1..].iter();
+    let sub = loop {
+        let word = rest.next()?;
+        match word.as_str() {
+            "-C" | "-c" | "--git-dir" | "--work-tree" | "--namespace" | "--exec-path" => {
+                rest.next()?;
+            }
+            with_a_dash if with_a_dash.starts_with('-') => {}
+            subcommand => break subcommand.to_ascii_lowercase(),
+        }
+    };
+    if MOVES.contains(&sub.as_str()) {
+        return Some(sub);
+    }
+    // `stash` is the one that is a read one way and the worst of them the
+    // other: bare, it takes the working tree away — the parent's working tree,
+    // since they share one — while `list` and `show` only look.
+    if sub == "stash" {
+        let first = rest.next().map(|w| w.as_str());
+        return (!matches!(first, Some("list" | "show"))).then_some(sub);
+    }
+    None
+}
+
 /// One statement, read as a program and its arguments.
 fn what_it_does(part: &str) -> Option<&'static str> {
     let words = words(part);

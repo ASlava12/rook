@@ -3546,7 +3546,11 @@ impl<'a> AgentLoop<'a> {
             rook: self.rook,
             provider: self.provider.clone(),
             tools: self.tools.clone(),
-            tool_ctx: self.tool_ctx.clone(),
+            // What tells a child from the turn that started it, everywhere a
+            // tool can see. The policy is shared on purpose — an approval given
+            // for the run is given for the run — so this is where "and it is a
+            // sub-agent" has to live.
+            tool_ctx: rook_tools::ToolContext { delegated: true, ..self.tool_ctx.clone() },
             policy: self.policy.clone(),
             approver: self.approver.clone(),
             hooks: self.hooks.clone(),

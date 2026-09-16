@@ -46,6 +46,22 @@ impl Tool for RunCommand {
     async fn call(&self, ctx: &ToolContext, args: &serde_json::Value) -> Result<ToolOutcome> {
         let command = arg_str(args, self.name(), "command")?;
 
+        // Refused rather than asked about: this is not a question of how much
+        // latitude the run has, it is that the answer belongs to the turn that
+        // started this one. Said as what to do instead, because a sub-agent
+        // told only "no" will try the next spelling of the same thing.
+        if ctx.delegated
+            && let Some(sub) = crate::policy::moves_the_branch(&command)
+        {
+            return Ok(ToolOutcome::error(format!(
+                "`git {sub}` is for the turn that started this one to run. This workspace is \
+                 shared with it, so a commit here would carry its unfinished work along with \
+                 yours, and anything that moves the branch changes what it is editing while it \
+                 edits. Change the files you were asked to change and say what you changed; \
+                 what becomes a commit is decided where the work was asked for."
+            )));
+        }
+
         let cwd = match args.get("cwd").and_then(|v| v.as_str()) {
             Some(rel) => ctx.resolve(rel)?,
             None => ctx.workspace.clone(),

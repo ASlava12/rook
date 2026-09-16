@@ -429,3 +429,61 @@ fn the_old_spellings_are_read_and_the_levels_are_ordered() {
     assert_eq!(read("auto"), Stance::Autonomous);
     assert_eq!(serde_json::to_value(Stance::Assist).unwrap(), serde_json::json!("assist"));
 }
+
+/// A sub-agent shares its workspace with the turn that started it, so the
+/// commands that reach past the files it was asked to change are not its to
+/// run. Taken from OpenResearch, where each helper gets a worktree and is
+/// forbidden to overlap on branches — the worktree does not transfer here, the
+/// rule about branches does.
+#[test]
+fn a_sub_agent_may_not_move_the_branch_under_the_turn_that_started_it() {
+    use rook_tools::policy::moves_the_branch;
+
+    for command in [
+        "git commit -m 'wip'",
+        "git push origin main",
+        "git checkout -b fix",
+        "git switch main",
+        "git reset --hard HEAD~1",
+        "git rebase main",
+        // The worst of them: it takes the working tree away, and the working
+        // tree is the parent's.
+        "git stash",
+        "git stash push -m wip",
+        // Spelled from elsewhere, or with git's own options before the
+        // subcommand — either would walk past a rule matched on the text.
+        "/usr/bin/git commit -m x",
+        "git -C crates/rook-core commit -m x",
+        "git --git-dir=.git checkout main",
+        // And after something harmless, which is how it would actually arrive.
+        "cargo test && git commit -am 'green'",
+    ] {
+        assert!(moves_the_branch(command).is_some(), "{command:?} moves the branch");
+    }
+
+    // Reading is the whole point of most errands, and none of it is refused.
+    for command in [
+        "git status",
+        "git diff --stat",
+        "git log --oneline -5",
+        "git show HEAD:src/lib.rs",
+        "git blame src/lib.rs",
+        "git rev-parse --show-toplevel",
+        // Listing, which is what anybody looking at the state runs. These were
+        // refused by the first version of the rule, which had `branch`, `tag`
+        // and every `stash` in the list — and neither `git branch fix` nor `git
+        // tag v1` does either of the things the rule is about: both leave HEAD
+        // and the working tree where they were.
+        "git branch",
+        "git branch -a",
+        "git tag -l 'v*'",
+        "git stash list",
+        "git stash show -p",
+        "cargo test",
+        // Not git at all, however much it reads like it.
+        "echo git commit",
+        "rg 'git commit' docs/",
+    ] {
+        assert!(moves_the_branch(command).is_none(), "{command:?} is not the branch moving");
+    }
+}

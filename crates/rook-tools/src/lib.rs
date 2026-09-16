@@ -167,6 +167,17 @@ pub struct Ran {
 #[derive(Clone)]
 pub struct ToolContext {
     pub workspace: PathBuf,
+    /// True in a sub-agent, which shares the workspace with the turn that
+    /// started it and must not move the branch under it.
+    ///
+    /// Taken from OpenResearch, whose helpers each get a git worktree and are
+    /// forbidden to overlap on branches. The worktree half does not transfer —
+    /// this agent already refuses two sessions writing one path, and a separate
+    /// tree means a separate `target/` and so a full rebuild for every child —
+    /// but the branch half is the same hazard here: a child that commits
+    /// commits the parent's half-finished work along with its own, and one that
+    /// switches branches changes what the parent is editing while it edits it.
+    pub delegated: bool,
     pub max_output_bytes: usize,
     pub command_timeout: std::time::Duration,
     /// When false, tools refuse paths outside the workspace.
@@ -268,6 +279,7 @@ impl ToolContext {
             isolation: isolate::Isolation::for_workspace(&workspace),
             isolate: isolate::Mode::Off,
             workspace,
+            delegated: false,
             max_output_bytes: 256 * 1024,
             command_timeout: std::time::Duration::from_secs(120),
             allow_outside_workspace: false,

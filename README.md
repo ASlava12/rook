@@ -799,6 +799,21 @@ rook session show <child>    # everything the sub-agent actually did
 Nesting stops at two levels, because past that the token cost compounds faster
 than the work gets done.
 
+A sub-agent works in the same directory as the turn that started it, and two
+sessions are already refused a write to the same file at the same time — the
+second is told which session holds it. What a shared directory does not protect
+is the branch: a child that commits carries its parent's unfinished work along
+with its own, and one that checks out or resets changes what the parent is
+editing while it edits. So a sub-agent is refused `commit`, `checkout`,
+`switch`, `push`, `reset`, `rebase`, `merge`, `stash` and their neighbours, and
+told what to do instead. Reading is untouched, since that is what most errands
+are for — `status`, `diff`, `log`, `show`, `blame`, and the listing halves of
+the ones that have two, `git branch` and `git stash list`. Adapted from
+[OpenResearch](references/README.md), whose helpers each get a git worktree and
+are forbidden to overlap on branches: the worktree itself does not transfer,
+because a separate tree is a separate `target/` and so a full rebuild for every
+child.
+
 ### Memory
 
 The agent can remember things across sessions, and you can read, correct and
