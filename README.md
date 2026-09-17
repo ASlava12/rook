@@ -711,6 +711,55 @@ desk-small` changes one line and leaves the comments around it alone.
 has the notion; sub-agents and `/btw` run at `low` regardless, since a bounded
 errand does not need the depth the main turn does.
 
+### Working at one goal for longer than a turn
+
+A turn ends, and something has to decide whether there is another one. If that
+something is the model that just did the work, a long run is a model marking its
+own homework until the budget is gone — so a project writes down what it is
+judged by, and the harness runs it:
+
+```toml
+# .rook/evaluation.toml — the person's, not the agent's
+[[check]]
+name = "tests"
+run  = "cargo test --workspace"
+guards = ["crates/*/tests/**"]   # changing these is allowed, and is reported
+
+[[check]]
+name = "coverage"
+run  = "cargo llvm-cov --json | jq .data[0].totals.lines.percent"
+measures = "coverage"            # watched rather than gated on
+```
+
+```sh
+rook eval                        # run them and say what they said
+rook work "make the tests pass"  # turns at one goal until they do
+rook work "keep the docs current" --keep-going --tokens 2000000
+rook work --resume               # carry on the last run in this workspace
+```
+
+`rook eval` is a command and not a tool: the model cannot call it, because an
+agent that could run its own evaluation could run it until it passed. Real
+independence is not available to a coding agent — it has to be able to edit the
+repository, and the tests are in the repository — so what the scorecard buys is
+a witness. The guarded files and the scorecard itself are hashed before the work
+and again after, and a check that went green in the same iteration that rewrote
+it says so beside the pass instead of disappearing into it.
+
+Between iterations the loop reads what the harness measured and what the
+filesystem says changed, and never the turn's account of itself. It names a
+regression before anything else — a model handed only the current state cannot
+tell a repair from a break it has just caused — carries the end of a failing
+check's output into the next prompt, and stops when two iterations in a row
+change nothing. Each iteration is its own session: seventy turns in one
+conversation is a context nobody can afford, and what has to survive between
+them is the workspace, the checks, and `.rook/plan.md` — the agent's own file,
+where it keeps what is done, what is next, and what it tried that did not work.
+Rewriting that plan is not doing the work, and does not count as a change.
+
+The record is written after every iteration, so a run measured in days survives
+the machine restarting under it.
+
 ### From an editor
 
 `rook acp` speaks the [Agent Client Protocol](https://agentclientprotocol.com) on

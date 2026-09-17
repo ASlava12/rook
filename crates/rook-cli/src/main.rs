@@ -99,6 +99,13 @@ enum Command {
         /// approved, which is the safe end of the wait and also a short run.
         #[arg(long)]
         yes: bool,
+        /// Carry on the last run in this workspace rather than starting one.
+        ///
+        /// A run measured in days is one a machine reboots in the middle of,
+        /// and what it has done by then — the iterations, what the checks said,
+        /// what it spent — is worth more than starting over.
+        #[arg(long)]
+        resume: bool,
     },
     /// Run the checks this project is judged by, from `.rook/evaluation.toml`.
     ///
@@ -562,12 +569,13 @@ fn main() -> Result<()> {
         Some(Command::Models { recheck, source }) => cmd_models(cli.workspace, cli.json, recheck, source),
         Some(Command::Config(cmd)) => cmd_config(cmd, cli.json),
         Some(Command::Eval { json }) => cmd_eval(cli.workspace, json || cli.json),
-        Some(Command::Work { goal, most, tokens, keep_going, yes }) => cmd_work(
+        Some(Command::Work { goal, most, tokens, keep_going, yes, resume }) => cmd_work(
             cli.workspace,
             goal.join(" "),
             rook_core::work::Plan { goal: String::new(), most, tokens, until_clean: !keep_going },
             yes || cli.yes,
             cli.json,
+            resume,
         ),
         Some(Command::Acp) => cmd_acp(cli.workspace),
         Some(Command::Serve { port }) => cmd_serve(port),
@@ -1840,6 +1848,7 @@ fn cmd_work(
     plan: rook_core::work::Plan,
     yes: bool,
     json: bool,
+    resume: bool,
 ) -> Result<()> {
     use rook_core::work::{Iteration, Next};
 
@@ -1854,7 +1863,41 @@ fn cmd_work(
 
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let rook = rook_core::Rook::open(workspace.clone())?;
-    let run = rook_store::format_session_id(rook_store::new_session_id());
+
+    // Resuming reads the last run for this workspace and carries on counting
+    // from where it stopped — the ceilings and the budget are the run's, not
+    // this invocation's, or a run resumed four times would have four times the
+    // budget somebody set once.
+    let last = rook.store.kv_get(&rook_core::work::last_key(&here)).ok().flatten();
+    let earlier: Vec<Iteration> = match resume {
+        false => Vec::new(),
+        true => {
+            let Some(id) = last.as_deref().map(String::from_utf8_lossy) else {
+                anyhow::bail!(
+                    "nothing has been run in {} yet, so there is nothing to carry on from.                      `rook work \"<goal>\"` starts one.",
+                    here.display()
+                );
+            };
+            let record = rook
+                .store
+                .kv_get(&rook_core::work::record_key(&id))
+                .ok()
+                .flatten()
+                .and_then(|bytes| serde_json::from_slice::<Vec<Iteration>>(&bytes).ok());
+            match record {
+                Some(done) => {
+                    eprintln!("carrying on {id}, {} iterations in", done.len());
+                    done
+                }
+                None => anyhow::bail!("the record of {id} is not readable, so it cannot be carried on"),
+            }
+        }
+    };
+    let run = match (resume, last.as_deref().map(String::from_utf8_lossy)) {
+        (true, Some(id)) => id.to_string(),
+        _ => rook_store::format_session_id(rook_store::new_session_id()),
+    };
+    let _ = rook.store.kv_set(&rook_core::work::last_key(&here), run.as_bytes());
 
     let ended = runtime.block_on(async {
         // Built once for the whole run, not once per iteration: an MCP server
@@ -1867,9 +1910,13 @@ fn cmd_work(
         let servers = rook_core::agent::servers_for(&rook.config, &rook.workspace);
         let jobs = rook_core::agent::jobs_for(&rook.config);
 
-        let mut done: Vec<Iteration> = Vec::new();
+        let mut done: Vec<Iteration> = earlier;
         let ended = loop {
-            let prompt = match rook_core::work::after(&plan, &done) {
+            // Read fresh each time: the last turn may have rewritten it, and
+            // its own plan is the only thing besides the checks that carries
+            // from one iteration to the next.
+            let notes = rook_core::work::notes(&here);
+            let prompt = match rook_core::work::after(&plan, &done, notes.as_deref()) {
                 Next::Stop(why) => break why,
                 Next::Again(prompt) => prompt,
             };
@@ -1923,7 +1970,7 @@ fn cmd_work(
             // days is one a machine can lose halfway through, and what it has
             // done by then is worth more than the tidiness of writing once.
             if let Ok(text) = serde_json::to_vec(&done) {
-                let _ = rook.store.kv_set(&format!("work/{run}"), &text);
+                let _ = rook.store.kv_set(&rook_core::work::record_key(&run), &text);
             }
         };
         mcp.shutdown().await;
