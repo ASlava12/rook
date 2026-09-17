@@ -760,7 +760,13 @@ fn in_the_clear(base: &str, key: Option<&str>, permitted: bool) -> Result<()> {
         // them said it four times at startup — which is how a line worth
         // reading becomes one nobody reads.
         if not_said_yet(&host) {
-            tracing::warn!("sending an API key to {host} over plain http, because it is set to");
+            // What is configured, not what just happened: this is said when the
+            // client is built, and every endpoint in the rotation gets one —
+            // including the ones that are unreachable today and will carry
+            // nothing at all. "sending" claimed an event that had not occurred.
+            tracing::warn!(
+                "a request to {host} would carry its API key over plain http, because it is set to"
+            );
         }
         return Ok(());
     }
