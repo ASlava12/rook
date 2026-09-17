@@ -343,6 +343,12 @@ fn scorecard(last: &Iteration) -> String {
     const MOST_PER_CHECK: usize = 1_500;
 
     let mut said = String::new();
+    // What a failing check printed, against the first check that printed it.
+    // One broken file fails every check that imports it, with the same
+    // traceback each time: a live run put six copies of one `IndentationError`
+    // in the first sixty lines of a prompt, and eight checks at the cap below
+    // is twelve kilobytes of one message.
+    let mut already: Vec<(&str, &str)> = Vec::new();
     for check in &last.report.checks {
         let mark = match check.passed {
             true => "ok  ",
@@ -353,7 +359,16 @@ fn scorecard(last: &Iteration) -> String {
             None => String::new(),
         };
         said.push_str(&format!("{mark} {}{measured}\n", check.name));
+        if !check.passed
+            && let Some((first, _)) = already.iter().find(|(_, output)| *output == check.said.trim_end())
+        {
+            // Named rather than silently dropped: which checks share a cause is
+            // the useful half of knowing there is one cause.
+            said.push_str(&format!("     (the same as {first})\n"));
+            continue;
+        }
         if !check.passed {
+            already.push((check.name.as_str(), check.said.trim_end()));
             let output = check.said.trim_end();
             let kept = match output.len() > MOST_PER_CHECK {
                 false => output,
@@ -637,6 +652,45 @@ mod tests {
         assert!(prompt.contains("(…7 earlier)"), "it says what it left out: {prompt}");
         assert!(prompt.contains("#12 wrote"), "and keeps the recent ones: {prompt}");
         assert!(!prompt.contains("#1 wrote"), "and not the old ones: {prompt}");
+    }
+
+    /// One broken file fails every check that imports it, with the same
+    /// traceback each time. A live run put six copies of one `IndentationError`
+    /// in the first sixty lines of a prompt; eight checks at the cap is twelve
+    /// kilobytes of one message, in the most expensive part of it.
+    #[test]
+    fn checks_that_failed_for_the_same_reason_say_it_once() {
+        let broken = |name: &str| {
+            let mut check = scored(name, false);
+            check.said = "Traceback\n  File \"stack.py\", line 115\nIndentationError".into();
+            check
+        };
+        let done =
+            vec![iteration(1, vec![broken("imports"), broken("push-pop"), broken("peek")], &["stack.py"])];
+        let Next::Again(prompt) = after(&plan(), &done, None) else { panic!("not clean") };
+
+        // The precondition: all three really did fail with the same words, so
+        // this is about the repetition and not about a quiet run.
+        assert_eq!(done[0].report.passed(), 0, "all three failed");
+        assert_eq!(prompt.matches("IndentationError").count(), 1, "said once: {prompt}");
+        // And which checks share the cause, because that is the useful half.
+        assert!(prompt.contains("(the same as imports)"), "{prompt}");
+        assert!(prompt.contains("FAIL peek"), "every check is still listed: {prompt}");
+    }
+
+    /// Two failures that are genuinely different are both worth reading.
+    #[test]
+    fn checks_that_failed_differently_both_say_why() {
+        let mut one = scored("a", false);
+        one.said = "the first thing went wrong".into();
+        let mut two = scored("b", false);
+        two.said = "something else entirely".into();
+        let done = vec![iteration(1, vec![one, two], &["src/lib.rs"])];
+
+        let Next::Again(prompt) = after(&plan(), &done, None) else { panic!("not clean") };
+        assert!(prompt.contains("the first thing went wrong"), "{prompt}");
+        assert!(prompt.contains("something else entirely"), "{prompt}");
+        assert!(!prompt.contains("the same as"), "nothing is shared here: {prompt}");
     }
 
     /// A model that sees no file assumes there is nowhere to write.
