@@ -1947,11 +1947,39 @@ fn cmd_work(
             }
             rook_core::agent::equip(&mut agent, servers.clone(), &mcp, jobs.clone());
 
-            let outcome = match agent.run(&prompt).await {
-                Ok(outcome) => outcome,
-                Err(why) => break format!("iteration {at} did not finish: {why}"),
+            // An iteration that could not run is an iteration that changed
+            // nothing, not the end of the run. A tunnel hiccupped mid-stream
+            // here — `unexpected EOF during chunk size line` — and a run that
+            // had been going for hours ended on it. One transient failure must
+            // not throw that away, and a persistent one does not need a rule of
+            // its own: two iterations that change nothing already stop a run,
+            // and the reason is carried in the record either way.
+            let failed = match agent.run(&prompt).await {
+                Ok(outcome) => Ok(outcome),
+                Err(why) => {
+                    eprintln!("  iteration {at} did not finish: {why}");
+                    Err(why.to_string())
+                }
             };
             let report = rook_core::evaluation::run(&here, &card, &before);
+            let outcome = match failed {
+                Ok(outcome) => outcome,
+                Err(why) => {
+                    done.push(Iteration {
+                        at,
+                        session: rook_store::format_session_id(session),
+                        reply: why,
+                        changed: Vec::new(),
+                        steps: 0,
+                        tokens: 0,
+                        report,
+                    });
+                    if let Ok(text) = serde_json::to_vec(&done) {
+                        let _ = rook.store.kv_set(&rook_core::work::record_key(&run), &text);
+                    }
+                    continue;
+                }
+            };
             if !json {
                 println!("{}", outcome.reply.trim());
                 eprintln!("  {}", report.summary());
