@@ -75,6 +75,31 @@ enum Command {
     /// Read the configuration, fill in what it does not say, and check it.
     #[command(subcommand)]
     Config(ConfigCmd),
+    /// Work at one goal across many turns, with the checks run between them.
+    ///
+    /// A turn ends and something has to decide whether there is another one.
+    /// Here that decision reads what the harness measured and what the
+    /// filesystem says changed — never the turn's account of itself.
+    Work {
+        /// The standing goal, carried into every iteration.
+        #[arg(required = true)]
+        goal: Vec<String>,
+        /// Iterations at most. Zero lifts it, and then the other two bound it.
+        #[arg(long, default_value_t = 10)]
+        most: u32,
+        /// Tokens at most, across every iteration. Zero lifts it.
+        #[arg(long, default_value_t = 0)]
+        tokens: u64,
+        /// Keep going after the checks pass, looking for more to do, rather
+        /// than stopping at the first clean evaluation.
+        #[arg(long)]
+        keep_going: bool,
+        /// Approve everything the deny list does not forbid, for a run nobody
+        /// is watching. Without it an unattended run refuses what it cannot get
+        /// approved, which is the safe end of the wait and also a short run.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Run the checks this project is judged by, from `.rook/evaluation.toml`.
     ///
     /// The harness runs them, not the model — an agent that could run its own
@@ -537,6 +562,13 @@ fn main() -> Result<()> {
         Some(Command::Models { recheck, source }) => cmd_models(cli.workspace, cli.json, recheck, source),
         Some(Command::Config(cmd)) => cmd_config(cmd, cli.json),
         Some(Command::Eval { json }) => cmd_eval(cli.workspace, json || cli.json),
+        Some(Command::Work { goal, most, tokens, keep_going, yes }) => cmd_work(
+            cli.workspace,
+            goal.join(" "),
+            rook_core::work::Plan { goal: String::new(), most, tokens, until_clean: !keep_going },
+            yes || cli.yes,
+            cli.json,
+        ),
         Some(Command::Acp) => cmd_acp(cli.workspace),
         Some(Command::Serve { port }) => cmd_serve(port),
         Some(Command::Daemon(c)) => cmd_daemon(c, cli.json),
@@ -1791,6 +1823,141 @@ fn show_stats(s: &StoreStats, json: bool) -> Result<()> {
 /// The same rule `last` follows: sessions belong to the workspace they ran in,
 /// and a project's list is what you meant. What is hidden is said, so nobody
 /// concludes their history is gone.
+/// Work at one goal across many turns, evaluating between them.
+///
+/// The loop is: take a witness of what the checks guard, run a turn, run the
+/// checks, record what happened, and ask [`rook_core::work::after`] whether
+/// there is another. The deciding is in core and tested there; what is here is
+/// the driving.
+///
+/// One session per iteration rather than one for the run. Seventy turns in one
+/// conversation is a context nobody can afford, and the state that has to
+/// survive between them is not the conversation — it is the workspace and what
+/// the checks said about it, both of which the next prompt carries.
+fn cmd_work(
+    workspace: Option<PathBuf>,
+    goal: String,
+    plan: rook_core::work::Plan,
+    yes: bool,
+    json: bool,
+) -> Result<()> {
+    use rook_core::work::{Iteration, Next};
+
+    let here = workspace_of(&workspace);
+    let Some(card) = rook_core::evaluation::read(&here).map_err(anyhow::Error::msg)? else {
+        anyhow::bail!(
+            "{} declares no checks, and a run with nothing to measure is a run that cannot tell              whether it is getting anywhere. Write a scorecard first — `[[check]]` tables, each              with a `name` and something to `run` — and `rook eval` will show what it says.",
+            rook_core::evaluation::scorecard_path(&here).display()
+        );
+    };
+    let plan = rook_core::work::Plan { goal, ..plan };
+
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let rook = rook_core::Rook::open(workspace.clone())?;
+    let run = rook_store::format_session_id(rook_store::new_session_id());
+
+    let ended = runtime.block_on(async {
+        // Built once for the whole run, not once per iteration: an MCP server
+        // respawned seventy times is seventy handshakes, and the rule about
+        // expensive things belonging to the front end is exactly this.
+        let mcp = rook.connect_mcp().await;
+        for (name, error) in &mcp.failures {
+            eprintln!("mcp {name}: {error}");
+        }
+        let servers = rook_core::agent::servers_for(&rook.config, &rook.workspace);
+        let jobs = rook_core::agent::jobs_for(&rook.config);
+
+        let mut done: Vec<Iteration> = Vec::new();
+        let ended = loop {
+            let prompt = match rook_core::work::after(&plan, &done) {
+                Next::Stop(why) => break why,
+                Next::Again(prompt) => prompt,
+            };
+            let at = done.len() as u32 + 1;
+            if !json {
+                eprintln!(
+                    "
+── iteration {at} ──"
+                );
+            }
+
+            // Taken before the turn, so "this was rewritten while it was being
+            // measured" is a comparison across the turn rather than a guess.
+            let before = rook_core::evaluation::witness(&here, &card);
+
+            let provider = match rook_core::models::configured(&rook.config) {
+                Ok(provider) => provider,
+                Err(why) => break format!("no model to run on: {why}"),
+            };
+            let session = match rook.start_session(&format!("work {at}")) {
+                Ok(session) => session,
+                Err(why) => break format!("could not start iteration {at}: {why}"),
+            };
+            let _ = rook.set_goal(session, &plan.goal);
+            let mut agent = rook_core::agent::AgentLoop::new(&rook, provider.into(), session);
+            if yes {
+                agent.allow_everything_not_denied();
+            }
+            rook_core::agent::equip(&mut agent, servers.clone(), &mcp, jobs.clone());
+
+            let outcome = match agent.run(&prompt).await {
+                Ok(outcome) => outcome,
+                Err(why) => break format!("iteration {at} did not finish: {why}"),
+            };
+            let report = rook_core::evaluation::run(&here, &card, &before);
+            if !json {
+                println!("{}", outcome.reply.trim());
+                eprintln!("  {}", report.summary());
+            }
+
+            done.push(Iteration {
+                at,
+                session: rook_store::format_session_id(session),
+                reply: outcome.reply.clone(),
+                changed: outcome.files_changed.clone(),
+                steps: outcome.steps,
+                tokens: u64::from(outcome.input_tokens) + u64::from(outcome.output_tokens),
+                report,
+            });
+            // After every iteration rather than at the end: a run measured in
+            // days is one a machine can lose halfway through, and what it has
+            // done by then is worth more than the tidiness of writing once.
+            if let Ok(text) = serde_json::to_vec(&done) {
+                let _ = rook.store.kv_set(&format!("work/{run}"), &text);
+            }
+        };
+        mcp.shutdown().await;
+        (done, ended)
+    });
+
+    let (done, why) = ended;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "run": run,
+                "stopped": why,
+                "iterations": done,
+            }))?
+        );
+    } else {
+        println!(
+            "
+{why}"
+        );
+        println!("`rook session show <id>` reads any one of them:");
+        for iteration in &done {
+            println!("  {} iteration {}", iteration.session, iteration.at);
+        }
+    }
+    // The verdict is the exit status, the way `eval`'s is, so something driving
+    // this from a script reads the status rather than the prose.
+    match done.last().is_some_and(|last| last.report.clean()) {
+        true => Ok(()),
+        false => std::process::exit(1),
+    }
+}
+
 /// Run the checks this project declares and print what they said.
 ///
 /// Outside any turn and reachable only from here: the model never calls this.

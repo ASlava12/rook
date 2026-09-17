@@ -38,6 +38,7 @@ pub mod search;
 pub mod secrets;
 pub mod service;
 pub mod telemetry;
+pub mod work;
 
 pub use config::{ApiEndpoint, Config, ConfigError, ModelSource};
 pub use docs::{DocSet, Kept};
