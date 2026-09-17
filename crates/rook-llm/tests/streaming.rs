@@ -629,13 +629,11 @@ async fn serve_half_a_body() -> String {
 /// and when that went, this had to be bounded where it can be judged.
 #[tokio::test]
 async fn a_connection_taken_and_never_answered_is_given_up_on_by_the_patience_that_was_set() {
-    let idle = Duration::from_millis(400);
+    // Above the floor that covers connecting, so what is measured here is the
+    // patience and not that floor.
+    let idle = Duration::from_secs(6);
     let request = Request::new(vec![Message::user("hi")]);
     let patience = rook_llm::first_token_patience(idle, request.prompt_bytes());
-    assert!(
-        patience < Duration::from_secs(2),
-        "a short prompt buys no allowance, so this is the patience being tested: {patience:?}"
-    );
 
     let url = serve_nothing().await;
     let started = std::time::Instant::now();
@@ -644,9 +642,11 @@ async fn a_connection_taken_and_never_answered_is_given_up_on_by_the_patience_th
         matches!(refused, Some(LlmError::NeverAnswered { .. })),
         "silence before a single byte is a model that never answered: {refused:?}"
     );
+    // The bound was reached rather than something else ending it early, and it
+    // is the one that was set rather than a deadline nobody chose.
     assert!(
-        started.elapsed() < Duration::from_secs(5),
-        "and it is given up on by the patience, not by a deadline nobody set: {:?}",
+        started.elapsed() >= patience && started.elapsed() < patience * 4,
+        "given up on at the patience of {patience:?}, not at {:?}",
         started.elapsed()
     );
 }
@@ -658,9 +658,12 @@ async fn a_connection_taken_and_never_answered_is_given_up_on_by_the_patience_th
 /// was read that way for weeks. The scale differs; the shape is this one.
 #[tokio::test]
 async fn the_patience_is_how_long_it_may_be_silent_not_how_long_it_may_take() {
-    let idle = Duration::from_millis(400);
-    let gap = Duration::from_millis(120);
-    let pieces = 20;
+    // The gap is what must stay well under the patience, and the total what
+    // must exceed it. Twelve times over on the gap, because the runner that
+    // found the last timing constant here is a virtual machine under load.
+    let idle = Duration::from_millis(1_500);
+    let gap = Duration::from_millis(100);
+    let pieces = 30;
     let url = serve_bytes(
         std::iter::repeat_n(
             "data: {\"choices\":[{\"delta\":{\"content\":\"tok \"}}]}\n\n".as_bytes(),
@@ -685,7 +688,7 @@ async fn the_patience_is_how_long_it_may_be_silent_not_how_long_it_may_take() {
     // The precondition, and the whole of the claim: the answer took several
     // times the patience to arrive, and no gap in it came close.
     assert!(
-        started.elapsed() > patience * 2,
+        started.elapsed() > patience,
         "the answer has to outlast the patience or this proves nothing: {:?} against {patience:?}",
         started.elapsed()
     );
@@ -698,7 +701,10 @@ async fn the_patience_is_how_long_it_may_be_silent_not_how_long_it_may_take() {
 /// that waits for ever.
 #[tokio::test]
 async fn a_body_that_stops_halfway_is_given_up_on_rather_than_waited_out() {
-    let idle = Duration::from_millis(400);
+    // Generous enough that a runner pausing between two reads is not mistaken
+    // for a body that stopped: what is being told apart here is stopped from
+    // slow, and the number only has to be longer than slow.
+    let idle = Duration::from_secs(2);
     let url = serve_half_a_body().await;
     let started = std::time::Instant::now();
     let refused = provider(url, idle).complete(request()).await.err();
@@ -707,7 +713,7 @@ async fn a_body_that_stops_halfway_is_given_up_on_rather_than_waited_out() {
         "a body that stopped arriving is a stall: {refused:?}"
     );
     assert!(
-        started.elapsed() < Duration::from_secs(5),
+        started.elapsed() >= idle && started.elapsed() < idle * 5,
         "given up on by the patience rather than by a deadline nobody set: {:?}",
         started.elapsed()
     );

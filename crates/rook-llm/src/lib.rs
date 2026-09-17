@@ -56,6 +56,16 @@ pub fn first_token_patience(idle: std::time::Duration, prompt_bytes: usize) -> s
     idle.saturating_add(std::time::Duration::from_secs(tokens / SLOWEST_PREFILL))
 }
 
+/// The floor under the wait for a first byte.
+///
+/// Connecting, the request going out and a header coming back all happen inside
+/// that wait, and none of them is the model being silent — which is the thing
+/// the configured patience is about. A floor rather than a number of its own:
+/// it can only lengthen a wait somebody set short, never shorten one they set
+/// long, and the smallest patience anyone writes down is about a reply that
+/// stops halfway.
+const ENOUGH_TO_CONNECT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Wait for an endpoint to begin answering, and no longer.
 ///
 /// The one part of a request nothing else can bound. Connecting has its own
@@ -69,11 +79,18 @@ pub fn first_token_patience(idle: std::time::Duration, prompt_bytes: usize) -> s
 /// The patience is the one somebody configured, plus what reading this prompt
 /// should take — so a cold model reading a full window is waited for, and the
 /// error says the size of the context was already allowed for.
+///
+/// Never less than [`ENOUGH_TO_CONNECT`], because the connection being made is
+/// in here too and is not the model being silent. A loaded FreeBSD runner took
+/// longer than a hundred and fifty milliseconds to accept a connection on
+/// loopback and write a header, and a test that had nothing to do with any of
+/// that failed as "the model sent nothing at all in 0s".
 pub(crate) async fn once_it_answers(
     patience: std::time::Duration,
     prompt_bytes: usize,
     sending: impl std::future::Future<Output = Result<reqwest::Response>>,
 ) -> Result<reqwest::Response> {
+    let patience = patience.max(ENOUGH_TO_CONNECT);
     match tokio::time::timeout(patience, sending).await {
         Ok(answer) => answer,
         Err(_) => Err(LlmError::NeverAnswered {
