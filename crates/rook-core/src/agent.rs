@@ -2177,6 +2177,16 @@ impl<'a> AgentLoop<'a> {
                     }
                 }
             }
+            // The model has stopped talking, so the endpoint is free — but the
+            // stream still holds its place in that endpoint's queue until it is
+            // dropped, and everything below this line can want that place. A
+            // turn on an endpoint allowing one request at a time deadlocked
+            // here for four and a half hours: it finished its answer, took a
+            // goal check, and the checker it spawned waited for a slot its own
+            // parent was holding open. Every configured endpoint allows one
+            // unless it says otherwise, and every autonomous turn takes a goal
+            // check, so this was every such run.
+            drop(stream);
             for text in carried {
                 self.interjections.say(&text);
             }

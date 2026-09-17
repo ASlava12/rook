@@ -171,6 +171,7 @@ impl Stream for Holding {
 
 #[cfg(test)]
 mod tests {
+    use futures_util::StreamExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
@@ -251,6 +252,36 @@ mod tests {
         let overlapped = three_requests("three", 3);
         assert_ne!(overlapped, "+-+-+-", "nothing ran alongside anything");
         assert!(overlapped.starts_with("+++"), "all three were in flight together: {overlapped}");
+    }
+
+    /// A stream keeps its place in the queue until it is dropped, and the
+    /// model having stopped talking is not the same moment.
+    ///
+    /// That gap deadlocked a turn for four and a half hours. An endpoint
+    /// allowing one request at a time — which is what every configured
+    /// endpoint allows unless it says otherwise — finished its answer, took a
+    /// goal check, and the checker it spawned waited for the place its own
+    /// parent was still holding. The parent was waiting for the checker. The
+    /// fix is a `drop` in `agent.rs` at the moment the stream is exhausted;
+    /// this is the half of it that belongs here, so the next edit knows the
+    /// permit really does outlive the last delta.
+    #[test]
+    fn a_finished_stream_still_holds_its_place_until_it_is_dropped() {
+        let queue = "desk-stream";
+        let log = Arc::new(Mutex::new(String::new()));
+        let limited = Limited::new(Box::new(Noting { id: "one".into(), log: log.clone() }), queue, 1);
+
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let stream = limited.stream(Request::new(vec![])).await.expect("a stream");
+            // Read to the end: the model has said everything it is going to.
+            let mut stream = stream;
+            while stream.next().await.is_some() {}
+            assert_eq!(free_at(queue), Some(0), "and the place is still taken");
+
+            drop(stream);
+            assert_eq!(free_at(queue), Some(1), "only dropping it gives the place back");
+        });
     }
 
     /// Two models on one server are two endpoints and one queue: what a local
