@@ -1967,6 +1967,9 @@ fn cmd_work(
             let outcome = match failed {
                 Ok(outcome) => outcome,
                 Err(why) => {
+                    if let Some(previous) = done.last_mut() {
+                        previous.forget_detail();
+                    }
                     done.push(Iteration {
                         at,
                         session: rook_store::format_session_id(session),
@@ -1987,6 +1990,13 @@ fn cmd_work(
                 eprintln!("  {}", report.summary());
             }
 
+            // Only the newest iteration's detail is ever read again, and the
+            // record is rewritten whole after every one — so the one being
+            // replaced gives its text up here. Without this a two-hundred
+            // iteration run wrote 385 MiB of its own words.
+            if let Some(previous) = done.last_mut() {
+                previous.forget_detail();
+            }
             done.push(Iteration {
                 at,
                 session: rook_store::format_session_id(session),

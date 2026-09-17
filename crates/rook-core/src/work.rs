@@ -135,6 +135,26 @@ impl Iteration {
     /// intentions and carried none of them out is the shape being watched for
     /// here — counting it as work would let a run spin for as long as the
     /// budget lasted, rewording the same list.
+    /// Drop what only the newest iteration is read for.
+    ///
+    /// The loop reads the last iteration's whole report — the output of each
+    /// failing check goes into the next prompt — and reads every earlier one
+    /// for three cheap things: how many checks passed, what it wrote, what it
+    /// spent. `reply` it never reads at all.
+    ///
+    /// The text is the expensive part and the record is rewritten whole after
+    /// every iteration, so keeping it made the run quadratic in its own words:
+    /// two hundred iterations of eight checks came to a 3.83 MiB record and
+    /// 385 MiB written over the run. Nothing is lost by forgetting it here —
+    /// `session` is the id `rook session show` reads, and the transcript has
+    /// all of it.
+    pub fn forget_detail(&mut self) {
+        self.reply = String::new();
+        for check in &mut self.report.checks {
+            check.said = String::new();
+        }
+    }
+
     fn did_nothing(&self) -> bool {
         !self.changed.iter().any(|path| path.replace('\\', "/") != NOTES)
     }
@@ -701,6 +721,52 @@ mod tests {
         assert!(prompt.contains("the first thing went wrong"), "{prompt}");
         assert!(prompt.contains("something else entirely"), "{prompt}");
         assert!(!prompt.contains("the same as"), "nothing is shared here: {prompt}");
+    }
+
+    /// The record is rewritten whole after every iteration, so anything kept
+    /// per iteration is paid for again by every iteration after it. Keeping the
+    /// text made a two-hundred-iteration run write 385 MiB of its own words —
+    /// measured before this, at 3.83 MiB for the record itself.
+    #[test]
+    fn a_long_runs_record_does_not_grow_with_what_the_turns_said() {
+        let bulky = |at: u32| {
+            let check = |n: usize| {
+                let mut scored = scored(&format!("check-{n}"), false);
+                scored.said = "x".repeat(2_000);
+                scored
+            };
+            let mut iteration = iteration(at, (0..8).map(check).collect(), &["src/lib.rs"]);
+            iteration.reply = "y".repeat(3_000);
+            iteration
+        };
+
+        // The precondition: one iteration really is heavy, so this is about
+        // the forgetting and not about a record that was small anyway.
+        let one = serde_json::to_vec(&vec![bulky(1)]).unwrap().len();
+        assert!(one > 15_000, "one whole iteration is {one} bytes");
+
+        // Kept the way the loop keeps them: the newest whole, the rest not.
+        let mut done: Vec<Iteration> = Vec::new();
+        for at in 1..=200 {
+            if let Some(previous) = done.last_mut() {
+                previous.forget_detail();
+            }
+            done.push(bulky(at));
+        }
+
+        let whole = serde_json::to_vec(&done).unwrap().len();
+        // A kilobyte or so each: the names and verdicts of eight checks, which
+        // is what `passed()` still counts, plus the session id and the paths.
+        // Against 3.83 MiB with the text kept — seventeen times smaller, and
+        // 22 MiB written over a run rather than 385.
+        assert!(whole < 300_000, "two hundred iterations come to {whole} bytes");
+        // And the newest still carries what the next prompt is built from.
+        assert!(done[199].report.checks[0].said.len() == 2_000, "the last one keeps its detail");
+        assert!(done[0].report.checks[0].said.is_empty(), "and the first has given it up");
+        // What every earlier one is still read for survives.
+        assert_eq!(done[0].report.passed(), 0, "how many passed");
+        assert_eq!(done[0].changed, vec!["src/lib.rs".to_string()], "what it wrote");
+        assert_eq!(done[0].tokens, 1_000, "and what it spent");
     }
 
     /// A model that sees no file assumes there is nowhere to write.
