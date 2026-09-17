@@ -1553,7 +1553,8 @@ fn checked(runtime: &tokio::runtime::Runtime, json: bool) -> Result<()> {
 /// choice between the two is made out here, and only the local half is given
 /// to the runtime.
 fn rechecked(runtime: &tokio::runtime::Runtime, json: bool) -> Result<()> {
-    let answers: Vec<rook_core::models::Answered> = match crate::source::Daemon::running() {
+    let daemon = crate::source::Daemon::running();
+    let answers: Vec<rook_core::models::Answered> = match &daemon {
         Some(daemon) => {
             // Which process was put back, because that is the whole of what
             // this command does and the table alone does not say it: the same
@@ -1571,6 +1572,9 @@ fn rechecked(runtime: &tokio::runtime::Runtime, json: bool) -> Result<()> {
     };
     if json {
         println!("{}", serde_json::to_string_pretty(&answers)?);
+        if let Some(daemon) = &daemon {
+            second_opinion(runtime, daemon, &answers);
+        }
         return Ok(());
     }
     if answers.is_empty() {
@@ -1600,7 +1604,60 @@ fn rechecked(runtime: &tokio::runtime::Runtime, json: bool) -> Result<()> {
     // `[endpoints]` became a table of its own the older word named the wrong
     // one of the two.
     print!("{}", fmt::table(&["", "model", "answered in", "what it says"], &rows));
+    if let Some(daemon) = &daemon {
+        second_opinion(runtime, daemon, &answers);
+    }
     Ok(())
+}
+
+/// Ask from here whatever the daemon says it cannot reach, and say so where
+/// the two disagree.
+///
+/// This command is what somebody runs to answer "why can the agent not see my
+/// server", and it answers it from inside the daemon — which is the one place
+/// that cannot notice the daemon being the problem. It happened: a rookd that
+/// had never reached the machines on its own network answered `No route to
+/// host` in nought milliseconds for both of them, while a terminal beside it
+/// reached one in ten and the other in ninety, with the same configuration,
+/// the same environment and the same binary. Everything the table showed was
+/// true and every word of it pointed at the network.
+///
+/// Only the ones it refused, so a recheck where everything answers costs
+/// nothing. `answering_again` has already run in that process and in this one,
+/// so neither answer is an exclusion being repeated back.
+fn second_opinion(
+    runtime: &tokio::runtime::Runtime,
+    daemon: &crate::source::Daemon,
+    answers: &[rook_core::models::Answered],
+) {
+    let refused: Vec<&str> = answers.iter().filter(|a| !a.answering()).map(|a| a.name.as_str()).collect();
+    if refused.is_empty() {
+        return;
+    }
+    let Ok(mut config) = rook_core::Config::load() else { return };
+    // The same function the daemon just ran, narrowed to what it could not
+    // reach: two ways of asking would be two answers to keep in step.
+    config.models.retain(|name, _| refused.contains(&name.as_str()));
+    let vault = rook_core::Vault::load().unwrap_or_else(|_| rook_core::Vault::empty());
+    let here = runtime.block_on(rook_core::models::recheck(&config, &vault));
+
+    let reached: Vec<String> =
+        here.iter().filter(|a| a.answering()).map(|a| format!("{} in {} ms", a.name, a.took_ms)).collect();
+    if reached.is_empty() {
+        return;
+    }
+    eprintln!(
+        "\nbut this terminal reaches {} — so it is that process and not the network.",
+        reached.join(", ")
+    );
+    // How long it has been running, where it will say: a daemon older than the
+    // network it is on is the shape this takes, and the age is what makes that
+    // readable rather than a guess.
+    let age = daemon
+        .health()
+        .map(|h| format!(" It has been up {}.", fmt::ago(rook_store::now_unix() - h.uptime_secs as i64)))
+        .unwrap_or_default();
+    eprintln!("`rook daemon restart` starts the installed build in its place.{age}");
 }
 
 /// Configured from the configuration and nothing else, so the two commands

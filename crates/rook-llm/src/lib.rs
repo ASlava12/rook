@@ -354,6 +354,26 @@ fn advice(endpoint: &str, detail: &str) -> String {
     {
         return "That host does not resolve. Check the spelling of the endpoint, and DNS.".to_string();
     }
+    // "No route to host" to a machine on this network is usually not a route.
+    //
+    // macOS hands out access to the local network per application, and refuses
+    // an application that has not been allowed it with `EHOSTUNREACH` — the
+    // same error as a missing route, immediately, with no packet sent and
+    // nothing written to any log. It cost an evening: two servers on the same
+    // subnet, a route to each, arp resolved, `curl` reaching both — `curl` is
+    // Apple's own binary and is not subject to it — and a `rookd` that had
+    // never reached either, answering in nought milliseconds. Restarting it did
+    // not help, because the answer does not depend on the process. Every
+    // message pointed at the network, and the network was fine.
+    if cfg!(target_os = "macos") && said.contains("no route to host") && !local && beside_us(endpoint) {
+        return "That address is on this network, so a missing route is the unlikely half of \
+                this. macOS allows an application into the local network one at a time, and \
+                refuses the rest with exactly this error — no packet, no log entry. Allow the \
+                terminal you run this from, and `rookd`, under System Settings → Privacy & \
+                Security → Local Network. `curl` reaching the same address proves nothing: it \
+                is Apple's own binary and is not subject to it."
+            .to_string();
+    }
     match local {
         true => "Nothing is listening there. Start the server, or point `[agent] model` at one \
                  that is running — `rook models` lists what an endpoint offers."
@@ -1131,6 +1151,35 @@ mod tests {
         .to_string();
         assert!(remote.contains("does not resolve"), "a name is a third fix again: {remote}");
         assert!(!remote.contains("API key"), "and not the one for a key: {remote}");
+    }
+
+    /// An evening went into this one. Two model servers on this subnet, a route
+    /// to each, arp resolved, `curl` reaching both — and a `rookd` that had
+    /// never reached either, refused in nought milliseconds with the error a
+    /// missing route gives. macOS lets an application into the local network
+    /// one at a time and refuses the rest exactly this way, with no packet sent
+    /// and nothing in any log, so every message the agent printed pointed at
+    /// the network and the network was fine.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn no_route_to_a_machine_on_this_network_names_the_permission_rather_than_the_network() {
+        let said = LlmError::Unreachable {
+            endpoint: "http://192.168.1.46:1234".into(),
+            detail: "No route to host (os error 65)".into(),
+        }
+        .to_string();
+        assert!(said.contains("Local Network"), "it names where the switch is: {said}");
+        assert!(said.contains("curl"), "and why curl proves nothing: {said}");
+        assert!(!said.contains("Nothing is listening"), "and not the advice for a refusal: {said}");
+
+        // A public address that really has no route keeps the older answer:
+        // this is about addresses on our own network and nothing else.
+        let far = LlmError::Unreachable {
+            endpoint: "https://api.example.com".into(),
+            detail: "No route to host (os error 65)".into(),
+        }
+        .to_string();
+        assert!(!far.contains("Local Network"), "the permission is not the reason out there: {far}");
     }
 
     /// A gateway on plain http is an ordinary thing to run on this machine.
