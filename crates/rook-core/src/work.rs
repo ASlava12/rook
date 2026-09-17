@@ -90,11 +90,17 @@ pub struct Plan {
     /// Iterations at most. Zero is no ceiling, and a run with no ceiling wants
     /// one of the other two.
     pub most: u32,
-    /// Tokens at most, across every iteration. Zero is no ceiling.
+    /// Stop once the run has spent this many tokens. Zero is no budget.
     ///
     /// The budget that matters over days: a step limit bounds one turn, and
     /// seventy of them bounded only by step limits is seventy times a number
     /// nobody chose with this in mind.
+    ///
+    /// A stopping rule and not a cap, which is the honest way to say it: the
+    /// spend is only known when an iteration ends, so the one that crosses the
+    /// line finishes and the run stops after it. A live run set to 8,000 ended
+    /// having spent 15,321, and there is no wording of this field that makes
+    /// that surprising if it says what it does.
     pub tokens: u64,
     /// Stop as soon as every check passes, rather than carrying on looking for
     /// something else to do.
@@ -543,6 +549,10 @@ mod tests {
         let mut three = two;
         three.push(iteration(3, vec![scored("tests", false)], &["c.rs"]));
         let Next::Stop(why) = after(&plan, &three, None) else { panic!("over budget") };
+        // What was spent, not what was allowed: the two differ, because the
+        // spend is only known when an iteration ends and the one that crosses
+        // the line finishes. A live run set to 8,000 stopped having spent
+        // 15,321, and a message quoting the budget would have hidden that.
         assert!(why.contains("3000 tokens"), "it says what was spent: {why}");
         assert!(why.contains("budget"), "{why}");
     }

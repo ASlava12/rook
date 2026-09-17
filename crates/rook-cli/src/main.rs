@@ -87,7 +87,9 @@ enum Command {
         /// Iterations at most. Zero lifts it, and then the other two bound it.
         #[arg(long, default_value_t = 10)]
         most: u32,
-        /// Tokens at most, across every iteration. Zero lifts it.
+        /// Stop once the run has spent this many tokens, counted between
+        /// iterations — so the one that crosses the line finishes first. Zero
+        /// lifts it.
         #[arg(long, default_value_t = 0)]
         tokens: u64,
         /// Keep going after the checks pass, looking for more to do, rather
