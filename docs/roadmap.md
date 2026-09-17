@@ -5,6 +5,25 @@ what unblocks the most.
 
 ## Done
 
+- **Independent evaluation** — `.rook/evaluation.toml` declares what a project
+  is judged by and `rook eval` runs it, from the command line only: there is
+  deliberately no tool, because an agent that could run its own evaluation could
+  run it until it passed. Real independence is not available to a coding agent,
+  so what this buys is a witness — the guarded files and the scorecard are
+  hashed before the work and after, and a check that went green in the same run
+  that rewrote it says so beside the pass. A check that outruns its deadline is
+  killed as a process group, which is the difference between a deadline and a
+  suggestion. 13 tests.
+- **Working at one goal across turns** — `rook work`, with the deciding in
+  `work::after` and tested there: it reads what the harness measured and what
+  the filesystem changed, never the turn's account of itself. Names a regression
+  before anything else, refuses to call a rewritten check a pass, stops on two
+  iterations that change nothing, counts a token budget across iterations rather
+  than within one, and carries what earlier iterations did whether or not the
+  model kept its own `.rook/plan.md`. One session per iteration; the record is
+  written after each, and `--resume` carries a run on with its ceilings and its
+  spend. 18 tests. Measured live: four iterations stuck at three of four checks,
+  stopped by the idle rule.
 - **Content-addressed store** — blake3 addressing, per-kind trained zstd
   dictionaries, inlining, mark-and-sweep GC with a caller-supplied expander,
   retention policy with real defaults, integrity verification, format versioning.
