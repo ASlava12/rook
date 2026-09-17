@@ -882,14 +882,18 @@ fn start_daemon(on_port: Option<u16>) -> Option<(std::process::Child, String)> {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(
-            match rook_core::telemetry::open_log(
+            match rook_core::telemetry::open_named(
                 &paths::logs_dir(),
+                rook_core::telemetry::PANICS,
                 rook_core::Config::load().map(|c| c.telemetry.max_log_bytes).unwrap_or(u64::MAX),
             ) {
-                // The same file `tracing` writes to, so what the daemon says is in
-                // one place. A tracing line is written to both and so appears
-                // twice, which at the default `warn` is a line a month and is the
-                // price of the panic that explains a crash being kept at all.
+                // Its own file, not the one `tracing` writes to. It was that one,
+                // and every line the daemon logged went into it twice — once from
+                // the file layer, once down this stderr — which doubles the length
+                // of the thing somebody reads when the daemon is misbehaving. What
+                // this file is for is the other half: a panic aborts the release
+                // build without `tracing` getting a word in, and the reason is
+                // here or nowhere. Empty is the ordinary state of it.
                 Some(log) => std::process::Stdio::from(log),
                 // A log that cannot be opened is not a reason to refuse to start,
                 // which is the rule the log itself follows.

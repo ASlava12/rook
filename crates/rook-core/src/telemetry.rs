@@ -47,12 +47,35 @@ pub fn init(config: &TelemetryConfig, to_terminal: bool) {
     }
 }
 
+/// Where a spawned daemon's own stderr goes.
+///
+/// Its own file, and not the one `tracing` writes to. It was that one, so every
+/// line the daemon logged was written twice — once by the file layer and once
+/// down the stderr that was the same file — and the comment that said so called
+/// it a line a month. An evening of reading a daemon that could not reach its
+/// own network found a dozen, doubled, which is twice as long to read and reads
+/// at first as two processes writing.
+///
+/// Kept rather than dropped, because what comes out here is what `tracing`
+/// cannot write: `panic = "abort"` is set for release, so a panic ends the
+/// daemon and every turn it was holding, and the reason is on stderr or it is
+/// nowhere. This file being anything other than empty is itself the news.
+pub const PANICS: &str = "rook-stderr.log";
+
 /// Rotate once at the limit, so the logs cost at most twice it and the previous
 /// run is still readable. Returns nothing if the directory is not writable —
 /// losing the file log is not a reason to refuse to start.
+///
+/// `name` is [`PANICS`] for a daemon's raw stderr and `rook.log` for the lines
+/// `tracing` writes.
 pub fn open_log(dir: &std::path::Path, max_bytes: u64) -> Option<File> {
+    open_named(dir, "rook.log", max_bytes)
+}
+
+/// The same, for a file that is not the one everything logs to.
+pub fn open_named(dir: &std::path::Path, name: &str, max_bytes: u64) -> Option<File> {
     std::fs::create_dir_all(dir).ok()?;
-    let path = dir.join("rook.log");
+    let path = dir.join(name);
     if std::fs::metadata(&path).is_ok_and(|m| m.len() >= max_bytes) {
         let _ = std::fs::rename(&path, path.with_extension("log.1"));
     }

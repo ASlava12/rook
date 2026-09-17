@@ -839,8 +839,11 @@ and the store's single write lock with it — for as long as the process lives.
 
 Logs go to stderr and to `$ROOK_HOME/logs/rook.log`, at `telemetry.log_level`
 unless `ROOK_LOG` says otherwise, rotated once at `telemetry.max_log_bytes` so
-they cost at most twice it. Nothing is uploaded anywhere; `telemetry.upload`
-exists so that answer is findable rather than assumed.
+they cost at most twice it. A spawned daemon's own stderr goes beside it, to
+`rook-stderr.log`, and that file is empty unless something wrote where `tracing`
+could not — a panic aborts the release build without a word, so the reason is
+there or nowhere. Nothing is uploaded anywhere; `telemetry.upload` exists so
+that answer is findable rather than assumed.
 
 A rule that will not compile is not applied, and which list it was in decides
 what that costs. Dropping an `allow` only means being asked more often, so it is

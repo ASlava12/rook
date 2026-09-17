@@ -87,6 +87,21 @@ stated in the system prompt, because GNU-versus-BSD tool differences are the mos
 common cross-platform failure in agent transcripts. macOS and FreeBSD share a
 variant automatically, which is the point.
 
+**The local network, on macOS.** Access to it is granted one application at a
+time, and an application that has not been granted it is refused with
+`EHOSTUNREACH` — the error a missing route gives, immediately, with no packet
+sent and nothing written to any log. A model server on the same subnet is
+therefore unreachable in a way that looks exactly like a network fault, and the
+obvious check makes it worse: `curl` is Apple's own binary and is not subject to
+the rule, so it reaches the address from the same shell in the same second.
+
+The permission belongs to the application the process is attributed to — the
+terminal, not the binary — and it is decided when that application starts, so
+turning it on does not affect a terminal that is already running. It is under
+System Settings → Privacy & Security → Local Network, and it takes a restart of
+the terminal. The advice for that error says so where the address is on this
+network; `advice` in [`rook-llm`](../crates/rook-llm/src/lib.rs) is where.
+
 **Path containment** is lexical — `..` is normalised without touching the
 filesystem — so it behaves identically on case-insensitive filesystems and on
 Windows, and works for paths that do not exist yet.

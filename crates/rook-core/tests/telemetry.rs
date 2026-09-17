@@ -59,3 +59,25 @@ fn a_log_under_its_limit_is_appended_to() {
 
     assert_eq!(logs.len("rook.log"), 10, "nothing was lost");
 }
+
+/// A daemon's own stderr is where a panic lands — `panic = "abort"` is set for
+/// release, so the process is gone before `tracing` can write a word. It used
+/// to land in the file `tracing` writes to, which meant every line the daemon
+/// logged was written twice: once by the file layer, once down the stderr that
+/// was the same file. An evening spent reading that log found a dozen doubled
+/// lines, which reads at first as two processes writing.
+#[test]
+fn a_daemons_own_stderr_is_not_the_file_tracing_writes_to() {
+    use rook_core::telemetry::{PANICS, open_named};
+
+    let logs = Logs::with(0);
+    let mut tracing = open_log(logs.0.path(), u64::MAX).unwrap();
+    let mut stderr = open_named(logs.0.path(), PANICS, u64::MAX).unwrap();
+    tracing.write_all(b"a warning\n").unwrap();
+    stderr.write_all(b"panicked at\n").unwrap();
+    drop((tracing, stderr));
+
+    assert_eq!(logs.names(), ["rook-stderr.log", "rook.log"], "two files, each with one job");
+    assert_eq!(logs.len("rook.log"), 10, "the warning is written once");
+    assert_eq!(logs.len(PANICS), 12, "and the panic is kept, apart from it");
+}
