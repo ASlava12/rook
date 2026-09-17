@@ -394,6 +394,14 @@ async fn prompt(
                     &format!("[{done}/{total}] {task}\n"),
                     &part(1),
                 ),
+                // The editor has nothing else to show while the model reads a
+                // long prompt, and on a local one that is minutes; a thought is
+                // where an editor puts what is happening but is not the answer.
+                Progress::Waiting { secs, patience } => protocol::agent_thought_chunk(
+                    &request.session_id,
+                    &format!("  {}\n", rook_core::calls::waiting(secs, patience)),
+                    &part(1),
+                ),
                 Progress::Delegating { at, doing } => protocol::agent_thought_chunk(
                     &request.session_id,
                     &format!("  {}\n", rook_core::calls::delegating(at, doing)),

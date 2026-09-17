@@ -532,6 +532,60 @@ pub enum Progress<'a> {
     Heard {
         text: &'a str,
     },
+    /// The model has been asked and has not begun to answer.
+    ///
+    /// The last silence in a turn with no account of itself. A tool that takes
+    /// a while says so, a sub-agent says so, a step says which it is — and then
+    /// the request goes out and nothing is heard until the first token, which
+    /// on a local model reading a full context is a quarter of an hour by
+    /// design. Watching that, a working agent and a dead tunnel are the same
+    /// blank screen, and it was read as the second for weeks.
+    ///
+    /// `patience` is how long this wait may last, so the line answers the
+    /// question that follows it: whether to keep waiting or go and look.
+    Waiting {
+        secs: u64,
+        patience: u64,
+    },
+}
+
+/// How long a wait for the model may go unmentioned. An ordinary answer begins
+/// before this and a line about it would be noise.
+const SAY_IT_WAITS_AFTER: std::time::Duration = std::time::Duration::from_secs(20);
+/// And how often after that — often enough to be a sign of life, rare enough
+/// that a quarter of an hour of prefill is thirty lines and not seven hundred.
+const SAY_IT_STILL_WAITS_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Wait for something, saying how long it has been waiting while it waits.
+///
+/// The same shape a long tool call already uses, for the one wait that had no
+/// voice: the model's. First after twenty seconds, because an ordinary answer
+/// begins before that and a line about it would be noise; then every half
+/// minute, which is often enough to be a sign of life and rare enough to read.
+async fn saying_it_waits<T>(
+    working: impl std::future::Future<Output = T>,
+    patience: std::time::Duration,
+    mut on_progress: impl FnMut(Progress<'_>),
+) -> T {
+    // The runtime's clock rather than the system's: it is the one the timer
+    // beside it runs on, so the two cannot disagree — and a test can hold it
+    // still rather than waiting out half a minute to watch this work.
+    let started = tokio::time::Instant::now();
+    tokio::pin!(working);
+    let mut saying =
+        tokio::time::interval_at(tokio::time::Instant::now() + SAY_IT_WAITS_AFTER, SAY_IT_STILL_WAITS_EVERY);
+    loop {
+        tokio::select! {
+            // So a wait that ends on the tick is reported as over rather than
+            // as still going.
+            biased;
+            done = &mut working => return done,
+            _ = saying.tick() => on_progress(Progress::Waiting {
+                secs: started.elapsed().as_secs(),
+                patience: patience.as_secs(),
+            }),
+        }
+    }
 }
 
 /// Answer a tool call the log never answered.
@@ -2109,7 +2163,15 @@ impl<'a> AgentLoop<'a> {
             request.effort = Some(self.effort);
             request.max_output_tokens = self.room_for_output(used);
             request.cache_ttl = self.rook.config.agent.cache_ttl();
-            let asked = match self.provider.stream(request.clone()).await {
+            // How long this endpoint may be silent before it is given up on —
+            // the configured patience plus what reading this prompt should
+            // take. Carried into the waiting line so that it answers the
+            // question it raises: whether to keep waiting or go and look.
+            let patience =
+                rook_llm::first_token_patience(self.rook.config.agent.stream_idle(), request.prompt_bytes());
+            let answering =
+                saying_it_waits(self.provider.stream(request.clone()), patience, &mut on_progress);
+            let asked = match answering.await {
                 Ok(stream) => Ok(stream),
                 // The window was an assumption and the endpoint has just
                 // disagreed with it. Believing the refusal costs a
@@ -2149,6 +2211,17 @@ impl<'a> AgentLoop<'a> {
             // said nothing rather than a connection that went away — and the
             // window had shown those two paragraphs.
             let mut broke: Option<CoreError> = None;
+            // The other half of the same silence, and on a local server the
+            // half that is long: the stream opens the moment the request lands
+            // and says nothing at all while the prompt is read. Nothing below
+            // fires once a first token has arrived — after that the stream's
+            // own idle timeout is what watches it.
+            let quiet_since = tokio::time::Instant::now();
+            let mut nothing_yet = true;
+            let mut saying = tokio::time::interval_at(
+                tokio::time::Instant::now() + SAY_IT_WAITS_AFTER,
+                SAY_IT_STILL_WAITS_EVERY,
+            );
             loop {
                 tokio::select! {
                     biased;
@@ -2160,6 +2233,7 @@ impl<'a> AgentLoop<'a> {
                         nursery.landed[at] = Some(result);
                     }
                     delta = stream.next() => {
+                        nothing_yet = false;
                         let Some(delta) = delta else { break };
                         match delta {
                             Ok(delta) => {
@@ -2175,6 +2249,10 @@ impl<'a> AgentLoop<'a> {
                             }
                         }
                     }
+                    _ = saying.tick(), if nothing_yet => on_progress(Progress::Waiting {
+                        secs: quiet_since.elapsed().as_secs(),
+                        patience: patience.as_secs(),
+                    }),
                 }
             }
             // The model has stopped talking, so the endpoint is free — but the

@@ -583,3 +583,132 @@ async fn the_same_pause_after_a_short_prompt_is_still_given_up_on() {
         "a short prompt buys no allowance, so the silence is still given up on: {ended:?}"
     );
 }
+
+/// Accept the connection, read the request, and never write a byte. A tunnel
+/// whose far end has gone looks exactly like this from here: the listener is
+/// still on the local port, so connecting succeeds and nothing follows.
+async fn serve_nothing() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut scratch = [0u8; 8192];
+        let _ = socket.read(&mut scratch).await;
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    });
+    format!("http://{addr}/v1")
+}
+
+/// A reply that starts arriving and stops, without closing the connection.
+/// `Content-Length` promises more than is sent, so the client is left waiting
+/// for a body that is never finished.
+async fn serve_half_a_body() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut scratch = [0u8; 8192];
+        let _ = socket.read(&mut scratch).await;
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 400\r\n\r\n\
+                  {\"choices\":[{\"message\":{\"role\":\"assist",
+            )
+            .await
+            .unwrap();
+        socket.flush().await.unwrap();
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    });
+    format!("http://{addr}/v1")
+}
+
+/// A connection that is taken and then never answered has no clock of its own:
+/// the bytes that would reset the stream's patience never arrive, so nothing
+/// inside the stream is reached at all. It was covered by a ten-minute total
+/// deadline on the client — the same deadline that cut replies still arriving —
+/// and when that went, this had to be bounded where it can be judged.
+#[tokio::test]
+async fn a_connection_taken_and_never_answered_is_given_up_on_by_the_patience_that_was_set() {
+    let idle = Duration::from_millis(400);
+    let request = Request::new(vec![Message::user("hi")]);
+    let patience = rook_llm::first_token_patience(idle, request.prompt_bytes());
+    assert!(
+        patience < Duration::from_secs(2),
+        "a short prompt buys no allowance, so this is the patience being tested: {patience:?}"
+    );
+
+    let url = serve_nothing().await;
+    let started = std::time::Instant::now();
+    let refused = provider(url, idle).stream(request).await.err();
+    assert!(
+        matches!(refused, Some(LlmError::NeverAnswered { .. })),
+        "silence before a single byte is a model that never answered: {refused:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "and it is given up on by the patience, not by a deadline nobody set: {:?}",
+        started.elapsed()
+    );
+}
+
+/// The patience is how long the model may be *silent*, not how long it may
+/// take. A clock on the whole answer was set here once, at ten minutes, and a
+/// reply arriving a token at a time was cut at exactly ten minutes and reported
+/// as `operation timed out` — which reads as the endpoint having gone away, and
+/// was read that way for weeks. The scale differs; the shape is this one.
+#[tokio::test]
+async fn the_patience_is_how_long_it_may_be_silent_not_how_long_it_may_take() {
+    let idle = Duration::from_millis(400);
+    let gap = Duration::from_millis(120);
+    let pieces = 20;
+    let url = serve_bytes(
+        std::iter::repeat_n(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"tok \"}}]}\n\n".as_bytes(),
+            pieces,
+        )
+        .collect(),
+        gap,
+        false,
+    )
+    .await;
+
+    let request = Request::new(vec![Message::user("hi")]);
+    let patience = rook_llm::first_token_patience(idle, request.prompt_bytes());
+    let started = std::time::Instant::now();
+    let mut stream = provider(url, idle).stream(request).await.unwrap();
+    let mut text = String::new();
+    while let Some(delta) = stream.next().await {
+        if let Delta::Text(t) = delta.expect("a reply still arriving is not late") {
+            text.push_str(&t);
+        }
+    }
+    // The precondition, and the whole of the claim: the answer took several
+    // times the patience to arrive, and no gap in it came close.
+    assert!(
+        started.elapsed() > patience * 2,
+        "the answer has to outlast the patience or this proves nothing: {:?} against {patience:?}",
+        started.elapsed()
+    );
+    assert_eq!(text, "tok ".repeat(pieces), "and all of it arrived");
+}
+
+/// The same question for a reply that is not streamed. Its body arrives after
+/// the model has already finished, so a pause in it is a connection that has
+/// stopped — and with no total deadline on the client, waiting on one is a turn
+/// that waits for ever.
+#[tokio::test]
+async fn a_body_that_stops_halfway_is_given_up_on_rather_than_waited_out() {
+    let idle = Duration::from_millis(400);
+    let url = serve_half_a_body().await;
+    let started = std::time::Instant::now();
+    let refused = provider(url, idle).complete(request()).await.err();
+    assert!(
+        matches!(refused, Some(LlmError::Stalled { .. })),
+        "a body that stopped arriving is a stall: {refused:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "given up on by the patience rather than by a deadline nobody set: {:?}",
+        started.elapsed()
+    );
+}

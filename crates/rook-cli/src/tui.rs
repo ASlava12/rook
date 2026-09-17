@@ -287,6 +287,10 @@ enum TurnEvent {
     Step(u32, u32),
     /// What the call in flight says about itself while it runs.
     Working(String),
+    /// How long the turn will wait for a model that has not begun to answer.
+    /// Said by the turn, because the size of the prompt it is waiting on is not
+    /// something a window can see.
+    Waiting(u64),
     Spent {
         input: u32,
         output: u32,
@@ -597,6 +601,10 @@ struct Chat {
     /// drawing is still running. Asked once per silence, and forgotten the
     /// moment anything is heard.
     asked_if_alive: bool,
+    /// How long the turn in flight will wait for the model, as the turn itself
+    /// works it out. `None` until it says so — a window that attached mid-turn
+    /// falls back to estimating, which is what every window did before.
+    waiting_for: Option<std::time::Duration>,
 }
 
 /// The configuration a window shows, whether or not it holds a store of its own.
@@ -925,6 +933,7 @@ impl Chat {
         self.heard = self.since;
         self.asked_if_alive = false;
         self.working = None;
+        self.waiting_for = None;
     }
 
     /// A turn is over, however it ended.
@@ -1447,6 +1456,11 @@ impl App {
     /// the configured number is the whole answer.
     fn waiting_for(&self) -> std::time::Duration {
         const BYTES_A_TOKEN: usize = 4;
+        // What the turn says, where it has said it: it knows the prompt to the
+        // byte and this side is estimating from the last reply's count.
+        if let Some(said) = self.chat.waiting_for {
+            return said;
+        }
         rook_llm::first_token_patience(self.patience, self.chat.carried as usize * BYTES_A_TOKEN)
     }
 
@@ -1495,6 +1509,9 @@ impl App {
                 TurnEvent::Tool { name, said } => self.chat.tool_started(&name, &said),
                 TurnEvent::Agent(line) => self.chat.push("agent", &line),
                 TurnEvent::Working(said) => self.chat.working = Some(said),
+                TurnEvent::Waiting(secs) => {
+                    self.chat.waiting_for = Some(std::time::Duration::from_secs(secs))
+                }
                 TurnEvent::Heard(text) => self.chat.taken_up(&text),
                 TurnEvent::Step(at, of) => self.chat.step = Some((at, of)),
                 TurnEvent::ToolDone(name, failed) => self.chat.tool_done(&name, failed),
@@ -2525,6 +2542,13 @@ impl App {
                             TurnEvent::Agent(format!("    {}", rook_core::calls::delegating(at, doing)))
                         }
                         Progress::Working { said, .. } => TurnEvent::Working(said.to_string()),
+                        // The window draws its own line for a silent model and
+                        // has since before this existed; what it could not do
+                        // was know how long that silence may last, because the
+                        // size of the prompt is not something this side sees.
+                        // This is that number, from the turn that will enforce
+                        // it.
+                        Progress::Waiting { patience, .. } => TurnEvent::Waiting(patience),
                         Progress::Heard { text } => TurnEvent::Heard(text.to_string()),
                         Progress::Step { at, of } => TurnEvent::Step(at, of),
                         Progress::ToolDone { name, failed } => TurnEvent::ToolDone(name.to_string(), failed),

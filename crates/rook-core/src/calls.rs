@@ -130,10 +130,38 @@ pub fn delegating(at: usize, doing: &str) -> String {
     format!("↳ {} {doing}", at + 1)
 }
 
+/// The line said while the model has been asked and has not begun to answer.
+///
+/// One phrasing for every front end, because the question a person asks when
+/// they read it is the same everywhere: is this working, or has it gone? Both
+/// numbers answer it — how long it has been, and how long it may be. Without
+/// the second, "waiting 4m" is the same blank wall it replaced.
+pub fn waiting(secs: u64, patience: u64) -> String {
+    format!("waiting on the model — {} so far, up to {}", plainly(secs), plainly(patience))
+}
+
+/// Seconds as a person says them.
+fn plainly(secs: u64) -> String {
+    match secs {
+        ..60 => format!("{secs}s"),
+        60..3600 => format!("{}m{:02}s", secs / 60, secs % 60),
+        _ => format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The wait says how long it may last, because that is the decision the
+    /// person reading it is about to take: keep waiting, or go and look.
+    #[test]
+    fn a_wait_says_both_how_long_it_has_been_and_how_long_it_may_be() {
+        let said = waiting(260, 3_840);
+        assert!(said.contains("4m20s"), "how long it has been: {said}");
+        assert!(said.contains("1h04m"), "and how long it may be: {said}");
+    }
 
     #[test]
     fn a_call_is_named_by_what_it_is_working_on() {

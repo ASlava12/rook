@@ -76,6 +76,34 @@ comparison when it is too large to hold. Draining still matters where a writer i
 on the other end — `hooks` deadlocked when it stopped reading a full pipe — so
 bound the memory and read to the end.
 
+**A deadline on the whole of a request is a clock on the answer.** The HTTP
+client had one at ten minutes. reqwest's `timeout` runs from the first connect
+until the body has finished, so on a streamed reply it bounds the answer rather
+than the silence: a stream delivering a token every few milliseconds was cut at
+exactly ten minutes and reported as `cannot reach …: operation timed out`, which
+reads as the endpoint having gone away and was read that way for weeks — the
+tunnel was blamed and the fault was ours. It also silently overrode a
+`stream_idle_timeout_secs` of twenty minutes, set for exactly the case it broke.
+Bound each part where it can be judged instead: connecting, by `connect_timeout`;
+the wait for a first byte, by a patience that knows how much prompt the model has
+to read; a stream going quiet mid-answer, by the idle timeout that resets as
+bytes arrive; a body nobody is streaming, by the same silence. A reply that is
+still arriving is not late.
+
+A patience measured in tens of minutes is only liveable if it says so. A wait
+with no line is a hang — `Progress::Waiting` carries how long it has been and how
+long it may be, after twenty seconds and every half minute, in all three front
+ends. The second number is what makes it a decision rather than a spinner.
+
+**A run that could not run is not a run that finished.** `rook work` stops after
+two iterations that change nothing, and a run whose model had gone away said
+exactly that: "2 iterations in a row changed nothing, so this is as far as it
+goes" — the sentence a person reads first, reporting a job done at the moment
+nothing had been tried. An iteration now keeps why it failed, the verdict says
+which of the two happened, and the next prompt is told the last turn was cut off
+rather than that it chose to do nothing. The same distinction, three places,
+because all three were saying the wrong one.
+
 **Errors say what to do.** `CaptureTooBig` names the limit that was hit.
 `StoreError::Locked` says which process is probably holding it and what to do
 instead. `NoCompatibleVersion` lists every mismatch, not the first.

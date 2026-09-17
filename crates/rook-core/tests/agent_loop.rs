@@ -6144,3 +6144,72 @@ async fn asking_the_same_claim_twice_without_writing_anything_is_still_a_pass() 
     assert!(outcome.files_changed.is_empty(), "nothing was written: {:?}", outcome.files_changed);
     assert!(second.contains("VERDICT: holds"), "so the second verdict stands: {second}");
 }
+
+/// A model that takes a while before its first word, with nothing else to say
+/// for itself.
+struct Silent {
+    after: std::time::Duration,
+    script: Mutex<Vec<Response>>,
+}
+
+#[async_trait]
+impl Provider for Silent {
+    fn id(&self) -> &str {
+        "silent/test"
+    }
+    fn context_window(&self) -> usize {
+        16_000
+    }
+    async fn complete(&self, _request: Request) -> rook_llm::Result<Response> {
+        tokio::time::sleep(self.after).await;
+        let mut script = self.script.lock().unwrap();
+        match script.is_empty() {
+            true => Err(LlmError::Other("the script ran out of responses".into())),
+            false => Ok(script.remove(0)),
+        }
+    }
+}
+
+/// The last silence in a turn that had no account of itself. A tool that takes
+/// a while says so, a sub-agent says so, a step says which it is — and then the
+/// request goes out and nothing is heard until the first token, which on a
+/// local model reading a full context is a quarter of an hour by design.
+/// Watched from outside, a model that is working and a tunnel that has gone are
+/// the same blank screen.
+///
+/// The clock is held still, so this is the behaviour and not a minute of
+/// waiting: what the turn does after twenty seconds of silence, and again after
+/// fifty.
+#[tokio::test(start_paused = true)]
+async fn a_model_that_has_not_begun_to_answer_says_so_while_it_is_waited_for() {
+    let f = fixture();
+    let session = f.rook.start_session("silent").unwrap();
+    let provider = Arc::new(Silent {
+        after: std::time::Duration::from_secs(70),
+        script: Mutex::new(vec![reply("here it is")]),
+    });
+
+    let mut waits: Vec<(u64, u64)> = Vec::new();
+    let outcome = AgentLoop::new(&f.rook, provider, session)
+        .run_with("say something", |progress| {
+            if let rook_core::agent::Progress::Waiting { secs, patience } = progress {
+                waits.push((secs, patience));
+            }
+        })
+        .await
+        .unwrap();
+
+    assert!(outcome.reply.contains("here it is"), "the answer still arrives: {}", outcome.reply);
+    // The precondition: seventy seconds of silence is long enough for the first
+    // line and one more. A turn that answered at once would prove nothing.
+    assert_eq!(
+        waits.iter().map(|(secs, _)| *secs).collect::<Vec<_>>(),
+        vec![20, 50],
+        "it says so after twenty seconds and every half minute after: {waits:?}"
+    );
+    let patience = Config::default().agent.stream_idle().as_secs();
+    assert!(
+        waits.iter().all(|(_, may)| *may >= patience),
+        "and how long it may wait, which is what says whether to keep waiting: {waits:?}"
+    );
+}

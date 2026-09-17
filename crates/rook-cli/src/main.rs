@@ -7,7 +7,6 @@ mod remote;
 mod source;
 mod tui;
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -15,7 +14,6 @@ use clap::{Parser, Subcommand};
 
 use crate::source::Source;
 use rook_core::SessionSummary;
-use rook_core::agent::Progress;
 use rook_core::{AGENT_VERSION, Rook};
 use rook_skills::SkillCard;
 use rook_store::Kind;
@@ -1166,48 +1164,9 @@ fn cmd_run(
         for (name, error) in &mcp.failures {
             eprintln!("mcp {name}: {error}");
         }
-        let mut out = std::io::stdout();
-        // Under `--json` the turn's one output is the object at the end, so the
-        // stream that a person would watch would only corrupt it.
-        let mut calls = crate::fmt::Calls::default();
         // Before the loop borrows the agent, for the phrase a call is named by.
-        let here = rook.workspace.clone();
-        let outcome = agent
-            .run_with(&prompt, |progress| match progress {
-                _ if json => {}
-                Progress::Delta(rook_llm::Delta::Text(text)) => {
-                    let _ = write!(out, "{text}");
-                    calls.said(text);
-                    let _ = out.flush();
-                }
-                Progress::Delta(rook_llm::Delta::ToolCall(call)) => {
-                    let said = rook_core::calls::doing(&call.name, Some(&call.arguments), &here);
-                    let _ = write!(out, "{}", calls.started(&call.name, &said));
-                    let _ = out.flush();
-                }
-                Progress::Delegated { task, done, total } => {
-                    let _ = writeln!(out, "\n  [{done}/{total}] {task}");
-                    let _ = out.flush();
-                }
-                Progress::Delegating { at, doing } => {
-                    let _ = writeln!(out, "\n    {}", rook_core::calls::delegating(at, doing));
-                    let _ = out.flush();
-                }
-                Progress::ToolDone { name, failed } => {
-                    let _ = write!(out, "{}", calls.finished(name, failed));
-                    let _ = out.flush();
-                }
-                // What the tool knows and nobody else does: how long it has
-                // been running and how long since it printed. Dropped here
-                // until now, so a quarter of a minute of a silent command read
-                // as a hang in the one front end people script with.
-                Progress::Working { said, .. } => {
-                    let _ = write!(out, "{}", calls.working(said));
-                    let _ = out.flush();
-                }
-                _ => {}
-            })
-            .await?;
+        let mut watching = crate::fmt::Watching::new(rook.workspace.clone(), json);
+        let outcome = agent.run_with(&prompt, |progress| watching.see(progress)).await?;
         mcp.shutdown().await;
         let changes = rook.changes(session, false).ok();
         // A script that pipes this into something else has to be able to tell a
@@ -1956,7 +1915,13 @@ fn cmd_work(
             // not throw that away, and a persistent one does not need a rule of
             // its own: two iterations that change nothing already stop a run,
             // and the reason is carried in the record either way.
-            let failed = match agent.run(&prompt).await {
+            // Watched as it goes, the same as a single turn is. Without this an
+            // iteration printed its heading and nothing else until it ended,
+            // and an iteration is minutes — which leaves a run of days with no
+            // way to tell work from a hang, in the one command where that
+            // question is asked most.
+            let mut watching = crate::fmt::Watching::new(here.clone(), json);
+            let failed = match agent.run_with(&prompt, |progress| watching.see(progress)).await {
                 Ok(outcome) => Ok(outcome),
                 Err(why) => {
                     eprintln!("  iteration {at} did not finish: {why}");
@@ -1973,11 +1938,16 @@ fn cmd_work(
                     done.push(Iteration {
                         at,
                         session: rook_store::format_session_id(session),
-                        reply: why,
+                        reply: why.clone(),
                         changed: Vec::new(),
                         steps: 0,
                         tokens: 0,
                         report,
+                        // So the run's verdict can say which of the two this
+                        // was. An iteration that could not reach its model
+                        // changes nothing, and so does one with nothing left
+                        // to do; only this tells them apart.
+                        failed: Some(why),
                     });
                     if let Ok(text) = serde_json::to_vec(&done) {
                         let _ = rook.store.kv_set(&rook_core::work::record_key(&run), &text);
@@ -1986,7 +1956,9 @@ fn cmd_work(
                 }
             };
             if !json {
-                println!("{}", outcome.reply.trim());
+                // The reply was written as it arrived, so what is left is where
+                // the iteration got to.
+                println!();
                 eprintln!("  {}", report.summary());
             }
 
@@ -2005,6 +1977,7 @@ fn cmd_work(
                 steps: outcome.steps,
                 tokens: u64::from(outcome.input_tokens) + u64::from(outcome.output_tokens),
                 report,
+                failed: None,
             });
             // After every iteration rather than at the end: a run measured in
             // days is one a machine can lose halfway through, and what it has

@@ -687,6 +687,13 @@ fn as_event(progress: Progress<'_>, workspace: &std::path::Path) -> Option<ChatE
         Progress::Heard { text } => ChatEvent::Agent { text: format!("  ✓ taken up: {text}") },
         Progress::ToolDone { name, failed } => ChatEvent::ToolDone { name: name.to_string(), failed },
         Progress::Step { at, of } => ChatEvent::Step { at, of },
+        // A model that has been asked and has not begun to answer, said the
+        // same way a tool that is taking a while is: a line that is replaced
+        // rather than added to, because it is one fact changing.
+        Progress::Waiting { secs, patience } => ChatEvent::ToolWorking {
+            name: "model".to_string(),
+            said: rook_core::calls::waiting(secs, patience),
+        },
         Progress::Spent { input, output, cached } => {
             ChatEvent::Spent { input_tokens: input, output_tokens: output, cached_tokens: cached }
         }

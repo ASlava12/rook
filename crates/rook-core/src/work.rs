@@ -125,16 +125,21 @@ pub struct Iteration {
     pub steps: u32,
     pub tokens: u64,
     pub report: Report,
+    /// Why the turn did not finish, where it did not.
+    ///
+    /// An iteration that could not run is not an iteration that had nothing
+    /// left to do, and before this the two were the same record: a run whose
+    /// model had gone away stopped saying "two iterations in a row changed
+    /// nothing, so this is as far as it goes", which reads as a run that
+    /// finished. It is the sentence a person reads first, and it was the
+    /// wrong one exactly when something was wrong.
+    ///
+    /// Defaulted so a run recorded before this existed still resumes.
+    #[serde(default)]
+    pub failed: Option<String>,
 }
 
 impl Iteration {
-    /// Whether this iteration left the workspace exactly as it found it.
-    ///
-    /// Its own plan does not count. An agent with a file it may write and
-    /// nothing to do writes the file, and an iteration that rewrote its
-    /// intentions and carried none of them out is the shape being watched for
-    /// here — counting it as work would let a run spin for as long as the
-    /// budget lasted, rewording the same list.
     /// Drop what only the newest iteration is read for.
     ///
     /// The loop reads the last iteration's whole report — the output of each
@@ -153,8 +158,26 @@ impl Iteration {
         for check in &mut self.report.checks {
             check.said = String::new();
         }
+        // Why it could not run is the exception, because it is what the run's
+        // verdict is made of — but a provider error can be a page, and the
+        // record holds one of these per iteration for as long as the run lasts.
+        if let Some(why) = &self.failed {
+            self.failed = Some(rook_llm::truncate(why, MOST_OF_A_REASON));
+        }
     }
 
+    /// Whether the turn ran at all.
+    pub fn could_not_run(&self) -> bool {
+        self.failed.is_some()
+    }
+
+    /// Whether this iteration left the workspace exactly as it found it.
+    ///
+    /// Its own plan does not count. An agent with a file it may write and
+    /// nothing to do writes the file, and an iteration that rewrote its
+    /// intentions and carried none of them out is the shape being watched for
+    /// here — counting it as work would let a run spin for as long as the
+    /// budget lasted, rewording the same list.
     fn did_nothing(&self) -> bool {
         !self.changed.iter().any(|path| path.replace('\\', "/") != NOTES)
     }
@@ -177,6 +200,11 @@ pub enum Next {
 /// model that has nothing left to try, and every further iteration costs the
 /// same and finds the same.
 const IDLE_BEFORE_STOPPING: usize = 2;
+
+/// As much of a failure as the run's verdict needs. The first sentence of a
+/// provider error says which of the four it was; the traceback under it does
+/// not, and is in the session either way.
+const MOST_OF_A_REASON: usize = 300;
 
 /// Whether to go again, and on what.
 ///
@@ -216,6 +244,17 @@ pub fn after(plan: &Plan, done: &[Iteration], notes: Option<&str>) -> Next {
     // reports having considered the matter.
     let idle = done.iter().rev().take_while(|i| i.did_nothing()).count();
     if idle >= IDLE_BEFORE_STOPPING {
+        // Which of the two it was. A run that could not reach its model changes
+        // nothing for exactly the same reason it does no work, and reporting
+        // that as "as far as it goes" is how a broken tunnel reads as a
+        // finished job — the agent looked busy and was not.
+        let broken = done[done.len() - idle..].iter().filter(|i| i.could_not_run()).count();
+        if broken == idle {
+            return Next::Stop(format!(
+                "{idle} iterations in a row could not run at all, so nothing was tried: {}",
+                last.failed.as_deref().unwrap_or("no reason was recorded")
+            ));
+        }
         return Next::Stop(format!(
             "{idle} iterations in a row changed nothing, so this is as far as it goes — {}",
             last.report.summary()
@@ -306,12 +345,20 @@ fn again(plan: &Plan, done: &[Iteration], last: &Iteration, notes: Option<&str>)
         );
     }
 
-    if last.did_nothing() {
-        said.push_str(
+    match &last.failed {
+        // Not the same fact, and the model is the one who would pay for the
+        // confusion: told it "changed no files" it looks for what it decided,
+        // and the last turn decided nothing — it was cut off.
+        Some(why) => said.push_str(&format!(
+            "\nThe last iteration did not finish — {why}. Nothing it may have started was \
+             recorded, so the workspace is as the iteration before left it.\n"
+        )),
+        None if last.did_nothing() => said.push_str(
             "\nThe last iteration changed no files. If there is nothing left worth doing, say so \
              plainly rather than looking again; a run that changes nothing twice is stopped. \
              Rewriting the plan is not doing the work and does not count as a change.\n",
-        );
+        ),
+        None => {}
     }
     said.push_str(&keep_notes(notes));
     said
@@ -345,6 +392,10 @@ fn so_far(done: &[Iteration]) -> String {
         said.push_str(&format!("  (…{from} earlier)\n"));
     }
     for iteration in &done[from..] {
+        if let Some(why) = &iteration.failed {
+            said.push_str(&format!("  #{} could not run — {why}\n", iteration.at));
+            continue;
+        }
         let wrote = match iteration.changed.len() {
             0 => "nothing".to_string(),
             n if n <= NAMED => iteration.changed.join(", "),
@@ -444,7 +495,14 @@ mod tests {
             steps: 5,
             tokens: 1_000,
             report: Report { checks, scorecard_changed: false },
+            failed: None,
         }
+    }
+
+    /// An iteration whose turn never finished: no reply, nothing written, and
+    /// the checks measured whatever the workspace already was.
+    fn cut_off(at: u32, checks: Vec<Scored>, why: &str) -> Iteration {
+        Iteration { steps: 0, tokens: 0, failed: Some(why.into()), ..iteration(at, checks, &[]) }
     }
 
     #[test]
@@ -530,6 +588,54 @@ mod tests {
         let Next::Stop(why) = after(&plan(), &[one, idle.clone(), idle], None) else { panic!("two is") };
         assert!(why.contains("changed nothing"), "{why}");
         assert!(why.contains("0 of 1 checks pass"), "and carries where it got to: {why}");
+    }
+
+    /// A run whose model has gone away changes nothing for a reason that is
+    /// not "there is nothing left to do", and the verdict is the sentence a
+    /// person reads first. Said the same way, a broken tunnel reads as a
+    /// finished job — the agent looked busy for an hour and had not run once.
+    #[test]
+    fn a_run_that_never_reached_its_model_does_not_report_having_finished() {
+        let why = "cannot reach http://127.0.0.1:9999: operation timed out";
+        let done = vec![
+            iteration(1, vec![scored("tests", false)], &["src/lib.rs"]),
+            cut_off(2, vec![scored("tests", false)], why),
+            cut_off(3, vec![scored("tests", false)], why),
+        ];
+        let Next::Stop(said) = after(&plan(), &done, None) else { panic!("two that cannot run stop it") };
+        assert!(said.contains("could not run at all"), "it says what happened: {said}");
+        assert!(said.contains("127.0.0.1:9999"), "and what to go and look at: {said}");
+        assert!(!said.contains("as far as it goes"), "and does not read as a run that finished: {said}");
+    }
+
+    /// Only when that is the whole of it. One turn cut off and one that ran and
+    /// chose to do nothing is a run that is stuck, and saying "nothing was
+    /// tried" of it would be the same mistake pointing the other way.
+    #[test]
+    fn one_cut_off_turn_beside_one_that_did_nothing_is_still_a_run_that_is_stuck() {
+        let done = vec![
+            iteration(1, vec![scored("tests", false)], &["src/lib.rs"]),
+            cut_off(2, vec![scored("tests", false)], "the tunnel went away"),
+            iteration(3, vec![scored("tests", false)], &[]),
+        ];
+        let Next::Stop(said) = after(&plan(), &done, None) else { panic!("two quiet ones stop it") };
+        assert!(said.contains("changed nothing"), "{said}");
+    }
+
+    /// The next turn is told the same thing, and for the same reason: handed
+    /// "the last iteration changed no files" it goes looking for what it
+    /// decided, and the last iteration decided nothing — it was cut off.
+    #[test]
+    fn a_turn_that_was_cut_off_is_not_reported_to_the_next_one_as_a_choice() {
+        let done = vec![
+            iteration(1, vec![scored("tests", false)], &["src/lib.rs"]),
+            cut_off(2, vec![scored("tests", false)], "the endpoint stopped answering"),
+        ];
+        let Next::Again(prompt) = after(&plan(), &done, None) else { panic!("one is not stuck") };
+        assert!(prompt.contains("did not finish"), "{prompt}");
+        assert!(prompt.contains("stopped answering"), "and why: {prompt}");
+        assert!(!prompt.contains("changed no files"), "and not as a decision it took: {prompt}");
+        assert!(prompt.contains("#2 could not run"), "the history says so too: {prompt}");
     }
 
     #[test]

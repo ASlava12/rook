@@ -86,10 +86,14 @@ impl Google {
             true => format!("models/{}:streamGenerateContent?alt=sse", self.model),
             false => format!("models/{}:generateContent", self.model),
         };
-        self.authorized(self.http.post(self.endpoint(&path)).json(&wire_request(request)))
-            .send()
-            .await
-            .map_err(|e| LlmError::unreachable(&self.config.base_url, e))
+        let req = self.authorized(self.http.post(self.endpoint(&path)).json(&wire_request(request)));
+        let bytes = request.prompt_bytes();
+        let patience = crate::first_token_patience(self.config.stream_idle_timeout, bytes);
+        let base = self.config.base_url.clone();
+        crate::once_it_answers(patience, bytes, async move {
+            req.send().await.map_err(|e| LlmError::unreachable(&base, e))
+        })
+        .await
     }
 }
 
@@ -134,10 +138,11 @@ impl Provider for Google {
             return Err(LlmError::Status {
                 status: status.as_u16(),
                 retry_after: crate::retry_after(response.headers()),
-                body: crate::quoted_text(response).await,
+                body: crate::quoted_text(response, self.config.stream_idle_timeout).await,
             });
         }
-        let text = crate::whole_text(response, &self.config.base_url).await?;
+        let text =
+            crate::whole_text(response, &self.config.base_url, self.config.stream_idle_timeout).await?;
         let listing: Listing = serde_json::from_str(&text)
             .map_err(|e| LlmError::Decode(format!("{e}: {}", truncate(&text, 300))))?;
         Ok(listing
@@ -160,10 +165,11 @@ impl Provider for Google {
             return Err(LlmError::Status {
                 status: status.as_u16(),
                 retry_after: crate::retry_after(response.headers()),
-                body: crate::quoted_text(response).await,
+                body: crate::quoted_text(response, self.config.stream_idle_timeout).await,
             });
         }
-        let text = crate::whole_text(response, &self.config.base_url).await?;
+        let text =
+            crate::whole_text(response, &self.config.base_url, self.config.stream_idle_timeout).await?;
 
         let wire: WireResponse = serde_json::from_str(&text)
             .map_err(|e| LlmError::Decode(format!("{e}: {}", truncate(&text, 500))))?;
@@ -202,7 +208,7 @@ impl Provider for Google {
             return Err(LlmError::Status {
                 status: status.as_u16(),
                 retry_after: crate::retry_after(response.headers()),
-                body: crate::quoted_text(response).await,
+                body: crate::quoted_text(response, self.config.stream_idle_timeout).await,
             });
         }
 
@@ -212,7 +218,7 @@ impl Provider for Google {
         let first = crate::first_token_patience(idle, request.prompt_bytes());
         // Roughly, and said as such: it is here to rule the context out as the
         // explanation, not to be a token count anybody bills from.
-        let asked_to_read = request.prompt_bytes() / 4;
+        let asked_to_read = request.prompt_bytes() / crate::BYTES_A_TOKEN_ROUGHLY;
         let endpoint = self.config.base_url.clone();
         let fallback_model = self.model.clone();
 

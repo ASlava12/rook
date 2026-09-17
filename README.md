@@ -665,6 +665,21 @@ being off are three sets of reachable endpoints and one file — which is what
 outright: a paid gateway should not become what the agent reaches for because the
 desk machine is asleep.
 
+How long the agent waits for a model is one number: `[agent]
+stream_idle_timeout_secs`, how long an endpoint may be silent. The wait for a
+*first* token adds what reading the prompt should take, because a local model
+filling a large context is silent for minutes by design, and nothing else bounds
+it. Nothing else may: a deadline on the whole request is a clock on the answer
+rather than on the silence, and the ten-minute one that used to be here cut a
+reply that was arriving a token at a time and reported it as `operation timed
+out` — which reads as the endpoint having gone away, and was read that way. A
+reply that is still arriving is not late.
+
+While it waits it says so, in every front end: `waiting on the model — 4m20s so
+far, up to 21m30s`, after twenty seconds and every half minute after. That line
+is the whole difference between a model reading a long prompt and a tunnel that
+has dropped, which are otherwise the same blank screen.
+
 Keys can stay out of the file. `secret:<name>` reads `rook secrets`, which keeps a
 value at 0600 or refers it out to a keychain, a password manager or a command;
 `env:<VAR>` reads this process's environment, which is where every key was before

@@ -205,6 +205,71 @@ impl Calls {
     }
 }
 
+/// What a person watching a turn sees while it is running.
+///
+/// One of these rather than one per command. `rook run` rendered a turn live
+/// and `rook work` rendered nothing at all: an iteration printed its heading
+/// and then, for however long the turn took, nothing — which is the one shape
+/// that cannot be told from a hang, and on a local model one step is minutes.
+/// The command built for runs measured in days was the one with no way to see
+/// that anything was happening.
+pub struct Watching {
+    out: std::io::Stdout,
+    calls: Calls,
+    /// For naming a call by what it is doing here rather than by its arguments.
+    here: std::path::PathBuf,
+    /// Under `--json` the one output is the object at the end, and a stream a
+    /// person would watch only corrupts it.
+    quiet: bool,
+}
+
+impl Watching {
+    pub fn new(here: std::path::PathBuf, quiet: bool) -> Self {
+        Self { out: std::io::stdout(), calls: Calls::default(), here, quiet }
+    }
+
+    pub fn see(&mut self, progress: rook_core::agent::Progress<'_>) {
+        use rook_core::agent::Progress;
+        use std::io::Write;
+
+        if self.quiet {
+            return;
+        }
+        let written = match progress {
+            Progress::Delta(rook_llm::Delta::Text(text)) => {
+                self.calls.said(text);
+                text.to_string()
+            }
+            Progress::Delta(rook_llm::Delta::ToolCall(call)) => {
+                let said = rook_core::calls::doing(&call.name, Some(&call.arguments), &self.here);
+                self.calls.started(&call.name, &said)
+            }
+            Progress::Delegated { task, done, total } => format!("\n  [{done}/{total}] {task}\n"),
+            Progress::Delegating { at, doing } => {
+                format!("\n    {}\n", rook_core::calls::delegating(at, doing))
+            }
+            Progress::ToolDone { name, failed } => self.calls.finished(name, failed),
+            // What the tool knows and nobody else does: how long it has been
+            // running and how long since it printed. A quarter of a minute of a
+            // silent command reads as a hang otherwise.
+            Progress::Working { said, .. } => self.calls.working(said),
+            // The same, for the wait nothing else reports: the model has been
+            // asked and has not begun to answer. A terminal has no line to
+            // rewrite, so it gets one line every half minute — which is what
+            // tells a cold prefill from a tunnel that has gone.
+            Progress::Waiting { secs, patience } => {
+                self.calls.working(&rook_core::calls::waiting(secs, patience))
+            }
+            _ => String::new(),
+        };
+        if written.is_empty() {
+            return;
+        }
+        let _ = write!(self.out, "{written}");
+        let _ = self.out.flush();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -25,6 +25,13 @@
 // so where the characters wider than a byte actually arrive. A slice here
 // either uses an index the code just found, and says so, or it is a crash
 // waiting for somebody who does not write in English.
+
+/// English prose and code both sit near this, and being out by half costs a
+/// wait rather than a failure. Said once because four places estimate the same
+/// thing from the same bytes, and a wait that allows for a prompt of one size
+/// must not report having allowed for another.
+pub(crate) const BYTES_A_TOKEN_ROUGHLY: usize = 4;
+
 /// How long to wait for the first token of a reply, given how much was sent.
 ///
 /// The configured patience is the right question for every chunk after the
@@ -45,12 +52,37 @@ pub fn first_token_patience(idle: std::time::Duration, prompt_bytes: usize) -> s
     /// Tokens a second, well under anything measured, because the cost of being
     /// wrong is not symmetric.
     const SLOWEST_PREFILL: u64 = 100;
-    /// English prose and code both sit near this, and being out by half costs a
-    /// wait rather than a failure.
-    const BYTES_A_TOKEN: usize = 4;
-
-    let tokens = (prompt_bytes / BYTES_A_TOKEN) as u64;
+    let tokens = (prompt_bytes / BYTES_A_TOKEN_ROUGHLY) as u64;
     idle.saturating_add(std::time::Duration::from_secs(tokens / SLOWEST_PREFILL))
+}
+
+/// Wait for an endpoint to begin answering, and no longer.
+///
+/// The one part of a request nothing else can bound. Connecting has its own
+/// timeout, and a stream that has begun is held to `stream_idle_timeout` as its
+/// bytes arrive — but a server that takes the connection and then says nothing
+/// has no clock of its own, and a half-open tunnel is exactly that shape: the
+/// listener is still there, the far end is not. A total deadline on the client
+/// used to cover this, at the price of also being a deadline on the answer;
+/// this covers it without pricing the answer at all.
+///
+/// The patience is the one somebody configured, plus what reading this prompt
+/// should take — so a cold model reading a full window is waited for, and the
+/// error says the size of the context was already allowed for.
+pub(crate) async fn once_it_answers(
+    patience: std::time::Duration,
+    prompt_bytes: usize,
+    sending: impl std::future::Future<Output = Result<reqwest::Response>>,
+) -> Result<reqwest::Response> {
+    match tokio::time::timeout(patience, sending).await {
+        Ok(answer) => answer,
+        Err(_) => Err(LlmError::NeverAnswered {
+            secs: patience.as_secs(),
+            // Roughly, and said as such — it is here to rule the context out as
+            // the explanation, not to be a number anybody bills from.
+            tokens: prompt_bytes / BYTES_A_TOKEN_ROUGHLY,
+        }),
+    }
 }
 
 /// Server-sent event frames, reassembled from transport chunks.
@@ -364,12 +396,22 @@ const MOST_QUOTED_BYTES: usize = 2000;
 /// `base_url` is configuration and the body is whatever is on the other end of
 /// it, so "read it all and then look at the length" is a cap that has already
 /// been paid by the time it is checked.
-pub(crate) async fn whole_text(mut response: reqwest::Response, url: &str) -> Result<String> {
+pub(crate) async fn whole_text(
+    mut response: reqwest::Response,
+    url: &str,
+    patience: std::time::Duration,
+) -> Result<String> {
     let mut body = Vec::new();
     loop {
-        match response.chunk().await {
-            Ok(None) => return Ok(String::from_utf8_lossy(&body).into_owned()),
-            Ok(Some(chunk)) => {
+        // Bounded by silence, because nothing else bounds it any more: the
+        // body of a reply that is not streamed arrives after the model has
+        // finished, so a pause in it is a connection that has stopped rather
+        // than a model still thinking, and there is no total deadline on the
+        // client to end it.
+        match tokio::time::timeout(patience, response.chunk()).await {
+            Err(_) => return Err(LlmError::Stalled { secs: patience.as_secs() }),
+            Ok(Ok(None)) => return Ok(String::from_utf8_lossy(&body).into_owned()),
+            Ok(Ok(Some(chunk))) => {
                 body.extend_from_slice(&chunk);
                 if body.len() > MOST_REPLY_BYTES {
                     return Err(LlmError::Decode(format!(
@@ -378,7 +420,7 @@ pub(crate) async fn whole_text(mut response: reqwest::Response, url: &str) -> Re
                     )));
                 }
             }
-            Err(e) => return Err(LlmError::unreachable(url, e)),
+            Ok(Err(e)) => return Err(LlmError::unreachable(url, e)),
         }
     }
 }
@@ -386,11 +428,14 @@ pub(crate) async fn whole_text(mut response: reqwest::Response, url: &str) -> Re
 /// As much of a failed request's body as goes in the message, and no more: an
 /// endpoint that answers a 500 with a megabyte of HTML should not cost a
 /// megabyte to say so.
-pub(crate) async fn quoted_text(mut response: reqwest::Response) -> String {
+pub(crate) async fn quoted_text(mut response: reqwest::Response, patience: std::time::Duration) -> String {
     let mut body = Vec::new();
     while body.len() <= MOST_QUOTED_BYTES {
-        match response.chunk().await {
-            Ok(Some(chunk)) => body.extend_from_slice(&chunk),
+        // Whatever arrives promptly. This is already an error being quoted
+        // back, and a refusal whose body stops halfway is still a refusal —
+        // waiting on it would turn a message into a hang.
+        match tokio::time::timeout(patience, response.chunk()).await {
+            Ok(Ok(Some(chunk))) => body.extend_from_slice(&chunk),
             _ => break,
         }
     }
@@ -765,7 +810,8 @@ fn in_the_clear(base: &str, key: Option<&str>, permitted: bool) -> Result<()> {
             // including the ones that are unreachable today and will carry
             // nothing at all. "sending" claimed an event that had not occurred.
             tracing::warn!(
-                "a request to {host} would carry its API key over plain http, because it is set to"
+                "a request to {host} would carry its API key over plain http, which \
+                 `key_in_the_clear = true` beside that address allows"
             );
         }
         return Ok(());
@@ -841,9 +887,20 @@ fn client_for(base: &str, proxy: &Proxy) -> Result<reqwest::Client> {
     init_tls();
     let client = reqwest::Client::builder()
         .user_agent(concat!("rook/", env!("CARGO_PKG_VERSION")))
-        // A long-running agent turn can legitimately take minutes on a local
-        // model; a short default timeout would look like a provider bug.
-        .timeout(std::time::Duration::from_secs(600))
+        // No total deadline, deliberately. reqwest's `timeout` runs from the
+        // first connect until the body has finished, so on a streamed reply it
+        // is a clock on the answer itself: one was set here at ten minutes, and
+        // a stream delivering a token every few milliseconds was cut at exactly
+        // ten minutes and reported as `operation timed out` — which reads as
+        // the endpoint having gone away, and was read that way. A tunnel was
+        // blamed for weeks.
+        //
+        // What that deadline was there for is bounded where each part of it can
+        // actually be judged: connecting, here; waiting for the first byte, by
+        // the patience each `send` applies, which knows how much prompt the
+        // model has to read first; and a stream going quiet mid-answer, by
+        // `stream_idle_timeout`, which resets as bytes arrive. A reply that is
+        // still arriving is not late, however long it has been going.
         .connect_timeout(std::time::Duration::from_secs(15));
     // The address still decides first — a request to this network never takes
     // a proxy, which is what `beside_us` was written for and is now asked
