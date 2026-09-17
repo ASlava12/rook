@@ -73,7 +73,10 @@ name = "tests"
 run = "{}"
 guards = ["tests/*.cmd", "tests/*.sh"]
 "#,
-        shell("sh tests/check.sh", "cmd /C tests\\check.cmd")
+        // Four backslashes: two survive Rust and become one in the TOML, which
+        // needs it escaped — `\\c` is not an escape TOML knows, and the
+        // scorecard would not parse at all.
+        shell("sh tests/check.sh", "cmd /C tests\\\\check.cmd")
     ));
     std::fs::create_dir_all(dir.path().join("tests")).unwrap();
     let named = match cfg!(windows) {
@@ -172,7 +175,10 @@ name = "hangs"
 run = "{}"
 timeout_secs = 1
 "#,
-        shell("(sleep 60); echo done", "timeout /t 60 /nobreak> NUL&& echo done")
+        // `ping` rather than `timeout`: this check is given no stdin, and
+        // `timeout` refuses to run without one — it exited at once, which let
+        // a broken deadline pass for being fast.
+        shell("(sleep 60); echo done", "ping -n 61 127.0.0.1 >NUL&& echo done")
     ));
     let card = evaluation::read(dir.path()).unwrap().unwrap();
     let began = std::time::Instant::now();

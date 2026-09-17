@@ -254,6 +254,14 @@ once the turn has written something since, is reported `unproven` and names
 what changed, the way a checker that reached for nothing already was. When a
 warning in prose has been ignored twice, the next version of it is not prose.
 
+The seventh reading watched that fix work and the scenario fail anyway, which
+is the distinction the rule is about. The model rewrote `add`, asked again, and
+got `unproven` naming the file that had changed; asked a third time, `unproven`
+again — a repeat launders nothing — and the goal check agreed. Then it said
+"the `add` function now correctly returns the sum of its arguments". Every
+answer the agent gave was right and the model ignored all three, so there is
+nothing here left to fix: do not re-fix it.
+
 The same applies to `cargo xtask bench`, which is why a failed run there now
 keeps its store and workspace and prints the `session show` that reads them.
 It used to delete both, so a red cell could only be rerun — and a rerun of a

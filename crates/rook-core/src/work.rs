@@ -258,6 +258,8 @@ fn again(plan: &Plan, done: &[Iteration], last: &Iteration, notes: Option<&str>)
         }
     }
 
+    said.push_str(&so_far(done));
+
     // The thing the whole evaluation exists for, said to the model as well as
     // to the person: a check that went green because what it guards was
     // rewritten has not been made to pass.
@@ -286,6 +288,49 @@ fn again(plan: &Plan, done: &[Iteration], last: &Iteration, notes: Option<&str>)
         );
     }
     said.push_str(&keep_notes(notes));
+    said
+}
+
+/// What the earlier iterations did, from the run's own record.
+///
+/// The agent is asked to keep `.rook/plan.md` and may not: told to write a plan
+/// and given five steps, a live run spent all five on the work and wrote
+/// nothing — which is a defensible choice and left the next iteration with no
+/// memory at all. This is the half that does not depend on the model
+/// cooperating. It is facts the harness holds: which iteration, what it wrote,
+/// how the checks stood after it.
+///
+/// The last few only. A run of seventy iterations would otherwise spend its
+/// whole prompt on its own history, and what is worth carrying is the recent
+/// shape of it — the rest is in the record, which `rook session show` reads.
+fn so_far(done: &[Iteration]) -> String {
+    /// Enough to see a trend and a repetition, few enough to stay cheap.
+    const RECENT: usize = 5;
+    /// Names rather than a count, up to here: "wrote 12 files" says nothing
+    /// about whether this iteration went over the same ground as the last.
+    const NAMED: usize = 4;
+
+    if done.is_empty() {
+        return String::new();
+    }
+    let mut said = String::from("\nWhat the earlier iterations of this goal did:\n");
+    let from = done.len().saturating_sub(RECENT);
+    if from > 0 {
+        said.push_str(&format!("  (…{from} earlier)\n"));
+    }
+    for iteration in &done[from..] {
+        let wrote = match iteration.changed.len() {
+            0 => "nothing".to_string(),
+            n if n <= NAMED => iteration.changed.join(", "),
+            n => format!("{}, and {} more", iteration.changed[..NAMED].join(", "), n - NAMED),
+        };
+        said.push_str(&format!(
+            "  #{} wrote {wrote} — {} of {} checks passed after it\n",
+            iteration.at,
+            iteration.report.passed(),
+            iteration.report.checks.len()
+        ));
+    }
     said
 }
 
@@ -560,6 +605,38 @@ mod tests {
         };
         assert!(later.contains("the thing to do next"), "and so does every one after: {later}");
         assert!(later.contains("Keep `.rook/plan.md` current"), "{later}");
+    }
+
+    /// The agent is asked to keep a plan and may not: told to and given five
+    /// steps, a live run spent all five on the work and wrote nothing. So the
+    /// history the harness holds is carried whether or not the model
+    /// cooperates — which iteration, what it wrote, how the checks stood.
+    #[test]
+    fn what_earlier_iterations_did_is_carried_without_the_model_writing_it_down() {
+        let done = vec![
+            iteration(1, vec![scored("a", true), scored("b", false)], &["src/one.rs"]),
+            iteration(2, vec![scored("a", true), scored("b", false)], &["src/two.rs", "src/three.rs"]),
+        ];
+        // No plan at all, which is the case this is for.
+        let Next::Again(prompt) = after(&plan(), &done, None) else { panic!("not clean") };
+
+        assert!(prompt.contains("#1 wrote src/one.rs"), "it names what the first did: {prompt}");
+        assert!(prompt.contains("#2 wrote src/two.rs, src/three.rs"), "{prompt}");
+        assert!(prompt.contains("1 of 2 checks passed after it"), "and where the checks stood: {prompt}");
+    }
+
+    /// A run of seventy iterations would otherwise spend its whole prompt on
+    /// its own history.
+    #[test]
+    fn a_long_runs_history_is_the_recent_part_of_it_and_says_how_much_is_missing() {
+        let done: Vec<Iteration> =
+            (1..=12).map(|at| iteration(at, vec![scored("tests", false)], &["src/lib.rs"])).collect();
+        let plan = Plan { most: 0, ..plan() };
+        let Next::Again(prompt) = after(&plan, &done, None) else { panic!("not clean") };
+
+        assert!(prompt.contains("(…7 earlier)"), "it says what it left out: {prompt}");
+        assert!(prompt.contains("#12 wrote"), "and keeps the recent ones: {prompt}");
+        assert!(!prompt.contains("#1 wrote"), "and not the old ones: {prompt}");
     }
 
     /// A model that sees no file assumes there is nowhere to write.
