@@ -792,68 +792,11 @@ pub(crate) async fn kill_tree(child: &mut tokio::process::Child, group: &Group) 
 
 /// Everything one command started, whatever the platform calls it.
 ///
-/// A process group on unix, where the command is put in its own and one signal
-/// reaches whatever it left behind. A job object on Windows, which is the
-/// nearest thing and is exact — and which nothing used, so `kill_group` there
-/// returned `false` without trying and a command that ran past its timeout went
-/// on running while the message said it could not be killed.
-pub(crate) struct Group {
-    /// The number to point a question at, and what a person is shown.
-    pid: Option<u32>,
-    #[cfg(windows)]
-    job: Option<rook_contain::Started>,
-}
-
-impl Group {
-    /// Takes hold of a command that has just started.
-    pub(crate) fn holding(pid: Option<u32>) -> Self {
-        #[cfg(windows)]
-        return Self { pid, job: pid.and_then(rook_contain::Started::holding) };
-        #[cfg(not(windows))]
-        Self { pid }
-    }
-
-    /// Whoever is asking about this command, by number.
-    pub(crate) fn pid(&self) -> Option<u32> {
-        self.pid
-    }
-
-    /// Whether anything is still running in it.
-    ///
-    /// Signal 0 is the question rather than an answer: it performs the
-    /// permission and existence checks and delivers nothing. The command's own
-    /// shell is in this group and has been reaped by the time this is asked, so
-    /// a member left is one the command started and did not wait for. The job
-    /// object answers the same question by counting.
-    ///
-    /// `None` where there is nothing to ask, which is not the same as an empty
-    /// one — `false` there would claim nothing was left behind, and `true` that
-    /// every command leaves something.
-    pub(crate) fn alive(&self) -> Option<bool> {
-        #[cfg(unix)]
-        return self.pid.map(|pid| unsafe { libc::kill(-(pid as i32), 0) == 0 });
-        #[cfg(windows)]
-        return self.job.as_ref().and_then(rook_contain::Started::alive);
-        #[cfg(not(any(unix, windows)))]
-        None
-    }
-
-    /// Ends all of it. `true` when the call was made.
-    pub(crate) fn end(&self) -> bool {
-        #[cfg(unix)]
-        return self.pid.is_some_and(|pid| unsafe { libc::kill(-(pid as i32), libc::SIGKILL) == 0 });
-        #[cfg(windows)]
-        return match &self.job {
-            Some(job) => job.end(),
-            // Not even the shell, otherwise: a job that could not be made left
-            // this answering `false` and killing nothing, where unix's signal
-            // always at least reaches the command itself.
-            None => self.pid.is_some_and(rook_contain::end_process),
-        };
-        #[cfg(not(any(unix, windows)))]
-        false
-    }
-}
+/// Lives in `rook-contain` now: it is a platform question, and a second caller
+/// turned up in `rook eval`, where a check that outran its deadline left the
+/// shell killed and `sleep 60` still holding the pipe — the same bug this had
+/// already been written to fix.
+pub(crate) use rook_contain::Group;
 
 /// Both ends of a stream, bounded, and how much went past.
 ///

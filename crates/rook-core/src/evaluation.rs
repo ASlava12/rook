@@ -403,18 +403,28 @@ fn ran(workspace: &Path, command: &str, timeout_secs: u64) -> (Option<i32>, Stri
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    // Without a console of its own: a scorecard of ten checks would otherwise
-    // be ten windows opening and shutting on Windows, once per run.
-    let child = rook_contain::quietly(&mut built).spawn();
+    // In a group of its own, so the deadline below can take the whole tree —
+    // and without a console, or a scorecard of ten checks would be ten windows
+    // opening and shutting on Windows, once per run.
+    let child = rook_contain::on_its_own(&mut built).spawn();
     let mut child = match child {
         Ok(child) => child,
         Err(e) => return (None, format!("could not run {command:?}: {e}")),
     };
+    let group = rook_contain::Group::holding(Some(child.id()));
 
+    // Appended to by the readers and read from here, because after a deadline
+    // this is taken without waiting for them: a check that left something
+    // running behind it holds the pipe open, and a reader waiting for an end
+    // that is not coming would hang the run it was measuring.
+    let kept: std::sync::Arc<std::sync::Mutex<Vec<u8>>> = Default::default();
     let draining: Vec<_> = [child.stdout.take().map(Drained::Out), child.stderr.take().map(Drained::Err)]
         .into_iter()
         .flatten()
-        .map(|stream| std::thread::spawn(move || stream.read_to_end()))
+        .map(|stream| {
+            let kept = kept.clone();
+            std::thread::spawn(move || stream.drain_into(&kept))
+        })
         .collect();
 
     let patience = std::time::Duration::from_secs(match timeout_secs {
@@ -422,11 +432,19 @@ fn ran(workspace: &Path, command: &str, timeout_secs: u64) -> (Option<i32>, Stri
         given => given,
     });
     let began = std::time::Instant::now();
+    let mut overran = false;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status.code(),
             Ok(None) if began.elapsed() >= patience => {
-                let _ = child.kill();
+                overran = true;
+                // The group rather than the child. Killing the shell alone
+                // leaves what it started: `sh -c "sleep 60"` came back sixty
+                // seconds later with its deadline set to one, on two platforms,
+                // because `sleep` outlived the shell and held the pipe.
+                if !group.end() {
+                    let _ = child.kill();
+                }
                 let _ = child.wait();
                 // `None` rather than a failing code: stopped at a deadline is
                 // not the same as failed, and a report that called it one would
@@ -439,13 +457,21 @@ fn ran(workspace: &Path, command: &str, timeout_secs: u64) -> (Option<i32>, Stri
         }
     };
 
-    let mut said = String::new();
-    for reader in draining {
-        if let Ok(part) = reader.join() {
-            said.push_str(&part);
+    // Waited for, but not indefinitely. A check that leaves a daemon behind
+    // holds the pipe after its own exit, and what has been read by now is worth
+    // more than the last few bytes of what has not.
+    let gave_up_at = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    for reader in &draining {
+        while !reader.is_finished() && std::time::Instant::now() < gave_up_at {
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
-    if status.is_none() && began.elapsed() >= patience {
+
+    let mut said = match kept.lock() {
+        Ok(kept) => String::from_utf8_lossy(&kept).into_owned(),
+        Err(poisoned) => String::from_utf8_lossy(&poisoned.into_inner()).into_owned(),
+    };
+    if overran {
         said.push_str(&format!("\n(stopped after {}s without finishing)", patience.as_secs()));
     }
     (status, said)
@@ -458,18 +484,18 @@ enum Drained {
 }
 
 impl Drained {
-    fn read_to_end(self) -> String {
+    fn drain_into(self, kept: &std::sync::Mutex<Vec<u8>>) {
         use std::io::Read;
         let mut source: Box<dyn Read> = match self {
             Drained::Out(out) => Box::new(out),
             Drained::Err(err) => Box::new(err),
         };
-        let mut kept: Vec<u8> = Vec::new();
         let mut chunk = [0u8; 8 * 1024];
         loop {
             match source.read(&mut chunk) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
+                    let Ok(mut kept) = kept.lock() else { break };
                     // Kept to the cap and then read past it rather than stopped:
                     // the writer is still on the other end, and a reader that
                     // stops is the deadlock this exists to avoid.
@@ -480,6 +506,5 @@ impl Drained {
                 }
             }
         }
-        String::from_utf8_lossy(&kept).into_owned()
     }
 }

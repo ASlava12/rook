@@ -269,6 +269,92 @@ unsafe impl Sync for Started {}
 ///
 /// UTF-8 is tried first because much of what a turn runs — cargo, rustc, node —
 /// emits it whatever the code page says, and the two agree on ASCII anyway.
+/// Everything one command started, whatever the platform calls it.
+///
+/// A process group on unix, where the command is put in its own and one signal
+/// reaches whatever it left behind. A job object on Windows, which is the
+/// nearest thing and is exact.
+///
+/// Here rather than beside the one tool that first needed it, because it is the
+/// answer to a platform question and this is where those live — and because a
+/// second caller turned up: a check run by `rook eval` kills its shell and
+/// leaves `sleep 60` holding the pipe, which is the same bug the exec tool
+/// already had and had already fixed.
+pub struct Group {
+    /// The number to point a question at, and what a person is shown.
+    pid: Option<u32>,
+    #[cfg(windows)]
+    job: Option<Started>,
+}
+
+impl Group {
+    /// Takes hold of a command that has just started.
+    pub fn holding(pid: Option<u32>) -> Self {
+        #[cfg(windows)]
+        return Self { pid, job: pid.and_then(Started::holding) };
+        #[cfg(not(windows))]
+        Self { pid }
+    }
+
+    /// Whoever is asking about this command, by number.
+    pub fn pid(&self) -> Option<u32> {
+        self.pid
+    }
+
+    /// Whether anything is still running in it.
+    ///
+    /// Signal 0 is the question rather than an answer: it performs the
+    /// permission and existence checks and delivers nothing. The command's own
+    /// shell is in this group and has been reaped by the time this is asked, so
+    /// a member left is one the command started and did not wait for. The job
+    /// object answers the same question by counting.
+    ///
+    /// `None` where there is nothing to ask, which is not the same as an empty
+    /// one — `false` there would claim nothing was left behind, and `true` that
+    /// every command leaves something.
+    pub fn alive(&self) -> Option<bool> {
+        #[cfg(unix)]
+        // Safety: a signal number of 0 delivers nothing and only asks.
+        return self.pid.map(|pid| unsafe { libc::kill(-(pid as i32), 0) == 0 });
+        #[cfg(windows)]
+        return self.job.as_ref().and_then(Started::alive);
+        #[cfg(not(any(unix, windows)))]
+        None
+    }
+
+    /// Ends all of it. `true` when the call was made.
+    pub fn end(&self) -> bool {
+        #[cfg(unix)]
+        // Safety: a documented call. The negative pid is the group, which is
+        // the whole point — killing the shell alone leaves what it started.
+        return self.pid.is_some_and(|pid| unsafe { libc::kill(-(pid as i32), libc::SIGKILL) == 0 });
+        #[cfg(windows)]
+        return match &self.job {
+            Some(job) => job.end(),
+            // Not even the shell, otherwise: a job that could not be made left
+            // this answering `false` and killing nothing, where unix's signal
+            // always at least reaches the command itself.
+            None => self.pid.is_some_and(end_process),
+        };
+        #[cfg(not(any(unix, windows)))]
+        false
+    }
+}
+
+/// Put a command in a group of its own, so a deadline can take the whole tree.
+///
+/// On Windows the job object is taken after the spawn instead, by
+/// [`Group::holding`]; what this does there is keep the console to itself,
+/// which is the other half of not disturbing whoever is watching.
+pub fn on_its_own(command: &mut std::process::Command) -> &mut std::process::Command {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    quietly(command)
+}
+
 pub fn printed(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
     #[cfg(windows)]
     if !is_utf8(bytes) {

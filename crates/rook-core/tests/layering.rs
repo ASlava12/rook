@@ -140,8 +140,10 @@ fn an_internal_crate_is_never_a_dependency_of_one_platform_only() {
 #[test]
 fn every_file_that_starts_a_process_says_how() {
     // `DETACHED_PROCESS` for the daemon, which wants no console at all and its
-    // own process group; `quietly` or `NO_WINDOW` for everything else.
-    const SAYS_HOW: [&str; 3] = ["creation_flags", "quietly", "NO_WINDOW"];
+    // own process group; `quietly` or `NO_WINDOW` for everything else; and
+    // `on_its_own` where a deadline has to reach the whole tree, which is
+    // `quietly` and a process group together.
+    const SAYS_HOW: [&str; 4] = ["creation_flags", "quietly", "NO_WINDOW", "on_its_own"];
     let mut checked = 0;
 
     for entry in walk(&crates_dir()) {

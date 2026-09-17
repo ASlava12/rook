@@ -7,6 +7,20 @@
 
 use rook_core::evaluation::{self, Scorecard};
 
+/// A check's command is written by whoever declares the scorecard, in whatever
+/// shell their machine has — so a test of one has to be written twice.
+///
+/// Five of these failed on the Windows runner and passed here, because `sh`
+/// spelling reached `cmd /C`: `echo it went wrong; exit 1` runs nothing there.
+/// The same mistake the repository already writes down about paths, in the
+/// other place a platform disagrees.
+fn shell(sh: &str, cmd: &str) -> String {
+    match cfg!(windows) {
+        true => cmd.to_string(),
+        false => sh.to_string(),
+    }
+}
+
 fn workspace_with(scorecard: &str) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join(".rook")).unwrap();
@@ -18,7 +32,7 @@ fn workspace_with(scorecard: &str) -> tempfile::TempDir {
 /// everything else is a deviation from.
 #[test]
 fn a_declared_check_is_run_and_its_verdict_is_the_commands() {
-    let dir = workspace_with(
+    let dir = workspace_with(&format!(
         r#"
 [[check]]
 name = "passes"
@@ -26,9 +40,10 @@ run = "exit 0"
 
 [[check]]
 name = "fails"
-run = "echo it went wrong; exit 1"
+run = "{}"
 "#,
-    );
+        shell("echo it went wrong; exit 1", "echo it went wrong&& exit 1")
+    ));
     let card = evaluation::read(dir.path()).unwrap().expect("a scorecard is declared");
     let before = evaluation::witness(dir.path(), &card);
     let report = evaluation::run(dir.path(), &card, &before);
@@ -51,16 +66,21 @@ run = "echo it went wrong; exit 1"
 /// arrived this way says so beside itself.
 #[test]
 fn a_check_that_passes_because_what_it_guards_was_rewritten_says_so() {
-    let dir = workspace_with(
+    let dir = workspace_with(&format!(
         r#"
 [[check]]
 name = "tests"
-run = "sh tests/check.sh"
-guards = ["tests/*.sh"]
+run = "{}"
+guards = ["tests/*.cmd", "tests/*.sh"]
 "#,
-    );
+        shell("sh tests/check.sh", "cmd /C tests\\check.cmd")
+    ));
     std::fs::create_dir_all(dir.path().join("tests")).unwrap();
-    let check = dir.path().join("tests/check.sh");
+    let named = match cfg!(windows) {
+        true => "tests/check.cmd",
+        false => "tests/check.sh",
+    };
+    let check = dir.path().join(named);
     std::fs::write(&check, "exit 1\n").unwrap();
 
     let card = evaluation::read(dir.path()).unwrap().unwrap();
@@ -78,7 +98,7 @@ guards = ["tests/*.sh"]
 
     let after = evaluation::run(dir.path(), &card, &before);
     assert!(after.checks[0].passed, "it passes now");
-    assert_eq!(after.checks[0].touched, vec!["tests/check.sh".to_string()], "and names what changed");
+    assert_eq!(after.checks[0].touched, vec![named.to_string()], "and names what changed");
     assert!(!after.clean(), "so the run is not clean, however green the check is");
     assert!(
         after.summary().contains("not news yet"),
@@ -120,14 +140,15 @@ run = "exit 0"
 /// beside the pass and named, so a report says what the number is.
 #[test]
 fn a_check_can_carry_a_number_as_well_as_a_verdict() {
-    let dir = workspace_with(
+    let dir = workspace_with(&format!(
         r#"
 [[check]]
 name = "coverage"
-run = "echo some noise; echo 81.4"
+run = "{}"
 measures = "coverage"
 "#,
-    );
+        shell("echo some noise; echo 81.4", "echo some noise&& echo 81.4")
+    ));
     let card = evaluation::read(dir.path()).unwrap().unwrap();
     let report = evaluation::run(dir.path(), &card, &evaluation::witness(dir.path(), &card));
 
@@ -140,14 +161,19 @@ measures = "coverage"
 /// merely slow.
 #[test]
 fn a_check_that_never_finishes_is_stopped_and_is_not_reported_as_a_failure() {
-    let dir = workspace_with(
+    // Through a shell that outlives its child on purpose: `sh -c "sleep 60"`
+    // may exec into `sleep` and be killed with it, which would let a broken
+    // deadline pass. A subshell cannot, so what is tested is the deadline
+    // reaching the whole tree rather than just the shell.
+    let dir = workspace_with(&format!(
         r#"
 [[check]]
 name = "hangs"
-run = "sleep 60"
+run = "{}"
 timeout_secs = 1
 "#,
-    );
+        shell("(sleep 60); echo done", "timeout /t 60 /nobreak> NUL&& echo done")
+    ));
     let card = evaluation::read(dir.path()).unwrap().unwrap();
     let began = std::time::Instant::now();
     let report = evaluation::run(dir.path(), &card, &evaluation::witness(dir.path(), &card));
@@ -295,13 +321,17 @@ guards = ["tests/**"]
 /// that costs more than the run.
 #[test]
 fn what_a_check_prints_is_bounded_rather_than_kept_whole() {
-    let dir = workspace_with(
+    let dir = workspace_with(&format!(
         r#"
 [[check]]
 name = "loud"
-run = "for i in $(seq 1 20000); do echo 'a line of output that is not short at all'; done; exit 1"
+run = "{}"
 "#,
-    );
+        shell(
+            "i=0; while [ $i -lt 20000 ]; do echo 'a line of output that is not short at all'; i=$((i+1)); done; exit 1",
+            "for /L %i in (1,1,20000) do @echo a line of output that is not short at all&& exit 1"
+        )
+    ));
     let card = evaluation::read(dir.path()).unwrap().unwrap();
     let report = evaluation::run(dir.path(), &card, &evaluation::witness(dir.path(), &card));
 
@@ -316,14 +346,18 @@ run = "for i in $(seq 1 20000); do echo 'a line of output that is not short at a
 /// nobody read it would never return, which is how `hooks` once deadlocked.
 #[test]
 fn a_check_that_writes_to_both_streams_finishes() {
-    let dir = workspace_with(
+    let dir = workspace_with(&format!(
         r#"
 [[check]]
 name = "both"
-run = "for i in $(seq 1 5000); do echo out; echo err 1>&2; done; exit 0"
+run = "{}"
 timeout_secs = 60
 "#,
-    );
+        shell(
+            "i=0; while [ $i -lt 5000 ]; do echo out; echo err 1>&2; i=$((i+1)); done; exit 0",
+            "for /L %i in (1,1,5000) do @(echo out&& echo err 1>&2)"
+        )
+    ));
     let card = evaluation::read(dir.path()).unwrap().unwrap();
     let report = evaluation::run(dir.path(), &card, &evaluation::witness(dir.path(), &card));
 
