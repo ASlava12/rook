@@ -395,3 +395,33 @@ fn a_scorecard_survives_being_written_and_read_again() {
     assert_eq!(read.checks[0].guards, vec!["crates/*/tests/**".to_string()]);
     assert_eq!(read.checks[0].timeout_secs, 900);
 }
+
+/// A command is handed to the shell the way that shell reads one.
+///
+/// This spelled `cmd /C` itself with `Command::arg`, which quotes for the C
+/// runtime and escapes an embedded `"` as `\"` — a backslash `cmd.exe` takes
+/// literally. So every check whose command quoted anything was mangled on
+/// Windows and nowhere else. It cost a CI failure that said only "work exited
+/// before evaluation": the check quoted the path of a test binary, never ran,
+/// and the run it was measuring finished early with nothing to show.
+///
+/// Quoting a name with a space in it is the smallest command that both shells
+/// read the same way and that survives only if the quotes reach the shell.
+#[test]
+fn a_check_whose_command_quotes_something_reaches_the_shell_with_its_quotes() {
+    let dir = workspace_with(
+        r#"
+[[check]]
+name = "quoted"
+run = "echo ok> \"a file.txt\""
+"#,
+    );
+    let card = evaluation::read(dir.path()).unwrap().unwrap();
+    let before = evaluation::witness(dir.path(), &card);
+    let report = evaluation::run(dir.path(), &card, &before);
+
+    assert!(report.passed() == 1, "the check ran: {}", report.summary());
+    let written = std::fs::read_to_string(dir.path().join("a file.txt"))
+        .expect("the quotes reached the shell, so the name has a space in it and no quotes");
+    assert!(written.trim() == "ok", "and the command itself ran: {written:?}");
+}

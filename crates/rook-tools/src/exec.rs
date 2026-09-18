@@ -589,13 +589,11 @@ pub fn spawn_shell(
     env: &[(&str, &str)],
     isolation: Option<&crate::isolate::Isolation>,
 ) -> Result<tokio::process::Child> {
+    // `cmd /C` rather than PowerShell on Windows: it is always present, and a
+    // skill that needs PowerShell invokes it explicitly. How each shell reads a
+    // command line is [`rook_contain::shell`]'s question, asked in one place
+    // because the two that asked it separately answered it differently.
     #[cfg(windows)]
-    // `cmd /C` rather than PowerShell: it is always present, and skills that
-    // need PowerShell can invoke it explicitly. `raw_arg` rather than `arg`:
-    // `arg` quotes for the C runtime's rules and escapes an embedded `"` as
-    // `\"`, which `cmd.exe` does not read that way — it takes the backslash
-    // literally. A command with a quotation mark in it, which is most of the
-    // ones worth running, arrived at the shell mangled.
     let mut cmd = match isolation {
         // The launcher runs `cmd /C` itself, in the directory it is told.
         Some(isolation) => {
@@ -604,22 +602,13 @@ pub fn spawn_shell(
             c.env(crate::isolate::CWD_ENV, cwd);
             c
         }
-        None => {
-            use std::os::windows::process::CommandExt;
-            let mut c = tokio::process::Command::new("cmd");
-            c.as_std_mut().raw_arg(format!("/C {command}"));
-            c
-        }
+        None => tokio::process::Command::from(rook_contain::shell(command)),
     };
     #[cfg(not(windows))]
     let mut cmd = match isolation {
         Some(isolation) => crate::isolate::contained(command, isolation)
             .map_err(|e| ToolError::Io { path: cwd.to_path_buf(), source: e })?,
-        None => {
-            let mut c = tokio::process::Command::new("/bin/sh");
-            c.arg("-c").arg(command);
-            c
-        }
+        None => tokio::process::Command::from(rook_contain::shell(command)),
     };
     cmd.envs(env.iter().copied())
         .current_dir(cwd)

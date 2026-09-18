@@ -341,6 +341,37 @@ impl Group {
     }
 }
 
+/// A command handed to the platform's shell, spelled the way that shell reads.
+///
+/// Here rather than at each call site because there were two of them and they
+/// disagreed. `rook-tools` learned the hard way that `Command::arg` quotes for
+/// the C runtime and escapes an embedded `"` as `\"`, which `cmd.exe` reads as
+/// a literal backslash — so a command with a quotation mark in it, which is
+/// most of the ones worth running, arrives at the shell mangled. It wrote that
+/// down and used `raw_arg`. The scorecard runner, written later, used `arg`,
+/// and every check whose command quoted a path was mangled on Windows and
+/// nowhere else: the one that quoted the path of a test binary never ran, the
+/// run it was measuring finished early, and the failure said only that the
+/// process had exited.
+///
+/// One function, so the next place that needs a shell gets the answer rather
+/// than the chance to rediscover it.
+pub fn shell(command: &str) -> std::process::Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut built = std::process::Command::new("cmd");
+        built.raw_arg(format!("/C {command}"));
+        built
+    }
+    #[cfg(not(windows))]
+    {
+        let mut built = std::process::Command::new("/bin/sh");
+        built.arg("-c").arg(command);
+        built
+    }
+}
+
 /// Put a command in a group of its own, so a deadline can take the whole tree.
 ///
 /// On Windows the job object is taken after the spawn instead, by

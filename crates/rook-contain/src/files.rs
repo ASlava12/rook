@@ -61,7 +61,8 @@ pub fn write(root: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
         file.sync_all()?;
         drop(file);
         parent.rename(&temp, &parent, name)?;
-        sync_directory(&parent)
+        sync_directory(&parent);
+        Ok(())
     })();
     if result.is_err() {
         let _ = parent.remove_file(&temp);
@@ -88,13 +89,30 @@ fn temporary(parent: &Dir) -> io::Result<(String, cap_std::fs::File)> {
     Err(io::Error::new(io::ErrorKind::AlreadyExists, "could not reserve a temporary write file"))
 }
 
-fn sync_directory(dir: &Dir) -> io::Result<()> {
-    // Windows does not support FlushFileBuffers on these directory handles.
+/// Persist a directory entry, where the platform allows it at all.
+///
+/// Never fatal, and that is the point. By the time this is called after a
+/// rename, the file is already in place: whether the entry has reached the
+/// disk decides what survives a power cut and nothing about whether the write
+/// happened. Returning the error made a completed write report as a failed one
+/// — `rook skills rollback` wrote every file it meant to and then told the
+/// person the skill was "part 3eed63bffed8 and part what was there before",
+/// naming a recovery they did not need.
+///
+/// And it fired on two of the three platforms. A cap-std directory handle is
+/// opened for lookup rather than for reading — `O_PATH` on Linux, the same idea
+/// on FreeBSD — and `fsync` on such a descriptor is `EBADF`, which is how
+/// "Bad file descriptor" came to be the answer to writing a file. macOS has no
+/// such mode, so the local gate never saw it and CI saw it every time.
+fn sync_directory(dir: &Dir) {
     #[cfg(unix)]
-    dir.try_clone()?.into_std_file().sync_all()?;
+    if let Ok(handle) = dir.try_clone() {
+        // A failure here is the platform saying it will not, not a fault to
+        // report: the caller has already done what it was asked.
+        let _ = handle.into_std_file().sync_all();
+    }
     #[cfg(not(unix))]
     let _ = dir;
-    Ok(())
 }
 
 fn create_parent(root: &Dir, path: &Path) -> io::Result<Dir> {
@@ -104,7 +122,7 @@ fn create_parent(root: &Dir, path: &Path) -> io::Result<Dir> {
     #[cfg(unix)]
     for ancestor in path.ancestors().skip(1) {
         let ancestor = if ancestor.as_os_str().is_empty() { Path::new(".") } else { ancestor };
-        sync_directory(&root.open_dir(ancestor)?)?;
+        sync_directory(&root.open_dir(ancestor)?);
     }
     root.open_dir(path)
 }
@@ -200,8 +218,8 @@ pub fn move_file(from_root: &Path, from: &Path, to_root: &Path, to: &Path) -> io
         let _ = destination.remove_file(to);
     }
     let bytes = copied?;
-    sync_directory(&destination)?;
+    sync_directory(&destination);
     source.remove_file(from)?;
-    sync_directory(&source)?;
+    sync_directory(&source);
     Ok(bytes)
 }

@@ -417,14 +417,11 @@ const MOST_OUTPUT: usize = 256 * 1024;
 /// forever, which is how `hooks` once deadlocked here. Bounded while the bytes
 /// arrive rather than after, for the same reason every other accumulator is.
 fn ran(workspace: &Path, command: &str, timeout_secs: u64) -> (Option<i32>, String) {
-    let (shell, flag) = match cfg!(windows) {
-        true => ("cmd", "/C"),
-        false => ("sh", "-c"),
-    };
-    let mut built = std::process::Command::new(shell);
+    // Through the one place that knows how each shell reads a command line: a
+    // check that quotes a path — which is any check naming a file with a space
+    // in it — was mangled on Windows for as long as this spelled it itself.
+    let mut built = rook_contain::shell(command);
     built
-        .arg(flag)
-        .arg(command)
         .current_dir(workspace)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
