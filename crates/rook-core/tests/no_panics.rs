@@ -23,16 +23,23 @@ fn repo_root() -> PathBuf {
 /// `#[cfg(test)]` is spelled several ways — `#[cfg(all(test, unix))]` hid eleven
 /// of these from a first count.
 fn production(text: &str) -> &str {
-    text.lines()
-        .position(|line| {
-            let t = line.trim();
-            t.starts_with("#[cfg(") && t.contains("test") && !t.contains("not(test)")
-        })
-        .map(|at| {
-            let upto: usize = text.lines().take(at).map(|l| l.len() + 1).sum();
-            &text[..upto.min(text.len())]
-        })
-        .unwrap_or(text)
+    // Cut at an offset taken from the text rather than reconstructed from it.
+    // This summed the lengths `lines()` reports and added one byte for each
+    // newline — which is short by one on every line of a Windows checkout,
+    // where the separator is two bytes. The cut then landed a byte or two
+    // early, and on the run that found it that was the middle of an em dash:
+    // the test that forbids panics panicked, and only on the platform this
+    // repository cannot check before pushing. `split_inclusive` keeps the
+    // separator, so the offset is real and is always a character boundary.
+    let mut upto = 0usize;
+    for line in text.split_inclusive('\n') {
+        let t = line.trim();
+        if t.starts_with("#[cfg(") && t.contains("test") && !t.contains("not(test)") {
+            return &text[..upto];
+        }
+        upto += line.len();
+    }
+    text
 }
 
 /// `.unwrap()` says "this cannot fail" without saying why, and is wrong exactly
@@ -92,4 +99,25 @@ fn nothing_that_ships_can_panic_without_saying_why() {
         read.0
     );
     assert!(found.is_empty(), "code that ships must not panic:\n  {}", found.join("\n  "));
+}
+
+/// Where the production part ends cannot depend on how the file was checked
+/// out. It did: the offset was rebuilt by summing what `lines()` reports and
+/// adding one byte per newline, which is short by one on every line of a
+/// Windows checkout — so the cut fell a byte or two early, and on the run that
+/// found it that was the middle of an em dash. The test that forbids panics
+/// panicked, on the one platform the gate here cannot reach.
+#[test]
+fn where_the_production_part_ends_does_not_depend_on_the_line_endings() {
+    let unix = "//! — a dash, two bytes wide\nfn ships() {}\n#[cfg(test)]\nmod tests {}\n";
+    let windows = unix.replace('\n', "\r\n");
+
+    let kept = production(unix);
+    assert!(kept.contains("fn ships()"), "what ships is kept: {kept:?}");
+    assert!(!kept.contains("mod tests"), "and the test module is not: {kept:?}");
+    assert_eq!(
+        production(&windows).replace("\r\n", "\n"),
+        kept,
+        "and a checkout with two-byte line endings cuts in the same place"
+    );
 }
