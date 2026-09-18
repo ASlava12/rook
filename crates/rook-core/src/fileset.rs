@@ -278,7 +278,25 @@ pub fn capture_paths(
     paths: &[PathBuf],
     limits: &CaptureLimits,
 ) -> Result<(FileSet, ObjectId)> {
-    let rel = |p: &Path| p.strip_prefix(root).unwrap_or(p).to_string_lossy().replace('\\', "/");
+    // Against the canonical root as well as the written one. On Windows a
+    // canonicalized path carries the `\\?\` verbatim prefix and the workspace
+    // as configured does not, so one strip fails where the other succeeds —
+    // and what the failure produced was worse than an error: the absolute path
+    // was kept and its separators rewritten, turning `\\?\C:\…` into `//?/C:/…`,
+    // which parses back as a UNC path belonging to no workspace at all. Every
+    // rewind on Windows then refused with "is outside the workspace". Unix
+    // never saw it, because there the rewrite is a no-op.
+    let canonical = root.canonicalize().ok();
+    let rel = |p: &Path| {
+        let stripped = p
+            .strip_prefix(root)
+            .or_else(|_| match &canonical {
+                Some(canonical) => p.strip_prefix(canonical),
+                None => p.strip_prefix(root),
+            })
+            .unwrap_or(p);
+        stripped.to_string_lossy().replace('\\', "/")
+    };
     let mut files = BTreeMap::new();
     let mut absent = Vec::new();
     let mut total = 0u64;

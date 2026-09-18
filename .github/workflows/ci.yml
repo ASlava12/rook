@@ -73,7 +73,10 @@ jobs:
           # `target/` — two and a half gigabytes over ssh that nobody reads, and
           # the one part of this job that has failed on its own.
           copyback: false
-          prepare: pkg install -y rust
+          # `git` because the worktree delegation tests drive a real repository,
+          # and without it they fail as `No such file or directory` from a
+          # process that never started — which reads as a broken feature.
+          prepare: pkg install -y rust git
           run: |
             cargo test --workspace
 

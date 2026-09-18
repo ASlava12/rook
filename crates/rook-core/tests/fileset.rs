@@ -320,3 +320,42 @@ fn abandoned_write_files_are_not_captured_even_when_hidden_files_are_included() 
     assert!(explicit.files.is_empty());
     assert!(explicit.absent.is_empty());
 }
+
+/// A path given in its canonical form is still inside the workspace.
+///
+/// The two spellings differ on every platform — a symlinked `/tmp` here, the
+/// `\\?\` verbatim prefix on Windows — and only one strip was tried. When it
+/// failed the absolute path was kept and its separators rewritten, so
+/// `\\?\C:\…\new.txt` became `//?/C:/…/new.txt`: a key that parses back as a
+/// UNC path belonging to no workspace at all. Every rewind on Windows then
+/// refused with "is outside the workspace", and unix never saw it because
+/// there the rewrite is a no-op.
+#[test]
+fn a_path_in_its_canonical_form_is_still_captured_relative_to_the_workspace() {
+    let store_dir = tempfile::tempdir().unwrap();
+    let src = tempfile::tempdir().unwrap();
+    let store = Store::open(store_dir.path()).unwrap();
+    seed(src.path(), &[("new.txt", "made")]);
+
+    let canonical = src.path().join("new.txt").canonicalize().unwrap();
+    // The precondition: the two spellings really do differ, or this proves
+    // nothing. A machine where they agree has nothing to test here.
+    if canonical == src.path().join("new.txt") {
+        return;
+    }
+
+    let (set, _) = capture_paths(
+        &store,
+        "checkpoint",
+        "c",
+        src.path(),
+        std::slice::from_ref(&canonical),
+        &CaptureLimits::default(),
+    )
+    .unwrap();
+    assert!(
+        set.files.contains_key("new.txt"),
+        "the canonical spelling is the same file, so it is kept relative: {:?}",
+        set.files.keys().collect::<Vec<_>>()
+    );
+}

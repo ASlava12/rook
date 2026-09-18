@@ -6657,7 +6657,7 @@ fn git_fixture(root: &std::path::Path, args: &[&str]) {
         ])
         .args(args)
         .output()
-        .unwrap();
+        .unwrap_or_else(|e| panic!("git {args:?} could not start ({e}) — these tests need git on PATH"));
     assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
 }
 
