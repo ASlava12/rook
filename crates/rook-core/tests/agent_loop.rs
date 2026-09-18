@@ -1075,7 +1075,10 @@ async fn a_rewind_undoes_what_the_turn_delegated_as_well_as_what_it_did() {
     ]));
     let mut agent = AgentLoop::new(&f.rook, provider, session);
     agent.allow_everything_not_denied();
-    agent.run("have someone rewrite notes.txt").await.unwrap();
+    let outcome = agent.run("have someone rewrite notes.txt").await.unwrap();
+    let moved = tempfile::tempdir().unwrap();
+    let child = rook_store::parse_session_id(&outcome.delegated[0]).unwrap();
+    f.rook.move_session(child, moved.path()).unwrap();
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "rewritten\n", "the child did the work");
 
     let kinds: Vec<String> =
@@ -6625,4 +6628,275 @@ async fn an_audit_refusal_is_reported_as_incomplete_without_forcing_continuation
     assert_eq!(provider.work.seen.lock().unwrap().len(), 1);
     assert!(rook_core::agent::why_it_stopped(&outcome.stopped).unwrap().contains("incomplete"));
     assert!(f.rook.transcript(session, 0, 100, 4096).unwrap().iter().any(|e| e.label == "blocked"));
+}
+
+fn git_fixture(root: &std::path::Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .current_dir(root)
+        .args([
+            "-c",
+            "user.name=Rook tests",
+            "-c",
+            "user.email=tests@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+        ])
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+}
+
+#[tokio::test]
+async fn an_isolated_delegate_keeps_edits_separate_and_parent_rewind_preserves_them() {
+    let f = fixture();
+    let target = f.workspace.path().join("notes.txt");
+    std::fs::write(&target, "original\n").unwrap();
+    git_fixture(f.workspace.path(), &["init", "-q"]);
+    git_fixture(f.workspace.path(), &["add", "notes.txt"]);
+    git_fixture(f.workspace.path(), &["commit", "-qm", "baseline"]);
+    let session = f.rook.start_session("isolated edit").unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("delegate", serde_json::json!({"tasks":["rewrite notes.txt"],"isolation":"worktree"})),
+        call("write_file", serde_json::json!({"path":"notes.txt","content":"alternative\n"})),
+        reply("alternative ready"),
+        reply("review the alternative"),
+    ]));
+    let seen = provider.share();
+    let mut agent = AgentLoop::new(&f.rook, provider, session);
+    agent.allow_everything_not_denied();
+    let outcome = agent.run("build a separate alternative").await.unwrap();
+    assert_eq!(outcome.delegated.len(), 1, "{outcome:?}");
+    let id = rook_store::parse_session_id(&outcome.delegated[0]).unwrap();
+    let child = f.rook.store.get_session(id).unwrap().unwrap();
+    let path = std::path::Path::new(&child.workspace);
+    assert_ne!(path, f.workspace.path());
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "original\n");
+    assert_eq!(std::fs::read_to_string(path.join("notes.txt")).unwrap(), "alternative\n");
+    assert!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .flat_map(|r| &r.messages)
+            .any(|m| m.role == Role::Tool && m.content.contains("Isolated worktree retained"))
+    );
+    f.rook.rewind(session, 1, true).unwrap();
+    assert_eq!(std::fs::read_to_string(path.join("notes.txt")).unwrap(), "alternative\n");
+    // Review through the model's tool, including a refusal to discard edits by
+    // default. Explicit removal still goes through the ordinary write policy.
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("worktree", serde_json::json!({"session":outcome.delegated[0],"action":"diff"})),
+        call(
+            "worktree",
+            serde_json::json!({"session":outcome.delegated[0],"action":"read","path":"notes.txt"}),
+        ),
+        call("worktree", serde_json::json!({"session":outcome.delegated[0],"action":"remove"})),
+        reply("reviewed; kept edits"),
+    ]));
+    let seen = provider.share();
+    let mut agent = AgentLoop::new(&f.rook, provider, session);
+    agent.allow_everything_not_denied();
+    agent.run("review the worktree").await.unwrap();
+    {
+        let requests = seen.lock().unwrap();
+        let results: Vec<_> = requests
+            .iter()
+            .flat_map(|r| &r.messages)
+            .filter(|m| m.role == Role::Tool)
+            .map(|m| &m.content)
+            .collect();
+        assert!(results.iter().any(|s| s.contains("+alternative")), "{results:?}");
+        assert!(results.iter().any(|s| s.contains("modified or untracked")), "{results:?}");
+    }
+    assert!(path.exists());
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call(
+            "worktree",
+            serde_json::json!({"session":outcome.delegated[0],"action":"remove","discard":true}),
+        ),
+        reply("removed"),
+    ]));
+    let mut agent = AgentLoop::new(&f.rook, provider, session);
+    agent.allow_everything_not_denied();
+    agent.run("discard the alternative").await.unwrap();
+    assert!(!path.exists());
+    assert!(f.rook.store.get_session(id).unwrap().is_some());
+}
+
+#[tokio::test]
+async fn worktree_delegation_refuses_dirty_inputs_and_a_zero_retention_limit() {
+    for dirty in [true, false] {
+        let mut config = Config::default();
+        if !dirty {
+            config.agent.max_worktrees = 0;
+        }
+        let f = fixture_with(config);
+        std::fs::write(f.workspace.path().join("notes.txt"), "original\n").unwrap();
+        git_fixture(f.workspace.path(), &["init", "-q"]);
+        git_fixture(f.workspace.path(), &["add", "notes.txt"]);
+        git_fixture(f.workspace.path(), &["commit", "-qm", "baseline"]);
+        if dirty {
+            std::fs::write(f.workspace.path().join("untracked.txt"), "pending").unwrap();
+        }
+        let session = f.rook.start_session("refusal").unwrap();
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            call("delegate", serde_json::json!({"task":"edit","isolation":"worktree","wait":false})),
+            call("subagents", serde_json::json!({"wait_secs":30})),
+            reply("could not start"),
+        ]));
+        let seen = provider.share();
+        let mut agent = AgentLoop::new(&f.rook, provider, session);
+        agent.allow_everything_not_denied();
+        let outcome = agent.run("start an isolated edit").await.unwrap();
+        assert!(outcome.delegated.is_empty());
+        let expected = if dirty { "clean workspace" } else { "worktree limit" };
+        assert!(
+            seen.lock().unwrap().iter().flat_map(|r| &r.messages).any(|m| m.content.contains(expected)),
+            "expected {expected}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_model_can_page_the_middle_of_captured_command_output() {
+    let mut config = Config::default();
+    config.sandbox.max_output_bytes = 100;
+    config.sandbox.max_spill_bytes = 10_000;
+    config.sandbox.isolate = rook_tools::isolate::Mode::Off;
+    let f = fixture_with(config);
+    let session = f.rook.start_session("output").unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("run_command", serde_json::json!({"command":"printf '%0500dMIDDLE%0500d' 0 0"})),
+        reply("captured"),
+    ]));
+    let seen = provider.share();
+    let mut agent = AgentLoop::new(&f.rook, provider, session);
+    agent.allow_everything_not_denied();
+    agent.run("print a long result").await.unwrap();
+    let seq = f
+        .rook
+        .store
+        .events(session, 0, usize::MAX)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.record.kind == rook_store::EventKind::ToolResult)
+        .unwrap()
+        .seq;
+    {
+        let requests = seen.lock().unwrap();
+        let shown = requests.iter().flat_map(|r| &r.messages).find(|m| m.role == Role::Tool).unwrap();
+        assert!(!shown.content.contains("MIDDLE"), "the fixture really omitted the middle");
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&shown.content).unwrap()["result_id"], seq);
+    }
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("read_result", serde_json::json!({"result_id":seq,"source":"output","offset":490,"limit":30})),
+        reply("found the middle"),
+    ]));
+    let seen = provider.share();
+    AgentLoop::new(&f.rook, provider, session).run("read the middle").await.unwrap();
+    assert!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .flat_map(|r| &r.messages)
+            .filter(|m| m.role == Role::Tool)
+            .any(|m| m.content.contains("MIDDLE"))
+    );
+}
+
+#[tokio::test]
+async fn the_loop_prunes_before_requesting_and_can_recover_an_omitted_result() {
+    let mut config = Config::default();
+    config.agent.context_window = Some(100_000);
+    config.agent.prune_tool_results_keep_tokens = 2_000;
+    config.agent.prune_tool_results_min_tokens = 4_000;
+    let f = fixture_with(config);
+    let session = f.rook.start_session("long history").unwrap();
+    f.rook.log(session, rook_store::EventKind::UserMessage, "", "inspect these results").unwrap();
+    let mut first = None;
+    for i in 0..20 {
+        f.rook.log(session, rook_store::EventKind::ToolCall, "run_command", "{}").unwrap();
+        let seq = f
+            .rook
+            .log(
+                session,
+                rook_store::EventKind::ToolResult,
+                "run_command",
+                &format!("{i}: {} RECOVERED_MIDDLE {}", "a".repeat(5_000), "z".repeat(5_000)),
+            )
+            .unwrap();
+        first.get_or_insert(seq);
+    }
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("read_result", serde_json::json!({"result_id":first.unwrap(),"offset":4900,"limit":300})),
+        reply("recovered the saved middle"),
+    ]));
+    let seen = provider.share();
+    let outcome =
+        AgentLoop::new(&f.rook, provider, session).run("recover the first result's middle").await.unwrap();
+    assert_eq!(outcome.compactions, 0);
+    let requests = seen.lock().unwrap();
+    let first_result = requests[0].messages.iter().find(|m| m.role == Role::Tool).unwrap();
+    assert!(first_result.content.contains("Old result omitted"), "{}", first_result.content);
+    assert!(!first_result.content.contains("RECOVERED_MIDDLE"));
+    assert!(
+        requests[1]
+            .messages
+            .iter()
+            .filter(|m| m.role == Role::Tool)
+            .any(|m| m.content.contains("RECOVERED_MIDDLE"))
+    );
+    let first_after = requests[1].messages.iter().find(|m| m.role == Role::Tool).unwrap();
+    assert_eq!(
+        first_result.content, first_after.content,
+        "retrieving a page does not rewrite the cached prefix"
+    );
+    assert!(f.rook.context_usage(session, None).unwrap().live_tokens < 16_000);
+}
+
+#[tokio::test]
+async fn asynchronous_worktrees_enforce_the_retained_count_and_write_deny_rules() {
+    for denied in [false, true] {
+        let mut config = Config::default();
+        config.agent.max_worktrees = 1;
+        if denied {
+            config.sandbox.deny.push("rook-worktrees".into());
+        }
+        let f = fixture_with(config);
+        std::fs::write(f.workspace.path().join("notes.txt"), "baseline").unwrap();
+        git_fixture(f.workspace.path(), &["init", "-q"]);
+        git_fixture(f.workspace.path(), &["add", "notes.txt"]);
+        git_fixture(f.workspace.path(), &["commit", "-qm", "baseline"]);
+        let session = f.rook.start_session("alternatives").unwrap();
+        let provider = Arc::new(ByPrompt(vec![
+            (
+                "start isolated choices",
+                call(
+                    "delegate",
+                    serde_json::json!({"tasks":["choice one","choice two"],"isolation":"worktree","wait":false}),
+                ),
+            ),
+            ("started: task01", call("subagents", serde_json::json!({"wait_secs":30}))),
+            ("refused:", reply("creation denied")),
+            ("worktree limit", reply("one retained; the limit stopped the other")),
+            ("choice one", reply("first alternative ready")),
+            ("choice two", reply("second alternative ready")),
+        ]));
+        let mut agent = AgentLoop::new(&f.rook, provider, session);
+        agent.allow_everything_not_denied();
+        let outcome = agent.run("start isolated choices").await.unwrap();
+        if denied {
+            assert_eq!(outcome.reply, "creation denied");
+            assert!(outcome.delegated.is_empty());
+        } else {
+            assert_eq!(outcome.delegated.len(), 1, "{outcome:?}");
+            assert!(outcome.reply.contains("limit stopped"), "{outcome:?}");
+        }
+        let folder = f.workspace.path().join(".git/rook-worktrees");
+        let count = std::fs::read_dir(folder).map(|entries| entries.count()).unwrap_or(0);
+        assert_eq!(count, usize::from(!denied));
+    }
 }

@@ -34,6 +34,7 @@ pub mod mention;
 pub mod models;
 pub mod paths;
 pub mod plugins;
+mod results;
 pub mod script;
 pub mod search;
 pub mod secrets;
@@ -41,6 +42,7 @@ pub mod service;
 mod sources;
 pub mod telemetry;
 pub mod work;
+mod worktrees;
 
 pub use config::{ApiEndpoint, Config, ConfigError, ModelSource};
 pub use docs::{DocSet, Kept};

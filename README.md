@@ -932,7 +932,7 @@ takes a `model`, for the sub-task that wants the large one or must not go throug
 the paid one; the field is offered only where there is a choice to make, and a
 name that is not configured is refused with the real ones listed.
 
-A sub-agent works in the same directory as the turn that started it, and two
+By default a sub-agent works in the same directory as the turn that started it, and two
 sessions are already refused a write to the same file at the same time — the
 second is told which session holds it. What a shared directory does not protect
 is the branch: a child that commits carries its parent's unfinished work along
@@ -942,10 +942,63 @@ editing while it edits. So a sub-agent is refused `commit`, `checkout`,
 told what to do instead. Reading is untouched, since that is what most errands
 are for — `status`, `diff`, `log`, `show`, `blame`, and the listing halves of
 the ones that have two, `git branch` and `git stash list`. Adapted from
-[OpenResearch](references/README.md), whose helpers each get a git worktree and
-are forbidden to overlap on branches: the worktree itself does not transfer,
-because a separate tree is a separate `target/` and so a full rebuild for every
-child.
+[OpenResearch](references/README.md).
+
+For independent implementations, the model can call
+`delegate({"tasks":["implement an alternative"],"isolation":"worktree"})`.
+Each child gets a detached Git worktree from `HEAD`, its own local tools and
+language-server pool. Both waiting and `wait:false` delegation support this.
+The source workspace must be the clean repository root, including untracked
+files; unsaved editor buffers and parent MCP/editor connections are not copied.
+Ignored files, build artifacts and initialized submodules are not copied either.
+Builds may therefore need separate setup. An isolated child’s background jobs stop
+when that child ends. Worktrees isolate file changes; they
+are not an additional security sandbox.
+
+The child report names its session and retained path under Git's common directory,
+in `rook-worktrees/`. The parent's `worktree` tool offers `status`, `diff`,
+`read` (with `path`, line `offset` and `limit`), and `remove`. New files appear
+in the diff response's `untracked` list. Review the alternative, read the files,
+and transfer selected edits with the ordinary editing tools; no automatic merge
+or commit occurs. Removal refuses dirty worktrees unless `discard:true` explicitly
+requests discarding them, and still obeys the write policy. Parent rewind leaves
+isolated children intact. `[agent] max_worktrees = 8` bounds retained copies per
+repository; zero disables creation. Clean up reviewed trees explicitly. After a
+process crash, `git worktree list` and `git worktree remove <path>` provide recovery.
+
+### Old tool results and full output
+
+Old results can leave the model's context while remaining in the session log.
+By default Rook protects the latest eight results and at least 8,000 recent result
+tokens, then clears an older batch only when the estimated saving reaches 8,000
+tokens. Human answers and loaded skills are protected. Each batch changes the
+cached conversation prefix once; its persistent watermark keeps subsequent
+requests stable. This runs before summarizing compaction and makes no model call.
+
+```toml
+[agent]
+prune_tool_results_min_tokens = 8000  # 0 disables further pruning
+prune_tool_results_keep_tokens = 8000
+max_replayed_result_tokens = 1000   # replayed result head/tail view; 0 keeps it whole
+max_worktrees = 8
+```
+
+Results carry a numeric `result_id`. The model can use
+`read_result({"result_id":42,"offset":0,"limit":16384})` for the complete
+stored answer, or add `"source":"output"` for a command's captured stdout/stderr.
+Pages return byte offsets and `next_offset`; omitting `result_id` lists recorded
+result IDs, including before compaction (listing offsets are event numbers).
+Recovered pages are not shortened again before the model sees them.
+An optional `session` selects a direct child, so the parent can inspect its command results.
+
+Full command capture is bounded by `[sandbox] max_spill_bytes` (64 MiB by default),
+and maintenance retains `max_output_files` (100 by default). Known resolved
+secrets are redacted before spill bytes reach disk, including values split across
+pipe reads. A capture that reaches its limit is explicitly incomplete. Background jobs also capture output; read `job` first to obtain its result ID,
+then request `source: "output"`. Running or stopped jobs report incomplete capture.
+Editor-owned terminals retain only what their runner captures; the pager cannot
+recover bytes the editor discarded. Context pruning itself deletes
+neither recorded results nor command output files.
 
 ### Memory
 

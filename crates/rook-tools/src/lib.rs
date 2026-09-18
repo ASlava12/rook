@@ -150,6 +150,10 @@ pub trait Terminals: Send + Sync {
 /// answers is the thing that later takes it back out of what comes back.
 pub trait Secrets: Send + Sync {
     fn value(&self, name: &str) -> Option<String>;
+    /// Values already resolved this turn, for redacting persisted output.
+    fn redactions(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// What a command did, however it was run.
@@ -167,16 +171,8 @@ pub struct Ran {
 #[derive(Clone)]
 pub struct ToolContext {
     pub workspace: PathBuf,
-    /// True in a sub-agent, which shares the workspace with the turn that
-    /// started it and must not move the branch under it.
-    ///
-    /// Taken from OpenResearch, whose helpers each get a git worktree and are
-    /// forbidden to overlap on branches. The worktree half does not transfer —
-    /// this agent already refuses two sessions writing one path, and a separate
-    /// tree means a separate `target/` and so a full rebuild for every child —
-    /// but the branch half is the same hazard here: a child that commits
-    /// commits the parent's half-finished work along with its own, and one that
-    /// switches branches changes what the parent is editing while it edits it.
+    /// True in a sub-agent. Branch-changing commands remain forbidden even
+    /// in an isolated worktree; changes are reviewed and transferred by its parent.
     pub delegated: bool,
     pub max_output_bytes: usize,
     pub command_timeout: std::time::Duration,

@@ -311,8 +311,12 @@ fn the_whole_advertised_tool_list_stays_within_a_budget() {
     // it costs buys a citation rather than a claim. Each time the new
     // description was cut to the bone first; what is left is the shape of the
     // arguments, which a tool cannot be called without.
+    // Two bounded retrieval/lifecycle tools: read_result restores omitted data
+    // (also from direct children); worktree reviews and cleans isolated edits.
+    // Their descriptions are one sentence each, and the schemas retain only
+    // the fields needed for paging, ownership, and explicit dirty-tree removal.
     assert!(
-        full < 2_500,
+        full < 2_800,
         "the whole list costs ~{full} tokens on every eager request; trim a description or \
          merge an argument before raising this"
     );
@@ -330,7 +334,7 @@ fn the_whole_advertised_tool_list_stays_within_a_budget() {
     // and a sentence saying it looks locally first, which is the part that has
     // to reach a model deciding whether to answer from memory.
     assert!(
-        stubs < 1_100,
+        stubs < 1_250,
         "the stubs cost ~{stubs} tokens on every request, which is what is \
          actually paid: lazy loading is the default"
     );

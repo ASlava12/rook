@@ -85,8 +85,11 @@ async fn a_secret_bearing_command_does_not_spill_raw_output() {
     ctx.secrets = Some(Arc::new(SyntheticSecret));
     let result = RunCommand.call(&ctx, &json!({"command":"printf '%s' \"$ROOK_SECRET_TEST\"; i=0; while [ $i -lt 200 ]; do printf x; i=$((i+1)); done", "secrets":["test"]})).await.unwrap();
     assert!(!result.is_error, "{}", result.content);
-    assert!(!result.meta.contains_key("output_file"));
-    assert!(!d.path().join("output").exists());
+    let path = result.meta["output_file"].as_str().expect("long output is retained after redaction");
+    let kept = std::fs::read_to_string(path).unwrap();
+    assert!(kept.contains("${secret}"), "{kept}");
+    assert!(!kept.contains("synthetic-private-value"), "raw secrets must never reach disk");
+    assert_eq!(result.meta["output_complete"], true);
 }
 #[tokio::test]
 async fn closing_output_does_not_disable_the_command_deadline() {

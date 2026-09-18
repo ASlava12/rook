@@ -60,7 +60,7 @@ impl DictSet {
 
     /// Every one an object of this kind might have been compressed with, the
     /// current one first.
-    fn all(&self, kind: Kind) -> Vec<Vec<u8>> {
+    pub(crate) fn all(&self, kind: Kind) -> Vec<Vec<u8>> {
         self.dicts.read().ok().and_then(|d| d.get(&(kind as u8)).cloned()).unwrap_or_default()
     }
 

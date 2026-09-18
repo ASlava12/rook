@@ -351,3 +351,28 @@ async fn stopping_a_background_command_takes_the_grandchild_and_not_only_the_she
     }
     panic!("the grandchild outlived the stop, which the job reported as done");
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_background_commands_middle_survives_its_bounded_display() {
+    let (dir, mut ctx) = ctx(2);
+    ctx.jobs = Some(Arc::new(Jobs::new(2, 100)));
+    ctx.spill_dir = Some(dir.path().join("output"));
+    ctx.max_spill_bytes = 10_000;
+    let started = RunCommand
+        .call(&ctx, &serde_json::json!({"command":"printf '%0500dMIDDLE%0500d' 0 0","background":true}))
+        .await
+        .unwrap();
+    let id = started.meta["job"].as_str().unwrap();
+    let result = JobTool.call(&ctx, &serde_json::json!({"id":id,"wait_secs":30})).await.unwrap();
+    assert_eq!(result.meta["running"], false);
+    assert!(
+        !ctx.jobs.as_ref().unwrap().get(id).unwrap().output.contains("MIDDLE"),
+        "the display was really truncated"
+    );
+    assert_eq!(result.meta["output_complete"], true);
+    let path = result.meta["output_file"].as_str().unwrap();
+    let output = std::fs::read_to_string(path).unwrap();
+    assert_eq!(output.len(), 1006);
+    assert!(output.contains("MIDDLE"));
+}

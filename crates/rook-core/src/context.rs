@@ -168,13 +168,16 @@ fn from_end(text: &str, bytes: usize) -> usize {
 /// result has to render the same way at every step of a turn: shortening by
 /// recency — the newest few whole, older ones cut — rewrites a message that was
 /// already sent, which breaks the prefix there and makes everything after it
-/// uncached. That costs more than it saves.
+/// uncached. The separate result-pruning pass batches that tradeoff behind a
+/// minimum savings threshold and a durable watermark.
 pub fn shorten_result(text: &str, budget_tokens: usize) -> String {
     if budget_tokens == 0 || estimate_tokens(text) <= budget_tokens {
         return text.to_string();
     }
     let dropped = estimate_tokens(text) - budget_tokens;
-    let marker = format!("\n\n[… {dropped} tokens elided; `rook store cat` has the whole of it …]\n\n");
+    let marker = format!(
+        "\n\n[… {dropped} tokens elided; use `read_result` with this result_id for the stored text …]\n\n"
+    );
     let Some(room) = budget_tokens.checked_sub(estimate_tokens(&marker)).map(|left| left * 4) else {
         return String::new();
     };
@@ -229,7 +232,7 @@ mod tests {
         assert!(kept.starts_with("first line"), "the head is where a result is read from");
         assert!(kept.ends_with("last line"), "and the tail is why it stopped");
         assert!(kept.contains("elided"), "and it says the middle went: {kept}");
-        assert!(kept.contains("store cat"), "and where the whole of it still is");
+        assert!(kept.contains("read_result"), "and where the whole of it still is");
 
         assert_eq!(
             super::tokens_in_request(rook_store::EventKind::ToolResult, long.len(), 800, 200),

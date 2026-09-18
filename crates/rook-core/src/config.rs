@@ -578,6 +578,12 @@ pub struct AgentConfig {
     /// Past this the middle goes and the marker says how much and where the
     /// rest is. 0 carries every result whole, which is what it did before.
     pub max_replayed_result_tokens: usize,
+    /// Minimum estimated tokens saved before clearing old tool results. 0 disables.
+    pub prune_tool_results_min_tokens: usize,
+    /// Recent result tokens protected from pruning; at least eight results always survive.
+    pub prune_tool_results_keep_tokens: usize,
+    /// Retained isolated worktrees per repository. Zero disables their creation.
+    pub max_worktrees: usize,
     /// Everything one turn may spend, its sub-agents included. 0 lifts it.
     ///
     /// Steps were the only bound, and they do not bound this: a sub-agent
@@ -831,6 +837,9 @@ impl Default for AgentConfig {
             // five, so the ordinary ones are untouched, and well under the
             // three that made up more than half of one turn's context.
             max_replayed_result_tokens: 1_000,
+            prune_tool_results_min_tokens: 8_000,
+            prune_tool_results_keep_tokens: 8_000,
+            max_worktrees: 8,
             // Generous enough that ordinary work never meets it — a turn is
             // usually thousands, a long one hundreds of thousands — and low
             // enough to halve the runaway that prompted it.

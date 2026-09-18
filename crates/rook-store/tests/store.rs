@@ -752,3 +752,41 @@ fn malformed_format_markers_are_errors_without_panics_or_rewrites() {
         assert_eq!(std::fs::read_to_string(path).unwrap(), marker);
     }
 }
+
+#[test]
+fn paged_reads_verify_whole_objects_across_codecs_and_dictionary_generations() {
+    let (_dir, store) = tmp_store();
+    let cases = [b"short".to_vec(), noise(300_000, 27), b"a long result\n".repeat(30_000)];
+    for body in cases {
+        let id = store.put(Kind::ToolResult, &body).unwrap();
+        for offset in [0, body.len() / 2, body.len()] {
+            assert_eq!(
+                store.get_range(&id, offset as u64, 71).unwrap(),
+                body[offset..(offset + 71).min(body.len())]
+            );
+        }
+        assert!(store.get_range(&id, body.len() as u64 + 1, 1).is_err());
+    }
+    let first: Vec<_> = (0..100).map(message).collect();
+    store.dicts().train(Kind::Message, &first, 4096).unwrap();
+    let body = message(123);
+    let id = store.put(Kind::Message, &body).unwrap();
+    assert_eq!(store.stat_object(&id).unwrap().unwrap().codec, 2);
+    let next: Vec<_> = (1000..1100).map(message).collect();
+    store.dicts().train(Kind::Message, &next, 4096).unwrap();
+    assert_eq!(store.get_range(&id, 5, 91).unwrap(), body[5..96]);
+    let external = noise(2 * 1024 * 1024, 99);
+    let id = store.put(Kind::Other, &external).unwrap();
+    assert!(store.stat_object(&id).unwrap().unwrap().external);
+    assert_eq!(store.get_range(&id, 75_000, 500).unwrap(), external[75_000..75_500]);
+    let hex = id.to_hex();
+    let path = store.root().join("objects").join(&hex[..2]).join(&hex[2..4]).join(&hex);
+    let mut broken = std::fs::read(&path).unwrap();
+    let end = broken.len() - 1;
+    broken[end] ^= 0xff;
+    std::fs::write(&path, broken).unwrap();
+    assert!(
+        store.get_range(&id, 0, 10).is_err(),
+        "corruption outside the requested page must also be detected"
+    );
+}

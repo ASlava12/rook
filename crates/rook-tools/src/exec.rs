@@ -54,11 +54,9 @@ impl Tool for RunCommand {
             && let Some(sub) = crate::policy::moves_the_branch(&command)
         {
             return Ok(ToolOutcome::error(format!(
-                "`git {sub}` is for the turn that started this one to run. This workspace is \
-                 shared with it, so a commit here would carry its unfinished work along with \
-                 yours, and anything that moves the branch changes what it is editing while it \
-                 edits. Change the files you were asked to change and say what you changed; \
-                 what becomes a commit is decided where the work was asked for."
+                "`git {sub}` is for the turn that started this one to run. Change the files \
+                 you were asked to change and report them; the parent decides how to commit \
+                 or integrate those edits. This applies to shared and isolated workspaces."
             )));
         }
 
@@ -85,7 +83,13 @@ impl Tool for RunCommand {
                 Ok(chosen) => chosen,
                 Err(refused) => return Ok(ToolOutcome::error(refused)),
             };
-            let id = jobs.start(&command, &cwd, isolation)?;
+            if args.get("secrets").and_then(|v| v.as_array()).is_some_and(|v| !v.is_empty()) {
+                return Ok(ToolOutcome::error("named secrets require a foreground command"));
+            }
+            let redactions = ctx.secrets.as_ref().map(|s| s.redactions()).unwrap_or_default();
+            let spill =
+                ctx.spill_dir.as_deref().and_then(|dir| Spill::open(dir, ctx.max_spill_bytes, redactions));
+            let id = jobs.start_captured(&command, &cwd, isolation, spill)?;
             return Ok(ToolOutcome::ok(format!("started {id}; `job` reads what it prints")).with("job", id));
         }
 
@@ -102,6 +106,8 @@ impl Tool for RunCommand {
             Err(refused) => return Ok(ToolOutcome::error(refused)),
         };
 
+        let mut redactions = ctx.secrets.as_ref().map(|s| s.redactions()).unwrap_or_default();
+        redactions.extend(env.iter().map(|(_, value)| value.clone()));
         if let Some(terminals) = &ctx.terminals {
             if !env.is_empty() {
                 return Ok(ToolOutcome::error(
@@ -140,8 +146,7 @@ impl Tool for RunCommand {
         let spill = ctx
             .spill_dir
             .as_deref()
-            .filter(|_| asked_for.is_empty())
-            .and_then(|dir| Spill::open(dir, ctx.max_spill_bytes))
+            .and_then(|dir| Spill::open(dir, ctx.max_spill_bytes, redactions))
             .map(|s| std::sync::Arc::new(std::sync::Mutex::new(s)));
         // Shared by both streams: what matters is whether the command said
         // anything, not which pipe it came down.
@@ -286,11 +291,11 @@ impl Tool for RunCommand {
             let outcome = ToolOutcome::error(format!(
                 "{}{}",
                 timed_out(timeout, killed, &printed, silent_for),
-                kept.as_ref().map(|(note, _)| note.as_str()).unwrap_or("")
+                kept.as_ref().map(|(note, _, _)| note.as_str()).unwrap_or("")
             ))
             .with("timed_out", true);
             return Ok(match kept {
-                Some((_, path)) => outcome.with("output_file", path),
+                Some((_, path, _)) => outcome.with("output_file", path).with("output_complete", false),
                 None => outcome,
             });
         }
@@ -346,7 +351,7 @@ impl Tool for RunCommand {
         let outcome = ToolOutcome {
             content: format!(
                 "exit {code}\n{combined}{}{held}{left_running}",
-                kept.as_ref().map(|(n, _)| n.as_str()).unwrap_or("")
+                kept.as_ref().map(|(n, _, _)| n.as_str()).unwrap_or("")
             ),
             is_error: code != 0,
             truncated,
@@ -356,7 +361,9 @@ impl Tool for RunCommand {
         .with("exit_code", code)
         .with("isolation", contained);
         Ok(match kept {
-            Some((_, path)) => outcome.with("output_file", path),
+            Some((_, path, complete)) => {
+                outcome.with("output_file", path).with("output_complete", complete && !orphaned)
+            }
             None => outcome,
         })
     }
@@ -378,8 +385,8 @@ impl RunCommand {
 /// The head holds the first error and the tail holds why it failed, which is why
 /// they are what the model is shown; but a run whose interesting line is the
 /// four hundredth of two thousand has it nowhere. This is where it is, and the
-/// model reaches it with the shell it already has.
-struct Spill {
+/// model reaches it through the core's scoped, paged result reader.
+pub(crate) struct Spill {
     file: std::fs::File,
     path: std::path::PathBuf,
     written: u64,
@@ -387,12 +394,15 @@ struct Spill {
     /// Bytes the cap kept out. A spill that silently stops is a file that reads
     /// as a complete record of a command that printed less than it did.
     dropped: u64,
+    failed: bool,
+    redactions: Vec<Vec<u8>>,
+    pending: Vec<u8>,
 }
 
 impl Spill {
     /// `None` when there is nowhere to put it, which is not an error: the ends
     /// are still what the model is shown either way.
-    fn open(dir: &std::path::Path, cap: u64) -> Option<Self> {
+    pub(crate) fn open(dir: &std::path::Path, cap: u64, redactions: Vec<String>) -> Option<Self> {
         if cap == 0 {
             return None;
         }
@@ -407,11 +417,47 @@ impl Spill {
         static NTH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let nth = NTH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let path = dir.join(format!("{stamp:039}-{nth:06}.log"));
-        let file = std::fs::File::create(&path).ok()?;
-        Some(Self { file, path, written: 0, cap, dropped: 0 })
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options.open(&path).ok()?;
+        let mut redactions: Vec<Vec<u8>> =
+            redactions.into_iter().filter(|s| !s.is_empty()).map(String::into_bytes).collect();
+        redactions.sort_by_key(|v| std::cmp::Reverse(v.len()));
+        redactions.dedup();
+        Some(Self { file, path, written: 0, cap, dropped: 0, failed: false, redactions, pending: Vec::new() })
     }
 
-    fn write(&mut self, bytes: &[u8]) {
+    pub(crate) fn write(&mut self, bytes: &[u8]) {
+        self.pending.extend_from_slice(bytes);
+        self.flush_redacted(false);
+    }
+
+    // Keep the possible start of a secret until the next chunk arrives. Raw
+    // secret bytes never reach disk, even when a pipe read splits the value.
+    pub(crate) fn flush_redacted(&mut self, finished: bool) {
+        let overlap = self.redactions.first().map(|v| v.len().saturating_sub(1)).unwrap_or(0);
+        let safe = if finished { self.pending.len() } else { self.pending.len().saturating_sub(overlap) };
+        let mut i = 0;
+        let mut clean = Vec::with_capacity(safe);
+        while i < safe {
+            if let Some(value) = self.redactions.iter().find(|value| self.pending[i..].starts_with(value)) {
+                clean.extend_from_slice(b"${secret}");
+                i += value.len();
+            } else {
+                clean.push(self.pending[i]);
+                i += 1;
+            }
+        }
+        self.pending.drain(..i);
+        self.write_capped(&clean);
+    }
+
+    fn write_capped(&mut self, bytes: &[u8]) {
         use std::io::Write;
         let room = self.cap.saturating_sub(self.written) as usize;
         if room == 0 {
@@ -419,19 +465,35 @@ impl Spill {
             return;
         }
         let taking = room.min(bytes.len());
-        if self.file.write_all(&bytes[..taking]).is_ok() {
-            self.written += taking as u64;
+        match self.file.write_all(&bytes[..taking]) {
+            Ok(()) => {
+                self.written += taking as u64;
+                self.dropped += (bytes.len() - taking) as u64;
+            }
+            Err(_) => {
+                self.dropped += bytes.len() as u64;
+                self.failed = true;
+                self.cap = self.written;
+            }
         }
-        self.dropped += (bytes.len() - taking) as u64;
+    }
+
+    pub(crate) fn details(&self) -> (String, bool) {
+        (self.path.display().to_string(), self.dropped == 0 && self.pending.is_empty())
     }
 
     /// What to tell the model, once the command has finished.
     fn note(&self) -> String {
-        let past = match self.dropped {
-            0 => String::new(),
-            n => format!(", {n} bytes past `[sandbox] max_spill_bytes` not kept"),
+        let past = match (self.failed, self.dropped) {
+            (true, _) => ", output file write failed; capture incomplete".into(),
+            (false, 0) => String::new(),
+            (false, n) => format!(", {n} bytes past `[sandbox] max_spill_bytes` not kept"),
         };
-        format!("\n[whole output: {} ({} bytes{past})]", self.path.display(), self.written)
+        format!(
+            "\n[whole output: {} ({} bytes{past}); read_result with source=output reads the captured bytes]",
+            self.path.display(),
+            self.written
+        )
     }
 }
 
@@ -685,14 +747,15 @@ enum Ended {
 fn settle(
     spill: Option<std::sync::Arc<std::sync::Mutex<Spill>>>,
     anything_lost: bool,
-) -> Option<(String, String)> {
+) -> Option<(String, String, bool)> {
     let spill = spill?;
-    let spill = spill.lock().unwrap_or_else(|e| e.into_inner());
+    let mut spill = spill.lock().unwrap_or_else(|e| e.into_inner());
+    spill.flush_redacted(true);
     if !anything_lost {
         let _ = std::fs::remove_file(&spill.path);
         return None;
     }
-    Some((spill.note(), spill.path.display().to_string()))
+    Some((spill.note(), spill.path.display().to_string(), spill.dropped == 0))
 }
 
 /// How long a command has been quiet, from the clock the drains share.
@@ -987,5 +1050,23 @@ mod saying_what_it_is_doing {
             wedged, "running 300s, quiet for 295s",
             "and one that has said nothing for almost all of it says that instead"
         );
+    }
+}
+
+#[cfg(test)]
+mod spill_redaction_tests {
+    use super::Spill;
+
+    #[test]
+    fn a_secret_split_between_pipe_reads_never_reaches_the_spill() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut spill = Spill::open(dir.path(), 10_000, vec!["very-private-secret".into()]).unwrap();
+        spill.write(b"prefix very-pri");
+        let on_disk = std::fs::read(&spill.path).unwrap();
+        assert!(!String::from_utf8_lossy(&on_disk).contains("very-pri"));
+        spill.write(b"vate-secret suffix");
+        spill.flush_redacted(true);
+        assert_eq!(std::fs::read_to_string(&spill.path).unwrap(), "prefix ${secret} suffix");
+        assert_eq!(spill.dropped, 0);
     }
 }

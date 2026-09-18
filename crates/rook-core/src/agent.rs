@@ -404,7 +404,7 @@ type ClaimedResult<'a> = std::result::Result<(Option<crate::service::Writing<'a>
 /// the writing tools has not been stopped from writing, only from doing it
 /// itself.
 const CHANGES_THINGS: &[&str] =
-    &[WRITE_SKILL, FIND_SKILL, REMEMBER, FORGET, DELEGATE, SUBAGENTS, STANCE, VERIFY];
+    &[WRITE_SKILL, FIND_SKILL, REMEMBER, FORGET, DELEGATE, SUBAGENTS, STANCE, VERIFY, crate::worktrees::TOOL];
 
 /// The same for the toolbox. `run_command` is deliberately absent — verifying a
 /// claim means running things — so this stops a checker editing the work it is
@@ -1570,7 +1570,7 @@ impl<'a> AgentLoop<'a> {
         // not a conversation any dialect accepts.
         let mut thought: Option<String> = None;
         let thinking_budget = self.rook.config.agent.max_reasoning_tokens;
-        let result_budget = self.rook.config.agent.max_replayed_result_tokens;
+        let pruned = crate::results::watermark(self.rook, self.session)?;
         // A replayed conversation reads as continuous however long the gaps
         // were, so a session picked up a week later looks like one paused for a
         // moment — and "did you already run the tests?" has a different answer
@@ -1652,10 +1652,9 @@ impl<'a> AgentLoop<'a> {
                     // list invalid for the provider, so drop it rather than
                     // send something that will be rejected.
                     if let Some(id) = open_call.take() {
-                        let kept = crate::context::shorten_result(&body, result_budget);
                         messages.push(Message::tool_result(
                             id,
-                            crate::sources::tool_result(&event.record.label, &kept),
+                            crate::results::render(self.rook, &event, &body, pruned),
                         ));
                     }
                 }
@@ -1693,6 +1692,16 @@ impl<'a> AgentLoop<'a> {
             }
             specs.push(if lazy { spec.stub() } else { spec })
         };
+        push(ToolSpec {
+            name: crate::results::READ_RESULT.into(),
+            description:
+                "Read saved results or command output in byte pages; omit result_id to list result IDs."
+                    .into(),
+            parameters: json!({"type":"object", "properties":{
+                "result_id":{"type":"integer"}, "session":{"type":"string", "description":"Optional direct child session."}, "offset":{"type":"integer"},
+                "limit":{"type":"integer"}, "source":{"type":"string","enum":["result","output"]}
+            }}),
+        });
         if self.rook.config.agent.todo_tool {
             push(ToolSpec {
                 name: PLAN.into(),
@@ -1833,6 +1842,16 @@ impl<'a> AgentLoop<'a> {
         }
         if self.depth < MAX_DEPTH {
             push(ToolSpec {
+                name: crate::worktrees::TOOL.into(),
+                description: "Review or remove a delegated worktree; read files to transfer selected edits."
+                    .into(),
+                parameters: json!({"type":"object", "properties":{
+                    "session":{"type":"string"}, "action":{"type":"string","enum":["status","diff","read","remove"]},
+                    "path":{"type":"string"}, "offset":{"type":"integer"}, "limit":{"type":"integer"},
+                    "discard":{"type":"boolean"}
+                }, "required":["session"]}),
+            });
+            push(ToolSpec {
                 name: VERIFY.into(),
                 description: "Have a claim checked by an agent that did not make it and cannot edit anything. Use it before reporting work done."
                     .into(),
@@ -1879,6 +1898,8 @@ impl<'a> AgentLoop<'a> {
                                             exchanges; anything else is passed verbatim — put \
                                             here what it would otherwise read."
                         },
+                        "isolation": {"type":"string", "enum":["shared","worktree"],
+                            "description":"Default shared. worktree requires a clean Git root; edits are retained separately for review."},
                         "max_steps": { "type": "integer" },
                         // One word rather than a model and an effort, which
                         // are never chosen apart: the question a caller can
@@ -2094,6 +2115,7 @@ impl<'a> AgentLoop<'a> {
         prompt: &str,
         mut on_progress: F,
     ) -> Result<TurnOutcome> {
+        let _workspace = crate::worktrees::Lease::acquire(&self.rook.workspace, false)?;
         self.rook.name_session_from(self.session, prompt).ok();
         self.run_session_hooks().await;
         self.offer_language_server().await;
@@ -2206,6 +2228,11 @@ impl<'a> AgentLoop<'a> {
                 self.rook.log(self.session, EventKind::UserMessage, "while running", &said).ok();
                 on_progress(Progress::Heard { text: &said });
                 messages.push(Message::user(&said));
+            }
+
+            if crate::results::prune(self.rook, self.session, &mut messages)? > 0 {
+                anchor = None;
+                worth_compacting = true;
             }
 
             // Once per turn that it achieves something. A span too small to
@@ -2784,6 +2811,7 @@ impl<'a> AgentLoop<'a> {
                         done
                     }
                 };
+                let recorded_body = rook_store::ObjectId::of(result.as_bytes());
                 on_progress(Progress::ToolDone { name: &call.name, failed });
                 for (_, name) in dropped.iter().filter(|(id, _)| *id == call.id) {
                     result.push_str(&format!(
@@ -2794,7 +2822,24 @@ impl<'a> AgentLoop<'a> {
                 let shown = if call.name == LOAD_SKILL && !failed {
                     result
                 } else {
-                    crate::sources::tool_result(&call.name, &result)
+                    let recorded = self
+                        .rook
+                        .store
+                        .get_session(self.session)
+                        .ok()
+                        .flatten()
+                        .and_then(|m| m.next_seq.checked_sub(1))
+                        .and_then(|seq| self.rook.store.events(self.session, seq, 1).ok())
+                        .and_then(|events| events.into_iter().next())
+                        .filter(|e| {
+                            e.record.kind == EventKind::ToolResult
+                                && e.record.label == call.name
+                                && e.record.body == recorded_body
+                        });
+                    match recorded {
+                        Some(event) => crate::results::fresh(&event, &result),
+                        None => crate::sources::tool_result(&call.name, &result),
+                    }
                 };
                 messages.push(Message::tool_result(&call.id, shown));
             }
@@ -2929,6 +2974,50 @@ impl<'a> AgentLoop<'a> {
         }
 
         outcome.tools_called.push(call.name.clone());
+
+        if call.name == crate::worktrees::TOOL {
+            if call.arguments.get("action").and_then(|v| v.as_str()) == Some("remove") {
+                let tree = match crate::worktrees::owned(self.rook, self.session, &call.arguments) {
+                    Ok((_, tree)) => tree,
+                    Err(why) => return (why.to_string(), true),
+                };
+                let risk = rook_tools::policy::Risk::Write(vec![tree.path.display().to_string()]);
+                if let Some(refusal) = self
+                    .gate_risk(
+                        &call.name,
+                        &call.arguments,
+                        risk,
+                        Shown::Text("Remove this worktree. discard=true deletes its unmerged edits."),
+                    )
+                    .await
+                {
+                    self.rook.log(self.session, EventKind::ToolResult, &call.name, &refusal).ok();
+                    return (refusal, true);
+                }
+            }
+            let (text, failed) = match crate::worktrees::inspect(
+                self.rook,
+                self.session,
+                &call.arguments,
+                &self.vault,
+            )
+            .await
+            {
+                Ok(text) => (self.vault.redact(&text), false),
+                Err(why) => (why.to_string(), true),
+            };
+            self.rook.log(self.session, EventKind::ToolResult, &call.name, &text).ok();
+            return (text, failed);
+        }
+
+        if call.name == crate::results::READ_RESULT {
+            let (text, failed) = match crate::results::read(self.rook, self.session, &call.arguments) {
+                Ok(text) => (self.vault.redact(&text), false),
+                Err(why) => (why.to_string(), true),
+            };
+            self.rook.log(self.session, EventKind::ToolResult, &call.name, &text).ok();
+            return (text, failed);
+        }
 
         if call.name == VERIFY {
             let text = self.verify(&call.arguments, outcome, on_progress).await;
@@ -3234,7 +3323,16 @@ impl<'a> AgentLoop<'a> {
         // before the store keeps it. A command's output, a page, a file and an
         // MCP server's answer are all the same question here.
         let text = self.vault.redact(&text);
-        self.rook.log(self.session, EventKind::ToolResult, &call.name, &text).ok();
+        match self.rook.log(self.session, EventKind::ToolResult, &call.name, &text) {
+            Ok(seq) if matches!(call.name.as_str(), "run_command" | "job") => {
+                if let Err(why) = crate::results::register_output(self.rook, self.session, seq, &outcome.meta)
+                {
+                    tracing::warn!("full output could not be registered: {why}");
+                }
+            }
+            Err(why) => tracing::warn!("tool result could not be saved: {why}"),
+            _ => {}
+        }
         (text, outcome.is_error)
     }
 
@@ -3284,6 +3382,23 @@ impl<'a> AgentLoop<'a> {
             Ok(tasks) => tasks,
             Err(why) => return why,
         };
+        let isolated = match args.get("isolation") {
+            None => false,
+            Some(value) if value.as_str() == Some("shared") => false,
+            Some(value) if value.as_str() == Some("worktree") => true,
+            _ => return "isolation must be shared or worktree".into(),
+        };
+        if isolated {
+            if self.tool_ctx.files.is_some() || self.tool_ctx.terminals.is_some() {
+                return "worktree isolation requires local disk tools; editor-owned files/terminals are not supported".into();
+            }
+            let paths = match crate::worktrees::allocation_paths(self.rook).await {
+                Ok(paths) => paths,
+                Err(why) => return why.to_string(),
+            };
+            let risk = rook_tools::policy::Risk::Write(paths);
+            if let Some(refusal) = self.gate_risk(DELEGATE, args, risk, Shown::Text("Create detached Git worktrees for these tasks; keep their edits separately for review.")).await { return refusal; }
+        }
 
         // Anything that is not one of the two words is context the parent wrote
         // out for the child. A live model filled this with the file it had just
@@ -3348,7 +3463,21 @@ impl<'a> AgentLoop<'a> {
         if !args.get("wait").and_then(|w| w.as_bool()).unwrap_or(true) {
             let names: Vec<String> = tasks
                 .iter()
-                .map(|task| nursery.start(crew, task, inherited.clone(), max_steps, provider.clone(), effort))
+                .map(|task| {
+                    nursery.start(
+                        crew,
+                        task,
+                        inherited.clone(),
+                        Bounds {
+                            steps: max_steps,
+                            by: crew.by,
+                            tokens: 0,
+                            provider: provider.clone(),
+                            effort,
+                            isolated,
+                        },
+                    )
+                })
                 .collect();
             return format!(
                 "started: {}. `{SUBAGENTS}` says where they got to, passes one a remark, and \
@@ -3387,7 +3516,8 @@ impl<'a> AgentLoop<'a> {
                 let provider = provider.clone();
                 async move {
                     let _permit = limit.acquire().await;
-                    let bounds = Bounds { steps: max_steps, by: self.by, tokens: each, provider, effort };
+                    let bounds =
+                        Bounds { steps: max_steps, by: self.by, tokens: each, provider, effort, isolated };
                     (i, crew.run_subtask(task, inherited.as_deref(), bounds, doing, i, said).await)
                 }
             })
@@ -4899,6 +5029,7 @@ impl AgentLoop<'_> {
 /// them in the wrong order.
 #[derive(Clone)]
 struct Bounds {
+    isolated: bool,
     steps: Option<u32>,
     /// The turn's deadline, passed down unchanged: every sub-agent of a turn
     /// finishes by the moment the turn does.
@@ -4947,23 +5078,39 @@ impl Crew<'_> {
         said: std::sync::Arc<Interjections>,
     ) -> Result<(String, TurnOutcome)> {
         let session = self.rook.fork_for_subtask(self.parent, task)?;
+        let mut tree =
+            if bounds.isolated { Some(crate::worktrees::create(self.rook, session).await?) } else { None };
+        let _finished = tree.as_ref().map(|_| crate::worktrees::Finished(self.rook, session));
+        let isolated_rook = tree.as_ref().map(|tree| self.rook.for_workspace(tree.path.clone()));
+        let rook = isolated_rook.as_ref().unwrap_or(self.rook);
         if let Some(context) = inherited {
             self.rook.log(session, EventKind::Note, "inherited", context).ok();
         }
 
         // What the call asked for, or what the turn is using.
         let chosen = bounds.provider.clone().unwrap_or_else(|| self.provider.clone());
-        let mut child = AgentLoop::new(self.rook, chosen, session);
+        let mut child = AgentLoop::new(rook, chosen, session);
         child.depth = self.depth + 1;
-        child.tools = self.tools.clone();
-        child.tool_ctx = self.tool_ctx.clone();
+        if tree.is_none() {
+            child.tools = self.tools.clone();
+            child.tool_ctx = self.tool_ctx.clone();
+            child.servers = self.servers.clone();
+        } else {
+            // MCP servers and editor bridges may be rooted in the parent. Local
+            // tools, language servers and jobs must be constructed for this tree.
+            child.tool_ctx.delegated = true;
+            child.tool_ctx.allow_outside_workspace = false;
+            child.servers = servers_for(&rook.config, &rook.workspace);
+            crate::lsp::register(&mut child.tools, child.servers.clone());
+            child.tool_ctx.jobs = Some(jobs_for(&rook.config));
+            child.tools.register(std::sync::Arc::new(rook_tools::jobs::JobTool));
+        }
         child.policy = self.policy.clone();
         child.approver = self.approver.clone();
         // Deliberately not `ask_via`: a subagent the user did not start should
         // not interrupt them, and its parent is the one holding the context to
         // judge the answer.
         child.hooks = self.hooks.clone();
-        child.servers = self.servers.clone();
         child.spawned = self.spawned.clone();
         // Its own queue, not the parent's: what the user says while several of
         // these run has to reach all of them, and taking from one queue would
@@ -4979,14 +5126,25 @@ impl Crew<'_> {
         // Boxed because this is `run` calling itself through a tool call. The
         // channel carries only tool names, so it holds at most one short string
         // per step the children are already bounded to.
-        let where_it_runs = self.rook.workspace.clone();
-        let outcome = Box::pin(child.run_with(task, move |progress| {
+        let where_it_runs = rook.workspace.clone();
+        let result = Box::pin(child.run_with(task, move |progress| {
             if let Progress::Delta(Delta::ToolCall(call)) = progress {
                 let _ = doing
                     .send((index, crate::calls::doing(&call.name, Some(&call.arguments), &where_it_runs)));
             }
         }))
-        .await?;
+        .await;
+        let mut report = None;
+        if let Some(tree) = tree.as_mut() {
+            tree.finished = true;
+            tree.save(self.rook, session)?;
+            report = Some(tree.report(session));
+        }
+        let mut outcome =
+            result.map_err(|why| CoreError::Other(format!("{why}\n{}", report.as_deref().unwrap_or(""))))?;
+        if let Some(report) = report {
+            outcome.reply.push_str(&format!("\n\n{report}"));
+        }
         Ok((rook_store::format_session_id(session), outcome))
     }
 }
@@ -5044,9 +5202,7 @@ impl<'f> Nursery<'f> {
         crew: &'f Crew<'a>,
         task: &str,
         inherited: Option<String>,
-        max_steps: Option<u32>,
-        provider: Option<std::sync::Arc<dyn Provider>>,
-        effort: Option<rook_llm::Effort>,
+        mut bounds: Bounds,
     ) -> String {
         let at = self.tasks.len();
         let said: std::sync::Arc<Interjections> = Default::default();
@@ -5064,10 +5220,10 @@ impl<'f> Nursery<'f> {
         };
         let (limit, doing) = (self.limit.clone(), self.doing.clone());
         // Read before the move: every child of a turn shares its deadline.
-        let by = crew.by;
+        bounds.by = crew.by;
+        bounds.tokens = share;
         self.running.push(Box::pin(async move {
             let _permit = limit.acquire().await;
-            let bounds = Bounds { steps: max_steps, by, tokens: share, provider, effort };
             (at, crew.run_subtask(&task, inherited.as_deref(), bounds, doing, at, said).await)
         }));
         name_of(at)

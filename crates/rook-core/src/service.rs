@@ -990,6 +990,7 @@ impl Rook {
                 ))
             })
             .unwrap_or(0);
+        let pruned = crate::results::watermark(self, session)?;
         for event in self.store.events(session, from_seq, usize::MAX)? {
             if !crate::context::reaches_the_model(event.record.kind) {
                 continue;
@@ -1002,10 +1003,7 @@ impl Rook {
                 let shown = if event.record.kind == EventKind::SkillLoaded {
                     crate::sources::replay_skill(&body, &self.workspace, &self.config.agent.trusted_sources)
                 } else {
-                    crate::sources::tool_result(
-                        &event.record.label,
-                        &crate::context::shorten_result(&body, self.config.agent.max_replayed_result_tokens),
-                    )
+                    crate::results::render(self, &event, &body, pruned)
                 };
                 live += crate::context::estimate_tokens(&shown);
                 continue;
@@ -1054,7 +1052,11 @@ impl Rook {
             // the writing is a turn whose rewind has to undo it, and a sub-task
             // keeps its checkpoints in a session of its own.
             let mut logs = vec![(session, self.store.events(session, to_seq, usize::MAX)?)];
+            let mut isolated_roots = std::collections::BTreeSet::new();
             for child in self.delegated_after(session, to_seq)? {
+                if let Some(path) = crate::worktrees::retained_path(self, child)? {
+                    isolated_roots.insert(path.canonicalize().unwrap_or(path));
+                }
                 logs.push((child, self.store.events(child, 0, usize::MAX)?));
             }
             let mut ordered = Vec::new();
@@ -1080,10 +1082,18 @@ impl Rook {
             ordered.sort_by_key(|(order, ts, _, event)| {
                 (order.is_some(), order.unwrap_or(*ts as u64), event.seq)
             });
-            for (_, _, _, event) in ordered {
+            for (_, _, owner, event) in ordered {
                 let set = FileSet::load(&self.store, &event.record.body)?;
-                checkpoints += 1;
                 let root = PathBuf::from(&set.root);
+                // Follow the checkpoint's original root, not the session's
+                // current location: a shared child may have been moved since
+                // editing the parent. Only isolated alternatives are excluded.
+                if owner != session
+                    && isolated_roots.contains(&root.canonicalize().unwrap_or_else(|_| root.clone()))
+                {
+                    continue;
+                }
+                checkpoints += 1;
                 for (rel, hex) in &set.files {
                     let id = ObjectId::from_hex(hex).ok_or_else(|| {
                         CoreError::Capture(format!("manifest holds a bad object id for {rel}"))
@@ -1806,6 +1816,7 @@ impl Rook {
             at,
             &format!("{} @{at}", meta.title),
         )?;
+        crate::results::inherit(self, session, forked.id)?;
         // Forking a delegated conversation is a separate branch, not a new
         // delegation whose edits the ancestor's rewind owns.
         forked.tags.retain(|tag| tag != "subtask");

@@ -417,6 +417,85 @@ impl Store {
         Ok(data)
     }
 
+    /// Read a byte range with bounded memory, still verifying the whole object's
+    /// size and hash. Compressed results need a sequential decode; long command
+    /// spills use seekable files in the core instead.
+    pub fn get_range(&self, id: &ObjectId, offset: u64, limit: usize) -> Result<Vec<u8>> {
+        use std::io::{BufReader, Read};
+        let meta = self.stat_object(id)?.ok_or_else(|| StoreError::MissingObject(id.short()))?;
+        let corrupt = |reason: &str| StoreError::Corrupt { id: id.short(), reason: reason.into() };
+        if offset > meta.size_raw {
+            return Err(corrupt("range starts past the object's end"));
+        }
+        let source = || -> Result<Box<dyn Read>> {
+            if meta.external {
+                let path = self.object_path(id);
+                Ok(Box::new(std::fs::File::open(&path).map_err(|e| StoreError::io(&path, e))?))
+            } else {
+                let txn = self.db.begin_read()?;
+                let blobs = txn.open_table(schema::BLOBS)?;
+                let bytes = blobs
+                    .get(id.as_bytes())?
+                    .ok_or_else(|| corrupt("index entry has no inline payload"))?
+                    .value()
+                    .to_vec();
+                Ok(Box::new(std::io::Cursor::new(bytes)))
+            }
+        };
+        let dictionaries = match meta.codec {
+            codec::CODEC_ZSTD_DICT => {
+                self.dicts.all(Kind::from_u8(meta.kind)).into_iter().map(Some).collect()
+            }
+            codec::CODEC_RAW | codec::CODEC_ZSTD => vec![None],
+            _ => return Err(corrupt("unknown codec")),
+        };
+        let mut last = "required dictionary is missing".to_string();
+        for dict in dictionaries {
+            let attempt = (|| -> Result<Vec<u8>> {
+                let mut reader: Box<dyn Read> = match meta.codec {
+                    codec::CODEC_RAW => source()?,
+                    _ => Box::new(
+                        zstd::stream::read::Decoder::with_dictionary(
+                            BufReader::new(source()?),
+                            dict.as_deref().unwrap_or_default(),
+                        )
+                        .map_err(|e| StoreError::Encoding(e.to_string()))?,
+                    ),
+                };
+                let mut hash = blake3::Hasher::new();
+                let mut chunk = [0u8; 64 * 1024];
+                let mut seen = 0u64;
+                let mut kept = Vec::new();
+                loop {
+                    let n = reader.read(&mut chunk).map_err(|e| StoreError::Encoding(e.to_string()))?;
+                    if n == 0 {
+                        break;
+                    }
+                    let end = seen.saturating_add(n as u64);
+                    if end > meta.size_raw {
+                        return Err(corrupt("decoded bytes exceed recorded size"));
+                    }
+                    hash.update(&chunk[..n]);
+                    let start = offset.max(seen);
+                    let stop = offset.saturating_add(limit as u64).min(end);
+                    if start < stop {
+                        kept.extend_from_slice(&chunk[(start - seen) as usize..(stop - seen) as usize]);
+                    }
+                    seen = end;
+                }
+                if seen != meta.size_raw || hash.finalize().as_bytes() != id.as_bytes() {
+                    return Err(corrupt("content size or hash mismatch after decode"));
+                }
+                Ok(kept)
+            })();
+            match attempt {
+                Ok(bytes) => return Ok(bytes),
+                Err(why) => last = why.to_string(),
+            }
+        }
+        Err(corrupt(&last))
+    }
+
     /// Resolve a unique hash prefix, the way `git` resolves a short sha.
     pub fn resolve_prefix(&self, prefix: &str) -> Result<Option<ObjectId>> {
         if let Some(id) = ObjectId::from_hex(prefix) {

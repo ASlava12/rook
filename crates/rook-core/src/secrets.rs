@@ -374,6 +374,9 @@ fn usable_name(name: &str) -> Result<String> {
 }
 
 impl rook_tools::Secrets for Vault {
+    fn redactions(&self) -> Vec<String> {
+        self.handed_out.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
     fn value(&self, name: &str) -> Option<String> {
         Vault::value(self, name)
     }

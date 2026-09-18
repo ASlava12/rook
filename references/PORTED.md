@@ -9,6 +9,9 @@ Add a row when you implement something after reading a reference. Add it to
 
 | what | from | read at | where it landed |
 |---|---|---|---|
+| Optional worktrees for delegated alternatives | OpenResearch `325eb509dc8e4ca7074568cf0ae1f0f98704eac0`, `src/local/git.rs`, `src/local/experiments.rs`; OpenCode `95daf90670b7c039c436c85537da5fbfe2205b41`, `packages/opencode/src/worktree/index.ts` — opt-in detached trees, retained for review; require clean HEAD and bounded count, keep merging explicit | local pinned source | `rook-core/src/worktrees.rs`, `delegate.isolation`, `worktree` |
+| Pruning old tool results with recoverable originals | OpenCode `95daf90670b7c039c436c85537da5fbfe2205b41`, `packages/opencode/src/session/compaction.ts` — protect recent results and prune only when savings justify changing the cached prefix; retain source data, persist a watermark and offer paged retrieval rather than clearing output permanently | local pinned source | `rook-core/src/results.rs`, `read_result`, `[agent] prune_tool_results_*`; streaming redacted command spills in `rook-tools/src/exec.rs` |
+
 | Session rewind that restores files as well as conversation | codex `/rewind` ([#11626](https://github.com/openai/codex/issues/11626)), `/undo` ([#9203](https://github.com/openai/codex/issues/9203)) | issues, not source | `Rook::rewind`, `rook session rewind` |
 | Context-usage visibility | opencode `/context` ([#6152](https://github.com/anomalyco/opencode/issues/6152)) | issues, not source | `Rook::context_usage`, `rook session context` |
 | Lazy tool/skill schemas | hermes ([#6839](https://github.com/NousResearch/hermes-agent/issues/6839)) | issues, not source | `ToolBox::stubs`, `SkillCard`, `load_skill` |

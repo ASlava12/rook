@@ -23,6 +23,9 @@ pub struct Job {
     pub command: String,
     pub started_at: i64,
     pub output: String,
+    /// Captured output available independently of the in-memory head and tail.
+    pub output_file: Option<String>,
+    pub output_complete: bool,
     /// `None` while it runs.
     pub exit_code: Option<i32>,
     /// Seconds since it last printed anything, while it runs. `None` when it
@@ -57,6 +60,7 @@ struct Running {
     /// that what the command started since is inside it.
     group: Arc<crate::exec::Group>,
     printed: Arc<Mutex<Printed>>,
+    spill: Option<Arc<Mutex<crate::exec::Spill>>>,
     exit: Arc<Mutex<Option<i32>>>,
 }
 
@@ -88,6 +92,16 @@ impl Jobs {
         command: &str,
         cwd: &std::path::Path,
         isolation: Option<&crate::isolate::Isolation>,
+    ) -> Result<String> {
+        self.start_captured(command, cwd, isolation, None)
+    }
+
+    pub(crate) fn start_captured(
+        &self,
+        command: &str,
+        cwd: &std::path::Path,
+        isolation: Option<&crate::isolate::Isolation>,
+        spill: Option<crate::exec::Spill>,
     ) -> Result<String> {
         let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
         // A finished job is kept so its output can still be read, and a turn
@@ -122,6 +136,8 @@ impl Jobs {
 
         let (into, code, cap, stopped) = (printed.clone(), exit.clone(), self.max_output_bytes, stop.clone());
         let held = group.clone();
+        let spill = spill.map(|s| Arc::new(Mutex::new(s)));
+        let capture = spill.clone();
         tokio::spawn(async move {
             let mut out = child.stdout.take();
             let mut err = child.stderr.take();
@@ -129,7 +145,10 @@ impl Jobs {
             // command that fills the stderr pipe while stdout is drained blocks
             // on the write and never finishes either.
             let reading = async {
-                tokio::join!(drain(&mut out, &into, cap), drain(&mut err, &into, cap));
+                tokio::join!(
+                    drain(&mut out, &into, cap, capture.as_ref()),
+                    drain(&mut err, &into, cap, capture.as_ref())
+                );
             };
             tokio::select! {
                 _ = async { reading.await; let _ = child.wait().await; } => {}
@@ -138,12 +157,15 @@ impl Jobs {
                 }
             }
             let status = child.wait().await.ok().and_then(|s| s.code()).unwrap_or(-1);
+            if let Some(spill) = &capture {
+                spill.lock().unwrap_or_else(|e| e.into_inner()).flush_redacted(true);
+            }
             *code.lock().unwrap_or_else(|e| e.into_inner()) = Some(status);
         });
 
         running.insert(
             id.clone(),
-            Running { command: command.to_string(), started_at: now(), stop, group, printed, exit },
+            Running { command: command.to_string(), started_at: now(), stop, group, printed, exit, spill },
         );
         Ok(id)
     }
@@ -202,12 +224,23 @@ impl Running {
         let quiet = printed.quiet_for();
         let output = printed.seen();
         drop(printed);
+        let exit_code = *self.exit.lock().unwrap_or_else(|e| e.into_inner());
+        let (output_file, output_complete) = self
+            .spill
+            .as_ref()
+            .map(|s| {
+                let (path, complete) = s.lock().unwrap_or_else(|e| e.into_inner()).details();
+                (Some(path), complete && exit_code.is_some_and(|code| code >= 0))
+            })
+            .unwrap_or((None, false));
         Job {
             id: id.to_string(),
             command: self.command.clone(),
             started_at: self.started_at,
             output,
-            exit_code: *self.exit.lock().unwrap_or_else(|e| e.into_inner()),
+            output_file,
+            output_complete,
+            exit_code,
             quiet_for_secs: quiet.map(|d| d.as_secs()),
             group: self.group.pid(),
         }
@@ -287,12 +320,16 @@ async fn drain(
     stream: &mut Option<impl tokio::io::AsyncRead + Unpin>,
     into: &Arc<Mutex<Printed>>,
     cap: usize,
+    spill: Option<&Arc<Mutex<crate::exec::Spill>>>,
 ) {
     let Some(stream) = stream else { return };
     let mut chunk = vec![0u8; 16 * 1024];
     while let Ok(n) = stream.read(&mut chunk).await {
         if n == 0 {
             return;
+        }
+        if let Some(spill) = spill {
+            spill.lock().unwrap_or_else(|e| e.into_inner()).write(&chunk[..n]);
         }
         // Decoded a read at a time, which is what this has to be: a background
         // command is read for hours and what it printed is asked for while it
@@ -367,8 +404,17 @@ impl crate::Tool for JobTool {
             None => jobs.get(id),
         };
         match job {
-            Some(job) => Ok(crate::ToolOutcome::ok(format!("{}\n{}", describe(&job), job.output))
-                .with("running", job.exit_code.is_none())),
+            Some(job) => {
+                let mut outcome = crate::ToolOutcome::ok(format!("{}\n{}", describe(&job), job.output))
+                    .with("running", job.exit_code.is_none());
+                if let Some(path) = job.output_file {
+                    outcome
+                        .content
+                        .push_str("\n[read_result with source=output reads the captured command output]");
+                    outcome = outcome.with("output_file", path).with("output_complete", job.output_complete);
+                }
+                Ok(outcome)
+            }
             None => Ok(crate::ToolOutcome::error(format!("no background command {id}"))),
         }
     }
