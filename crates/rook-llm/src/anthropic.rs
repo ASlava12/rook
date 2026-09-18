@@ -208,6 +208,7 @@ impl Provider for Anthropic {
                 tool_calls,
                 tool_call_id: None,
                 cache: false,
+                images: Vec::new(),
                 reasoning,
             },
             stop_reason,
@@ -450,10 +451,13 @@ fn wire_request(model: &str, request: &Request, stream: bool) -> serde_json::Val
                     })),
                 }
             }
-            Role::User => messages.push(serde_json::json!({
-                "role": "user",
-                "content": [text_block(&message.content, message.cache, request.cache_ttl)],
-            })),
+            Role::User => {
+                let mut blocks: Vec<_> = message.images.iter().map(|image| serde_json::json!({
+                    "type":"image", "source":{"type":"base64", "media_type":image.mime_type,"data":image.data}
+                })).collect();
+                blocks.push(text_block(&message.content, message.cache, request.cache_ttl));
+                messages.push(serde_json::json!({"role":"user", "content":blocks}));
+            }
             Role::Assistant => {
                 // First, as the API orders them, and only when this turn is
                 // still going: thinking is required back beside the tool call

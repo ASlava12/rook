@@ -87,7 +87,7 @@ git clone https://github.com/ASlava12/rook && cd rook
 cargo xtask dist               # builds, packages the built-in skills, prints the sizes
 ```
 
-Two binaries, no runtime and no shared libraries — 6.7 MiB and 6.1 MiB at the
+Two binaries, no runtime and no shared libraries — 8.1 MiB and 7.4 MiB at the
 time of writing, which `dist` prints so the number here can be checked rather
 than believed.
 
@@ -784,6 +784,93 @@ flags do not replace the saved plan. Completed checks are not rerun; changed
 guarded files make a reused result unproven. A check selected before a crash but
 without a saved result requires inspection and a new work run to evaluate again.
 Known token usage includes pre-crash turns and delegated sessions.
+
+### Images and embedded context
+
+Select a vision-capable model, then attach local files explicitly:
+
+```sh
+rook run --image screenshot.png --context component.ts 'Explain this UI defect'
+```
+
+In the REPL or TUI, `/attach-image PATH` and `/attach-context PATH` queue files
+for the next submitted turn; `/attachments` shows the count and `/attachments
+clear` removes them. The browser chat has a multiple-file picker. Image input
+uses OpenAI-compatible content parts, Anthropic image blocks or Gemini inline
+data; a text-only model may reject the request, and Rook does not retry it with
+the images removed.
+
+Up to four attachments per turn: PNG, JPEG, WebP or GIF images up to 2 MiB each
+and 4096 pixels per side; UTF-8 context up to 256 KiB combined. Unsupported
+binary documents, audio and remote image URLs are rejected. File names, embedded
+text and text within images are source data, never grants of permission. ACP
+advertises `image` and `embeddedContext`, accepting image blocks, text resources,
+image blobs and UTF-8 text blobs. Resource links remain references, without an
+automatic network fetch. The WebSocket and ACP frame ceiling is 16 MiB.
+
+Images are stored with their user message, so resume and forks replay the same
+bytes without reopening the original path. Transcripts show names and context,
+not base64. Context accounting includes image estimates. Compaction preserves
+an attached image until the model first answers it and bounds a model request to four images; older images
+are replaced by the text history and a notice that their pixels are no longer
+in context. Reattach an old image when its visual details matter. Stored history
+still retains its original bytes under normal session retention.
+
+The chat API accepts `options.attachments`, for example:
+
+```json
+{"attachments":[{"type":"image","name":"screen.png","mime_type":"image/png","data":"BASE64_BYTES"},{"type":"text","name":"component.ts","text":"source code"}]}
+```
+
+### Run recipes
+
+A recipe packages a repeatable task without changing the skill format. Save
+`.rook/recipes/audit.toml`, then select it explicitly:
+
+```toml
+version = 1
+prompt = "Audit {{scope}} for {{focus}}. Report evidence and unchecked areas."
+# skill = "your-audit-skill"       # must already be installed and applicable
+# model = "local-audit"           # current model or a configured [models] name
+output = "{{report}}"
+output_schema = { type = "object", required = ["findings"], properties = { findings = { type = "array" } } }
+
+[parameters.scope]
+description = "Directory or component to inspect"
+[parameters.focus]
+default = "correctness"
+[parameters.report]
+default = "report.json"
+
+[limits]
+steps = 40
+tokens = 100000
+seconds = 1800
+```
+
+```sh
+rook run --recipe audit --param scope=crates --yes
+rook run --recipe .rook/recipes/audit.toml --param scope=web "Focus on input handling"
+```
+
+`/recipe audit {"scope":"crates"}` selects it for subsequent chat/TUI turns;
+`/recipe off` clears the selection. The browser exposes the same name and JSON
+parameter fields. API clients set `options.recipe` to
+`{"path":"audit","parameters":{"scope":"crates"}}` on a prompt.
+
+Parameters without defaults are required. Missing or unknown parameters, invalid
+skills, schemas or paths fail before the turn runs. Templates expand once, with
+parameter values quoted in the procedure. Recipes and parameters remain source
+data; selecting a recipe grants no new tool permissions. A recipe's output file
+uses the normal write approval policy (`--yes` grants what the deny list permits);
+an explicit `--output` overrides that destination. Explicit output/schema options
+win over recipe defaults. Repair attempts use the ordinary `--schema-retries`.
+
+Limits are positive and only tighten existing turn limits. Model names cannot
+introduce endpoints or credentials: configure those in Rook first. Recipe files
+and supplied parameters are each limited to 64 KiB, with at most 32 parameters.
+Files must stay within the workspace; remote recipes and executable template
+expressions are not supported. The additional prompt augments the selected task.
 
 ### Interrupted executions
 

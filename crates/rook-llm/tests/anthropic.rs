@@ -120,6 +120,7 @@ async fn tool_results_are_blocks_in_one_user_message() {
         ],
         tool_call_id: None,
         cache: false,
+        images: Vec::new(),
         reasoning: Vec::new(),
     };
     let request = Request::new(vec![
@@ -375,6 +376,7 @@ async fn a_marked_conversation_turn_carries_the_breakpoint_on_its_last_block() {
         tool_calls: vec![ToolCall { id: "a".into(), name: "t".into(), arguments: serde_json::json!({}) }],
         tool_call_id: None,
         cache: true,
+        images: Vec::new(),
         reasoning: Vec::new(),
     };
     provider(url)
@@ -490,6 +492,7 @@ async fn thinking_comes_back_beside_the_call_it_led_to() {
         tool_calls: vec![],
         tool_call_id: Some("toolu_1".into()),
         cache: false,
+        images: Vec::new(),
         reasoning: Vec::new(),
     };
     provider(url)
@@ -577,4 +580,25 @@ async fn a_whole_response_carries_its_thinking_too() {
     assert_eq!(response.message.tool_calls[0].arguments["path"], "a.txt");
     assert_eq!(response.message.reasoning.len(), 1, "{:?}", response.message.reasoning);
     assert_eq!(response.message.reasoning[0]["signature"], "sig-1");
+}
+
+#[tokio::test]
+async fn inline_images_use_base64_sources_and_cache_follows_the_image() {
+    let (url, seen) = serve("200 OK", "application/json", DONE).await;
+    let mut message = Message::user("inspect").cacheable();
+    message.images.push(rook_llm::Image {
+        mime_type: "image/png".into(),
+        data: "aW1hZ2U=".into(),
+        width: 20,
+        height: 30,
+    });
+    provider(url).complete(Request::new(vec![message])).await.unwrap();
+    let body = seen.lock().unwrap().clone().unwrap();
+    let blocks = &body["messages"][0]["content"];
+    assert_eq!(
+        blocks[0]["source"],
+        serde_json::json!({"type":"base64","media_type":"image/png","data":"aW1hZ2U="})
+    );
+    assert_eq!(blocks[1]["text"], "inspect");
+    assert_eq!(blocks[1]["cache_control"]["type"], "ephemeral");
 }

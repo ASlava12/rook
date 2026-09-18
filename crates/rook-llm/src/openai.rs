@@ -124,6 +124,7 @@ impl Provider for OpenAiCompatible {
                 tool_calls,
                 tool_call_id: None,
                 cache: false,
+                images: Vec::new(),
                 reasoning: Vec::new(),
             },
             stop_reason,
@@ -530,7 +531,7 @@ struct StreamOptions {
 #[derive(Serialize)]
 struct WireMessage<'a> {
     role: &'static str,
-    content: &'a str,
+    content: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -546,7 +547,15 @@ impl<'a> From<&'a Message> for WireMessage<'a> {
                 Role::Assistant => "assistant",
                 Role::Tool => "tool",
             },
-            content: &m.content,
+            content: if m.images.is_empty() {
+                serde_json::json!(m.content)
+            } else {
+                let mut parts = vec![serde_json::json!({"type":"text", "text":m.content})];
+                parts.extend(m.images.iter().map(|image| serde_json::json!({
+                    "type":"image_url", "image_url":{"url":format!("data:{};base64,{}", image.mime_type, image.data)}
+                })));
+                serde_json::json!(parts)
+            },
             tool_call_id: m.tool_call_id.as_deref(),
             tool_calls: m
                 .tool_calls

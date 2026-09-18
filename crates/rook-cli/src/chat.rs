@@ -24,6 +24,10 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
         "[operation-id inspection note]",
         "inspect execution or acknowledge a reviewed unknown result",
     ),
+    ("attach-image", "<path>", "attach an image to the next turn"),
+    ("attach-context", "<path>", "embed a UTF-8 file in the next turn"),
+    ("attachments", "[clear]", "count or clear pending attachments"),
+    ("recipe", "[name [JSON parameters]|off]", "select a run recipe for subsequent turns"),
     ("output", "[path|off]", "save the final answer inside the workspace"),
     ("schema", "[file|off]", "validate the final answer against JSON Schema"),
     ("schema-retries", "[0..3]", "format-only correction attempts"),
@@ -329,7 +333,7 @@ async fn through_the_daemon(
         to_daemon.send(ClientMessage::Prompt {
             session: session.clone(),
             text: line,
-            options: output.clone(),
+            options: crate::output_options::for_turn(&mut output),
         })?;
         while let Some(event) = events.recv().await {
             if let Some(over) = watching.saw(event, &to_daemon) {
@@ -416,7 +420,7 @@ async fn turn(
 ) {
     let _attention = crate::notify::OnEnd;
     let mut agent = AgentLoop::new(rook, provider.into(), session);
-    agent.options = shared.output.borrow().clone();
+    agent.options = crate::output_options::for_turn(&mut shared.output.borrow_mut());
     // Even under `--yes`: approving every command is not the same as never
     // wanting to be asked which one to run.
     agent.ask_via(std::sync::Arc::new(crate::approve::Terminal));

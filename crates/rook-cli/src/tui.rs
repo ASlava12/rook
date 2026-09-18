@@ -2074,7 +2074,7 @@ impl App {
         let opening = ClientMessage::Prompt {
             session: self.chat.session.map(rook_store::format_session_id),
             text: prompt,
-            options: self.shared.output.borrow().clone(),
+            options: crate::output_options::for_turn(&mut self.shared.output.borrow_mut()),
         };
         // On the socket this window already has, if it has one: attaching to a
         // session opens one before there is a prompt, and a second socket would
@@ -2499,7 +2499,11 @@ impl App {
         let asker = self.asker.clone();
         let policy = self.shared.policy.clone();
         let effort = self.shared.effort.get();
-        let output = self.shared.output.borrow().clone();
+        let output = if aside.is_some() {
+            Default::default()
+        } else {
+            crate::output_options::for_turn(&mut self.shared.output.borrow_mut())
+        };
         // Taken here rather than in the task, because the task owns none of
         // this window and a `RefCell` does not cross into one.
         let named = self.shared.model.borrow().clone();

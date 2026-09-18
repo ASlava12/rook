@@ -39,7 +39,9 @@ pub async fn upgrade(
         Err(why) => return (axum::http::StatusCode::BAD_REQUEST, why).into_response(),
     };
     let equipment = state.equipment_for(&engine).await;
-    ws.on_upgrade(move |socket| serve(socket, engine, equipment, state))
+    ws.max_message_size(rook_core::attachments::MAX_FRAME_BYTES)
+        .max_frame_size(rook_core::attachments::MAX_FRAME_BYTES)
+        .on_upgrade(move |socket| serve(socket, engine, equipment, state))
 }
 
 /// Refuses the upgrade before anything else looks at the request.
@@ -216,6 +218,10 @@ async fn serve(
                 // the window had to wait or cancel, and cancelling loses
                 // everything the turn had done to say one sentence to it.
                 if let Some(live) = state.live.read().await.get(&id).filter(|l| l.running()).cloned() {
+                    if !options.attachments.is_empty() {
+                        report(&outbound, "Attachments cannot be added to a running turn; wait for it to finish or stop it first.".into());
+                        continue;
+                    }
                     live.interjections.say(&text);
                     let _ = outbound.send(ChatEvent::Interjected { text });
                     watching = Some(watch(&live, id, outbound.clone(), watching));

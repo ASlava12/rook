@@ -49,6 +49,7 @@ fn call(name: &str, args: serde_json::Value) -> Response {
             tool_calls: vec![ToolCall { id: "c1".into(), name: name.into(), arguments: args }],
             tool_call_id: None,
             cache: false,
+            images: Vec::new(),
             reasoning: Vec::new(),
         },
         stop_reason: StopReason::ToolUse,

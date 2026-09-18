@@ -90,6 +90,7 @@ async fn a_tool_result_names_the_call_it_answers() {
         }],
         tool_call_id: None,
         cache: false,
+        images: Vec::new(),
         reasoning: Vec::new(),
     };
     let request =
@@ -240,4 +241,23 @@ async fn a_stream_yields_text_as_it_arrives_and_calls_whole() {
     assert_eq!(stop, StopReason::ToolUse);
     assert_eq!(usage.input_tokens, 9);
     assert_eq!(model, "gemini-2.5-flash", "reported once, on the first frame, and kept");
+}
+
+#[tokio::test]
+async fn inline_images_use_gemini_inline_data_beside_text() {
+    let (url, seen) = serve(ANSWERED).await;
+    let mut message = Message::user("inspect");
+    message.images.push(rook_llm::Image {
+        mime_type: "image/png".into(),
+        data: "aW1hZ2U=".into(),
+        width: 20,
+        height: 30,
+    });
+    provider(url).complete(Request::new(vec![message])).await.unwrap();
+    let body = sent(&seen.await.unwrap());
+    assert_eq!(
+        body["contents"][0]["parts"][1]["inlineData"],
+        serde_json::json!({"mimeType":"image/png","data":"aW1hZ2U="})
+    );
+    assert_eq!(body["contents"][0]["parts"][0]["text"], "inspect");
 }

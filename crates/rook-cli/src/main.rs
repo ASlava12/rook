@@ -46,6 +46,18 @@ struct Cli {
 
 #[derive(clap::Args)]
 struct OutputArgs {
+    /// Attach a local PNG, JPEG, WebP or GIF (repeatable, up to 2 MiB each).
+    #[arg(long = "image")]
+    images: Vec<PathBuf>,
+    /// Embed a UTF-8 file as untrusted source context (repeatable).
+    #[arg(long = "context")]
+    contexts: Vec<PathBuf>,
+    /// Run .rook/recipes/<name>.toml, or a workspace-relative recipe file.
+    #[arg(long)]
+    recipe: Option<String>,
+    /// A recipe parameter, as NAME=VALUE. May be repeated.
+    #[arg(long = "param", requires = "recipe")]
+    parameters: Vec<String>,
     /// Save the final answer atomically inside the session workspace.
     #[arg(long)]
     output: Option<String>,
@@ -69,10 +81,38 @@ impl OutputArgs {
                 Ok(serde_json::from_slice(&bytes)?)
             })
             .transpose()?;
+        let recipe = self
+            .recipe
+            .map(|path| -> Result<rook_proto::RecipeInvocation> {
+                let mut parameters = std::collections::BTreeMap::new();
+                for parameter in self.parameters {
+                    let (name, value) =
+                        parameter.split_once('=').ok_or_else(|| anyhow::anyhow!("use --param NAME=VALUE"))?;
+                    anyhow::ensure!(
+                        parameters.insert(name.to_owned(), value.to_owned()).is_none(),
+                        "duplicate recipe parameter {name:?}"
+                    );
+                }
+                Ok(rook_proto::RecipeInvocation { path, parameters })
+            })
+            .transpose()?;
+        anyhow::ensure!(
+            self.images.len() + self.contexts.len() <= rook_core::attachments::MAX_ATTACHMENTS,
+            "at most 4 attachments per turn"
+        );
+        let attachments = self
+            .images
+            .iter()
+            .map(|p| (p, true))
+            .chain(self.contexts.iter().map(|p| (p, false)))
+            .map(|(p, image)| rook_core::attachments::from_file(p, image))
+            .collect::<rook_core::Result<Vec<_>>>()?;
         Ok(rook_proto::TurnOptions {
+            attachments,
             output: self.output,
             output_schema: schema,
             schema_retries: self.schema_retries,
+            recipe,
         })
     }
 }
@@ -1160,7 +1200,11 @@ fn cmd_run(
     options: rook_proto::TurnOptions,
 ) -> Result<()> {
     let _attention = crate::notify::OnEnd;
-    let asked = prompt.join(" ");
+    let asked = if prompt.is_empty() && (options.recipe.is_some() || !options.attachments.is_empty()) {
+        "Process the selected recipe or attachments".to_owned()
+    } else {
+        prompt.join(" ")
+    };
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     // The exit code is decided inside and taken here, after the store has been
     // dropped: exiting from within would skip closing it cleanly.

@@ -194,6 +194,7 @@ impl Provider for Google {
                 tool_calls,
                 tool_call_id: None,
                 cache: false,
+                images: Vec::new(),
                 reasoning: Vec::new(),
             },
             usage: wire.usage.into(),
@@ -328,7 +329,15 @@ fn wire_request(request: &Request) -> Value {
                 }
                 system.push_str(&message.content);
             }
-            Role::User => contents.push(json!({ "role": "user", "parts": [{ "text": message.content }] })),
+            Role::User => {
+                let mut parts = vec![json!({"text":message.content})];
+                parts.extend(message.images.iter().map(|image| {
+                    json!({
+                        "inlineData":{"mimeType":image.mime_type,"data":image.data}
+                    })
+                }));
+                contents.push(json!({"role":"user","parts":parts}));
+            }
             Role::Assistant => {
                 let mut parts: Vec<Value> = Vec::new();
                 if !message.content.is_empty() {

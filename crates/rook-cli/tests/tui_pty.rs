@@ -1277,3 +1277,18 @@ fn reopening_a_session_shows_the_notes_that_say_what_happened_to_it() {
 
     assert!(screen.contains("finish the report"), "the note is on the screen:\n{screen}");
 }
+
+#[test]
+fn attachments_can_be_selected_and_cleared_from_the_tui() {
+    let _one = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let file = workspace.path().join("context.txt");
+    std::fs::write(&file, "this is source context").unwrap();
+    let mut pty = tui(home.path(), workspace.path());
+    pty.screen(100, 30);
+    pty.send(&format!("/attach-context {}\r", file.display()));
+    pty.screen_showing(100, 30, "attachments for next turn: 1");
+    pty.send("/attachments clear\r");
+    pty.screen_showing(100, 30, "attachments for next turn: 0");
+}

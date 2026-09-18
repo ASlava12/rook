@@ -9,10 +9,32 @@ pub enum Role {
     Tool,
 }
 
+/// Inline image supplied by the user; never a URL for a provider to fetch.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Image {
+    pub mime_type: String,
+    pub data: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl Image {
+    /// A conservative local estimate; actual provider usage replaces it later.
+    pub fn estimated_tokens(&self) -> usize {
+        (self.width as usize)
+            .div_ceil(32)
+            .saturating_mul((self.height as usize).div_ceil(32))
+            .saturating_mul(3)
+            .max(1536)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<Image>,
     /// Present on assistant messages that requested tools.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCall>,
@@ -53,6 +75,7 @@ impl Message {
         Self {
             role,
             content: text.into(),
+            images: Vec::new(),
             tool_calls: vec![],
             tool_call_id: None,
             cache: false,
@@ -286,7 +309,14 @@ impl Request {
     /// difference between a good estimate and an exact count is a wait somebody
     /// can see rather than a failure they cannot.
     pub fn prompt_bytes(&self) -> usize {
-        let said: usize = self.messages.iter().map(|m| m.content.len()).sum();
+        let said: usize = self
+            .messages
+            .iter()
+            .map(|m| {
+                m.content.len()
+                    + m.images.iter().map(|i| i.estimated_tokens().saturating_mul(4)).sum::<usize>()
+            })
+            .sum();
         let tools: usize = self.tools.iter().map(|t| t.name.len() + t.description.len()).sum();
         said + tools
     }
@@ -326,6 +356,7 @@ fn joined_user_turns(messages: Vec<Message>) -> Vec<Message> {
             {
                 last.content.push_str("\n\n");
                 last.content.push_str(&message.content);
+                last.images.extend(message.images);
                 // The marker belongs to the end of what is cached, and the end
                 // has just moved.
                 last.cache = message.cache;

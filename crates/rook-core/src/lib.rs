@@ -14,6 +14,7 @@ pub const SHELL: &str = "cmd.exe (`cmd /C`)";
 pub const SHELL: &str = "/bin/sh";
 
 pub mod agent;
+pub mod attachments;
 pub mod calls;
 pub mod catalog;
 pub mod changes;
@@ -37,6 +38,7 @@ mod output;
 pub mod paths;
 mod persistence;
 pub mod plugins;
+mod recipes;
 mod results;
 pub mod script;
 pub mod search;

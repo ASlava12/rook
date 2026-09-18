@@ -913,6 +913,13 @@ impl Rook {
             let meta = self.store.stat_object(&e.record.body)?;
             let (body, truncated) = match self.store.get(&e.record.body) {
                 Ok(raw) => {
+                    let raw = if e.record.kind == EventKind::UserMessage
+                        && e.record.label == crate::attachments::LABEL
+                    {
+                        crate::attachments::decode(&String::from_utf8_lossy(&raw))?.content.into_bytes()
+                    } else {
+                        raw
+                    };
                     let (windowed, truncated) = crate::context::window_bytes(&raw, max_body);
                     (String::from_utf8_lossy(&windowed).into_owned(), truncated)
                 }
@@ -980,7 +987,13 @@ impl Rook {
             let entry = by_kind.entry(kind.as_str().to_string()).or_default();
             entry.events += 1;
             entry.bytes += bytes;
-            entry.tokens += (bytes as usize).div_ceil(4);
+            entry.tokens +=
+                if kind == EventKind::UserMessage && event.record.label == crate::attachments::LABEL {
+                    let body = self.store.get(&event.record.body)?;
+                    crate::attachments::tokens(&crate::attachments::decode(&String::from_utf8_lossy(&body))?)
+                } else {
+                    (bytes as usize).div_ceil(4)
+                };
         }
 
         // What a fresh turn would carry: everything after the last compaction
@@ -1001,6 +1014,14 @@ impl Rook {
         let pruned = crate::results::watermark(self, session)?;
         for event in self.store.events(session, from_seq, usize::MAX)? {
             if !crate::context::reaches_the_model(event.record.kind) {
+                continue;
+            }
+            if event.record.kind == EventKind::UserMessage && event.record.label == crate::attachments::LABEL
+            {
+                let bytes = self.store.get(&event.record.body)?;
+                live += crate::attachments::tokens(&crate::attachments::decode(&String::from_utf8_lossy(
+                    &bytes,
+                ))?);
                 continue;
             }
             // JSON quoting changes the size, especially for code and multiline output.

@@ -47,7 +47,7 @@ pub struct Notification<'a> {
     pub params: serde_json::Value,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Error {
     pub code: i64,
     pub message: String,
@@ -90,19 +90,96 @@ pub enum ContentBlock {
     ResourceLink {
         uri: String,
     },
+    Image {
+        data: String,
+        #[serde(rename = "mimeType")]
+        mime_type: String,
+        uri: Option<String>,
+    },
+    Resource {
+        resource: EmbeddedResource,
+    },
     #[serde(other)]
     Other,
 }
 
-impl ContentBlock {
-    /// What the model should see. Non-text blocks are named rather than dropped,
-    /// so a prompt that was mostly an attachment does not arrive empty.
-    pub fn render(&self) -> Option<String> {
-        match self {
-            ContentBlock::Text { text } => Some(text.clone()),
-            ContentBlock::ResourceLink { uri } => Some(format!("[attached: {uri}]")),
-            ContentBlock::Other => None,
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddedResource {
+    pub uri: String,
+    pub mime_type: Option<String>,
+    pub text: Option<String>,
+    pub blob: Option<String>,
+}
+
+impl Prompt {
+    pub fn content(self) -> Result<(String, Vec<rook_proto::Attachment>), Error> {
+        use base64::Engine;
+        let mut text = Vec::new();
+        let mut attachments = Vec::new();
+        for block in self.prompt {
+            match block {
+                ContentBlock::Text { text: said } => text.push(said),
+                ContentBlock::Image { data, mime_type, uri } => {
+                    attachments.push(rook_proto::Attachment::Image {
+                        name: uri.unwrap_or_else(|| "ACP image".into()),
+                        mime_type,
+                        data,
+                    })
+                }
+                ContentBlock::ResourceLink { uri } => attachments.push(rook_proto::Attachment::Text {
+                    name: "resource link (reference only; not fetched)".into(),
+                    text: uri,
+                }),
+                ContentBlock::Resource { resource } => {
+                    let mime = resource.mime_type.unwrap_or_else(|| "application/octet-stream".into());
+                    match (resource.text, resource.blob) {
+                        (Some(body), None) => {
+                            attachments.push(rook_proto::Attachment::Text { name: resource.uri, text: body })
+                        }
+                        (None, Some(data)) if mime.starts_with("image/") => {
+                            attachments.push(rook_proto::Attachment::Image {
+                                name: resource.uri,
+                                mime_type: mime,
+                                data,
+                            })
+                        }
+                        (None, Some(data))
+                            if mime.starts_with("text/")
+                                || matches!(mime.as_str(), "application/json" | "application/xml") =>
+                        {
+                            if data.len() > rook_core::attachments::MAX_TEXT_BYTES.div_ceil(3) * 4 {
+                                return Err(Error::invalid_params("embedded text exceeds 256 KiB"));
+                            }
+                            let bytes = base64::engine::general_purpose::STANDARD
+                                .decode(data)
+                                .map_err(|e| Error::invalid_params(e.to_string()))?;
+                            let text = String::from_utf8(bytes)
+                                .map_err(|_| Error::invalid_params("embedded text must be UTF-8"))?;
+                            attachments.push(rook_proto::Attachment::Text { name: resource.uri, text });
+                        }
+                        _ => {
+                            return Err(Error::invalid_params(
+                                "embed UTF-8 text or a PNG, JPEG, WebP or GIF; unsupported resource content",
+                            ));
+                        }
+                    }
+                }
+                ContentBlock::Other => {
+                    return Err(Error::invalid_params(
+                        "unsupported content block; use text, image, resource or resource_link",
+                    ));
+                }
+            }
+            if attachments.len() > rook_core::attachments::MAX_ATTACHMENTS {
+                return Err(Error::invalid_params("at most 4 attachments per turn"));
+            }
         }
+        let text = text.join("\n");
+        if text.trim().is_empty() && attachments.is_empty() {
+            return Err(Error::invalid_params("the prompt has no content"));
+        }
+        Ok((text, attachments))
     }
 }
 

@@ -96,10 +96,29 @@ impl ApiError {
     }
 }
 
+/// A local recipe explicitly selected by the user for this turn.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecipeInvocation {
+    pub path: String,
+    #[serde(default)]
+    pub parameters: std::collections::BTreeMap<String, String>,
+}
+
+/// User-selected content. URIs identify data; they never trigger a fetch.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Attachment {
+    Image { name: String, mime_type: String, data: String },
+    Text { name: String, text: String },
+}
+
 /// An explicit output contract for one turn, shared by every front end.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TurnOptions {
+    pub recipe: Option<RecipeInvocation>,
+    pub attachments: Vec<Attachment>,
     /// Relative to the session workspace; never chosen by the model.
     pub output: Option<String>,
     pub output_schema: Option<serde_json::Value>,
@@ -108,7 +127,7 @@ pub struct TurnOptions {
 
 impl Default for TurnOptions {
     fn default() -> Self {
-        Self { output: None, output_schema: None, schema_retries: 2 }
+        Self { attachments: Vec::new(), recipe: None, output: None, output_schema: None, schema_retries: 2 }
     }
 }
 

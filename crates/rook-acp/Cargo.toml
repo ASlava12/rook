@@ -10,6 +10,8 @@ authors.workspace = true
 [dependencies]
 async-trait = "0.1.92"
 rook-core.workspace = true
+rook-proto.workspace = true
+base64 = "0.22.1"
 rook-llm.workspace = true
 rook-store.workspace = true
 rook-tools.workspace = true

@@ -407,3 +407,60 @@ fn work_resume_preserves_the_first_iteration_and_never_repeats_interrupted_check
     assert_eq!(state["plan"]["most"], 3, "--resume must not reset the saved budget");
     assert_eq!(state["active"]["session"], saved);
 }
+
+#[test]
+fn a_recipe_selects_a_configured_model_and_saves_a_parameterized_structured_report() {
+    let _serial = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let endpoint = serve_one(answered(r#"{"ok":true}"#));
+    std::fs::write(home.path().join("config.toml"), format!(
+        "[agent]\nmodel='openai-compatible/default-model'\ninstall_servers=false\n[models.audit]\nmodel='chosen-model'\napi='openai'\nurl='{endpoint}'\n"
+    )).unwrap();
+    std::fs::create_dir_all(workspace.path().join(".rook/recipes")).unwrap();
+    std::fs::write(workspace.path().join(".rook/recipes/audit.toml"), "version=1\nprompt='Audit {{scope}}'\nmodel='audit'\noutput='{{scope}}.json'\noutput_schema={type='object',required=['ok'],properties={ok={const=true}}}\n[parameters.scope]\ndescription='Scope to inspect'\n[limits]\nsteps=2\ntokens=4000\nseconds=60\n").unwrap();
+    let command = || {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_rook"));
+        command
+            .env("ROOK_HOME", home.path())
+            .env("ROOK_LLM_BASE_URL", "http://127.0.0.1:9/v1")
+            .arg("--workspace")
+            .arg(workspace.path())
+            .arg("--json")
+            .stdin(Stdio::null());
+        command
+    };
+    let result =
+        command().args(["run", "--recipe", "audit", "--param", "scope=src", "--yes"]).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    let body: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(body["outcome"]["reply"], r#"{"ok":true}"#);
+    assert_eq!(std::fs::read_to_string(workspace.path().join("src.json")).unwrap(), r#"{"ok":true}"#);
+    {
+        let store = rook_store::Store::open(home.path().join("store")).unwrap();
+        assert_eq!(store.list_sessions().unwrap()[0].model, "audit");
+    }
+    let missing = command().args(["run", "--recipe", "audit", "--yes"]).output().unwrap();
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("missing recipe parameter"));
+    assert_eq!(std::fs::read_to_string(workspace.path().join("src.json")).unwrap(), r#"{"ok":true}"#);
+}
+
+#[test]
+fn a_cli_turn_reads_only_explicit_attachments_and_rejects_oversized_files() {
+    let _serial = one_at_a_time();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("context.txt");
+    std::fs::write(&file, "local context").unwrap();
+    let endpoint = serve_one(answered("read attachment"));
+    let (stdout, stderr, status) =
+        run_with_status(&["run", "--json", "--context", file.to_str().unwrap()], &endpoint, "");
+    assert_eq!(status, 0, "{stdout} {stderr}");
+    assert!(stdout.contains("read attachment"));
+    let large = std::fs::File::create(&file).unwrap();
+    large.set_len(256 * 1024 + 1).unwrap();
+    let (_, stderr, status) =
+        run_with_status(&["run", "--context", file.to_str().unwrap()], "http://127.0.0.1:9/v1", "");
+    assert_ne!(status, 0);
+    assert!(stderr.contains("exceeds"), "{stderr}");
+}

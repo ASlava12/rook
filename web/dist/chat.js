@@ -399,15 +399,23 @@ export async function renderChat() {
   const sendButton = el('button', { id: 'send', type: 'submit' }, 'Send');
   const stopButton = el('button', { id: 'stop', type: 'button', hidden: true, onclick: stop }, 'Stop');
 
+  let loadingAttachments = false;
+  const attachmentsInput = el('input', { id: 'attachments', type: 'file', multiple: true, 'aria-label': 'Images or UTF-8 context files' });
+  const recipePath = el('input', { id: 'recipe-name', 'aria-label': 'Run recipe', placeholder: 'Recipe name or workspace-relative .toml file (optional)' });
+  const recipeParameters = el('textarea', { id: 'recipe-parameters', 'aria-label': 'Recipe parameters', placeholder: 'Parameters as JSON, for example {"scope":"src"}', rows: 2 });
   const outputPath = el('input', { id: 'output-file', 'aria-label': 'Final answer file', placeholder: 'Save final answer: workspace-relative path (optional)' });
   const outputSchema = el('textarea', { id: 'output-schema', 'aria-label': 'Output JSON Schema', placeholder: 'JSON Schema (optional)', rows: 3 });
   const repairs = el('input', { id: 'output-repairs', type: 'number', min: 0, max: 3, value: 2, title: 'Format repair attempts' });
-  const outputSettings = el('details', {}, el('summary', {}, 'Result format and file'),
+  const outputSettings = el('details', {}, el('summary', {}, 'Attachments, recipe and output'),
+    el('div', { class: 'row' }, el('label', { for: 'attachments' }, 'Images or text files (up to 4)'), attachmentsInput),
+    el('div', { class: 'row' }, recipePath), el('div', { class: 'row' }, recipeParameters),
     el('div', { class: 'row' }, outputPath), el('div', { class: 'row' }, outputSchema),
     el('div', { class: 'row' }, el('label', { for: 'output-repairs' }, 'Repair attempts'), repairs));
-  const form = el('form', { class: 'ask', onsubmit: (event) => {
+  const form = el('form', { class: 'ask', onsubmit: async (event) => {
     event.preventDefault();
-    const text = input.value.trim();
+    if (loadingAttachments) return;
+    const files = Array.from(attachmentsInput.files || []);
+    const text = input.value.trim() || (recipePath.value.trim() ? `Run recipe ${recipePath.value.trim()}` : files.length ? 'Analyse the attachments' : '');
     if (!text) return;
     askToNotify();
     let options;
@@ -416,11 +424,49 @@ export async function renderChat() {
       if (new TextEncoder().encode(schema).length > 65536) throw new Error('Output schema exceeds 64 KiB');
       const retries = Number(repairs.value);
       if (!Number.isInteger(retries) || retries < 0 || retries > 3) throw new Error('Repair attempts must be 0..3');
-      options = { output: outputPath.value.trim() || null,
+      let recipe = null;
+      if (recipePath.value.trim()) {
+        if (new TextEncoder().encode(recipeParameters.value).length > 65536) throw new Error('Recipe parameters exceed 64 KiB');
+        const parameters = JSON.parse(recipeParameters.value.trim() || '{}');
+        if (!parameters || Array.isArray(parameters) || typeof parameters !== 'object' ||
+            Object.values(parameters).some(value => typeof value !== 'string')) throw new Error('Recipe parameters must be a JSON object of strings');
+        recipe = { path: recipePath.value.trim(), parameters };
+      }
+      if (files.length > 4) throw new Error('At most 4 attachments per turn');
+      if (state.chat.busy && files.length) throw new Error('Wait for the running turn to finish before attaching files');
+      let textBytes = 0;
+      for (const file of files) {
+        const isImage = /^image\//.test(file.type) || /\.(png|jpe?g|webp|gif)$/i.test(file.name);
+        if (isImage && file.size > 2 * 1024 * 1024) throw new Error('An image exceeds 2 MiB; resize it first');
+        if (!isImage) textBytes += file.size;
+      }
+      if (textBytes > 256 * 1024) throw new Error('Embedded text exceeds 256 KiB');
+      loadingAttachments = true;
+      const attachments = [];
+      for (const file of files) {
+        const isImage = /^image\//.test(file.type) || /\.(png|jpe?g|webp|gif)$/i.test(file.name);
+        const bytes = await file.arrayBuffer();
+        if (isImage) {
+          const uri = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = () => reject(reader.error);
+            reader.readAsDataURL(new Blob([bytes]));
+          });
+          const extension = file.name.split('.').pop().toLowerCase();
+          const mime = file.type.startsWith('image/') ? file.type : `image/${extension === 'jpg' ? 'jpeg' : extension}`;
+          attachments.push({ type: 'image', name: file.name, mime_type: mime, data: uri.slice(uri.indexOf(',') + 1) });
+        } else {
+          attachments.push({ type: 'text', name: file.name, text: new TextDecoder('utf-8', { fatal: true }).decode(bytes) });
+        }
+      }
+      options = { recipe, attachments, output: outputPath.value.trim() || null,
         output_schema: schema ? JSON.parse(schema) : null, schema_retries: retries };
     } catch (error) { say('err', String(error)); return; }
+    finally { loadingAttachments = false; }
     send({ type: 'prompt', session: state.chat.session, text, options });
     input.value = '';
+    attachmentsInput.value = '';
     // While a turn runs this is something to say to it, and the server echoes
     // it back as `interjected` — so the transcript is written there, once, and
     // the working state is left alone.

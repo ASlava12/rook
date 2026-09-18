@@ -85,6 +85,7 @@ impl Assembler {
                 tool_calls: self.tool_calls,
                 tool_call_id: None,
                 cache: false,
+                images: Vec::new(),
                 reasoning: self.reasoning_blocks,
             },
             stop_reason,

@@ -34,7 +34,35 @@ use rook_llm::Delta;
 use rook_tools::ask::{Answer, Question};
 use rook_tools::policy::{Approval, Approver, Risk};
 
-use protocol::{ContentBlock, Error, Incoming, PROTOCOL_VERSION};
+use protocol::{Error, Incoming, PROTOCOL_VERSION};
+
+async fn next_frame<R: AsyncBufRead + Unpin>(reader: &mut R) -> std::io::Result<Option<String>> {
+    let mut frame = Vec::new();
+    loop {
+        let bytes = reader.fill_buf().await?;
+        if bytes.is_empty() {
+            return if frame.is_empty() {
+                Ok(None)
+            } else {
+                String::from_utf8(frame)
+                    .map(Some)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+            };
+        }
+        let newline = bytes.iter().position(|b| *b == b'\n');
+        let take = newline.map_or(bytes.len(), |at| at + 1);
+        if take > rook_core::attachments::MAX_FRAME_BYTES.saturating_sub(frame.len()) {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "ACP frame exceeds 16 MiB"));
+        }
+        frame.extend_from_slice(&bytes[..take]);
+        reader.consume(take);
+        if newline.is_some() {
+            return String::from_utf8(frame)
+                .map(Some)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e));
+        }
+    }
+}
 
 /// Run the server on stdin/stdout until the client closes the connection.
 pub async fn serve_stdio(rook: Rook) -> std::io::Result<()> {
@@ -43,7 +71,7 @@ pub async fn serve_stdio(rook: Rook) -> std::io::Result<()> {
 
 /// The server over any pair of streams, so it can be driven by a test as well as
 /// by an editor.
-pub async fn serve<R, W>(rook: Rook, reader: R, mut sink: W) -> std::io::Result<()>
+pub async fn serve<R, W>(rook: Rook, mut reader: R, mut sink: W) -> std::io::Result<()>
 where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin + Send + 'static,
@@ -73,12 +101,16 @@ where
     let client_files: Arc<Mutex<ClientFiles>> = Default::default();
 
     let peer = Arc::new(Peer::new(outbound));
-    let mut lines = reader.lines();
     let mut turn: Option<Turn> = None;
 
-    while let Some(line) = lines.next_line().await? {
+    let read_result = loop {
+        let line = match next_frame(&mut reader).await {
+            Ok(Some(line)) => line,
+            Ok(None) => break Ok(()),
+            Err(error) => break Err(error),
+        };
         let Ok(message) = serde_json::from_str::<Incoming>(&line) else {
-            tracing::debug!("unparsable line: {line}");
+            tracing::debug!("unparsable ACP frame");
             continue;
         };
 
@@ -143,16 +175,20 @@ where
             // A notification we do not handle is not an error.
             (_, None) => tracing::debug!("ignoring notification {method}"),
         }
-    }
+    };
 
     if let Some(turn) = turn {
         turn.handle.abort();
+        let _ = turn.handle.await;
     }
     mcp.shutdown().await;
     servers.shutdown().await;
     drop(peer);
+    if read_result.is_err() {
+        writer.abort();
+    }
     let _ = writer.await;
-    Ok(())
+    read_result
 }
 
 /// Settings a client may change for the rest of the connection.
@@ -214,7 +250,7 @@ fn dispatch(
             "agentInfo": { "name": "rook", "version": rook_core::AGENT_VERSION },
             "agentCapabilities": {
                 "loadSession": true,
-                "promptCapabilities": { "image": false, "audio": false, "embeddedContext": false },
+                "promptCapabilities": { "image": true, "audio": false, "embeddedContext": true },
             },
             "authMethods": [],
         })),
@@ -317,10 +353,11 @@ async fn prompt(
         return answer(Err(Error::invalid_params("not a session id")));
     };
 
-    let text = request.prompt.iter().filter_map(ContentBlock::render).collect::<Vec<_>>().join("\n");
-    if text.trim().is_empty() {
-        return answer(Err(Error::invalid_params("the prompt has no text")));
-    }
+    let session_id = request.session_id.clone();
+    let (text, attachments) = match request.content() {
+        Ok(content) => content,
+        Err(error) => return answer(Err(error)),
+    };
 
     let provider = match rook_core::models::configured(&rook.config) {
         Ok(provider) => provider,
@@ -328,11 +365,12 @@ async fn prompt(
     };
 
     let mut agent = AgentLoop::new(&rook, provider.into(), session);
+    agent.options.attachments = attachments;
     agent.policy = shared.policy.clone();
     rook_core::agent::equip(&mut agent, shared.servers.clone(), &shared.mcp, shared.jobs.clone());
     let editor = Arc::new(EditorApprover {
         peer: peer.clone(),
-        session: request.session_id.clone(),
+        session: session_id.clone(),
         patience: rook.config.agent.answer_timeout(),
         deciding: rook.config.agent.decide_alone_after(),
     });
@@ -342,7 +380,7 @@ async fn prompt(
     if setup.client.read {
         agent.tool_ctx.files = Some(Arc::new(EditorFiles {
             peer: peer.clone(),
-            session: request.session_id.clone(),
+            session: session_id.clone(),
             can_write: setup.client.write,
             workspace: rook.workspace.clone(),
             allow_outside: rook.config.sandbox.allow_outside_workspace,
@@ -351,7 +389,7 @@ async fn prompt(
     if setup.client.terminal {
         agent.tool_ctx.terminals = Some(Arc::new(EditorTerminals {
             peer: peer.clone(),
-            session: request.session_id.clone(),
+            session: session_id.clone(),
             timeout: agent.tool_ctx.command_timeout,
         }));
     }
@@ -380,17 +418,17 @@ async fn prompt(
         .run_with(&text, |progress| {
             let update = match progress {
                 Progress::Delta(Delta::Text(text)) => {
-                    protocol::agent_message_chunk(&request.session_id, text, &part(2))
+                    protocol::agent_message_chunk(&session_id, text, &part(2))
                 }
                 Progress::Delta(Delta::Reasoning(text)) => {
-                    protocol::agent_thought_chunk(&request.session_id, text, &part(1))
+                    protocol::agent_thought_chunk(&session_id, text, &part(1))
                 }
                 Progress::Delta(Delta::ToolCall(call)) => {
                     // Ends whatever was being streamed: the thinking after a
                     // call is not a continuation of the thinking before it.
                     streaming.store(0, Ordering::Relaxed);
                     protocol::tool_call(
-                        &request.session_id,
+                        &session_id,
                         &format!("call_{}", started.fetch_add(1, Ordering::Relaxed)),
                         &call.name,
                         protocol::tool_kind(&call.name),
@@ -399,7 +437,7 @@ async fn prompt(
                 // The editor already has a tool call open for the delegation;
                 // this is progress within it, which reads as a thought.
                 Progress::Delegated { task, done, total } => protocol::agent_thought_chunk(
-                    &request.session_id,
+                    &session_id,
                     &format!("[{done}/{total}] {task}\n"),
                     &part(1),
                 ),
@@ -407,28 +445,26 @@ async fn prompt(
                 // long prompt, and on a local one that is minutes; a thought is
                 // where an editor puts what is happening but is not the answer.
                 Progress::Waiting { secs, patience } => protocol::agent_thought_chunk(
-                    &request.session_id,
+                    &session_id,
                     &format!("  {}\n", rook_core::calls::waiting(secs, patience)),
                     &part(1),
                 ),
                 Progress::Delegating { at, doing } => protocol::agent_thought_chunk(
-                    &request.session_id,
+                    &session_id,
                     &format!("  {}\n", rook_core::calls::delegating(at, doing)),
                     &part(1),
                 ),
                 // The editor has the call open already; this says it is still
                 // going and whether anything is happening in it, which is the
                 // one thing an open call does not say by itself.
-                Progress::Working { call, said } => protocol::agent_thought_chunk(
-                    &request.session_id,
-                    &format!("  {call}: {said}\n"),
-                    &part(1),
-                ),
+                Progress::Working { call, said } => {
+                    protocol::agent_thought_chunk(&session_id, &format!("  {call}: {said}\n"), &part(1))
+                }
                 // What the person said while it ran, at the moment it is taken
                 // up. Until now a message typed mid-turn was queued with no end
                 // to the wait in sight.
                 Progress::Heard { text } => protocol::agent_thought_chunk(
-                    &request.session_id,
+                    &session_id,
                     &format!(
                         "  ✓ taken up: {text}
 "
@@ -436,7 +472,7 @@ async fn prompt(
                     &part(1),
                 ),
                 Progress::ToolDone { failed, .. } => protocol::tool_call_done(
-                    &request.session_id,
+                    &session_id,
                     &format!("call_{}", finished.fetch_add(1, Ordering::Relaxed)),
                     failed,
                 ),
@@ -472,10 +508,7 @@ async fn prompt(
         if !said.is_empty() {
             // Its own message: what a turn adds at the end is not a
             // continuation of the last thing it streamed.
-            peer.notify(
-                "session/update",
-                protocol::agent_message_chunk(&request.session_id, &said, &part(2)),
-            );
+            peer.notify("session/update", protocol::agent_message_chunk(&session_id, &said, &part(2)));
         }
     }
     answer(match result {
@@ -870,5 +903,20 @@ mod audit_tests {
     fn stop_reasons_use_the_engines_wire_spelling() {
         assert_eq!(stop_reason("max_tokens"), "max_tokens");
         assert_eq!(stop_reason("refusal"), "refusal");
+    }
+}
+
+#[cfg(test)]
+mod frame_tests {
+    use super::*;
+    #[tokio::test]
+    async fn an_acp_frame_is_bounded_before_its_newline_arrives() {
+        let bytes = vec![b'x'; rook_core::attachments::MAX_FRAME_BYTES + 1];
+        let mut reader = BufReader::with_capacity(1024, bytes.as_slice());
+        assert_eq!(next_frame(&mut reader).await.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+        let mut reader = BufReader::with_capacity(2, b"one\ntwo\n".as_slice());
+        assert_eq!(next_frame(&mut reader).await.unwrap().as_deref(), Some("one\n"));
+        assert_eq!(next_frame(&mut reader).await.unwrap().as_deref(), Some("two\n"));
+        assert!(next_frame(&mut reader).await.unwrap().is_none());
     }
 }

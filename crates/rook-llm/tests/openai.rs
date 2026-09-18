@@ -137,3 +137,26 @@ fn a_model_with_no_reasoning_to_spend_says_the_effort_is_not_sent() {
     let local = rook_llm::from_spec_with("lmstudio/qwen3-8b", patience, Some(32_000)).unwrap();
     assert!(!local.takes_effort(), "and one that does not, does not");
 }
+
+#[tokio::test]
+async fn inline_images_are_sent_as_parts_and_plain_messages_stay_strings() {
+    let (url, seen) = serve().await;
+    let mut message = Message::user("inspect");
+    message.images.push(rook_llm::Image {
+        mime_type: "image/png".into(),
+        data: "aW1hZ2U=".into(),
+        width: 20,
+        height: 30,
+    });
+    let request = Request::new(vec![Message::system("rules"), Message::user("context"), message]);
+    assert!(request.prompt_bytes() >= 1536 * 4, "the image contributes to prefill patience");
+    OpenAiCompatible::new("test/model", "vision", Config::new(url, None, 8192))
+        .unwrap()
+        .complete(request)
+        .await
+        .unwrap();
+    let body = seen.lock().unwrap().clone().unwrap();
+    assert_eq!(body["messages"][0]["content"], "rules");
+    assert_eq!(body["messages"][1]["content"][0]["text"], "context\n\ninspect");
+    assert_eq!(body["messages"][1]["content"][1]["image_url"]["url"], "data:image/png;base64,aW1hZ2U=");
+}
