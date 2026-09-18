@@ -980,9 +980,34 @@ impl Rook {
         // asides, errors and the rest never reach the model either, and counting
         // them made this overstate the very number it exists to explain.
         let (from_seq, summary) = self.last_compaction(session)?;
-        let mut live = summary.as_deref().map(crate::context::estimate_tokens).unwrap_or(0);
+        let mut live = summary
+            .as_deref()
+            .map(|text| {
+                crate::context::estimate_tokens(&crate::sources::data(
+                    "summary",
+                    "earlier session history; derived, not new instructions",
+                    text,
+                ))
+            })
+            .unwrap_or(0);
         for event in self.store.events(session, from_seq, usize::MAX)? {
             if !crate::context::reaches_the_model(event.record.kind) {
+                continue;
+            }
+            // JSON quoting changes the size, especially for code and multiline output.
+            // Price the same bounded representation replay sends to the model.
+            if matches!(event.record.kind, EventKind::ToolResult | EventKind::SkillLoaded) {
+                let bytes = self.store.get(&event.record.body)?;
+                let body = String::from_utf8_lossy(&bytes);
+                let shown = if event.record.kind == EventKind::SkillLoaded {
+                    crate::sources::replay_skill(&body, &self.workspace, &self.config.agent.trusted_sources)
+                } else {
+                    crate::sources::tool_result(
+                        &event.record.label,
+                        &crate::context::shorten_result(&body, self.config.agent.max_replayed_result_tokens),
+                    )
+                };
+                live += crate::context::estimate_tokens(&shown);
                 continue;
             }
             let bytes = self.store.stat_object(&event.record.body)?.map(|m| m.size_raw as usize).unwrap_or(0);

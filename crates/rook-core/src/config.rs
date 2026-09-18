@@ -331,6 +331,9 @@ fn unread(written: &serde_json::Value, known: &serde_json::Value, at: &str, out:
             }
             continue;
         }
+        if at == "agent" && key == "trusted_sources" {
+            continue; // Source paths are user-chosen map keys, not configuration fields.
+        }
         let path = match at.is_empty() {
             true => key.clone(),
             false => format!("{at}.{key}"),
@@ -608,6 +611,9 @@ pub struct AgentConfig {
     /// request, so a repository cannot spend the context window by committing a
     /// large one.
     pub max_instructions_bytes: usize,
+    /// Canonical absolute source paths mapped to BLAKE3 of the exact rendered
+    /// instruction body. Empty means every discovered source is reference data.
+    pub trusted_sources: std::collections::BTreeMap<String, String>,
     /// How long a provider that offers the choice should keep the cached prompt
     /// prefix: `5m` or `1h`. A longer write costs more and a hit costs a tenth
     /// either way, so the hour pays off exactly when a conversation outlives
@@ -833,6 +839,7 @@ impl Default for AgentConfig {
             // short enough that a turn still going tomorrow is not.
             max_turn_secs: 14_400,
             max_instructions_bytes: 32 * 1024,
+            trusted_sources: Default::default(),
             prompt_cache_ttl: "5m".into(),
         }
     }

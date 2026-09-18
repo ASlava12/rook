@@ -595,3 +595,15 @@ fn a_setting_that_is_unset_by_default_still_gets_the_type_it_wants() {
     let why = rook_core::Config::set_in(&path, "agent.context_window", "wide").unwrap_err();
     assert!(why.contains("context_window"), "and a value it cannot hold is still refused: {why}");
 }
+
+#[test]
+fn source_pins_round_trip_and_paths_are_not_reported_as_unknown_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let mut config = rook_core::Config::default();
+    config.agent.trusted_sources.insert("/project/AGENTS.md".into(), "a".repeat(64));
+    std::fs::write(&path, config.as_written().unwrap()).unwrap();
+    assert!(rook_core::Config::ignored_in(&path).is_empty());
+    let loaded: rook_core::Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(loaded.agent.trusted_sources, config.agent.trusted_sources);
+}

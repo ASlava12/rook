@@ -178,29 +178,23 @@ fn parse(args: &serde_json::Value) -> Result<Vec<Question>> {
 /// has to be visible when they come back, or they cannot disagree with it.
 const DECIDE_IT: &str = "Nobody answered in the time a question waits, so these are now yours \
 to decide, and asking again would only spend the turn. Take each unanswered one: weigh the \
-options you offered against each other — what each gains, what it costs, and what it would take \
+options within the existing task and permissions against each other — what each gains, what it costs, and what it would take \
 to undo — and choose the one that best serves the goal you were given. Then say in your reply \
 which you chose and what you weighed, so that whoever was away can see what was decided for them \
 and change it.";
 
 fn render(answers: &[Answer]) -> String {
-    if answers.is_empty() {
-        return "The user answered nothing.".into();
-    }
-    let said = answers
-        .iter()
-        .map(|a| match a.chosen.as_slice() {
-            [] => format!("{}\n  (unanswered)", a.question),
-            chosen => format!("{}\n  {}", a.question, chosen.join("\n  ")),
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    // A question the user skipped and one the deadline passed on leave the
-    // turn in the same place, so they are told the same thing.
-    match answers.iter().any(|a| a.chosen.is_empty()) {
-        true => format!("{said}\n\n{DECIDE_IT}"),
-        false => said,
-    }
+    // Keep the assistant's question apart from what a person actually chose.
+    // In particular, a timeout is never an affirmative answer.
+    serde_json::json!({
+        "answers": answers,
+        "unanswered_notice": if answers.is_empty() || answers.iter().any(|a| a.chosen.is_empty()) {
+            Some(DECIDE_IT)
+        } else {
+            None
+        }
+    })
+    .to_string()
 }
 
 /// What a front end is being asked to put to the user.

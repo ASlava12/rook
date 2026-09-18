@@ -91,7 +91,10 @@ async fn answers_come_back_next_to_the_questions_they_answer() {
     .await
     .unwrap();
 
-    assert_eq!(out, "Which target?\n  prod\n\nMigrate first?\n  yes");
+    let result: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(result["answers"][0]["question"], "Which target?");
+    assert_eq!(result["answers"][0]["chosen"], serde_json::json!(["prod"]));
+    assert_eq!(result["answers"][1]["chosen"], serde_json::json!(["yes"]));
 }
 
 /// A question nobody answered leaves the turn somewhere, and where it leaves it
@@ -104,7 +107,8 @@ async fn a_question_nobody_answered_is_handed_back_to_the_turn_to_decide() {
     let out = call(&tool, serde_json::json!({"questions": [{"question": "Which target?"}]})).await.unwrap();
 
     assert!(out.contains("Which target?"), "the question it is about: {out}");
-    assert!(out.contains("(unanswered)"), "and that nobody answered it: {out}");
+    let result: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(result["answers"][0]["chosen"], serde_json::json!([]));
     assert!(out.contains("yours to decide"), "the turn does not stop on it: {out}");
     assert!(out.contains("asking again"), "and does not put it a second time: {out}");
     assert!(out.contains("weigh"), "it is decided by weighing what was offered: {out}");
@@ -117,7 +121,9 @@ async fn a_question_nobody_answered_is_handed_back_to_the_turn_to_decide() {
 async fn an_answered_question_carries_none_of_the_advice_for_an_unanswered_one() {
     let tool = ask_tool(vec![vec!["prod"]]);
     let out = call(&tool, serde_json::json!({"questions": [{"question": "Which target?"}]})).await.unwrap();
-    assert_eq!(out, "Which target?\n  prod");
+    let result: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(result["answers"][0]["chosen"], serde_json::json!(["prod"]));
+    assert!(result["unanswered_notice"].is_null());
 }
 
 #[tokio::test]
@@ -142,7 +148,8 @@ async fn more_questions_than_a_form_can_carry_are_cut_rather_than_refused() {
     let tool = ask_tool(vec![vec!["a"]; 6]);
     let many: Vec<_> = (0..6).map(|i| serde_json::json!({"question": format!("q{i}")})).collect();
     let out = call(&tool, serde_json::json!({"questions": many})).await.unwrap();
-    assert_eq!(out.matches("q").count(), 4, "asked four of six, and answered those");
+    let result: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(result["answers"].as_array().unwrap().len(), 4, "asked four of six, and answered those");
 }
 
 #[tokio::test]

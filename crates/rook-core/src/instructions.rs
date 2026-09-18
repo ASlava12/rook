@@ -1,19 +1,14 @@
-//! Standing instructions a project keeps beside its code.
+//! Project conventions discovered as reference material, without granting authority.
 //!
-//! `AGENTS.md` is the convention codex, opencode and others already read, and
-//! Rook read none of them: a project's conventions had to be repeated in every
-//! prompt or hidden in a skill, which is loaded on demand and so is not standing
-//! instruction at all.
-//!
-//! Two files, most general first: `$ROOK_HOME/AGENTS.md` applies everywhere and
-//! the workspace's applies here, so the project has the last word on anything
-//! both mention. Bounded, because a file in a repository is written by whoever
-//! sends the pull request and is paid for on every single request.
+//! `$ROOK_HOME/AGENTS.md` and the workspace's `AGENTS.md` are read in that order.
+//! The agent labels each source separately; only an exact content pin in the
+//! user's configuration promotes a complete body to scoped instructions.
+//! Repository files are bounded because anybody contributing to the repository
+//! can change their size and content.
 
 use std::path::{Path, PathBuf};
 
-/// Read in this order; the last one wins where they disagree, and the model is
-/// told which is which.
+/// The discovery convention; the filename itself confers no trust.
 pub const FILENAME: &str = "AGENTS.md";
 
 pub struct Instructions {

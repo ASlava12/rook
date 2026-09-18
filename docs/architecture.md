@@ -184,3 +184,16 @@ the same name — a skill vendored into a repository is there on purpose.
 - [platforms.md](platforms.md) — the four targets and what actually constrains them
 - [adr/](adr/) — the decisions, with their alternatives
 - [research/agent-landscape.md](research/agent-landscape.md) — what this is built against
+
+### Source authority
+
+`rook-core::sources` labels retrieved material as JSON data with harness-owned
+provenance. AGENTS files, skill catalogs/bodies and hook context travel outside
+the system role; live tool results, replayed history, memory and compaction
+inputs preserve the same boundary. Content-pinned sources can carry scoped
+instructions, but never tool permissions. Replayed skills recheck the current
+pins; old records without provenance remain data. `ask` separates actual chosen
+answers from questions and appended hook data. The completion classifier records
+refusals/blockers as incomplete (`blocked`), without forcing a refused task to
+continue. Neither this classifier nor prompt framing is a deterministic security
+boundary; tool policy and containment remain independent enforcement layers.

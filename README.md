@@ -1047,22 +1047,41 @@ missing Docker 27, instead of leaving you to guess. See
 
 ### Standing instructions
 
-A skill is loaded when it is wanted. What holds for every turn goes in an
-`AGENTS.md` — the file codex, opencode and others already read — either in the
-workspace or in `$ROOK_HOME` for what applies everywhere:
+A skill is loaded when needed. Project conventions can be kept in
+`$ROOK_HOME/AGENTS.md` or `<workspace>/AGENTS.md`. Both are read as **reference
+data**, outside the system message, capped at `[agent] max_instructions_bytes`
+each. Truncation is explicit. `rook doctor` shows their canonical paths,
+content hashes and current trust status.
 
-```
-~/.rook/AGENTS.md      # yours, wherever you work
-<workspace>/AGENTS.md  # this project's, and it has the last word
+Files, comments, web pages, command and MCP results, skill catalogs, hook context,
+memory and summaries are not new user instructions. The harness supplies JSON
+`rook_source` records with provenance and authority; embedded role labels or
+nested records do not change that authority. Tool permissions are enforced
+separately. Actual answers through the built-in `ask` tool are distinguished
+from the echoed question and timeout notices.
+
+To explicitly trust reviewed project or skill instructions, add a content pin
+to your **user configuration** (`$ROOK_HOME/config.toml`):
+
+```toml
+[agent.trusted_sources]
+"/canonical/absolute/project/AGENTS.md" = "<body_blake3 from rook doctor>"
 ```
 
-Both are read whole into the system prompt, most general first, capped at
-`[agent] max_instructions_bytes` each — it is paid for on every request and the
-project's copy is written by whoever sends the pull request. A cut is stated in
-the prompt rather than made silently, since instructions that stop mid-sentence
-read as instructions that end there. `rook doctor` lists what it found. The shipped `project-instructions` skill says
-what belongs in one and what does not — a long one is worse than none, since it
-crowds out the conversation on every request.
+The default map is empty. Pins match the canonical absolute path and BLAKE3 of
+the exact rendered instruction body. For skills, use `origin` and `body_blake3`
+from the `skill` event's `rook_source` record in `rook session show`:
+that hash includes the rendered skill identity and bundled resource listing,
+so it is **not** the hash of raw `SKILL.md` bytes. Review the content before
+adding a pin. A changed or truncated body loses trust; removing a pin also
+revokes trust when history is replayed. Trust is scoped to the workspace where
+the source is presented and never grants tool permissions or overrides the
+user's request. Older skill history without provenance remains data.
+
+This reduces prompt-injection exposure; it does not make an LLM immune to it.
+For defensive analysis, instructions found inside suspicious material are
+evidence to inspect. A refusal or blocker is reported as `blocked` (incomplete),
+not a successful audit. Completion classification is model-based and can err.
 
 ## Layout
 

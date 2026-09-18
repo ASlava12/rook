@@ -753,13 +753,13 @@ fn cmd_doctor(workspace: &Path, json: bool) -> Result<()> {
     }
 
     println!();
-    println!("standing instructions:");
+    println!("project reference sources (trust requires a content pin):");
     // Named, because the difference between a file the agent reads and one it
     // does not is invisible until something it says is ignored.
     let standing = rook_core::instructions::applying_in(workspace, config.agent.max_instructions_bytes);
     if standing.is_empty() {
         println!(
-            "  (none — an {} here or in {} applies to every turn)",
+            "  (none — an {} here or in {} is read as reference data)",
             rook_core::instructions::FILENAME,
             rook_core::paths::home().display()
         );
@@ -769,7 +769,14 @@ fn cmd_doctor(workspace: &Path, json: bool) -> Result<()> {
             0 => String::new(),
             n => format!(", {n} bytes past `[agent] max_instructions_bytes` not read"),
         };
-        println!("  {} ({} bytes{cut})", one.from.display(), one.text.len());
+        let origin = one.from.canonicalize().unwrap_or_else(|_| one.from.clone());
+        let hash = rook_store::ObjectId::of(one.text.as_bytes()).to_hex();
+        let trusted = one.elided == 0
+            && origin.is_absolute()
+            && config.agent.trusted_sources.get(origin.to_string_lossy().as_ref()) == Some(&hash);
+        let authority = if trusted { "scoped_instructions" } else { "data" };
+        println!("  {} ({} bytes{cut}; {authority})", origin.display(), one.text.len());
+        println!("    body_blake3: {hash}");
     }
 
     println!();
