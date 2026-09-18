@@ -855,6 +855,33 @@ impl Chat {
     const RAN: &'static str = "  (done · the turn hears it at its next step)";
     const TAKEN: &'static str = "  ✓ taken up";
 
+    /// Deliver to the process running the turn. Before rookd assigns the first
+    /// session ID, keep the text here; a prompt without that ID starts another
+    /// session instead of steering the one already opening.
+    fn interject(&self, text: &str, locally: bool, pending: &rook_core::agent::Interjections) -> Result<()> {
+        if locally {
+            pending.say(text);
+            return Ok(());
+        }
+        let remote = self.remote.as_ref().filter(|sender| !sender.is_closed()).ok_or_else(|| {
+            anyhow::anyhow!("message not sent: the daemon connection is closed; reconnect and resend")
+        })?;
+        let Some(session) = self.session else {
+            pending.say(text);
+            return Ok(());
+        };
+        remote
+            .send(ClientMessage::Prompt {
+                session: Some(rook_store::format_session_id(session)),
+                text: text.to_owned(),
+                // Attachments and output settings belong to the next new turn.
+                options: Default::default(),
+            })
+            .map_err(|_| {
+                anyhow::anyhow!("message not sent: the daemon connection closed; reconnect and resend")
+            })
+    }
+
     /// Mark the oldest line still waiting as taken up.
     ///
     /// Oldest first, because the turn takes them in the order they were said,
@@ -1560,12 +1587,16 @@ impl App {
         match event {
             ChatEvent::Started { session } => {
                 self.chat.session = rook_store::parse_session_id(&session);
+                self.flush_interjections();
             }
             // Joined a turn this window did not start. Said out loud: a window
             // that opens onto a session and finds it already working looks,
             // for a second, like a window answering something you did not ask.
             ChatEvent::Attached { session, running } => {
                 self.chat.session = rook_store::parse_session_id(&session);
+                if running {
+                    self.flush_interjections();
+                }
                 // A window that asked because it had been drawing `working…`
                 // over a long silence is answering a different question, and
                 // only one of the two answers is news.
@@ -1693,7 +1724,23 @@ impl App {
             crate::notify::attention();
         }
         self.chat.ended();
+        if self.source.here().is_none() {
+            for text in self.shared.interjections.take() {
+                self.chat.push("err", &format!("not sent (the turn ended before accepting it): {text}"));
+            }
+        }
         self.reload();
+    }
+
+    fn flush_interjections(&mut self) {
+        if self.source.here().is_some() || self.chat.session.is_none() {
+            return;
+        }
+        for text in self.shared.interjections.take() {
+            if let Err(error) = self.chat.interject(&text, false, &self.shared.interjections) {
+                self.chat.push("err", &format!("{error}: {text}"));
+            }
+        }
     }
 
     /// Give the mouse to the terminal, or take it back.
@@ -2448,7 +2495,7 @@ impl App {
             // setting takes effect at once and the turn hears about it at its
             // next step, which is the soonest anything can reach a model whose
             // request has already been sent.
-            match slash(&prompt) {
+            let queued = match slash(&prompt) {
                 Some(command) => match while_running(command) {
                     Some(why) => {
                         self.chat.push("stat", &format!("  not while a turn is running: {why}"));
@@ -2457,13 +2504,16 @@ impl App {
                     }
                     None => {
                         self.command(command);
-                        self.shared.interjections.say(&prompt);
-                        self.chat.push("stat", Chat::RAN);
+                        Chat::RAN
                     }
                 },
-                None => {
-                    self.shared.interjections.say(&prompt);
-                    self.chat.push("stat", Chat::QUEUED);
+                None => Chat::QUEUED,
+            };
+            match self.chat.interject(&prompt, self.source.here().is_some(), &self.shared.interjections) {
+                Ok(()) => self.chat.push("stat", queued),
+                Err(error) => {
+                    self.chat.push("err", &error.to_string());
+                    self.chat.input.set(&prompt);
                 }
             }
             self.chat.scroll = 0;
@@ -4242,6 +4292,49 @@ fn kind_style(kind: &str) -> Style {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn daemon_steering_waits_for_a_session_id_and_never_uses_the_local_runner_queue_afterwards() {
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut chat = super::Chat { remote: Some(sender), busy: true, ..Default::default() };
+        let pending = rook_core::agent::Interjections::default();
+        chat.interject("before the session ID", false, &pending).unwrap();
+        assert!(receiver.try_recv().is_err(), "a prompt without an ID would start another session");
+        chat.session = Some(42);
+        for text in pending.take() {
+            chat.interject(&text, false, &pending).unwrap();
+        }
+        chat.interject("after the session ID", false, &pending).unwrap();
+        assert!(pending.take().is_empty(), "rookd never reads the local runner's queue");
+        for expected in ["before the session ID", "after the session ID"] {
+            let super::ClientMessage::Prompt { session, text, options } = receiver.try_recv().unwrap() else {
+                panic!("expected a prompt addressed to the running session")
+            };
+            assert_eq!(session, Some(rook_store::format_session_id(42)));
+            assert_eq!(text, expected);
+            assert!(options.attachments.is_empty());
+            assert!(options.output.is_none());
+            assert!(options.recipe.is_none());
+        }
+    }
+
+    #[test]
+    fn a_closed_daemon_channel_does_not_claim_that_steering_was_queued() {
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        drop(receiver);
+        let mut chat = super::Chat { remote: Some(sender), busy: true, ..Default::default() };
+        let pending = rook_core::agent::Interjections::default();
+        for session in [None, Some(42)] {
+            chat.session = session;
+            let error = chat.interject("do not lose this", false, &pending).unwrap_err();
+            assert!(error.to_string().contains("not sent"));
+            assert!(pending.take().is_empty());
+        }
+        chat.remote = None;
+        assert!(chat.interject("disconnected", false, &pending).is_err());
+        chat.interject("local turn", true, &pending).unwrap();
+        assert_eq!(pending.take(), ["local turn"]);
+    }
 
     /// A line typed while a turn runs is marked when the turn takes it up.
     ///

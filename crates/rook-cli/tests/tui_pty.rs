@@ -441,10 +441,14 @@ fn a_model_that_never_answers(home: &std::path::Path) {
 /// reads it, so a test can put a real approval on the screen. The turn stops
 /// there: an approval blocks until somebody answers, which is the state being
 /// looked at.
-fn a_model_that_asks_to_run(home: &std::path::Path, command: &str) {
+fn a_model_that_asks_to_run(
+    home: &std::path::Path,
+    command: &str,
+) -> std::sync::mpsc::Receiver<serde_json::Value> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let arguments = serde_json::json!({ "command": command, "cwd": "." }).to_string();
+    let (sent, received) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         use std::io::{BufRead, BufReader, Write};
         while let Ok((mut socket, _)) = listener.accept() {
@@ -460,8 +464,12 @@ fn a_model_that_asks_to_run(home: &std::path::Path, command: &str) {
                     break;
                 }
             }
-            // Drained, or the client sees the connection close on its body.
-            std::io::copy(&mut reader.take(length as u64), &mut std::io::sink()).ok();
+            assert!(length <= 1024 * 1024, "mock request is unexpectedly large");
+            let mut body = Vec::new();
+            reader.take(length as u64).read_to_end(&mut body).unwrap();
+            if request.contains("chat/completions") {
+                let _ = sent.send(serde_json::from_slice(&body).unwrap());
+            }
 
             let body = if request.contains("chat/completions") {
                 let call = serde_json::json!({"choices": [{"index": 0, "delta": {"tool_calls": [{
@@ -495,6 +503,79 @@ fn a_model_that_asks_to_run(home: &std::path::Path, command: &str) {
     )
     .unwrap();
     unsafe { std::env::set_var("ROOK_LLM_BASE_URL", format!("http://{addr}/v1")) };
+    received
+}
+
+fn steering_during_a_tool_reaches_the_next_request(through_daemon: bool) {
+    let _one = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let requests = a_model_that_asks_to_run(
+        home.path(),
+        "echo ready > steering-ready; while test ! -f steering-release; do sleep 0.1; done; echo done > steering-finished",
+    );
+    let config = home.path().join("config.toml");
+    let text = std::fs::read_to_string(&config).unwrap().replace("mode = \"ask\"", "mode = \"auto\"");
+    std::fs::write(config, text).unwrap();
+    let _daemon = through_daemon.then(|| Daemon::start(home.path(), workspace.path()));
+    let mut pty = tui(home.path(), workspace.path());
+    // Even a failed assertion must release the shell before its workspace goes.
+    struct ReleaseTool<'a>(&'a std::path::Path);
+    impl Drop for ReleaseTool<'_> {
+        fn drop(&mut self) {
+            let _ = std::fs::write(self.0.join("steering-release"), "continue");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while self.0.join("steering-ready").exists()
+                && !self.0.join("steering-finished").exists()
+                && std::time::Instant::now() < deadline
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
+    let _release = ReleaseTool(workspace.path());
+    pty.screen(100, 30);
+    pty.send("start the waiting command\rEARLY_NOTE\r");
+    let first = requests.recv_timeout(PATIENCE).unwrap();
+    assert!(first["messages"].to_string().contains("start the waiting command"));
+
+    // A file written by the tool proves it is running; no timing guess about
+    // whether Enter arrived before or after the turn finished.
+    let deadline = std::time::Instant::now() + PATIENCE;
+    while !workspace.path().join("steering-ready").exists() {
+        pty.screen(100, 30);
+        assert!(std::time::Instant::now() < deadline, "the tool never started: {}", pty.diagnosis());
+    }
+    pty.send("PREFER_BLUE\r");
+    pty.screen_showing(100, 30, "the turn will see this");
+    pty.send("/schema-retries 1\r");
+    pty.screen_showing(100, 30, "done · the turn hears it");
+    if through_daemon {
+        // Receipt by rookd, rather than only the TUI's optimistic local echo.
+        pty.screen_showing(100, 30, "↩ /schema-retries 1");
+    }
+    std::fs::write(workspace.path().join("steering-release"), "continue").unwrap();
+
+    let next = requests.recv_timeout(PATIENCE).unwrap();
+    let messages = next["messages"].as_array().unwrap();
+    for text in ["EARLY_NOTE", "PREFER_BLUE", "/schema-retries 1"] {
+        assert!(
+            messages.iter().any(|m| m["role"] == "user"
+                && m["content"].as_str().is_some_and(|body| body.lines().any(|line| line == text))),
+            "the next model request must contain the steering message {text:?}: {messages:?}"
+        );
+    }
+    pty.send("\u{3}");
+}
+
+#[test]
+fn a_running_daemon_turn_receives_text_and_slash_commands_from_the_tui() {
+    steering_during_a_tool_reaches_the_next_request(true);
+}
+
+#[test]
+fn a_running_local_turn_still_receives_text_and_slash_commands_from_the_tui() {
+    steering_during_a_tool_reaches_the_next_request(false);
 }
 
 /// The panel was four rows whatever it held, so the command being approved —
