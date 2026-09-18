@@ -777,8 +777,46 @@ them is the workspace, the checks, and `.rook/plan.md` — the agent's own file,
 where it keeps what is done, what is next, and what it tried that did not work.
 Rewriting that plan is not doing the work, and does not count as a change.
 
-The record is written after every iteration, so a run measured in days survives
-the machine restarting under it.
+The active iteration, original goal, scorecard and limits are saved before work
+starts. `rook work --resume` reuses that session, completed answer and evaluation
+receipts, including when the first iteration was interrupted. New CLI budget
+flags do not replace the saved plan. Completed checks are not rerun; changed
+guarded files make a reused result unproven. A check selected before a crash but
+without a saved result requires inspection and a new work run to evaluate again.
+Known token usage includes pre-crash turns and delegated sessions.
+
+### Interrupted executions
+
+Rook durably records an execution owner and each operation's intent before it
+runs, then its result. On restart, unfinished operations that may have effects
+are reported as **unknown**, not failed or successful. Commands are never
+replayed automatically. Reading remains available when policy permits it; changes
+in the affected session and its delegated family pause until inspection.
+
+```sh
+rook session recovery <session>
+rook session recovery <session> --acknowledge <operation-id> --note "Inspected the destination and command output; ..."
+```
+
+In chat/TUI use `/recovery` and `/recovery <operation-id> <inspection note>`.
+The browser's session view exposes the same receipts and inspection action.
+API clients use GET/POST `/api/sessions/{id}/recovery`; POST accepts `operation`
+and `note`. Acknowledgement records what the user inspected, clears that specific
+pause, and neither claims success nor repeats an operation. Stale operation IDs
+are rejected. Stop an active turn before acknowledging it.
+
+Receipts distinguish pending operations, background jobs, completed operation
+counts and the last result event. Full stored results remain available through
+`read_result`. Hooks, installers and harness-owned output/evaluation writes
+participate in recovery too. A background job left by a lost owner may still
+have affected external state; inspect its destination before continuing.
+Session forks retain uncertainty. Ordinary prune/maintenance protects active
+executions, unknown results and unfinished work iterations; explicit session
+deletion remains available after inspection.
+
+This is a recovery journal, not a transaction with the outside world: a crash
+between an effect and its durable receipt cannot prove whether the effect happened.
+Existing sessions created before this feature have only their older logs.
 
 ### From an editor
 

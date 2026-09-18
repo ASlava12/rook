@@ -113,6 +113,7 @@ fn run_with_status(args: &[&str], endpoint: &str, extra_config: &str) -> (String
 
 #[test]
 fn a_turn_run_for_a_person_streams_the_reply_and_summarises_beside_it() {
+    let _serial = one_at_a_time();
     let endpoint = serve_one(answered("the sky is blue"));
     let (stdout, stderr) = run(&["run", "what colour?"], &endpoint);
 
@@ -123,6 +124,7 @@ fn a_turn_run_for_a_person_streams_the_reply_and_summarises_beside_it() {
 
 #[test]
 fn a_turn_run_for_a_script_is_one_object_and_nothing_else() {
+    let _serial = one_at_a_time();
     let endpoint = serve_one(answered("the sky is blue"));
     let (stdout, _) = run(&["--json", "run", "what colour?"], &endpoint);
 
@@ -176,6 +178,7 @@ fn asked_for_a_tool() -> &'static str {
 /// a script piping the output onward could not tell it from a finished turn.
 #[test]
 fn a_turn_that_ran_out_of_steps_says_so_to_the_caller() {
+    let _serial = one_at_a_time();
     let endpoint = serve_forever(asked_for_a_tool());
     let (stdout, stderr, code) =
         run_with_status(&["--json", "run", "list everything"], &endpoint, "max_steps = 2\n");
@@ -193,6 +196,7 @@ fn a_turn_that_ran_out_of_steps_says_so_to_the_caller() {
 
 #[test]
 fn a_turn_that_finished_exits_cleanly() {
+    let _serial = one_at_a_time();
     let endpoint = serve_one(answered("done"));
     let (_, stderr, code) = run_with_status(&["run", "what colour?"], &endpoint, "");
 
@@ -202,6 +206,7 @@ fn a_turn_that_finished_exits_cleanly() {
 
 #[test]
 fn repeated_progress_only_replies_exit_as_incomplete() {
+    let _serial = one_at_a_time();
     let mut replies = Vec::new();
     for _ in 0..3 {
         let progress = answered("Let me continue the audit and write the report.");
@@ -252,4 +257,153 @@ fn output_is_saved_by_the_program_and_write_failure_is_a_nonzero_exit() {
 fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
     static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
     SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Runs inside the operator's second check, in a separate process from `rook`.
+#[test]
+fn evaluation_wait_child() {
+    let Ok(root) = std::env::var("ROOK_EVALUATION_WAIT") else { return };
+    let root = std::path::PathBuf::from(root);
+    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(root.join("pending")).unwrap();
+    file.write_all(b"x").unwrap();
+    file.sync_all().unwrap();
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(90);
+    while !root.join("release").exists() {
+        assert!(std::time::Instant::now() < until, "parent did not release evaluator helper");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn work_resume_preserves_the_first_iteration_and_never_repeats_interrupted_checks() {
+    let _serial = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[agent]\nmodel = 'openai-compatible/test-model'\ninstall_servers = false\n",
+    )
+    .unwrap();
+    std::fs::create_dir(workspace.path().join(".rook")).unwrap();
+    let executable = std::env::current_exe().unwrap().to_string_lossy().into_owned();
+    let quoted = if cfg!(windows) {
+        format!("\"{executable}\"")
+    } else {
+        format!("'{}'", executable.replace('\'', "'\\''"))
+    };
+    let card = rook_core::evaluation::Scorecard {
+        checks: vec![
+            rook_core::evaluation::Check {
+                name: "known".into(),
+                run: "echo x >> known".into(),
+                ..Default::default()
+            },
+            rook_core::evaluation::Check {
+                name: "pending".into(),
+                run: format!("{quoted} --exact evaluation_wait_child --nocapture"),
+                ..Default::default()
+            },
+        ],
+    };
+    std::fs::write(
+        workspace.path().join(".rook/evaluation.toml"),
+        card.checks
+            .iter()
+            .map(|check| {
+                format!(
+                    "[[check]]\nname = {}\nrun = {}\n",
+                    serde_json::to_string(&check.name).unwrap(),
+                    serde_json::to_string(&check.run).unwrap()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+    .unwrap();
+    let endpoint = serve_one(answered("finished the work"));
+    let command = || {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_rook"));
+        cmd.env("ROOK_HOME", home.path())
+            .env("ROOK_LOG", "error")
+            .env("ROOK_LLM_BASE_URL", &endpoint)
+            .env("ROOK_EVALUATION_WAIT", workspace.path())
+            .arg("--workspace")
+            .arg(workspace.path())
+            .arg("--json")
+            .stdin(Stdio::null());
+        cmd
+    };
+    struct Active {
+        child: std::process::Child,
+        release: std::path::PathBuf,
+    }
+    impl Drop for Active {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            let _ = std::fs::write(&self.release, b"release");
+        }
+    }
+    let mut active = Active {
+        child: command()
+            .args(["work", "--most", "3", "finish this"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+        release: workspace.path().join("release"),
+    };
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while std::fs::read(workspace.path().join("pending")).unwrap_or_default() != b"x" {
+        assert!(active.child.try_wait().unwrap().is_none(), "work exited before evaluation");
+        assert!(std::time::Instant::now() < until, "work did not reach evaluation");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    active.child.kill().unwrap();
+    active.child.wait().unwrap();
+    std::fs::write(&active.release, b"release").unwrap();
+    let saved = {
+        let store = rook_store::Store::open(home.path().join("store")).unwrap();
+        let meta = store.list_sessions().unwrap();
+        assert_eq!(meta.len(), 1);
+        rook_store::format_session_id(meta[0].id)
+    };
+    let known = std::fs::read(workspace.path().join("known")).unwrap();
+    // Resume uses the saved contract, even when the live scorecard became unreadable.
+    std::fs::write(workspace.path().join(".rook/evaluation.toml"), "invalid = [").unwrap();
+    let out = command().args(["work", "--resume", "--most", "10", "finish this"]).output().unwrap();
+    assert!(!out.status.success());
+    let body: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(body["stopped"].as_str().unwrap().contains("unknown operation"), "{body}");
+    assert!(body["iterations"].as_array().unwrap().is_empty(), "the first iteration is still in flight");
+    let out = command().args(["session", "recovery", &saved]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let receipts: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let operation = receipts[0]["unknown"][0]["id"].as_str().unwrap();
+    let out = command()
+        .args([
+            "session",
+            "recovery",
+            &saved,
+            "--acknowledge",
+            operation,
+            "--note",
+            "inspected the marker and released the check helper",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = command().args(["work", "--resume"]).output().unwrap();
+    assert!(!out.status.success());
+    let body: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(body["stopped"].as_str().unwrap().contains("will not repeat"), "{body}");
+    assert_eq!(std::fs::read(workspace.path().join("known")).unwrap(), known);
+    assert_eq!(std::fs::read(workspace.path().join("pending")).unwrap(), b"x");
+    let store = rook_store::Store::open(home.path().join("store")).unwrap();
+    assert_eq!(store.list_sessions().unwrap().len(), 1, "resume reused the same session");
+    let run = body["run"].as_str().unwrap();
+    let state: serde_json::Value =
+        serde_json::from_slice(&store.kv_get(&format!("work/state/{run}")).unwrap().unwrap()).unwrap();
+    assert_eq!(state["plan"]["most"], 3, "--resume must not reset the saved budget");
+    assert_eq!(state["active"]["session"], saved);
 }

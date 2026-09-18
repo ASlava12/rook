@@ -1225,3 +1225,49 @@ fn a_two_word_topic_is_not_read_as_a_topic_and_a_version() {
     // whole point of the copy.
     assert!(!said.contains("gathered"), "{said}");
 }
+
+#[test]
+fn recovery_inspection_and_acknowledgement_reach_the_daemon_and_reject_stale_ids() {
+    let rook = Rook::new();
+    let id = rook_store::new_session_id();
+    let named = rook_store::format_session_id(id);
+    {
+        let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+        store
+            .create_session(&rook_store::SessionMeta::new(
+                id,
+                "interrupted",
+                rook.workspace.path().display().to_string(),
+                rook_store::now_unix(),
+            ))
+            .unwrap();
+        let receipt = serde_json::json!({
+            "version":1,"session":named,"turn":"old-turn","owner":"dead-process","pid":0,
+            "started_at":0,"updated_at":0,"status":"running","task":"write one file","start_seq":0,
+            "completed_operations":0,"last_result_seq":null,"background":[],"unknown":[],
+            "pending":{"session":named,"id":"operation-one","tool":"write_file","arguments":"{}",
+                "started_at":0,"call_seq":0,"may_have_effects":true,"job":null,"registry":null}
+        });
+        store.kv_set(&format!("execution/{id:032x}"), &serde_json::to_vec(&receipt).unwrap()).unwrap();
+        store.flush().unwrap();
+    }
+    let _daemon = Daemon::start(&rook);
+    let receipts = rook.json(&["session", "recovery", &named]);
+    assert_eq!(receipts[0]["unknown"][0]["id"], "operation-one");
+    let result = rook.run(&[
+        "session",
+        "recovery",
+        &named,
+        "--acknowledge",
+        "operation-one",
+        "--note",
+        "inspected the destination",
+    ]);
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    let receipts = rook.json(&["session", "recovery", &named]);
+    assert!(receipts[0]["unknown"].as_array().unwrap().is_empty());
+    let stale =
+        rook.run(&["session", "recovery", &named, "--acknowledge", "operation-one", "--note", "old page"]);
+    assert!(!stale.status.success());
+    assert!(String::from_utf8_lossy(&stale.stderr).contains("refresh"));
+}

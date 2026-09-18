@@ -2219,6 +2219,17 @@ impl App {
     /// One question per Enter. The input line is the answer field, so typing
     /// past the choices works here exactly as it does in the plain CLI.
     fn command(&mut self, command: &str) {
+        let (name, rest) = command.split_once(' ').unwrap_or((command, ""));
+        if name == "recovery" {
+            let said = match self.chat.session {
+                Some(session) => {
+                    self.source.recovery_command(session, rest).unwrap_or_else(|e| e.to_string())
+                }
+                None => "start or resume a session first".into(),
+            };
+            self.chat.push("stat", &said);
+            return;
+        }
         let configured = crate::output_options::configure(command, &mut self.shared.output.borrow_mut());
         if let Some(result) = configured {
             self.chat.push("stat", &result.unwrap_or_else(|e| e.to_string()));

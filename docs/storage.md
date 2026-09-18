@@ -201,27 +201,29 @@ The index is never inconsistent: every commit is atomic, and a machine that
 loses power comes back to a store that opens. What it can lose is the tail of
 an unfinished turn.
 
-Flushing to disk costs about eight milliseconds, and one event at a time it was
-the most expensive thing the agent did — `cargo xtask load` measured nine
-milliseconds to append an event against a hundred and fifty microseconds to read
-one back, so a two-hundred-step turn spent four seconds writing down what it had
-just done. The flush now happens at the points a session can be returned to
-rather than between every pair of steps:
+Ordinary event appends are batched, but durability is explicit at the boundaries
+where losing intent or an answer would change recovery:
 
-- a **checkpoint**, which is what a rewind restores;
-- a **compaction**, which is a durable marker by design;
-- the **end of a turn**;
-- **closing the store**, which is what `rook run` does after its one turn;
-- and every 256 events regardless, so a long autonomous run that takes no
-  checkpoints still bounds what it could lose.
+- before an operation can run, and after its result is recorded;
+- when a background operation or execution changes state;
+- when an active work iteration or evaluation result is saved;
+- at checkpoints, compaction, turn completion and store close;
+- and every 256 events regardless.
 
-redb makes a durable commit persist everything committed before it, so each of
-those carries the whole span behind it. What is at risk is therefore the events
-since the most recent of them — a turn that was still running when the power
-went, which is not a turn that resumes, and whose effects on the workspace are
-on disk in the workspace either way.
+A durable redb commit persists earlier commits as well. Events since the last
+barrier can be lost, including unfinished streamed text. An external side effect
+and a store commit cannot be made atomic together: if a crash falls between the
+effect and its receipt, startup preserves the operation as unknown and pauses
+changes pending inspection. `rook session recovery <id>` shows the receipt;
+`work --resume` reuses the saved iteration and completed evaluation results.
+It does not automatically replay uncertain commands.
 
-Appending an event costs 397 µs now rather than 9 ms, measured the same way.
+The journal is session-scoped JSON in KV; existing postcard records are unchanged.
+Recovery state serialization is bounded to 8 MiB, execution previews to 2 KiB,
+background operations to 64, and a recovery report to 256 relevant related
+executions. Full operation arguments and results stay in the session log. Work
+recovery supports at most 256 scorecard checks. Prune and maintenance preserve
+sessions carrying the internal `rook:execution` or `rook:work` protection tags.
 
 ## Concurrency
 

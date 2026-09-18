@@ -310,6 +310,39 @@ impl Source {
         }
     }
 
+    pub fn recovery_command(&self, session: u128, arguments: &str) -> Result<String> {
+        let arguments = arguments.trim();
+        if !arguments.is_empty() {
+            let (operation, note) = arguments
+                .split_once(' ')
+                .ok_or_else(|| anyhow::anyhow!("use /recovery <operation-id> <inspection note>"))?;
+            self.acknowledge_operation(session, operation, note)?;
+        }
+        Ok(serde_json::to_string_pretty(&self.execution(session)?)?)
+    }
+
+    pub fn execution(&self, session: u128) -> Result<Vec<rook_core::execution::Execution>> {
+        match self {
+            Self::Local(rook) => Ok(rook.execution(session)?),
+            Self::Daemon(daemon) => {
+                daemon.get(&format!("/api/sessions/{}/recovery", rook_store::format_session_id(session)))
+            }
+        }
+    }
+
+    pub fn acknowledge_operation(&self, session: u128, operation: &str, note: &str) -> Result<()> {
+        match self {
+            Self::Local(rook) => Ok(rook.acknowledge_operation(session, operation, note)?),
+            Self::Daemon(daemon) => {
+                let _: serde_json::Value = daemon.post(
+                    &format!("/api/sessions/{}/recovery", rook_store::format_session_id(session)),
+                    &serde_json::json!({"operation":operation,"note":note}),
+                )?;
+                Ok(())
+            }
+        }
+    }
+
     pub fn rewind(&self, session: u128, to_seq: u64, restore_files: bool) -> Result<rook_core::Rewind> {
         match self {
             Source::Local(rook) => Ok(rook.rewind(session, to_seq, restore_files)?),

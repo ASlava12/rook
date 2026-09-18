@@ -116,8 +116,8 @@ enum Command {
     /// Here that decision reads what the harness measured and what the
     /// filesystem says changed — never the turn's account of itself.
     Work {
-        /// The standing goal, carried into every iteration.
-        #[arg(required = true)]
+        /// The standing goal, carried into every iteration; --resume uses the saved goal.
+        #[arg(required_unless_present = "resume")]
         goal: Vec<String>,
         /// Iterations at most. Zero lifts it, and then the other two bound it.
         #[arg(long, default_value_t = 10)]
@@ -430,6 +430,15 @@ enum StoreCmd {
 
 #[derive(Subcommand)]
 enum SessionCmd {
+    /// Inspect interrupted execution, or acknowledge one reviewed operation.
+    Recovery {
+        id: String,
+        #[arg(long, requires = "note")]
+        acknowledge: Option<String>,
+        /// What was checked and what happened; acknowledgement never retries it.
+        #[arg(long, requires = "acknowledge")]
+        note: Option<String>,
+    },
     Ls {
         /// Every workspace, not just this one.
         #[arg(long)]
@@ -1930,11 +1939,11 @@ fn cmd_work(
     use rook_core::work::{Iteration, Next};
 
     let here = workspace_of(&workspace);
-    let Some(card) = rook_core::evaluation::read(&here).map_err(anyhow::Error::msg)? else {
-        anyhow::bail!(
-            "{} declares no checks, and a run with nothing to measure is a run that cannot tell              whether it is getting anywhere. Write a scorecard first — `[[check]]` tables, each              with a `name` and something to `run` — and `rook eval` will show what it says.",
+    let read_card = || -> Result<rook_core::evaluation::Scorecard> {
+        rook_core::evaluation::read(&here).map_err(anyhow::Error::msg)?.ok_or_else(|| anyhow::anyhow!(
+            "{} declares no checks. Write [[check]] tables with a name and run command before starting work.",
             rook_core::evaluation::scorecard_path(&here).display()
-        );
+        ))
     };
     let plan = rook_core::work::Plan { goal, ..plan };
 
@@ -1974,7 +1983,30 @@ fn cmd_work(
         (true, Some(id)) => id.to_string(),
         _ => rook_store::format_session_id(rook_store::new_session_id()),
     };
-    let _ = rook.store.kv_set(&rook_core::work::last_key(&here), run.as_bytes());
+    let mut progress = match if resume { rook_core::work::read_state(&rook, &run)? } else { None } {
+        Some(saved) => saved,
+        None => {
+            anyhow::ensure!(
+                !plan.goal.is_empty(),
+                "this older run has no stored goal; supply it with --resume"
+            );
+            rook_core::work::RunState { plan: plan.clone(), card: read_card()?, active: None }
+        }
+    };
+    anyhow::ensure!(
+        plan.goal.is_empty() || progress.plan.goal == plan.goal,
+        "the saved run has a different goal; start a new run to change it"
+    );
+    if progress.active.as_ref().is_some_and(|active| active.at as usize <= earlier.len()) {
+        progress.active = None;
+    }
+    let plan = progress.plan.clone();
+    let card = progress.card.clone();
+    if !resume {
+        rook.store.kv_set(&rook_core::work::record_key(&run), b"[]")?;
+    }
+    rook.store.kv_set(&rook_core::work::last_key(&here), run.as_bytes())?;
+    rook_core::work::save_state(&rook, &run, &progress)?;
 
     let ended = runtime.block_on(async {
         // Built once for the whole run, not once per iteration: an MCP server
@@ -1999,52 +2031,134 @@ fn cmd_work(
             };
             let at = done.len() as u32 + 1;
             if !json {
-                eprintln!(
-                    "
-── iteration {at} ──"
+                eprintln!("\n── iteration {at} ──");
+            }
+
+            let (session, before) = if let Some(active) = &progress.active {
+                let Some(session) = rook_store::parse_session_id(&active.session) else {
+                    break "saved work session is invalid".into();
+                };
+                (session, active.before.clone())
+            } else {
+                let session = match rook.start_session(&format!("work {at}")) {
+                    Ok(session) => session,
+                    Err(why) => break format!("could not start iteration {at}: {why}"),
+                };
+                let before = rook_core::evaluation::witness(&here, &card);
+                progress.active = Some(rook_core::work::ActiveIteration {
+                    at,
+                    session: rook_store::format_session_id(session),
+                    before: before.clone(),
+                    answer: None,
+                    report: None,
+                });
+                if let Err(why) = rook_core::work::save_state(&rook, &run, &progress) {
+                    break format!("could not persist the active iteration: {why}");
+                }
+                (session, before)
+            };
+            let recovering = match rook.execution(session) {
+                Ok(receipts) => receipts.iter().any(|receipt| !receipt.unknown.is_empty()),
+                Err(why) => break format!("could not inspect execution: {why}"),
+            };
+            if recovering {
+                break format!(
+                    "iteration {at} has unknown operation results; inspect `rook session recovery {}` before resuming",
+                    rook_store::format_session_id(session)
                 );
             }
-
-            // Taken before the turn, so "this was rewritten while it was being
-            // measured" is a comparison across the turn rather than a guess.
-            let before = rook_core::evaluation::witness(&here, &card);
-
-            let provider = match rook_core::models::configured(&rook.config) {
-                Ok(provider) => provider,
-                Err(why) => break format!("no model to run on: {why}"),
-            };
-            let session = match rook.start_session(&format!("work {at}")) {
-                Ok(session) => session,
-                Err(why) => break format!("could not start iteration {at}: {why}"),
-            };
-            let _ = rook.set_goal(session, &plan.goal);
-            let mut agent = rook_core::agent::AgentLoop::new(&rook, provider.into(), session);
-            if yes {
-                agent.allow_everything_not_denied();
-            }
-            rook_core::agent::equip(&mut agent, servers.clone(), &mcp, jobs.clone());
-
-            // An iteration that could not run is an iteration that changed
-            // nothing, not the end of the run. A tunnel hiccupped mid-stream
-            // here — `unexpected EOF during chunk size line` — and a run that
-            // had been going for hours ended on it. One transient failure must
-            // not throw that away, and a persistent one does not need a rule of
-            // its own: two iterations that change nothing already stop a run,
-            // and the reason is carried in the record either way.
-            // Watched as it goes, the same as a single turn is. Without this an
-            // iteration printed its heading and nothing else until it ended,
-            // and an iteration is minutes — which leaves a run of days with no
-            // way to tell work from a hang, in the one command where that
-            // question is asked most.
-            let mut watching = crate::fmt::Watching::new(here.clone(), json);
-            let failed = match agent.run_with(&prompt, |progress| watching.see(progress)).await {
-                Ok(outcome) => Ok(outcome),
-                Err(why) => {
-                    eprintln!("  iteration {at} did not finish: {why}");
-                    Err(why.to_string())
+            // Reuse the core's receipt if the caller died before saving its summary.
+            if progress.active.as_ref().is_some_and(|active| active.answer.is_none()) {
+                match rook.completed_turn(session) {
+                    Ok(Some(answer)) => {
+                        if let Some(active) = &mut progress.active {
+                            active.answer = Some(Ok(answer));
+                        }
+                        if let Err(why) = rook_core::work::save_state(&rook, &run, &progress) {
+                            break format!("could not persist the recovered answer: {why}");
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(why) => break format!("could not read the completed turn: {why}"),
                 }
+            }
+            let failed = if let Some(answer) = progress.active.as_ref().and_then(|active| active.answer.clone()) {
+                answer
+            } else {
+                let partial_spend = match rook_core::work::spent(&rook, session) {
+                    Ok(tokens) => tokens,
+                    Err(why) => break format!("could not read the active iteration's token bill: {why}"),
+                };
+                let spent = done.iter().fold(partial_spend, |sum, iteration| sum.saturating_add(iteration.tokens));
+                if plan.tokens > 0 && spent >= plan.tokens {
+                    break format!("the saved run has spent {spent} tokens, reaching its {} token stopping limit", plan.tokens);
+                }
+                let prompt = if rook.store.get_session(session).ok().flatten().is_some_and(|meta| meta.next_seq > 0) {
+                    format!("{prompt}\n\nResume this existing iteration from its recorded history. Inspect completed operations and current files; do not repeat completed actions just because the process restarted.")
+                } else { prompt };
+                let provider = match rook_core::models::configured(&rook.config) {
+                    Ok(provider) => provider,
+                    Err(why) => break format!("no model to run on: {why}"),
+                };
+                let _ = rook.set_goal(session, &plan.goal);
+                let mut agent = rook_core::agent::AgentLoop::new(&rook, provider.into(), session);
+                if yes {
+                    agent.allow_everything_not_denied();
+                }
+                rook_core::agent::equip(&mut agent, servers.clone(), &mcp, jobs.clone());
+
+                // An iteration that could not run is an iteration that changed
+                // nothing, not the end of the run. A tunnel hiccupped mid-stream
+                // here — `unexpected EOF during chunk size line` — and a run that
+                // had been going for hours ended on it. One transient failure must
+                // not throw that away, and a persistent one does not need a rule of
+                // its own: two iterations that change nothing already stop a run,
+                // and the reason is carried in the record either way.
+                // Watched as it goes, the same as a single turn is. Without this an
+                // iteration printed its heading and nothing else until it ended,
+                // and an iteration is minutes — which leaves a run of days with no
+                // way to tell work from a hang, in the one command where that
+                // question is asked most.
+                let mut watching = crate::fmt::Watching::new(here.clone(), json);
+                let failed = match agent.run_with(&prompt, |progress| watching.see(progress)).await {
+                    Ok(outcome) => Ok(outcome),
+                    Err(why) => {
+                        eprintln!("  iteration {at} did not finish: {why}");
+                        Err(why.to_string())
+                    }
+                };
+                if let Some(active) = &mut progress.active {
+                    active.answer = Some(failed.clone());
+                }
+                if let Err(why) = rook_core::work::save_state(&rook, &run, &progress) {
+                    break format!("could not persist the iteration answer: {why}");
+                }
+                failed
             };
-            let report = rook_core::evaluation::run(&here, &card, &before);
+            let report = if let Some(report) = progress.active.as_ref().and_then(|active| active.report.clone()) {
+                report
+            } else {
+                let report = match rook.evaluate_recorded(session, &card, &before, Some(&jobs)) {
+                    Ok(report) => report,
+                    Err(why) => {
+                        break format!(
+                            "evaluation did not finish: {why}; inspect `rook session recovery {}`",
+                            rook_store::format_session_id(session)
+                        );
+                    }
+                };
+                if let Some(active) = &mut progress.active {
+                    active.report = Some(report.clone());
+                }
+                if let Err(why) = rook_core::work::save_state(&rook, &run, &progress) {
+                    break format!("could not persist the evaluation result: {why}");
+                }
+                report
+            };
+            let spent = match rook_core::work::spent(&rook, session) {
+                Ok(tokens) => tokens,
+                Err(why) => break format!("could not total the iteration's token bill: {why}"),
+            };
             let outcome = match failed {
                 Ok(outcome) => outcome,
                 Err(why) => {
@@ -2057,7 +2171,7 @@ fn cmd_work(
                         reply: why.clone(),
                         changed: Vec::new(),
                         steps: 0,
-                        tokens: 0,
+                        tokens: spent,
                         report,
                         // So the run's verdict can say which of the two this
                         // was. An iteration that could not reach its model
@@ -2065,8 +2179,15 @@ fn cmd_work(
                         // to do; only this tells them apart.
                         failed: Some(why),
                     });
-                    if let Ok(text) = serde_json::to_vec(&done) {
-                        let _ = rook.store.kv_set(&rook_core::work::record_key(&run), &text);
+                    let persisted = serde_json::to_vec(&done).map_err(|e| e.to_string()).and_then(|text| {
+                        rook.store.kv_set(&rook_core::work::record_key(&run), &text).map_err(|e| e.to_string())
+                    });
+                    if let Err(why) = persisted {
+                        break format!("could not persist the iteration: {why}");
+                    }
+                    progress.active = None;
+                    if let Err(why) = rook_core::work::save_state(&rook, &run, &progress) {
+                        break format!("could not finish the iteration receipt: {why}");
                     }
                     continue;
                 }
@@ -2091,15 +2212,22 @@ fn cmd_work(
                 reply: outcome.reply.clone(),
                 changed: outcome.files_changed.clone(),
                 steps: outcome.steps,
-                tokens: u64::from(outcome.input_tokens) + u64::from(outcome.output_tokens),
+                tokens: spent,
                 report,
                 failed: None,
             });
             // After every iteration rather than at the end: a run measured in
             // days is one a machine can lose halfway through, and what it has
             // done by then is worth more than the tidiness of writing once.
-            if let Ok(text) = serde_json::to_vec(&done) {
-                let _ = rook.store.kv_set(&rook_core::work::record_key(&run), &text);
+            let persisted = serde_json::to_vec(&done).map_err(|e| e.to_string()).and_then(|text| {
+                rook.store.kv_set(&rook_core::work::record_key(&run), &text).map_err(|e| e.to_string())
+            });
+            if let Err(why) = persisted {
+                break format!("could not persist the iteration: {why}");
+            }
+            progress.active = None;
+            if let Err(why) = rook_core::work::save_state(&rook, &run, &progress) {
+                break format!("could not finish the iteration receipt: {why}");
             }
         };
         mcp.shutdown().await;
@@ -2128,7 +2256,7 @@ fn cmd_work(
     }
     // The verdict is the exit status, the way `eval`'s is, so something driving
     // this from a script reads the status rather than the prose.
-    match done.last().is_some_and(|last| last.report.clean()) {
+    match progress.active.is_none() && done.last().is_some_and(|last| last.report.clean()) {
         true => Ok(()),
         false => std::process::exit(1),
     }
@@ -2518,6 +2646,14 @@ fn show_transcript(entries: &[rook_core::TranscriptEntry], json: bool) -> Result
 
 fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, json: bool) -> Result<()> {
     // Both read, and both are what somebody wants while the daemon is up.
+    if let SessionCmd::Recovery { id, acknowledge, note } = &cmd {
+        let session = source.session_named(id, workspace)?;
+        if let Some(operation) = acknowledge {
+            source.acknowledge_operation(session, operation, note.as_deref().unwrap_or_default())?;
+        }
+        println!("{}", serde_json::to_string_pretty(&source.execution(session)?)?);
+        return Ok(());
+    }
     if let SessionCmd::Ls { all } = cmd {
         return show_sessions(&source.sessions()?, workspace, all, json);
     }
@@ -2555,7 +2691,8 @@ fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, json: bool) -
         return show_rewind(&source.rewind(session, *to, !keep_files)?, *keep_files, json);
     }
     match cmd {
-        SessionCmd::Ls { .. }
+        SessionCmd::Recovery { .. }
+        | SessionCmd::Ls { .. }
         | SessionCmd::Show { .. }
         | SessionCmd::Diff { .. }
         | SessionCmd::Context { .. }

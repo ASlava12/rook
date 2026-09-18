@@ -245,11 +245,6 @@ function askUser(request) {
     const own = form.querySelector(`[name="${name}_other"]`).value.trim();
     return own ? [own] : [...form.querySelectorAll(`[name="${name}"]:checked`)].map((n) => n.value);
   };
-  const outputPath = el('input', { placeholder: 'Save final answer: workspace-relative path (optional)' });
-  const outputSchema = el('textarea', { placeholder: 'JSON Schema (optional)', rows: 3 });
-  const repairs = el('input', { type: 'number', min: 0, max: 3, value: 2, title: 'Format repair attempts' });
-  const outputSettings = el('details', {}, el('summary', {}, 'Result format and file'),
-    outputPath, outputSchema, el('label', {}, 'Repair attempts ', repairs));
   const form = el('form', { class: 'ask-form', onsubmit: (e) => {
       e.preventDefault();
       submit(request.questions.map(typed));
@@ -404,6 +399,12 @@ export async function renderChat() {
   const sendButton = el('button', { id: 'send', type: 'submit' }, 'Send');
   const stopButton = el('button', { id: 'stop', type: 'button', hidden: true, onclick: stop }, 'Stop');
 
+  const outputPath = el('input', { id: 'output-file', 'aria-label': 'Final answer file', placeholder: 'Save final answer: workspace-relative path (optional)' });
+  const outputSchema = el('textarea', { id: 'output-schema', 'aria-label': 'Output JSON Schema', placeholder: 'JSON Schema (optional)', rows: 3 });
+  const repairs = el('input', { id: 'output-repairs', type: 'number', min: 0, max: 3, value: 2, title: 'Format repair attempts' });
+  const outputSettings = el('details', {}, el('summary', {}, 'Result format and file'),
+    el('div', { class: 'row' }, outputPath), el('div', { class: 'row' }, outputSchema),
+    el('div', { class: 'row' }, el('label', { for: 'output-repairs' }, 'Repair attempts'), repairs));
   const form = el('form', { class: 'ask', onsubmit: (event) => {
     event.preventDefault();
     const text = input.value.trim();

@@ -66,6 +66,7 @@ struct Running {
 
 /// Every background command this front end started.
 pub struct Jobs {
+    registry: u64,
     running: Mutex<BTreeMap<String, Running>>,
     started: std::sync::atomic::AtomicU64,
     most: usize,
@@ -75,7 +76,9 @@ pub struct Jobs {
 
 impl Jobs {
     pub fn new(most: usize, max_output_bytes: usize) -> Self {
+        static NEXT_REGISTRY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self {
+            registry: NEXT_REGISTRY.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             running: Mutex::new(BTreeMap::new()),
             started: std::sync::atomic::AtomicU64::new(0),
             most,
@@ -168,6 +171,11 @@ impl Jobs {
             Running { command: command.to_string(), started_at: now(), stop, group, printed, exit, spill },
         );
         Ok(id)
+    }
+
+    /// Process-local identity; an execution receipt pairs it with its process owner.
+    pub fn identity(&self) -> u64 {
+        self.registry
     }
 
     pub fn list(&self) -> Vec<Job> {

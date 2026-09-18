@@ -179,6 +179,7 @@ impl Rook {
         store.set_level(config.storage.compression_level);
         // After the lock and before anything reads a transcript: the store takes
         // one writer, so a marker still here belongs to a process that is gone.
+        crate::execution::recover(&store)?;
         say_what_interrupted(&store, &paths::running_dir());
         let (plugins, plugin_errors) = crate::plugins::discover(&workspace);
         let (skills, mut skill_errors) = Self::discover_skills(&workspace, &plugins);
@@ -835,6 +836,13 @@ impl Rook {
         meta.agent = format!("rook {AGENT_VERSION}");
         meta.parent = Some(parent);
         meta.tags.push("subtask".into());
+        if self
+            .store
+            .get_session(parent)?
+            .is_some_and(|parent| parent.tags.iter().any(|tag| tag == "rook:work"))
+        {
+            meta.tags.push("rook:work".into());
+        }
         self.store.create_session(&meta)?;
         // Where in the parent this errand was handed out. Rewinding the parent
         // past that point has to undo the child's work as well as its own, and
@@ -1764,7 +1772,7 @@ impl Rook {
     }
 
     pub fn prune(&self, dry_run: bool) -> Result<rook_store::PruneReport> {
-        Ok(self.store.prune(&self.config.storage.retention, dry_run)?)
+        Ok(self.store.prune(&self.retention_policy(), dry_run)?)
     }
 
     pub fn verify(&self) -> Result<Vec<(ObjectId, String)>> {
@@ -1817,9 +1825,13 @@ impl Rook {
             &format!("{} @{at}", meta.title),
         )?;
         crate::results::inherit(self, session, forked.id)?;
+        crate::execution::inherit(self, session, forked.id)?;
         // Forking a delegated conversation is a separate branch, not a new
         // delegation whose edits the ancestor's rewind owns.
-        forked.tags.retain(|tag| tag != "subtask");
+        if let Some(current) = self.store.get_session(forked.id)? {
+            forked.tags = current.tags;
+        }
+        forked.tags.retain(|tag| tag != "subtask" && tag != "rook:work");
         self.store.update_session(forked.id, |meta| meta.tags = forked.tags.clone())?;
         Ok(forked)
     }
@@ -1829,8 +1841,15 @@ impl Rook {
         Ok(self.store.delete_session(session)?)
     }
 
+    fn retention_policy(&self) -> rook_store::RetentionPolicy {
+        let mut policy = self.config.storage.retention.clone();
+        policy.protect_tags.push("rook:execution".into());
+        policy.protect_tags.push("rook:work".into());
+        policy
+    }
+
     pub fn maintenance(&self, dry_run: bool) -> Result<MaintenanceReport> {
-        let policy = &self.config.storage.retention;
+        let policy = self.retention_policy();
         // Before the collection, so the objects the dropped refs were holding
         // are collectable in the same pass rather than the next one.
         let history_dropped = match policy.max_history_entries {
@@ -1841,7 +1860,7 @@ impl Rook {
         // store's own pruning never sees them — and a directory nothing empties
         // is the unbounded accumulator this codebase does not allow.
         let outputs_dropped = trim_outputs(&self.output_dir, self.config.sandbox.max_output_files, dry_run);
-        let mut prune = self.store.prune(policy, dry_run)?;
+        let mut prune = self.store.prune(&policy, dry_run)?;
         let grace = self.config.storage.gc_grace_secs;
         let mut gc = self.store.gc(&GcOptions {
             expand: Some(&fileset::gc_expander),
@@ -1863,7 +1882,7 @@ impl Rook {
                 }
                 let remaining = self.store.list_sessions()?.len();
                 let batch = (remaining / 8).max(1);
-                let oldest = self.store.oldest_unprotected(policy, batch)?;
+                let oldest = self.store.oldest_unprotected(&policy, batch)?;
                 if oldest.is_empty() {
                     break;
                 }

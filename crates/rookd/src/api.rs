@@ -26,6 +26,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/store/objects/{id}", get(object))
         .route("/api/store/refs", get(refs))
         .route("/api/sessions", get(sessions))
+        .route("/api/sessions/{id}/recovery", get(execution).post(acknowledge_operation))
         .route("/api/sessions/{id}/transcript", get(transcript))
         .route("/api/sessions/{id}/changes", get(changes))
         .route("/api/sessions/{id}/context", get(context))
@@ -217,6 +218,29 @@ async fn refs(State(s): State<Shared>, Query(q): Query<PrefixQuery>) -> ApiResul
 /// Sessions with their goals folded in. The goal lives in the `kv` table rather
 /// than on `SessionMeta`, because adding a field to a postcard record breaks
 /// every one already written — so it is joined here instead.
+async fn execution(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+) -> ApiResult<Vec<rook_core::execution::Execution>> {
+    Ok(Json(s.rook.read().await.execution(session_id(&id)?)?))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Acknowledgement {
+    operation: String,
+    note: String,
+}
+
+async fn acknowledge_operation(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+    Json(body): Json<Acknowledgement>,
+) -> ApiResult<serde_json::Value> {
+    s.rook.read().await.acknowledge_operation(session_id(&id)?, &body.operation, &body.note)?;
+    Ok(Json(serde_json::json!({"acknowledged":body.operation})))
+}
+
 async fn sessions(State(s): State<Shared>) -> ApiResult<Page<rook_core::SessionSummary>> {
     let items = s.rook.read().await.session_summaries()?;
     Ok(Json(Page::new(items)))

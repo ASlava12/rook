@@ -325,12 +325,35 @@ fn segment(pattern: &str, name: &str) -> bool {
 /// working, and it must not be reachable as a tool. A model that could run its
 /// own evaluation could run it until it passed.
 pub fn run(workspace: &Path, card: &Scorecard, before: &Witness) -> Report {
+    match run_observed(workspace, card, before, &[], |_| Ok::<(), std::convert::Infallible>(())) {
+        Ok(report) => report,
+        Err(never) => match never {},
+    }
+}
+
+pub(crate) enum CheckProgress<'a> {
+    Starting(&'a Check),
+    Completed(&'a Scored),
+}
+
+pub(crate) fn run_observed<E>(
+    workspace: &Path,
+    card: &Scorecard,
+    before: &Witness,
+    previous: &[Scored],
+    mut observe: impl FnMut(CheckProgress<'_>) -> Result<(), E>,
+) -> Result<Report, E> {
     let after = witness(workspace, card);
     let changed = after.differs_from(before);
     let scorecard_changed = changed.iter().any(|p| p == ".rook/evaluation.toml");
 
     let mut checks = Vec::new();
-    for check in &card.checks {
+    for (index, check) in card.checks.iter().enumerate() {
+        if let Some(recorded) = previous.get(index) {
+            checks.push(recorded.clone());
+            continue;
+        }
+        observe(CheckProgress::Starting(check))?;
         let began = std::time::Instant::now();
         let (status, said) = ran(workspace, &check.run, check.timeout_secs);
         let measured = match check.measures.trim().is_empty() {
@@ -355,8 +378,11 @@ pub fn run(workspace: &Path, card: &Scorecard, before: &Witness) -> Report {
             said: tail_of(&said),
             touched: guarded,
         });
+        if let Some(scored) = checks.last() {
+            observe(CheckProgress::Completed(scored))?;
+        }
     }
-    Report { checks, scorecard_changed }
+    Ok(Report { checks, scorecard_changed })
 }
 
 /// The last of what a command printed — enough to act on, and not a log.

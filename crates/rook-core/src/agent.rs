@@ -201,6 +201,7 @@ pub fn why_it_stopped(stopped: &str) -> Option<String> {
         "completion_unchecked" => {
             "could not determine whether the model finished; `/continue` resumes the task".into()
         }
+        "recovery" => "an interrupted operation has an unknown result; inspect `/recovery` and record what you checked before changes resume".into(),
         "blocked" => "the model reported a refusal or blocker; the task remains incomplete".into(),
         other => format!("the turn ended as {other:?} rather than finishing"),
     })
@@ -794,6 +795,8 @@ enum Reported {
 }
 
 pub struct AgentLoop<'a> {
+    execution: Option<std::sync::Weak<crate::execution::Journal>>,
+    launched_job: std::sync::Mutex<Option<String>>,
     pub options: rook_proto::TurnOptions,
     pub rook: &'a Rook,
     /// Shared rather than owned so a delegated child can reuse the connection
@@ -938,6 +941,8 @@ impl<'a> AgentLoop<'a> {
         let window = rook.window_to_budget(provider.context_window());
         let budget = ContextBudget::new(window, rook.config.agent.compact_at);
         Self {
+            execution: None,
+            launched_job: Default::default(),
             options: Default::default(),
             rook,
             provider,
@@ -982,6 +987,18 @@ impl<'a> AgentLoop<'a> {
     /// A language with files here and no server for it, and what the stance
     /// says to do about that: ask, fetch, or use the machine's own installer.
     ///
+    fn record_background(&self, tool: &str, arguments: &str) -> Result<crate::execution::Background> {
+        if let Some(reason) = self.rook.recovery_block(self.session)? {
+            return Err(CoreError::Other(reason));
+        }
+        let journal = self
+            .execution
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+            .ok_or_else(|| CoreError::Other("execution receipt is missing".into()))?;
+        journal.background(tool, &self.vault.redact(arguments))
+    }
+
     /// Once per session. What is installed serves the next session: the pool
     /// of servers is built by the front end before the first turn, which is
     /// what keeps rust-analyzer from re-indexing every turn, and the same fact
@@ -1078,10 +1095,25 @@ impl<'a> AgentLoop<'a> {
             // compile — which is the right way round, since what it must carry
             // is the setting as it was when the download was approved.
             let proxy = self.rook.config.proxy.for_install();
+            let receipt = match self.record_background("harness:lsp install", recipe.command) {
+                Ok(receipt) => receipt,
+                Err(error) => {
+                    self.report(Reported::Open(error.to_string()));
+                    return;
+                }
+            };
             let fetching = tokio::spawn(async move {
-                crate::install::Installer::new(crate::paths::servers_dir(), &proxy)?
-                    .install(recipe, &env)
-                    .await
+                let result = match crate::install::Installer::new(crate::paths::servers_dir(), &proxy) {
+                    Ok(installer) => installer.install(recipe, &env).await,
+                    Err(error) => Err(error),
+                };
+                receipt
+                    .finish(match &result {
+                        Ok(_) => "installed",
+                        Err(error) => error,
+                    })
+                    .map_err(|e| e.to_string())?;
+                result
             });
             if let Ok(mut slot) = self.installing.lock() {
                 *slot = Some((recipe, fetching));
@@ -1135,7 +1167,16 @@ impl<'a> AgentLoop<'a> {
         if let Some(refusal) = self.gate_risk("run_command", &args, risk, Shown::Nothing).await {
             return Err(refusal);
         }
-        let out = self.tools.call(&self.tool_ctx, "run_command", &args).await.map_err(|e| e.to_string())?;
+        let receipt =
+            self.record_background("harness:system install", &command).map_err(|e| e.to_string())?;
+        let result = self.tools.call(&self.tool_ctx, "run_command", &args).await;
+        receipt
+            .finish(&match &result {
+                Ok(out) => self.vault.redact(&out.content),
+                Err(error) => error.to_string(),
+            })
+            .map_err(|e| e.to_string())?;
+        let out = result.map_err(|e| e.to_string())?;
         match out.is_error {
             false => Ok(format!("installed {} with `{command}`", recipe.command)),
             true => Err(format!("`{command}` failed: {}", short(&out.content))),
@@ -1154,7 +1195,16 @@ impl<'a> AgentLoop<'a> {
             crate::paths::servers_dir(),
             &self.rook.config.proxy.for_install(),
         )?;
-        installer.install(recipe, self.rook.env()).await
+        let receipt =
+            self.record_background("harness:lsp install", recipe.command).map_err(|e| e.to_string())?;
+        let result = installer.install(recipe, self.rook.env()).await;
+        receipt
+            .finish(match &result {
+                Ok(_) => "installed",
+                Err(error) => error,
+            })
+            .map_err(|e| e.to_string())?;
+        result
     }
 
     /// What fetching a server is, for the policy: a command for the sources
@@ -2059,6 +2109,9 @@ impl<'a> AgentLoop<'a> {
             messages.len().saturating_sub(1),
             Message::user(format!("<context>\n{volatile}\n</context>")),
         );
+        if let Some(reason) = self.rook.recovery_block(self.session)? {
+            messages.push(Message::user(reason));
+        }
         if let Some(schema) = &self.options.output_schema {
             messages.push(Message::user(format!(
                 "Return your final answer as JSON matching the schema below. Its descriptions are \
@@ -2135,16 +2188,37 @@ impl<'a> AgentLoop<'a> {
             }
         }
         // Keep the top-level turn marked through final validation and file I/O too.
+        let journal =
+            crate::execution::Journal::start(self.rook, self.session, self.tool_ctx.jobs.as_deref())?;
+        self.execution = Some(std::sync::Arc::downgrade(&journal));
         let _running = (self.depth == 0).then(|| crate::service::Running::marked(self.session));
-        let mut outcome = self.run_inner(prompt, &mut on_progress).await?;
+        let mut outcome = match self.run_inner(prompt, &mut on_progress).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                journal.finish("failed", self.tool_ctx.jobs.as_deref())?;
+                return Err(error);
+            }
+        };
         let finalised = self.apply_output(&contract, &mut outcome, &mut on_progress).await;
         if let Err(error) = &finalised {
             outcome.stopped = "output_error".into();
             outcome.open_questions.push(error.to_string());
             self.rook.log(self.session, EventKind::Error, "output", &error.to_string()).ok();
         }
-        self.end_of_turn(&mut outcome).await;
+        let closing = self.end_of_turn(&mut outcome).await;
+        if finalised.is_ok() && closing.is_ok() {
+            journal.record_outcome(&outcome)?;
+        }
+        let needs_review = journal.finish(
+            if finalised.is_ok() && closing.is_ok() { &outcome.stopped } else { "failed" },
+            self.tool_ctx.jobs.as_deref(),
+        )?;
         finalised?;
+        closing?;
+        if needs_review || self.rook.recovery_block(self.session)?.is_some() {
+            outcome.stopped = "recovery".into();
+            outcome.open_questions.push("An interrupted operation has an unknown result. Inspect `/recovery` before acknowledging it; no side effects will be retried automatically.".into());
+        }
         Ok(outcome)
     }
 
@@ -2239,6 +2313,21 @@ impl<'a> AgentLoop<'a> {
             on_progress(Progress::Delta(&Delta::Text(format!("\n\n{}", outcome.reply))));
         }
         if let Some(path) = &contract.path {
+            if let Some(reason) = self.rook.recovery_block(self.session)? {
+                return Err(CoreError::Other(reason));
+            }
+            let journal = self
+                .execution
+                .as_ref()
+                .and_then(std::sync::Weak::upgrade)
+                .ok_or_else(|| CoreError::Other("execution receipt is missing".into()))?;
+            journal.begin(
+                "harness:output",
+                &path.to_string_lossy(),
+                true,
+                false,
+                self.tool_ctx.jobs.as_deref(),
+            )?;
             // Explicit user output is an authorized write, but participates in
             // the same ownership and undo mechanism as every model edit.
             rook_contain::files::validate(&self.rook.workspace, path)
@@ -2260,6 +2349,7 @@ impl<'a> AgentLoop<'a> {
                 "output",
                 &format!("saved final answer to {}", path.display()),
             )?;
+            journal.complete("final answer saved", self.tool_ctx.jobs.as_deref(), None)?;
         }
         Ok(())
     }
@@ -2270,13 +2360,23 @@ impl<'a> AgentLoop<'a> {
         mut on_progress: F,
     ) -> Result<TurnOutcome> {
         self.rook.name_session_from(self.session, prompt).ok();
+        let setup = if self.hooks.is_empty() {
+            None
+        } else {
+            Some(self.record_background("harness:prompt hooks", "configured session_start and prompt hooks")?)
+        };
         self.run_session_hooks().await;
-        self.offer_language_server().await;
-        self.offer_server_update().await;
+        if self.rook.recovery_block(self.session)?.is_none() {
+            self.offer_language_server().await;
+            self.offer_server_update().await;
+        }
         let gate = self
             .hooks
             .run(hooks::Event::Prompt, prompt, &self.payload(serde_json::json!({ "prompt": prompt })))
             .await;
+        if let Some(setup) = setup {
+            setup.finish("prompt hooks returned")?;
+        }
         if let Some(rook_tools::policy::Decision::Deny(why)) = gate.decision {
             return Err(CoreError::Other(format!("the turn was refused before it began: {why}")));
         }
@@ -2286,6 +2386,9 @@ impl<'a> AgentLoop<'a> {
         self.began_at_seq =
             self.rook.store.get_session(self.session).ok().flatten().map(|m| m.next_seq).unwrap_or(0);
         self.rook.log(self.session, EventKind::UserMessage, "", prompt)?;
+        if let Some(journal) = self.execution.as_ref().and_then(std::sync::Weak::upgrade) {
+            journal.admit(&self.vault.redact(prompt))?;
+        }
         // Set here and not in `new`: a front end builds the loop and may hold
         // it before there is a prompt, and what is being bounded is the turn.
         // Only at the top, because a sub-agent is given the parent's and a
@@ -2938,8 +3041,9 @@ impl<'a> AgentLoop<'a> {
                         (said, true)
                     }
                     _ => {
-                        let done =
-                            self.dispatch(call, &mut outcome, &mut on_progress, &crew, &mut nursery).await;
+                        let done = self
+                            .dispatch_recorded(call, &mut outcome, &mut on_progress, &crew, &mut nursery)
+                            .await?;
                         // A call that changed the workspace makes every earlier
                         // answer stale: the file read twice reads differently
                         // after the edit, and the count starts over. Not the
@@ -3085,6 +3189,54 @@ impl<'a> AgentLoop<'a> {
         Ok(outcome)
     }
 
+    async fn dispatch_recorded<'f>(
+        &self,
+        call: &rook_llm::ToolCall,
+        outcome: &mut TurnOutcome,
+        on_progress: &mut impl FnMut(Progress<'_>),
+        crew: &'f Crew<'a>,
+        nursery: &mut Nursery<'f>,
+    ) -> Result<(String, bool)>
+    where
+        'a: 'f,
+    {
+        let effects = !self.hooks.is_empty()
+            || self
+                .tools
+                .get(&call.name)
+                .map(|tool| tool.risk(&call.arguments) != rook_tools::policy::Risk::ReadOnly)
+                .unwrap_or_else(|| CHANGES_THINGS.contains(&call.name.as_str()));
+        if effects && let Some(reason) = self.rook.recovery_block(self.session)? {
+            self.rook.log(
+                self.session,
+                EventKind::ToolCall,
+                &call.name,
+                &self.vault.redact(&call.arguments.to_string()),
+            )?;
+            self.rook.log(self.session, EventKind::ToolResult, &call.name, &reason)?;
+            return Ok((reason, true));
+        }
+        let journal = self
+            .execution
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+            .ok_or_else(|| CoreError::Other("execution receipt is missing".into()))?;
+        let background = call.name == "run_command"
+            && call.arguments.get("background").and_then(serde_json::Value::as_bool) == Some(true);
+        journal.begin(
+            &call.name,
+            &self.vault.redact(&call.arguments.to_string()),
+            effects,
+            background,
+            self.tool_ctx.jobs.as_deref(),
+        )?;
+        *self.launched_job.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        let result = self.dispatch(call, outcome, on_progress, crew, nursery).await;
+        let job = self.launched_job.lock().unwrap_or_else(|e| e.into_inner()).take();
+        journal.complete(&result.0, self.tool_ctx.jobs.as_deref(), job.as_deref())?;
+        Ok(result)
+    }
+
     /// The text the model sees, and whether the call failed — which the outcome
     /// knows and the text only hints at.
     async fn dispatch<'f>(
@@ -3098,8 +3250,6 @@ impl<'a> AgentLoop<'a> {
     where
         'a: 'f,
     {
-        self.rook.log(self.session, EventKind::ToolCall, &call.name, &call.arguments.to_string()).ok();
-
         // Refused before it is recorded, and the order is the point: a verdict
         // from a checker that called nothing is reported as unproven, and a
         // reach for a tool it was never given is not a call it made. Counting it
@@ -3451,6 +3601,10 @@ impl<'a> AgentLoop<'a> {
                 .filter_map(|p| self.tool_ctx.resolve(p).ok())
                 .collect();
             self.rook.touched(self.session, &seen);
+        }
+        if call.name == "run_command" {
+            *self.launched_job.lock().unwrap_or_else(|e| e.into_inner()) =
+                outcome.meta.get("job").and_then(serde_json::Value::as_str).map(str::to_owned);
         }
         let mut text = match self.after_tool(call, &outcome).await {
             Some(extra) => format!("{}\n\n{extra}", outcome.content),
@@ -4411,13 +4565,11 @@ impl<'a> AgentLoop<'a> {
     /// happen in: what was fetched while it ran is collected first, because
     /// settling the reports is what copies them into the outcome and a line
     /// written after that is a line nobody reads.
-    async fn end_of_turn(&self, outcome: &mut TurnOutcome) {
+    async fn end_of_turn(&self, outcome: &mut TurnOutcome) -> Result<()> {
         self.collect_install().await;
         self.settle_reports(outcome);
-        // A turn is the unit somebody would miss. Its events were written
-        // without waiting for the disk — eight milliseconds each, which a
-        // two-hundred-step turn paid four seconds for — and this is where they
-        // are made to survive a power cut, once rather than four hundred times.
+        // Operation boundaries already flush their intent and receipt. This
+        // final barrier also keeps replies and housekeeping that ran no tools.
         //
         // Not fatal, and not silent: the turn is over and its work is on disk
         // in the workspace either way, but a store that cannot write is a
@@ -4426,13 +4578,14 @@ impl<'a> AgentLoop<'a> {
         if let Err(why) = self.rook.store.flush() {
             tracing::warn!("the session log is not on disk yet: {why}");
         }
-        self.finish(outcome).await;
+        self.finish(outcome).await
     }
 
-    async fn finish(&self, outcome: &TurnOutcome) {
+    async fn finish(&self, outcome: &TurnOutcome) -> Result<()> {
         if self.hooks.is_empty() {
-            return;
+            return Ok(());
         }
+        let receipt = self.record_background("harness:turn_end hooks", "configured turn_end hooks")?;
         let payload = self.payload(serde_json::json!({
             "steps": outcome.steps,
             "stopped": outcome.stopped,
@@ -4441,6 +4594,7 @@ impl<'a> AgentLoop<'a> {
             "output_tokens": outcome.output_tokens,
         }));
         self.hooks.run(hooks::Event::TurnEnd, &outcome.stopped, &payload).await;
+        receipt.finish("turn_end hooks returned")
     }
 
     fn payload(&self, mut extra: serde_json::Value) -> serde_json::Value {

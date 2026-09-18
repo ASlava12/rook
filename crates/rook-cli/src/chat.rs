@@ -19,6 +19,11 @@ use crate::fmt;
 /// help text and the TUI's completion both answer "what can I type here" and a
 /// second hand-written copy of the answer is one that drifts.
 pub const COMMANDS: &[(&str, &str, &str)] = &[
+    (
+        "recovery",
+        "[operation-id inspection note]",
+        "inspect execution or acknowledge a reviewed unknown result",
+    ),
     ("output", "[path|off]", "save the final answer inside the workspace"),
     ("schema", "[file|off]", "validate the final answer against JSON Schema"),
     ("schema-retries", "[0..3]", "format-only correction attempts"),
@@ -265,6 +270,42 @@ async fn through_the_daemon(
             let (name, rest) = command.split_once(' ').unwrap_or((command, ""));
             match name {
                 "quit" | "exit" => break,
+                "recovery" => {
+                    if let Some(session) = session.as_deref().and_then(rook_store::parse_session_id) {
+                        let client = reqwest::Client::builder()
+                            .no_proxy()
+                            .timeout(std::time::Duration::from_secs(30))
+                            .build()?;
+                        let url = format!(
+                            "{}/api/sessions/{}/recovery",
+                            daemon.base,
+                            rook_store::format_session_id(session)
+                        );
+                        let result: Result<String> = async {
+                            if !rest.trim().is_empty() {
+                                let (operation, note) = rest.trim().split_once(' ').ok_or_else(|| {
+                                    anyhow::anyhow!("use /recovery <operation-id> <inspection note>")
+                                })?;
+                                client
+                                    .post(&url)
+                                    .json(&serde_json::json!({"operation":operation,"note":note}))
+                                    .send()
+                                    .await?
+                                    .error_for_status()?;
+                            }
+                            let receipts: serde_json::Value =
+                                client.get(&url).send().await?.error_for_status()?.json().await?;
+                            Ok(serde_json::to_string_pretty(&receipts)?)
+                        }
+                        .await;
+                        match result {
+                            Ok(said) => println!("{said}"),
+                            Err(error) => eprintln!("{error}"),
+                        }
+                    } else {
+                        eprintln!("start or resume a session first");
+                    }
+                }
                 // The three the engine keeps per connection. Sent rather than
                 // set here: the turn runs there, and a setting kept on this
                 // side would be one the turn never reads.
@@ -507,6 +548,15 @@ pub async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command
     match name {
         "quit" | "exit" | "q" => return Ok(Said { text: String::new(), quit: true }),
         "help" | "?" => say!("{}", help_text()),
+        "recovery" => {
+            if !rest.is_empty() {
+                let (operation, note) = rest
+                    .split_once(' ')
+                    .ok_or_else(|| anyhow::anyhow!("use /recovery <operation-id> <inspection note>"))?;
+                rook.acknowledge_operation(*session, operation, note)?;
+            }
+            say!("{}", serde_json::to_string_pretty(&rook.execution(*session)?)?);
+        }
 
         // `mode` is what this was called; a habit is not worth breaking over a
         // rename, and both spell one setting.

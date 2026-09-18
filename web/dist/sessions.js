@@ -59,6 +59,33 @@ export async function renderSessions() {
         renderSessions();
       } }, 'Set')));
 
+    const receipts = await api(`/api/sessions/${state.session}/recovery`);
+    if (receipts.length) {
+      const recovery = el('details', { open: receipts.some(r => r.unknown.length > 0) },
+        el('summary', {}, 'Execution and recovery'));
+      for (const receipt of receipts) {
+        recovery.append(el('p', {}, `${receipt.session}: ${receipt.status}; ${receipt.completed_operations} recorded operations; owner ${receipt.owner} (pid ${receipt.pid})`));
+        recovery.append(el('pre', {}, receipt.task));
+        for (const op of [receipt.pending, ...receipt.background].filter(Boolean)) {
+          recovery.append(el('p', {}, `Last observed in progress: ${op.tool} (${op.id})`), el('pre', {}, op.arguments));
+        }
+        for (const op of receipt.unknown) {
+          const note = el('textarea', { 'aria-label': 'Inspection note', placeholder: 'What you inspected and what happened', maxlength: 4096 });
+          const acknowledge = el('button', { onclick: async () => {
+            try {
+              await api(`/api/sessions/${receipt.session}/recovery`, { operation: op.id, note: note.value });
+              await renderSessions();
+            } catch (error) { alert(error.error || error); }
+          } }, 'Record inspection');
+          recovery.append(el('p', {}, `Unknown result: ${op.tool} (${op.id}), source ${op.session} event #${op.call_seq}`),
+            el('pre', {}, op.arguments),
+            el('p', { class: 'sub' }, 'Recording inspection allows changes to resume. It does not repeat this operation or mark it successful.'),
+            el('div', { class: 'row' }, note, acknowledge));
+        }
+      }
+      right.append(recovery);
+    }
+
     // What it changed on disk, before what it said: that is the question a
     // transcript is usually being read to answer.
     const changed = await api(`/api/sessions/${state.session}/changes`);

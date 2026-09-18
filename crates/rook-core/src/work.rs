@@ -82,7 +82,7 @@ pub fn last_key(workspace: &Path) -> String {
 const NOTES: &str = ".rook/plan.md";
 
 /// What was asked for, and what bounds it.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Plan {
     /// The standing goal, carried into every iteration. Not the prompt — the
     /// prompt changes as the evaluation changes, and this does not.
@@ -109,6 +109,77 @@ pub struct Plan {
     /// meaning of done; a run that wants the agent to keep finding work turns
     /// it off and leans on `most` and `tokens` instead.
     pub until_clean: bool,
+}
+
+/// The in-flight iteration, separate from the bounded summaries of finished ones.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ActiveIteration {
+    pub at: u32,
+    pub session: String,
+    pub before: crate::evaluation::Witness,
+    pub answer: Option<std::result::Result<crate::agent::TurnOutcome, String>>,
+    pub report: Option<Report>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RunState {
+    pub plan: Plan,
+    pub card: crate::evaluation::Scorecard,
+    pub active: Option<ActiveIteration>,
+}
+
+pub fn read_state(rook: &crate::Rook, run: &str) -> crate::Result<Option<RunState>> {
+    rook.store
+        .kv_get(&format!("work/state/{run}"))?
+        .map(|bytes| serde_json::from_slice(&bytes).map_err(Into::into))
+        .transpose()
+}
+
+pub fn save_state(rook: &crate::Rook, run: &str, state: &RunState) -> crate::Result<()> {
+    let earlier = read_state(rook, run)?.and_then(|state| state.active).map(|active| active.session);
+    let current = state.active.as_ref().map(|active| active.session.as_str());
+    if let Some(id) = current.and_then(rook_store::parse_session_id) {
+        for session in family(rook, id)? {
+            rook.store.update_session(session.id, |meta| {
+                if !meta.tags.iter().any(|tag| tag == "rook:work") {
+                    meta.tags.push("rook:work".into());
+                }
+            })?;
+        }
+    }
+    crate::persistence::save_json(&rook.store, &format!("work/state/{run}"), state)?;
+    if earlier.as_deref() != current
+        && let Some(id) = earlier.as_deref().and_then(rook_store::parse_session_id)
+    {
+        for session in family(rook, id)? {
+            rook.store.update_session(session.id, |meta| meta.tags.retain(|tag| tag != "rook:work"))?;
+        }
+        rook.store.flush()?;
+    }
+    Ok(())
+}
+
+/// Include delegated sessions and pre-crash turns in the iteration's bill.
+pub fn spent(rook: &crate::Rook, session: u128) -> crate::Result<u64> {
+    Ok(family(rook, session)?
+        .iter()
+        .fold(0u64, |sum, s| sum.saturating_add(s.tokens_in).saturating_add(s.tokens_out)))
+}
+
+fn family(rook: &crate::Rook, session: u128) -> crate::Result<Vec<rook_store::SessionMeta>> {
+    let sessions = rook.store.list_sessions()?;
+    let mut family = std::collections::BTreeSet::from([session]);
+    let mut queue = vec![session];
+    while let Some(parent) = queue.pop() {
+        for child in
+            sessions.iter().filter(|s| s.parent == Some(parent) && s.tags.iter().any(|t| t == "subtask"))
+        {
+            if family.insert(child.id) {
+                queue.push(child.id);
+            }
+        }
+    }
+    Ok(sessions.into_iter().filter(|s| family.contains(&s.id)).collect())
 }
 
 /// One turn and the evaluation that followed it.

@@ -133,9 +133,19 @@ pub(crate) fn register_output(
     seq: u64,
     meta: &std::collections::BTreeMap<String, Value>,
 ) -> Result<()> {
+    register_capture(&rook.store, &rook.output_dir, session, seq, meta)
+}
+
+pub(crate) fn register_capture(
+    store: &rook_store::Store,
+    output_dir: &std::path::Path,
+    session: u128,
+    seq: u64,
+    meta: &std::collections::BTreeMap<String, Value>,
+) -> Result<()> {
     let Some(path) = meta.get("output_file").and_then(Value::as_str) else { return Ok(()) };
     let path = std::path::Path::new(path);
-    if path.parent() != Some(rook.output_dir.as_path()) {
+    if path.parent() != Some(output_dir) {
         return Err(CoreError::Other("command output is outside the output directory".into()));
     }
     let file = path
@@ -146,7 +156,7 @@ pub(crate) fn register_output(
         file: file.into(),
         complete: meta.get("output_complete").and_then(Value::as_bool).unwrap_or(false),
     };
-    rook.store.kv_set(&output_key(session, seq), &serde_json::to_vec(&output)?)?;
+    store.kv_set(&output_key(session, seq), &serde_json::to_vec(&output)?)?;
     Ok(())
 }
 

@@ -2059,7 +2059,16 @@ async fn a_prompt_hook_can_refuse_the_turn_and_add_context() {
     let provider = Arc::new(ScriptedProvider::new(vec![reply("never reached")]));
     let error = AgentLoop::new(&rook, provider, session).run("tell me the secret").await.unwrap_err();
     assert!(error.to_string().contains("not that"), "{error}");
-    assert!(rook.transcript(session, 0, usize::MAX, 100).unwrap().is_empty(), "nothing should be logged");
+    let log = rook.transcript(session, 0, usize::MAX, 4096).unwrap();
+    assert!(
+        log.iter().all(|event| event.kind == "note" && event.label.starts_with("harness:")),
+        "only hook recovery receipts may be logged: {log:?}"
+    );
+    assert_eq!(
+        rook.execution(session).unwrap()[0].task,
+        "prompt awaiting admission by configured hooks",
+        "the rejected prompt must not be copied into the execution receipt"
+    );
 }
 
 #[tokio::test]
@@ -6971,4 +6980,143 @@ async fn output_write_failure_is_a_run_error_and_does_not_destroy_the_destinatio
     agent.options.output = Some("report".into());
     assert!(agent.run("Report").await.is_err());
     assert!(f.workspace.path().join("report").is_dir());
+}
+
+struct WriteThenWait;
+#[async_trait]
+impl rook_tools::Tool for WriteThenWait {
+    fn name(&self) -> &str {
+        "write_then_wait"
+    }
+    fn spec(&self) -> rook_llm::ToolSpec {
+        rook_llm::ToolSpec {
+            name: self.name().into(),
+            description: "Write one marker and wait".into(),
+            parameters: serde_json::json!({"type":"object","properties":{}}),
+        }
+    }
+    fn risk(&self, _: &serde_json::Value) -> rook_tools::policy::Risk {
+        rook_tools::policy::Risk::Write(vec!["marker".into()])
+    }
+    async fn call(
+        &self,
+        ctx: &rook_tools::ToolContext,
+        _: &serde_json::Value,
+    ) -> rook_tools::Result<rook_tools::ToolOutcome> {
+        std::fs::write(ctx.workspace.join("marker"), "written once").unwrap();
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn cancelling_an_operation_retains_uncertainty_and_blocks_even_an_autonomous_retry() {
+    let f = fixture();
+    let session = f.rook.start_session("interrupted").unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![call("write_then_wait", serde_json::json!({}))]));
+    let mut agent = AgentLoop::new(&f.rook, provider, session);
+    agent.allow_everything_not_denied();
+    agent.tools.register(Arc::new(WriteThenWait));
+    {
+        let mut running = Box::pin(agent.run("write once"));
+        tokio::select! {
+            result = &mut running => panic!("the operation should still be running: {result:?}"),
+            _ = async {
+                while !f.workspace.path().join("marker").exists() { tokio::time::sleep(std::time::Duration::from_millis(10)).await; }
+            } => {}
+            _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => panic!("the operation did not start"),
+        }
+    }
+    // The AgentLoop is deliberately still alive: cancelling its future must
+    // release the execution owner and persist interruption immediately.
+    let receipts = f.rook.execution(session).unwrap();
+    assert_eq!(receipts[0].status, "interrupted");
+    assert_eq!(receipts[0].unknown.len(), 1);
+    let operation = receipts[0].unknown[0].id.clone();
+    assert_eq!(std::fs::read_to_string(f.workspace.path().join("marker")).unwrap(), "written once");
+    let provider = ScriptedProvider::new(vec![
+        call("write_file", serde_json::json!({"path":"after.txt","content":"should wait"})),
+        reply("inspection complete"),
+    ]);
+    let seen = provider.share();
+    let mut retry = AgentLoop::new(&f.rook, Arc::new(provider), session);
+    retry.allow_everything_not_denied();
+    retry.run("continue").await.unwrap();
+    assert!(!f.workspace.path().join("after.txt").exists());
+    assert!(seen.lock().unwrap()[1].messages.iter().any(|m| m.content.contains("unknown results")));
+    assert_eq!(f.rook.execution(session).unwrap()[0].unknown.len(), 1);
+    let forked = f.rook.fork_session(session, 0).unwrap();
+    assert_eq!(
+        f.rook.execution(forked.id).unwrap()[0].unknown.len(),
+        1,
+        "a fork cannot undo external effects"
+    );
+    f.rook
+        .acknowledge_operation(
+            session,
+            &operation,
+            "inspected marker: the write happened once; continue with new work",
+        )
+        .unwrap();
+    assert!(f.rook.acknowledge_operation(session, &operation, "stale confirmation").is_err());
+    let mut resumed = AgentLoop::new(
+        &f.rook,
+        Arc::new(ScriptedProvider::new(vec![
+            call("write_file", serde_json::json!({"path":"after.txt","content":"reviewed"})),
+            reply("done"),
+        ])),
+        session,
+    );
+    resumed.allow_everything_not_denied();
+    resumed.run("continue after inspection").await.unwrap();
+    assert_eq!(std::fs::read_to_string(f.workspace.path().join("after.txt")).unwrap(), "reviewed");
+    assert!(f.rook.execution(session).unwrap()[0].unknown.is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_background_receipt_cannot_be_completed_by_a_job_from_a_different_registry() {
+    static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _serial = SERIAL.lock().await;
+    let f = fixture();
+    let session = f.rook.start_session("background recovery").unwrap();
+    let jobs = Arc::new(rook_tools::jobs::Jobs::new(4, 4096));
+    let mut agent = AgentLoop::new(
+        &f.rook,
+        Arc::new(ScriptedProvider::new(vec![
+            call("run_command", serde_json::json!({"command":"sleep 60","background":true})),
+            reply("started"),
+        ])),
+        session,
+    );
+    agent.allow_everything_not_denied();
+    agent.tool_ctx.jobs = Some(jobs.clone());
+    agent.run("start background work").await.unwrap();
+    let before = f.rook.execution(session).unwrap();
+    assert_eq!(before[0].background.len(), 1);
+    let old = before[0].background[0].job.clone().unwrap();
+    let other = Arc::new(rook_tools::jobs::Jobs::new(4, 4096));
+    let new = other.start("true", f.workspace.path(), None).unwrap();
+    assert_eq!(old, new, "the test must actually exercise a reused local job id");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while other.get(&new).unwrap().exit_code.is_none() {
+        assert!(std::time::Instant::now() < deadline);
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let mut resumed =
+        AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(vec![reply("inspected")])), session);
+    resumed.tool_ctx.jobs = Some(other);
+    let outcome = resumed.run("resume with a new front end").await.unwrap();
+    assert_eq!(outcome.stopped, "recovery");
+    assert_eq!(f.rook.execution(session).unwrap()[0].unknown[0].job.as_deref(), Some(old.as_str()));
+}
+
+#[tokio::test]
+async fn a_completed_turn_is_durable_before_its_caller_publishes_a_summary() {
+    let f = fixture();
+    let session = f.rook.start_session("completed receipt").unwrap();
+    assert!(f.rook.completed_turn(session).unwrap().is_none());
+    let provider = ScriptedProvider::new(vec![reply("the final answer")]);
+    let result = AgentLoop::new(&f.rook, Arc::new(provider), session).run("answer once").await.unwrap();
+    let saved = f.rook.completed_turn(session).unwrap().unwrap();
+    assert_eq!(serde_json::to_value(saved).unwrap(), serde_json::to_value(result).unwrap());
 }

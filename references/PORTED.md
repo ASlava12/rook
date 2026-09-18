@@ -9,6 +9,7 @@ Add a row when you implement something after reading a reference. Add it to
 
 | what | from | read at | where it landed |
 |---|---|---|---|
+| Durable execution ownership, interrupted-operation receipts and conservative recovery | OpenClaw `src/cron/service/run-recovery.ts`, exact receipt identity and stale-owner reconciliation; adapted to Rook's single writer and arbitrary tool effects, with no automatic replay | `bcd05342c0c1831498648f3fee28f2c5a553b60a` | `rook-core/src/execution.rs`, `work.rs`, CLI/API/TUI recovery inspection |
 | Optional worktrees for delegated alternatives | OpenResearch `325eb509dc8e4ca7074568cf0ae1f0f98704eac0`, `src/local/git.rs`, `src/local/experiments.rs`; OpenCode `95daf90670b7c039c436c85537da5fbfe2205b41`, `packages/opencode/src/worktree/index.ts` — opt-in detached trees, retained for review; require clean HEAD and bounded count, keep merging explicit | local pinned source | `rook-core/src/worktrees.rs`, `delegate.isolation`, `worktree` |
 | Pruning old tool results with recoverable originals | OpenCode `95daf90670b7c039c436c85537da5fbfe2205b41`, `packages/opencode/src/session/compaction.ts` — protect recent results and prune only when savings justify changing the cached prefix; retain source data, persist a watermark and offer paged retrieval rather than clearing output permanently | local pinned source | `rook-core/src/results.rs`, `read_result`, `[agent] prune_tool_results_*`; streaming redacted command spills in `rook-tools/src/exec.rs` |
 
