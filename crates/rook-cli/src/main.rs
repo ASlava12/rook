@@ -3,6 +3,8 @@
 mod approve;
 mod chat;
 mod fmt;
+mod notify;
+mod output_options;
 mod remote;
 mod source;
 mod tui;
@@ -42,6 +44,39 @@ struct Cli {
     command: Option<Command>,
 }
 
+#[derive(clap::Args)]
+struct OutputArgs {
+    /// Save the final answer atomically inside the session workspace.
+    #[arg(long)]
+    output: Option<String>,
+    /// Validate the answer against this local JSON Schema file.
+    #[arg(long)]
+    output_schema: Option<PathBuf>,
+    /// Format-only correction attempts, without tools (0..3).
+    #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u8).range(0..=3))]
+    schema_retries: u8,
+}
+
+impl OutputArgs {
+    fn load(self) -> Result<rook_proto::TurnOptions> {
+        use std::io::Read;
+        let schema = self
+            .output_schema
+            .map(|path| -> Result<serde_json::Value> {
+                let mut bytes = Vec::new();
+                std::fs::File::open(&path)?.take(64 * 1024 + 1).read_to_end(&mut bytes)?;
+                anyhow::ensure!(bytes.len() <= 64 * 1024, "output schema exceeds 64 KiB");
+                Ok(serde_json::from_slice(&bytes)?)
+            })
+            .transpose()?;
+        Ok(rook_proto::TurnOptions {
+            output: self.output,
+            output_schema: schema,
+            schema_retries: self.schema_retries,
+        })
+    }
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Create the store and the config file, and say where skills go.
@@ -58,6 +93,8 @@ enum Command {
     /// Run a single turn against the configured model.
     Run {
         prompt: Vec<String>,
+        #[command(flatten)]
+        output: OutputArgs,
         /// Continue an existing session instead of starting one. `last` is the
         /// most recent in this workspace.
         #[arg(long)]
@@ -565,7 +602,9 @@ fn main() -> Result<()> {
         Some(Command::Init) => cmd_init(cli.workspace),
         Some(Command::Doctor) => cmd_doctor(&workspace_of(&cli.workspace), cli.json),
         Some(Command::Chat { session }) => chat::run(cli.workspace, session, cli.yes),
-        Some(Command::Run { prompt, session }) => cmd_run(cli.workspace, prompt, session, cli.yes, cli.json),
+        Some(Command::Run { prompt, session, output }) => {
+            cmd_run(cli.workspace, prompt, session, cli.yes, cli.json, output.load()?)
+        }
         Some(Command::Models { recheck, source }) => cmd_models(cli.workspace, cli.json, recheck, source),
         Some(Command::Config(cmd)) => cmd_config(cmd, cli.json),
         Some(Command::Eval { json }) => cmd_eval(cli.workspace, json || cli.json),
@@ -1109,7 +1148,9 @@ fn cmd_run(
     session: Option<String>,
     yes: bool,
     json: bool,
+    options: rook_proto::TurnOptions,
 ) -> Result<()> {
+    let _attention = crate::notify::OnEnd;
     let asked = prompt.join(" ");
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     // The exit code is decided inside and taken here, after the store has been
@@ -1131,8 +1172,10 @@ fn cmd_run(
         && let Some(daemon) = crate::source::Daemon::running()
     {
         let here = crate::source::asked_about(workspace);
-        let elsewhere = runtime.block_on(through_the_daemon(&daemon, &here, &asked, session, yes, json))?;
+        let elsewhere =
+            runtime.block_on(through_the_daemon(&daemon, &here, &asked, session, yes, json, options))?;
         if elsewhere {
+            crate::notify::attention();
             std::process::exit(2);
         }
         return Ok(());
@@ -1156,6 +1199,7 @@ fn cmd_run(
             None => rook,
         };
         let mut agent = rook_core::agent::AgentLoop::new(&rook, provider.into(), session);
+        agent.options = options;
         // `run` is scripted more often than watched, so it refuses what it cannot
         // get approved rather than prompting into a pipe.
         if yes {
@@ -1231,6 +1275,7 @@ fn cmd_run(
         anyhow::Ok(unfinished(finished, &outcome.stopped))
     })?;
     if unfinished {
+        crate::notify::attention();
         std::process::exit(2);
     }
     Ok(())
@@ -1257,6 +1302,7 @@ async fn through_the_daemon(
     session: Option<String>,
     yes: bool,
     json: bool,
+    options: rook_proto::TurnOptions,
 ) -> Result<bool> {
     use rook_proto::{ChatEvent, ClientMessage};
 
@@ -1266,7 +1312,7 @@ async fn through_the_daemon(
     let (base, here) = (daemon.base.clone(), workspace.to_path_buf());
     let socket =
         tokio::spawn(async move { crate::remote::hold(&base, &here, &mut outgoing, incoming).await });
-    to_daemon.send(ClientMessage::Prompt { session, text: asked.to_string() })?;
+    to_daemon.send(ClientMessage::Prompt { session, text: asked.to_string(), options })?;
 
     let mut watching = crate::remote::Watching::new(yes, json);
     let mut ended = None;
@@ -1290,6 +1336,7 @@ async fn through_the_daemon(
         _ => {}
     }
     let ChatEvent::Done {
+        reply: _,
         steps,
         input_tokens,
         output_tokens,
@@ -1321,7 +1368,7 @@ async fn through_the_daemon(
                 "stopped": stopped,
             }))?
         );
-        return Ok(unfinished(!said.trim().is_empty(), &stopped));
+        return Ok(unfinished(rook_core::agent::finished(&stopped), &stopped));
     }
     println!();
     for text in &decisions {
@@ -1341,7 +1388,7 @@ async fn through_the_daemon(
             n => format!(" · {n} compactions"),
         }
     );
-    Ok(unfinished(!said.trim().is_empty(), &stopped))
+    Ok(unfinished(rook_core::agent::finished(&stopped), &stopped))
 }
 
 fn unfinished(finished: bool, stopped: &str) -> bool {

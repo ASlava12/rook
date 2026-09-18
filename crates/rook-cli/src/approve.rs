@@ -11,6 +11,7 @@ pub struct Terminal;
 #[async_trait]
 impl Approver for Terminal {
     async fn ask(&self, tool: &str, risk: &Risk, preview: Option<&str>) -> Approval {
+        crate::notify::attention();
         let shown = preview.map(|p| format!("\n{}\n", indented(p))).unwrap_or_default();
         // Offered only where there is a family to name, and naming it rather
         // than calling it "this kind": approving `cargo test -p rook-core` for
@@ -46,6 +47,7 @@ impl Approver for Terminal {
 #[async_trait]
 impl rook_tools::ask::Asker for Terminal {
     async fn ask(&self, questions: &[Question]) -> Vec<Answer> {
+        crate::notify::attention();
         let asked = questions.to_vec();
         // stdin is blocking, and blocking it on the runtime's worker would stall
         // every other task in the turn.

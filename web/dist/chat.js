@@ -135,6 +135,10 @@ export function connect() {
         break;
       }
       case 'done': {
+        if (typeof e.reply === 'string' && current?.dataset.text !== e.reply) {
+          current = null;
+          saidByModel(e.reply);
+        }
         // A turn that ran out of steps and one that finished read the same
         // without this, and they are not the same thing to whoever asked.
         if (e.stopped && e.stopped !== 'end_turn' && e.stopped !== 'stop') {
@@ -241,6 +245,11 @@ function askUser(request) {
     const own = form.querySelector(`[name="${name}_other"]`).value.trim();
     return own ? [own] : [...form.querySelectorAll(`[name="${name}"]:checked`)].map((n) => n.value);
   };
+  const outputPath = el('input', { placeholder: 'Save final answer: workspace-relative path (optional)' });
+  const outputSchema = el('textarea', { placeholder: 'JSON Schema (optional)', rows: 3 });
+  const repairs = el('input', { type: 'number', min: 0, max: 3, value: 2, title: 'Format repair attempts' });
+  const outputSettings = el('details', {}, el('summary', {}, 'Result format and file'),
+    outputPath, outputSchema, el('label', {}, 'Repair attempts ', repairs));
   const form = el('form', { class: 'ask-form', onsubmit: (e) => {
       e.preventDefault();
       submit(request.questions.map(typed));
@@ -400,7 +409,16 @@ export async function renderChat() {
     const text = input.value.trim();
     if (!text) return;
     askToNotify();
-    send({ type: 'prompt', session: state.chat.session, text });
+    let options;
+    try {
+      const schema = outputSchema.value.trim();
+      if (new TextEncoder().encode(schema).length > 65536) throw new Error('Output schema exceeds 64 KiB');
+      const retries = Number(repairs.value);
+      if (!Number.isInteger(retries) || retries < 0 || retries > 3) throw new Error('Repair attempts must be 0..3');
+      options = { output: outputPath.value.trim() || null,
+        output_schema: schema ? JSON.parse(schema) : null, schema_retries: retries };
+    } catch (error) { say('err', String(error)); return; }
+    send({ type: 'prompt', session: state.chat.session, text, options });
     input.value = '';
     // While a turn runs this is something to say to it, and the server echoes
     // it back as `interjected` — so the transcript is written there, once, and
@@ -435,7 +453,7 @@ export async function renderChat() {
   $('#view').replaceChildren(el('div', { class: 'card' },
     el('div', { class: 'row', id: 'picker' }),
     el('div', { class: 'row', id: 'settings' }),
-    stream, form, naming));
+    stream, outputSettings, form, naming));
   renderPicker();
   renderSettings();
   connect();

@@ -1216,6 +1216,7 @@ impl App {
             approver: Arc::new(ChannelApprover::new(requests, patience)),
             asker: Arc::new(ChannelAsker::new(questions, config.agent.decide_alone_after())),
             shared: crate::chat::Session {
+                output: Default::default(),
                 policy: rook_core::agent::policy_for(&config),
                 effort: std::cell::Cell::new(config.agent.effort()),
                 model: std::cell::RefCell::new(None),
@@ -1433,6 +1434,7 @@ impl App {
     /// too. Whatever it had already logged stays in the session, so a stopped
     /// turn is still readable — and the note says why it ends where it does.
     fn stop(&mut self, turn: tokio::task::JoinHandle<()>) {
+        crate::notify::attention();
         turn.abort();
         // Only where the store is here: a routed window does not run the turn
         // it is stopping, and the daemon writes its own note.
@@ -1519,8 +1521,12 @@ impl App {
                     self.chat.carried = input.saturating_sub(self.chat.spent.map_or(0, |(was, ..)| was));
                     self.chat.spent = Some((input, output, cached));
                 }
-                TurnEvent::Approval(request) => self.chat.pending = Some(request),
+                TurnEvent::Approval(request) => {
+                    crate::notify::attention();
+                    self.chat.pending = Some(request);
+                }
                 TurnEvent::Ask(request) => {
+                    crate::notify::attention();
                     self.chat.asking = Some(Asking {
                         id: request.id,
                         questions: request.questions,
@@ -1604,9 +1610,11 @@ impl App {
             }
             ChatEvent::Interjected { text } => self.chat.push("stat", &format!("  ↩ {text}")),
             ChatEvent::Approval { id, tool, action, preview, kind } => {
+                crate::notify::attention();
                 self.chat.pending = Some(ApprovalRequest { id, tool, action, preview, kind })
             }
             ChatEvent::Ask { id, questions } => {
+                crate::notify::attention();
                 self.chat.asking = Some(Asking {
                     id,
                     questions: questions
@@ -1681,6 +1689,9 @@ impl App {
 
     /// A turn is over — answered, stopped or failed.
     fn finished(&mut self) {
+        if self.chat.busy {
+            crate::notify::attention();
+        }
         self.chat.ended();
         self.reload();
     }
@@ -2063,6 +2074,7 @@ impl App {
         let opening = ClientMessage::Prompt {
             session: self.chat.session.map(rook_store::format_session_id),
             text: prompt,
+            options: self.shared.output.borrow().clone(),
         };
         // On the socket this window already has, if it has one: attaching to a
         // session opens one before there is a prompt, and a second socket would
@@ -2207,6 +2219,11 @@ impl App {
     /// One question per Enter. The input line is the answer field, so typing
     /// past the choices works here exactly as it does in the plain CLI.
     fn command(&mut self, command: &str) {
+        let configured = crate::output_options::configure(command, &mut self.shared.output.borrow_mut());
+        if let Some(result) = configured {
+            self.chat.push("stat", &result.unwrap_or_else(|e| e.to_string()));
+            return;
+        }
         // The slash commands read and write this process's store directly, so a
         // window reading through a daemon says so rather than half-working.
         let Some(rook) = self.source.here().cloned() else {
@@ -2471,6 +2488,7 @@ impl App {
         let asker = self.asker.clone();
         let policy = self.shared.policy.clone();
         let effort = self.shared.effort.get();
+        let output = self.shared.output.borrow().clone();
         // Taken here rather than in the task, because the task owns none of
         // this window and a `RefCell` does not cross into one.
         let named = self.shared.model.borrow().clone();
@@ -2499,6 +2517,7 @@ impl App {
             };
 
             let mut agent = AgentLoop::new(&rook, provider.into(), session);
+            agent.options = output;
             if let Some(question) = aside {
                 let emit = to_loop.clone();
                 let result = agent
@@ -5153,7 +5172,8 @@ and the next line"
     fn a_window_joining_a_turn_does_not_change_what_it_runs_under() {
         assert!(this_window_decides(&ClientMessage::Prompt {
             session: None,
-            text: "audit the three projects".into()
+            text: "audit the three projects".into(),
+            options: Default::default()
         }));
         assert!(!this_window_decides(&ClientMessage::Attach { session: "01M26DDB".into() }));
     }

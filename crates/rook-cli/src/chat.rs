@@ -19,6 +19,9 @@ use crate::fmt;
 /// help text and the TUI's completion both answer "what can I type here" and a
 /// second hand-written copy of the answer is one that drifts.
 pub const COMMANDS: &[(&str, &str, &str)] = &[
+    ("output", "[path|off]", "save the final answer inside the workspace"),
+    ("schema", "[file|off]", "validate the final answer against JSON Schema"),
+    ("schema-retries", "[0..3]", "format-only correction attempts"),
     ("context", "[window]", "what this conversation costs, and of what"),
     ("skills", "[name]", "skills that apply here, or one skill's body"),
     ("session", "[id|last]", "this one's totals, or continue another"),
@@ -120,6 +123,7 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
     // One policy for the whole session, so "always this run" means the session
     // and not the single turn it was granted in.
     let shared = Session {
+        output: Default::default(),
         mcp: std::sync::Arc::new(mcp),
         policy: rook_core::agent::policy_for(&rook.config),
         // Likewise the language servers: a pool dropped per turn restarts
@@ -162,6 +166,15 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
                     continue;
                 }
                 if let Some(command) = line.strip_prefix('/') {
+                    if let Some(result) =
+                        crate::output_options::configure(command, &mut shared.output.borrow_mut())
+                    {
+                        match result {
+                            Ok(said) => print!("{said}"),
+                            Err(e) => println!("{e}"),
+                        }
+                        continue;
+                    }
                     match runtime.block_on(dispatch(&rook, &mut session, &shared, command)) {
                         Ok(said) => {
                             print!("{}", said.text);
@@ -223,6 +236,7 @@ async fn through_the_daemon(
     let _ = editor.load_history(&history);
     let mut watching = crate::remote::Watching::new(yes, false);
     let mut session = resume;
+    let mut output = rook_proto::TurnOptions::default();
 
     loop {
         // Blocking on stdin inside an async function, which is what a REPL is:
@@ -241,6 +255,13 @@ async fn through_the_daemon(
             false => line.trim().to_string(),
         };
         if let Some(command) = line.strip_prefix('/') {
+            if let Some(result) = crate::output_options::configure(command, &mut output) {
+                match result {
+                    Ok(said) => print!("{said}"),
+                    Err(e) => println!("{e}"),
+                }
+                continue;
+            }
             let (name, rest) = command.split_once(' ').unwrap_or((command, ""));
             match name {
                 "quit" | "exit" => break,
@@ -264,9 +285,14 @@ async fn through_the_daemon(
             }
             continue;
         }
-        to_daemon.send(ClientMessage::Prompt { session: session.clone(), text: line })?;
+        to_daemon.send(ClientMessage::Prompt {
+            session: session.clone(),
+            text: line,
+            options: output.clone(),
+        })?;
         while let Some(event) = events.recv().await {
             if let Some(over) = watching.saw(event, &to_daemon) {
+                crate::notify::attention();
                 let ChatEvent::Done { steps, input_tokens, output_tokens, compactions, .. } = over.done
                 else {
                     break;
@@ -317,6 +343,7 @@ async fn aside(rook: &Rook, provider: Box<dyn rook_llm::Provider>, session: u128
 
 /// What a session keeps between turns, so a turn does not rebuild it.
 pub struct Session {
+    pub output: std::cell::RefCell<rook_proto::TurnOptions>,
     pub mcp: std::sync::Arc<rook_core::McpSession>,
     pub policy: std::sync::Arc<rook_tools::policy::Policy>,
     pub servers: std::sync::Arc<rook_core::lsp::Servers>,
@@ -346,7 +373,9 @@ async fn turn(
     shared: &Session,
     prompt: &str,
 ) {
+    let _attention = crate::notify::OnEnd;
     let mut agent = AgentLoop::new(rook, provider.into(), session);
+    agent.options = shared.output.borrow().clone();
     // Even under `--yes`: approving every command is not the same as never
     // wanting to be asked which one to run.
     agent.ask_via(std::sync::Arc::new(crate::approve::Terminal));

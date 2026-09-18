@@ -8,6 +8,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+jsonschema = { version = "0.56.0", default-features = false }
 rook-contain = { path = "../rook-contain" }
 async-trait = "0.1.92"
 futures-util = "0.3.34"

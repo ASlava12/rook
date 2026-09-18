@@ -63,6 +63,9 @@ Add a row when you implement something after reading a reference. Add it to
 | A setting the file has and the agent does not | codex *warn about ignored configuration settings* — serde drops what it does not recognise, so `max_turn_sec` beside `max_turn_secs` is a limit raised in a file and not in the agent, with nothing anywhere saying so; the mirror of `every_config_field_is_read_somewhere` | source, via `refs advance` | `Config::ignored_in`, `Config::nearest_to`, `rook doctor` |
 | A probe that never answers, and the child it leaves | hermes *kill the PATH probe child on timeout* — ours had no deadline at all: sixteen `--version` probes run before the first turn, before `/api/health` answers and in `doctor`, and `output()` waits for a child however long it takes | source, via `refs advance` | `rook-skills::env::ran_within` |
 
+| Harness-owned final artifact and validated JSON result | codex `c4017a87aacc7558002b7cb510025e967c1d765e` `exec/src/cli.rs`; goose `50666ae0b9a51e260b52b7efbab2e4e020346e94` recipe reference, structured response | design only; independent implementation with local JSON Schema validation, bounded tools-free correction, atomic checkpointed write | `rook-core/src/output.rs`, `AgentLoop::apply_output`, CLI `--output` / `--output-schema`, shared prompt options |
+| Terminal attention on completion and questions | goose `50666ae0b9a51e260b52b7efbab2e4e020346e94` `goose-cli/src/session/output.rs` | design only; Rook uses terminal-only stderr and `ROOK_NOTIFY=off`, never JSON stdout | `rook-cli/src/notify.rs`, REPL/TUI approval and completion paths |
+
 ## Triage log
 
 `cargo xtask refs advance` prints what landed upstream since the pointer was last

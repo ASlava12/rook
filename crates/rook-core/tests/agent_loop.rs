@@ -6900,3 +6900,75 @@ async fn asynchronous_worktrees_enforce_the_retained_count_and_write_deny_rules(
         assert_eq!(count, usize::from(!denied));
     }
 }
+
+#[tokio::test]
+async fn output_contract_repairs_without_tools_and_writes_only_the_final_answer() {
+    let f = fixture();
+    let session = f.rook.start_session("output").unwrap();
+    std::fs::write(f.workspace.path().join("report.json"), "previous report").unwrap();
+    let provider = ScriptedProvider::new(vec![reply("not JSON"), reply(r#"{"ok":true}"#)]);
+    let seen = provider.share();
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), session);
+    agent.options = rook_proto::TurnOptions {
+        output: Some("report.json".into()),
+        output_schema: Some(
+            serde_json::json!({"type":"object","required":["ok"],"properties":{"ok":{"const":true}},"additionalProperties":false}),
+        ),
+        schema_retries: 1,
+    };
+    let outcome = agent.run("Give a report").await.unwrap();
+    assert_eq!(outcome.reply, r#"{"ok":true}"#);
+    assert_eq!(std::fs::read_to_string(f.workspace.path().join("report.json")).unwrap(), outcome.reply);
+    assert!(outcome.files_changed.contains(&"report.json".into()));
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    assert!(seen[1].tools.is_empty(), "repair must not repeat side effects");
+    assert!(seen[1].max_output_tokens > 0, "zero config means automatic, not zero output");
+    drop(seen);
+    f.rook.rewind(session, 0, true).unwrap();
+    assert_eq!(std::fs::read_to_string(f.workspace.path().join("report.json")).unwrap(), "previous report");
+}
+
+#[tokio::test]
+async fn invalid_structured_output_exhausts_its_bound_without_overwriting_the_artifact() {
+    let f = fixture();
+    let session = f.rook.start_session("output").unwrap();
+    std::fs::write(f.workspace.path().join("report.json"), "previous report").unwrap();
+    let provider = ScriptedProvider::new(vec![reply("invalid"), reply("still invalid")]);
+    let seen = provider.share();
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), session);
+    agent.options = rook_proto::TurnOptions {
+        output: Some("report.json".into()),
+        output_schema: Some(serde_json::json!({"type":"object"})),
+        schema_retries: 1,
+    };
+    let error = agent.run("Report").await.unwrap_err();
+    assert!(error.to_string().contains("after 1 repair attempts"), "{error}");
+    assert_eq!(seen.lock().unwrap().len(), 2);
+    assert_eq!(std::fs::read_to_string(f.workspace.path().join("report.json")).unwrap(), "previous report");
+}
+
+#[tokio::test]
+async fn output_contract_rejects_external_schema_references_before_running_the_model() {
+    let f = fixture();
+    let session = f.rook.start_session("output").unwrap();
+    for reference in ["https://example.invalid/schema.json", "file:///etc/passwd"] {
+        let provider = ScriptedProvider::new(vec![]);
+        let seen = provider.share();
+        let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), session);
+        agent.options.output_schema = Some(serde_json::json!({"$ref":reference}));
+        assert!(agent.run("Report").await.unwrap_err().to_string().contains("invalid output schema"));
+        assert!(seen.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn output_write_failure_is_a_run_error_and_does_not_destroy_the_destination() {
+    let f = fixture();
+    let session = f.rook.start_session("output").unwrap();
+    std::fs::create_dir(f.workspace.path().join("report")).unwrap();
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(vec![reply("done")])), session);
+    agent.options.output = Some("report".into());
+    assert!(agent.run("Report").await.is_err());
+    assert!(f.workspace.path().join("report").is_dir());
+}

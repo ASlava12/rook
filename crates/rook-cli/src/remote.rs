@@ -169,6 +169,9 @@ impl Watching {
                 eprintln!("{message}");
             }
             done @ (ChatEvent::Done { .. } | ChatEvent::Failed { .. } | ChatEvent::Cancelled) => {
+                if let ChatEvent::Done { reply: Some(reply), .. } = &done {
+                    self.said.clone_from(reply);
+                }
                 return Some(Ended {
                     session: std::mem::take(&mut self.session),
                     said: std::mem::take(&mut self.said),

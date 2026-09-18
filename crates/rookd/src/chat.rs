@@ -191,7 +191,7 @@ async fn serve(
                     watching = Some(watch(&live, id, outbound.clone(), watching));
                 }
             }
-            ClientMessage::Prompt { session, text } => {
+            ClientMessage::Prompt { session, text, options } => {
                 // The browser types it too, and it is the same thing there.
                 let text = match rook_core::agent::carrying_on(&text) {
                     true => rook_core::agent::CARRY_ON.to_string(),
@@ -241,7 +241,7 @@ async fn serve(
                         continue;
                     }
                 };
-                let live = begin(&state, &engine, &shared, &settings, id, text).await;
+                let live = begin(&state, &engine, &shared, &settings, id, text, options).await;
                 watching = Some(watch(&live, id, outbound.clone(), watching));
                 state.remember(id, live).await;
             }
@@ -350,6 +350,7 @@ async fn begin(
     settings: &Arc<Settings>,
     session: u128,
     prompt: String,
+    options: rook_proto::TurnOptions,
 ) -> Arc<Live> {
     let patience = engine.read().await.config.agent.answer_timeout();
     // A question waits longer than an approval, and for the opposite reason:
@@ -378,6 +379,7 @@ async fn begin(
             asker: asker.clone(),
             settings: settings.clone(),
             interjections: interjections.clone(),
+            options,
         },
         shared.clone(),
         from_turn,
@@ -604,6 +606,7 @@ impl Live {
 
 #[derive(Clone)]
 struct Connection {
+    options: rook_proto::TurnOptions,
     approver: Arc<ChannelApprover>,
     asker: Arc<ChannelAsker>,
     settings: Arc<Settings>,
@@ -643,6 +646,7 @@ async fn turn(
     agent.approver = connection.approver;
     agent.ask_via(connection.asker);
     agent.interjections = connection.interjections.clone();
+    agent.options = connection.options;
     rook_core::agent::equip(&mut agent, shared.servers.clone(), &shared.mcp, shared.jobs.clone());
 
     let emit = outbound.clone();
@@ -666,6 +670,7 @@ async fn turn(
                 let _ = outbound.send(ChatEvent::Forgot { text: text.clone() });
             }
             let _ = outbound.send(ChatEvent::Done {
+                reply: Some(outcome.reply.clone()),
                 steps: outcome.steps,
                 input_tokens: outcome.input_tokens,
                 output_tokens: outcome.output_tokens,
@@ -1146,6 +1151,7 @@ mod tests {
         turn(
             engine.clone(),
             Connection {
+                options: Default::default(),
                 approver,
                 asker,
                 settings: Arc::new(Settings::for_test()),

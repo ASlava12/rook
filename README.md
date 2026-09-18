@@ -1306,3 +1306,34 @@ dependency graph costs several gigabytes and is never stepped through.
 ## License
 
 MIT or Apache-2.0, at your option.
+
+
+### Final-answer artifacts and structured output
+
+`rook run --output report.md "Audit this project"` writes the last answer itself,
+without relying on a model tool call. The path is inside the session workspace;
+the existing parent directories must not contain symlinks. Writes are atomic,
+checkpointed for `session rewind`, and reported as changes. A failed write exits
+with an error. An interrupted turn can save its available answer, but still
+exits as incomplete.
+
+`--output-schema schema.json` validates that answer locally against JSON Schema.
+`--schema-retries 2` allows two format-only repair requests (0–3); those requests
+have no tools and consume the same turn token/time budget. Exhaustion or invalid
+output is an error and does not replace an existing output file. Schemas are at
+most 64 KiB; local `$defs` references work, network/file references are disabled.
+This checks structure, not the truth of the report. Streamed drafts can precede
+the validated final answer; the output file contains only the final answer.
+
+In chat/TUI use `/output report.md`, `/schema schema.json`, and
+`/schema-retries 2`; `/output off` and `/schema off` clear them. These choices apply
+to subsequent turns in that window. The browser exposes the same controls under
+“Result format and file”. API clients pass an `options` object on their `prompt`
+message, with `output`, `output_schema` (a JSON value), and `schema_retries`.
+`done.reply` carries the final answer separately from streamed intermediate text.
+
+The CLI and TUI ring the terminal bell when a turn finishes or stops, and when
+interactive approval or input is required. `ROOK_NOTIFY=off` disables the bell.
+Only a terminal on stderr receives it: redirected streams and JSON stdout stay
+free of notification escapes. Whether the bell is audible or visible depends
+on the terminal settings.

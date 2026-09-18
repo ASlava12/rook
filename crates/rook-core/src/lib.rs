@@ -32,6 +32,7 @@ pub mod mcp_server;
 pub mod memory;
 pub mod mention;
 pub mod models;
+mod output;
 pub mod paths;
 pub mod plugins;
 mod results;

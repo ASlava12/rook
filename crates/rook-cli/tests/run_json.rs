@@ -217,3 +217,39 @@ fn repeated_progress_only_replies_exit_as_incomplete() {
     assert_eq!(parsed["outcome"]["steps"], 3);
     assert!(stderr.contains("/continue"));
 }
+
+#[test]
+fn output_is_saved_by_the_program_and_write_failure_is_a_nonzero_exit() {
+    let _serial = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join("config.toml"), "[agent]\nmodel = \"openai-compatible/test-model\"\n")
+        .unwrap();
+    for (destination, success) in [("report.md", true), ("occupied", false)] {
+        std::fs::create_dir_all(workspace.path().join("occupied")).unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_rook"))
+            .env("ROOK_HOME", home.path())
+            .env("ROOK_LOG", "error")
+            .env("ROOK_LLM_BASE_URL", serve_one(answered("the exact final answer")))
+            .arg("--workspace")
+            .arg(workspace.path())
+            .args(["--json", "run", "--output", destination, "give a report"])
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(out.status.success(), success, "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(!out.stdout.contains(&7), "terminal notification must not enter JSON output");
+        assert!(!out.stderr.contains(&7), "redirected stderr is not a terminal");
+        if success {
+            assert_eq!(
+                std::fs::read_to_string(workspace.path().join(destination)).unwrap(),
+                "the exact final answer"
+            );
+        }
+    }
+}
+
+fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}

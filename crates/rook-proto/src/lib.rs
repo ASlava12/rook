@@ -96,6 +96,22 @@ impl ApiError {
     }
 }
 
+/// An explicit output contract for one turn, shared by every front end.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TurnOptions {
+    /// Relative to the session workspace; never chosen by the model.
+    pub output: Option<String>,
+    pub output_schema: Option<serde_json::Value>,
+    pub schema_retries: u8,
+}
+
+impl Default for TurnOptions {
+    fn default() -> Self {
+        Self { output: None, output_schema: None, schema_retries: 2 }
+    }
+}
+
 /// What a browser sends over the chat socket.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -103,28 +119,21 @@ pub enum ClientMessage {
     Prompt {
         session: Option<String>,
         text: String,
+        #[serde(default)]
+        options: TurnOptions,
     },
     /// Answer to an [`ChatEvent::Approval`], by its id.
-    Approval {
-        id: String,
-        decision: ApprovalDecision,
-    },
+    Approval { id: String, decision: ApprovalDecision },
     /// Answers to a [`ChatEvent::Ask`], in the order the questions came, one
     /// entry each. An empty `chosen` is a question the user skipped.
-    Answers {
-        id: String,
-        answers: Vec<Vec<String>>,
-    },
+    Answers { id: String, answers: Vec<Vec<String>> },
     /// Change a setting for the turn in flight, or for this connection's next
     /// one when none is running: `mode` takes a stance, `effort` takes low…max.
     ///
     /// The turn's, not the connection's. They were the connection's, so a
     /// second window joining a turn showed its own stance over one running
     /// under another, and could change that one underneath it.
-    Setting {
-        name: String,
-        value: String,
-    },
+    Setting { name: String, value: String },
     /// Stop the turn in flight, leaving what it already did in the log.
     Cancel,
     /// Join a turn this daemon is already running, without starting one.
@@ -133,9 +142,7 @@ pub enum ClientMessage {
     /// a window can be closed and another opened on the same session and find
     /// the work still going. What it missed while nothing was attached comes
     /// back first, then the rest as it happens.
-    Attach {
-        session: String,
-    },
+    Attach { session: String },
 }
 
 /// One question on a form the agent put to the user.
@@ -292,6 +299,9 @@ pub enum ChatEvent {
         of: u32,
     },
     Done {
+        /// The final answer, distinct from intermediate streamed text.
+        #[serde(default)]
+        reply: Option<String>,
         steps: u32,
         input_tokens: u32,
         output_tokens: u32,
