@@ -580,7 +580,14 @@ fn ci() -> Result<()> {
         .and_then(|()| {
             timed("clippy", &["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"], &mut timings)
         })
-        .and_then(|()| timed("test", &["test", "--workspace"], &mut timings));
+        // `--no-fail-fast`, because cargo otherwise stops at the first test
+        // binary that fails and says nothing about the rest. On the platforms
+        // this machine cannot run, that turns one red run into one round trip
+        // per failure: Windows took four pushes to work through four unrelated
+        // faults that were all present in the first. The cost is finishing a
+        // run that is already lost, which is minutes; the cost of the other
+        // way was a day.
+        .and_then(|()| timed("test", &["test", "--workspace", "--no-fail-fast"], &mut timings));
 
     let whole: Duration = timings.iter().map(|(_, d)| *d).sum();
     println!();

@@ -78,7 +78,10 @@ jobs:
           # process that never started — which reads as a broken feature.
           prepare: pkg install -y rust git
           run: |
-            cargo test --workspace
+            # As the gate does: one run names every failure rather than the
+            # first, which on a VM that takes ten minutes to come up is the
+            # difference between one round trip and four.
+            cargo test --workspace --no-fail-fast
 
   # Architectures with no hosted runner, but no C sysroot problem either.
   cross:

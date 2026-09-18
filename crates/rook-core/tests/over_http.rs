@@ -214,8 +214,33 @@ async fn a_provider_that_answers_with_an_error_ends_the_turn_with_the_reason() {
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
+        // The whole request, not one read of it. A turn's request carries the
+        // system prompt and every tool schema, which is many times a single
+        // read — and closing a socket that still has data in its receive
+        // buffer is an abortive close on Windows. The client then reads a
+        // reset instead of the 404 this exists to send, and the test failed on
+        // the state of a connection rather than on the answer. The same trap
+        // `streaming.rs` records for the other direction.
+        let mut raw = Vec::new();
         let mut scratch = [0u8; 8192];
-        let _ = socket.read(&mut scratch).await;
+        loop {
+            let Ok(n) = socket.read(&mut scratch).await else { return };
+            if n == 0 {
+                break;
+            }
+            raw.extend_from_slice(&scratch[..n]);
+            let text = String::from_utf8_lossy(&raw);
+            let Some((head, sent)) = text.split_once("\r\n\r\n") else { continue };
+            let length: usize = head
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length: "))
+                .or_else(|| head.lines().find_map(|l| l.strip_prefix("Content-Length: ")))
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(0);
+            if sent.len() >= length {
+                break;
+            }
+        }
         let body = r#"{"error":{"message":"model not found","type":"invalid_request_error"}}"#;
         let _ = socket
             .write_all(
@@ -226,6 +251,9 @@ async fn a_provider_that_answers_with_an_error_ends_the_turn_with_the_reason() {
                 .as_bytes(),
             )
             .await;
+        // Closed from this side rather than dropped, so the last bytes are
+        // delivered before the socket goes.
+        let _ = socket.shutdown().await;
     });
 
     let session = f.rook.start_session("http").unwrap();
