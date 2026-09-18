@@ -29,6 +29,11 @@ same [`Rook`](../crates/rook-core/src/service.rs) façade, which is what keeps t
 from becoming three products that disagree about what the agent did. Anything the
 web UI can show, `rook … --json` can print.
 
+The CLI entry point parses and routes commands. Its grammar lives in
+`rook-cli/src/args.rs`, handlers in `commands/`, and turn configuration shared
+with the REPL/TUI in `turn_options.rs`. In particular, command-line and interactive
+JSON Schema loading use the same bounded reader.
+
 ## Why the pieces are separate
 
 **`rook-store` knows nothing about agents.** It stores bytes by content hash,
@@ -76,8 +81,23 @@ read what it did.
 
 ## The agent loop
 
-[`AgentLoop::run`](../crates/rook-core/src/agent.rs) is deliberately small enough
-to read in one sitting. Per step:
+[`AgentLoop::run`](../crates/rook-core/src/agent.rs) owns turn orchestration and
+step ordering. Its private modules in `agent/` separate the responsibilities:
+
+| Modules | Responsibility |
+|---|---|
+| `lifecycle`, `setup` | Admission, recipes, hooks, execution receipts, installation and closing |
+| `prompt`, `history`, `budget`, `compaction` | Stable instructions, source context, replay and context limits |
+| `stream` | Provider progress, partial answers and releasing the endpoint before follow-up requests |
+| `tool_catalog`, `tools`, `effects` | Tool schemas, dispatch, approvals, checkpoints and change tracking |
+| `delegation` | Child execution, isolation, steering and collection of results |
+| `checks`, `output` | Verification, structured answers and final artifact writes |
+
+Subagent futures and collected results belong to `Nursery`; the provider stream
+pump advances it through methods. Collecting a ready result records it before
+returning, so cancellation of a wait cannot lose an already received result.
+These modules share one `AgentLoop` and preserve the public API used by every
+front end. Per step:
 
 1. **Budget check first.** [`ContextBudget`](../crates/rook-core/src/context.rs)
    compacts *before* the request when the estimate crosses the threshold. An agent

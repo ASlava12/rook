@@ -270,6 +270,11 @@ impl Watching {
     }
 }
 
+/// Cache hits only matter when there are any; a constant "0 cached" is noise.
+pub fn cached(tokens: u32) -> String {
+    if tokens == 0 { String::new() } else { format!(" ({tokens} cached)") }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

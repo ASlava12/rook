@@ -2074,7 +2074,7 @@ impl App {
         let opening = ClientMessage::Prompt {
             session: self.chat.session.map(rook_store::format_session_id),
             text: prompt,
-            options: crate::output_options::for_turn(&mut self.shared.output.borrow_mut()),
+            options: crate::turn_options::for_turn(&mut self.shared.output.borrow_mut()),
         };
         // On the socket this window already has, if it has one: attaching to a
         // session opens one before there is a prompt, and a second socket would
@@ -2230,7 +2230,7 @@ impl App {
             self.chat.push("stat", &said);
             return;
         }
-        let configured = crate::output_options::configure(command, &mut self.shared.output.borrow_mut());
+        let configured = crate::turn_options::configure(command, &mut self.shared.output.borrow_mut());
         if let Some(result) = configured {
             self.chat.push("stat", &result.unwrap_or_else(|e| e.to_string()));
             return;
@@ -2502,7 +2502,7 @@ impl App {
         let output = if aside.is_some() {
             Default::default()
         } else {
-            crate::output_options::for_turn(&mut self.shared.output.borrow_mut())
+            crate::turn_options::for_turn(&mut self.shared.output.borrow_mut())
         };
         // Taken here rather than in the task, because the task owns none of
         // this window and a `RefCell` does not cross into one.

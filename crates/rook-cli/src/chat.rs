@@ -176,7 +176,7 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
                 }
                 if let Some(command) = line.strip_prefix('/') {
                     if let Some(result) =
-                        crate::output_options::configure(command, &mut shared.output.borrow_mut())
+                        crate::turn_options::configure(command, &mut shared.output.borrow_mut())
                     {
                         match result {
                             Ok(said) => print!("{said}"),
@@ -264,7 +264,7 @@ async fn through_the_daemon(
             false => line.trim().to_string(),
         };
         if let Some(command) = line.strip_prefix('/') {
-            if let Some(result) = crate::output_options::configure(command, &mut output) {
+            if let Some(result) = crate::turn_options::configure(command, &mut output) {
                 match result {
                     Ok(said) => print!("{said}"),
                     Err(e) => println!("{e}"),
@@ -333,7 +333,7 @@ async fn through_the_daemon(
         to_daemon.send(ClientMessage::Prompt {
             session: session.clone(),
             text: line,
-            options: crate::output_options::for_turn(&mut output),
+            options: crate::turn_options::for_turn(&mut output),
         })?;
         while let Some(event) = events.recv().await {
             if let Some(over) = watching.saw(event, &to_daemon) {
@@ -420,7 +420,7 @@ async fn turn(
 ) {
     let _attention = crate::notify::OnEnd;
     let mut agent = AgentLoop::new(rook, provider.into(), session);
-    agent.options = crate::output_options::for_turn(&mut shared.output.borrow_mut());
+    agent.options = crate::turn_options::for_turn(&mut shared.output.borrow_mut());
     // Even under `--yes`: approving every command is not the same as never
     // wanting to be asked which one to run.
     agent.ask_via(std::sync::Arc::new(crate::approve::Terminal));
@@ -523,7 +523,7 @@ const EFFORT_UNSPENT: &str = "  this model is not one of the families that reaso
 /// which of its families take the field, and a second table in a front end is
 /// the one that goes stale.
 fn reaches_nothing(rook: &Rook) -> bool {
-    crate::provider(&rook.config).is_ok_and(|provider| !provider.takes_effort())
+    crate::commands::config::provider(&rook.config).is_ok_and(|provider| !provider.takes_effort())
 }
 
 /// Whether a word at the end of `/docs …` names a version rather than more of
