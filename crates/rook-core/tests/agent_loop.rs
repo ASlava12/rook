@@ -3446,13 +3446,32 @@ async fn a_loaded_skill_names_the_files_bundled_with_it() {
     let requests = sent.lock().unwrap();
     let loaded = requests.last().unwrap().messages.iter().rev().find(|m| m.role == Role::Tool).unwrap();
 
-    assert!(loaded.content.contains("Always greet"), "the body is still there: {}", loaded.content);
-    assert!(loaded.content.contains("scripts/check.sh"), "a bundled script must be named");
+    // Read out of the envelope rather than found in its text. A path inside
+    // JSON has its separators escaped, so on Windows a raw `contains` can
+    // never match one and the assertion passed or failed for a reason that had
+    // nothing to do with the claim — it went green here with the code it was
+    // testing removed, and red on the runner where the escaping bites.
+    let envelope: serde_json::Value = serde_json::from_str(&loaded.content)
+        .unwrap_or_else(|e| panic!("the tool result is a source envelope: {e}: {}", loaded.content));
+    let body = envelope["rook_source"]["content"].as_str().expect("the envelope carries the body");
+
+    assert!(body.contains("Always greet"), "the body is still there: {body}");
+    assert!(body.contains("scripts/check.sh"), "a bundled script must be named: {body}");
+    // In the spelling the envelope's own `origin` uses. One message naming one
+    // directory two ways — `C:\Users\RUNNER~1\…` beside
+    // `\\?\C:\Users\runneradmin\…`, which is what Windows produced — leaves a
+    // model unable to tell that they are the same place.
+    let canonical = dir.canonicalize().unwrap();
     assert!(
-        loaded.content.contains(dir.canonicalize().unwrap().to_str().unwrap())
-            || loaded.content.contains(dir.to_str().unwrap()),
-        "and its directory, or the path in the body cannot be followed: {}",
-        loaded.content
+        body.contains(canonical.to_str().unwrap()),
+        "and its directory, in the spelling the rest of the message uses: {body}"
+    );
+    assert!(
+        envelope["rook_source"]["origin"]
+            .as_str()
+            .is_some_and(|o| o.starts_with(canonical.to_str().unwrap())),
+        "which is the one `origin` carries: {}",
+        envelope["rook_source"]["origin"]
     );
 }
 

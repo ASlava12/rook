@@ -35,7 +35,12 @@ fn bundled(skill: &rook_skills::Skill) -> String {
         0 => String::new(),
         n => format!("\n- …and {n} more"),
     };
-    format!("\n\nBundled with this skill, under {}:{}{more}", skill.dir.display(), listed.join(""))
+    // The same spelling the envelope's `origin` carries, which is canonical.
+    // On Windows they differ — `C:\Users\RUNNER~1\…` beside
+    // `\\?\C:\Users\runneradmin\…` — so one message named one directory two
+    // ways, and a model reading it has no way to know they are the same place.
+    let dir = skill.dir.canonicalize().unwrap_or_else(|_| skill.dir.clone());
+    format!("\n\nBundled with this skill, under {}:{}{more}", dir.display(), listed.join(""))
 }
 
 /// How much of the workspace a session's first turn is shown. Sixty lines is
