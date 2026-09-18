@@ -141,10 +141,9 @@ fn gc_keeps_files_that_only_a_manifest_references() {
         FileSet::capture(&store, "checkpoint", "c", "", src.path(), &CaptureLimits::default(), None).unwrap();
     store.set_ref("checkpoint/c/0", &id).unwrap();
 
-    // Without the expander the file blob looks unreachable and would be lost.
-    // `min_age_secs` off, because the grace period would hide that on its own.
-    let naive = store.gc(&GcOptions { dry_run: true, min_age_secs: 0, ..Default::default() }).unwrap();
-    assert_eq!(naive.collected, 1);
+    // Refuse an incomplete reachability walk, including dry runs: suggesting
+    // that a live child can be deleted is already an incorrect GC plan.
+    assert!(store.gc(&GcOptions { dry_run: true, min_age_secs: 0, ..Default::default() }).is_err());
 
     let report =
         store.gc(&GcOptions { expand: Some(&gc_expander), min_age_secs: 0, ..Default::default() }).unwrap();
@@ -234,4 +233,90 @@ fn a_capture_of_a_binary_file_still_round_trips() {
     set.restore(&store, dest.path()).unwrap();
     assert_eq!(std::fs::read(dest.path().join("data.bin")).unwrap(), blob);
     let _ = Kind::FileBlob;
+}
+
+#[test]
+fn restore_creates_an_explicit_new_destination() {
+    let store_dir = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    let output = tempfile::tempdir().unwrap();
+    let store = Store::open(store_dir.path()).unwrap();
+    seed(source.path(), &[("nested/a.txt", "saved")]);
+    let (set, _) =
+        FileSet::capture(&store, "checkpoint", "new", "", source.path(), &CaptureLimits::default(), None)
+            .unwrap();
+    let destination = output.path().join("new-root");
+    assert_eq!(set.restore(&store, &destination).unwrap(), 1);
+    assert_eq!(std::fs::read_to_string(destination.join("nested/a.txt")).unwrap(), "saved");
+}
+
+#[test]
+fn restore_rejects_conflicting_destinations_before_replacing_any_file() {
+    for bad in ["directory", "file_parent", "planned_parent", "alias"] {
+        let state = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        let store = Store::open(state.path()).unwrap();
+        seed(src.path(), &[("a.txt", "captured")]);
+        seed(dst.path(), &[("a.txt", "keep this")]);
+        let (mut set, _) =
+            FileSet::capture(&store, "checkpoint", "check", "", src.path(), &CaptureLimits::default(), None)
+                .unwrap();
+        let id = set.files["a.txt"].clone();
+        match bad {
+            "directory" => {
+                std::fs::create_dir(dst.path().join("z")).unwrap();
+                set.files.insert("z".into(), id);
+            }
+            "file_parent" => {
+                seed(dst.path(), &[("z", "parent is a file")]);
+                set.files.insert("z/child".into(), id);
+            }
+            "planned_parent" => {
+                set.files.insert("z".into(), id.clone());
+                set.files.insert("z/child".into(), id);
+            }
+            "alias" => {
+                set.files.insert("./a.txt".into(), id);
+            }
+            _ => unreachable!(),
+        }
+        assert!(set.restore(&store, dst.path()).is_err(), "{bad}");
+        assert_eq!(std::fs::read_to_string(dst.path().join("a.txt")).unwrap(), "keep this", "{bad}");
+    }
+}
+
+#[test]
+fn abandoned_write_files_are_not_captured_even_when_hidden_files_are_included() {
+    let state = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let store = Store::open(state.path()).unwrap();
+    seed(
+        workspace.path(),
+        &[(".rook-write-123-0", "unfinished"), (".config", "keep"), (".rook-write-notes", "user document")],
+    );
+    let (set, _) = FileSet::capture(
+        &store,
+        "checkpoint",
+        "check",
+        "",
+        workspace.path(),
+        &CaptureLimits::default(),
+        None,
+    )
+    .unwrap();
+    assert!(!set.files.contains_key(".rook-write-123-0"));
+    assert!(set.files.contains_key(".config"));
+    assert!(set.files.contains_key(".rook-write-notes"));
+    let (explicit, _) = capture_paths(
+        &store,
+        "checkpoint",
+        "check",
+        workspace.path(),
+        &[workspace.path().join(".rook-write-123-0")],
+        &CaptureLimits::default(),
+    )
+    .unwrap();
+    assert!(explicit.files.is_empty());
+    assert!(explicit.absent.is_empty());
 }

@@ -17,6 +17,7 @@ pub mod agent;
 pub mod calls;
 pub mod catalog;
 pub mod changes;
+mod completion;
 pub mod config;
 pub mod context;
 pub mod docs;

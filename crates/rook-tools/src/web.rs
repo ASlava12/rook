@@ -219,7 +219,7 @@ impl Fetch {
                 landed = Some(hop);
                 break;
             };
-            let to = absolute(&at, &to);
+            let to = absolute(&at, &to)?;
             if host_of(&to) != host_of(&at) {
                 return Err(format!(
                     "{at} redirects to {to}, which is a different host — fetch that address if it \
@@ -232,9 +232,6 @@ impl Fetch {
             return Err(format!("{url} redirects more than {MOST_HOPS} times"));
         };
         let status = response.status();
-        if status == reqwest::StatusCode::NOT_MODIFIED {
-            return Ok(None);
-        }
         let header = |name: reqwest::header::HeaderName| {
             response.headers().get(name).and_then(|v| v.to_str().ok()).map(str::to_string)
         };
@@ -269,15 +266,11 @@ fn redirected_to(response: &reqwest::Response) -> Option<String> {
 }
 
 /// A `Location` may be relative, and a relative one cannot leave the host.
-fn absolute(from: &str, location: &str) -> String {
-    if location.starts_with("http://") || location.starts_with("https://") {
-        return location.to_string();
-    }
-    let root = from.split('/').take(3).collect::<Vec<_>>().join("/");
-    match location.starts_with('/') {
-        true => format!("{root}{location}"),
-        false => format!("{root}/{location}"),
-    }
+fn absolute(from: &str, location: &str) -> std::result::Result<String, String> {
+    reqwest::Url::parse(from)
+        .and_then(|url| url.join(location))
+        .map(|url| url.to_string())
+        .map_err(|e| format!("invalid redirect: {e}"))
 }
 
 fn host_of(url: &str) -> &str {
@@ -703,4 +696,19 @@ fn results(engine: &Engine, body: &serde_json::Value, limit: usize) -> Vec<Strin
                 .collect()
         })
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod redirect_tests {
+    #[test]
+    fn relative_redirects_use_the_current_document_url() {
+        for (location, expected) in [
+            ("next", "http://example.test/dir/next"),
+            ("../next", "http://example.test/next"),
+            ("?q=1", "http://example.test/dir/start?q=1"),
+            ("//elsewhere.test/x", "http://elsewhere.test/x"),
+        ] {
+            assert_eq!(super::absolute("http://example.test/dir/start", location).unwrap(), expected);
+        }
+    }
 }

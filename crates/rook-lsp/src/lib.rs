@@ -549,6 +549,9 @@ fn symbol(value: &serde_json::Value) -> Option<Symbol> {
 /// makes it safe.
 #[allow(clippy::string_slice)]
 pub fn locate(text: &str, symbol: &str) -> Option<Position> {
+    if symbol.is_empty() {
+        return None;
+    }
     for (line, content) in text.lines().enumerate() {
         let mut from = 0;
         while let Some(offset) = content[from..].find(symbol) {
@@ -557,7 +560,10 @@ pub fn locate(text: &str, symbol: &str) -> Option<Position> {
             let after = content[at + symbol.len()..].chars().next();
             let boundary = |c: Option<char>| !c.is_some_and(|c| c.is_alphanumeric() || c == '_');
             if boundary(before) && boundary(after) {
-                return Some(Position { line: line as u32, character: content[..at].chars().count() as u32 });
+                return Some(Position {
+                    line: line as u32,
+                    character: content[..at].encode_utf16().count() as u32,
+                });
             }
             from = at + symbol.len();
         }

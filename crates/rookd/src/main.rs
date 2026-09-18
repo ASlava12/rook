@@ -173,25 +173,25 @@ impl AppState {
 
     pub async fn config_if_changed(&self) -> Option<String> {
         let touched = std::fs::metadata(&self.config_path).and_then(|m| m.modified()).ok();
-        {
-            let mut last = self.config_read.lock().unwrap_or_else(|e| e.into_inner());
-            if *last == touched {
-                return None;
-            }
-            *last = touched;
+        if *self.config_read.lock().unwrap_or_else(|e| e.into_inner()) == touched {
+            return None;
         }
         let Ok(config) = rook_core::Config::load_from(self.config_path.clone()) else { return None };
         let model = config.agent.model.clone();
-        let was = {
-            let mut rook = self.rook.write().await;
-            let was = rook.config.agent.model.clone();
-            rook.config = config.clone();
-            was
-        };
-        // Every project, because they share the file as they share the store.
-        for project in self.elsewhere.write().await.values() {
-            project.engine.write().await.config = config.clone();
+        // Never queue a writer behind a running turn: Tokio then queues new readers too.
+        let Ok(projects) = self.elsewhere.try_read() else { return None };
+        let Ok(mut rook) = self.rook.try_write() else { return None };
+        let mut guards = Vec::new();
+        for project in projects.values() {
+            let Ok(guard) = project.engine.try_write() else { return None };
+            guards.push(guard);
         }
+        let was = rook.config.agent.model.clone();
+        rook.config = config.clone();
+        for mut guard in guards {
+            guard.config = config.clone();
+        }
+        *self.config_read.lock().unwrap_or_else(|e| e.into_inner()) = touched;
         (was != model).then(|| format!("the model is `{model}` now, from config.toml"))
     }
 
@@ -217,22 +217,20 @@ impl AppState {
             return Ok(known.engine.clone());
         }
 
-        let built = Arc::new(RwLock::new(self.rook.read().await.for_workspace(here.clone())));
-        kept.insert(here, Project { engine: built.clone(), last_used: std::time::Instant::now() });
-        // How many projects there are is decided by whoever connects. Dropping
-        // the one nobody has asked for in longest costs a rediscovery of its
-        // skills; a connection still holding it keeps working either way.
-        while kept.len() > self.max_projects {
-            let Some(stale) = kept.iter().min_by_key(|(_, p)| p.last_used).map(|(path, _)| path.clone())
-            else {
-                break;
+        if kept.len() >= self.max_projects {
+            let stale = kept
+                .iter()
+                .filter(|(_, p)| Arc::strong_count(&p.engine) == 1)
+                .min_by_key(|(_, p)| p.last_used)
+                .map(|(path, _)| path.clone());
+            let Some(stale) = stale else {
+                return Err("all project slots are in use; close a project connection and retry".into());
             };
             kept.remove(&stale);
-            // The project is gone, so its servers and its background commands
-            // go with it: keeping them alive would be keeping processes for a
-            // workspace nothing can reach any more.
             self.equipment.write().await.remove(&stale);
         }
+        let built = Arc::new(RwLock::new(self.rook.read().await.for_workspace(here.clone())));
+        kept.insert(here, Project { engine: built.clone(), last_used: std::time::Instant::now() });
         Ok(built)
     }
 
@@ -360,7 +358,10 @@ async fn serve() -> Result<()> {
         started: std::time::Instant::now(),
         about,
     });
-    let app = api::router(state.clone()).merge(web::router());
+    let app = api::router(state.clone()).merge(web::router()).layer(axum::middleware::from_fn_with_state(
+        config.server.allowed_hosts.clone(),
+        chat::trusted_authority,
+    ));
 
     let maintenance = tokio::spawn(maintain(state.clone(), config.storage.maintenance_interval_hours));
 

@@ -61,8 +61,9 @@ a caller gets depends on what it is: a turn wants the one it was pointed at,
 because moving it part-way throws away its cached prefix, and an errand wants
 whichever has room.
 
-**`rook-contain` is the floor.** Platform glue with no dependencies of its own,
-internal or external, and the one place Win32 lives — which is why
+**`rook-contain` is the floor.** Platform glue and capability filesystem operations,
+with no internal dependencies, and the one place Win32 lives. Its external
+dependencies are cap-std and platform bindings, without native C builds, so
 `cargo check --target x86_64-pc-windows-msvc -p rook-contain` works from a Mac
 while the rest of the workspace does not. Anything may reach for it: starting a
 process without a console window is its answer as much as containing one is.

@@ -140,6 +140,7 @@ impl Tool for RunCommand {
         let spill = ctx
             .spill_dir
             .as_deref()
+            .filter(|_| asked_for.is_empty())
             .and_then(|dir| Spill::open(dir, ctx.max_spill_bytes))
             .map(|s| std::sync::Arc::new(std::sync::Mutex::new(s)));
         // Shared by both streams: what matters is whether the command said
@@ -180,7 +181,10 @@ impl Tool for RunCommand {
         let mut exited = None;
         let running = async {
             tokio::select! {
-                _ = capture!() => Ended::Drained,
+                _ = capture!() => {
+                    exited = child.wait().await.ok();
+                    Ended::Drained
+                },
                 status = child.wait() => {
                     exited = status.ok();
                     Ended::Exited
@@ -269,6 +273,8 @@ impl Tool for RunCommand {
             // The whole group, not the shell: `sh -c` may fork rather than
             // exec, and killing the shell alone leaves the real work running.
             let killed = group.end();
+            let _ = child.kill().await;
+            let _ = child.wait().await;
             // How long it had been quiet when the clock ran out. Zero heard at
             // all means it never printed anything, and the whole allowance is
             // the silence.

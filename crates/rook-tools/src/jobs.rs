@@ -132,7 +132,7 @@ impl Jobs {
                 tokio::join!(drain(&mut out, &into, cap), drain(&mut err, &into, cap));
             };
             tokio::select! {
-                _ = reading => {}
+                _ = async { reading.await; let _ = child.wait().await; } => {}
                 _ = stopped.notified() => {
                     crate::exec::kill_tree(&mut child, &held).await;
                 }

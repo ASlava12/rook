@@ -16,8 +16,8 @@ it zips 1.3 GB inside one HTTP request.
 
 ### 1. Content addressing
 
-Objects are keyed by their blake3 hash. Storing the same bytes twice is a hash
-lookup and nothing else. A session that reads the same 40 KB file twenty times
+Objects are keyed by their blake3 hash. A duplicate reuses a readable object;
+resubmitting the original bytes repairs a damaged object under the same hash. A session that reads the same 40 KB file twenty times
 costs twenty ~50-byte log records, not 800 KB.
 
 This is also why a session log entry holds an `ObjectId` rather than a payload:
@@ -34,9 +34,12 @@ Dictionaries are trained per [`Kind`](../crates/rook-store/src/object.rs) —
 messages, tool results, file blobs, skills, memories, snapshots, documentation —
 because those populations have genuinely different shapes.
 
-Retraining never invalidates history: **every object records the codec it was
-written with**, so old objects keep decoding against the dictionary they were
-written against.
+Retraining preserves each previous dictionary as `<kind>.<generation>.zdict`
+before atomically publishing the new `<kind>.zdict`. Readers retain all generations
+across restarts and try them against the dictionary ID in the zstd frame. The
+object's codec alone does not identify its dictionary. Scheduled maintenance
+trains only missing kinds; explicit `rook store train` can retrain existing ones.
+Already lost dictionaries require a backup or the original object bytes.
 
 Measured, on a synthetic transcript of 3,000 turns plus 320 tool results over 64
 distinct source files (`cargo xtask compaction`):
@@ -47,15 +50,17 @@ distinct source files (`cargo xtask compaction`):
 | after dedup (distinct objects) | 5.29 MiB | 4.4× |
 | stored, standalone zstd | 0.63 MiB | 8.4× |
 | stored, trained dictionaries | 0.14 MiB | **37.1×** |
-| on disk, index + objects | 1.07 MiB | 21.9× end-to-end |
+| on disk, index + objects | 4.02 MiB | 5.8× end-to-end |
 
 Sixty-four files rather than twenty-five, because a dictionary needs 32 samples
 of a kind before it is trained: at twenty-five the file blobs never got one, so
 the measurement exercised the message dictionary alone while the claim above is
 one dictionary per kind. Both are trained now, which is what the run prints.
-The end-to-end figure barely moved — 20.5× to 21.9× — but the split between
-dedup and compression did, because more distinct files means less to dedup and
-more for zstd to work on.
+The September 17, 2026 rerun measured 4.02 MiB on disk; the earlier 1.07 MiB
+figure is superseded. An isolated checkout of the original HEAD measured the
+same 4.02 MiB, so this is not growth introduced by the audit fixes. Encoded
+payload sizes remain unchanged. The disk total includes redb allocation and is
+not the payload compression ratio.
 
 Note the gap between "stored" and "on disk": the redb index has its own overhead,
 and at this scale it dominates. `rook store stat` reports both, because reporting
@@ -100,7 +105,10 @@ tens of bytes rather than hundreds, and there are a lot of them.
 ### Format versioning
 
 `format.json` carries a version. Opening a store written by a **newer** format
-fails with `StoreError::FormatTooNew` rather than reading it wrong.
+fails with `StoreError::FormatTooNew` rather than reading it wrong. Format 2
+preserves dictionary generations; opening format 1 upgrades its marker under the
+store lock. Older binaries then refuse the store instead of overwriting a dictionary
+or failing to load retired generations. This upgrade does not recover lost data.
 
 ## Bounded growth
 

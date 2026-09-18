@@ -136,7 +136,9 @@ async fn a_server_that_dies_mid_call_fails_the_call_instead_of_hanging() {
         .await
         .expect("a dead server must not leave the call pending")
         .unwrap_err();
-    assert!(matches!(err, McpError::Closed { .. }), "{err}");
+    assert!(matches!(err, McpError::Transport { .. }), "{err}");
+    assert!(err.to_string().contains("outcome is unknown"), "{err}");
+    assert!(err.to_string().contains("server exited"), "{err}");
 }
 
 /// A server that fails to start or dies on a call explains itself on stderr,
@@ -151,7 +153,9 @@ async fn a_server_that_dies_complaining_says_what_it_complained_about() {
         .await
         .expect("a dead server must not leave the call pending")
         .unwrap_err();
-    assert!(matches!(err, McpError::Closed { .. }), "{err}");
+    assert!(matches!(err, McpError::Transport { .. }), "{err}");
+    assert!(err.to_string().contains("outcome is unknown"), "{err}");
+    assert!(err.to_string().contains("server exited"), "{err}");
     assert!(err.to_string().contains("ANTHROPIC_API_KEY is not set"), "{err}");
 }
 
@@ -198,7 +202,7 @@ async fn dropping_a_server_takes_its_child_process_with_it() {
 /// call returned the same transport error and nothing tried again. One restart
 /// and one retry per call, a few per run.
 #[tokio::test]
-async fn a_server_that_dies_once_is_restarted_and_the_call_answered() {
+async fn a_server_that_dies_is_restarted_for_the_next_explicit_call() {
     let _one = one_at_a_time().await;
     // Held, or the directory goes with the temporary and the mock has nowhere
     // to record having died.
@@ -211,7 +215,11 @@ async fn a_server_that_dies_once_is_restarted_and_the_call_answered() {
     let result = server.call_tool("echo", &serde_json::json!({ "text": "still here" })).await;
 
     assert!(marker.exists(), "the server has to have died for this to be about anything");
-    let answered = result.expect("the retry after the restart answers");
+    assert!(result.unwrap_err().to_string().contains("unknown"));
+    let answered = server
+        .call_tool("echo", &serde_json::json!({ "text": "still here" }))
+        .await
+        .expect("the next explicit call uses the repaired connection");
     assert!(answered.to_text().contains("still here"), "{:?}", answered.to_text());
     server.shutdown().await;
 }

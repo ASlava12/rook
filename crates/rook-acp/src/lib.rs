@@ -85,7 +85,14 @@ where
         // A reply to something we asked, rather than a request of its own.
         if message.method.is_none() {
             if let Some(id) = message.id.as_ref().and_then(|i| i.as_u64()) {
-                peer.resolve(id, message.result.unwrap_or(serde_json::Value::Null)).await;
+                let result = match (message.result, message.error) {
+                    (Some(result), None) => Ok(result),
+                    (_, Some(error)) => {
+                        Err(serde_json::from_value(error).unwrap_or_else(|e| Error::internal(e.to_string())))
+                    }
+                    _ => Err(Error::internal("response has neither result nor error")),
+                };
+                peer.resolve(id, result).await;
             }
             continue;
         }
@@ -317,7 +324,7 @@ async fn prompt(
 
     let provider = match rook_core::models::configured(&rook.config) {
         Ok(provider) => provider,
-        Err(e) => return peer.respond(&id, Err(Error::internal(e.to_string()))),
+        Err(e) => return answer(Err(Error::internal(e.to_string()))),
     };
 
     let mut agent = AgentLoop::new(&rook, provider.into(), session);
@@ -337,6 +344,8 @@ async fn prompt(
             peer: peer.clone(),
             session: request.session_id.clone(),
             can_write: setup.client.write,
+            workspace: rook.workspace.clone(),
+            allow_outside: rook.config.sandbox.allow_outside_workspace,
         }));
     }
     if setup.client.terminal {
@@ -478,8 +487,8 @@ async fn prompt(
 fn stop_reason(stopped: &str) -> &'static str {
     match stopped {
         "max_steps" => "max_turn_requests",
-        "MaxTokens" => "max_tokens",
-        "Refusal" => "refusal",
+        "max_tokens" => "max_tokens",
+        "refusal" => "refusal",
         _ => "end_turn",
     }
 }
@@ -487,13 +496,13 @@ fn stop_reason(stopped: &str) -> &'static str {
 /// The other end of the connection: notifications out, requests out, replies in.
 struct Peer {
     outbound: mpsc::UnboundedSender<String>,
-    waiting: Mutex<HashMap<u64, oneshot::Sender<serde_json::Value>>>,
+    waiting: std::sync::Mutex<HashMap<u64, oneshot::Sender<Result<serde_json::Value, Error>>>>,
     next_id: AtomicU64,
 }
 
 impl Peer {
     fn new(outbound: mpsc::UnboundedSender<String>) -> Self {
-        Self { outbound, waiting: Mutex::new(HashMap::new()), next_id: AtomicU64::new(1) }
+        Self { outbound, waiting: std::sync::Mutex::new(HashMap::new()), next_id: AtomicU64::new(1) }
     }
 
     fn send(&self, value: &impl serde::Serialize) {
@@ -515,7 +524,8 @@ impl Peer {
     }
 
     async fn request(&self, method: &str, params: serde_json::Value) -> Option<serde_json::Value> {
-        self.request_within(method, params, None).await
+        let limit = (method != "terminal/wait_for_exit").then(|| std::time::Duration::from_secs(60));
+        self.request_within(method, params, limit).await
     }
 
     /// `None` waits as long as the client takes, which is right for a terminal
@@ -529,7 +539,8 @@ impl Peer {
     ) -> Option<serde_json::Value> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
-        self.waiting.lock().await.insert(id, tx);
+        self.waiting.lock().unwrap_or_else(|e| e.into_inner()).insert(id, tx);
+        let _pending = Pending { peer: self, id };
         self.send(&protocol::Request { jsonrpc: "2.0", id, method, params });
         let answer = match limit {
             None => rx.await.ok(),
@@ -538,15 +549,31 @@ impl Peer {
         if answer.is_none() {
             // Nothing will resolve it now, and the entry would otherwise sit in
             // the map for the life of the connection.
-            self.waiting.lock().await.remove(&id);
+            self.waiting.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
         }
-        answer
+        answer.and_then(|result| match result {
+            Ok(value) => Some(value),
+            Err(error) => {
+                tracing::warn!("editor refused {method}: {}", error.message);
+                None
+            }
+        })
     }
 
-    async fn resolve(&self, id: u64, result: serde_json::Value) {
-        if let Some(tx) = self.waiting.lock().await.remove(&id) {
+    async fn resolve(&self, id: u64, result: Result<serde_json::Value, Error>) {
+        if let Some(tx) = self.waiting.lock().unwrap_or_else(|e| e.into_inner()).remove(&id) {
             let _ = tx.send(result);
         }
+    }
+}
+
+struct Pending<'a> {
+    peer: &'a Peer,
+    id: u64,
+}
+impl Drop for Pending<'_> {
+    fn drop(&mut self) {
+        self.peer.waiting.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.id);
     }
 }
 
@@ -668,6 +695,8 @@ struct EditorFiles {
     peer: Arc<Peer>,
     session: String,
     can_write: bool,
+    workspace: std::path::PathBuf,
+    allow_outside: bool,
 }
 
 #[async_trait]
@@ -690,14 +719,9 @@ impl rook_tools::Files for EditorFiles {
         if !self.can_write {
             // Falling back rather than refusing: the client can read buffers and
             // not write them, and a write to disk is still correct then.
-            if let Some(parent) = path.parent() {
-                tokio::fs::create_dir_all(parent)
-                    .await
-                    .map_err(|e| rook_tools::ToolError::Io { path: parent.to_path_buf(), source: e })?;
-            }
-            return tokio::fs::write(path, contents)
-                .await
-                .map_err(|e| rook_tools::ToolError::Io { path: path.to_path_buf(), source: e });
+            let mut ctx = rook_tools::ToolContext::new(self.workspace.clone());
+            ctx.allow_outside_workspace = self.allow_outside;
+            return ctx.write_text(path, contents).await;
         }
         let params = serde_json::json!({ "sessionId": self.session, "path": path, "content": contents });
         self.peer.request("fs/write_text_file", params).await.map(|_| ()).ok_or_else(|| {
@@ -807,5 +831,44 @@ impl rook_tools::Terminals for EditorTerminals {
             truncated: read["truncated"] == true,
             timed_out,
         })
+    }
+}
+
+#[cfg(test)]
+mod audit_tests {
+    use super::*;
+    #[tokio::test]
+    async fn editor_errors_cannot_be_reported_as_successful_writes() {
+        use rook_tools::Files;
+        let (send, mut requests) = mpsc::unbounded_channel();
+        let peer = Arc::new(Peer::new(send));
+        let editor = EditorFiles {
+            peer: peer.clone(),
+            session: "s".into(),
+            can_write: true,
+            workspace: "/tmp".into(),
+            allow_outside: false,
+        };
+        let write = tokio::spawn(async move { editor.write(Path::new("/tmp/x"), "text").await });
+        let request: serde_json::Value = serde_json::from_str(&requests.recv().await.unwrap()).unwrap();
+        peer.resolve(request["id"].as_u64().unwrap(), Err(Error::internal("write refused"))).await;
+        assert!(write.await.unwrap().is_err());
+    }
+    #[tokio::test]
+    async fn cancelling_a_peer_request_releases_its_pending_entry() {
+        let (send, mut requests) = mpsc::unbounded_channel();
+        let peer = Arc::new(Peer::new(send));
+        let asking = peer.clone();
+        let task = tokio::spawn(async move { asking.request("read", serde_json::json!({})).await });
+        requests.recv().await.unwrap();
+        assert_eq!(peer.waiting.lock().unwrap().len(), 1);
+        task.abort();
+        let _ = task.await;
+        assert!(peer.waiting.lock().unwrap().is_empty());
+    }
+    #[test]
+    fn stop_reasons_use_the_engines_wire_spelling() {
+        assert_eq!(stop_reason("max_tokens"), "max_tokens");
+        assert_eq!(stop_reason("refusal"), "refusal");
     }
 }

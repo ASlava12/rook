@@ -103,11 +103,15 @@ impl Hooks {
         let hooks = configs
             .iter()
             .filter(|c| !c.command.trim().is_empty())
-            .map(|config| {
-                let rule = config.matches.as_deref().and_then(|pattern| {
-                    Rule::parse(pattern).map_err(|e| errors.push(format!("{}: {e}", config.command))).ok()
-                });
-                (config.clone(), rule)
+            .filter_map(|config| {
+                let rule = match config.matches.as_deref().map(Rule::parse).transpose() {
+                    Ok(rule) => rule,
+                    Err(e) => {
+                        errors.push(format!("{}: {e}", config.command));
+                        return None;
+                    }
+                };
+                Some((config.clone(), rule))
             })
             .collect();
         (Self { hooks }, errors)
@@ -194,8 +198,16 @@ fn shell(command: &str) -> tokio::process::Command {
 /// long it talks and this bounds how much.
 const MOST_REPLY_BYTES: usize = 64 * 1024;
 
+struct HookGroup(rook_contain::Group);
+impl Drop for HookGroup {
+    fn drop(&mut self) {
+        self.0.end();
+    }
+}
+
 async fn invoke(config: &HookConfig, payload: &serde_json::Value) -> std::io::Result<HookReply> {
     let mut command = shell(&config.command);
+    rook_contain::on_its_own(command.as_std_mut());
     let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -203,18 +215,23 @@ async fn invoke(config: &HookConfig, payload: &serde_json::Value) -> std::io::Re
         .kill_on_drop(true)
         .spawn()?;
 
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(payload.to_string().as_bytes()).await;
-        let _ = stdin.shutdown().await;
+    let _group = HookGroup(rook_contain::Group::holding(child.id()));
+    let input = serde_json::to_vec(payload)?;
+    if input.len() > 8 * 1024 * 1024 {
+        return Err(std::io::Error::other("hook input exceeds 8 MiB"));
     }
-
+    let stdin = child.stdin.take();
     let (mut out, mut err) = (child.stdout.take(), child.stderr.take());
     let finished = async {
-        // Both together, for the reason `run_command` reads them together: a
-        // hook that fills the stderr pipe while stdout is drained blocks on the
-        // write and never finishes either.
-        let (stdout, stderr) = tokio::join!(bounded(&mut out), bounded(&mut err));
-        (child.wait().await, stdout, stderr)
+        let feed = async {
+            if let Some(mut stdin) = stdin {
+                let _ = stdin.write_all(&input).await;
+                let _ = stdin.shutdown().await;
+            }
+        };
+        let (_, stdout, stderr, status) =
+            tokio::join!(feed, bounded(&mut out), bounded(&mut err), child.wait());
+        (status, stdout, stderr)
     };
     let (status, stdout, stderr) =
         tokio::time::timeout(Duration::from_secs(config.timeout_secs), finished).await.map_err(|_| {

@@ -13,7 +13,7 @@ members = [
     "crates/rook-proto",
     "crates/rookd",
     "crates/rook-cli",
-    "xtask", "crates/rook-mcp", "crates/rook-acp", "crates/rook-lsp",
+    "xtask",
 ]
 exclude = ["references"]
 

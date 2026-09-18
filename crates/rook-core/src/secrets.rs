@@ -229,9 +229,8 @@ impl Vault {
     /// what comes back.
     pub fn value(&self, name: &str) -> Option<String> {
         let value = self.value_of(self.entries.get(name.trim())?)?;
-        if let Ok(mut handed) = self.handed_out.lock()
-            && !handed.contains(&value)
-        {
+        let mut handed = self.handed_out.lock().unwrap_or_else(|e| e.into_inner());
+        if !handed.contains(&value) {
             handed.push(value.clone());
         }
         Some(value)
@@ -251,9 +250,8 @@ impl Vault {
         if value.is_empty() {
             return;
         }
-        if let Ok(mut handed) = self.handed_out.lock()
-            && !handed.iter().any(|held| held == value)
-        {
+        let mut handed = self.handed_out.lock().unwrap_or_else(|e| e.into_inner());
+        if !handed.iter().any(|held| held == value) {
             handed.push(value.to_string());
         }
     }
@@ -268,7 +266,7 @@ impl Vault {
     /// the ordinary way a secret ends up in a transcript — `echo $TOKEN`, a
     /// curl trace, a config file printed by `cat`.
     pub fn redact(&self, text: &str) -> String {
-        let Ok(handed) = self.handed_out.lock() else { return text.to_string() };
+        let handed = self.handed_out.lock().unwrap_or_else(|e| e.into_inner());
         let mut out = text.to_string();
         for value in handed.iter() {
             // Short values would match half the output of anything. A secret
@@ -378,5 +376,29 @@ fn usable_name(name: &str) -> Result<String> {
 impl rook_tools::Secrets for Vault {
     fn value(&self, name: &str) -> Option<String> {
         Vault::value(self, name)
+    }
+}
+
+#[cfg(test)]
+mod poisoning_tests {
+    use super::*;
+
+    #[test]
+    fn a_poisoned_registry_still_hides_old_and_new_credentials() {
+        let mut vault = Vault::empty();
+        vault.also_hide("previous-private-value");
+        vault.entries.insert("new".into(), Entry { value: Some("new-private-value".into()), source: None });
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = vault.handed_out.lock().unwrap();
+            panic!("simulate an interrupted credential registration");
+        }));
+        assert!(poisoned.is_err());
+        assert!(vault.handed_out.is_poisoned());
+        assert_eq!(vault.value("new").as_deref(), Some("new-private-value"));
+        vault.also_hide("endpoint-private-value");
+        assert_eq!(
+            vault.redact("previous-private-value new-private-value endpoint-private-value"),
+            "${secret} ${secret} ${secret}"
+        );
     }
 }

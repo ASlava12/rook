@@ -280,6 +280,10 @@ pub enum ChatEvent {
     /// The turn was stopped before it finished. Sent instead of `Done`, so a
     /// client waiting on one of them is never left waiting.
     Cancelled,
+    /// A terminal failure; ordinary Error events may only reject a setting.
+    Failed {
+        message: String,
+    },
     /// A step of the turn, as it begins: a window showing only that something
     /// is happening cannot say how much of the budget is left, and a turn at
     /// step 190 of 200 is about to stop whatever it is in the middle of.

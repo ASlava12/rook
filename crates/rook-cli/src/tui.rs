@@ -1671,6 +1671,9 @@ impl App {
             }
             ChatEvent::Error { message } => {
                 self.chat.push("err", &message);
+            }
+            ChatEvent::Failed { message } => {
+                self.chat.push("err", &message);
                 self.finished();
             }
         }

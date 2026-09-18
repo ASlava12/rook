@@ -287,3 +287,27 @@ fn where_a_skill_came_from_reads_back_from_what_a_card_says() {
     // unknown source is no reason to drop what the user put in their workspace.
     assert_eq!(SkillSource::from_label("from-the-future").rank(), SkillSource::Builtin.rank());
 }
+
+#[test]
+fn a_variant_cannot_read_outside_its_bundle_or_exceed_its_budget() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("private.txt"), "private").unwrap();
+    let dir = write_skill(
+        root.path(),
+        "bounded",
+        "name: bounded\ndescription: bounded\nvariants:\n  - body: ../private.txt\n",
+        "default",
+    );
+    let skill = rook_skills::Skill::load(&dir, SkillSource::User).unwrap();
+    assert!(skill.body_for(&env_linux()).is_err());
+    let mut skill = skill;
+    skill.manifest.variants[0].body = "huge.txt".into();
+    std::fs::write(dir.join("huge.txt"), "x".repeat(1024 * 1024 + 1)).unwrap();
+    assert!(skill.body_for(&env_linux()).is_err());
+    #[cfg(unix)]
+    {
+        skill.manifest.variants[0].body = "linked.txt".into();
+        std::os::unix::fs::symlink(root.path().join("private.txt"), dir.join("linked.txt")).unwrap();
+        assert!(skill.body_for(&env_linux()).is_err());
+    }
+}

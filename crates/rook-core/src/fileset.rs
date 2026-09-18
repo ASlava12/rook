@@ -113,6 +113,9 @@ impl FileSet {
             .follow_links(false);
 
         for entry in walker.build().flatten() {
+            if rook_contain::files::is_write_temporary(entry.path()) {
+                continue;
+            }
             if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
                 continue;
             }
@@ -173,21 +176,26 @@ impl FileSet {
 
     /// Write the captured files back under `dest`.
     pub fn restore(&self, store: &Store, dest: &Path) -> Result<usize> {
-        let mut written = 0;
+        std::fs::create_dir_all(dest).map_err(|e| CoreError::Io { path: dest.to_path_buf(), source: e })?;
+        // Reject deterministic path/content errors before the first write.
+        // This is preflight, not a transaction against disk failures or races.
+        validate_restore_plan(self.files.keys().map(PathBuf::from))?;
+        let mut plan = Vec::new();
         for (rel, hex) in &self.files {
-            let Some(id) = ObjectId::from_hex(hex) else {
-                return Err(CoreError::Capture(format!("manifest holds a bad object id for {rel}")));
-            };
-            let data = store.get(&id)?;
-            let path = dest.join(rel);
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| CoreError::Io { path: parent.to_path_buf(), source: e })?;
-            }
-            std::fs::write(&path, data).map_err(|e| CoreError::Io { path: path.clone(), source: e })?;
-            written += 1;
+            let id = ObjectId::from_hex(hex)
+                .ok_or_else(|| CoreError::Capture(format!("manifest holds a bad object id for {rel}")))?;
+            rook_contain::files::validate(dest, Path::new(rel))
+                .map_err(|e| CoreError::Io { path: dest.join(rel), source: e })?;
+            // Deliberately do not retain all decoded bodies: a restore can be
+            // much larger than RAM. The second read trades CPU for bounded memory.
+            store.get(&id)?;
+            plan.push((rel, id));
         }
-        Ok(written)
+        for (rel, id) in &plan {
+            rook_contain::files::write(dest, Path::new(rel), &store.get(id)?)
+                .map_err(|e| CoreError::Io { path: dest.join(rel), source: e })?;
+        }
+        Ok(plan.len())
     }
 
     /// Paths that differ between two captures, as (path, change).
@@ -213,6 +221,25 @@ impl FileSet {
     pub fn referenced_objects(&self) -> Vec<ObjectId> {
         self.files.values().filter_map(|h| ObjectId::from_hex(h)).collect()
     }
+}
+
+pub(crate) fn validate_restore_plan(paths: impl IntoIterator<Item = PathBuf>) -> Result<()> {
+    let mut names = std::collections::BTreeSet::new();
+    for path in paths {
+        let normalized: PathBuf = path.components().filter(|p| *p != std::path::Component::CurDir).collect();
+        if !names.insert(normalized) {
+            return Err(CoreError::Capture("restore plan names the same destination twice".into()));
+        }
+    }
+    for path in &names {
+        if path.ancestors().skip(1).any(|parent| names.contains(parent)) {
+            return Err(CoreError::Capture(format!(
+                "restore plan uses a file as a parent of {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -256,6 +283,9 @@ pub fn capture_paths(
     let mut absent = Vec::new();
     let mut total = 0u64;
     for path in paths {
+        if rook_contain::files::is_write_temporary(path) {
+            continue;
+        }
         let Ok(meta) = std::fs::metadata(path) else {
             absent.push(rel(path));
             continue;

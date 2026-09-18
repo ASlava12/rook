@@ -164,11 +164,20 @@ impl Provider for Says {
     fn context_window(&self) -> usize {
         16_000
     }
-    async fn complete(&self, _request: Request) -> rook_llm::Result<Response> {
+    async fn complete(&self, request: Request) -> rook_llm::Result<Response> {
+        let text = if request
+            .messages
+            .first()
+            .is_some_and(|m| m.content.starts_with("Classify whether an assistant"))
+        {
+            r#"{"action":"finish"}"#
+        } else {
+            self.0
+        };
         Ok(Response {
             message: Message {
                 role: Role::Assistant,
-                content: self.0.into(),
+                content: text.into(),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
                 cache: false,

@@ -5,7 +5,7 @@ use crate::object::ObjectId;
 
 /// Bump only for changes that older builds cannot read. `Store::open` refuses a
 /// store written by a newer format rather than silently corrupting it.
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 
 /// hash -> postcard(ObjectMeta)
 pub const OBJECTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("objects");

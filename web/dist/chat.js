@@ -120,7 +120,8 @@ export function connect() {
       case 'spent': state.chat.spent = e; renderSettings(); break;
       case 'remembered': say('stat', `remembered: ${e.text}`); break;
       case 'forgot': say('stat', `forgot: ${e.text}`); break;
-      case 'error': say('err', e.message); done(); break;
+      case 'failed': say('err', e.message); done(); break;
+      case 'error': say('err', e.message); break;
       case 'cancelled': say('stat', '[stopped]'); done(); break;
       case 'interjected': say('you', `› ${e.text}`); say('stat', '(the turn will see this at its next step)'); break;
       case 'approval': askApproval(e); break;

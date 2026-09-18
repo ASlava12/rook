@@ -39,8 +39,8 @@ logical bytes written by the agent :    23.31 MiB
   after dedup (distinct objects)   :     5.29 MiB
   cold store, standalone zstd      :     0.63 MiB   ratio  8.4x
   warm store, trained dictionaries :     0.14 MiB   ratio 37.1x
-  on-disk total (index + objects)  :     1.07 MiB
-  end-to-end (logical -> on disk)  :     21.9x
+  on-disk total (index + objects)  :     4.02 MiB
+  end-to-end (logical -> on disk)  :     5.8x
 ```
 
 Reproduce it yourself: `cargo xtask compaction`.
@@ -445,11 +445,16 @@ ws://127.0.0.1:7717/api/chat?workspace=/path/to/a  # a conversation in one proje
 ws://127.0.0.1:7717/api/chat?workspace=/path/to/b  # and another, at the same time
 ```
 
-Each connection gets its own engine, looking at its own project, sharing one
-history, one memory and one search. How many are kept is
+Connections to the same project share an engine; different projects have their
+own engines, sharing one history, one memory and one search. How many are kept is
 `[server] max_projects`, because how many a daemon is asked for is decided by
-whoever connects; past it the least recently wanted is dropped and rebuilt when
-it is next named.
+whoever connects. Only idle engines are evicted; when all slots are held by
+connections or turns, a new project is refused until one becomes idle.
+
+The daemon accepts loopback `Host` authorities and checks browser `Origin` against
+that authority. For a reverse proxy or remote address, explicitly list the exact
+trusted `host:port` values in `[server] allowed_hosts = ["rook.example:8443"]` and
+restart the daemon after changing this list.
 
 Two connections naming the same workspace run at once as well. A call that is
 about to write claims those paths for as long as it takes, and a second turn
@@ -860,8 +865,12 @@ command takes that command away for good.
 
 An allow rule has to cover **every** part, not one of them: `ls && rm -rf ~` is
 not `ls`, and a write touching `src/main.rs` and `/etc/passwd` is not a write
-under `src`. A line the matcher cannot take apart — one with a `$(…)` in it — is
-asked about rather than assumed. Against a path, a plain rule lines up with a
+under `src`. Automatic allow-rules do not cover shell lines containing `$`,
+backticks, redirects (`<` or `>`), or backslashes, even inside quotes. Options
+that execute other commands or write output, such as `find -exec` and `rg --pre`,
+also prevent automatic matching. In `assist` these commands need approval; the
+prompt explains why the allow-rule did not apply. In `autonomous`, the stance
+still applies, subject to deny and ask rules. Against a path, a plain rule lines up with a
 directory boundary, so `src/` is not `notsrc/`; a regular expression is left to
 say what it says.
 
@@ -1059,7 +1068,7 @@ crowds out the conversation on every request.
 
 ```
 crates/
-  rook-contain  platform glue with no dependencies of its own, and the one place Win32 lives
+  rook-contain  platform and capability filesystem operations; no internal dependencies
   rook-store    content-addressed store: redb index, zstd dictionaries, gc, retention
   rook-skills   SKILL.md parsing, environment detection, version + variant resolution
   rook-core     the engine: config, agent loop, context budget, file captures

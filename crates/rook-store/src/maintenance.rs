@@ -32,9 +32,7 @@ pub struct GcOptions<'a> {
     ///
     /// `None` means no object here has children — true of a bare store and of
     /// nothing else. A caller that leaves it out of a `..Default::default()` for
-    /// a store that does hold manifests collects every file a checkpoint or a
-    /// skill version refers to, because the manifest is reachable and its
-    /// contents are not reachable through anything else.
+    /// a store that holds manifests is refused before anything is deleted.
     pub expand: Option<Expander<'a>>,
     /// Report what would be collected without deleting anything.
     pub dry_run: bool,
@@ -157,16 +155,20 @@ impl Store {
             if !reachable.insert(id.0) {
                 continue;
             }
-            let Some(expand) = opts.expand else { continue };
             let Some(meta) = self.stat_object(&id)? else { continue };
             // Only container kinds can name children; skip the read otherwise.
             let kind = Kind::from_u8(meta.kind);
             if !matches!(kind, Kind::Snapshot | Kind::Skill | Kind::Memory) {
                 continue;
             }
-            if let Ok(body) = self.get(&id) {
-                worklist.extend(expand(kind, &body));
-            }
+            let expand = opts.expand.ok_or_else(|| {
+                crate::StoreError::Encoding(
+                    "garbage collection needs a container expander for this store".into(),
+                )
+            })?;
+            // Incomplete reachability must never turn live children into garbage.
+            let body = self.get(&id)?;
+            worklist.extend(expand(kind, &body));
         }
         report.reachable = reachable.len() as u64;
 
@@ -329,12 +331,45 @@ impl Store {
             .collect())
     }
 
-    /// Worth running once a store has a few hundred objects, and again after
-    /// usage changes shape. Objects written earlier keep decoding: each records
-    /// the codec it was written with.
-    pub fn train_dictionaries(&self, sample_limit: usize, dict_size: usize) -> Result<Vec<(String, usize)>> {
+    /// Worth running once a store has a few hundred objects, and again when
+    /// somebody asks for it.
+    ///
+    /// `again` is false for the maintenance that runs on a timer, and that is
+    /// the whole of what it is for. Retraining is no longer destructive — the
+    /// dictionary it replaces is kept and objects written under it still
+    /// decode — but a daemon left running retrained every twenty-four hours,
+    /// which is a dictionary kept per day, per kind, for ever, in exchange for
+    /// a ratio that stopped moving after the first one. A person who has
+    /// changed what the store holds asks for it with `rook store train`.
+    /// The kinds that have no dictionary yet, and only those.
+    pub fn train_missing_dictionaries(
+        &self,
+        sample_limit: usize,
+        dict_size: usize,
+    ) -> Result<Vec<(String, usize)>> {
+        self.train_dictionaries(sample_limit, dict_size, false)
+    }
+
+    /// Every kind, replacing what is there. What `rook store train` does.
+    pub fn retrain_dictionaries(
+        &self,
+        sample_limit: usize,
+        dict_size: usize,
+    ) -> Result<Vec<(String, usize)>> {
+        self.train_dictionaries(sample_limit, dict_size, true)
+    }
+
+    fn train_dictionaries(
+        &self,
+        sample_limit: usize,
+        dict_size: usize,
+        again: bool,
+    ) -> Result<Vec<(String, usize)>> {
         let mut out = Vec::new();
         for kind in Kind::ALL {
+            if !again && self.dicts.has(kind) {
+                continue;
+            }
             let ids = self.list_objects(Some(kind), sample_limit)?;
             if ids.len() < crate::codec::MIN_SAMPLES {
                 continue;

@@ -52,10 +52,10 @@ fails the build rather than being noticed later. It is ranks rather than a list
 of edges: adding an ordinary dependency needs no edit there, and adding a crate
 needs one line.
 
-`rook-contain` is the floor: platform glue with no dependencies of its own, and
-the one place Win32 lives. Anything may reach for it — starting a process
-without a console window is its answer as much as containing one is — and it
-reaches for nothing.
+`rook-contain` is the floor: platform glue and capability filesystem operations,
+with no internal dependencies, and the one place Win32 lives. Anything may reach
+for it. Its external dependencies include cap-std and platform bindings; it must
+remain independently cross-checkable without the workspace's native C libraries.
 
 `rook-store` must not learn what a skill or a checkpoint is. When GC needs to know
 that a manifest keeps files alive, the caller passes an expander.

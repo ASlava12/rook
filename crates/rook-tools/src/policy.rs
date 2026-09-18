@@ -193,6 +193,9 @@ impl Risk {
         match self {
             Risk::ReadOnly => "read".into(),
             Risk::Write(paths) => format!("write {}", paths.join(", ")),
+            Risk::Execute(command) if commands_in(command).is_none() => {
+                format!("run `{command}` (automatic allow-rules do not apply to this shell syntax)")
+            }
             Risk::Execute(command) => format!("run `{command}`"),
             Risk::Network(url) => format!("fetch {url}"),
             Risk::Stance(to) => format!("work at `{}` for the rest of the run", to.as_str()),
@@ -668,7 +671,7 @@ fn unescaped(payload: &str) -> String {
 /// commands inside `$(…)` run too — so a line containing one is refused an
 /// answer here and goes to the prompt.
 fn commands_in(line: &str) -> Option<Vec<String>> {
-    if line.contains("$(") || line.contains('`') {
+    if line.contains(['$', '`', '>', '<', '\\']) {
         return None;
     }
     let parts: Vec<String> = line
@@ -676,6 +679,28 @@ fn commands_in(line: &str) -> Option<Vec<String>> {
         .map(|part| part.trim().to_string())
         .filter(|part| !part.is_empty())
         .collect();
+    if parts.iter().any(|part| {
+        let words = words(part);
+        words.iter().any(|word| {
+            matches!(
+                word.as_str(),
+                "-exec"
+                    | "-execdir"
+                    | "-ok"
+                    | "-okdir"
+                    | "-delete"
+                    | "-fprint"
+                    | "-fprint0"
+                    | "-fprintf"
+                    | "-fls"
+            ) || word.starts_with("--pre")
+                || word.starts_with("--output")
+                || word == "--ext-diff"
+                || word == "--textconv"
+        })
+    }) {
+        return None;
+    }
     (!parts.is_empty()).then_some(parts)
 }
 

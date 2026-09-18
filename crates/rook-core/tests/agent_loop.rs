@@ -40,6 +40,9 @@ impl Provider for ScriptedProvider {
         16_000
     }
     async fn complete(&self, request: Request) -> rook_llm::Result<Response> {
+        if let Some(answer) = completion_answer(&request) {
+            return Ok(answer);
+        }
         self.seen.lock().unwrap().push(request);
         let mut script = self.script.lock().unwrap();
         if script.is_empty() {
@@ -490,7 +493,11 @@ async fn a_plain_turn_is_logged_end_to_end() {
 
     let entries = f.rook.transcript(session, 0, 100, 4096).unwrap();
     let kinds: Vec<&str> = entries.iter().map(|e| e.kind.as_str()).collect();
-    assert_eq!(kinds, vec!["user", "assistant"], "both sides of the turn must be in the log");
+    assert_eq!(
+        kinds,
+        vec!["user", "assistant", "note"],
+        "both sides and the completion check must be in the log"
+    );
     assert_eq!(entries[0].body, "say hello");
 }
 
@@ -535,7 +542,7 @@ async fn a_tool_call_runs_and_both_halves_reach_the_log() {
 
     let entries = f.rook.transcript(session, 0, 100, 8192).unwrap();
     let kinds: Vec<&str> = entries.iter().map(|e| e.kind.as_str()).collect();
-    assert_eq!(kinds, vec!["user", "tool-call", "tool-result", "assistant"]);
+    assert_eq!(kinds, vec!["user", "tool-call", "tool-result", "assistant", "note"]);
     assert!(entries[2].body.contains("line two"), "{}", entries[2].body);
     // Read back, a call says what it was doing — the same words a front end
     // watching it live shows. It said `read_file` here, which answers "it read
@@ -969,6 +976,9 @@ impl Provider for ByPrompt {
         16_000
     }
     async fn complete(&self, request: Request) -> rook_llm::Result<Response> {
+        if let Some(answer) = completion_answer(&request) {
+            return Ok(answer);
+        }
         let last = request.messages.last().map(|m| m.content.clone()).unwrap_or_default();
         match self.0.iter().find(|(when, _)| last.contains(when)) {
             Some((_, answer)) => Ok(answer.clone()),
@@ -2098,7 +2108,10 @@ impl Provider for TimedProvider {
     fn context_window(&self) -> usize {
         16_000
     }
-    async fn complete(&self, _request: Request) -> rook_llm::Result<Response> {
+    async fn complete(&self, request: Request) -> rook_llm::Result<Response> {
+        if let Some(answer) = completion_answer(&request) {
+            return Ok(answer);
+        }
         let started = std::time::Instant::now();
         tokio::time::sleep(self.delay).await;
         let response = {
@@ -5334,6 +5347,9 @@ impl Provider for RefusesOnce {
         200_000
     }
     async fn complete(&self, request: Request) -> rook_llm::Result<Response> {
+        if let Some(answer) = completion_answer(&request) {
+            return Ok(answer);
+        }
         self.seen.lock().unwrap().push(request);
         let mut refused = self.refused.lock().unwrap();
         if !*refused {
@@ -5362,7 +5378,7 @@ async fn a_window_the_endpoint_refuses_is_summarised_to_fit_rather_than_fatal() 
     let outcome = AgentLoop::new(&f.rook, provider, session).run("do the thing").await.unwrap();
 
     assert_eq!(outcome.reply, "done", "the turn survives the refusal");
-    assert_eq!(seen.lock().unwrap().len(), 2, "refused once, asked again: {}", seen.lock().unwrap().len());
+    assert_eq!(seen.lock().unwrap().len(), 2, "refused once, asked again");
     assert!(outcome.compactions >= 1, "and summarised to fit rather than sending the same thing");
     let said = outcome.open_questions.join("\n");
     assert!(said.contains("context_window"), "it says what to set: {said}");
@@ -6160,7 +6176,10 @@ impl Provider for Silent {
     fn context_window(&self) -> usize {
         16_000
     }
-    async fn complete(&self, _request: Request) -> rook_llm::Result<Response> {
+    async fn complete(&self, request: Request) -> rook_llm::Result<Response> {
+        if let Some(answer) = completion_answer(&request) {
+            return Ok(answer);
+        }
         tokio::time::sleep(self.after).await;
         let mut script = self.script.lock().unwrap();
         match script.is_empty() {
@@ -6212,4 +6231,286 @@ async fn a_model_that_has_not_begun_to_answer_says_so_while_it_is_waited_for() {
         waits.iter().all(|(_, may)| *may >= patience),
         "and how long it may wait, which is what says whether to keep waiting: {waits:?}"
     );
+}
+
+#[tokio::test]
+async fn unreadable_user_history_is_visible_and_the_new_instruction_survives() {
+    use rook_store::{EventKind, Kind, NewEvent};
+    redirect_home();
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let session;
+    {
+        let store = Store::open(dir.path()).unwrap();
+        let samples: Vec<_> = (0..100).map(|i| format!("Please write the complete analysis of session {i} into the requested report file, including all findings and validation results. {}", "Repeated context for training. ".repeat(20)).into_bytes()).collect();
+        store.dicts().train(Kind::Message, &samples, 4096).unwrap();
+        session = rook_store::new_session_id();
+        store
+            .create_session(&rook_store::SessionMeta::new(
+                session,
+                "history",
+                workspace.path().to_string_lossy().as_ref(),
+                rook_store::now_unix(),
+            ))
+            .unwrap();
+        store
+            .append_event(session, NewEvent::new(EventKind::UserMessage, Kind::Message, &samples[0]))
+            .unwrap();
+        let event = store.events(session, 0, 1).unwrap().remove(0);
+        assert_eq!(
+            store.stat_object(&event.record.body).unwrap().unwrap().codec,
+            rook_store::codec::CODEC_ZSTD_DICT
+        );
+    }
+    std::fs::remove_file(dir.path().join("dicts/message.zdict")).unwrap();
+    let rook = Rook::from_parts(
+        Store::open(dir.path()).unwrap(),
+        Config::default(),
+        Environment::bare("linux", "x86_64", "0.4.0"),
+        SkillIndex::default(),
+        workspace.path().to_path_buf(),
+    );
+    let provider = ScriptedProvider::new(vec![reply("Earlier instruction unavailable")]);
+    let seen = provider.share();
+    AgentLoop::new(&rook, Arc::new(provider), session).run("Save the report to result.md").await.unwrap();
+    let requests = seen.lock().unwrap();
+    let messages = &requests[0].messages;
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.content.contains("message from the user was recorded but cannot be read back"))
+    );
+    assert!(messages.iter().any(|m| m.content.contains("Save the report to result.md")));
+}
+
+// Ordinary loop tests script the work, while completion-specific tests below
+// supply separate verdicts. These default checks carry no simulated bill.
+fn is_completion_request(request: &Request) -> bool {
+    request
+        .messages
+        .first()
+        .is_some_and(|m| m.content.starts_with("Classify whether an assistant's proposed last reply"))
+}
+
+fn completion_answer(request: &Request) -> Option<Response> {
+    is_completion_request(request).then(|| {
+        let mut answer = reply(r#"{"action":"finish"}"#);
+        answer.usage = Usage::default();
+        answer
+    })
+}
+
+struct CompletionProvider {
+    work: ScriptedProvider,
+    verdicts: Mutex<Vec<Response>>,
+    checks: Mutex<Vec<Request>>,
+    check_delay: std::time::Duration,
+}
+
+impl CompletionProvider {
+    fn new(work: Vec<Response>, verdicts: Vec<Response>) -> Self {
+        Self {
+            work: ScriptedProvider::new(work),
+            verdicts: Mutex::new(verdicts),
+            checks: Mutex::new(Vec::new()),
+            check_delay: std::time::Duration::ZERO,
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for CompletionProvider {
+    fn id(&self) -> &str {
+        "scripted/completion"
+    }
+    fn context_window(&self) -> usize {
+        16_000
+    }
+    async fn complete(&self, request: Request) -> rook_llm::Result<Response> {
+        if is_completion_request(&request) {
+            self.checks.lock().unwrap().push(request);
+            if !self.check_delay.is_zero() {
+                tokio::time::sleep(self.check_delay).await;
+            }
+            let mut verdicts = self.verdicts.lock().unwrap();
+            if verdicts.is_empty() {
+                return Err(LlmError::Other("completion unavailable".into()));
+            }
+            return Ok(verdicts.remove(0));
+        }
+        self.work.complete(request).await
+    }
+}
+
+#[tokio::test]
+async fn a_progress_only_end_turn_continues_and_writes_the_requested_report() {
+    let f = fixture();
+    let session = f.rook.start_session("premature-end").unwrap();
+    let promise = "The fresh remediation reads well. Let me delegate three deep sweeps in parallel while I continue on the core myself.";
+    let provider = Arc::new(CompletionProvider::new(
+        vec![
+            call("list_dir", serde_json::json!({"path":"."})),
+            reply(promise),
+            call(
+                "write_file",
+                serde_json::json!({"path":"report05_agent.md", "content":"Verified findings.\n"}),
+            ),
+            reply("Report written."),
+        ],
+        vec![reply(r#"{"action":"continue"}"#), reply(r#"{"action":"finish"}"#)],
+    ));
+    let mut agent = AgentLoop::new(&f.rook, provider.clone(), session);
+    agent.policy = Arc::new(
+        rook_tools::policy::Policy::compile(
+            rook_tools::policy::Stance::Assist,
+            &["report05_agent.md".into()],
+            &[],
+            &[],
+        )
+        .0,
+    );
+    let outcome = agent.run("Audit this directory and write report05_agent.md").await.unwrap();
+    assert_eq!(outcome.stopped, "end_turn");
+    assert_eq!(outcome.reply, "Report written.");
+    assert_eq!(
+        std::fs::read_to_string(f.workspace.path().join("report05_agent.md")).unwrap(),
+        "Verified findings.\n"
+    );
+    assert_eq!(outcome.input_tokens, 600, "both completion requests are charged");
+    assert_eq!(outcome.output_tokens, 120);
+    let checks = provider.checks.lock().unwrap();
+    assert_eq!(checks.len(), 2);
+    assert!(checks[0].messages.last().unwrap().content.contains(promise));
+    assert!(checks.iter().all(|r| r.tools.is_empty()));
+    let seen = provider.work.seen.lock().unwrap();
+    assert!(seen[2].messages.last().unwrap().content.contains("read-only restrictions"));
+}
+
+#[tokio::test]
+async fn repeated_promises_stop_explicitly_instead_of_claiming_completion() {
+    let f = fixture();
+    let session = f.rook.start_session("promises").unwrap();
+    let provider = Arc::new(CompletionProvider::new(
+        vec![reply("Сейчас продолжу проверку."); 3],
+        vec![reply(r#"{"action":"continue"}"#); 3],
+    ));
+    let outcome = AgentLoop::new(&f.rook, provider.clone(), session).run("Проверь код").await.unwrap();
+    assert_eq!(outcome.stopped, "incomplete");
+    assert_eq!(outcome.steps, 3);
+    assert_eq!(provider.checks.lock().unwrap().len(), 3);
+    assert!(!outcome.open_questions.is_empty());
+    assert!(rook_core::agent::why_it_stopped(&outcome.stopped).unwrap().contains("/continue"));
+    assert!(f.rook.transcript(session, 0, 100, 4096).unwrap().iter().any(|e| e.label == "incomplete"));
+}
+
+#[tokio::test]
+async fn final_answers_questions_and_blockers_end_without_a_continuation_nudge() {
+    for answer in [
+        "The answer is 42.",
+        "В какую папку записать отчёт?",
+        "I cannot access the repository.",
+        "Here is the plan you requested: first read the code.",
+    ] {
+        let f = fixture();
+        let session = f.rook.start_session("final-answer").unwrap();
+        let provider =
+            Arc::new(CompletionProvider::new(vec![reply(answer)], vec![reply(r#"{"action":"finish"}"#)]));
+        let outcome = AgentLoop::new(&f.rook, provider.clone(), session)
+            .run("Help with this task. Помоги с задачей.")
+            .await
+            .unwrap();
+        assert_eq!(outcome.stopped, "end_turn");
+        assert_eq!(outcome.reply, answer);
+        assert_eq!(provider.work.seen.lock().unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn an_unavailable_or_invalid_completion_check_is_not_a_success() {
+    for verdicts in [
+        vec![],
+        vec![reply("maybe")],
+        vec![call("write_file", serde_json::json!({"path":"unauthorized", "content":"x"}))],
+    ] {
+        let f = fixture();
+        let session = f.rook.start_session("unchecked").unwrap();
+        let provider = Arc::new(CompletionProvider::new(vec![reply("I will keep looking.")], verdicts));
+        let outcome = AgentLoop::new(&f.rook, provider, session).run("Inspect the code").await.unwrap();
+        assert_eq!(outcome.stopped, "completion_unchecked");
+        assert!(!outcome.open_questions.is_empty());
+        assert!(!f.workspace.path().join("unauthorized").exists());
+    }
+}
+
+#[tokio::test]
+async fn completion_does_not_bypass_a_turns_spend_limit() {
+    let f = fixture();
+    let session = f.rook.start_session("completion-budget").unwrap();
+    let provider = Arc::new(CompletionProvider::new(vec![reply("I will continue.")], vec![]));
+    let mut agent = AgentLoop::new(&f.rook, provider.clone(), session);
+    agent.max_turn_tokens = 120;
+    let outcome = agent.run("Inspect the code").await.unwrap();
+    assert_eq!(outcome.stopped, "budget");
+    assert!(provider.checks.lock().unwrap().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stalled_completion_check_has_a_bounded_wait() {
+    let f = fixture();
+    let session = f.rook.start_session("completion-timeout").unwrap();
+    let mut provider =
+        CompletionProvider::new(vec![reply("I will continue.")], vec![reply(r#"{"action":"finish"}"#)]);
+    provider.check_delay = std::time::Duration::from_secs(120);
+    let start = tokio::time::Instant::now();
+    let outcome = AgentLoop::new(&f.rook, Arc::new(provider), session).run("Inspect").await.unwrap();
+    assert_eq!(outcome.stopped, "completion_unchecked");
+    assert!(outcome.open_questions.iter().any(|q| q.contains("timed out")));
+    assert!(start.elapsed() < std::time::Duration::from_secs(65));
+}
+
+#[tokio::test]
+async fn a_continuation_reminder_does_not_override_readonly_policy() {
+    let mut config = Config::default();
+    config.sandbox.stance = rook_tools::policy::Stance::ReadOnly;
+    let f = fixture_with(config);
+    let session = f.rook.start_session("readonly-continuation").unwrap();
+    let provider = Arc::new(CompletionProvider::new(
+        vec![
+            reply("I will update the file now."),
+            call("write_file", serde_json::json!({"path":"forbidden.txt", "content":"changed"})),
+            reply("Writing is not permitted in this session."),
+        ],
+        vec![reply(r#"{"action":"continue"}"#), reply(r#"{"action":"finish"}"#)],
+    ));
+    let outcome = AgentLoop::new(&f.rook, provider, session).run("Inspect without editing").await.unwrap();
+    assert_eq!(outcome.stopped, "end_turn");
+    assert!(!f.workspace.path().join("forbidden.txt").exists());
+    assert!(outcome.files_changed.is_empty());
+    let entries = f.rook.transcript(session, 0, 100, 4096).unwrap();
+    assert!(entries.iter().any(|e| e.kind == "tool-result" && e.body.contains("read-only")));
+}
+
+#[tokio::test]
+async fn input_arriving_during_completion_is_delivered_before_the_turn_ends() {
+    let f = fixture();
+    let session = f.rook.start_session("completion-steering").unwrap();
+    let provider = Arc::new(CompletionProvider::new(
+        vec![reply("Done."), reply("Here is the plan.")],
+        vec![reply(r#"{"action":"finish"}"#); 2],
+    ));
+    let mut agent = AgentLoop::new(&f.rook, provider.clone(), session);
+    let saying = agent.interjections.clone();
+    let outcome = agent
+        .run_with("Inspect", |progress| {
+            if let rook_core::agent::Progress::Spent { input: 200, .. } = progress {
+                saying.say("Stop inspecting; only give a plan.");
+            }
+        })
+        .await
+        .unwrap();
+    assert_eq!(outcome.reply, "Here is the plan.");
+    assert_eq!(outcome.steps, 2);
+    let checks = provider.checks.lock().unwrap();
+    assert!(checks[1].messages.last().unwrap().content.contains("only give a plan"));
+    assert!(saying.take().is_empty());
 }

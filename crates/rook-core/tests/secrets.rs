@@ -27,6 +27,11 @@ impl Provider for Scripted {
         16_000
     }
     async fn complete(&self, request: Request) -> rook_llm::Result<Response> {
+        if request.messages.first().is_some_and(|m| m.content.starts_with("Classify whether an assistant")) {
+            let mut verdict = reply(r#"{"action":"finish"}"#);
+            verdict.usage = Usage::default();
+            return Ok(verdict);
+        }
         self.1.lock().unwrap().push(request);
         let mut script = self.0.lock().unwrap();
         match script.is_empty() {

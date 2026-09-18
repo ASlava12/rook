@@ -57,7 +57,7 @@ fn identical_content_is_stored_once() {
 
 #[test]
 fn large_objects_spill_to_files_small_ones_stay_inline() {
-    let (_d, s) = tmp_store();
+    let (d, s) = tmp_store();
     // Incompressible, so it stays above the inline threshold after encoding.
     let big = noise(3_000_000, 0xC0FFEE);
     let big_id = s.put(Kind::FileBlob, &big).unwrap();
@@ -66,6 +66,10 @@ fn large_objects_spill_to_files_small_ones_stay_inline() {
     assert!(s.stat_object(&big_id).unwrap().unwrap().external, "3 MB object should be external");
     assert!(!s.stat_object(&small_id).unwrap().unwrap().external, "small object should be inline");
     assert_eq!(s.get(&big_id).unwrap(), big);
+    drop(s);
+    let reopened = Store::open(d.path()).unwrap();
+    assert_eq!(reopened.get(&big_id).unwrap(), big);
+    assert_eq!(std::fs::read_dir(d.path().join("tmp")).unwrap().count(), 0);
 }
 
 #[test]
@@ -165,7 +169,7 @@ fn gc_collects_only_unreachable_objects() {
     s.create_session(&SessionMeta::new(sid, "t", "/tmp", rook_store::now_unix())).unwrap();
     s.append_event(sid, NewEvent::new(EventKind::UserMessage, Kind::Message, &message(1))).unwrap();
 
-    let pinned = s.put(Kind::Skill, b"a skill that a ref points at ...........").unwrap();
+    let pinned = s.put(Kind::Other, b"a payload that a ref points at .........").unwrap();
     s.set_ref("skills/keep@1.0.0", &pinned).unwrap();
     let loose = s.put(Kind::ToolResult, b"output nobody references ...............").unwrap();
 
@@ -187,13 +191,8 @@ fn gc_honours_the_expander_for_container_objects() {
     let manifest = s.put(Kind::Snapshot, leaf.to_hex().as_bytes()).unwrap();
     s.set_ref("snapshots/latest", &manifest).unwrap();
 
-    // Without an expander the leaf looks unreachable.
-    assert_eq!(
-        s.gc(&rook_store::GcOptions { dry_run: true, min_age_secs: 0, ..Default::default() })
-            .unwrap()
-            .collected,
-        1
-    );
+    assert!(s.gc(&rook_store::GcOptions { dry_run: true, min_age_secs: 0, ..Default::default() }).is_err());
+    assert!(s.has(&leaf).unwrap());
 
     let expand = |_kind: Kind, body: &[u8]| -> Vec<ObjectId> {
         std::str::from_utf8(body).ok().and_then(ObjectId::from_hex).into_iter().collect()
@@ -251,7 +250,7 @@ fn trained_dictionaries_beat_standalone_compression() {
         s.put(Kind::Message, c).unwrap();
     }
     let before = s.stats().unwrap();
-    let trained = s.train_dictionaries(400, 16 * 1024).unwrap();
+    let trained = s.retrain_dictionaries(400, 16 * 1024).unwrap();
     assert!(
         trained.iter().any(|(k, _)| k == "message"),
         "a dictionary should have been trained for the message kind"
@@ -440,7 +439,7 @@ fn each_kind_is_trained_on_its_own_and_only_with_enough_to_learn_from() {
     }
 
     let trained: Vec<String> =
-        s.train_dictionaries(400, 16 * 1024).unwrap().into_iter().map(|(k, _)| k).collect();
+        s.retrain_dictionaries(400, 16 * 1024).unwrap().into_iter().map(|(k, _)| k).collect();
 
     assert!(trained.contains(&"message".to_string()), "{trained:?}");
     assert!(
@@ -634,4 +633,122 @@ fn a_checkpoint_does_not_wait_for_anything_to_be_written() {
     assert_eq!(store.not_on_disk_yet(), 0, "and a checkpoint takes them all with it");
 
     assert_eq!(store.events(session, 0, usize::MAX).unwrap().len(), 11, "ten steps and the checkpoint");
+}
+
+#[test]
+fn retraining_preserves_every_generation_after_reopening() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut objects = Vec::new();
+    {
+        let store = Store::open(dir.path()).unwrap();
+        for generation in 0..3 {
+            let samples: Vec<_> = (0..100).map(|n| message(generation * 1000 + n)).collect();
+            assert!(store.dicts().train(Kind::Message, &samples, 4096).unwrap() > 0);
+            let data = message(generation * 1000 + 500);
+            let id = store.put(Kind::Message, &data).unwrap();
+            assert_eq!(store.stat_object(&id).unwrap().unwrap().codec, rook_store::codec::CODEC_ZSTD_DICT);
+            objects.push((id, data));
+        }
+    }
+    let store = Store::open(dir.path()).unwrap();
+    for (id, data) in objects {
+        assert_eq!(store.get(&id).unwrap(), data);
+    }
+}
+
+#[test]
+fn resubmitting_known_bytes_repairs_an_unreadable_dedup_hit() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = message(12345);
+    let id;
+    {
+        let store = Store::open(dir.path()).unwrap();
+        let samples: Vec<_> = (0..100).map(message).collect();
+        store.dicts().train(Kind::Message, &samples, 4096).unwrap();
+        id = store.put(Kind::Message, &data).unwrap();
+        assert_eq!(store.stat_object(&id).unwrap().unwrap().codec, rook_store::codec::CODEC_ZSTD_DICT);
+    }
+    std::fs::remove_file(dir.path().join("dicts/message.zdict")).unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    assert!(store.get(&id).is_err());
+    assert_eq!(store.put(Kind::Message, &data).unwrap(), id);
+    assert_eq!(store.get(&id).unwrap(), data);
+}
+
+#[test]
+fn scheduled_training_does_not_replace_existing_dictionaries() {
+    let (_dir, store) = tmp_store();
+    for n in 0..100 {
+        store.put(Kind::Message, &message(n)).unwrap();
+    }
+    assert!(!store.train_missing_dictionaries(100, 4096).unwrap().is_empty());
+    let before = store.dicts().get(Kind::Message).unwrap();
+    for n in 100..200 {
+        store.put(Kind::Message, &message(n)).unwrap();
+    }
+    assert!(store.train_missing_dictionaries(200, 4096).unwrap().is_empty());
+    assert_eq!(store.dicts().get(Kind::Message).unwrap(), before);
+}
+
+#[test]
+fn gc_does_not_sweep_when_a_live_container_cannot_be_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let child;
+    {
+        let store = Store::open(dir.path()).unwrap();
+        child = store.put(Kind::FileBlob, b"must survive").unwrap();
+        let samples: Vec<_> = (0..100).map(message).collect();
+        store.dicts().train(Kind::Snapshot, &samples, 4096).unwrap();
+        let parent = store.put(Kind::Snapshot, &message(1000)).unwrap();
+        assert_eq!(store.stat_object(&parent).unwrap().unwrap().codec, rook_store::codec::CODEC_ZSTD_DICT);
+        store.set_ref("checkpoint", &parent).unwrap();
+    }
+    std::fs::remove_file(dir.path().join("dicts/snapshot.zdict")).unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let expand = |_: Kind, _: &[u8]| vec![child];
+    assert!(
+        store
+            .gc(&rook_store::GcOptions { min_age_secs: 0, expand: Some(&expand), ..Default::default() })
+            .is_err()
+    );
+    assert_eq!(store.get(&child).unwrap(), b"must survive");
+}
+
+#[test]
+fn checkpoint_order_survives_forks_and_is_collected_with_its_session() {
+    let (_dir, store) = tmp_store();
+    let session = rook_store::new_session_id();
+    store.create_session(&SessionMeta::new(session, "original", "/tmp", rook_store::now_unix())).unwrap();
+    store.append_event(session, NewEvent::new(EventKind::Checkpoint, Kind::Snapshot, b"{}")).unwrap();
+    let key = format!("checkpoint-order/{session}/0");
+    let order = store.kv_get(&key).unwrap().unwrap();
+    let fork = rook_store::new_session_id();
+    store.fork_session(session, fork, 1, "copy").unwrap();
+    let fork_key = format!("checkpoint-order/{fork}/0");
+    assert_eq!(store.kv_get(&fork_key).unwrap(), Some(order));
+    store.delete_session(session).unwrap();
+    assert!(store.kv_get(&key).unwrap().is_none());
+    assert!(store.kv_get(&fork_key).unwrap().is_some());
+}
+#[test]
+fn a_legacy_store_upgrades_its_format_marker_before_retraining() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("format.json"), br#"{"format":1}"#).unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let marker: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("format.json")).unwrap()).unwrap();
+    assert_eq!(marker["format"], 2);
+    let id = store.put(Kind::Message, b"still readable").unwrap();
+    assert_eq!(store.get(&id).unwrap(), b"still readable");
+}
+
+#[test]
+fn malformed_format_markers_are_errors_without_panics_or_rewrites() {
+    for marker in ["42", "null", "{}", r#"{"format":4294967297}"#] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("format.json");
+        std::fs::write(&path, marker).unwrap();
+        assert!(Store::open(dir.path()).is_err());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), marker);
+    }
 }

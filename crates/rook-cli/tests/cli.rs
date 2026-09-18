@@ -314,10 +314,8 @@ fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
 /// `CARGO_BIN_EXE_` is only set for this package's own binaries, so the daemon
 /// has to be found rather than named.
 ///
-/// Built here if it is not there. Assuming `cargo test --workspace` had already
-/// built it was true of every incremental run and false of a clean one: the
-/// crates compile in dependency order and this test binary can run before the
-/// daemon is linked — which is what CI does, every time.
+/// Build once before daemon tests, including incremental runs: an existing
+/// binary may speak an older store format than the CLI being tested.
 fn rookd() -> PathBuf {
     static BUILT: std::sync::Once = std::sync::Once::new();
     let path = PathBuf::from(env!("CARGO_BIN_EXE_rook")).with_file_name(if cfg!(windows) {
@@ -327,9 +325,6 @@ fn rookd() -> PathBuf {
     });
 
     BUILT.call_once(|| {
-        if path.exists() {
-            return;
-        }
         let built = Command::new(env!("CARGO"))
             .args(["build", "-p", "rookd"])
             .current_dir(env!("CARGO_MANIFEST_DIR"))
@@ -861,8 +856,11 @@ fn the_repl_can_change_the_approvals_and_the_effort() {
     // or a habit holding `/mode` must keep working.
     let out = rook.chat("/mode\n/stance readonly\n/stance\n/effort\n/effort low\n/effort\n/quit\n");
 
-    let lines: Vec<&str> =
-        out.lines().filter(|l| ["assist", "readonly", "high", "low"].contains(l)).collect();
+    let lines: Vec<&str> = out
+        .lines()
+        .map(|l| l.trim_start_matches(['›', ' ']))
+        .filter(|l| ["assist", "readonly", "high", "low"].contains(l))
+        .collect();
     assert_eq!(lines, ["assist", "readonly", "high", "low"], "each reads back what was set:\n{out}");
 }
 

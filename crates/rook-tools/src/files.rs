@@ -73,8 +73,8 @@ impl Tool for ReadFile {
         // two thousand lines of it made its size the caller's problem in memory
         // as well as in context.
         let window = match ctx.files {
-            Some(_) => Window::of(&ctx.read_text(&path).await?, offset, limit),
-            None => match read_window(&path, offset, limit).await? {
+            Some(_) => Window::of(&ctx.read_text(&path).await?, offset, limit, ctx.max_output_bytes),
+            None => match read_window(ctx, &path, offset, limit, ctx.max_output_bytes).await? {
                 Some(window) => window,
                 None => {
                     return Ok(ToolOutcome::error(format!(
@@ -144,26 +144,39 @@ struct Window {
 impl Window {
     /// From text a front end already holds — an editor buffer is text by
     /// definition, and it is the editor's memory, not ours.
-    fn of(text: &str, offset: usize, limit: usize) -> Self {
-        let all: Vec<&str> = text.lines().collect();
-        Self {
-            lines: all.iter().skip(offset).take(limit).map(|l| (*l).to_string()).collect(),
-            total_lines: all.len(),
-            total_bytes: text.len(),
+    fn of(text: &str, offset: usize, limit: usize, budget: usize) -> Self {
+        let mut lines = Vec::new();
+        let mut retained = 0usize;
+        for line in text.lines().skip(offset).take(limit) {
+            if retained >= budget {
+                break;
+            }
+            let line = rook_llm::truncate(line, budget - retained);
+            retained = retained.saturating_add(line.len()).saturating_add(16);
+            lines.push(line);
         }
+        Self { lines, total_lines: text.lines().count(), total_bytes: text.len() }
     }
 }
 
 /// `None` when the file is not text. The check reads the first buffered chunk
 /// rather than the whole file, so deciding a file is not worth reading does not
 /// read it.
-async fn read_window(path: &std::path::Path, offset: usize, limit: usize) -> Result<Option<Window>> {
+async fn read_window(
+    ctx: &ToolContext,
+    path: &std::path::Path,
+    offset: usize,
+    limit: usize,
+    budget: usize,
+) -> Result<Option<Window>> {
     let owned = path.to_path_buf();
+    let ctx = ctx.clone();
     tokio::task::spawn_blocking(move || {
+        let (root, relative) = ctx.disk_path(&owned)?;
+        let file = rook_contain::files::open(&root, &relative)
+            .map_err(|source| ToolError::Io { path: owned.clone(), source })?;
         use std::io::{BufRead, Read};
 
-        let file =
-            std::fs::File::open(&owned).map_err(|e| ToolError::Io { path: owned.clone(), source: e })?;
         let total_bytes = file.metadata().map(|m| m.len() as usize).unwrap_or(0);
         let mut reader = std::io::BufReader::new(file);
 
@@ -173,6 +186,7 @@ async fn read_window(path: &std::path::Path, offset: usize, limit: usize) -> Res
         }
 
         let mut window = Window { lines: Vec::new(), total_lines: 0, total_bytes };
+        let mut retained = 0usize;
         let mut raw = Vec::new();
         loop {
             raw.clear();
@@ -195,9 +209,11 @@ async fn read_window(path: &std::path::Path, offset: usize, limit: usize) -> Res
             }
             let n = window.total_lines;
             window.total_lines += 1;
-            if n >= offset && window.lines.len() < limit {
+            if n >= offset && window.lines.len() < limit && retained < budget {
                 let text = String::from_utf8_lossy(&raw);
-                window.lines.push(text.trim_end_matches(['\n', '\r']).to_string());
+                let line = rook_llm::truncate(text.trim_end_matches(['\n', '\r']), budget - retained);
+                retained = retained.saturating_add(line.len()).saturating_add(16);
+                window.lines.push(line);
             }
         }
         Ok(Some(window))
@@ -363,7 +379,9 @@ impl Tool for DeleteFile {
             return Ok(refused);
         }
         let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        std::fs::remove_file(&path).map_err(|e| ToolError::Io { path: path.clone(), source: e })?;
+        let (root, relative) = ctx.disk_path(&path)?;
+        rook_contain::files::remove(&root, &relative)
+            .map_err(|e| ToolError::Io { path: path.clone(), source: e })?;
         Ok(ToolOutcome::ok(format!("deleted {} ({bytes} bytes)", path.display())).with("bytes", bytes))
     }
 
@@ -414,35 +432,12 @@ impl Tool for MoveFile {
     }
 
     async fn call(&self, ctx: &ToolContext, args: &serde_json::Value) -> Result<ToolOutcome> {
-        let from = ctx.resolve(&arg_str(args, self.name(), "from")?)?;
-        let to = ctx.resolve(&arg_str(args, self.name(), "to")?)?;
-        if let Some(refused) = not_a_file(&from, "this moves one file, so name the file to move") {
-            return Ok(refused);
-        }
-        // Refused rather than overwritten: a move that lands on something is a
-        // deletion nobody asked for, and the tool that deletes says so in its
-        // own name.
-        if to.exists() {
-            return Ok(ToolOutcome::error(format!(
-                "{} is already there — delete it first if that is what you meant, or move to a \
-                 path that is free",
-                to.display()
-            )));
-        }
-        if let Some(parent) = to.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| ToolError::Io { path: parent.to_path_buf(), source: e })?;
-        }
-        // Across filesystems `rename` fails with `EXDEV`, and a workspace with
-        // a mount inside it is an ordinary thing; copying and removing is the
-        // same move, more slowly.
-        if let Err(e) = std::fs::rename(&from, &to) {
-            std::fs::copy(&from, &to).map_err(|_| ToolError::Io { path: from.clone(), source: e })?;
-            std::fs::remove_file(&from).map_err(|e| ToolError::Io { path: from.clone(), source: e })?;
-        }
-        let bytes = std::fs::metadata(&to).map(|m| m.len()).unwrap_or(0);
-        Ok(ToolOutcome::ok(format!("moved {} to {} ({bytes} bytes)", from.display(), to.display()))
-            .with("bytes", bytes))
+        let from = arg_str(args, self.name(), "from")?;
+        let to = arg_str(args, self.name(), "to")?;
+        let ctx = ctx.clone();
+        tokio::task::spawn_blocking(move || move_one(&ctx, &from, &to))
+            .await
+            .map_err(|e| ToolError::Denied(format!("file mover failed: {e}")))?
     }
 
     async fn preview(&self, ctx: &ToolContext, args: &serde_json::Value) -> Option<String> {
@@ -466,6 +461,47 @@ impl Tool for MoveFile {
     fn overwrites(&self) -> bool {
         true
     }
+}
+
+// Resolve the parent without following the last entry: moving a link must not
+// silently move its target. Checkpoints represent regular files, not links.
+fn move_entry(ctx: &ToolContext, raw: &str) -> Result<std::path::PathBuf> {
+    let path = std::path::Path::new(raw);
+    let name = path.file_name().ok_or_else(|| ToolError::Invalid {
+        tool: "move_file".into(),
+        message: "name a file to move".into(),
+    })?;
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+    Ok(ctx.resolve(&parent.to_string_lossy())?.join(name))
+}
+
+fn move_one(ctx: &ToolContext, from: &str, to: &str) -> Result<ToolOutcome> {
+    let from = move_entry(ctx, from)?;
+    let to = move_entry(ctx, to)?;
+    if std::fs::symlink_metadata(&from).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Ok(ToolOutcome::error(
+            "moving symbolic links is not supported; the link and its target were left in place",
+        ));
+    }
+    if let Some(refused) = not_a_file(&from, "this moves one file, so name the file to move") {
+        return Ok(refused);
+    }
+    // Refused rather than overwritten: a move that lands on something is a
+    // deletion nobody asked for, and the tool that deletes says so in its
+    // own name.
+    if std::fs::symlink_metadata(&to).is_ok() {
+        return Ok(ToolOutcome::error(format!(
+            "{} is already there — delete it first if that is what you meant, or move to a \
+                 path that is free",
+            to.display()
+        )));
+    }
+    let (from_root, from_relative) = ctx.disk_path(&from)?;
+    let (to_root, to_relative) = ctx.disk_path(&to)?;
+    let bytes = rook_contain::files::move_file(&from_root, &from_relative, &to_root, &to_relative)
+        .map_err(|e| ToolError::Io { path: to.clone(), source: e })?;
+    Ok(ToolOutcome::ok(format!("moved {} to {} ({bytes} bytes)", from.display(), to.display()))
+        .with("bytes", bytes))
 }
 
 pub struct EditFile;
@@ -521,7 +557,7 @@ impl Tool for EditFile {
         // Every file worked out before any is written: a refactor that fails on
         // the third must not leave the first two changed, which is the rule this
         // already kept within one file.
-        for target in parse_targets(args)? {
+        for target in resolved_targets(ctx, args)? {
             let path = ctx.resolve(&target.path)?;
             if let Some(refused) = not_a_file(&path, "name the file to edit inside it. Nothing was written") {
                 return Ok(refused);
@@ -582,7 +618,7 @@ impl Tool for EditFile {
 
     async fn preview(&self, ctx: &ToolContext, args: &serde_json::Value) -> Option<String> {
         let mut shown = Vec::new();
-        for target in parse_targets(args).ok()? {
+        for target in resolved_targets(ctx, args).ok()? {
             let path = ctx.resolve(&target.path).ok()?;
             let before = ctx.read_text(&path).await.ok()?;
             // The same edits the call would make, against a copy nothing writes:
@@ -608,6 +644,14 @@ impl Tool for EditFile {
 struct Target {
     path: String,
     edits: Vec<Edit>,
+}
+
+fn resolved_targets(ctx: &ToolContext, args: &serde_json::Value) -> Result<Vec<Target>> {
+    let mut targets = parse_targets(args)?;
+    for target in &mut targets {
+        target.path = ctx.resolve(&target.path)?.to_string_lossy().into_owned();
+    }
+    distinct(targets)
 }
 
 /// Accepts `files` for several and `path` with `edits` for one, so a refactor
@@ -902,6 +946,9 @@ impl Tool for ListDir {
             .build()
             .flatten()
         {
+            if rook_contain::files::is_write_temporary(entry.path()) {
+                continue;
+            }
             if entry.depth() == 0 {
                 continue;
             }
@@ -926,5 +973,26 @@ impl Tool for ListDir {
         }
         Ok(ToolOutcome { content: body, is_error: false, truncated, full_bytes: 0, meta: Default::default() }
             .with("entries", total as u64))
+    }
+}
+
+#[cfg(test)]
+mod audit_tests {
+    #[tokio::test]
+    async fn a_window_retains_only_its_byte_budget() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("large");
+        let mut file = std::fs::File::create(&path).unwrap();
+        for _ in 0..64 {
+            writeln!(file, "{}", "x".repeat(64 * 1024)).unwrap();
+        }
+        drop(file);
+        let ctx = crate::ToolContext::new(dir.path().to_path_buf());
+        let budget = 64 * 1024;
+        let window = super::read_window(&ctx, &path, 0, usize::MAX, budget).await.unwrap().unwrap();
+        assert!(window.total_bytes > budget * 32);
+        assert!(window.lines.iter().map(String::len).sum::<usize>() <= budget);
+        assert_eq!(window.total_lines, 64);
     }
 }

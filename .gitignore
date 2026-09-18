@@ -1,4 +1,5 @@
 .env
+scratch
 /target
 **/*.rs.bk
 .DS_Store

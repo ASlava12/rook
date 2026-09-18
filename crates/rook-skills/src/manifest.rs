@@ -195,7 +195,7 @@ pub struct SkillManifest {
     pub license: Option<String>,
     #[serde(default)]
     pub keywords: Vec<String>,
-    /// Tools the skill is permitted to use, mirroring the spec's field name.
+    /// Informational compatibility metadata; this does not change Rook's approval policy.
     #[serde(default, rename = "allowed-tools")]
     pub allowed_tools: Vec<String>,
     #[serde(default)]

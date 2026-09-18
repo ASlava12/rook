@@ -225,6 +225,7 @@ impl Provider for Google {
         Ok(Box::pin(async_stream::try_stream! {
             let mut bytes = response.bytes_stream();
             let mut frames = crate::Frames::new();
+            let mut received = 0usize;
             // Whether anything has come back yet: until it has, the model is
             // still reading, and reading is the part that scales with the
             // prompt.
@@ -249,6 +250,8 @@ impl Provider for Google {
                     Ok(Some(chunk)) => chunk.map_err(|e| LlmError::unreachable(&endpoint, e))?,
                 };
                 said_anything = true;
+                received = received.saturating_add(chunk.len());
+                if received > crate::MOST_REPLY_BYTES { Err(LlmError::Decode("stream exceeded the response byte budget".into()))?; }
                 frames.feed(&chunk);
                 if frames.held() > MAX_FRAME_BYTES {
                     Err(LlmError::Decode("an event exceeded the frame cap".into()))?;

@@ -81,7 +81,7 @@ fn main() {
     }
 
     let cold = store.stats().unwrap();
-    let trained = store.train_dictionaries(512, 16 * 1024).unwrap();
+    let trained = store.retrain_dictionaries(512, 16 * 1024).unwrap();
 
     // Pass 2: same traffic into a store that already has the dictionaries.
     let dir2 = tempfile::tempdir().unwrap();

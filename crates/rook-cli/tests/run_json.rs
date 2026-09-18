@@ -8,23 +8,36 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::{Command, Stdio};
 
-/// Answers one request with a finished turn, in the OpenAI dialect the
-/// `openai-compatible` provider speaks.
+/// Answers the streamed turn and then the tools-free completion check.
 fn serve_one(reply: &'static str) -> String {
+    serve_sequence(vec![
+        ("text/event-stream", format!("data: {reply}\n\ndata: [DONE]\n\n")),
+        ("application/json", completion_verdict("finish")),
+    ])
+}
+
+fn completion_verdict(action: &str) -> String {
+    serde_json::json!({
+        "id": "check", "model": "test-model",
+        "choices": [{"index": 0, "message": {"role": "assistant",
+            "content": serde_json::json!({"action": action}).to_string()}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 2, "completion_tokens": 1}
+    })
+    .to_string()
+}
+
+fn serve_sequence(replies: Vec<(&'static str, String)>) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     std::thread::spawn(move || {
-        let Ok((mut socket, _)) = listener.accept() else { return };
-        read_request(&mut socket);
-        let body = format!("data: {reply}\n\ndata: [DONE]\n\n");
-        let _ = socket.write_all(
-            format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            )
-            .as_bytes(),
-        );
-        let _ = socket.flush();
+        for (mime, body) in replies {
+            let Ok((mut socket, _)) = listener.accept() else { return };
+            read_request(&mut socket);
+            let _ = socket.write_all(
+                format!("HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()
+            );
+            let _ = socket.flush();
+        }
     });
     format!("http://{addr}/v1")
 }
@@ -118,7 +131,7 @@ fn a_turn_run_for_a_script_is_one_object_and_nothing_else() {
     assert_eq!(parsed["outcome"]["reply"], "the sky is blue");
     assert_eq!(parsed["outcome"]["steps"], 1);
     assert_eq!(parsed["outcome"]["stopped"], "end_turn", "a script has to know it finished");
-    assert_eq!(parsed["outcome"]["input_tokens"], 10);
+    assert_eq!(parsed["outcome"]["input_tokens"], 12, "the completion check is charged too");
     assert!(parsed["session"].as_str().is_some_and(|s| !s.is_empty()), "{parsed}");
 }
 
@@ -185,4 +198,22 @@ fn a_turn_that_finished_exits_cleanly() {
 
     assert_eq!(code, 0, "{stderr}");
     assert!(!stderr.contains("rather than finishing"), "{stderr}");
+}
+
+#[test]
+fn repeated_progress_only_replies_exit_as_incomplete() {
+    let mut replies = Vec::new();
+    for _ in 0..3 {
+        let progress = answered("Let me continue the audit and write the report.");
+        replies.push(("text/event-stream", format!("data: {progress}\n\ndata: [DONE]\n\n")));
+        replies.push(("application/json", completion_verdict("continue")));
+    }
+    let endpoint = serve_sequence(replies);
+    let (stdout, stderr, code) =
+        run_with_status(&["--json", "run", "Audit this directory and write a report"], &endpoint, "");
+    assert_eq!(code, 2, "unfinished work must not succeed: {stderr}");
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(parsed["outcome"]["stopped"], "incomplete");
+    assert_eq!(parsed["outcome"]["steps"], 3);
+    assert!(stderr.contains("/continue"));
 }

@@ -47,7 +47,7 @@ pub struct Notification<'a> {
     pub params: serde_json::Value,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct Error {
     pub code: i64,
     pub message: String,

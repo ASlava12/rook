@@ -238,6 +238,7 @@ impl Provider for OpenAiCompatible {
         Ok(Box::pin(async_stream::try_stream! {
             let mut bytes = resp.bytes_stream();
             let mut frames = crate::Frames::new();
+            let mut received = 0usize;
             // Whether anything has come back yet: until it has, the model is
             // still reading, and reading is the part that scales with the
             // prompt.
@@ -262,6 +263,8 @@ impl Provider for OpenAiCompatible {
                     Ok(Some(chunk)) => chunk.map_err(|e| LlmError::unreachable(&endpoint, e))?,
                 };
                 said_anything = true;
+                received = received.saturating_add(chunk.len());
+                if received > crate::MOST_REPLY_BYTES { Err(LlmError::Decode("stream exceeded the response byte budget".into()))?; }
                 frames.feed(&chunk);
                 if frames.held() > MAX_FRAME_BYTES {
                     Err(LlmError::Decode(format!(
@@ -304,7 +307,7 @@ impl Provider for OpenAiCompatible {
                                     call.id.as_deref(),
                                     function.name.as_deref(),
                                     function.arguments.as_deref().unwrap_or_default(),
-                                );
+                                )?;
                             }
                             if let Some(reason) = choice.finish_reason {
                                 stop = Some(finish_reason(&reason));
@@ -315,7 +318,7 @@ impl Provider for OpenAiCompatible {
             }
 
             let had_tools = !tools.is_empty();
-            for call in tools.drain() {
+            for call in tools.drain()? {
                 yield Delta::ToolCall(call);
             }
             yield Delta::Done {

@@ -15,7 +15,17 @@ use crate::protocol::{Incoming, Notification, Request};
 use crate::transport::Transport;
 use crate::{McpError, Result, ServerConfig};
 
-type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Incoming>>>>;
+type Pending = Arc<std::sync::Mutex<HashMap<u64, oneshot::Sender<Incoming>>>>;
+
+struct Registered<'a> {
+    pending: &'a Pending,
+    id: u64,
+}
+impl Drop for Registered<'_> {
+    fn drop(&mut self) {
+        self.pending.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.id);
+    }
+}
 
 /// The tail of the server's stderr, kept so a failure can say what the server
 /// said about it. Bounded in lines and in each line, because a server dying in
@@ -178,7 +188,7 @@ impl Stdio {
             }
         });
 
-        let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+        let pending: Pending = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let reader_pending = pending.clone();
         let finished = Arc::new(AtomicBool::new(false));
         let reader_finished = finished.clone();
@@ -193,7 +203,8 @@ impl Stdio {
                 };
                 match message.id {
                     Some(id) => {
-                        if let Some(tx) = reader_pending.lock().await.remove(&id) {
+                        if let Some(tx) = reader_pending.lock().unwrap_or_else(|e| e.into_inner()).remove(&id)
+                        {
                             let _ = tx.send(message);
                         }
                     }
@@ -211,7 +222,7 @@ impl Stdio {
             // stopped there, and would wait for the timeout.
             reader_finished.store(true, Ordering::Relaxed);
             // The pipe closed: waiters would otherwise hang until their timeout.
-            reader_pending.lock().await.clear();
+            reader_pending.lock().unwrap_or_else(|e| e.into_inner()).clear();
         });
 
         Ok(Self {
@@ -248,35 +259,29 @@ impl Transport for Stdio {
     ) -> Result<Incoming> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id, tx);
+        self.pending.lock().unwrap_or_else(|e| e.into_inner()).insert(id, tx);
+        let _registered = Registered { pending: &self.pending, id };
         // After registering, so the two orders are both covered: an insert
         // before the reader's sweep is released by it, and one after sees this.
         if self.finished.load(Ordering::Relaxed) {
-            self.pending.lock().await.remove(&id);
+            self.pending.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
             return Err(McpError::Closed { server: self.name.clone(), said: self.heard.said() });
         }
 
         let line = serde_json::to_string(&Request { jsonrpc: "2.0", id, method, params }).map_err(|e| {
             McpError::Decode { server: self.name.clone(), method: method.into(), message: e.to_string() }
         })?;
-        if let Err(e) = self.write_line(&line).await {
-            self.pending.lock().await.remove(&id);
-            return Err(e);
-        }
-
-        match tokio::time::timeout(timeout, rx).await {
-            Err(_) => {
-                self.pending.lock().await.remove(&id);
-                Err(McpError::Timeout {
-                    server: self.name.clone(),
-                    method: method.into(),
-                    timeout,
-                    said: self.heard.said(),
-                })
-            }
-            Ok(Err(_)) => Err(McpError::Closed { server: self.name.clone(), said: self.heard.said() }),
-            Ok(Ok(message)) => Ok(message),
-        }
+        tokio::time::timeout(timeout, async {
+            self.write_line(&line).await?;
+            rx.await.map_err(|_| McpError::Closed { server: self.name.clone(), said: self.heard.said() })
+        })
+        .await
+        .map_err(|_| McpError::Timeout {
+            server: self.name.clone(),
+            method: method.into(),
+            timeout,
+            said: self.heard.said(),
+        })?
     }
 
     async fn notify(&self, method: &str, params: Option<serde_json::Value>) -> Result<()> {

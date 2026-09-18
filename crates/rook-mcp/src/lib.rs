@@ -289,8 +289,19 @@ impl Server {
             // A dead subprocess is worth one restart and one retry. Anything the
             // server itself answered — an rpc error, a decode failure — is the
             // server working, and restarting it would only lose the answer.
-            Err(e) if e.is_transport() && self.restart().await => {
+            Err(e) if e.is_transport() && method != "tools/call" && self.restart().await => {
                 self.transport.read().await.request(method, params, timeout).await?
+            }
+            Err(e) if method == "tools/call" && e.is_transport() => {
+                // Repair the connection for a later explicit call, without
+                // repeating an action whose result was lost.
+                self.restart().await;
+                return Err(McpError::Transport {
+                    server: self.name.clone(),
+                    message: format!(
+                        "tool outcome is unknown; it may have completed and was not retried: {e}"
+                    ),
+                });
             }
             Err(e) => return Err(e),
         };

@@ -4,6 +4,7 @@
 //! telling the user to stop the daemon, a read goes over its API and prints the
 //! same thing — the difference should not be visible unless something fails.
 
+use crate::remote::escaped;
 use anyhow::{Context, Result, bail};
 use serde::de::DeserializeOwned;
 
@@ -1001,19 +1002,6 @@ fn changed_note(changed: &[String]) -> String {
         true => "checked every page against its source: none had changed".into(),
         false => format!("read again: {}", changed.join(", ")),
     }
-}
-
-/// A query safe to paste into a url. Written out for the same reason as the one
-/// in `rook-tools`: one rule, and the crate that does it properly is a
-/// dependency for ten lines.
-fn escaped(query: &str) -> String {
-    query
-        .bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
-            other => format!("%{other:02X}"),
-        })
-        .collect()
 }
 
 /// What a refused routed call says.

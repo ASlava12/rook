@@ -104,8 +104,16 @@ impl Skill {
     pub fn load(dir: impl AsRef<Path>, source: SkillSource) -> Result<Self> {
         let dir = dir.as_ref().to_path_buf();
         let path = skill_file(&dir).ok_or_else(|| SkillError::NotFound(dir.display().to_string()))?;
-        let text = std::fs::read_to_string(&path).map_err(|e| SkillError::io(&path, e))?;
+        let text = rook_contain::files::read_text(
+            &dir,
+            Path::new(path.file_name().unwrap_or_default()),
+            1024 * 1024,
+        )
+        .map_err(|e| SkillError::io(&path, e))?;
         let (manifest, body) = manifest::parse(&text, &path)?;
+        if !manifest.allowed_tools.is_empty() {
+            tracing::warn!(skill = %manifest.name, "allowed-tools is informational metadata; Rook's approval policy controls tool access");
+        }
         Ok(Self { manifest, body, dir, source })
     }
 
@@ -151,7 +159,8 @@ impl Skill {
             None => Ok((self.body.clone(), None)),
             Some(v) => {
                 let path = self.dir.join(&v.body);
-                let text = std::fs::read_to_string(&path).map_err(|e| SkillError::io(&path, e))?;
+                let text = rook_contain::files::read_text(&self.dir, &v.body, 1024 * 1024)
+                    .map_err(|e| SkillError::io(&path, e))?;
                 Ok((text, Some(v.clone())))
             }
         }

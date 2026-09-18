@@ -303,6 +303,15 @@ async fn scripted_call(tool: &str, arguments: serde_json::Value) -> String {
             let _ = socket.write_all(format!("data: {frame}\n\ndata: [DONE]\n\n").as_bytes()).await;
             let _ = socket.flush().await;
         }
+        let Ok((mut socket, _)) = listener.accept().await else { return };
+        let mut scratch = [0u8; 32768];
+        let _ = socket.read(&mut scratch).await;
+        let body = serde_json::json!({"choices": [{"message": {"role": "assistant",
+            "content": "{\"action\":\"finish\"}"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1}})
+        .to_string();
+        let _ = socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await;
+        let _ = socket.flush().await;
     });
     format!("http://{addr}")
 }
@@ -658,4 +667,27 @@ async fn the_two_ways_to_set_the_mode_reach_the_same_policy() {
 
     assert_eq!(mode["currentValue"], "autonomous", "the older message must move the newer view: {after}");
     assert_eq!(after["result"]["modes"]["currentModeId"], "autonomous");
+}
+
+#[tokio::test]
+async fn a_failed_prompt_is_not_answered_again_when_cancelled() {
+    let mut config = Config::default();
+    config.agent.model = "missing-provider/model".into();
+    let mut editor = Editor::start_with(config, |_| {});
+    let created = editor.call(1, "session/new", serde_json::json!({"cwd":"/tmp", "mcpServers":[]})).await;
+    let sid = created["result"]["sessionId"].clone();
+    let first = editor
+        .call(
+            2,
+            "session/prompt",
+            serde_json::json!({"sessionId":sid,"prompt":[{"type":"text","text":"hi"}]}),
+        )
+        .await;
+    assert!(first.get("error").is_some());
+    editor.notify("session/cancel", serde_json::json!({"sessionId":sid})).await;
+    // A following request is the barrier: the next response must be its own.
+    let barrier = serde_json::json!({"jsonrpc":"2.0", "id":3, "method":"session/list", "params":{}});
+    editor.stdin.write_all(format!("{barrier}\n").as_bytes()).await.unwrap();
+    let next = editor.next().await;
+    assert_eq!(next["id"], 3);
 }

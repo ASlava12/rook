@@ -7,6 +7,10 @@ rust-version.workspace = true
 description = "Containing a command on Windows: a low integrity level, and the directories it may write labelled for it"
 
 [dependencies]
+cap-std = "4.0.3"
+
+[dev-dependencies]
+tempfile = "3.27.0"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

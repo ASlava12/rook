@@ -18,6 +18,7 @@ use crate::AppState;
 type Shared = Arc<AppState>;
 
 pub fn router(state: Shared) -> Router {
+    let allowed = state.rook.try_read().map(|r| r.config.server.allowed_hosts.clone()).unwrap_or_default();
     Router::new()
         .route("/api/health", get(health))
         .route("/api/store/stats", get(stats))
@@ -73,6 +74,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/jobs/{id}/stop", post(stop_job))
         .route("/api/search", get(search))
         .route("/api/files", get(naming))
+        .layer(axum::middleware::from_fn_with_state(allowed, crate::chat::trusted_authority))
         .with_state(state)
 }
 
@@ -1355,6 +1357,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
+                    .header("host", "localhost")
                     .method("POST")
                     .uri(path)
                     .header("content-type", "application/json")
@@ -1372,7 +1375,7 @@ mod tests {
         let response = f
             .router
             .clone()
-            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .oneshot(Request::builder().header("host", "localhost").uri(path).body(Body::empty()).unwrap())
             .await
             .unwrap();
         let status = response.status();
@@ -1827,6 +1830,7 @@ mod tests {
             "/api/checkpoints",
         ] {
             let simple = Request::builder()
+                .header("host", "localhost")
                 .method("POST")
                 .uri(path)
                 .header("content-type", "text/plain;charset=UTF-8")
@@ -1836,7 +1840,7 @@ mod tests {
             let answered = f.router.clone().oneshot(simple).await.unwrap();
             assert_eq!(
                 answered.status(),
-                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                StatusCode::FORBIDDEN,
                 "{path} accepted a request no browser had to ask permission for"
             );
         }
@@ -1887,6 +1891,7 @@ mod tests {
             let response = router
                 .oneshot(
                     Request::builder()
+                        .header("host", "localhost")
                         .method("POST")
                         .uri("/api/maintenance")
                         .header("content-type", "application/json")
@@ -1918,6 +1923,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
+                    .header("host", "localhost")
                     .method("POST")
                     .uri("/api/maintenance")
                     .header("content-type", "application/json")
@@ -2042,5 +2048,46 @@ mod tests {
         assert!(refused.contains("not a directory"), "{refused}");
         let missing = rook.move_session(f.session, &dir.path().join("nowhere")).unwrap_err().to_string();
         assert!(missing.contains("nowhere"), "the refusal names the path it could not reach: {missing}");
+    }
+    #[tokio::test]
+    async fn matching_foreign_host_and_origin_do_not_authorize_the_api() {
+        let f = fixture();
+        for path in ["/api/health", "/api/sessions", "/api/chat"] {
+            let request = Request::builder()
+                .uri(path)
+                .header("host", "audit.invalid:7717")
+                .header("origin", "http://audit.invalid:7717")
+                .body(Body::empty())
+                .unwrap();
+            assert_eq!(f.router.clone().oneshot(request).await.unwrap().status(), StatusCode::FORBIDDEN);
+        }
+    }
+    #[tokio::test]
+    async fn config_reload_does_not_queue_a_writer_behind_a_turn() {
+        let f = fixture();
+        let held = f.state.rook.read().await;
+        std::fs::write(&f.state.config_path, "[agent]\nmodel = \"lmstudio/reloaded\"\n").unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), f.state.config_if_changed())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(f.state.rook.try_read().is_ok());
+        drop(held);
+        assert!(f.state.config_if_changed().await.is_some());
+    }
+    #[tokio::test]
+    async fn active_workspace_engines_are_not_evicted() {
+        let f = fixture();
+        let dirs: Vec<_> = (0..4).map(|_| tempfile::tempdir().unwrap()).collect();
+        let first = f.state.engine_for(Some(dirs[0].path())).await.unwrap();
+        let second = f.state.engine_for(Some(dirs[1].path())).await.unwrap();
+        let third = f.state.engine_for(Some(dirs[2].path())).await.unwrap();
+        assert!(f.state.engine_for(Some(dirs[3].path())).await.is_err());
+        assert!(Arc::ptr_eq(&first, &f.state.engine_for(Some(dirs[0].path())).await.unwrap()));
+        drop(second);
+        drop(third);
+        assert!(f.state.engine_for(Some(dirs[3].path())).await.is_ok());
     }
 }

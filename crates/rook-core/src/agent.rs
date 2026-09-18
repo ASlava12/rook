@@ -195,6 +195,12 @@ pub fn why_it_stopped(stopped: &str) -> Option<String> {
         "max_steps" => carry_on("the step limit", "`[agent] max_steps`"),
         "budget" => carry_on("the spend limit", "`[agent] max_turn_tokens`"),
         "time" => carry_on("the time limit", "`[agent] max_turn_secs`"),
+        "incomplete" => {
+            "the model kept promising further work without performing it; `/continue` resumes the task".into()
+        }
+        "completion_unchecked" => {
+            "could not determine whether the model finished; `/continue` resumes the task".into()
+        }
         other => format!("the turn ended as {other:?} rather than finishing"),
     })
 }
@@ -1512,7 +1518,25 @@ impl<'a> AgentLoop<'a> {
         for event in events {
             let body = match self.rook.store.get(&event.record.body) {
                 Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-                Err(_) => continue,
+                // Preserve a visible gap: dropping an unreadable instruction
+                // silently makes the model continue a different conversation.
+                Err(why) => {
+                    tracing::warn!(
+                        session = %rook_store::format_session_id(self.session),
+                        at = event.record.ts,
+                        "an event could not be read back and is a hole in this request: {why}"
+                    );
+                    format!(
+                        "[this {} was recorded but cannot be read back from the store: {why}. \
+                         Its content is currently unavailable. If it mattered, say so and ask for it \
+                         again rather than guessing what it said.]",
+                        match event.record.kind {
+                            EventKind::UserMessage => "message from the user",
+                            EventKind::ToolResult => "tool result",
+                            _ => "part of the conversation",
+                        }
+                    )
+                }
             };
             if let Some(gap) = gap_before(last_at, event.record.ts) {
                 messages.push(Message::user(format!("[{gap} later]")));
@@ -2058,6 +2082,7 @@ impl<'a> AgentLoop<'a> {
         let mut looping = 0usize;
         let mut stuck = false;
         let mut checked_goal = false;
+        let mut completion_retries = 0;
         let mut worth_compacting = true;
         // Once per turn: an endpoint that refuses the length twice is not
         // refusing an assumption, and summarising again would spend a call to
@@ -2487,6 +2512,85 @@ impl<'a> AgentLoop<'a> {
                             ))),
                         }
                     }
+                    // EndTurn closes a model message, including a progress-only
+                    // "Let me delegate three sweeps". Check its intent before
+                    // treating it as the end of the user's task. Checkers already
+                    // have their own verdict protocol and must not check themselves.
+                    if !self.checking
+                        && !cut
+                        && response.stop_reason == rook_llm::StopReason::EndTurn
+                        && !response.message.content.trim().is_empty()
+                    {
+                        let decision = self
+                            .completion_check(
+                                prompt,
+                                messages
+                                    .iter()
+                                    .rev()
+                                    .find(|m| m.role == Role::User)
+                                    .map(|m| m.content.as_str())
+                                    .unwrap_or(prompt),
+                                &response.message.content,
+                                &mut outcome,
+                                &mut on_progress,
+                            )
+                            .await;
+                        // A new instruction can arrive during the check too.
+                        let said = self.interjections.take();
+                        if !said.is_empty() {
+                            messages.push(carried.clone());
+                            for text in said {
+                                self.rook.log(
+                                    self.session,
+                                    EventKind::UserMessage,
+                                    "while running",
+                                    &text,
+                                )?;
+                                on_progress(Progress::Heard { text: &text });
+                                messages.push(Message::user(&text));
+                            }
+                            continue;
+                        }
+                        match decision {
+                            Ok(crate::completion::Action::Finish) => {}
+                            Ok(crate::completion::Action::Continue) if completion_retries < 2 => {
+                                completion_retries += 1;
+                                self.rook.log(
+                                    self.session,
+                                    EventKind::Note,
+                                    "completion",
+                                    crate::completion::CONTINUE,
+                                )?;
+                                messages.push(carried.clone());
+                                messages.push(Message::user(crate::completion::CONTINUE));
+                                continue;
+                            }
+                            decision => {
+                                let (stopped, note) = match decision {
+                                    Ok(_) => (
+                                        "incomplete",
+                                        "the model repeatedly announced further work without performing it"
+                                            .to_owned(),
+                                    ),
+                                    Err(note) => (
+                                        if self.out_of_time() {
+                                            "time"
+                                        } else if self.overspent(&outcome) {
+                                            "budget"
+                                        } else {
+                                            "completion_unchecked"
+                                        },
+                                        note,
+                                    ),
+                                };
+                                outcome.stopped = stopped.into();
+                                self.rook.log(self.session, EventKind::Note, stopped, &note)?;
+                                self.report(Reported::Open(note));
+                                self.end_of_turn(&mut outcome).await;
+                                return Ok(outcome);
+                            }
+                        }
+                    }
                     outcome.stopped = response.stop_reason.as_str().into();
                     // Ending on the output limit is the model having no room to
                     // finish, not a turn that finished: asked once to go on it
@@ -2523,6 +2627,7 @@ impl<'a> AgentLoop<'a> {
                 continue;
             }
 
+            completion_retries = 0;
             // Two calls given one id would be replayed as two results carrying
             // it, which every dialect rejects — so the model's mistake would
             // come back as an opaque error from the provider, after the work had
@@ -3494,6 +3599,63 @@ impl<'a> AgentLoop<'a> {
             }
             Err(e) => (format!("could not check {claim:?}: {e}"), None),
         }
+    }
+
+    async fn completion_check(
+        &self,
+        task: &str,
+        latest: &str,
+        reply: &str,
+        outcome: &mut TurnOutcome,
+        on_progress: &mut impl FnMut(Progress<'_>),
+    ) -> std::result::Result<crate::completion::Action, String> {
+        if self.overspent(outcome) {
+            return Err(self.spend_note());
+        }
+        if self.out_of_time() {
+            return Err(self.time_note());
+        }
+        let mut request = crate::completion::request(task, latest, reply);
+        if self.max_turn_tokens > 0 {
+            request.max_output_tokens =
+                u64::from(request.max_output_tokens).min(self.left_to_spend(outcome)) as u32;
+        }
+        let mut patience = std::time::Duration::from_secs(60);
+        if let Some(by) = self.by {
+            patience = patience.min(by.saturating_duration_since(std::time::Instant::now()));
+        }
+        let response = saying_it_waits(
+            tokio::time::timeout(patience, self.provider.complete(request)),
+            patience,
+            &mut *on_progress,
+        )
+        .await
+        .map_err(|_| "completion check timed out; task completion is unknown".to_owned())?
+        .map_err(|e| format!("completion check failed; task completion is unknown: {e}"))?;
+        outcome.input_tokens = outcome.input_tokens.saturating_add(response.usage.input_tokens);
+        outcome.output_tokens = outcome.output_tokens.saturating_add(response.usage.output_tokens);
+        outcome.cached_tokens = outcome.cached_tokens.saturating_add(response.usage.cache_read_tokens);
+        on_progress(Progress::Spent {
+            input: outcome.input_tokens,
+            output: outcome.output_tokens,
+            cached: outcome.cached_tokens,
+        });
+        self.rook
+            .store
+            .append_event(
+                self.session,
+                rook_store::NewEvent::new(
+                    EventKind::Note,
+                    rook_store::Kind::Message,
+                    response.message.content.as_bytes(),
+                )
+                .label("completion check")
+                .usage(response.usage.input_tokens, response.usage.output_tokens),
+            )
+            .map_err(|e| e.to_string())?;
+        crate::completion::verdict(&response).ok_or_else(|| {
+            "completion check returned no valid verdict; task completion is unknown".to_owned()
+        })
     }
 
     /// Whether the goal is met, asked of a checker before an autonomous turn

@@ -140,51 +140,53 @@ impl Transport for Http {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let body = Request { jsonrpc: "2.0", id, method, params };
 
-        let response =
-            tokio::time::timeout(timeout, self.post(&body)).await.map_err(|_| McpError::Timeout {
-                server: self.name.clone(),
-                method: method.into(),
-                timeout,
-                said: String::new(),
-            })??;
-
-        let status = response.status();
-        let event_stream = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|t| t.starts_with("text/event-stream"));
-
-        // Said as what it is rather than as a status: a 401 is the one
-        // failure here a person can act on, and the header is where the
-        // authorisation server is named.
-        if status == reqwest::StatusCode::UNAUTHORIZED {
-            let offered = response
+        tokio::time::timeout(timeout, async {
+            let response = self.post(&body).await?;
+            let status = response.status();
+            let event_stream = response
                 .headers()
-                .get_all(reqwest::header::WWW_AUTHENTICATE)
-                .iter()
-                .filter_map(|value| value.to_str().ok())
-                .map(str::to_string)
-                .collect();
-            return Err(McpError::Unauthorized { server: self.name.clone(), offered });
-        }
-        if !status.is_success() {
-            return Err(McpError::Transport {
-                server: self.name.clone(),
-                message: format!("{status}: {}", quoted_text(response).await),
-            });
-        }
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|t| t.starts_with("text/event-stream"));
 
-        if event_stream {
-            read_event_stream(&self.name, method, id, response, timeout).await
-        } else {
-            let text = whole_text(response, &self.name).await?;
-            serde_json::from_str(&text).map_err(|e| McpError::Decode {
-                server: self.name.clone(),
-                method: method.into(),
-                message: format!("{e}: {}", rook_llm::truncate(&text, 300)),
-            })
-        }
+            // Said as what it is rather than as a status: a 401 is the one
+            // failure here a person can act on, and the header is where the
+            // authorisation server is named.
+            if status == reqwest::StatusCode::UNAUTHORIZED {
+                let offered = response
+                    .headers()
+                    .get_all(reqwest::header::WWW_AUTHENTICATE)
+                    .iter()
+                    .filter_map(|value| value.to_str().ok())
+                    .map(str::to_string)
+                    .collect();
+                return Err(McpError::Unauthorized { server: self.name.clone(), offered });
+            }
+            if !status.is_success() {
+                return Err(McpError::Transport {
+                    server: self.name.clone(),
+                    message: format!("{status}: {}", quoted_text(response).await),
+                });
+            }
+
+            if event_stream {
+                read_event_stream(&self.name, method, id, response, timeout).await
+            } else {
+                let text = whole_text(response, &self.name).await?;
+                serde_json::from_str(&text).map_err(|e| McpError::Decode {
+                    server: self.name.clone(),
+                    method: method.into(),
+                    message: format!("{e}: {}", rook_llm::truncate(&text, 300)),
+                })
+            }
+        })
+        .await
+        .map_err(|_| McpError::Timeout {
+            server: self.name.clone(),
+            method: method.into(),
+            timeout,
+            said: String::new(),
+        })?
     }
 
     async fn notify(&self, method: &str, params: Option<serde_json::Value>) -> Result<()> {

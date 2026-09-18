@@ -169,10 +169,8 @@ async fn a_leading_slash_is_told_from_an_attempt_to_leave_the_workspace() {
 /// outside the workspace, so redirecting a write that goes around the sandbox
 /// would have been worth the race.
 ///
-/// What is left is narrower still: a real directory in that canonical path
-/// would have to be replaced by a symlink between these two lines. Written down
-/// rather than defended against, because defending against it means opening
-/// every component by descriptor, on three platforms, in the hot path.
+/// A later parent-directory swap is separately covered by descriptor-relative
+/// I/O, tested below using the already-resolved path.
 #[cfg(unix)]
 #[test]
 fn a_resolved_path_has_already_been_through_its_symlinks() {
@@ -204,4 +202,17 @@ fn a_resolved_path_has_already_been_through_its_symlinks() {
         "the swap has nothing to act on: {}",
         resolved.display()
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn replacing_a_resolved_parent_cannot_redirect_the_actual_write() {
+    let d = dirs();
+    std::fs::create_dir(d.workspace.join("real")).unwrap();
+    let ctx = ToolContext::new(d.workspace.clone());
+    let resolved = ctx.resolve("real/file.txt").unwrap();
+    std::fs::rename(d.workspace.join("real"), d.workspace.join("old")).unwrap();
+    link(&d.outside, &d.workspace.join("real"));
+    assert!(ctx.write_text(&resolved, "must stay inside").await.is_err());
+    assert!(!d.outside.join("file.txt").exists());
 }

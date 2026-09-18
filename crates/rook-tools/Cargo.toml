@@ -8,12 +8,8 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-# Not `cfg(windows)` any more, which is what it was while the only thing wanted
-# from it was a job object. `printed` is wanted on every platform — it is the
-# one place a command's bytes become text — and the crate costs nothing off
-# Windows, where it has no dependencies of its own and compiles to almost
-# nothing. As a Windows-only dependency it compiled here and broke every other
-# platform, which is the failure this line exists to not repeat.
+# Process groups, output decoding and capability filesystem I/O are used on
+# every platform; this must not become a Windows-only dependency.
 rook-contain = { path = "../rook-contain" }
 async-trait = "0.1.92"
 ignore = "0.4.33"

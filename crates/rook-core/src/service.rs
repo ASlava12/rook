@@ -65,7 +65,7 @@ pub struct Rook {
     /// on its own — it replaces exact text, and text another turn has changed is
     /// not there to replace — but `write_file` overwrites whole, so the loser of
     /// that race silently loses its work.
-    writing: std::sync::Mutex<BTreeMap<PathBuf, Held>>,
+    writing: std::sync::Mutex<BTreeMap<PathBuf, Claim>>,
     /// Where the whole of a runaway command's output is kept.
     ///
     /// A field rather than [`paths::output_dir`] because `from_parts` exists so
@@ -91,6 +91,13 @@ pub struct Held {
     pub since: i64,
 }
 
+#[derive(Clone, Copy)]
+struct Claim {
+    held: Held,
+    token: u64,
+    leases: usize,
+}
+
 /// How long a claim is believed.
 ///
 /// The guard releases on drop, which covers a call that returns, one that
@@ -104,14 +111,21 @@ const HELD_FOR_AT_MOST: i64 = 3_600;
 /// A turn's hold on the paths it is about to write, released when dropped.
 pub struct Writing<'a> {
     rook: &'a Rook,
-    paths: Vec<PathBuf>,
+    paths: Vec<(PathBuf, u64)>,
 }
 
 impl Drop for Writing<'_> {
     fn drop(&mut self) {
         let mut held = self.rook.writing.lock().unwrap_or_else(|e| e.into_inner());
-        for path in &self.paths {
-            held.remove(path);
+        for (path, token) in &self.paths {
+            if let Some(claim) = held.get_mut(path)
+                && claim.token == *token
+            {
+                claim.leases -= 1;
+                if claim.leases == 0 {
+                    held.remove(path);
+                }
+            }
         }
     }
 }
@@ -1001,18 +1015,9 @@ impl Rook {
     /// every path, the earliest capture at or after `to_seq` holds its
     /// pre-edit content, and a path recorded as absent is deleted.
     pub fn rewind(&self, session: u128, to_seq: u64, restore_files: bool) -> Result<Rewind> {
-        let meta = self
-            .store
+        self.store
             .get_session(session)?
             .ok_or_else(|| CoreError::NoSession(rook_store::format_session_id(session)))?;
-
-        let forked = self.store.fork_session(
-            session,
-            rook_store::new_session_id(),
-            to_seq,
-            &format!("{} @{to_seq}", meta.title),
-        )?;
-        self.set_mark(FORK_AT, forked.id, to_seq)?;
 
         let mut restore: BTreeMap<PathBuf, ObjectId> = BTreeMap::new();
         let mut remove: Vec<PathBuf> = Vec::new();
@@ -1023,20 +1028,44 @@ impl Rook {
             // property of the workspace, not of one log: a turn that delegated
             // the writing is a turn whose rewind has to undo it, and a sub-task
             // keeps its checkpoints in a session of its own.
-            let mut logs = vec![self.store.events(session, to_seq, usize::MAX)?];
+            let mut logs = vec![(session, self.store.events(session, to_seq, usize::MAX)?)];
             for child in self.delegated_after(session, to_seq)? {
-                logs.push(self.store.events(child, 0, usize::MAX)?);
+                logs.push((child, self.store.events(child, 0, usize::MAX)?));
             }
-            for event in logs.into_iter().flatten() {
-                if event.record.kind != EventKind::Checkpoint {
-                    continue;
+            let mut ordered = Vec::new();
+            for (owner, events) in logs {
+                for event in events.into_iter().filter(|e| e.record.kind == EventKind::Checkpoint) {
+                    let order = self
+                        .store
+                        .kv_get(&format!("checkpoint-order/{owner}/{}", event.seq))?
+                        .and_then(|b| b.try_into().ok())
+                        .map(u64::from_le_bytes);
+                    ordered.push((order, event.record.ts, owner, event));
                 }
+            }
+            // Legacy timestamps have second resolution. Refuse an ambiguous
+            // cross-session order rather than restore a confidently wrong state.
+            for (i, (order, ts, owner, _)) in ordered.iter().enumerate() {
+                if order.is_none()
+                    && ordered.iter().skip(i + 1).any(|(o, t, who, _)| o.is_none() && t == ts && who != owner)
+                {
+                    return Err(CoreError::Other("legacy checkpoints have an ambiguous cross-session order; restore a named checkpoint instead".into()));
+                }
+            }
+            ordered.sort_by_key(|(order, ts, _, event)| {
+                (order.is_some(), order.unwrap_or(*ts as u64), event.seq)
+            });
+            for (_, _, _, event) in ordered {
                 let set = FileSet::load(&self.store, &event.record.body)?;
                 checkpoints += 1;
                 let root = PathBuf::from(&set.root);
                 for (rel, hex) in &set.files {
-                    if let Some(id) = ObjectId::from_hex(hex) {
-                        restore.entry(root.join(rel)).or_insert(id);
+                    let id = ObjectId::from_hex(hex).ok_or_else(|| {
+                        CoreError::Capture(format!("manifest holds a bad object id for {rel}"))
+                    })?;
+                    let path = root.join(rel);
+                    if !remove.contains(&path) {
+                        restore.entry(path).or_insert(id);
                     }
                 }
                 for rel in &set.absent {
@@ -1047,6 +1076,37 @@ impl Rook {
                 }
             }
         }
+
+        let root = self
+            .workspace
+            .canonicalize()
+            .map_err(|e| CoreError::Io { path: self.workspace.clone(), source: e })?;
+        let destination = |path: &Path| -> Result<(PathBuf, PathBuf)> {
+            let boundary = if self.config.sandbox.allow_outside_workspace {
+                path.ancestors().last().unwrap_or(&root).to_path_buf()
+            } else {
+                root.clone()
+            };
+            let relative = path
+                .strip_prefix(&boundary)
+                .or_else(|_| path.strip_prefix(&self.workspace))
+                .map_err(|_| {
+                    CoreError::Capture(format!("checkpoint path {} is outside the workspace", path.display()))
+                })?
+                .to_path_buf();
+            Ok((boundary, relative))
+        };
+        crate::fileset::validate_restore_plan(restore.keys().chain(remove.iter()).cloned())?;
+        for path in restore.keys().chain(remove.iter()) {
+            let (boundary, relative) = destination(path)?;
+            rook_contain::files::validate(&boundary, &relative)
+                .map_err(|e| CoreError::Io { path: path.clone(), source: e })?;
+        }
+        for id in restore.values() {
+            self.store.get(id)?;
+        }
+        let forked = self.fork_session(session, to_seq)?;
+        self.set_mark(FORK_AT, forked.id, to_seq)?;
 
         // Before writing over them. The checkpoints hold what the agent found;
         // what is on disk now is whatever happened since, and an edit made by
@@ -1065,15 +1125,20 @@ impl Rook {
 
         let mut restored = 0;
         for (path, id) in &restore {
-            let data = self.store.get(id)?;
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| CoreError::Io { path: parent.to_path_buf(), source: e })?;
-            }
-            std::fs::write(path, data).map_err(|e| CoreError::Io { path: path.clone(), source: e })?;
+            let (boundary, relative) = destination(path)?;
+            rook_contain::files::write(&boundary, &relative, &self.store.get(id)?)
+                .map_err(|e| CoreError::Io { path: path.clone(), source: e })?;
             restored += 1;
         }
-        let removed = remove.iter().filter(|p| std::fs::remove_file(p).is_ok()).count();
+        let mut removed = 0;
+        for path in &remove {
+            let (boundary, relative) = destination(path)?;
+            match rook_contain::files::remove(&boundary, &relative) {
+                Ok(()) => removed += 1,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(CoreError::Io { path: path.clone(), source: e }),
+            }
+        }
 
         Ok(Rewind {
             session: rook_store::format_session_id(forked.id),
@@ -1094,22 +1159,30 @@ impl Rook {
     pub fn writing(&self, session: u128, paths: &[PathBuf]) -> Result<Writing<'_>> {
         let now = rook_store::now_unix();
         let mut held = self.writing.lock().unwrap_or_else(|e| e.into_inner());
-        held.retain(|_, by| now.saturating_sub(by.since) < HELD_FOR_AT_MOST);
-
-        if let Some((path, by)) = paths.iter().find_map(|p| held.get(p).map(|by| (p, *by)))
-            && by.session != session
-        {
-            return Err(CoreError::Other(format!(
-                "{} is being written by session {} right now — wait for it or work on \
-                 something else",
-                path.display(),
-                rook_store::format_session_id(by.session)
-            )));
-        }
+        held.retain(|_, by| now.saturating_sub(by.held.since) < HELD_FOR_AT_MOST);
         for path in paths {
-            held.insert(path.clone(), Held { session, since: now });
+            if let Some(by) = held.get(path)
+                && by.held.session != session
+            {
+                return Err(CoreError::Other(format!(
+                    "{} is being written by session {} right now",
+                    path.display(),
+                    rook_store::format_session_id(by.held.session)
+                )));
+            }
         }
-        Ok(Writing { rook: self, paths: paths.to_vec() })
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let mut leased = Vec::new();
+        for path in paths.iter().collect::<std::collections::BTreeSet<_>>() {
+            let claim = held.entry(path.clone()).or_insert_with(|| Claim {
+                held: Held { session, since: now },
+                token: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                leases: 0,
+            });
+            claim.leases += 1;
+            leased.push((path.clone(), claim.token));
+        }
+        Ok(Writing { rook: self, paths: leased })
     }
 
     /// Move every claim `secs` further into the past.
@@ -1120,7 +1193,7 @@ impl Rook {
     pub fn age_claims_for_test(&self, secs: i64) {
         let mut held = self.writing.lock().unwrap_or_else(|e| e.into_inner());
         for by in held.values_mut() {
-            by.since -= secs;
+            by.held.since -= secs;
         }
     }
 
@@ -1167,8 +1240,8 @@ impl Rook {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
-            .filter(|(_, by)| now.saturating_sub(by.since) < HELD_FOR_AT_MOST)
-            .map(|(path, by)| (path.clone(), *by))
+            .filter(|(_, by)| now.saturating_sub(by.held.since) < HELD_FOR_AT_MOST)
+            .map(|(path, by)| (path.clone(), by.held))
             .collect()
     }
 
@@ -1246,6 +1319,9 @@ impl Rook {
         let mut seen = 0usize;
         for entry in walker.build().flatten() {
             let path = entry.path();
+            if rook_contain::files::is_write_temporary(path) {
+                continue;
+            }
             let relative = path.strip_prefix(&self.workspace).unwrap_or(path).to_string_lossy();
             let relative = relative.replace('\\', "/");
             if limits.exclude.iter().any(|skip| relative.contains(skip.as_str())) {
@@ -1447,7 +1523,9 @@ impl Rook {
         let mut found = Vec::new();
         let mut frontier = vec![session];
         while let Some(parent) = frontier.pop() {
-            for child in all.iter().filter(|m| m.parent == Some(parent)) {
+            for child in
+                all.iter().filter(|m| m.parent == Some(parent) && m.tags.iter().any(|t| t == "subtask"))
+            {
                 // The parent's own children are the ones that must be past the
                 // rewind point; anything below them went with its parent.
                 if parent != session || self.forked_at(child.id)?.is_none_or(|at| at >= seq) {
@@ -1472,21 +1550,31 @@ impl Rook {
     /// Returns whether the fact was new. A repeat that folds in new tags or
     /// pinning is still written — otherwise the merge would be silently lost.
     pub fn remember(&self, fact: Fact, note: Option<String>) -> Result<memory::Learned> {
-        let mut book = self.memory()?;
-        let learned = book.learn(fact);
-        if learned != memory::Learned::Unchanged {
-            self.save_memory(&book, note)?;
+        loop {
+            let head = self.store.get_ref(MEMORY_HEAD)?;
+            let mut book = match head {
+                Some(id) => MemoryBook::load(&self.store, &id)?,
+                None => MemoryBook::default(),
+            };
+            let learned = book.learn(fact.clone());
+            if learned == memory::Learned::Unchanged || self.save_memory(&book, note.clone(), head)? {
+                return Ok(learned);
+            }
         }
-        Ok(learned)
     }
 
     pub fn forget(&self, id_or_text: &str, note: Option<String>) -> Result<Option<Fact>> {
-        let mut book = self.memory()?;
-        let removed = book.forget(id_or_text);
-        if removed.is_some() {
-            self.save_memory(&book, note)?;
+        loop {
+            let head = self.store.get_ref(MEMORY_HEAD)?;
+            let mut book = match head {
+                Some(id) => MemoryBook::load(&self.store, &id)?,
+                None => MemoryBook::default(),
+            };
+            let removed = book.forget(id_or_text);
+            if removed.is_none() || self.save_memory(&book, note.clone(), head)? {
+                return Ok(removed);
+            }
         }
-        Ok(removed)
     }
 
     /// Facts relevant to `query` that fit in `budget` tokens, scoped to this
@@ -1586,14 +1674,22 @@ impl Rook {
         Ok(changes)
     }
 
-    fn save_memory(&self, book: &MemoryBook, note: Option<String>) -> Result<ObjectId> {
+    fn save_memory(
+        &self,
+        book: &MemoryBook,
+        note: Option<String>,
+        expected: Option<ObjectId>,
+    ) -> Result<bool> {
         let mut book = book.clone();
         book.note = note;
         book.updated_at = rook_store::now_unix();
         let id = book.store(&self.store)?;
-        self.store.set_ref(MEMORY_HEAD, &id)?;
-        self.store.set_ref(&format!("{MEMORY_LOG}{}", rook_store::history_key()), &id)?;
-        Ok(id)
+        Ok(self.store.compare_set_ref(
+            MEMORY_HEAD,
+            expected,
+            &id,
+            &format!("{MEMORY_LOG}{}", rook_store::history_key()),
+        )?)
     }
 
     // ------------------------------------------------------------ maintenance
@@ -1641,7 +1737,7 @@ impl Rook {
     }
 
     pub fn train_dictionaries(&self) -> Result<Vec<(String, usize)>> {
-        Ok(self.store.train_dictionaries(
+        Ok(self.store.retrain_dictionaries(
             self.config.storage.train_dictionaries_after,
             self.config.storage.dictionary_bytes,
         )?)
@@ -1679,12 +1775,17 @@ impl Rook {
     pub fn fork_session(&self, session: u128, at: u64) -> Result<rook_store::SessionMeta> {
         let meta =
             self.store.get_session(session)?.ok_or_else(|| CoreError::Other("no such session".into()))?;
-        Ok(self.store.fork_session(
+        let mut forked = self.store.fork_session(
             session,
             rook_store::new_session_id(),
             at,
             &format!("{} @{at}", meta.title),
-        )?)
+        )?;
+        // Forking a delegated conversation is a separate branch, not a new
+        // delegation whose edits the ancestor's rewind owns.
+        forked.tags.retain(|tag| tag != "subtask");
+        self.store.update_session(forked.id, |meta| meta.tags = forked.tags.clone())?;
+        Ok(forked)
     }
 
     /// Returns how many events went with it.
@@ -1761,7 +1862,11 @@ impl Rook {
         let trained = if dry_run {
             Vec::new()
         } else {
-            self.store.train_dictionaries(
+            // Only the kinds that have none. A timer that retrains keeps a
+            // dictionary per run for ever, and the ratio stopped moving after
+            // the first one; `rook store train` is where a person asks for a
+            // fresh one because what the store holds has changed shape.
+            self.store.train_missing_dictionaries(
                 self.config.storage.train_dictionaries_after,
                 self.config.storage.dictionary_bytes,
             )?

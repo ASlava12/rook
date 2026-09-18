@@ -760,3 +760,6 @@ mod tests {
         assert!(!status.success(), "it finished on its own, so it was not ended: {status:?}");
     }
 }
+
+/// Filesystem operations confined to an opened directory, including symlink resolution.
+pub mod files;

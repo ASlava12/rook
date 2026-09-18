@@ -246,13 +246,41 @@ impl std::fmt::Debug for ToolContext {
 }
 
 impl ToolContext {
+    pub(crate) fn disk_path(&self, path: &std::path::Path) -> Result<(PathBuf, PathBuf)> {
+        if !path.is_absolute() {
+            return Err(ToolError::Invalid {
+                tool: "file I/O".into(),
+                message: "expected an absolute path resolved against the workspace".into(),
+            });
+        }
+        let root = if self.allow_outside_workspace {
+            path.ancestors().last().unwrap_or(&self.workspace).to_path_buf()
+        } else {
+            through_symlinks(&normalize(&self.workspace))
+        };
+        let relative = path
+            .strip_prefix(&root)
+            .or_else(|_| path.strip_prefix(&self.workspace))
+            .map_err(|_| ToolError::Denied("path is outside the workspace".into()))?
+            .to_path_buf();
+        Ok((root, relative))
+    }
+
     /// Read a text file through whatever owns it.
     pub async fn read_text(&self, path: &std::path::Path) -> Result<String> {
         match &self.files {
             Some(files) => files.read(path).await,
-            None => tokio::fs::read_to_string(path)
+            None => {
+                let ctx = self.clone();
+                let path = path.to_path_buf();
+                tokio::task::spawn_blocking(move || {
+                    let (root, relative) = ctx.disk_path(&path)?;
+                    rook_contain::files::read_text(&root, &relative, 16 * 1024 * 1024)
+                        .map_err(|source| ToolError::Io { path, source })
+                })
                 .await
-                .map_err(|e| ToolError::Io { path: path.to_path_buf(), source: e }),
+                .map_err(|e| ToolError::Denied(format!("file reader failed: {e}")))?
+            }
         }
     }
 
@@ -260,14 +288,16 @@ impl ToolContext {
         match &self.files {
             Some(files) => files.write(path, contents).await,
             None => {
-                if let Some(parent) = path.parent() {
-                    tokio::fs::create_dir_all(parent)
-                        .await
-                        .map_err(|e| ToolError::Io { path: parent.to_path_buf(), source: e })?;
-                }
-                tokio::fs::write(path, contents)
-                    .await
-                    .map_err(|e| ToolError::Io { path: path.to_path_buf(), source: e })
+                let ctx = self.clone();
+                let path = path.to_path_buf();
+                let contents = contents.to_owned();
+                tokio::task::spawn_blocking(move || {
+                    let (root, relative) = ctx.disk_path(&path)?;
+                    rook_contain::files::write(&root, &relative, contents.as_bytes())
+                        .map_err(|source| ToolError::Io { path, source })
+                })
+                .await
+                .map_err(|e| ToolError::Denied(format!("file writer failed: {e}")))?
             }
         }
     }
@@ -304,9 +334,16 @@ impl ToolContext {
         let joined = if candidate.is_absolute() { candidate } else { self.workspace.join(candidate) };
         let normalized = normalize(&joined);
         if self.allow_outside_workspace {
-            return Ok(normalized);
+            return Ok(through_symlinks(&normalized));
         }
 
+        for component in normalized.ancestors() {
+            if std::fs::symlink_metadata(component).is_ok_and(|m| m.file_type().is_symlink())
+                && component.canonicalize().is_err()
+            {
+                return Err(ToolError::Denied(format!("{} is an unresolved symlink", component.display())));
+            }
+        }
         let root = through_symlinks(&normalize(&self.workspace));
         let real = through_symlinks(&normalized);
         if !real.starts_with(&root) {

@@ -197,7 +197,6 @@ impl Store {
             let p = root.join(sub);
             std::fs::create_dir_all(&p).map_err(|e| StoreError::io(&p, e))?;
         }
-        Self::check_format(&root)?;
 
         let index = root.join("index.redb");
         let db = match Database::create(&index) {
@@ -208,6 +207,7 @@ impl Store {
             Err(redb::DatabaseError::DatabaseAlreadyOpen) => return Err(StoreError::Locked { path: index }),
             Err(e) => return Err(e.into()),
         };
+        Self::check_format(&root)?;
         // Create every table up front so read transactions never race a missing
         // table on a fresh store.
         let txn = db.begin_write()?;
@@ -231,9 +231,18 @@ impl Store {
             Ok(text) => {
                 let v: serde_json::Value =
                     serde_json::from_str(&text).map_err(|e| StoreError::Encoding(e.to_string()))?;
-                let found = v.get("format").and_then(|f| f.as_u64()).unwrap_or(0) as u32;
+                let found = v
+                    .get("format")
+                    .and_then(|f| f.as_u64())
+                    .and_then(|n| u32::try_from(n).ok())
+                    .ok_or_else(|| StoreError::Encoding("invalid store format marker".into()))?;
                 if found > FORMAT_VERSION {
                     return Err(StoreError::FormatTooNew { found, supported: FORMAT_VERSION });
+                }
+                if found < FORMAT_VERSION {
+                    let mut v = v;
+                    v["format"] = FORMAT_VERSION.into();
+                    codec::atomic_write(&path, &serde_json::to_vec_pretty(&v).unwrap_or_default())?;
                 }
                 Ok(())
             }
@@ -246,7 +255,7 @@ impl Store {
                 // has no failing case, and an empty file would be a store that
                 // reads as a different format rather than as a missing one.
                 let written = serde_json::to_vec_pretty(&body).unwrap_or_default();
-                std::fs::write(&path, written).map_err(|e| StoreError::io(&path, e))
+                codec::atomic_write(&path, &written)
             }
             Err(e) => Err(StoreError::io(&path, e)),
         }
@@ -274,8 +283,8 @@ impl Store {
 
     // ---------------------------------------------------------------- objects
 
-    /// Store `data`, returning its content id. Storing the same bytes twice is a
-    /// hash lookup and nothing else.
+    /// Store `data`, returning its content id. A duplicate reuses a readable
+    /// object; supplying the original bytes repairs an unreadable dedup hit.
     pub fn put(&self, kind: Kind, data: &[u8]) -> Result<ObjectId> {
         let txn = self.db.begin_write()?;
         let id = self.put_tx(&txn, kind, data)?;
@@ -285,10 +294,34 @@ impl Store {
 
     fn put_tx(&self, txn: &WriteTransaction, kind: Kind, data: &[u8]) -> Result<ObjectId> {
         let id = ObjectId::of(data);
+        let mut kind = kind;
         {
             let objects = txn.open_table(schema::OBJECTS)?;
-            if objects.get(id.as_bytes())?.is_some() {
-                return Ok(id);
+            if let Some(existing) = objects.get(id.as_bytes())? {
+                let meta: ObjectMeta = postcard::from_bytes(existing.value())?;
+                let stored = if meta.external {
+                    std::fs::read(self.object_path(&id)).ok()
+                } else {
+                    txn.open_table(schema::BLOBS)?.get(id.as_bytes())?.map(|blob| blob.value().to_vec())
+                };
+                if stored
+                    .as_deref()
+                    .and_then(|bytes| {
+                        codec::decode(
+                            &self.dicts,
+                            Kind::from_u8(meta.kind),
+                            meta.codec,
+                            bytes,
+                            meta.size_raw as usize,
+                        )
+                        .ok()
+                    })
+                    .is_some_and(|bytes| ObjectId::of(&bytes) == id)
+                {
+                    return Ok(id);
+                }
+                // Supplied original bytes repair an unreadable dedup hit.
+                kind = Kind::from_u8(meta.kind);
             }
         }
 
@@ -303,9 +336,16 @@ impl Store {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| StoreError::io(parent, e))?;
             }
-            let tmp = self.root.join("tmp").join(id.to_hex());
-            std::fs::write(&tmp, &encoded).map_err(|e| StoreError::io(&tmp, e))?;
-            std::fs::rename(&tmp, &path).map_err(|e| StoreError::io(&path, e))?;
+            codec::atomic_write_in(&path, &encoded, &self.root.join("tmp"))?;
+            // A newly created hash-prefix directory must survive the same
+            // power loss as the object and the committed database entry.
+            #[cfg(unix)]
+            {
+                let objects = self.root.join("objects");
+                std::fs::File::open(&objects)
+                    .and_then(|dir| dir.sync_all())
+                    .map_err(|e| StoreError::io(&objects, e))?;
+            }
         }
 
         let meta = ObjectMeta {
@@ -480,6 +520,28 @@ impl Store {
         Ok(())
     }
 
+    /// Publish a version and its history entry only if the head has not moved.
+    pub fn compare_set_ref(
+        &self,
+        name: &str,
+        expected: Option<ObjectId>,
+        id: &ObjectId,
+        history: &str,
+    ) -> Result<bool> {
+        let txn = self.db.begin_write()?;
+        {
+            let mut refs = txn.open_table(schema::REFS)?;
+            let actual = refs.get(name)?.map(|v| v.value().to_vec());
+            if actual.as_deref() != expected.as_ref().map(|id| id.as_bytes()) {
+                return Ok(false);
+            }
+            refs.insert(name, id.as_bytes())?;
+            refs.insert(history, id.as_bytes())?;
+        }
+        txn.commit()?;
+        Ok(true)
+    }
+
     pub fn get_ref(&self, name: &str) -> Result<Option<ObjectId>> {
         let txn = self.db.begin_read()?;
         let refs = txn.open_table(schema::REFS)?;
@@ -629,6 +691,19 @@ impl Store {
             events.insert(schema::event_key(session, seq).as_slice(), encoded.as_slice())?;
         }
 
+        if event.kind == EventKind::Checkpoint {
+            let mut kv = txn.open_table(schema::KV)?;
+            let previous = kv.get("checkpoint-clock")?.map(|v| v.value().to_vec());
+            let order = previous
+                .as_deref()
+                .and_then(|b| b.try_into().ok())
+                .map(u64::from_le_bytes)
+                .unwrap_or(0)
+                .checked_add(1)
+                .ok_or_else(|| StoreError::Encoding("checkpoint order exhausted".into()))?;
+            kv.insert("checkpoint-clock", order.to_le_bytes().as_slice())?;
+            kv.insert(format!("checkpoint-order/{session}/{seq}").as_str(), order.to_le_bytes().as_slice())?;
+        }
         txn.commit()?;
         match ordinary {
             true => self.unflushed.fetch_add(1, Ordering::Relaxed),
@@ -738,6 +813,15 @@ impl Store {
                 meta.event_count += 1;
                 meta.next_seq = seq + 1;
                 events.insert(schema::event_key(new_id, seq).as_slice(), raw.as_slice())?;
+                if record.kind == EventKind::Checkpoint {
+                    let mut kv = txn.open_table(schema::KV)?;
+                    let order = kv
+                        .get(format!("checkpoint-order/{source}/{seq}").as_str())?
+                        .map(|value| value.value().to_vec());
+                    if let Some(order) = order {
+                        kv.insert(format!("checkpoint-order/{new_id}/{seq}").as_str(), order.as_slice())?;
+                    }
+                }
             }
         }
         {
@@ -774,10 +858,11 @@ impl Store {
             // an accumulator with no bound, since retention deletes on a timer.
             let mut kv = txn.open_table(schema::KV)?;
             let suffix = format!("/{session:032x}");
+            let checkpoints = format!("checkpoint-order/{session}/");
             let orphaned: Vec<String> = kv
                 .iter()?
                 .filter_map(|entry| entry.ok().map(|(key, _)| key.value().to_string()))
-                .filter(|key| key.ends_with(&suffix))
+                .filter(|key| key.ends_with(&suffix) || key.starts_with(&checkpoints))
                 .collect();
             for key in orphaned {
                 kv.remove(key.as_str())?;

@@ -1277,6 +1277,11 @@ async fn through_the_daemon(
     let Some(over) = ended else {
         anyhow::bail!("the daemon closed the connection before the turn finished");
     };
+    match &over.done {
+        ChatEvent::Failed { message } => anyhow::bail!("{message}"),
+        ChatEvent::Cancelled => anyhow::bail!("the turn was cancelled"),
+        _ => {}
+    }
     let ChatEvent::Done {
         steps,
         input_tokens,

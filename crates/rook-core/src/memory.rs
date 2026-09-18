@@ -35,7 +35,7 @@ impl Scope {
     pub fn applies_in(&self, workspace: &str) -> bool {
         match self {
             Scope::Global => true,
-            Scope::Project(path) => workspace.starts_with(path.as_str()),
+            Scope::Project(path) => scoped_path(workspace).starts_with(scoped_path(path)),
         }
     }
 
@@ -44,7 +44,9 @@ impl Scope {
         match (self, other) {
             (_, Scope::Global) => true,
             (Scope::Global, Scope::Project(_)) => false,
-            (Scope::Project(mine), Scope::Project(theirs)) => mine.starts_with(theirs.as_str()),
+            (Scope::Project(mine), Scope::Project(theirs)) => {
+                scoped_path(mine).starts_with(scoped_path(theirs))
+            }
         }
     }
 
@@ -54,6 +56,24 @@ impl Scope {
             Scope::Project(path) => path.clone(),
         }
     }
+}
+
+fn scoped_path(path: &str) -> std::path::PathBuf {
+    let path = std::path::Path::new(path);
+    if let Ok(real) = path.canonicalize() {
+        return real;
+    }
+    let mut normalized = std::path::PathBuf::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            part => normalized.push(part.as_os_str()),
+        }
+    }
+    normalized
 }
 
 /// Where a fact came from. Without it, a wrong memory is impossible to trace

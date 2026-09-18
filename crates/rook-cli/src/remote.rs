@@ -67,7 +67,7 @@ pub async fn hold(
 
 /// A query value safe to paste into a url, by the same rule as everywhere else
 /// here: one line of it, rather than a crate for ten.
-fn escaped(value: &str) -> String {
+pub(crate) fn escaped(value: &str) -> String {
     value
         .bytes()
         .map(|b| match b {
@@ -168,7 +168,7 @@ impl Watching {
             ChatEvent::Error { message } => {
                 eprintln!("{message}");
             }
-            done @ ChatEvent::Done { .. } => {
+            done @ (ChatEvent::Done { .. } | ChatEvent::Failed { .. } | ChatEvent::Cancelled) => {
                 return Some(Ended {
                     session: std::mem::take(&mut self.session),
                     said: std::mem::take(&mut self.said),
@@ -179,5 +179,18 @@ impl Watching {
             _ => {}
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod audit_tests {
+    use super::*;
+    #[test]
+    fn terminal_failures_end_a_run_but_setting_errors_do_not() {
+        let (send, _) = mpsc::unbounded_channel();
+        let mut watching = Watching::new(false, true);
+        assert!(watching.saw(ChatEvent::Error { message: "invalid setting".into() }, &send).is_none());
+        assert!(watching.saw(ChatEvent::Failed { message: "provider failed".into() }, &send).is_some());
+        assert!(watching.saw(ChatEvent::Cancelled, &send).is_some());
     }
 }

@@ -85,6 +85,30 @@ fn from_this_daemon(headers: &axum::http::HeaderMap) -> bool {
     origin.strip_prefix("http://").or_else(|| origin.strip_prefix("https://")) == Some(host)
 }
 
+/// Host is untrusted input, even when Origin repeats it (DNS rebinding).
+/// Explicit proxy aliases are configuration, not values supplied by the caller.
+pub async fn trusted_authority(
+    State(allowed): State<Vec<String>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let authority = request.headers().get(axum::http::header::HOST).and_then(|h| h.to_str().ok());
+    let trusted = authority.is_some_and(|host| {
+        if allowed.iter().any(|a| a == host) {
+            return true;
+        }
+        host.parse::<axum::http::uri::Authority>().is_ok_and(|a| {
+            let name = a.host().trim_matches(['[', ']']);
+            name.eq_ignore_ascii_case("localhost")
+                || name.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
+        })
+    });
+    if !trusted || !from_this_daemon(request.headers()) {
+        return (axum::http::StatusCode::FORBIDDEN, "untrusted Host or Origin").into_response();
+    }
+    next.run(request).await
+}
+
 async fn serve(
     socket: WebSocket,
     engine: Arc<tokio::sync::RwLock<rook_core::Rook>>,
@@ -534,6 +558,7 @@ impl Live {
     /// Assembled from parts, so the registry's own bookkeeping can be asked
     /// about without starting a turn to ask it.
     #[doc(hidden)]
+    #[cfg(test)]
     pub fn for_test(
         task: tokio::task::JoinHandle<()>,
         helpers: Vec<tokio::task::AbortHandle>,
@@ -723,7 +748,7 @@ fn ended_badly(
 }
 
 fn report(outbound: &mpsc::UnboundedSender<ChatEvent>, message: String) {
-    let _ = outbound.send(ChatEvent::Error { message });
+    let _ = outbound.send(ChatEvent::Failed { message });
 }
 
 /// What a connection keeps between turns.
@@ -781,6 +806,7 @@ impl Settings {
     /// A policy and an effort that no config was read for, so the registry's
     /// own bookkeeping can be tested without a project on disk. Reached only
     /// through `Live::for_test`, which is the seam.
+    #[cfg(test)]
     fn for_test() -> Self {
         let (policy, _) =
             rook_tools::policy::Policy::compile(rook_tools::policy::Stance::ALL[0], &[], &[], &[]);
@@ -1134,7 +1160,7 @@ mod tests {
 
         let said: Vec<ChatEvent> = std::iter::from_fn(|| heard.try_recv().ok()).collect();
         let told = said.iter().find_map(|e| match e {
-            ChatEvent::Error { message } => Some(message.clone()),
+            ChatEvent::Failed { message } => Some(message.clone()),
             _ => None,
         });
         let told = told.unwrap_or_else(|| panic!("the window was told nothing: {said:?}"));

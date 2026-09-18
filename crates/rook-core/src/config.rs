@@ -652,6 +652,8 @@ pub struct StorageConfig {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ServerConfig {
+    /// Explicit reverse-proxy authorities (host:port); never inferred from request headers.
+    pub allowed_hosts: Vec<String>,
     pub bind: String,
     pub port: u16,
     /// How many projects the daemon keeps an engine for.
@@ -851,7 +853,13 @@ impl Default for StorageConfig {
 
 impl Default for ServerConfig {
     fn default() -> Self {
-        Self { bind: "127.0.0.1".into(), port: 7717, max_projects: 16, allow_remote: false }
+        Self {
+            bind: "127.0.0.1".into(),
+            port: 7717,
+            max_projects: 16,
+            allow_remote: false,
+            allowed_hosts: Vec::new(),
+        }
     }
 }
 
