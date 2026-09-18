@@ -56,6 +56,15 @@ pub(crate) fn cmd_store(source: &Source, cmd: StoreCmd, json: bool) -> Result<()
                 fmt::bytes(report.bytes_freed),
                 report.orphan_files_removed
             );
+            if report.undecodable > 0 {
+                println!(
+                    "{} object(s) nothing can decode any more removed ({} freed) — they were \
+                     compressed with a dictionary this store no longer has, and the events that \
+                     named them now read as gone rather than as broken",
+                    report.undecodable,
+                    fmt::bytes(report.undecodable_bytes)
+                );
+            }
             // Otherwise a store with garbage in it reports collecting none of
             // it, and the reason is invisible.
             if report.too_new > 0 {
@@ -225,6 +234,13 @@ fn show_maintenance(
         report.prune.sessions_deleted, report.prune.events_deleted, report.prune.protected
     );
     println!("{tag}collected {} ({} freed)", report.gc.collected, fmt::bytes(report.gc.bytes_freed));
+    if report.undecodable > 0 {
+        println!(
+            "{tag}removed {} object(s) nothing can decode any more ({} freed)",
+            report.undecodable,
+            fmt::bytes(report.undecodable_bytes)
+        );
+    }
     if report.history_dropped > 0 {
         println!(
             "{tag}dropped {} history entr{} past `[storage.retention] max_history_entries`",

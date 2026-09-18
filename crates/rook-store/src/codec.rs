@@ -173,21 +173,17 @@ pub fn decode(dicts: &DictSet, kind: Kind, codec: u8, data: &[u8], raw_size: usi
                     kind.as_str()
                 )));
             }
-            let mut last = String::new();
             for dict in &held {
                 let decoded = zstd::bulk::Decompressor::with_dictionary(dict)
                     .and_then(|mut d| d.decompress(data, raw_size));
-                match decoded {
-                    Ok(bytes) => return Ok(bytes),
-                    Err(e) => last = e.to_string(),
+                if let Ok(bytes) = decoded {
+                    return Ok(bytes);
                 }
             }
-            Err(StoreError::Encoding(format!(
-                "{last}: none of the {} {} dictionaries this store has decode it, so the one it \
-                 was written with is gone",
-                held.len(),
-                kind.as_str()
-            )))
+            // Not the last zstd message, which says `Dictionary mismatch` and
+            // names neither the kind nor how many were tried. What a person
+            // needs here is whether anything can still be done about it.
+            Err(StoreError::Undecodable { kind: kind.as_str(), held: held.len() })
         }
         other => Err(StoreError::Encoding(format!("unknown codec {other}"))),
     }

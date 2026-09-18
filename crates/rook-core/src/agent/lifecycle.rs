@@ -163,7 +163,11 @@ impl AgentLoop<'_> {
     pub(super) async fn end_of_turn(&self, outcome: &mut TurnOutcome) -> Result<()> {
         self.collect_install().await;
         self.settle_reports(outcome);
-        // Operation boundaries already flush their intent and receipt. This
+        // A turn is the unit somebody would miss. Its events were written
+        // without waiting for the disk — eight milliseconds each, which a
+        // two-hundred-step turn paid four seconds for — and this is where they
+        // are made to survive a power cut, once rather than four hundred times.
+        // Operation boundaries already flush their intent and receipt; this
         // final barrier also keeps replies and housekeeping that ran no tools.
         //
         // Not fatal, and not silent: the turn is over and its work is on disk

@@ -19,6 +19,19 @@ pub enum StoreError {
     Corrupt { id: String, reason: String },
     #[error("encoding error: {0}")]
     Encoding(String),
+    /// Compressed with a dictionary this store no longer holds.
+    ///
+    /// Its own variant because it is the one decode failure nothing can put
+    /// right, and because that is what makes it safe to collect. A dictionary
+    /// merely missing from disk is a file to restore and reports as
+    /// `Encoding`; this says the store has the dictionaries for that kind and
+    /// none of them decode the object, so the one it was written with is gone
+    /// and the bytes are ballast.
+    #[error(
+        "compressed with a {kind} dictionary this store no longer has, and the {held} it does have \
+         do not decode it"
+    )]
+    Undecodable { kind: &'static str, held: usize },
     #[error("store format v{found} is newer than this build supports (v{supported}); upgrade rook")]
     FormatTooNew { found: u32, supported: u32 },
     // Not "probably `rookd`": a reachable daemon is exactly the case that never

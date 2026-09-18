@@ -7,6 +7,10 @@
 //! All front ends still drive the same loop; splitting its responsibilities
 //! does not introduce another execution path.
 //!
+//! Deliberately small, across all of them. Everything that varies — the model,
+//! the tools, the skills — is behind a trait or a data structure, so the loop
+//! itself stays something a person can read in one sitting and reason about.
+//!
 //! Two behaviours are built in rather than bolted on:
 //!
 //! * **Progressive disclosure.** The system prompt carries skill *cards* and
@@ -752,6 +756,9 @@ impl<'a> AgentLoop<'a> {
         let journal =
             crate::execution::Journal::start(self.rook, self.session, self.tool_ctx.jobs.as_deref())?;
         self.execution = Some(std::sync::Arc::downgrade(&journal));
+        // From here until the turn ends, this session is marked as having one in
+        // flight. Only the turn a person asked for: a sub-agent's session ends
+        // with its parent's, and two explanations of one death read as two.
         let _running = (self.depth == 0).then(|| crate::service::Running::marked(self.session));
         let mut outcome = match self.run_inner(prompt, &mut on_progress).await {
             Ok(outcome) => outcome,

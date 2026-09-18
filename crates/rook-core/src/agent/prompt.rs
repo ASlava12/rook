@@ -254,6 +254,10 @@ impl<'a> AgentLoop<'a> {
         let file = resolved.variant.as_ref().map(|v| v.body.clone()).unwrap_or_else(|| {
             if resolved.skill.dir.join("SKILL.md").is_file() { "SKILL.md".into() } else { "skill.md".into() }
         });
+        // Named, and by where it came from: a body on its own is anonymous, and
+        // a model that had just written a skill and loaded it back decided it
+        // had been handed "the environment's built-in default" and went looking
+        // for somewhere else to write.
         let body = format!(
             "skill {} ({}):\n{}{}",
             resolved.skill.id(),

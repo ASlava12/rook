@@ -844,3 +844,75 @@ fn an_object_written_under_an_earlier_dictionary_still_reads_after_retraining() 
     );
     assert!(s.verify().unwrap().is_empty(), "and so does everything else in the store");
 }
+
+/// Set a store up the way the defect left one: an object compressed with a
+/// dictionary that was then overwritten and not kept.
+fn store_with_a_lost_dictionary(dir: &std::path::Path) -> ObjectId {
+    let s = Store::open(dir).unwrap();
+    for i in 0..400 {
+        s.put(Kind::Message, &message(i)).unwrap();
+    }
+    s.retrain_dictionaries(400, 16 * 1024).unwrap();
+    let id = s.put(Kind::Message, &message(1_000)).unwrap();
+    for i in 0..400 {
+        s.put(Kind::Message, format!("{{\"note\":\"{}\",\"n\":{i}}}", "s".repeat(200)).as_bytes()).unwrap();
+    }
+    s.retrain_dictionaries(800, 16 * 1024).unwrap();
+    drop(s);
+    // What the overwrite did, done by hand: the replaced dictionary is gone
+    // and only the current one is left.
+    std::fs::remove_file(dir.join("dicts/message.1.zdict")).unwrap();
+    id
+}
+
+/// Reachable and useless is a state ordinary collection cannot reach: every one
+/// of these is named by a live event, and mark-and-sweep asks only whether
+/// anything still names an object. What it cannot ask is whether the bytes
+/// still mean anything.
+#[test]
+fn an_object_no_dictionary_can_decode_any_more_is_collected() {
+    let dir = tempfile::tempdir().unwrap();
+    let id = store_with_a_lost_dictionary(dir.path());
+
+    let s = Store::open(dir.path()).unwrap();
+    // Written after the surviving dictionary, so it is the control: whatever is
+    // collected, this must still read.
+    let still_good = s.put(Kind::Message, &message(2_000)).unwrap();
+
+    // The precondition, and the whole reason this is safe to delete: the store
+    // has a dictionary for this kind and it does not decode these.
+    assert!(
+        matches!(s.get(&id), Err(rook_store::StoreError::Undecodable { .. })),
+        "the object has to be undecodable or there is nothing to collect"
+    );
+    let lost = s.verify().unwrap().len() as u64;
+    // Everything written under the replaced dictionary, not only the one asked
+    // about — which is what the defect did to a real store, and worth having
+    // the number say so rather than testing a single object.
+    assert!(lost > 1, "a retraining takes everything written under the old one, not one object");
+
+    let (removed, freed) = s.collect_undecodable(false).unwrap();
+    assert_eq!(removed, lost, "exactly what `verify` was reporting, and nothing else");
+    assert!(freed > 0, "and their bytes are freed: {freed}");
+    assert!(
+        matches!(s.get(&id), Err(rook_store::StoreError::MissingObject(_))),
+        "what named one now reads as gone rather than as broken"
+    );
+    assert_eq!(s.get(&still_good).unwrap(), message(2_000), "and what could be read still can be");
+    assert!(s.verify().unwrap().is_empty(), "and the store verifies clean");
+}
+
+/// The other half, and the one that matters more. A dictionary missing from
+/// disk is a file somebody can put back; deleting the data instead would be
+/// the same mistake again, pointing the other way.
+#[test]
+fn an_object_whose_dictionary_is_only_missing_from_disk_is_left_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let id = store_with_a_lost_dictionary(dir.path());
+    std::fs::remove_file(dir.path().join("dicts/message.zdict")).unwrap();
+
+    let s = Store::open(dir.path()).unwrap();
+    assert!(s.get(&id).is_err(), "nothing can be read without the dictionary");
+    let (removed, _) = s.collect_undecodable(false).unwrap();
+    assert_eq!(removed, 0, "and nothing is deleted for it: the file can be put back");
+}

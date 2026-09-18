@@ -69,6 +69,13 @@ pub(super) fn render_span(entries: &[crate::TranscriptEntry], budget_tokens: usi
 }
 
 impl<'a> AgentLoop<'a> {
+    /// Replace the earlier part of the session with a summary of it.
+    ///
+    /// Summarised by the model rather than elided, because an agent that has
+    /// forgotten what it did twenty turns ago repeats it. If the summary cannot
+    /// be produced — a provider error, a span that will not fit — it falls back
+    /// to a marker, since a failed compaction must not wedge the turn.
+    ///
     /// Public so a test can drive it: the alternative is filling a context
     /// window to make it happen, which measures the budget rather than this.
     #[doc(hidden)]

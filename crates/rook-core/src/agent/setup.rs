@@ -24,6 +24,9 @@ fn system_risk(recipe: &crate::install::Recipe) -> (serde_json::Value, rook_tool
 }
 
 impl<'a> AgentLoop<'a> {
+    /// A language with files here and no server for it, and what the stance
+    /// says to do about that: ask, fetch, or use the machine's own installer.
+    ///
     /// Once per session. What is installed serves the next session: the pool
     /// of servers is built by the front end before the first turn, which is
     /// what keeps rust-analyzer from re-indexing every turn, and the same fact

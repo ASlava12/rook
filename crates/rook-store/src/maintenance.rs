@@ -63,6 +63,17 @@ pub struct GcReport {
     /// Files in `objects/` with no index entry — the residue of a crash between
     /// writing a payload and committing its metadata.
     pub orphan_files_removed: u64,
+    /// Objects removed because nothing can decode them any more, which the
+    /// sweep never reaches on its own: they are named by live events and so are
+    /// reachable, and reachability is the only question it asks. Filled in by
+    /// whoever runs [`Store::collect_undecodable`] beside the sweep rather than
+    /// by the sweep itself — the two are different questions and the numbers
+    /// stay apart so that a store losing something says which kind of loss it
+    /// was.
+    #[serde(default)]
+    pub undecodable: u64,
+    #[serde(default)]
+    pub undecodable_bytes: u64,
     pub dry_run: bool,
 }
 
@@ -386,6 +397,57 @@ impl Store {
             }
         }
         Ok(out)
+    }
+
+    /// Remove the objects nothing can decode any more.
+    ///
+    /// Reachable and useless, which is why ordinary collection leaves them:
+    /// mark-and-sweep asks whether anything still names an object, and every
+    /// one of these is named by a live event. What it cannot ask is whether
+    /// the bytes still mean anything, and for these they do not — the
+    /// dictionary they were compressed with was overwritten by a retraining
+    /// and no copy was kept, which is the defect [`crate::codec::DictSet`]
+    /// describes. One store lost 2,942 objects of 4,108 that way.
+    ///
+    /// Only that one reason. An object the store cannot decode because the
+    /// dictionary file is missing from disk is a file somebody can put back,
+    /// and deleting the data instead would be the same mistake again, pointing
+    /// the other way; that case reports as `Encoding` and is left alone here.
+    ///
+    /// The event that named it keeps its record — when it was, what kind it
+    /// was, what it was labelled — and the body reads back as gone rather than
+    /// as a decode error, which is the honest answer and the one every reader
+    /// already handles.
+    pub fn collect_undecodable(&self, dry_run: bool) -> Result<(u64, u64)> {
+        let mut doomed: Vec<(ObjectId, crate::ObjectMeta)> = Vec::new();
+        for (id, meta) in self.list_objects(None, usize::MAX)? {
+            if let Err(crate::StoreError::Undecodable { .. }) = self.get(&id) {
+                doomed.push((id, meta));
+            }
+        }
+        let freed: u64 = doomed.iter().map(|(_, meta)| meta.size_stored).sum();
+        if dry_run || doomed.is_empty() {
+            return Ok((doomed.len() as u64, freed));
+        }
+
+        let txn = self.db.begin_write()?;
+        {
+            let mut objects = txn.open_table(schema::OBJECTS)?;
+            let mut blobs = txn.open_table(schema::BLOBS)?;
+            for (id, meta) in &doomed {
+                objects.remove(id.as_bytes())?;
+                if !meta.external {
+                    blobs.remove(id.as_bytes())?;
+                }
+            }
+        }
+        txn.commit()?;
+        for (id, meta) in &doomed {
+            if meta.external {
+                let _ = std::fs::remove_file(self.object_path(id));
+            }
+        }
+        Ok((doomed.len() as u64, freed))
     }
 
     /// Re-read and re-hash every object. Reports ids that failed.

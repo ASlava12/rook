@@ -1784,12 +1784,19 @@ impl Rook {
     /// collected them after ten minutes when a person asked rather than the
     /// timer.
     pub fn collect_garbage(&self, dry_run: bool) -> Result<rook_store::GcReport> {
-        Ok(self.store.gc(&GcOptions {
+        // First, for the reason `maintenance` gives: a manifest that will not
+        // decode cannot be asked what it keeps alive, so the sweep behind it
+        // would stop rather than sweep.
+        let (undecodable, undecodable_bytes) = self.store.collect_undecodable(dry_run)?;
+        let mut report = self.store.gc(&GcOptions {
             expand: Some(&fileset::gc_expander),
             dry_run,
             min_age_secs: self.config.storage.gc_grace_secs,
             ..Default::default()
-        })?)
+        })?;
+        report.undecodable = undecodable;
+        report.undecodable_bytes = undecodable_bytes;
+        Ok(report)
     }
 
     pub fn prune(&self, dry_run: bool) -> Result<rook_store::PruneReport> {
@@ -1882,6 +1889,12 @@ impl Rook {
         // is the unbounded accumulator this codebase does not allow.
         let outputs_dropped = trim_outputs(&self.output_dir, self.config.sandbox.max_output_files, dry_run);
         let mut prune = self.store.prune(&policy, dry_run)?;
+        // Before collection rather than after. These are reachable, so a sweep
+        // never reaches them on its own — and a container among them would stop
+        // the sweep outright, since reachability cannot be decided from a
+        // manifest that will not decode. Removing them first also lets the
+        // sweep take what they were the only thing naming.
+        let (undecodable, undecodable_bytes) = self.store.collect_undecodable(dry_run)?;
         let grace = self.config.storage.gc_grace_secs;
         let mut gc = self.store.gc(&GcOptions {
             expand: Some(&fileset::gc_expander),
@@ -1954,6 +1967,8 @@ impl Rook {
             over_budget_by,
             history_dropped,
             outputs_dropped,
+            undecodable,
+            undecodable_bytes,
         })
     }
 
@@ -2204,6 +2219,15 @@ pub struct MaintenanceReport {
     /// Kept copies of command output removed past `[sandbox] max_output_files`.
     #[serde(default)]
     pub outputs_dropped: u64,
+    /// Objects removed because nothing can decode them any more.
+    ///
+    /// Reported rather than done quietly: it is the only part of maintenance
+    /// that deletes something a live event still names, and the number is the
+    /// size of a loss that already happened — not of one this caused.
+    #[serde(default)]
+    pub undecodable: u64,
+    #[serde(default)]
+    pub undecodable_bytes: u64,
 }
 
 /// Keep the newest `keep` files under the output directory and delete the rest.
