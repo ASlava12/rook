@@ -790,3 +790,57 @@ fn paged_reads_verify_whole_objects_across_codecs_and_dictionary_generations() {
         "corruption outside the requested page must also be detected"
     );
 }
+
+/// Retraining must not make what is already written unreadable.
+///
+/// It did. Training overwrote `<kind>.zdict` in place while an object recorded
+/// only that it had used *a* dictionary and never which one, so every object
+/// written under the previous one stopped decoding — and a daemon left running
+/// retrains every twenty-four hours, which made it a standing arrangement to
+/// destroy whatever had been written since the last time. On one real store it
+/// took 2,942 objects of 4,108: seventy-two per cent of an agent's memory,
+/// reported by `store verify` as `Dictionary mismatch` and by everything else
+/// as nothing at all. The comment above the code said the opposite, in two
+/// places, and had said it since the beginning.
+#[test]
+fn an_object_written_under_an_earlier_dictionary_still_reads_after_retraining() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = Store::open(dir.path()).unwrap();
+    for i in 0..400 {
+        s.put(Kind::Message, &message(i)).unwrap();
+    }
+    s.retrain_dictionaries(400, 16 * 1024).unwrap();
+
+    // Written under the first dictionary, and large enough that it is actually
+    // compressed with one rather than stored verbatim.
+    let under_the_first = message(1_000);
+    assert!(under_the_first.len() > 64, "a payload this small would be kept raw and prove nothing");
+    let id = s.put(Kind::Message, &under_the_first).unwrap();
+    let first = std::fs::read(dir.path().join("dicts/message.zdict")).unwrap();
+
+    // Samples of a different shape, so the second dictionary is a different
+    // one — otherwise a dictionary that happened to be identical would carry
+    // the test.
+    for i in 0..400 {
+        s.put(Kind::Message, format!("{{\"note\":\"{}\",\"n\":{i}}}", "s".repeat(200)).as_bytes()).unwrap();
+    }
+    s.retrain_dictionaries(800, 16 * 1024).unwrap();
+    let second = std::fs::read(dir.path().join("dicts/message.zdict")).unwrap();
+    assert_ne!(first, second, "the dictionary has to have changed or nothing was put at risk");
+
+    // Reopened, which is the whole of it. A store that has been running keeps
+    // the replaced dictionary in memory and reads its own history back
+    // whatever is on disk — so the loss only shows in the next process, which
+    // is why a daemon retraining at three in the morning was noticed days
+    // later by a session that would not display. This test read the store it
+    // had just written until it was made to reopen it, and passed with the
+    // code it was testing deleted.
+    drop(s);
+    let s = Store::open(dir.path()).unwrap();
+    assert_eq!(
+        s.get(&id).unwrap(),
+        under_the_first,
+        "an object written under the dictionary that was replaced still reads"
+    );
+    assert!(s.verify().unwrap().is_empty(), "and so does everything else in the store");
+}
