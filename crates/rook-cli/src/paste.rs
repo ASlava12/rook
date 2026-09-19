@@ -26,10 +26,24 @@
 //! queued up behind a slow redraw is still typing, and an Enter at the end of
 //! it still sends. A single line pasted with its newline is sent too, which is
 //! what a shell does with one.
+//!
+//! None of this applies where the reader does see the bracket. There a paste
+//! is an `Event::Paste` and a run of keys is typing, however fast it arrived —
+//! a script driving the window through a pty writes whole lines at once, and
+//! the pty tests do exactly that. Reading such a run as a paste put a
+//! two-line script into the box and sent nothing, on every platform but the
+//! one this was written for.
 
 use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+
+/// Whether crossterm hands a bracketed paste over as `Event::Paste` here. It
+/// does wherever it reads a tty; it does not on Windows, where it reads console
+/// records and the bracket arrives as six keystrokes or not at all. A fact
+/// about the library and the platform together, which is why it is spelled
+/// here and not asked of `rook-contain`, which knows nothing of crossterm.
+const READER_SEES_THE_BRACKET: bool = !cfg!(windows);
 
 /// Keys closer together than this arrived from a paste. A hand puts tens of
 /// milliseconds between keys and machine input microseconds; a console host
@@ -93,6 +107,21 @@ pub(crate) struct Gathered {
 /// Read the keys queued behind `first`, and any that follow within the time a
 /// paste puts between keys, and say what the run was.
 pub(crate) fn gather(first: KeyEvent, source: &mut impl Keys) -> std::io::Result<Gathered> {
+    gather_as(first, source, READER_SEES_THE_BRACKET)
+}
+
+/// `gather`, told whether the reader sees the bracket — asked rather than
+/// spelled, so a test runs the Windows answer from any platform.
+fn gather_as(
+    first: KeyEvent,
+    source: &mut impl Keys,
+    reader_sees_the_bracket: bool,
+) -> std::io::Result<Gathered> {
+    // Where a paste arrives as a paste, a key is a key, and nothing is waited
+    // for: the question this module answers has been answered by the terminal.
+    if reader_sees_the_bracket {
+        return Ok(Gathered { burst: Burst::Keys(vec![first]), then: Vec::new() });
+    }
     let mut keys = vec![first];
     let mut then = Vec::new();
     // Nothing behind it is the ordinary case, and typing must not pay for a
@@ -120,6 +149,16 @@ pub(crate) fn gather(first: KeyEvent, source: &mut impl Keys) -> std::io::Result
             // A key coming back up is not a key going down, and a paste arrives
             // as pairs of both.
             Event::Key(_) => {}
+            // Text for the same box, so its place in the order is the whole
+            // of its meaning: what was typed before it goes in before it, and
+            // what follows it is read after it. It ends the run. Deferred
+            // behind the run instead, a `^u` typed just before a paste and the
+            // Enter typed just after it were read as a pair — the box was
+            // cleared, an empty message was sent, and the paste landed last.
+            Event::Paste(text) => {
+                then.push(Event::Paste(text));
+                break;
+            }
             other => then.push(other),
         }
     }
@@ -256,9 +295,13 @@ mod tests {
             .collect()
     }
 
-    /// Read `events` as the terminal would deliver them, the first as the key
-    /// the loop already has in hand.
-    fn read(mut events: Vec<(Duration, Event)>) -> (Gathered, Script) {
+    /// Read `events` as a Windows console would deliver them, the first as the
+    /// key the loop already has in hand.
+    fn read(events: Vec<(Duration, Event)>) -> (Gathered, Script) {
+        read_where(events, false)
+    }
+
+    fn read_where(mut events: Vec<(Duration, Event)>, reader_sees_the_bracket: bool) -> (Gathered, Script) {
         let Event::Key(first) = events.remove(0).1 else { unreachable!("a script starts with a key") };
         let mut script = Script {
             events: events.into(),
@@ -266,8 +309,40 @@ mod tests {
             started: Instant::now(),
             elapsed: Duration::ZERO,
         };
-        let gathered = gather(first, &mut script).expect("a script does not fail");
+        let gathered =
+            gather_as(first, &mut script, reader_sees_the_bracket).expect("a script does not fail");
         (gathered, script)
+    }
+
+    /// The regression the first version shipped: on unix a paste is an
+    /// `Event::Paste`, so a run of keys is typing — and a script driving the
+    /// window through a pty writes two lines at once. Read as a paste, both
+    /// went into the box and nothing was sent.
+    #[test]
+    fn where_the_reader_sees_the_bracket_a_run_of_keys_is_typing_and_nothing_is_waited_for() {
+        let (got, script) = read_where(keys("one\ntwo\n"), true);
+        assert_eq!(
+            got.burst,
+            Burst::Keys(typed("o")),
+            "a key was not handed back as itself: {:?}",
+            got.burst
+        );
+        assert!(script.asked.is_empty(), "the terminal was asked to wait: {:?}", script.asked);
+        assert_eq!(script.events.len(), 7, "keys were taken from the queue: {:?}", script.events);
+    }
+
+    /// `^u` typed, then a paste the reader did see, then Enter, in one breath.
+    /// The paste ends the run and goes next, so the Enter behind it is read
+    /// after it and sends what was pasted — not before it, on an empty box.
+    #[test]
+    fn a_paste_the_reader_did_see_keeps_its_place_among_the_keys() {
+        let mut events = keys("u");
+        events.push((Duration::ZERO, Event::Paste("one\ntwo".into())));
+        events.extend(keys("\n"));
+        let (got, script) = read(events);
+        assert_eq!(got.burst, Burst::Keys(typed("u")));
+        assert_eq!(got.then, vec![Event::Paste("one\ntwo".into())]);
+        assert_eq!(script.events.len(), 1, "the Enter behind the paste was taken with the keys before it");
     }
 
     fn typed(text: &str) -> Vec<KeyEvent> {
