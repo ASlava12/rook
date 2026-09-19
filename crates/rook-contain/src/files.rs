@@ -219,7 +219,22 @@ pub fn move_file(from_root: &Path, from: &Path, to_root: &Path, to: &Path) -> io
     }
     let bytes = copied?;
     sync_directory(&destination);
-    source.remove_file(from)?;
+    // A move across roots is a copy and then an unlink, because a rename cannot
+    // cross them and must not follow a symlink on the way. So this is the one
+    // step that can fail with the work half done — and it fails safe, leaving
+    // both copies rather than none. Said outright: the raw error is
+    // `Permission denied` on a path the caller did not name, which reads as the
+    // move having done nothing while the destination sits there.
+    if let Err(e) = source.remove_file(from) {
+        return Err(io::Error::new(
+            e.kind(),
+            format!(
+                "copied to the destination but could not remove {}: {e}. Both copies exist; \
+                 remove the original by hand once you know why",
+                from.to_string_lossy()
+            ),
+        ));
+    }
     sync_directory(&source);
     Ok(bytes)
 }
