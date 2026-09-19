@@ -7,7 +7,12 @@
 # they disagree, and copies two binaries and the built-in skills into a
 # directory under your profile. It writes nowhere else and asks for no
 # privileges. It does add its directory to your user PATH, because on Windows
-# there is no profile file everybody agrees on — and it says so when it does.
+# there is no profile file everybody agrees on, and it says so when it does.
+#
+# Plain ASCII throughout, on purpose. Windows PowerShell reads a file with no
+# byte-order mark in the system code page, and on a Cyrillic one the bytes of
+# an em dash include a curly quote, which closes the string it sits in. Run as
+# a file rather than piped through `iex`, that was a parse error.
 
 $ErrorActionPreference = 'Stop'
 
@@ -39,13 +44,17 @@ try {
     try {
         Invoke-WebRequest -Uri "$base/SHA256SUMS" -OutFile "$tmp\SHA256SUMS" -UseBasicParsing
     } catch {
-        throw "no published release to install from yet — build from a clone with ``cargo xtask dist``"
+        throw "no published release to install from yet; build from a clone with ``cargo xtask dist``"
     }
 
     $sums = Get-Content "$tmp\SHA256SUMS" | ForEach-Object { , ($_ -split '\s+', 2) }
     $line = $sums | Where-Object { $_[1] -like "*$target*" } | Select-Object -First 1
     if (-not $line) { throw "the release has no build for $target" }
-    $archive = $line[1].Trim()
+    # `sha256sum` in Git Bash on the Windows runner hashes in binary mode and
+    # writes the name as `*rook-....zip`. The star is the mode marker, not the
+    # name; taken as the name it was a URL nobody had published, and v0.7.0
+    # could not be installed from here.
+    $archive = $line[1].Trim().TrimStart('*')
     $expected = $line[0].Trim()
 
     Invoke-WebRequest -Uri "$base/$archive" -OutFile "$tmp\$archive" -UseBasicParsing
@@ -54,7 +63,7 @@ try {
     # download somebody else can replace.
     $got = (Get-FileHash "$tmp\$archive" -Algorithm SHA256).Hash.ToLower()
     if ($got -ne $expected.ToLower()) {
-        throw "the checksum does not match: expected $expected, got $got — nothing was installed"
+        throw "the checksum does not match: expected $expected, got $got; nothing was installed"
     }
     Write-Host 'rook: checksum ok'
 
@@ -76,7 +85,7 @@ try {
     & "$prefix\bin\rook.exe" --version
 
     # There is no `~/.profile` everybody agrees on here, so the user's own PATH
-    # is edited — and said out loud, because a script that changes your
+    # is edited, and said out loud, because a script that changes your
     # environment silently is one you find out about later.
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     if ($userPath -notlike "*$prefix\bin*") {

@@ -131,7 +131,9 @@ jobs:
           find staged -type f -exec mv {} dist/ \;
           # One file with every checksum in it, which is what an install script
           # can verify against without knowing which archive it wants first.
-          cat dist/*.sha256 > SHA256SUMS
+          # `sha256sum` on the Windows runner marks binary mode with a star before
+          # the name; one shape of line, so a reader needs to know about one.
+          cat dist/*.sha256 | sed 's/ [*]/  /' > SHA256SUMS
           rm dist/*.sha256
           mv SHA256SUMS dist/
           ls -la dist
