@@ -4,17 +4,93 @@
 //! platform-idiomatic split across config/data/cache directories: an agent's
 //! state is one thing users back up, sync and inspect together, and scattering
 //! it makes "where did my agent's memory go" a support question.
+//!
+//! Where that one root goes is a platform question, and on Windows the answer
+//! was wrong: a dotted directory in the profile root is a unix habit, and
+//! `C:\Users\<user>\.rook` is what somebody complained about. It is
+//! `%LOCALAPPDATA%\rook` now — Local rather than Roaming, because a roaming
+//! profile is copied to a server at every logon and this directory holds
+//! sessions, caches and downloaded language servers, which is gigabytes nobody
+//! asked to have synchronised.
 
 use std::path::{Path, PathBuf};
 
-/// `$ROOK_HOME`, else `~/.rook` (`%USERPROFILE%\.rook` on Windows).
+/// `$ROOK_HOME`, else the platform's place for a program's own state.
+///
+/// On Windows that is `%LOCALAPPDATA%\rook`; on unix `~/.rook`, which is where
+/// it has always been and where every dotfile of its kind lives.
 pub fn home() -> PathBuf {
     if let Ok(explicit) = std::env::var("ROOK_HOME")
         && !explicit.is_empty()
     {
         return PathBuf::from(explicit);
     }
-    user_home().join(".rook")
+    default_home(&user_home(), local_app_data().as_deref(), |p| p.is_dir())
+}
+
+/// The root to use when nothing names one, as a function of what exists.
+///
+/// Its own function so the choice can be tested from any platform, which is
+/// this repository's rule about a path that differs by platform: ask the code
+/// that makes it rather than spelling one answer.
+///
+/// The legacy directory wins when it is there, and that is the whole of the
+/// migration. Somebody upgrading has their sessions, their memory and their
+/// installed language servers under `%USERPROFILE%\.rook`; moving gigabytes
+/// under them — possibly across volumes, possibly while a daemon holds the
+/// store lock — to tidy a path is not a trade worth making, and leaving them
+/// pointing at an empty new directory would read as the agent having forgotten
+/// everything. New installs get the right place; old ones keep working and
+/// `rook doctor` says where they are.
+fn default_home(user: &Path, local: Option<&Path>, exists: impl Fn(&Path) -> bool) -> PathBuf {
+    let legacy = user.join(".rook");
+    match local {
+        Some(local) if !exists(&legacy) => local.join("rook"),
+        _ => legacy,
+    }
+}
+
+/// A line about where the state is, when that is worth saying, and nothing
+/// when it is the ordinary place.
+///
+/// Three cases are worth a line and the fourth is not: told explicitly, kept
+/// where an older install put it, or — the one that reads as data loss — an
+/// old directory sitting beside the one now in use, which happens when
+/// somebody sets `ROOK_HOME`, or copies a profile, and then wonders which of
+/// the two the agent is reading.
+pub fn where_the_state_is() -> Option<String> {
+    let home = home();
+    let legacy = user_home().join(".rook");
+    if std::env::var("ROOK_HOME").is_ok_and(|v| !v.is_empty()) {
+        return Some(format!("{} — named by ROOK_HOME", home.display()));
+    }
+    if cfg!(windows) && home == legacy {
+        return Some(format!(
+            "{} — where an earlier version put it, and still in use. A fresh install \
+             would use {}; moving it is a copy you make when you want to.",
+            home.display(),
+            local_app_data().unwrap_or_default().join("rook").display()
+        ));
+    }
+    (home != legacy && legacy.is_dir())
+        .then(|| format!("{} — and there is another at {}", home.display(), legacy.display()))
+}
+
+/// `%LOCALAPPDATA%`, and nothing on a platform that has no such idea.
+fn local_app_data() -> Option<PathBuf> {
+    if !cfg!(windows) {
+        return None;
+    }
+    std::env::var("LOCALAPPDATA")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        // Windows without the variable: the documented location under the
+        // profile, rather than falling back to the path this moved away from.
+        .or_else(|| {
+            let user = user_home();
+            (user != Path::new(".")).then(|| user.join("AppData").join("Local"))
+        })
 }
 
 pub fn user_home() -> PathBuf {
@@ -43,8 +119,25 @@ pub fn secrets_file() -> PathBuf {
     home().join("secrets.toml")
 }
 
+/// Where `config.toml` is read and written.
+///
+/// `ROOK_CONFIG_DIR` moves it and nothing else, which is the point: a person
+/// who keeps their configuration in a dotfiles repository wants that one file
+/// there, not the store, not the logs, and not the sessions. `ROOK_HOME` is
+/// still how to move the lot.
+///
+/// `secrets.toml` deliberately does not follow it. It is the one file here that
+/// is nothing but credentials, and the directory somebody points this at is by
+/// construction a directory they sync, share or commit.
+pub fn config_dir() -> PathBuf {
+    match std::env::var("ROOK_CONFIG_DIR") {
+        Ok(explicit) if !explicit.is_empty() => PathBuf::from(explicit),
+        _ => home(),
+    }
+}
+
 pub fn config_file() -> PathBuf {
-    home().join("config.toml")
+    config_dir().join("config.toml")
 }
 
 pub fn user_skills_dir() -> PathBuf {
@@ -187,6 +280,72 @@ pub fn private_dir(path: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(path)
 }
 
+/// `ROOK_HOME` is process-wide, so the tests that set it take this in turn.
+/// Two of them in two modules is already enough to have them read each other's
+/// value and fail on a machine that runs them in parallel, which is every one.
+#[cfg(test)]
+static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+fn alone() -> std::sync::MutexGuard<'static, ()> {
+    ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[cfg(test)]
+mod where_it_goes {
+    use super::*;
+
+    /// The complaint this answers: `C:\Users\<user>\.rook` is a unix habit
+    /// wearing a Windows path. Asked of the code rather than spelled, because
+    /// the answer differs by platform and this machine is only one of them.
+    #[test]
+    fn a_fresh_install_on_windows_goes_under_local_app_data() {
+        let user = Path::new("C:\\Users\\vart");
+        let local = PathBuf::from("C:\\Users\\vart\\AppData\\Local");
+        assert_eq!(default_home(user, Some(&local), |_| false), local.join("rook"));
+    }
+
+    /// And keeps working where it already is. Somebody upgrading has their
+    /// sessions, their memory and their downloaded language servers in the old
+    /// place; pointing them at an empty new one reads as the agent having
+    /// forgotten everything, and moving gigabytes to tidy a path is not a
+    /// trade worth making.
+    #[test]
+    fn an_install_that_already_has_a_home_keeps_it() {
+        let user = Path::new("C:\\Users\\vart");
+        let local = PathBuf::from("C:\\Users\\vart\\AppData\\Local");
+        let legacy = user.join(".rook");
+        assert_eq!(default_home(user, Some(&local), |p| p == legacy), legacy);
+    }
+
+    /// Unix has no such directory and no such complaint: `~/.rook` is where
+    /// every dotfile of its kind lives, and where this has always been.
+    #[test]
+    fn unix_is_left_where_it_was() {
+        let user = Path::new("/home/vart");
+        assert_eq!(default_home(user, None, |_| false), user.join(".rook"));
+    }
+
+    /// One file, and only that one. Somebody keeping their configuration in a
+    /// dotfiles repository wants it there — not the store, not the logs, and
+    /// above all not the credentials.
+    #[test]
+    fn the_config_directory_moves_the_config_and_leaves_the_secrets() {
+        let _alone = alone();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("ROOK_HOME", home.path());
+            std::env::set_var("ROOK_CONFIG_DIR", elsewhere.path());
+        }
+        assert_eq!(config_file(), elsewhere.path().join("config.toml"));
+        assert_eq!(secrets_file(), home.path().join("secrets.toml"));
+        assert_eq!(store_dir(), home.path().join("store"));
+        unsafe { std::env::remove_var("ROOK_CONFIG_DIR") };
+        assert_eq!(config_file(), home.path().join("config.toml"), "and it is not sticky");
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
@@ -199,6 +358,7 @@ mod tests {
     /// this is the half that is not silent.
     #[test]
     fn a_state_directory_others_can_read_is_named_with_the_mode_that_lets_them() {
+        let _alone = alone();
         // Under the temporary directory rather than at it: `private_dir` leaves
         // an existing directory alone, and a temporary one arrives with
         // whatever mode the platform gives it.

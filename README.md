@@ -91,6 +91,17 @@ Two binaries, no runtime and no shared libraries — 8.1 MiB and 7.4 MiB at the
 time of writing, which `dist` prints so the number here can be checked rather
 than believed.
 
+Everything it keeps — sessions, memory, skills, downloaded language servers —
+goes in one directory, because that is what somebody backs up, copies to another
+machine and inspects when they want to know what the agent knows. On unix it is
+`~/.rook`; on Windows `%LOCALAPPDATA%\rook`, Local rather than Roaming because a
+roaming profile is copied to a server at every logon and this is gigabytes. An
+install that already has `%USERPROFILE%\.rook` from an earlier version keeps
+using it rather than being moved, and `rook doctor` says which one is in use.
+`ROOK_HOME` moves the lot; `ROOK_CONFIG_DIR` moves `config.toml` alone, for a
+configuration kept in a dotfiles repository — `secrets.toml` does not follow it,
+being nothing but credentials.
+
 Releases carry `x86_64` and `aarch64` builds for Linux (static, musl — they run
 on the distribution you have rather than the one the runner had), `x86_64` for
 Windows, and both architectures for macOS. FreeBSD is a supported target that

@@ -76,8 +76,22 @@ This is set explicitly in `rook-llm`'s dependency features, not left to defaults
 Where behaviour genuinely differs, it is handled in one place rather than sprinkled
 through the code.
 
-**Paths.** `$ROOK_HOME`, else `~/.rook` — `%USERPROFILE%\.rook` on Windows, with a
-`HOMEDRIVE`/`HOMEPATH` fallback. See [`paths.rs`](../crates/rook-core/src/paths.rs).
+**Paths.** `$ROOK_HOME`, else `~/.rook` on unix and `%LOCALAPPDATA%\rook` on
+Windows. Local rather than Roaming: a roaming profile is copied to a server at
+every logon, and this directory holds sessions, caches and downloaded language
+servers — gigabytes nobody asked to have synchronised.
+
+It was `%USERPROFILE%\.rook`, which is a unix habit wearing a Windows path and
+was reported as one. An install that already has that directory keeps using it:
+moving gigabytes under somebody to tidy a path is not a trade worth making, and
+pointing them at an empty new one would read as the agent having forgotten
+everything. `rook doctor` says which of the two is in use.
+
+`ROOK_CONFIG_DIR` moves `config.toml` alone, for a configuration kept in a
+dotfiles repository. `secrets.toml` deliberately does not follow it — it is
+nothing but credentials, and the directory somebody points this at is by
+construction one they sync or commit. See
+[`paths.rs`](../crates/rook-core/src/paths.rs).
 
 **Shell.** `/bin/sh -c` on Unix, `cmd /C` on Windows. `cmd` rather than PowerShell
 because it is always present; a skill that needs PowerShell invokes it explicitly.

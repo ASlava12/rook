@@ -71,6 +71,14 @@ pub(crate) fn cmd_doctor(workspace: &Path, json: bool) -> Result<()> {
 
     println!();
     println!("state:");
+    // Where it is, when that is not where a fresh install would put it. An
+    // upgrade keeps an existing directory rather than moving gigabytes of
+    // sessions, so on Windows the old `%USERPROFILE%\.rook` goes on being used
+    // and nothing would otherwise say so — which is how somebody ends up
+    // looking for their history under `%LOCALAPPDATA%` and not finding it.
+    if let Some(note) = rook_core::paths::where_the_state_is() {
+        println!("  {note}");
+    }
     // What accumulates under here is every transcript the agent has written,
     // the files it read included — so who else can read it is a fact about
     // this machine worth one line.
