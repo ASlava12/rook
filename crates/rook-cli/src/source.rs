@@ -677,6 +677,16 @@ impl Source {
         }
     }
 
+    pub fn update_skills(&self) -> Result<Vec<(String, rook_core::Refreshed)>> {
+        match self {
+            Self::Local(rook) => Ok(rook.update_skills()?),
+            Self::Daemon(d) => {
+                let said: serde_json::Value = d.post("/api/skills/update", &serde_json::json!({}))?;
+                Ok(serde_json::from_value(said["skills"].clone())?)
+            }
+        }
+    }
+
     pub fn new_skill(&self, name: &str, description: &str) -> Result<std::path::PathBuf> {
         match self {
             Self::Local(rook) => Ok(rook.new_skill(name, description)?),

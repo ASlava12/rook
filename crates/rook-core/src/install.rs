@@ -263,12 +263,12 @@ pub fn stale(into: &Path, after: std::time::Duration) -> Vec<(&'static Recipe, S
 }
 
 /// An asset past this is not a language server, whatever it is called.
-const MOST_ASSET_BYTES: usize = 256 << 20;
+pub(crate) const MOST_ASSET_BYTES: usize = 256 << 20;
 /// A gzip that inflates past this is a bomb, not a binary.
-const MOST_UNPACKED_BYTES: u64 = 512 << 20;
+pub(crate) const MOST_UNPACKED_BYTES: u64 = 512 << 20;
 /// The API answer is a few kilobytes; a megabyte of it is a different server.
-const MOST_API_BYTES: usize = 4 << 20;
-const MOST_HOPS: usize = 4;
+pub(crate) const MOST_API_BYTES: usize = 4 << 20;
+pub(crate) const MOST_HOPS: usize = 4;
 
 /// A package as npm should be asked for it: the newest, unless the recipe
 /// already says which.
@@ -325,17 +325,10 @@ impl Installer {
     pub fn at(api: String, into: PathBuf, proxy: &rook_llm::Proxy) -> Result<Self, String> {
         // The same provider the model client installs, for the same reason:
         // the rustls default needs a C toolchain, which is the FreeBSD blocker.
-        rook_llm::init_tls();
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(600))
-            .connect_timeout(std::time::Duration::from_secs(15))
-            // Followed by hand, and only to hosts a release download is known
-            // to go through: an approval named an address, and a redirect
-            // elsewhere is how that becomes a request nobody agreed to.
-            .redirect(reqwest::redirect::Policy::none())
-            .user_agent(concat!("rook/", env!("CARGO_PKG_VERSION")));
-        let client = proxy.on(client, Some(&api))?;
-        let client = client.build().map_err(|e| format!("could not build an HTTP client: {e}"))?;
+        // Redirects are followed by hand, and only to hosts a release download
+        // is known to go through: an approval named an address, and a redirect
+        // elsewhere is how that becomes a request nobody agreed to.
+        let client = release_client(&api, proxy)?;
         Ok(Self { client, api, into })
     }
 
@@ -489,49 +482,132 @@ impl Installer {
     /// past the cap is refused while it is still coming rather than measured
     /// once it is all here.
     async fn download(&self, release: &Asset) -> Result<Vec<u8>, String> {
-        let mut at = release.url.clone();
-        let origin = host_of(&at);
-        let mut landed = None;
-        for _ in 0..MOST_HOPS {
-            let hop = self.client.get(&at).send().await.map_err(|e| format!("could not fetch {at}: {e}"))?;
-            let Some(to) = hop.headers().get(reqwest::header::LOCATION).and_then(|v| v.to_str().ok()) else {
-                landed = Some(hop);
-                break;
-            };
-            let to = to.to_string();
-            let host = host_of(&to);
-            // Where GitHub keeps release files, and nowhere else.
-            let known = host == origin
-                || host == "objects.githubusercontent.com"
-                || host == "release-assets.githubusercontent.com";
-            if !known {
-                return Err(format!("{at} redirects to {to}, which is not where a release is kept"));
-            }
-            at = to;
-        }
-        let Some(response) = landed else {
-            return Err(format!("{} redirected more than {MOST_HOPS} times", release.url));
-        };
-        if !response.status().is_success() {
-            return Err(format!("{at} answered {}", response.status()));
-        }
-        let (bytes, sha256) = read_bounded(response, MOST_ASSET_BYTES).await?;
-        if sha256 != release.sha256 {
-            return Err(format!(
-                "the download does not match the digest the release lists: got sha256 {sha256}, \
-                 the release says {} — nothing was installed",
-                release.sha256
-            ));
-        }
-        if release.size != 0 && bytes.len() as u64 != release.size {
-            return Err(format!(
-                "the download is {} bytes and the release says {} — nothing was installed",
-                bytes.len(),
-                release.size
-            ));
-        }
-        Ok(bytes)
+        fetch_asset(&self.client, release).await
     }
+}
+
+/// An asset's bytes, followed through the redirects a release download takes
+/// and checked against the digest the release listed for it.
+///
+/// One function rather than one per caller: where a download may be redirected
+/// to is a security answer, and two copies of it drift into two answers.
+pub(crate) async fn fetch_asset(client: &reqwest::Client, release: &Asset) -> Result<Vec<u8>, String> {
+    let mut at = release.url.clone();
+    let origin = host_of(&at);
+    let mut landed = None;
+    for _ in 0..MOST_HOPS {
+        let hop = client.get(&at).send().await.map_err(|e| format!("could not fetch {at}: {e}"))?;
+        let Some(to) = hop.headers().get(reqwest::header::LOCATION).and_then(|v| v.to_str().ok()) else {
+            landed = Some(hop);
+            break;
+        };
+        let to = to.to_string();
+        let host = host_of(&to);
+        // Where GitHub keeps release files, and nowhere else.
+        let known = host == origin
+            || host == "objects.githubusercontent.com"
+            || host == "release-assets.githubusercontent.com";
+        if !known {
+            return Err(format!("{at} redirects to {to}, which is not where a release is kept"));
+        }
+        at = to;
+    }
+    let Some(response) = landed else {
+        return Err(format!("{} redirected more than {MOST_HOPS} times", release.url));
+    };
+    if !response.status().is_success() {
+        return Err(format!("{at} answered {}", response.status()));
+    }
+    let (bytes, sha256) = read_bounded(response, MOST_ASSET_BYTES).await?;
+    if sha256 != release.sha256 {
+        return Err(format!(
+            "the download does not match the digest the release lists: got sha256 {sha256}, \
+             the release says {} — nothing was installed",
+            release.sha256
+        ));
+    }
+    if release.size != 0 && bytes.len() as u64 != release.size {
+        return Err(format!(
+            "the download is {} bytes and the release says {} — nothing was installed",
+            bytes.len(),
+            release.size
+        ));
+    }
+    Ok(bytes)
+}
+
+/// The HTTP client a release fetch uses: no automatic redirects, because where
+/// one may go is decided here, and a user agent that says which rook asked.
+pub(crate) fn release_client(api: &str, proxy: &rook_llm::Proxy) -> Result<reqwest::Client, String> {
+    rook_llm::init_tls();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(600))
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent(concat!("rook/", env!("CARGO_PKG_VERSION")));
+    proxy.on(client, Some(api))?.build().map_err(|e| format!("could not build an HTTP client: {e}"))
+}
+
+/// Unpack a gzipped tar into `into`, bounded on what it inflates to and
+/// refusing any entry that would land outside `into`.
+///
+/// The same refusal as the zip, and for the same reason: an archive names its
+/// own paths, and `../` in one is how a download writes somewhere it was not
+/// told to. A tar can also carry links, and a link is how an archive writes
+/// through a path it never named — so only ordinary files and directories are
+/// unpacked, and anything else is refused by name rather than skipped.
+pub(crate) fn unpack_tar_gz(bytes: &[u8], into: &Path, strip_top: bool) -> Result<(), String> {
+    use std::io::Read;
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes));
+    let mut inflated: u64 = 0;
+    let entries = archive.entries().map_err(|e| format!("not a tar this can open: {e}"))?;
+    for entry in entries {
+        let mut entry = entry.map_err(|e| format!("an entry of the tar: {e}"))?;
+        let kind = entry.header().entry_type();
+        let path = entry.path().map_err(|e| format!("an entry of the tar names no usable path: {e}"))?;
+        let inside = match strip_top {
+            true => path.components().skip(1).collect::<PathBuf>(),
+            false => path.to_path_buf(),
+        };
+        if inside.as_os_str().is_empty() {
+            continue;
+        }
+        if inside.components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
+            return Err(format!("the tar names a path outside itself: {} — refused", inside.display()));
+        }
+        let to = into.join(&inside);
+        if kind.is_dir() {
+            std::fs::create_dir_all(&to).map_err(|e| format!("could not create {}: {e}", to.display()))?;
+            continue;
+        }
+        if !kind.is_file() {
+            return Err(format!("the tar carries {} as a {kind:?}, not a file — refused", inside.display()));
+        }
+        if let Some(dir) = to.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+        }
+        let mut out =
+            std::fs::File::create(&to).map_err(|e| format!("could not write {}: {e}", to.display()))?;
+        let mut chunk = vec![0u8; 64 << 10];
+        loop {
+            let n = entry.read(&mut chunk).map_err(|e| format!("{}: {e}", to.display()))?;
+            if n == 0 {
+                break;
+            }
+            inflated += n as u64;
+            if inflated > MOST_UNPACKED_BYTES {
+                return Err(format!("the archive inflates past {MOST_UNPACKED_BYTES} bytes — refused"));
+            }
+            std::io::Write::write_all(&mut out, &chunk[..n])
+                .map_err(|e| format!("could not write {}: {e}", to.display()))?;
+        }
+        #[cfg(unix)]
+        if let Ok(mode) = entry.header().mode() {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&to, std::fs::Permissions::from_mode(mode));
+        }
+    }
+    Ok(())
 }
 
 /// The digest an asset entry lists, if it lists one that could check anything.
@@ -539,7 +615,7 @@ impl Installer {
 /// `sha256:` followed by nothing, or by half a hash, is not a digest — and a
 /// download compared against an empty one would fail to match rather than be
 /// refused for having nothing to match, which is the wrong message.
-fn listed_sha256(asset: &serde_json::Value) -> Option<String> {
+pub(crate) fn listed_sha256(asset: &serde_json::Value) -> Option<String> {
     let hex = asset["digest"].as_str()?.strip_prefix("sha256:")?.to_ascii_lowercase();
     (hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit())).then_some(hex)
 }
@@ -590,7 +666,10 @@ async fn keep_ends(
 
 /// The body and its sha256, read together so the hash is of what arrived and
 /// the cap is applied before the bytes are kept.
-async fn read_bounded(mut response: reqwest::Response, most: usize) -> Result<(Vec<u8>, String), String> {
+pub(crate) async fn read_bounded(
+    mut response: reqwest::Response,
+    most: usize,
+) -> Result<(Vec<u8>, String), String> {
     let mut body = Vec::new();
     let mut hasher = sha2::Sha256::new();
     loop {
@@ -636,7 +715,7 @@ fn unpack_gz(bytes: &[u8], to: &Path) -> Result<(), String> {
 /// Unpack a zip into `into`, bounded on what it inflates to and refusing any
 /// entry that would land outside `into`: an archive names its own paths, and
 /// `../` in one is how a download writes somewhere it was not told to.
-fn unpack_zip(bytes: &[u8], into: &Path, strip_top: bool) -> Result<(), String> {
+pub(crate) fn unpack_zip(bytes: &[u8], into: &Path, strip_top: bool) -> Result<(), String> {
     use std::io::Read;
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
         .map_err(|e| format!("not a zip this can open: {e}"))?;
@@ -688,7 +767,7 @@ fn unpack_zip(bytes: &[u8], into: &Path, strip_top: bool) -> Result<(), String> 
 /// `current` as a copy of the versioned tree, for the same reason one binary
 /// is copied: a link needs a privilege on Windows that an ordinary account
 /// does not have.
-fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
+pub(crate) fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
     // Everything, whatever the tree says about itself: a walker that honours
     // ignore files would leave behind whatever a package chose to hide from
     // its own repository, which is not the question here.
@@ -721,7 +800,7 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
 /// this codebase can hand anyone, and an upgrade of an installed server is
 /// exactly the moment it happens. The rename also means a half-written
 /// download is never briefly in place under the name of a working one.
-fn place(from: &Path, to: &Path) -> Result<(), String> {
+pub(crate) fn place(from: &Path, to: &Path) -> Result<(), String> {
     let beside = to.with_extension("incoming");
     std::fs::copy(from, &beside).map_err(|e| format!("could not copy to {}: {e}", beside.display()))?;
     match std::fs::rename(&beside, to) {
@@ -733,7 +812,7 @@ fn place(from: &Path, to: &Path) -> Result<(), String> {
     }
 }
 
-fn executable(path: &Path) -> Result<(), String> {
+pub(crate) fn executable(path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -744,7 +823,7 @@ fn executable(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn host_of(url: &str) -> String {
+pub(crate) fn host_of(url: &str) -> String {
     url.split("://").nth(1).unwrap_or(url).split('/').next().unwrap_or("").to_ascii_lowercase()
 }
 

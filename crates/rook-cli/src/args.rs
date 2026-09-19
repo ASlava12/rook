@@ -34,6 +34,22 @@ pub(crate) enum Command {
     Init,
     /// Report what Rook detected about this machine and what it means for skills.
     Doctor,
+    /// Check GitHub for a newer rook, and fetch it.
+    ///
+    /// The previous version is kept beside the new one as `rook.previous`, so
+    /// going back is a rename. `--check` only asks.
+    Update {
+        /// Say what is published and stop, without fetching anything.
+        #[arg(long)]
+        check: bool,
+        /// Fetch and replace even where the published version is not newer,
+        /// which is how a broken install is repaired or a version undone.
+        #[arg(long)]
+        force: bool,
+        /// As JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Talk to the agent interactively.
     Chat {
         /// Continue an existing session instead of starting one. `last` is the
@@ -483,6 +499,9 @@ pub(crate) enum SkillCmd {
     Install { name: String },
     /// Where `search` and `install` look.
     Sources,
+    /// Bring skills installed from a source up to what it offers now. Skills
+    /// written here, and installed ones edited since, are left alone and said.
+    Update,
     /// Scaffold a new skill.
     New {
         name: String,

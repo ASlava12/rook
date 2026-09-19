@@ -311,6 +311,7 @@ installed, and `skills install` says so and prints the path.
 rook skills sources                 # where it looks
 rook skills search pdf              # what those places offer
 rook skills install pdf             # the whole directory, scripts included
+rook skills update                  # bring the installed ones up to what the source offers
 ```
 
 Nothing is fetched until one of those runs. Opening the store, starting a turn
@@ -320,6 +321,31 @@ write, because it puts instructions on the machine that later sessions follow.
 
 A source needs no index and no API — its skills are read from the `SKILL.md`
 files in it, which is the format everything here already speaks.
+
+**Updating them without losing what you changed.** `skills update` refreshes
+only what came from a source, and only where nothing here has touched it since.
+Two kinds of leaving alone, and both are said out loud rather than skipped in
+silence:
+
+```
+  pdf      — updated from https://github.com/anthropics/skills
+  brand    — changed here since it came from … 3 weeks ago; left as it is.
+             `rook skills history brand` shows what it came as.
+  deploy   — yours, not from a source
+  legacy   — … no longer offers it; left as it is
+```
+
+A skill written here never came from a source. A skill that came from one and
+has been edited since is somebody's work, and an update that discarded it would
+be destroying the reason they installed it — so the new version is held back and
+named, and `skills history` and `skills rollback` are how to take it after
+looking. Whether it was edited is decided by comparing what is on disk against
+the snapshot taken when it was installed — a map of path to content hash, so no
+clock has to be right and a copied directory is not mistaken for an edit. A
+source that will not answer is reported as unreachable rather than read as the
+skill having been withdrawn: a network hiccup must not remove anybody's tools.
+Every update captures what it replaced first, so `rook skills rollback` puts the
+previous body back.
 
 ### None of this loads until it is needed
 

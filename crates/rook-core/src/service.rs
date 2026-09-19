@@ -542,8 +542,110 @@ impl Rook {
                 path.display()
             )));
         }
-        self.capture_skill(name, Some(format!("installed from {}", skill.source)))?;
+        self.capture_skill(name, Some(format!("{INSTALLED_FROM}{}", skill.source)))?;
         Ok(path)
+    }
+
+    /// Bring the skills that came from a source up to what the source offers
+    /// now, and leave everything else exactly as it is.
+    ///
+    /// Two kinds of "leave alone", and both matter. A skill somebody wrote here
+    /// never came from a source and is not this command's business. A skill
+    /// that came from one and has been *edited since* is somebody's work too —
+    /// overwriting it would be the update destroying the reason anybody
+    /// installed it. Both are reported rather than skipped in silence, because
+    /// a command that says "nothing to do" about a skill whose update it is
+    /// holding back has told the person the opposite of what happened.
+    ///
+    /// Told apart by content rather than by timestamps: what a capture holds is
+    /// a path-to-hash map, so "changed since installed" is a comparison of two
+    /// maps and needs no clock to be right.
+    pub fn update_skills(&self) -> Result<Vec<(String, Refreshed)>> {
+        let names: Vec<String> = self
+            .skills()
+            .all()
+            .iter()
+            .filter(|s| s.source == SkillSource::User)
+            .map(|s| s.manifest.name.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if names.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Once for the lot rather than once per skill: each source is a fetch.
+        let (offered, errors) = crate::catalog::offered(&self.config.skill_sources, true);
+        let mut out = Vec::new();
+        for name in names {
+            out.push((name.clone(), self.refresh_skill(&name, &offered, &errors)?));
+        }
+        Ok(out)
+    }
+
+    fn refresh_skill(
+        &self,
+        name: &str,
+        offered: &[crate::catalog::Offered],
+        errors: &[String],
+    ) -> Result<Refreshed> {
+        // The newest capture this command or `install` made, not the oldest:
+        // it is the last moment the content on disk was the source's rather
+        // than somebody's, which is exactly what "edited since" is measured
+        // from. Reading the first install instead reports every skill as
+        // edited the moment it has been updated once.
+        let Some(installed) =
+            self.skill_history(name)?.into_iter().find(|r| came_from_a_source(r.note.as_deref()).is_some())
+        else {
+            return Ok(Refreshed::Yours);
+        };
+        let source = came_from_a_source(installed.note.as_deref()).unwrap_or_default().to_string();
+
+        let Some(offer) = offered.iter().find(|o| o.name == name) else {
+            return Ok(match errors.is_empty() {
+                true => Refreshed::Gone { source },
+                // A source that would not answer is not a source that dropped
+                // the skill, and deleting on that reading would be a network
+                // hiccup removing somebody's tools.
+                false => Refreshed::Unreachable { why: errors.join("; ") },
+            });
+        };
+
+        // The directory, and then the guard goes. `reload_skills` below wants
+        // the write lock on the same index, and holding a read guard across it
+        // is a deadlock — one this found by hanging rather than by failing.
+        let dir = {
+            let skills = self.skills();
+            let skill = *skills
+                .versions_of(name)
+                .first()
+                .ok_or_else(|| CoreError::Other(format!("no skill named {name:?}")))?;
+            skill.dir.clone()
+        };
+        let here = FileSet::content_of(&dir, &CaptureLimits::for_skill())?;
+        let Some(recorded) = ObjectId::from_hex(&installed.object) else {
+            // A ref that does not name an object is a store somebody should
+            // look at, not a reason to overwrite their skill.
+            return Ok(Refreshed::Unreachable {
+                why: format!("the capture {} is not readable", installed.object),
+            });
+        };
+        let was = FileSet::load(&self.store, &recorded)?;
+
+        if here != was.files {
+            return Ok(Refreshed::Edited { source, came_at: installed.captured_at });
+        }
+        // The same limits the capture was taken under, or a skill between the
+        // two budgets would compare as changed against itself.
+        let there = FileSet::content_of(&offer.dir, &CaptureLimits::for_skill())?;
+        if here == there {
+            return Ok(Refreshed::Current);
+        }
+
+        crate::catalog::install(offer, &paths::user_skills_dir())?;
+        self.reload_skills();
+        self.capture_skill(name, Some(format!("{UPDATED_FROM}{}", offer.source)))?;
+        Ok(Refreshed::Updated { source: offer.source.clone() })
     }
 
     pub fn new_skill(&self, name: &str, description: &str) -> Result<PathBuf> {
@@ -2202,6 +2304,44 @@ pub struct TranscriptEntry {
     /// name where watching it live showed the work. Empty for everything else.
     #[serde(default)]
     pub doing: String,
+}
+
+/// The note a capture carries when a skill arrived from a source, and the
+/// thing `update_skills` reads to tell somebody else's skill from your own.
+const INSTALLED_FROM: &str = "installed from ";
+const UPDATED_FROM: &str = "updated from ";
+
+/// The source named by a capture's note, if that capture is one `install` or
+/// `update` made. Both spellings are kept because the history is read by
+/// people: "installed from" and "updated from" say different things there,
+/// and to this comparison they mean the same thing.
+fn came_from_a_source(note: Option<&str>) -> Option<&str> {
+    note.and_then(|n| n.strip_prefix(INSTALLED_FROM).or_else(|| n.strip_prefix(UPDATED_FROM)))
+}
+
+/// What refreshing one skill came to.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum Refreshed {
+    /// Nobody installed it: it was written here, and this command has no
+    /// business with it.
+    Yours,
+    /// It came from a source, and the source has nothing by that name now.
+    /// Left in place — a skill that stopped being published is still a skill
+    /// somebody is using.
+    Gone { source: String },
+    /// The sources could not be read, so whether it moved is unknown. Left
+    /// alone: a network hiccup must not read as a skill having been withdrawn.
+    Unreachable { why: String },
+    /// Already what the source offers.
+    Current,
+    /// Changed here since it last came from the source. Left alone, and said
+    /// out loud: the edit is somebody's work, and an update that discards it
+    /// destroys the reason they installed it.
+    Edited { source: String, came_at: i64 },
+    /// Replaced with what the source offers now, the previous content captured
+    /// first so `rook skills rollback` can put it back.
+    Updated { source: String },
 }
 
 #[derive(Debug, Serialize, Deserialize)]

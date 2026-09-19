@@ -52,6 +52,8 @@ pub fn router(state: Shared) -> Router {
         .route("/api/skills/offered", get(skills_offered))
         .route("/api/skills/diff", get(skill_diff))
         .route("/api/skills/install", post(install_skill))
+        .route("/api/skills/update", post(update_skills))
+        .route("/api/update", get(check_for_update).post(apply_update))
         .route("/api/skills/new", post(new_skill))
         .route("/api/skills/{name}/capture", post(capture_skill))
         .route("/api/skills/{name}/rollback", post(rollback_skill))
@@ -705,6 +707,52 @@ async fn install_skill(State(s): State<Shared>, Json(body): Json<Named>) -> ApiR
         .await
         .map_err(|e| Fail(StatusCode::INTERNAL_SERVER_ERROR, ApiError::new("panic", e.to_string())))??;
     Ok(Json(serde_json::json!({ "path": path })))
+}
+
+/// Takes a body it does not read, and that is the point: a JSON body is what
+/// makes a cross-origin simple POST impossible without a preflight, and this
+/// rewrites skills from the network.
+async fn update_skills(
+    State(s): State<Shared>,
+    Json(_): Json<serde_json::Value>,
+) -> ApiResult<serde_json::Value> {
+    let rook = s.rook.clone().read_owned().await;
+    let skills = tokio::task::spawn_blocking(move || rook.update_skills())
+        .await
+        .map_err(|e| Fail(StatusCode::INTERNAL_SERVER_ERROR, ApiError::new("panic", e.to_string())))??;
+    Ok(Json(serde_json::json!({ "skills": skills })))
+}
+
+/// What the latest release is. A `GET`, because asking changes nothing — and
+/// the answer is a network round trip, so nothing calls it on a timer.
+async fn check_for_update(State(s): State<Shared>) -> ApiResult<serde_json::Value> {
+    let proxy = s.rook.read().await.config.proxy.for_install();
+    let found = rook_core::upgrade::check(&proxy)
+        .await
+        .map_err(|e| Fail(StatusCode::BAD_GATEWAY, ApiError::new("update", e)))?;
+    Ok(Json(serde_json::json!(found)))
+}
+
+/// Fetch it and put it in place. The daemon replaces its own binary here: the
+/// process keeps running on the bytes it started with, so the answer says what
+/// has to happen before the new one is the one serving.
+async fn apply_update(
+    State(s): State<Shared>,
+    Json(_): Json<serde_json::Value>,
+) -> ApiResult<serde_json::Value> {
+    let proxy = s.rook.read().await.config.proxy.for_install();
+    let found = rook_core::upgrade::check(&proxy)
+        .await
+        .map_err(|e| Fail(StatusCode::BAD_GATEWAY, ApiError::new("update", e)))?;
+    if !found.newer {
+        return Ok(Json(serde_json::json!({ "applied": false, "check": found })));
+    }
+    let layout = rook_core::upgrade::Layout::here()
+        .map_err(|e| Fail(StatusCode::INTERNAL_SERVER_ERROR, ApiError::new("update", e)))?;
+    let done = rook_core::upgrade::apply(&found, &layout, &proxy)
+        .await
+        .map_err(|e| Fail(StatusCode::BAD_GATEWAY, ApiError::new("update", e)))?;
+    Ok(Json(serde_json::json!({ "applied": true, "update": done })))
 }
 
 #[derive(Deserialize)]
@@ -1849,6 +1897,8 @@ mod tests {
             "/api/maintenance",
             "/api/shutdown",
             "/api/memory/add",
+            "/api/skills/update",
+            "/api/update",
             "/api/skills/install",
             "/api/skills/new",
             "/api/checkpoints",

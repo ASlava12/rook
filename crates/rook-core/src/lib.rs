@@ -46,6 +46,7 @@ pub mod secrets;
 pub mod service;
 mod sources;
 pub mod telemetry;
+pub mod upgrade;
 pub mod work;
 mod worktrees;
 
@@ -57,6 +58,6 @@ pub use memory::{Fact, MemoryBook, Scope};
 pub use secrets::{Named, Source, Vault};
 pub use service::{
     AGENT_VERSION, AuthoredSkill, ContextUsage, KindUsage, MaintenanceReport, McpSession, MemoryVersion,
-    Rewind, Rollback, Rook, SessionSummary, SkillCandidate, SkillVersionRecord, SkillWhy, TranscriptEntry,
-    session_named,
+    Refreshed, Rewind, Rollback, Rook, SessionSummary, SkillCandidate, SkillVersionRecord, SkillWhy,
+    TranscriptEntry, session_named,
 };

@@ -3,6 +3,7 @@
 use crate::args::SkillCmd;
 use crate::{fmt, source::Source};
 use anyhow::Result;
+use rook_core::Refreshed;
 use rook_skills::SkillCard;
 use std::path::Path;
 
@@ -133,6 +134,38 @@ pub(crate) fn cmd_skills(source: &Source, cmd: SkillCmd, workspace: &Path, json:
         | SkillCmd::Search { .. }
         | SkillCmd::History { .. }
         | SkillCmd::Diff { .. } => unreachable!("routed above"),
+        SkillCmd::Update => {
+            let refreshed = source.update_skills()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&refreshed)?);
+                return Ok(());
+            }
+            if refreshed.is_empty() {
+                println!("no skills in {} yet", rook_core::paths::user_skills_dir().display());
+            }
+            for (name, outcome) in &refreshed {
+                match outcome {
+                    Refreshed::Updated { source } => println!("  {name} — updated from {source}"),
+                    Refreshed::Current => println!("  {name} — already current"),
+                    // Named rather than counted: a skill whose update is being
+                    // held back is the one thing somebody running this wants to
+                    // know about, and "nothing to do" would be the opposite of
+                    // what happened.
+                    Refreshed::Edited { source, came_at } => println!(
+                        "  {name} — changed here since it came from {source} {}; left as it is. \
+                         `rook skills history {name}` shows what it came as.",
+                        fmt::ago(*came_at)
+                    ),
+                    Refreshed::Gone { source } => {
+                        println!("  {name} — {source} no longer offers it; left as it is")
+                    }
+                    Refreshed::Unreachable { why } => {
+                        println!("  {name} — could not be checked ({why}); left as it is")
+                    }
+                    Refreshed::Yours => println!("  {name} — yours, not from a source"),
+                }
+            }
+        }
         SkillCmd::Install { name } => {
             let path = source.install_skill(&name)?;
             println!("installed {}", path.display());

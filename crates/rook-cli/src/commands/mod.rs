@@ -11,4 +11,5 @@ pub(crate) mod secrets;
 pub(crate) mod sessions;
 pub(crate) mod skills;
 pub(crate) mod store;
+pub(crate) mod update;
 pub(crate) mod work;

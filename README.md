@@ -124,6 +124,41 @@ on the distribution you have rather than the one the runner had), `x86_64` for
 Windows, and both architectures for macOS. FreeBSD is a supported target that
 builds and tests in CI and has no published binary yet: build it from a clone.
 
+### Keeping it current
+
+```sh
+rook update --check     # what is published, and what is running
+rook update             # fetch it and put it in place
+rook skills update      # bring installed skills up to what their source offers
+```
+
+`rook update` asks GitHub for the latest release, compares it as a version
+rather than as text, and does nothing when this build is not behind — a clone
+of the repository is usually *ahead* of the last release, which is neither up
+to date nor behind, and it says which. When there is something newer it fetches
+the archive for this machine, checks it against the SHA-256 the release lists
+before anything is written, and replaces `rook`, `rookd` and the built-in
+skills beside the running binary.
+
+What it replaced is kept beside what replaced it — `rook.previous`,
+`rookd.previous`, `skills.previous` — so going back is a rename and needs
+nothing to still be downloadable. Each replacement is a rename rather than a
+write over the top, which is the only spelling that works on Windows, where a
+running `.exe` cannot be overwritten, and the only safe one on macOS, where the
+code signature is cached against the inode. The `rook` and `rookd` already
+running keep the bytes they started with until they are restarted, and the
+command says so rather than implying otherwise. If rook came from a package
+manager the rename will be refused, and the error says to update it with that
+instead.
+
+`rook skills update` is the same idea one layer up, and it is careful about the
+same thing: a skill that came from a source and has been *edited here since* is
+somebody's work, so it is left alone and named — an update that discarded it
+would be destroying the reason it was installed. A skill written here never came
+from a source and is not the command's business. Told apart by comparing content
+against the snapshot taken when it was installed, so no clock has to be right;
+`rook skills history <name>` shows what it came as.
+
 ## Use
 
 ```sh
@@ -144,6 +179,7 @@ rook checkpoint create before-refactor     # or `c` in the TUI's Checkpoints tab
 rook docs add redis                        # read its documentation once, answer from it after
 rookd                                      # http://127.0.0.1:7717 — web UI + API
 rook daemon status                         # where it is, and whether it is this build
+rook update                                # a newer release, if there is one; keeps the previous beside it
 rook daemon restart                        # after an upgrade; names any turn it ends
 ```
 

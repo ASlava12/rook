@@ -91,16 +91,19 @@ impl CaptureLimits {
 }
 
 impl FileSet {
-    /// Walk `root`, store every eligible file, and return the manifest.
-    pub fn capture(
-        store: &Store,
-        kind: &str,
-        name: &str,
-        version: &str,
+    /// Walk `root` under `limits`, and hand each eligible file to `identify`,
+    /// which says what goes in the manifest against its path.
+    ///
+    /// One walk for the two questions asked of a directory — store it, and say
+    /// what is in it — because they have to agree. A capture and a comparison
+    /// that walked differently would disagree about a file one of them skipped,
+    /// and the comparison is what decides whether somebody's edit is about to
+    /// be overwritten.
+    fn walk(
         root: &Path,
         limits: &CaptureLimits,
-        note: Option<String>,
-    ) -> Result<(Self, ObjectId)> {
+        mut identify: impl FnMut(&Path) -> Result<String>,
+    ) -> Result<(BTreeMap<String, String>, u64)> {
         let mut files = BTreeMap::new();
         let mut total = 0u64;
 
@@ -146,11 +149,45 @@ impl FileSet {
                 });
             }
 
-            let data = std::fs::read(entry.path())
-                .map_err(|e| CoreError::Io { path: entry.path().to_path_buf(), source: e })?;
-            let id = store.put(Kind::FileBlob, &data)?;
-            files.insert(rel_str, id.to_hex());
+            files.insert(rel_str, identify(entry.path())?);
         }
+        Ok((files, total))
+    }
+
+    /// What is under `root`, as path to content hash, storing nothing.
+    ///
+    /// The same map `capture` would build, because an id is a hash of the
+    /// bytes and nothing else. Comparing two directories is a question about
+    /// content and not a reason to keep a copy of either: asking it of a
+    /// catalogue on every `skills update` would put every version of every
+    /// skill ever offered into the store, most of which nobody installed.
+    /// Hashed as it is read, so no file is ever held whole.
+    pub fn content_of(root: &Path, limits: &CaptureLimits) -> Result<BTreeMap<String, String>> {
+        Self::walk(root, limits, |path| {
+            let file = std::fs::File::open(path)
+                .map_err(|e| CoreError::Io { path: path.to_path_buf(), source: e })?;
+            let id = ObjectId::of_reader(file)
+                .map_err(|e| CoreError::Io { path: path.to_path_buf(), source: e })?;
+            Ok(id.to_hex())
+        })
+        .map(|(files, _)| files)
+    }
+
+    /// Walk `root`, store every eligible file, and return the manifest.
+    pub fn capture(
+        store: &Store,
+        kind: &str,
+        name: &str,
+        version: &str,
+        root: &Path,
+        limits: &CaptureLimits,
+        note: Option<String>,
+    ) -> Result<(Self, ObjectId)> {
+        let (files, total) = Self::walk(root, limits, |path| {
+            let data =
+                std::fs::read(path).map_err(|e| CoreError::Io { path: path.to_path_buf(), source: e })?;
+            Ok(store.put(Kind::FileBlob, &data)?.to_hex())
+        })?;
 
         let set = FileSet {
             kind: kind.to_string(),

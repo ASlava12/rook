@@ -310,14 +310,17 @@ pub fn private_dir(path: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(path)
 }
 
-/// `ROOK_HOME` is process-wide, so the tests that set it take this in turn.
-/// Two of them in two modules is already enough to have them read each other's
-/// value and fail on a machine that runs them in parallel, which is every one.
+/// `ROOK_HOME`, `ROOK_CONFIG_DIR` and `ROOK_BUILTIN_SKILLS` are process-wide,
+/// so every test in this crate that sets one takes this in turn. Two of them
+/// in two modules is already enough to have them read each other's value and
+/// fail on a machine that runs them in parallel, which is every one — so it is
+/// one gate for the crate rather than one per module, because two gates would
+/// not stop the two modules racing.
 #[cfg(test)]
 static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
-fn alone() -> std::sync::MutexGuard<'static, ()> {
+pub(crate) fn alone() -> std::sync::MutexGuard<'static, ()> {
     ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner())
 }
 

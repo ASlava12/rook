@@ -1271,3 +1271,31 @@ fn recovery_inspection_and_acknowledgement_reach_the_daemon_and_reject_stale_ids
     assert!(!stale.status.success());
     assert!(String::from_utf8_lossy(&stale.stderr).contains("refresh"));
 }
+
+/// A release check that cannot reach the release API says so and exits
+/// non-zero. The point is the wiring as much as the message: a command nobody
+/// can reach is a feature nobody has, and "the check passed" is the wrong
+/// thing to print when nothing was checked.
+#[test]
+fn a_release_check_that_cannot_reach_github_says_so_rather_than_saying_up_to_date() {
+    let rook = Rook::new();
+    // A port nothing is listening on, so the failure is the connection and not
+    // a parse of somebody's error page.
+    let out = Command::new(env!("CARGO_BIN_EXE_rook"))
+        .env("ROOK_HOME", rook.home.path())
+        .env("ROOK_LOG", "error")
+        .env("ROOK_RELEASE_API", "http://127.0.0.1:1")
+        .env("NO_PROXY", "*")
+        .env("no_proxy", "*")
+        .args(["update", "--check"])
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success(), "it must not exit 0: {}", String::from_utf8_lossy(&out.stdout));
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("could not reach"), "and it names what it could not reach: {said}");
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("up to date"),
+        "and never claims a version it did not read"
+    );
+}
