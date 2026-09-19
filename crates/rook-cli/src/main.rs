@@ -62,8 +62,8 @@ fn main() -> Result<()> {
         }
         Some(Command::Init) => commands::config::cmd_init(cli.workspace),
         Some(Command::Doctor) => commands::doctor::cmd_doctor(&workspace_of(&cli.workspace), cli.json),
-        Some(Command::Update { check, force, json }) => {
-            commands::update::cmd_update(check, force, json || cli.json)
+        Some(Command::Update { check, force, rollback, json }) => {
+            commands::update::cmd_update(check, force, rollback, json || cli.json)
         }
         Some(Command::Chat { session }) => chat::run(cli.workspace, session, cli.yes),
         Some(Command::Run { prompt, session, output }) => {

@@ -264,6 +264,59 @@ pub async fn apply(check: &Check, layout: &Layout, proxy: &rook_llm::Proxy) -> R
     })
 }
 
+/// Put back what the last update replaced.
+///
+/// The same swap in the other direction, which makes it a toggle rather than a
+/// one-way door: what is running now becomes the kept one, so a rollback taken
+/// by mistake is undone by running it again. That matters more than it sounds
+/// — the reason to roll back is usually that the new version is doing
+/// something surprising, and finding out it was not the version is a normal
+/// outcome of looking.
+///
+/// Told in prose it was a rename somebody had to get right three times, on
+/// Windows with an extension in the middle of the name. A promise that the
+/// previous version is one rename away is worth a command, or it is a promise
+/// each person keeps for themselves.
+pub fn rollback(layout: &Layout) -> Result<RolledBack, String> {
+    let mut back = Vec::new();
+    let mut left = Vec::new();
+    let mut destinations = vec![layout.bin.join(exe_name("rook"))];
+    let daemon = layout.bin.join(exe_name("rookd"));
+    if daemon.exists() || with_suffix(&daemon, KEPT).exists() {
+        destinations.push(daemon);
+    }
+    destinations.extend(layout.skills.clone());
+
+    for to in destinations {
+        let kept = with_suffix(&to, KEPT);
+        if !kept.exists() {
+            left.push(format!("{} — nothing kept, so there is nothing to go back to", to.display()));
+            continue;
+        }
+        // `swap_in` copies the source aside before it touches the
+        // destination, so naming the kept one as the source is safe even
+        // though the same call is about to overwrite it.
+        let (at, now_kept) = swap_in(&kept, &to)?;
+        back.push((at, now_kept));
+    }
+    if back.is_empty() {
+        return Err(format!(
+            "nothing to go back to beside {} — a rollback restores what an update kept, and no \
+             update has run here. `rook update` fetches a version instead",
+            layout.bin.display()
+        ));
+    }
+    Ok(RolledBack { back, left })
+}
+
+/// What a rollback put back, and what it could not.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RolledBack {
+    /// Each destination restored, with where what had been running went.
+    pub back: Vec<(PathBuf, PathBuf)>,
+    pub left: Vec<String>,
+}
+
 #[allow(clippy::type_complexity)]
 fn place_all(
     check: &Check,
@@ -454,6 +507,43 @@ mod tests {
             b"v2",
             "going back once goes back one version, not to the first ever installed"
         );
+    }
+
+    #[test]
+    fn a_rollback_puts_back_what_the_update_replaced_and_is_itself_undoable() {
+        let _alone = paths::alone();
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let rook = bin.join(exe_name("rook"));
+        std::fs::write(&rook, b"the old one").unwrap();
+        let staged = dir.path().join("staged");
+        std::fs::write(&staged, b"the new one").unwrap();
+        swap_in(&staged, &rook).unwrap();
+        assert_eq!(std::fs::read(&rook).unwrap(), b"the new one");
+
+        let layout = Layout::beside(&bin);
+        let done = rollback(&layout).unwrap();
+        assert_eq!(std::fs::read(&rook).unwrap(), b"the old one", "the version before the update is back");
+        assert_eq!(done.back.len(), 1, "and only the binary that was there: {done:?}");
+
+        // The reason to roll back is usually a guess, and finding out it was
+        // wrong must not cost the version you were on.
+        rollback(&layout).unwrap();
+        assert_eq!(std::fs::read(&rook).unwrap(), b"the new one", "rolling back again undoes the rollback");
+    }
+
+    #[test]
+    fn a_rollback_with_nothing_kept_says_so_rather_than_reporting_a_success() {
+        let _alone = paths::alone();
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join(exe_name("rook")), b"never updated").unwrap();
+
+        let why = rollback(&Layout::beside(&bin)).unwrap_err();
+        assert!(why.contains("no update has run here"), "{why}");
+        assert!(why.contains("rook update"), "and says what to do instead: {why}");
     }
 
     #[test]

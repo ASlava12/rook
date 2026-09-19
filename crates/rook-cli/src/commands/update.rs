@@ -3,7 +3,27 @@
 use anyhow::Result;
 use rook_core::upgrade;
 
-pub(crate) fn cmd_update(check_only: bool, force: bool, json: bool) -> Result<()> {
+pub(crate) fn cmd_update(check_only: bool, force: bool, rollback: bool, json: bool) -> Result<()> {
+    // Nothing is asked of the network to go back, which is most of the point:
+    // the version to go back to is already on the disk, and a rollback that
+    // needed GitHub to be reachable would be unavailable exactly when an
+    // update has gone wrong.
+    if rollback {
+        let layout = upgrade::Layout::here().map_err(anyhow::Error::msg)?;
+        let done = upgrade::rollback(&layout).map_err(anyhow::Error::msg)?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&done)?);
+            return Ok(());
+        }
+        for (at, now_kept) in &done.back {
+            println!("  {} (what was there is now {})", at.display(), now_kept.display());
+        }
+        for why in &done.left {
+            println!("  — {why}");
+        }
+        println!("\nrun this again to undo it. `rook --version` says which one is there now.");
+        return Ok(());
+    }
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     runtime.block_on(async move {
         // No store and no workspace: this replaces files beside the binary and

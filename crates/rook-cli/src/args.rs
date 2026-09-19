@@ -40,12 +40,16 @@ pub(crate) enum Command {
     /// going back is a rename. `--check` only asks.
     Update {
         /// Say what is published and stop, without fetching anything.
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["force", "rollback"])]
         check: bool,
         /// Fetch and replace even where the published version is not newer,
         /// which is how a broken install is repaired or a version undone.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "rollback")]
         force: bool,
+        /// Put back what the last update replaced, without asking GitHub
+        /// anything. Running it again undoes it.
+        #[arg(long)]
+        rollback: bool,
         /// As JSON.
         #[arg(long)]
         json: bool,

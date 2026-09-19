@@ -129,6 +129,7 @@ builds and tests in CI and has no published binary yet: build it from a clone.
 ```sh
 rook update --check     # what is published, and what is running
 rook update             # fetch it and put it in place
+rook update --rollback  # put back what the last update replaced
 rook skills update      # bring installed skills up to what their source offers
 ```
 
@@ -141,15 +142,21 @@ before anything is written, and replaces `rook`, `rookd` and the built-in
 skills beside the running binary.
 
 What it replaced is kept beside what replaced it — `rook.previous`,
-`rookd.previous`, `skills.previous` — so going back is a rename and needs
-nothing to still be downloadable. Each replacement is a rename rather than a
-write over the top, which is the only spelling that works on Windows, where a
-running `.exe` cannot be overwritten, and the only safe one on macOS, where the
-code signature is cached against the inode. The `rook` and `rookd` already
-running keep the bytes they started with until they are restarted, and the
-command says so rather than implying otherwise. If rook came from a package
-manager the rename will be refused, and the error says to update it with that
-instead.
+`rookd.previous`, `skills.previous` — and `rook update --rollback` puts it
+back, asking the network nothing, because the version to go back to is already
+on the disk and a rollback that needed GitHub to be reachable would be
+unavailable exactly when an update has gone wrong. It is a toggle: what was
+running becomes the kept one, so running it a second time undoes it. The reason
+to roll back is usually a guess, and finding out the version was not the
+problem should not cost you the version.
+
+Each replacement is a rename rather than a write over the top, which is the only
+spelling that works on Windows, where a running `.exe` cannot be overwritten,
+and the only safe one on macOS, where the code signature is cached against the
+inode. The `rook` and `rookd` already running keep the bytes they started with
+until they are restarted, and the command says so rather than implying
+otherwise. If rook came from a package manager the rename will be refused, and
+the error says to update it with that instead.
 
 `rook skills update` is the same idea one layer up, and it is careful about the
 same thing: a skill that came from a source and has been *edited here since* is

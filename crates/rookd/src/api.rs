@@ -54,6 +54,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/skills/install", post(install_skill))
         .route("/api/skills/update", post(update_skills))
         .route("/api/update", get(check_for_update).post(apply_update))
+        .route("/api/update/rollback", post(rollback_update))
         .route("/api/skills/new", post(new_skill))
         .route("/api/skills/{name}/capture", post(capture_skill))
         .route("/api/skills/{name}/rollback", post(rollback_skill))
@@ -753,6 +754,17 @@ async fn apply_update(
         .await
         .map_err(|e| Fail(StatusCode::BAD_GATEWAY, ApiError::new("update", e)))?;
     Ok(Json(serde_json::json!({ "applied": true, "update": done })))
+}
+
+/// Put back what the last update replaced. Asks the network nothing: the
+/// version to go back to is already on the disk, which is what makes this
+/// available when an update is the thing that went wrong.
+async fn rollback_update(Json(_): Json<serde_json::Value>) -> ApiResult<serde_json::Value> {
+    let layout = rook_core::upgrade::Layout::here()
+        .map_err(|e| Fail(StatusCode::INTERNAL_SERVER_ERROR, ApiError::new("update", e)))?;
+    let done = rook_core::upgrade::rollback(&layout)
+        .map_err(|e| Fail(StatusCode::CONFLICT, ApiError::new("update", e)))?;
+    Ok(Json(serde_json::json!(done)))
 }
 
 #[derive(Deserialize)]
@@ -1899,6 +1911,7 @@ mod tests {
             "/api/memory/add",
             "/api/skills/update",
             "/api/update",
+            "/api/update/rollback",
             "/api/skills/install",
             "/api/skills/new",
             "/api/checkpoints",
