@@ -132,25 +132,31 @@ impl Layout {
     }
 }
 
-/// The target triple this build's release asset is named after.
+/// The target triple a release asset for this machine would be named after.
 ///
-/// Derived from what the compiler knows rather than from a build script: the
-/// five published targets are the five the release workflow builds, and a
-/// platform that has none is told so by name instead of being handed a
-/// download for another one. Linux is published as musl, which runs on glibc
-/// systems too.
-pub fn target() -> Result<String, String> {
+/// What platform this is, and nothing about whether a release carries it —
+/// those are two facts and conflating them was a bug: asking this on FreeBSD
+/// used to fail outright, so `rook update --check` could not even say that a
+/// new version existed on the one supported platform that has to build from a
+/// clone. A triple that matches no asset answers that question by matching no
+/// asset, which is where it belongs.
+///
+/// Derived from what the compiler knows rather than from a build script.
+/// Linux is published as musl, which runs on glibc systems too.
+pub fn target() -> String {
     let arch = std::env::consts::ARCH;
-    match (std::env::consts::OS, arch) {
-        ("macos", "aarch64" | "x86_64") => Ok(format!("{arch}-apple-darwin")),
-        ("windows", "x86_64") => Ok("x86_64-pc-windows-msvc".into()),
-        ("linux", "aarch64" | "x86_64") => Ok(format!("{arch}-unknown-linux-musl")),
-        (os, arch) => Err(format!(
-            "no release is published for {os} {arch}, so there is nothing to fetch — \
-             `cargo install --path crates/rook-cli` builds it from source instead"
-        )),
+    match std::env::consts::OS {
+        "macos" => format!("{arch}-apple-darwin"),
+        "windows" => format!("{arch}-pc-windows-msvc"),
+        "linux" => format!("{arch}-unknown-linux-musl"),
+        os => format!("{arch}-unknown-{os}"),
     }
 }
+
+/// What to do where a release carries nothing for this machine. One sentence,
+/// in one place, because the check prints it and the fetch refuses with it.
+pub const BUILD_IT_INSTEAD: &str =
+    "`cargo install --path crates/rook-cli` from a clone builds it from source instead";
 
 /// Ask the release API what the newest version is.
 pub async fn check(proxy: &rook_llm::Proxy) -> Result<Check, String> {
@@ -182,7 +188,7 @@ pub async fn check(proxy: &rook_llm::Proxy) -> Result<Check, String> {
         // versions and let the person decide.
         _ => false,
     };
-    let target = target()?;
+    let target = target();
     let asset = release["assets"]
         .as_array()
         .into_iter()
@@ -211,7 +217,7 @@ pub async fn check(proxy: &rook_llm::Proxy) -> Result<Check, String> {
 pub async fn apply(check: &Check, layout: &Layout, proxy: &rook_llm::Proxy) -> Result<Applied, String> {
     let Some(asset) = &check.asset else {
         return Err(format!(
-            "release {} has nothing named for {} — nothing was fetched",
+            "release {} has nothing named for {} — nothing was fetched. {BUILD_IT_INSTEAD}",
             check.tag, check.target
         ));
     };
@@ -455,18 +461,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_platform_with_no_release_is_named_rather_than_handed_another_ones() {
-        // Whatever this is compiled for, one of the two has to be true.
-        match target() {
-            Ok(triple) => assert!(
-                triple.contains(std::env::consts::ARCH),
-                "the asset is named for this machine: {triple}"
-            ),
-            Err(why) => assert!(
-                why.contains(std::env::consts::OS) && why.contains("from source"),
-                "it says which platform and what to do instead: {why}"
-            ),
-        }
+    fn the_triple_names_this_machine_whether_or_not_a_release_carries_it() {
+        let triple = target();
+        assert!(triple.starts_with(std::env::consts::ARCH), "the machine's architecture: {triple}");
+        // FreeBSD is a supported target with no published binary, and it is
+        // the one this used to fail outright on — which meant `update --check`
+        // could not tell it that a new version existed at all.
+        assert_eq!(
+            triple.contains("freebsd"),
+            cfg!(target_os = "freebsd"),
+            "and its operating system: {triple}"
+        );
     }
 
     #[test]

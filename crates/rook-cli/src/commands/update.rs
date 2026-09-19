@@ -85,9 +85,10 @@ fn say_what_is_published(found: &upgrade::Check) {
     }
     match (&found.asset, found.newer) {
         (None, _) => println!(
-            "\nrelease {} carries nothing named for {} — `cargo install --path crates/rook-cli` \
-             builds it from source instead",
-            found.tag, found.target
+            "\nrelease {} carries nothing named for {}. {}",
+            found.tag,
+            found.target,
+            upgrade::BUILD_IT_INSTEAD
         ),
         (Some(asset), true) => {
             println!("\n{} is newer. {} is {} bytes.", found.latest, asset.name, asset.size)

@@ -136,7 +136,10 @@ rook skills update      # bring installed skills up to what their source offers
 `rook update` asks GitHub for the latest release, compares it as a version
 rather than as text, and does nothing when this build is not behind — a clone
 of the repository is usually *ahead* of the last release, which is neither up
-to date nor behind, and it says which. When there is something newer it fetches
+to date nor behind, and it says which. On a supported platform the releases
+carry no binary for — FreeBSD — `--check` still says what is published and that
+it is newer, because not being able to fetch a version is no reason not to know
+one exists. When there is something newer it fetches
 the archive for this machine, checks it against the SHA-256 the release lists
 before anything is written, and replaces `rook`, `rookd` and the built-in
 skills beside the running binary.

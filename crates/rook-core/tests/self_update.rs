@@ -111,7 +111,7 @@ async fn a_newer_release_is_fetched_checked_and_put_in_place_keeping_what_it_rep
     let home = tempfile::tempdir().unwrap();
     unsafe { std::env::set_var("ROOK_HOME", home.path()) };
 
-    let target = upgrade::target().unwrap();
+    let target = upgrade::target();
     let (name, archive) = release_archive("99.0.0", &target, b"the new rook", "shipped");
     let archive = Arc::new(archive);
     let api = github("v99.0.0", &name, archive.clone(), sha256_of(&archive)).await;
@@ -158,7 +158,7 @@ async fn a_download_that_does_not_match_the_listed_digest_replaces_nothing() {
     let home = tempfile::tempdir().unwrap();
     unsafe { std::env::set_var("ROOK_HOME", home.path()) };
 
-    let target = upgrade::target().unwrap();
+    let target = upgrade::target();
     let (name, archive) = release_archive("99.0.0", &target, b"not what was promised", "shipped");
     let api = github("v99.0.0", &name, Arc::new(archive), sha256_of(b"something else entirely")).await;
     unsafe { std::env::set_var("ROOK_RELEASE_API", &api) };
@@ -187,7 +187,7 @@ async fn a_release_no_newer_than_this_build_is_reported_rather_than_installed() 
     let home = tempfile::tempdir().unwrap();
     unsafe { std::env::set_var("ROOK_HOME", home.path()) };
 
-    let target = upgrade::target().unwrap();
+    let target = upgrade::target();
     let (name, archive) = release_archive("0.0.1", &target, b"ancient", "shipped");
     let archive = Arc::new(archive);
     let api = github("v0.0.1", &name, archive.clone(), sha256_of(&archive)).await;
@@ -213,9 +213,17 @@ async fn a_release_with_nothing_for_this_platform_says_so_and_fetches_nothing() 
 
     let found = upgrade::check(&Default::default()).await.unwrap();
     assert!(found.asset.is_none(), "{found:?}");
+    // The point of separating the two questions. FreeBSD is a supported target
+    // with no published binary, and being unable to fetch one is no reason to
+    // be unable to say that a newer version exists — which is what this did
+    // until the FreeBSD runner said so.
+    assert_eq!(found.latest, "99.0.0", "it still says what is published: {found:?}");
+    assert!(found.newer, "and that it is newer than this build: {found:?}");
+
     let install = tempfile::tempdir().unwrap();
     let bin = installed(install.path(), "withdrawn");
     let why = upgrade::apply(&found, &upgrade::Layout::beside(&bin), &Default::default()).await.unwrap_err();
     assert!(why.contains(&found.target), "it names the platform it has nothing for: {why}");
+    assert!(why.contains("from source"), "and what to do instead: {why}");
     unsafe { std::env::remove_var("ROOK_RELEASE_API") };
 }
