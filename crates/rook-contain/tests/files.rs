@@ -52,9 +52,22 @@ fn a_move_that_cannot_remove_the_original_says_both_copies_exist() {
     let to = tempfile::tempdir().unwrap();
     std::fs::create_dir(from.path().join("held")).unwrap();
     std::fs::write(from.path().join("held/note.txt"), b"keep me").unwrap();
+    std::fs::write(from.path().join("held/probe.txt"), b"probe").unwrap();
     // The directory entry is what an unlink changes, so it is the directory
     // that has to be unwritable.
     std::fs::set_permissions(from.path().join("held"), std::fs::Permissions::from_mode(0o500)).unwrap();
+
+    // Whether that bites, asked rather than assumed. Root bypasses directory
+    // permissions, so under root the unlink succeeds, the move works, and the
+    // failure this test is about cannot be staged at all — which is what
+    // happened on the FreeBSD runner, where the tests run as root and this
+    // failed on a platform difference that has nothing to do with its subject.
+    // A probe rather than a uid check: what matters is whether the permission
+    // is enforced for whoever is running, not who that is.
+    if std::fs::remove_file(from.path().join("held/probe.txt")).is_ok() {
+        std::fs::set_permissions(from.path().join("held"), std::fs::Permissions::from_mode(0o700)).unwrap();
+        return;
+    }
 
     let failed = files::move_file(from.path(), Path::new("held/note.txt"), to.path(), Path::new("note.txt"))
         .expect_err("the original cannot be removed");
