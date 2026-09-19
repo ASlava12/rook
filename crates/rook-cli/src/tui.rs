@@ -219,15 +219,38 @@ pub fn run(source: crate::source::Source, yes: bool, started: Option<String>) ->
     // `paste::gather` is what reads it; this still asks the terminal to mark
     // it, because a marker read as keys is a better tell than a stopwatch.
     let pasting = execute!(std::io::stdout(), event::EnableBracketedPaste).is_ok();
+    // Shift+Enter is what a hand reaches for, and a unix terminal reading
+    // escape sequences cannot tell it from Enter: the two send the same byte.
+    // The keyboard protocol Kitty defined is the one that can, and iTerm2,
+    // Ghostty, WezTerm, foot and Kitty itself all speak it — a terminal that
+    // does not simply ignores the request, which is why it is asked for rather
+    // than configured.
+    //
+    // `DISAMBIGUATE_ESCAPE_CODES` alone, and deliberately: it is the flag that
+    // makes Enter, Tab and Esc carry their modifiers, and nothing else changes
+    // shape. Asking for key releases or for every key as an escape code would
+    // rewrite what the whole window reads for the sake of one binding.
+    let shift_enter = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false)
+        && execute!(
+            std::io::stdout(),
+            event::PushKeyboardEnhancementFlags(event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        )
+        .is_ok();
     let daemon = source.daemon_base().map(str::to_string);
     let mut app = App::new(source, runtime, yes);
     app.mouse = mouse;
+    app.shift_enter = shift_enter;
     let result = app.run(&mut terminal);
     if mouse {
         let _ = execute!(std::io::stdout(), event::DisableMouseCapture);
     }
     if pasting {
         let _ = execute!(std::io::stdout(), event::DisableBracketedPaste);
+    }
+    // Popped, or the shell that comes after this window keeps being told about
+    // modifiers it never asked for.
+    if shift_enter {
+        let _ = execute!(std::io::stdout(), event::PopKeyboardEnhancementFlags);
     }
     ratatui::restore();
     // Written down, not only returned — and after the screen is restored, so it
@@ -1090,6 +1113,10 @@ struct App {
     /// offers a modifier to get past it and no two agree on which — so this is
     /// a key instead, and the footer says which of the two you currently have.
     mouse: bool,
+    /// Whether the terminal agreed to tell Shift+Enter from Enter. Carried
+    /// rather than asked again, because what the help names has to be what the
+    /// window will actually receive, and the request is made once at startup.
+    shift_enter: bool,
     /// Every file in the workspace, walked when a mention starts and kept until
     /// it ends. Walking per keystroke would be twenty thousand files sixty
     /// times a second to narrow a list already in hand; walking once per
@@ -1266,6 +1293,7 @@ impl App {
             // not take the mouse says so by leaving this false, and the footer
             // then offers nothing to toggle.
             mouse: false,
+            shift_enter: false,
             turn: None,
             overlay: None,
             palette: Typing::default(),
@@ -1947,15 +1975,38 @@ impl App {
     ///
     /// Shift+Enter is what a hand reaches for, and on Windows it arrives —
     /// console input records carry the modifier outright, where a unix terminal
-    /// reading escape sequences cannot tell it from Enter. So each platform is
-    /// offered the one that works there, and both are accepted.
+    /// reading escape sequences cannot tell it from Enter.
+    ///
+    /// Then the same fault turned up on macOS, from the other direction. `⌥⏎`
+    /// is the right key there and it reaches nothing unless the terminal sends
+    /// Option as Meta, which iTerm2 does not do until somebody finds the
+    /// setting. Twice now the named key has been the one that could not work,
+    /// so what is named first is the one that needs nothing configured: `^J`
+    /// is the line feed, distinct from Enter in raw mode on every terminal.
+    /// The nicer key is named second because it is nicer, and all of them are
+    /// accepted.
     const NEWLINE_KEY: &str = if cfg!(windows) {
         "Shift+⏎"
     } else if cfg!(target_os = "macos") {
-        "⌥⏎"
+        "^J or ⌥⏎"
     } else {
-        "Alt+⏎"
+        "^J or Alt+⏎"
     };
+
+    /// What to call it here, which is a question about this terminal and not
+    /// about this platform. Where it agreed to disambiguate, Shift+Enter is
+    /// the one a hand reaches for and it arrives; where it did not, naming it
+    /// would be the same fault a third time.
+    fn named_newline(shift_enter: bool) -> &'static str {
+        match shift_enter {
+            true => "Shift+⏎",
+            false => Self::NEWLINE_KEY,
+        }
+    }
+
+    fn newline_key(&self) -> &'static str {
+        Self::named_newline(self.shift_enter)
+    }
 
     /// Typing in the palette narrows the list; enter takes what is under the
     /// cursor.
@@ -2090,6 +2141,21 @@ impl App {
             // named was the one that could not work, and there was no way to
             // write a second line at all.
             KeyCode::Enter if key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) => {
+                self.chat.input.insert('\n')
+            }
+            // The one that needs nothing configured. A terminal sends Option
+            // as Meta only when it is told to, and iTerm2 ships with it off —
+            // so on macOS the key the help named arrived at no one who had not
+            // already changed a setting they had no reason to look for. That
+            // is the Windows fault again with a different key: the answer was
+            // on the screen and could not work.
+            //
+            // `^J` is the line feed itself. In raw mode a terminal stops
+            // turning `\r` into `\n`, so the two are distinct and crossterm
+            // reads 0x0A as Ctrl+J — its own comment on the byte says to use
+            // this rather than the newline. No terminal has to be configured
+            // for it, on any platform.
+            KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.chat.input.insert('\n')
             }
             KeyCode::Enter if self.chat.asking.is_some() => self.answer(),
@@ -4095,7 +4161,7 @@ impl App {
             key("  @           names a file in the workspace · tab completes it"),
             key(&format!(
                 "  {:<12}a newline in the message · ⏎ sends · paste keeps its lines",
-                Self::NEWLINE_KEY
+                self.newline_key()
             )),
             key("  Esc         closes what is open; in the chat, clears then quits"),
             key("  j k ↑ ↓     move · Space/PgDn scroll · r reload · wheel scrolls"),
@@ -4486,15 +4552,23 @@ and the next line"
     fn the_key_for_a_newline_is_named_the_way_this_keyboard_labels_it() {
         let named = super::App::NEWLINE_KEY;
         assert!(named.contains('⏎'), "it is a key with Enter in it: {named:?}");
-        match (cfg!(windows), cfg!(target_os = "macos")) {
+        match cfg!(windows) {
             // Alt+Enter never reaches the app here: the terminal keeps it to go
             // full screen, so naming it would be naming the one key that cannot
             // work.
-            (true, _) => assert!(named.starts_with("Shift+"), "the one that arrives here: {named:?}"),
-            (_, true) => assert!(named.starts_with('⌥'), "the symbol printed on the key there"),
-            _ => assert!(named.starts_with("Alt+"), "{named:?}"),
+            true => assert!(named.starts_with("Shift+"), "the one that arrives here: {named:?}"),
+            // And on unix the first one named is the one that arrives whatever
+            // the terminal is set to. `⌥⏎` reaches nothing until iTerm2 is told
+            // to send Option as Meta, so naming it alone was the same fault in
+            // the other direction.
+            false => assert!(named.starts_with("^J"), "the one needing nothing configured: {named:?}"),
         }
         assert!(cfg!(target_os = "macos") || !named.contains('⌥'), "no keyboard here has that on it");
+
+        // And where the terminal agreed to tell the two apart, the key named is
+        // the one a hand reaches for — which is the whole reason for asking it.
+        assert_eq!(super::App::named_newline(true), "Shift+⏎");
+        assert_eq!(super::App::named_newline(false), named, "otherwise, what arrives without asking");
     }
     use super::*;
 

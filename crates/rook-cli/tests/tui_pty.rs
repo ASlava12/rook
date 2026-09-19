@@ -1373,3 +1373,71 @@ fn attachments_can_be_selected_and_cleared_from_the_tui() {
     pty.send("/attachments clear\r");
     pty.screen_showing(100, 30, "attachments for next turn: 0");
 }
+
+/// The key that writes a second line has to be one this terminal sends, and
+/// twice now the named one was not: `Alt+⏎` on Windows, which the terminal
+/// keeps for itself, and `⌥⏎` on macOS, which reaches nothing until iTerm2 is
+/// told to send Option as Meta — off by default, and the reason somebody with
+/// a fresh install could not write a second line.
+///
+/// `^J` is the line feed. In raw mode the terminal stops folding `\r` into
+/// `\n`, so it is a key of its own on every terminal and needs nothing
+/// configured. That is what this asserts: the byte goes in, the message does
+/// not go out.
+#[test]
+fn ctrl_j_writes_a_second_line_instead_of_sending_the_first() {
+    let _one = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let mut pty = tui(home.path(), workspace.path());
+    pty.screen(100, 30);
+
+    // A command, so nothing needs a model: if it were sent, the window would
+    // answer it and the mark of a said message would appear.
+    pty.send("/nosuch alpha");
+    pty.send("\n"); // ^J — the line feed itself, not the Enter key
+    pty.send("omega");
+    let held = pty.screen_showing(100, 30, "omega").join("\n");
+
+    assert!(held.contains("alpha"), "the first line is still in the box:\n{held}");
+    assert!(
+        !held.contains("▌ /nosuch alpha"),
+        "and ^J did not send it — a said message carries that mark:\n{held}"
+    );
+
+    // And Enter after it sends the pair, so the newline went in rather than
+    // being swallowed: what comes back is one message with both lines.
+    pty.send("\r");
+    let sent = pty.screen_showing(100, 30, "▌ /nosuch alpha").join("\n");
+    assert!(sent.contains("omega"), "both lines went as one message:\n{sent}");
+}
+
+/// The other half: where the terminal *can* tell Shift+Enter from Enter, it is
+/// taken as a newline. A unix terminal sends the same byte for both until it is
+/// asked to disambiguate, which is what the window asks for at startup through
+/// the keyboard protocol iTerm2, Ghostty, Kitty, WezTerm and foot all speak.
+/// This sends what such a terminal sends — Enter is key 13, and modifier 2 is
+/// Shift — so the binding is proved without needing one of them to run the test.
+#[test]
+fn shift_enter_writes_a_second_line_where_the_terminal_can_say_it_was_shift() {
+    let _one = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let mut pty = tui(home.path(), workspace.path());
+    pty.screen(100, 30);
+
+    pty.send("/nosuch alpha");
+    pty.send("\u{1b}[13;2u"); // Shift+Enter, as a disambiguating terminal writes it
+    pty.send("omega");
+    let held = pty.screen_showing(100, 30, "omega").join("\n");
+
+    assert!(held.contains("alpha"), "the first line is still in the box:\n{held}");
+    assert!(
+        !held.contains("▌ /nosuch alpha"),
+        "and Shift+⏎ did not send it — a said message carries that mark:\n{held}"
+    );
+
+    pty.send("\r");
+    let sent = pty.screen_showing(100, 30, "▌ /nosuch alpha").join("\n");
+    assert!(sent.contains("omega"), "both lines went as one message:\n{sent}");
+}
