@@ -115,18 +115,15 @@ impl Layout {
         // The two shapes `builtin_skills_dir` looks in, in the same order, and
         // the release layout where neither is there yet: a release without its
         // skills is an agent with none, and nothing would say so.
-        let flat = bin.join("skills");
-        // `<bin>/../share/…` rather than the parent's `share/…` only where
-        // there is no parent to ask: the path is printed, and one carrying a
-        // `..` reads as a bug in the thing printing it.
-        let shared = match bin.parent() {
-            Some(prefix) => prefix.join("share/rook/skills"),
-            None => bin.join("../share/rook/skills"),
-        };
-        let skills = match (flat.is_dir(), shared.is_dir()) {
-            (true, _) => flat,
-            (_, true) => shared,
-            _ => shared,
+        // The same two places the loader looks in, in the same order, asked of
+        // the same list: an update that refreshed a directory the binary does
+        // not read is the whole failure this is guarding against.
+        let [flat, shared] = paths::builtin_skill_places(bin);
+        let skills = match flat.is_dir() {
+            true => flat,
+            // Neither there yet is a release with no skills at all, so the
+            // release's own layout is where they go.
+            false => shared,
         };
         Self { bin: bin.to_path_buf(), skills: Some(skills), skills_left: None }
     }

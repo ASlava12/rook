@@ -327,10 +327,26 @@ pub(crate) fn cmd_doctor(workspace: &Path, json: bool) -> Result<()> {
     // The built-in ones live next to the binary, which a plain `cargo build`
     // does not put them there — the commonest reason a fresh install has none,
     // and invisible from a count of zero.
-    if cards.is_empty() && rook_core::paths::builtin_skills_dir().is_none() {
-        println!("  none are installed next to {}", std::env::current_exe().unwrap_or_default().display());
-        println!("  `cargo xtask dist` packages them there, or set ROOK_BUILTIN_SKILLS");
-        println!("  your own go in {}", rook_core::paths::user_skills_dir().display());
+    let (builtin, passed_over) = rook_core::paths::where_the_builtin_skills_are();
+    match &builtin {
+        Some(dir) => println!("  built-in: {}", dir.display()),
+        None if cards.is_empty() => {
+            println!(
+                "  none are installed next to {}",
+                std::env::current_exe().unwrap_or_default().display()
+            );
+            println!("  `cargo xtask dist` packages them there, or set ROOK_BUILTIN_SKILLS");
+            println!("  your own go in {}", rook_core::paths::user_skills_dir().display());
+        }
+        None => {}
+    }
+    // Both layouts are wanted — one is what `dist` builds, the other is what a
+    // release archive carries — and a machine with both reads one of them. An
+    // installer refreshes the other, so the catalogue in use goes stale and
+    // nothing says so: here it is said, at the moment it becomes true.
+    for ignored in &passed_over {
+        println!("  {} also holds built-in skills and is not read", ignored.display());
+        println!("    an installer refreshes it; remove whichever set you do not want");
     }
     for c in blocked {
         println!("  {} — {}", c.name, c.mismatches.join("; "));

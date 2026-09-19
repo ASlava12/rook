@@ -226,14 +226,69 @@ pub fn project_plugins_dir(workspace: &Path) -> PathBuf {
 /// `ROOK_BUILTIN_SKILLS` overrides the search, which is how you point a
 /// `cargo run` build at the repository's own `skills/` directory.
 pub fn builtin_skills_dir() -> Option<PathBuf> {
-    if let Ok(explicit) = std::env::var("ROOK_BUILTIN_SKILLS")
-        && !explicit.is_empty()
-    {
-        return Some(PathBuf::from(explicit));
+    where_the_builtin_skills_are().0
+}
+
+/// The built-in skills in use, and any other place that also holds a set and
+/// is therefore not read.
+///
+/// Two layouts are supported on purpose: `cargo xtask dist` puts them beside
+/// the binary so a build runs from `target/release`, and a release archive
+/// puts them under `share/rook/skills`. Taking the first that exists is right
+/// until both do — and then an installer that refreshes one while the binary
+/// reads the other leaves a stale catalogue that nothing says a word about.
+/// That happened on a machine here: a `dist` tree copied into `~/.local/bin`
+/// by hand, and every later `install.sh` updating the copy nobody read.
+///
+/// So the question is answered once and the answer keeps what it passed over,
+/// rather than by a `find` that discards its losers. `rook doctor` prints
+/// both, which is the whole of the fix: the two layouts are both wanted, and
+/// what was missing was anyone saying which one won.
+pub fn where_the_builtin_skills_are() -> (Option<PathBuf>, Vec<PathBuf>) {
+    let explicit = std::env::var("ROOK_BUILTIN_SKILLS").ok().filter(|v| !v.is_empty()).map(PathBuf::from);
+    let beside = std::env::current_exe().ok().and_then(|exe| exe.parent().map(Path::to_path_buf));
+    chosen_and_passed_over(explicit, beside.as_deref(), |c| c.is_dir())
+}
+
+/// The two places built-in skills are looked for beside a binary, in the order
+/// they are preferred: what `cargo xtask dist` writes, then what a release
+/// archive carries.
+///
+/// One list rather than one per caller. Three places asked this — the loader,
+/// `rook doctor` and the updater — and the third had quietly grown a fourth
+/// answer for the case where neither exists yet, which is how two layouts
+/// become three.
+pub fn builtin_skill_places(bin: &Path) -> [PathBuf; 2] {
+    // The prefix's own `share`, asked of the parent rather than joined through
+    // `..`: these paths are printed, and one carrying a `..` reads as a bug in
+    // whatever printed it.
+    let shared = match bin.parent() {
+        Some(prefix) => prefix.join("share/rook/skills"),
+        None => bin.join("../share/rook/skills"),
+    };
+    [bin.join("skills"), shared]
+}
+
+/// The same, with what it reads from passed in: `current_exe` is not something
+/// a test can move, and the answer is worth testing on every platform rather
+/// than on whichever one is running.
+fn chosen_and_passed_over(
+    explicit: Option<PathBuf>,
+    beside: Option<&Path>,
+    exists: impl Fn(&Path) -> bool,
+) -> (Option<PathBuf>, Vec<PathBuf>) {
+    let candidates: Vec<PathBuf> =
+        beside.into_iter().flat_map(builtin_skill_places).filter(|c| exists(c)).collect();
+    match explicit {
+        // An explicit directory is the answer, and a layout beside the binary
+        // is then passed over too — which is worth saying, because setting the
+        // variable and forgetting it looks exactly like an install gone wrong.
+        Some(named) => (Some(named), candidates),
+        None => {
+            let mut found = candidates.into_iter();
+            (found.next(), found.collect())
+        }
     }
-    let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?;
-    [dir.join("skills"), dir.join("../share/rook/skills")].into_iter().find(|c| c.is_dir())
 }
 
 /// Language servers `rook lsp install` fetched: one directory per server, one
@@ -322,6 +377,61 @@ static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[cfg(test)]
 pub(crate) fn alone() -> std::sync::MutexGuard<'static, ()> {
     ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[cfg(test)]
+mod which_skills_are_read {
+    use super::*;
+
+    /// Everything under `bin`, so `exists` answers for a tree that is not here.
+    fn there(bin: &str, present: &[&str]) -> (Option<PathBuf>, Vec<PathBuf>) {
+        let present: Vec<PathBuf> = present.iter().map(PathBuf::from).collect();
+        chosen_and_passed_over(None, Some(Path::new(bin)), move |c| present.iter().any(|p| p == c))
+    }
+
+    #[test]
+    fn one_layout_is_read_and_nothing_is_passed_over() {
+        let (read, ignored) = there("/opt/rook/bin", &["/opt/rook/share/rook/skills"]);
+        assert_eq!(read.as_deref(), Some(Path::new("/opt/rook/share/rook/skills")), "{read:?}");
+        assert!(ignored.is_empty(), "nothing to warn about: {ignored:?}");
+    }
+
+    /// The trap this exists for. A `cargo xtask dist` tree copied into a prefix
+    /// by hand, and every later `install.sh` refreshing the other one: the
+    /// binary goes on reading a catalogue that stops being updated, and until
+    /// this nothing said a word about it.
+    #[test]
+    fn with_both_layouts_the_one_beside_the_binary_wins_and_the_other_is_named() {
+        let both = ["/opt/rook/bin/skills", "/opt/rook/share/rook/skills"];
+        let (read, ignored) = there("/opt/rook/bin", &both);
+        assert_eq!(read.as_deref(), Some(Path::new(both[0])), "the flat one is first: {read:?}");
+        assert_eq!(
+            ignored,
+            vec![PathBuf::from(both[1])],
+            "and the one an installer refreshes is named, not discarded"
+        );
+        assert!(!format!("{ignored:?}").contains(".."), "a path somebody reads: {ignored:?}");
+    }
+
+    /// Setting the variable and forgetting it looks exactly like an install
+    /// that did not take, so what it overrode is worth a line too.
+    #[test]
+    fn an_explicit_directory_wins_and_still_says_what_it_overrode() {
+        let (read, ignored) = chosen_and_passed_over(
+            Some(PathBuf::from("/somewhere/of/their/own")),
+            Some(Path::new("/opt/rook/bin")),
+            |c| c == Path::new("/opt/rook/bin/skills"),
+        );
+        assert_eq!(read.as_deref(), Some(Path::new("/somewhere/of/their/own")), "{read:?}");
+        assert_eq!(ignored, vec![PathBuf::from("/opt/rook/bin/skills")], "{ignored:?}");
+    }
+
+    #[test]
+    fn no_layout_at_all_is_no_answer_rather_than_a_directory_that_is_not_there() {
+        let (read, ignored) = there("/opt/rook/bin", &[]);
+        assert!(read.is_none(), "a path that does not exist is not an answer: {read:?}");
+        assert!(ignored.is_empty(), "{ignored:?}");
+    }
 }
 
 #[cfg(test)]
