@@ -140,6 +140,36 @@ pub fn config_file() -> PathBuf {
     config_dir().join("config.toml")
 }
 
+/// Settings for every account on this machine, under the user's own.
+///
+/// `/etc/rook/config.toml` on unix, `%PROGRAMDATA%\rook\config.toml` on
+/// Windows. Absent on most machines; it is there for somebody who administers
+/// several and wants one place to say what they all do.
+pub fn system_config_file() -> PathBuf {
+    #[cfg(windows)]
+    {
+        let root = std::env::var("PROGRAMDATA")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "C:\\ProgramData".into());
+        PathBuf::from(root).join("rook").join("config.toml")
+    }
+    #[cfg(not(windows))]
+    PathBuf::from("/etc/rook/config.toml")
+}
+
+/// A project's own settings, which are read with less authority than the rest.
+///
+/// It travels with the repository, so whoever wrote it is not necessarily
+/// whoever is running the agent — the same reason `<workspace>/.env` is not
+/// read at all. This one is read, because "this codebase needs more steps than
+/// most" is a real thing for a project to say, but only for the settings that
+/// cannot widen what the agent may do. [`crate::Config::load_for`] holds that
+/// list.
+pub fn workspace_config_file(workspace: &Path) -> PathBuf {
+    workspace.join(".rook").join("config.toml")
+}
+
 pub fn user_skills_dir() -> PathBuf {
     home().join("skills")
 }

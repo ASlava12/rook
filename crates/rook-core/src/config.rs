@@ -948,6 +948,118 @@ impl Default for SandboxConfig {
     }
 }
 
+/// What a project's own file may decide: how to work in this codebase, and
+/// nothing about what the agent is permitted to do.
+///
+/// An allowlist rather than a list of the dangerous keys, because a denylist
+/// rots — the next setting added is permitted by nobody having thought about
+/// it. `agent.model` is deliberately absent: which endpoint a conversation is
+/// sent to is the person's decision, and a repository is not the person.
+const PROJECT_MAY_SET: &[&str] = &[
+    "agent.compact_at",
+    "agent.effort",
+    "agent.lazy_skills",
+    "agent.lazy_tools",
+    "agent.max_instructions_bytes",
+    "agent.max_parallel_subagents",
+    "agent.max_skill_cards",
+    "agent.max_steps",
+    "agent.max_subagents_per_turn",
+    "agent.max_turn_secs",
+    "agent.max_turn_tokens",
+    "agent.max_worktrees",
+    "agent.one_script",
+    "agent.plan_first",
+    "agent.todo_tool",
+];
+
+/// Lists a project may add to but never replace. Adding to either can only
+/// narrow what runs, which is the whole reason these two are here and
+/// `sandbox.allow` is not.
+const PROJECT_MAY_ADD_TO: &[&str] = &["sandbox.ask", "sandbox.deny"];
+
+/// One layer, or an empty one where there is no file.
+fn read_layer(path: std::path::PathBuf) -> std::result::Result<toml::Table, ConfigError> {
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(toml::Table::new()),
+        Err(source) => return Err(ConfigError::Read { path, source }),
+    };
+    toml::from_str(&text).map_err(|e| ConfigError::Parse { path, message: e.to_string() })
+}
+
+/// `over` wins the keys it names. A table is merged into; anything else is
+/// replaced, because half an array is a value nobody wrote.
+fn merge(under: &mut toml::Table, over: toml::Table) {
+    for (key, value) in over {
+        match (under.get_mut(&key), value) {
+            (Some(toml::Value::Table(existing)), toml::Value::Table(incoming)) => merge(existing, incoming),
+            (_, value) => {
+                under.insert(key, value);
+            }
+        }
+    }
+}
+
+/// The part of a project's file that is allowed to take effect.
+///
+/// Everything else is dropped here rather than refused loudly, because a
+/// project shipping a setting this build does not honour must not stop the
+/// agent from starting in it — `refused_from_workspace` is where it is named.
+fn kept_from_workspace(project: &toml::Table) -> toml::Table {
+    let mut kept = toml::Table::new();
+    for (table, value) in project {
+        let Some(inner) = value.as_table() else { continue };
+        for (key, value) in inner {
+            if !PROJECT_MAY_SET.contains(&format!("{table}.{key}").as_str()) {
+                continue;
+            }
+            let into = kept.entry(table.clone()).or_insert_with(|| toml::Value::Table(toml::Table::new()));
+            if let Some(into) = into.as_table_mut() {
+                into.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    kept
+}
+
+/// The two lists a project may add to, added to rather than set.
+///
+/// Its own step because it is the only place a project's value is combined
+/// with what is under it instead of replacing it: replacing `deny` would let a
+/// repository shorten it, which is the one thing this whole arrangement is
+/// against. Entries already there are not repeated.
+fn append_lists(merged: &mut toml::Table, project: &toml::Table) {
+    // What the built-in defaults hold, for the case that decides whether this
+    // is safe at all: no layer names `deny`, so the merged table has no such
+    // key, and a project's list would become the only one — silently dropping
+    // `rm -rf /` and everything beside it. Seeded from the defaults first, so
+    // a project's entries are added to them and never instead of them.
+    let defaults = toml::Value::try_from(Config::default()).ok();
+    for full in PROJECT_MAY_ADD_TO {
+        let Some((table, key)) = full.split_once('.') else { continue };
+        let Some(adding) = project.get(table).and_then(|t| t.get(key)).and_then(|v| v.as_array()) else {
+            continue;
+        };
+        let fallback = defaults
+            .as_ref()
+            .and_then(|d| d.get(table))
+            .and_then(|t| t.get(key))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let into = merged.entry(table.to_string()).or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        let Some(into) = into.as_table_mut() else { continue };
+        let mut list = into.get(key).and_then(|v| v.as_array()).cloned().unwrap_or(fallback);
+        for value in adding {
+            if !list.contains(value) {
+                list.push(value.clone());
+            }
+        }
+        into.insert(key.to_string(), toml::Value::Array(list));
+    }
+}
+
 impl Default for TelemetryConfig {
     fn default() -> Self {
         Self { upload: false, log_level: "warn".into(), max_log_bytes: 64 << 20 }
@@ -1032,6 +1144,63 @@ impl Config {
     /// ignoring it would also silently change which model the agent talks to.
     pub fn load() -> std::result::Result<Self, ConfigError> {
         Self::load_from(crate::paths::config_file())
+    }
+
+    /// The three layers, least authority first: the machine's, the person's,
+    /// then the project's.
+    ///
+    /// Merged key by key rather than file by file, so a project that sets one
+    /// thing keeps everything else the person chose. A later layer wins the
+    /// keys it names and nothing else; a table is merged into, an array is
+    /// replaced.
+    ///
+    /// The project's layer is different in kind and is treated as such. It
+    /// travels with the repository — somebody clones a project and the file
+    /// comes with it — so whoever wrote it is not whoever is running the
+    /// agent. `<workspace>/.env` is not read at all for that reason. This is
+    /// read, because "this codebase needs more steps than most" is a real
+    /// thing for a project to say, but only [`PROJECT_MAY_SET`]: settings
+    /// about how to work here, never about what the agent is allowed to do,
+    /// where its secrets are, or what it may start. `sandbox.deny` and
+    /// `sandbox.ask` are the exception and are *appended* rather than
+    /// replacing, because adding to them can only narrow.
+    ///
+    /// What a project asked for and did not get is not dropped in silence —
+    /// [`Self::refused_from_workspace`] names it, and `rook doctor` prints it.
+    pub fn load_for(workspace: &std::path::Path) -> std::result::Result<Self, ConfigError> {
+        let mut merged = read_layer(crate::paths::system_config_file())?;
+        merge(&mut merged, read_layer(crate::paths::config_file())?);
+        let project = read_layer(crate::paths::workspace_config_file(workspace))?;
+        merge(&mut merged, kept_from_workspace(&project));
+        append_lists(&mut merged, &project);
+        toml::Value::Table(merged).try_into().map_err(|e: toml::de::Error| ConfigError::Parse {
+            path: crate::paths::config_file(),
+            message: e.to_string(),
+        })
+    }
+
+    /// Settings a project's own file asked for and was not given, deepest name
+    /// first, so the reason its value did not take effect is readable rather
+    /// than mysterious.
+    pub fn refused_from_workspace(workspace: &std::path::Path) -> Vec<String> {
+        let Ok(project) = read_layer(crate::paths::workspace_config_file(workspace)) else {
+            return Vec::new();
+        };
+        let mut refused = Vec::new();
+        for (table, value) in &project {
+            let Some(inner) = value.as_table() else {
+                refused.push(table.clone());
+                continue;
+            };
+            for key in inner.keys() {
+                let full = format!("{table}.{key}");
+                if !PROJECT_MAY_SET.contains(&full.as_str()) && !PROJECT_MAY_ADD_TO.contains(&full.as_str()) {
+                    refused.push(full);
+                }
+            }
+        }
+        refused.sort();
+        refused
     }
 
     /// From a path decided by the caller — a long-running process resolves it

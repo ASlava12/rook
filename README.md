@@ -102,6 +102,23 @@ using it rather than being moved, and `rook doctor` says which one is in use.
 configuration kept in a dotfiles repository — `secrets.toml` does not follow it,
 being nothing but credentials.
 
+Settings are read in three layers, each winning the keys it names over the one
+before: the machine's (`/etc/rook/config.toml`, `%PROGRAMDATA%\rook\config.toml`),
+the person's, and the project's (`<workspace>/.rook/config.toml`). Merged key by
+key, so a project that sets one thing keeps everything else you chose.
+
+The project's layer is read with less authority than the other two, because it
+arrives with the repository — whoever wrote it is not necessarily whoever is
+running the agent, which is the same reason `<workspace>/.env` is not read at
+all. It may say how to work in this codebase: `max_steps`, `effort`,
+`plan_first`, the compaction and budget settings. It may not say what the agent
+is allowed to do, where its secrets are, what it may start, or which model its
+conversation goes to. `sandbox.deny` and `sandbox.ask` are the exception and are
+*added to* rather than replaced, because adding to them can only narrow — a
+project can forbid `make deploy` here and cannot unforbid `rm -rf /`. What a
+project asked for and did not get is listed by `rook doctor` rather than dropped
+in silence.
+
 Releases carry `x86_64` and `aarch64` builds for Linux (static, musl — they run
 on the distribution you have rather than the one the runner had), `x86_64` for
 Windows, and both architectures for macOS. FreeBSD is a supported target that

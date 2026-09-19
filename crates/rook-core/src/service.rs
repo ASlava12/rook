@@ -174,7 +174,7 @@ impl Rook {
         paths::ensure_dirs().map_err(|e| CoreError::Io { path: paths::home(), source: e })?;
         let workspace =
             workspace.or_else(|| std::env::current_dir().ok()).unwrap_or_else(|| PathBuf::from("."));
-        let config = Config::load()?;
+        let config = Config::load_for(&workspace)?;
         let mut store = Store::open(paths::store_dir())?;
         store.set_level(config.storage.compression_level);
         // After the lock and before anything reads a transcript: the store takes

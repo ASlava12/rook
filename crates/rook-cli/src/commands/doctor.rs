@@ -174,6 +174,24 @@ pub(crate) fn cmd_doctor(workspace: &Path, json: bool) -> Result<()> {
         }
     }
 
+    // What the project's own file asked for and did not get. It travels with
+    // the repository, so it may say how to work here and not what the agent is
+    // allowed to do — and a setting dropped in silence leaves whoever wrote it
+    // certain they changed something.
+    let refused = rook_core::Config::refused_from_workspace(workspace);
+    if !refused.is_empty() {
+        println!();
+        println!(
+            "{} sets these, and they are not a project's to set:",
+            rook_core::paths::workspace_config_file(workspace).display()
+        );
+        for key in &refused {
+            println!("  {key}");
+        }
+        println!("  A project may say how to work in it, never what the agent may do.");
+        println!("  `sandbox.deny` and `sandbox.ask` are the exception: added to, never replaced.");
+    }
+
     println!("model:");
     match probe_provider(&config) {
         Ok(note) => println!("  {note}"),
