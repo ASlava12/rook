@@ -633,8 +633,13 @@ pub struct AgentConfig {
 #[serde(default)]
 pub struct MemoryConfig {
     pub enabled: bool,
-    /// Ceiling on what recalled facts may cost in the system prompt. Memory that
+    /// Ceiling on what recalled facts may cost in a request. Memory that
     /// silently grows into the context window is the failure this prevents.
+    ///
+    /// Not in the system prompt, which is what this used to say: recalled facts
+    /// go beside the newest message, because they change with the prompt and
+    /// anything that varies per turn in the cacheable prefix invalidates
+    /// everything behind it.
     pub context_budget_tokens: usize,
 }
 
@@ -649,7 +654,14 @@ impl Default for MemoryConfig {
 pub struct StorageConfig {
     /// zstd level for new objects. 9 is the default knee; 19 is for archives.
     pub compression_level: i32,
-    /// Retrain dictionaries once this many objects of a kind exist.
+    /// How many objects of a kind a dictionary is trained from.
+    ///
+    /// The name says "after", and nothing waits for a threshold: this is the
+    /// sample limit handed to training, and 32 of a kind is what training
+    /// itself requires. Kept as it is because renaming a setting somebody may
+    /// have written down turns it into a default silently — worse than a name
+    /// that needs this sentence. Since dictionaries stopped being retrained on
+    /// a timer it only matters when `rook store train` is asked for.
     pub train_dictionaries_after: usize,
     pub dictionary_bytes: usize,
     pub retention: RetentionPolicy,

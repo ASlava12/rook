@@ -725,3 +725,44 @@ fn acp_images_and_embedded_resources_preserve_bytes_and_do_not_fetch_links() {
         assert!(prompt.content().is_err(), "unsupported blocks must not disappear");
     }
 }
+
+/// `title` is for a person and `name` is for a program, and this sent the tool's
+/// own name as the title — so an editor showed `read_file` where the CLI, the
+/// window and the browser all show `read notes.txt`, from the one phrase
+/// `rook_core::calls::doing` exists to make. The protocol stabilized the
+/// optional `name` field on 2026-09-17, which is what sent somebody looking and
+/// found the human half holding the programmatic value.
+#[tokio::test]
+async fn a_tool_call_carries_a_name_for_a_program_and_a_title_for_a_person() {
+    let _turn = provider_lock().await;
+    let base = scripted_call("read_file", serde_json::json!({ "path": "notes.txt" })).await;
+    unsafe { std::env::set_var("OLLAMA_HOST", &base) };
+
+    let mut config = Config::default();
+    config.agent.model = "ollama/scripted".into();
+    config.sandbox.stance = rook_tools::policy::Stance::Autonomous;
+    let mut editor = Editor::start_with(config, |_| {});
+    std::fs::write(editor.workspace.join("notes.txt"), b"a note").unwrap();
+
+    editor.call(1, "initialize", serde_json::json!({ "protocolVersion": 1 })).await;
+    let id = editor.call(2, "session/new", serde_json::json!({ "cwd": "." })).await["result"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let prompt = serde_json::json!({
+        "jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+        "params": { "sessionId": id, "prompt": [{ "type": "text", "text": "read the notes" }] }
+    });
+    editor.stdin.write_all(format!("{prompt}\n").as_bytes()).await.unwrap();
+
+    let seen = editor.drain(Duration::from_millis(4000)).await;
+    let call = seen
+        .iter()
+        .find(|m| m["params"]["update"]["sessionUpdate"] == "tool_call")
+        .map(|m| m["params"]["update"].clone())
+        .unwrap_or_else(|| panic!("a tool call has to be announced: {seen:#?}"));
+
+    assert_eq!(call["name"], "read_file", "the programmatic name an editor matches on: {call}");
+    assert_eq!(call["title"], "read notes.txt", "and the phrase a person reads: {call}");
+    assert_eq!(call["kind"], "read", "with the kind the schema defines: {call}");
+}

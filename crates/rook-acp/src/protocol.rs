@@ -222,12 +222,22 @@ pub fn agent_thought_chunk(session: &str, text: &str, message: &str) -> serde_js
     )
 }
 
-pub fn tool_call(session: &str, id: &str, title: &str, kind: &str) -> serde_json::Value {
+/// `title` is for a person to read and `name` is for a program to match on.
+///
+/// Both, because they are different questions and this sent one answer to both:
+/// the tool's own name went in `title`, so an editor showed `read_file` where
+/// every other front end here shows `read src/main.rs` — the phrase
+/// [`rook_core::calls::doing`] exists to produce. The protocol stabilized the
+/// optional `name` field on 2026-09-17 for the other half, which is how the
+/// mismatch was noticed at all: an editor had no programmatic handle, and the
+/// human one was holding the programmatic value.
+pub fn tool_call(session: &str, id: &str, name: &str, title: &str, kind: &str) -> serde_json::Value {
     update(
         session,
         serde_json::json!({
             "sessionUpdate": "tool_call",
             "toolCallId": id,
+            "name": name,
             "title": title,
             "kind": kind,
             "status": "in_progress",

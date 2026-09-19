@@ -394,6 +394,10 @@ async fn prompt(
         }));
     }
 
+    // Before the loop borrows the agent: a call names its paths the way somebody
+    // standing in this project would, which is the same phrase the CLI, the
+    // window and the browser show.
+    let here = rook.workspace.clone();
     // Ids are handed out in call order and consumed in the same order, which is
     // how a completion is matched to the call it finishes: the loop dispatches
     // a step's calls in the order the model asked for them.
@@ -431,6 +435,7 @@ async fn prompt(
                         &session_id,
                         &format!("call_{}", started.fetch_add(1, Ordering::Relaxed)),
                         &call.name,
+                        &rook_core::calls::doing(&call.name, Some(&call.arguments), &here),
                         protocol::tool_kind(&call.name),
                     )
                 }

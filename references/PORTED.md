@@ -1844,3 +1844,81 @@ set with nothing to say still answers with the best of the weak.
 **opencode 9f8db119f → 859106eb1.** Six, and nothing: a DeepSeek model entry, a
 Copilot plugin asking for summarised thinking on every model rather than one, two
 generated catalogs and two documentation edits.
+
+## 2026-09-19, the nine pointers after v0.5.0
+
+Every pointer was behind, between three and eight days: acp 32 commits, codex
+346, goose 40, opencode 38, cline 80, openhands 102, openresearch 12, hermes
+3,821 and openclaw 3,996. The last two are `status=ahead, behind=0` with the
+merge base exactly at the pin, so those histories did not diverge — they really
+move that fast, and the compare endpoint serves at most 250 of them, which is
+the window this reading had.
+
+Those counts came from the compare API, not from `xtask refs status`, and
+comparing the two is what found a fault in ours: it fetched two hundred deep
+and printed `200 commits behind` as a measurement for references that were 346
+and 3,821 behind. A number that reads as counted and is a ceiling — the same
+fault this repository already writes down about a cap checked after the fact.
+It says `at least 200 behind` now, with the command that turns it into a number.
+
+**acp c849ac2f0 → 1a1efa84c.** Mostly registry listings and dependency bumps.
+Two that matter: `feat(schema): stabilize tool call name` moved the optional
+`name` field on tool calls to stable on 2026-09-17, and `fix(rust): accept null
+for defaultable payloads` says peers do send `null` where a default exists.
+
+The first one was acted on, and it found something worse than its own absence:
+`rookd acp` sent the tool's own name as the `title` — the field a person reads —
+so an editor showed `read_file` where the CLI, the window and the browser all
+show `read notes.txt` from `rook_core::calls::doing`. It now sends both, `name`
+for a program to match on and the phrase for a person, and
+`a_tool_call_carries_a_name_for_a_program_and_a_title_for_a_person` drives it
+through a real editor exchange. The null-for-defaults note is not acted on: our
+reader is hand-written and its own tests cover absent fields, but it is worth a
+pass the next time that file is open.
+
+**goose 50666ae0b → ba8ba0cad.** The richest of the nine for us, none of it
+urgent:
+
+- `fix(context): treat auto-compact 100% as disabled` — the same question our
+  `compact_at` raises at `1.0`. Worth deciding rather than discovering.
+- `fix(subagent): keep the subagent prompt prefix cacheable` — our own rule
+  about the front of a request, applied where we have not checked it: the crew's
+  prompt.
+- `fix: avoid splitting graphemes in skills list` — the class our
+  `char_boundary_at_or_before` helpers answer, in a place we have not looked.
+- `fix(acp): send session usage updates after each provider call` — we report
+  `Progress::Spent` to three front ends; whether the ACP bridge forwards it is
+  unchecked.
+- `refactor: remove planning mode from the CLI` — outside corroboration for
+  [ADR-0010](../docs/adr/0010-no-todo-tool.md), from a project that had built
+  the thing and took it out.
+
+**codex c4017a87a → 78245b47a.** Three hundred and forty-six, and the shape of
+them is one project: a Windows sandbox, built out over a dozen commits — MXC
+sandbox wiring into command execution, token groups validated before SIDs are
+copied, setup split into preparation and completion, a service with its own
+dependencies. That is the closest relative solving the problem
+[ADR-0011](../docs/adr/0011-containment-is-the-platforms.md) leaves open on
+Windows, where we have a job object and no sandbox. Reading it is the next piece
+of work worth scheduling; nothing was taken now.
+
+**openresearch 325eb509d → d22125fef.** Twelve, all harness-onboarding: running
+sign-in and setup in an embedded terminal, Windows installs of other agents,
+sending prompts through stdin. Nothing for us — the part we read it for,
+`agent-skills/` and `orx-agent-delegation`, did not move.
+
+**openhands de5a79b4c → a07364828.** Product and SaaS work. One security item
+transfers in principle and not in fact: `HTML-escape injected runtime config and
+set Cache-Control: no-store on credential injection`. We inject nothing into the
+page — `rookd` serves `web/dist` verbatim from embedded assets, so the class does
+not exist here. Recorded because that is a design decision paying off rather
+than an absence of the bug by luck.
+
+**cline cfe9cadab → 2755adfa4** and **opencode 95daf9067 → 9a5356579.** Desktop
+apps, account flows, provider catalogs, billing. Nothing on the subjects we keep
+them for.
+
+**hermes** and **openclaw** were not read this round. Four thousand commits each
+is not a triage, it is a project, and the window the API serves would make any
+claim about them partial. Named here so the gap is a decision and not an
+oversight.

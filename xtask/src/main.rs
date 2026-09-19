@@ -534,6 +534,10 @@ fn refs(action: RefsCmd) -> Result<()> {
     }
 }
 
+/// How deep the status fetch goes, named because the count is read against it:
+/// a drift that reaches this is reported as a floor rather than a measurement.
+const DRIFT_DEPTH: u32 = 200;
+
 /// Upstream tip and how far the pinned commit is behind it.
 ///
 /// The clones are shallow, so a deeper fetch is needed before the two commits
@@ -541,7 +545,8 @@ fn refs(action: RefsCmd) -> Result<()> {
 /// rather than reporting a wrong number.
 fn upstream(r: &Reference) -> Result<(String, String)> {
     let remote = format!("origin/{}", r.branch);
-    git_in(&r.path, &["fetch", "--quiet", "--depth", "200", "origin", &r.branch])
+    let deep = DRIFT_DEPTH.to_string();
+    git_in(&r.path, &["fetch", "--quiet", "--depth", &deep, "origin", &r.branch])
         .or_else(|_| git_in(&r.path, &["fetch", "--quiet", "origin", &r.branch]))?;
     let head = git_in(&r.path, &["rev-parse", &remote])
         .or_else(|_| git_in(&r.path, &["rev-parse", "FETCH_HEAD"]))?;
@@ -550,6 +555,17 @@ fn upstream(r: &Reference) -> Result<(String, String)> {
         return Ok((head, "up to date".into()));
     }
     let drift = match git_in(&r.path, &["rev-list", "--count", &format!("{pin}..{head}")]) {
+        // A count that reaches the depth we fetched is the depth, not the drift.
+        // It printed `200 commits behind` for a reference that was 346 behind
+        // and for one that was 3,821 — a number that reads as measured and is a
+        // ceiling, which is the same fault this repository writes down about
+        // caps checked after the fact. Said as a floor instead, with what to run
+        // to turn it into a number.
+        Ok(n) if n.trim().parse::<u32>().is_ok_and(|n| n >= DRIFT_DEPTH) => format!(
+            "at least {n} behind — the fetch is {DRIFT_DEPTH} deep; \
+             `git -C {} fetch --unshallow` to count",
+            r.path
+        ),
         Ok(n) => format!("{n} commits behind"),
         Err(_) => "behind (history too shallow to count)".into(),
     };
