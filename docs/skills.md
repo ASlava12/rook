@@ -35,6 +35,15 @@ description: Fill in and flatten PDF forms.
 agent matches on when deciding whether to load the skill, so it should describe the
 *trigger*, not the implementation.
 
+`license`, `keywords` and `allowed-tools` are accepted because the Agent Skills
+spec has them, and nothing here reads the first two. `allowed-tools` is
+informational and does **not** grant or restrict anything: what a tool call may
+do is the approval policy's decision, made per call against the workspace and
+the stance, and a file inside the material being read is the last place that
+should be able to widen it. A skill that sets it gets a line in the log saying
+so, which is the only reason to mention it here — an unexplained warning is
+worse than the field.
+
 ## Versions
 
 ```yaml

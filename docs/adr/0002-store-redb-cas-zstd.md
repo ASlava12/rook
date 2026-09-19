@@ -31,9 +31,20 @@ write and debug, for benefits that refs over a CAS already provide.
 
 A 400-byte JSON message compressed alone barely shrinks; zstd never sees enough
 context to model it. Trained on a few hundred messages of the same shape it becomes
-a few dozen bytes. Measured end to end: **20.7× with dictionaries against 4.3×
-without** (`cargo xtask compaction`). Every object records the codec it was written
-with, so retraining never invalidates history.
+a few dozen bytes. Measured end to end when this was decided: **20.7× with
+dictionaries against 4.3× without**. The harness that produced it still exists
+and the figure has moved with the corpus — `cargo xtask compaction` prints
+today's, and [storage.md](../storage.md) quotes it; the decision rests on the
+order of magnitude rather than on the digits.
+
+This said, for its whole first life, that "every object records the codec it was
+written with, so retraining never invalidates history". The codec records that an
+object used *a* dictionary and never which one, and retraining overwrote the
+file — so every object written under the replaced dictionary became unreadable.
+One store lost 2,942 of 4,108 that way, and nothing anybody looks at reported it.
+What makes the sentence true now is that each replaced dictionary is kept and a
+decode tries every generation the store still has; the timer no longer retrains
+at all. The claim was the kind that reads as a property and was an assumption.
 
 ## Cost
 

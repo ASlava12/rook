@@ -90,7 +90,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [aarch64-unknown-linux-gnu, x86_64-unknown-linux-musl]
+        # `aarch64-unknown-linux-musl` because the release publishes a binary
+        # for it: without it here, the tag is the first time that target is
+        # ever compiled, and a break in it is found by whoever downloaded it.
+        target: [aarch64-unknown-linux-gnu, x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

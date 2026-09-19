@@ -13,6 +13,7 @@ Linux, macOS, Windows и FreeBSD — поддерживаемые цели. `car
 | `x86_64-unknown-freebsd` | FreeBSD | тестируется в виртуальной машине |
 | `aarch64-unknown-linux-gnu` | Linux | компилируется |
 | `x86_64-unknown-linux-musl` | Linux (статически) | компилируется |
+| `aarch64-unknown-linux-musl` | Linux (статически) | компилируется |
 | `x86_64-apple-darwin` | macOS | компилируется |
 | `aarch64-pc-windows-msvc` | Windows | по мере сил |
 | `aarch64-unknown-freebsd` | FreeBSD | по мере сил |

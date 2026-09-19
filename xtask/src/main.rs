@@ -24,6 +24,11 @@ const TARGETS: &[Target] = &[
     Target::tested("x86_64-unknown-freebsd", "freebsd", "freebsd-vm"),
     Target::checked("aarch64-unknown-linux-gnu", "linux"),
     Target::checked("x86_64-unknown-linux-musl", "linux (static)"),
+    // Released, and missing from this table until somebody compared the table
+    // with the assets: `release.yml` cross-builds it and every release has
+    // published a binary for it, while `xtask targets` and both platform
+    // documents said the matrix stopped at the x86 one.
+    Target::checked("aarch64-unknown-linux-musl", "linux (static)"),
     Target::checked("x86_64-apple-darwin", "macos"),
     Target::untried("aarch64-pc-windows-msvc", "windows"),
     Target::untried("aarch64-unknown-freebsd", "freebsd"),

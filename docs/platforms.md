@@ -13,6 +13,7 @@ prints the current matrix.
 | `x86_64-unknown-freebsd` | FreeBSD | tested in a VM |
 | `aarch64-unknown-linux-gnu` | Linux | compiled |
 | `x86_64-unknown-linux-musl` | Linux (static) | compiled |
+| `aarch64-unknown-linux-musl` | Linux (static) | compiled |
 | `x86_64-apple-darwin` | macOS | compiled |
 | `aarch64-pc-windows-msvc` | Windows | best effort |
 | `aarch64-unknown-freebsd` | FreeBSD | best effort |

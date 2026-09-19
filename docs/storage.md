@@ -35,11 +35,23 @@ messages, tool results, file blobs, skills, memories, snapshots, documentation �
 because those populations have genuinely different shapes.
 
 Retraining preserves each previous dictionary as `<kind>.<generation>.zdict`
-before atomically publishing the new `<kind>.zdict`. Readers retain all generations
-across restarts and try them against the dictionary ID in the zstd frame. The
-object's codec alone does not identify its dictionary. Scheduled maintenance
-trains only missing kinds; explicit `rook store train` can retrain existing ones.
-Already lost dictionaries require a backup or the original object bytes.
+before atomically publishing the new `<kind>.zdict`. Readers retain every
+generation across restarts and try them in turn, newest first: an object records
+only that it used *a* dictionary, never which one. Trying is safe because a zstd
+frame names the dictionary it was written with, so the wrong one is refused
+rather than decoded into something else — and it is why a decode costs one
+attempt per generation rather than a lookup. Scheduled maintenance trains only
+the kinds that have none; `rook store train` retrains them all.
+
+A dictionary that was lost before any of this cannot be recovered from a
+backup of the store alone, and the objects it held are ballast: reachable from
+live events, so collection by reachability never reaches them, and unreadable,
+so nothing else will. `Rook::maintenance` and `rook store gc` remove them and
+say how many, before the sweep — a container that will not decode cannot be
+asked what it keeps alive. Only for that reason: a dictionary merely missing
+from `dicts/` is a file to put back, reports differently, and costs nothing.
+The events that named the removed objects keep their records, and their bodies
+read back as gone rather than as broken.
 
 Measured, on a synthetic transcript of 3,000 turns plus 320 tool results over 64
 distinct source files (`cargo xtask compaction`):

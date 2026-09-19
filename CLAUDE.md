@@ -10,7 +10,7 @@ public failure in another agent, and the ADRs cite them.
 
 ```sh
 cargo xtask ci             # fmt + clippy -D warnings + test — the CI gate
-cargo test --workspace
+cargo test --workspace --no-fail-fast   # as the gate runs it: every failure, not the first
 cargo xtask compaction     # re-measure the storage claims in README/docs
 cargo xtask load           # time the per-turn work; --part one of them, --profile under samply
 cargo xtask dist           # release build; also prints the binary sizes README quotes
@@ -227,13 +227,16 @@ A test of such a path asks the code that made it (`install::current`), or
 spells both answers under `cfg!(windows)`. A name that exists on no PATH is the
 way to assert that a lookup fell through.
 
-**The gate says how long it took.** Five minutes incrementally on this
-machine — fmt under a second, clippy about twenty, and the rest building and
-running the tests, of which `tui_pty` alone is a hundred seconds and is
-serialized on purpose. A run far off that is a question rather than a day to sit
-through: "the gate got slower" was a feeling for a week, and the answer was
-neither the tests nor the code but `target/debug/deps` holding over a million
-files, so every run was a cold one. `cargo xtask clean --all` is what reclaims
+**The gate says how long it took.** About eight minutes incrementally on this
+machine — fmt under a second, clippy forty, and the rest building and running
+the tests, of which `tui_pty` alone is a hundred seconds and is serialized on
+purpose. It was five minutes and clippy twenty until the suite grew by half
+again; the figure is re-measured rather than remembered, because a baseline
+nobody updates makes every run look far off and the rule unusable. A run far
+off *this* is a question rather than a day to sit through: "the gate got
+slower" was a feeling for a week, and the answer was neither the tests nor the
+code but `target/debug/deps` holding over a million files, so every run was a
+cold one. `cargo xtask clean --all` is what reclaims
 that, at the cost of one full rebuild.
 
 **Slow is measured before it is fixed.** `cargo xtask load` times the parts a
@@ -392,8 +395,14 @@ not know it.
   postcard is not self-describing, so a decoder reading an old record hits the
   end of the buffer looking for the new field. Put session-scoped extras in the
   `kv` table instead — that is where `goal/<session>` lives.
-- Never change how an existing object decodes. Objects record their own codec
-  precisely so encoding can evolve without rewriting history.
+- **Never change how an existing object decodes, and do not trust the codec byte
+  to tell you whether you have.** It says an object used *a* dictionary, never
+  which one — so retraining a dictionary and overwriting the file changed how
+  every object under the old one decoded, which is to say it stopped. One store
+  lost 2,942 objects of 4,108 that way, in silence, while three comments and an
+  ADR said it could not happen. What holds now is that every replaced dictionary
+  is kept and a decode tries each generation; anything that narrows that is the
+  same bug again. `store verify` is what notices, and nothing else does.
 - Re-run `cargo xtask compaction` and update the numbers in `README.md` and
   `docs/storage.md` if they move. Those numbers are load-bearing claims.
 
