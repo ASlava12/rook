@@ -96,6 +96,21 @@ construction one they sync or commit. See
 **Shell.** `/bin/sh -c` on Unix, `cmd /C` on Windows. `cmd` rather than PowerShell
 because it is always present; a skill that needs PowerShell invokes it explicitly.
 
+**Pasting.** A terminal delivers a pasted newline as the Enter key, so a pasted
+paragraph used to go to the agent one line at a time. On unix both front ends
+ask the terminal to bracket a paste, and the whole of it arrives as one piece.
+On Windows the libraries reading the console have never heard of the bracket,
+so the same paste arrives as keystrokes, and the tell is what is queued: a hand
+puts tens of milliseconds between keys, a paste is queued whole. The window
+reads the keys that arrived together as one run and judges the run — a marker
+at the front, or a newline with text after it, makes it a paste that goes into
+the box and is not sent, and anything else is the typing it was. The line
+editor asks, when Enter arrives, whether typing is already queued behind it,
+and takes the Enter as a newline when it is; the last newline of a paste has
+nothing behind it and sends, as a shell would. See
+[`paste.rs`](../crates/rook-cli/src/paste.rs) and `typing_is_already_queued`
+in [`rook-contain`](../crates/rook-contain/src/lib.rs).
+
 **Userland.** Derived from the OS: `gnu` on Linux, `bsd` on macOS and the BSDs,
 `msvc` on Windows. It is exposed to skills as a `requires`/`variants` predicate and
 stated in the system prompt, because GNU-versus-BSD tool differences are the most

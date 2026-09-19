@@ -213,7 +213,11 @@ pub fn run(source: crate::source::Source, yes: bool, started: Option<String>) ->
     // Without this a pasted newline arrives as the Enter key, so a paragraph
     // pasted into the box was sent one line at a time — the first as a prompt
     // and the rest chasing it. With it the terminal brackets the paste and the
-    // whole of it arrives as one event, newlines included.
+    // whole of it arrives as one event, newlines included — on unix. Windows
+    // crossterm reads console records and has never heard of the bracket, so
+    // there the same paste still arrives as keystrokes, marker and all, and
+    // `paste::gather` is what reads it; this still asks the terminal to mark
+    // it, because a marker read as keys is a better tell than a stopwatch.
     let pasting = execute!(std::io::stdout(), event::EnableBracketedPaste).is_ok();
     let daemon = source.daemon_base().map(str::to_string);
     let mut app = App::new(source, runtime, yes);
@@ -475,7 +479,9 @@ impl Typing {
     /// A terminal delivers a pasted newline as the Enter key, so a paragraph
     /// pasted in was sent a line at a time: the first line went as a prompt and
     /// the rest chased it as prompts of their own. Bracketed paste is what tells
-    /// a paste from typing, and this is the half that keeps the newlines.
+    /// a paste from typing — or `paste::gather`, where the reader of the
+    /// terminal cannot see the bracket — and this is the half that keeps the
+    /// newlines.
     fn paste(&mut self, text: &str) {
         // `\r\n` and a bare `\r` both mean a new line here. A `\r` left in
         // would move the cursor back over what was already drawn.
@@ -1443,16 +1449,39 @@ impl App {
             // Poll rather than block: a streaming turn has to keep redrawing
             // even while nobody is typing.
             if event::poll(TICK)? {
-                match event::read()? {
-                    Event::Key(key) if key.kind == KeyEventKind::Press => self.on_key(key),
-                    Event::Paste(text) => self.on_paste(&text),
-                    Event::Mouse(mouse) => self.on_scroll(mouse.kind),
-                    _ => {}
-                }
+                self.on_event(event::read()?)?;
             }
         }
         if let Some(turn) = self.turn.take() {
             turn.abort();
+        }
+        Ok(())
+    }
+
+    /// One event from the terminal, given its turn.
+    ///
+    /// A key is not taken alone: the keys queued behind it are read with it,
+    /// because on Windows a paste arrives as keystrokes and only the run of
+    /// them says so — `paste` has the reasoning. Typing comes back as the keys
+    /// it was, in order.
+    fn on_event(&mut self, event: Event) -> Result<()> {
+        match event {
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                let gathered = crate::paste::gather(key, &mut crate::paste::Terminal)?;
+                match gathered.burst {
+                    crate::paste::Burst::Paste(text) => self.on_paste(&text),
+                    crate::paste::Burst::Keys(keys) => keys.into_iter().for_each(|key| self.on_key(key)),
+                }
+                // Whatever else arrived while the keys were being read — the
+                // wheel, a resize — still gets its turn. None of it is a key
+                // press, so this does not gather again.
+                for event in gathered.then {
+                    self.on_event(event)?;
+                }
+            }
+            Event::Paste(text) => self.on_paste(&text),
+            Event::Mouse(mouse) => self.on_scroll(mouse.kind),
+            _ => {}
         }
         Ok(())
     }

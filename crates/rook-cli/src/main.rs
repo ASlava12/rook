@@ -6,6 +6,7 @@ mod chat;
 mod commands;
 mod fmt;
 mod notify;
+mod paste;
 mod remote;
 mod source;
 mod tui;

@@ -510,10 +510,112 @@ pub fn keep_the_console_to_ourselves() {
     }
 }
 
+/// Whether the console holds typing nobody has read yet: a key going down that
+/// spells a character.
+///
+/// The one question a line editor needs answered when Enter arrives. A hand has
+/// nothing queued behind its Enter; a paste has the rest of itself, because the
+/// terminal writes a paste whole and the console queues it as written. On
+/// Windows that is the only tell there is — the console reader the line editor
+/// uses has never heard of bracketed paste — so a pasted paragraph was accepted
+/// at its first newline, and every line after it went to the model as a prompt
+/// of its own. Peeked, never read: what is queued stays for whoever is reading.
+///
+/// Nothing on unix, where the tty brackets a paste and the line editor reads
+/// the bracket; and nothing when stdin is not a console, where there is no
+/// Enter to tell from anything.
+pub fn typing_is_already_queued() -> bool {
+    #[cfg(windows)]
+    {
+        windows::typing_is_already_queued()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+#[cfg(all(test, windows))]
+mod console_tests {
+    use windows_sys::Win32::System::Console::{INPUT_RECORD, KEY_EVENT, MOUSE_EVENT};
+
+    fn key(down: bool, c: char) -> INPUT_RECORD {
+        // Safety: a zeroed record is a valid one, and every field set here is
+        // plain data.
+        let mut record: INPUT_RECORD = unsafe { std::mem::zeroed() };
+        record.EventType = KEY_EVENT as u16;
+        record.Event.KeyEvent.bKeyDown = i32::from(down);
+        record.Event.KeyEvent.uChar.UnicodeChar = c as u16;
+        record
+    }
+
+    /// What is queued behind an Enter pressed by hand — its own release, and
+    /// perhaps another Enter — is not typing; a character going down is.
+    #[test]
+    fn a_return_with_nothing_behind_it_is_a_hand_and_a_character_behind_it_is_a_paste() {
+        use super::windows::spells_a_character;
+        assert!(!spells_a_character(&key(false, '\r')), "a release was read as typing");
+        assert!(!spells_a_character(&key(true, '\r')), "another Enter was read as typing");
+        assert!(spells_a_character(&key(true, 'b')), "a character going down was not typing");
+        assert!(spells_a_character(&key(true, '\t')), "a tab going down was not typing");
+        // Safety: as above.
+        let mut mouse: INPUT_RECORD = unsafe { std::mem::zeroed() };
+        mouse.EventType = MOUSE_EVENT as u16;
+        assert!(!spells_a_character(&mouse), "a mouse record was read as typing");
+    }
+}
+
 #[cfg(windows)]
 mod windows {
     use std::path::Path;
     use std::ptr::null_mut;
+
+    /// `PeekConsoleInputW` over what is queued on stdin, looking for a key
+    /// going down with a character on it.
+    pub fn typing_is_already_queued() -> bool {
+        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+        use windows_sys::Win32::System::Console::{
+            GetStdHandle, INPUT_RECORD, PeekConsoleInputW, STD_INPUT_HANDLE,
+        };
+        // A paste has its next character within a few records of the Enter —
+        // a key is a down and an up, and a newline is one key — so a short
+        // look answers the question, and the bound is what keeps a peek at
+        // the queue from being a copy of it.
+        const LOOK: usize = 64;
+        // Safety: `GetStdHandle` returns a handle this process owns or an
+        // invalid one; `PeekConsoleInputW` is given a buffer of exactly the
+        // length it is told, fills at most that many records and says how
+        // many, and the records are plain data, zeroed before the call.
+        unsafe {
+            let handle = GetStdHandle(STD_INPUT_HANDLE);
+            if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+                return false;
+            }
+            let mut records: [INPUT_RECORD; LOOK] = std::mem::zeroed();
+            let mut count = 0u32;
+            // A stdin that is not a console refuses, and refusing is nothing
+            // queued: a pipe has no Enter to tell from anything.
+            if PeekConsoleInputW(handle, records.as_mut_ptr(), LOOK as u32, &mut count) == 0 {
+                return false;
+            }
+            records[..(count as usize).min(LOOK)].iter().any(spells_a_character)
+        }
+    }
+
+    /// A key going down with a character on it: text, or a tab. Enter is a
+    /// `\r` and is not one, so an Enter with only its own release and perhaps
+    /// another Enter behind it reads as a hand.
+    pub(super) fn spells_a_character(record: &windows_sys::Win32::System::Console::INPUT_RECORD) -> bool {
+        use windows_sys::Win32::System::Console::KEY_EVENT;
+        if u32::from(record.EventType) != KEY_EVENT {
+            return false;
+        }
+        // Safety: the record says it is a key event, and that is the member
+        // of the union a key event fills.
+        let key = unsafe { record.Event.KeyEvent };
+        let c = unsafe { key.uChar.UnicodeChar };
+        key.bKeyDown != 0 && (c >= 0x20 || c == u16::from(b'\t'))
+    }
 
     /// `SetHandleInformation(h, HANDLE_FLAG_INHERIT, 0)` for the three
     /// standard handles: after this, a child started from here is handed

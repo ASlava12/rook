@@ -12,8 +12,50 @@ use rook_core::{Rook, TranscriptEntry};
 use rook_llm::Delta;
 use rook_store::EventKind;
 use rustyline::error::ReadlineError;
+use rustyline::validate::{ValidationContext, ValidationResult, Validator};
 
 use crate::fmt;
+
+/// The line editor's one opinion about a line: whether the Enter that ended it
+/// was pressed or pasted.
+///
+/// rustyline brackets a paste on unix and reads the bracket itself, so a pasted
+/// paragraph arrives there whole. On Windows it reads console records, where
+/// the bracket is not a thing, and a paste arrived as keystrokes: the first
+/// newline in it accepted the line, so the first line went to the model as a
+/// prompt and every line after it chased it as one of its own. What tells the
+/// two apart is what is queued behind the Enter — a hand has nothing there and
+/// a paste has the rest of itself — and an Enter with typing behind it is a
+/// newline in the line, not the end of it. The last newline of a paste has
+/// nothing behind it and does send, which is what a shell does with one.
+struct Pasting;
+
+impl Validator for Pasting {
+    fn validate(&self, _: &mut ValidationContext<'_>) -> rustyline::Result<ValidationResult> {
+        Ok(match rook_contain::typing_is_already_queued() {
+            true => ValidationResult::Incomplete,
+            false => ValidationResult::Valid(None),
+        })
+    }
+}
+
+// The rest of what a helper is, and nothing of it: no completion here, no
+// hints, no colouring.
+impl rustyline::completion::Completer for Pasting {
+    type Candidate = String;
+}
+impl rustyline::hint::Hinter for Pasting {
+    type Hint = String;
+}
+impl rustyline::highlight::Highlighter for Pasting {}
+impl rustyline::Helper for Pasting {}
+
+/// The editor both sessions read from: rustyline, with the opinion above.
+fn editor() -> Result<rustyline::Editor<Pasting, rustyline::history::DefaultHistory>> {
+    let mut editor = rustyline::Editor::new()?;
+    editor.set_helper(Some(Pasting));
+    Ok(editor)
+}
 
 /// Every command, its argument shape and what it does — one list, because the
 /// help text and the TUI's completion both answer "what can I type here" and a
@@ -153,7 +195,7 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
         println!("no model is chosen. `/model <name>` picks one: {}", named.join(", "));
     }
 
-    let mut editor = rustyline::DefaultEditor::new()?;
+    let mut editor = editor()?;
     let history = rook_core::paths::home().join("history");
     let _ = editor.load_history(&history);
 
@@ -240,7 +282,7 @@ async fn through_the_daemon(
     let socket =
         tokio::spawn(async move { crate::remote::hold(&base, &here, &mut outgoing, incoming).await });
 
-    let mut editor = rustyline::DefaultEditor::new()?;
+    let mut editor = editor()?;
     let history = rook_core::paths::home().join("history");
     let _ = editor.load_history(&history);
     let mut watching = crate::remote::Watching::new(yes, false);
