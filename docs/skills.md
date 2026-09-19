@@ -94,7 +94,7 @@ Three rules follow from that, and the shipped skills are held to all three by
 `crates/rook-skills/tests/builtin.rs`:
 
 - **`Use when …`**, or `Use before …` where the moment is a command about to be
-  run. One card is capped at 50 tokens and the five shipped ones at 220 together.
+  run. One card is capped at 50 tokens and the shipped set at 220 together.
 - **A "not for …" clause only where the confusion is real.** `in-place-edit` says
   it is not for the editing tools, because reaching for `sed` when `edit_file`
   is right is the mistake it exists to catch. `rust-release` says nothing of the
@@ -227,9 +227,9 @@ body in when it decides it needs one.
 This matters more than it sounds. Full bodies for a large library cost thousands of
 tokens on every request, and on local models a tool-and-skill-heavy prompt is
 roughly an order of magnitude slower to process than plain text. A card is small
-next to the body it stands for: the five Rook ships average about forty tokens
+next to the body it stands for: the ones Rook ships average about thirty-six tokens
 each against bodies of two hundred to nine hundred, and a test caps one card at
-fifty and the five together at 220. Fifty cards of that size are around two
+fifty and the shipped set together at 220. Fifty cards of that size are around two
 thousand tokens on every request, which is what `agent.max_skill_cards` bounds
 — and why a card that describes its subject instead of naming its moment is
 worth rewriting rather than tolerating.

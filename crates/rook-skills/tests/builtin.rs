@@ -101,7 +101,7 @@ fn a_shipped_card_says_when_to_use_it_and_stays_small() {
         );
         whole += cost;
     }
-    // `max_skill_cards` is 50, and these five are what a fresh install pays
+    // `max_skill_cards` is 50, and these are what a fresh install pays
     // before it has collected anything of its own. It was ~175 when each card
     // described its subject; the thirty tokens bought the situation, which is
     // the only thing a card is read for — and one body not loaded to find out

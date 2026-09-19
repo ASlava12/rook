@@ -198,7 +198,7 @@ using it.
 
 **A skill card names the situation, not the subject.** A card is paid for on
 every request and is read for exactly one decision: load the body or not. All
-five shipped ones described what the skill *was* — "Work a fork in the road out
+shipped ones described what the skill *was* — "Work a fork in the road out
 loud", "Edit files in place from the shell" — which reads well and leaves a
 model to spend 200 to 900 tokens on a body to find out whether it wanted it.
 `Use when …` is the shape, and `Use before …` where the moment is a command
