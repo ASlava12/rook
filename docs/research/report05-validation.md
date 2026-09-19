@@ -1,76 +1,80 @@
-# Проверка отчёта №5 и незакоммиченных изменений
+# Validating report five, and the changes that were not yet committed
 
-Дата: 2026-09-18. Исходный HEAD: `f08928c`. Проверен локальный
-`scratch/report05_agent.md` и весь накопленный diff относительно HEAD, включая
-новые исходники и тесты. До изменений сохранена копия исходного diff.
-Авторство незакоммиченных строк по Git установить нельзя: среди них есть и
-исправления предыдущих задач. Поэтому решение принималось по коду и тестам,
-а не по предполагаемому автору.
+Dated 2026-09-18. Starting HEAD: `f08928c`. What was checked: a local
+`scratch/report05_agent.md` and the whole accumulated diff against that HEAD,
+new sources and tests included. A copy of the original diff was kept before
+anything was changed.
 
-## Решения по отчёту
+Git cannot say who wrote an uncommitted line, and among these were fixes from
+earlier tasks as well. So each decision was taken from the code and its tests
+rather than from a guess at the author.
 
-| ID | Результат проверки | Решение и подтверждение |
+## What was decided about the report
+
+| ID | What the check found | What was done, and what shows it |
 |---|---|---|
-| R-01 | Подтверждено. `disk_path` тоже делает файловые вызовы; в `read_window` открытие файла оставалось снаружи blocking-задачи. | Дисковые ветки `read_text`, `write_text`, открытие в `read_window` и копирование в `move_file` выполняются в `spawn_blocking`. Тест с FIFO на однопоточном runtime проверяет, что таймер срабатывает во время заблокированного чтения. |
-| R-02 | Подтверждено, но `cap_std::fs::Dir::sync_all` в используемой версии отсутствует. | На Unix синхронизируется каталог через клонированный стандартный файловый handle после rename; при создании вложенных каталогов — также их предки. Для move публикация назначения синхронизируется до удаления источника. Ошибка синхронизации возвращается вызывающему коду. На Windows такой directory flush не заявляется. |
-| R-03 | Подтверждено частично: SIGKILL оставляет временный файл. Перенос к store может дать EXDEV; удаление по маске может задеть действующую запись. | Временный файл остаётся рядом с назначением. Занятые имена пропускаются, при исчерпании попыток чужой файл не удаляется. Точное служебное имя `.rook-write-<pid>-<serial>` исключено из capture, capture_paths, list_dir и written_since. Регрессия проверяет занятые имена, сохранность исходного файла и уборку собственного temp при ошибке. Остатки после SIGKILL физически не удаляются автоматически. |
-| R-04 | Частично неверное обоснование: прежний обход уже получал ENOTDIR для приведённого примера. Реальны другие пропуски: каталог в последнем компоненте, конфликты внутри плана и нормализованные дубликаты. | Добавлены проверки типов существующих компонентов и всего плана restore/rewind до записи. Четыре сценария проверяют сохранность первого файла при отказе на более позднем пути. Предварительная проверка не является транзакцией файловой системы. |
-| R-05 | Двойное чтение есть; неприемлемое замедление не доказано. | Кэш всех распакованных файлов не принят: он увеличивает пиковую память до размера снимка. Сохранены проверка читаемости до первой записи и применение по одному объекту, причина указана в коде. |
-| R-06 | Подтверждено; полный путь вызова опаснее описанного: `resolve` раскрывал последнюю ссылку и мог переместить саму цель. | Разрешается родитель, последняя запись проверяется без раскрытия ссылки. Источник-симлинк отклоняется; существующее назначение, включая висячую ссылку, не заменяется. Низкоуровневый helper также проверяет тип источника. Тест сохраняет ссылку, её цель и занятое назначение. Полная поддержка перемещения ссылок не вводится: снимки хранят обычные файлы. |
-| R-07 | Завершение группы на всех выходах намеренно убирает потомков хука. Предложенный `alive()` делает `kill(-pgid, 0)` и не проверяет владельца. | Предложение отклонено: оно не закрывает повторное использование PGID и добавляет ещё одну гонку check/use. Сохранена очистка при завершении/отмене/таймауте; тест проверяет таймаут хука, который не читает stdin. Теоретический риск повторного использования Unix PGID не объявляется устранённым. |
-| R-08 | Подтверждён защитный дефект; обычный release использует panic=abort, поэтому доступность сценария ниже, чем подразумевает отчёт. | Отравленный mutex восстанавливается в redact, value и also_hide. Тест искусственного poisoning проверяет маскирование как ранее зарегистрированных, так и новых значений. |
-| R-09 | Консервативный разбор — намеренная граница allow-правил. Утверждение о безусловном запросе подтверждения неточно для autonomous. | Ограничение объяснено в описании риска и обоих README, включая отличие assist от autonomous. Правила не ослаблены. |
-| R-10 | Латентный контракт, текущие callers передают абсолютные пути. `strip_prefix("")` сам по себе не является причиной отказа, как утверждает отчёт. | Добавлена явная ошибка для относительного дискового пути. Регрессия проверяет понятную диагностику при allow_outside_workspace=true. |
+| R-01 | Confirmed. `disk_path` makes filesystem calls too, and in `read_window` the open was still outside the blocking task. | The disk branches of `read_text` and `write_text`, the open in `read_window` and the copy in `move_file` run in `spawn_blocking`. A test with a FIFO on a single-threaded runtime checks that the timer fires while a read is blocked. |
+| R-02 | Confirmed, but the version of `cap_std` in use has no `fs::Dir::sync_all`. | On Unix the directory is synced through a cloned standard file handle after the rename, and so are the ancestors of a newly created nested destination. For a move, the destination is published and synced before the source is removed. A sync failure was returned to the caller. **Reversed on 2026-09-19:** it is not returned any more, because a cap-std directory handle is opened for lookup rather than for reading — `O_PATH` on Linux, the same idea on FreeBSD — so `fsync` on it is `EBADF`, and every `rook skills rollback` on those platforms reported a write that had in fact completed as a failure. A directory sync decides what survives a power cut and nothing about whether the write happened, so it returns nothing at all now. On Windows no such directory flush is claimed. |
+| R-03 | Confirmed in part: a `SIGKILL` leaves the temporary file behind. A move to the store can return `EXDEV`, and deleting by a pattern could take a file somebody else is using. | The temporary file stays beside its destination. An occupied name is skipped, and when the attempts run out another process's file is not removed. The exact private name `.rook-write-<pid>-<serial>` is excluded from capture, `capture_paths`, `list_dir` and `written_since`. The regression checks occupied names, that the original survives, and that a failed write cleans up its own temporary. What a `SIGKILL` leaves is not removed automatically. |
+| R-04 | The reasoning was partly wrong: the previous walk already returned `ENOTDIR` for the example given. The real gaps are elsewhere — a directory in the final component, conflicts within one plan, and duplicates that normalise to the same path. | The type of every existing component and the whole restore/rewind plan are checked before anything is written. Four scenarios check that the first file survives a refusal on a later path. This is a check before the fact and not a filesystem transaction. |
+| R-05 | The double read is real; an unacceptable slowdown was not shown. | Caching every decompressed file was refused: it raises peak memory to the size of the snapshot. The readability check before the first write and applying one object at a time were kept, with the reason written in the code. |
+| R-06 | Confirmed, and the whole call path was worse than described: `resolve` expanded the final link and could move the target itself. | The parent is resolved and the final entry is examined without following it. A symlink as the source is refused; an existing destination is not replaced, a dangling link included. The low-level helper checks the source type as well. The test keeps the link, its target and an occupied destination. Moving links is not supported at all: snapshots hold ordinary files. |
+| R-07 | Ending the group on every exit deliberately takes a hook's children with it. The proposed `alive()` does `kill(-pgid, 0)` and does not check the owner. | Refused: it does not close PGID reuse and adds one more check-then-use race. The cleanup on exit, cancellation and timeout stays, and a test checks the timeout of a hook that never reads its stdin. The theoretical risk of a reused Unix PGID is not claimed to be eliminated. |
+| R-08 | A defensive defect, confirmed; an ordinary release build sets `panic = "abort"`, so the path is less reachable than the report implies. | A poisoned mutex is recovered from in `redact`, `value` and `also_hide`. A test that poisons it deliberately checks that both already-registered and new values are still masked. |
+| R-09 | Parsing conservatively is a deliberate boundary for allow rules. The claim that confirmation is always asked for is not accurate under `autonomous`. | The limit is explained in the risk description and in both READMEs, including how `assist` differs from `autonomous`. The rules were not loosened. |
+| R-10 | A latent contract; today's callers all pass absolute paths. `strip_prefix("")` is not by itself the reason for the refusal, as the report claims. | An explicit error for a relative disk path. The regression checks that the diagnosis is readable with `allow_outside_workspace = true`. |
 
-В дополнение к R-02 проверена публикация внешних объектов store: прежде перед
-коммитом метаданных не было `sync_all` файла и каталога. Теперь используется
-общий helper `write → sync file → rename → sync directory`; синхронизируется
-также `objects`, где создаётся каталог префикса хеша. Тест внешнего объекта
-проверяет чтение после повторного открытия и отсутствие temp-файла.
-Это проверка корректного пути публикации, не эксперимент с отключением питания.
+Alongside R-02, publishing an external store object was checked: before this
+there was no `sync_all` of the file or of the directory ahead of committing its
+metadata. One helper now does `write → sync file → rename → sync directory`,
+and `objects`, where the hash-prefix directory is created, is synced too. The
+external-object test checks that it reads back after reopening and that no
+temporary is left. This checks the publishing path, not what a power cut does.
 
-## Проверка ранее накопленных правок
+## Checking the edits that had accumulated
 
-| Область | Что сохранено после проверки |
+| Area | What survived the check |
 |---|---|
-| rook-store | Поколения словарей, их атомарная публикация, ремонт нечитаемого dedup-hit, отказ GC при неполной достижимости, обучение только недостающих словарей по таймеру, checkpoint clock и формат 2. Старые postcard-структуры не расширялись. |
-| rook-core: rewind, memory, claims | Общий порядок checkpoint родителя и потомков, исключение обычных fork из делегаций, проверка назначения, CAS обновления памяти и история в одной транзакции, leases и защита от устаревшего guard, границы project scope по компонентам пути. |
-| rook-core: agent | Видимый пропуск нечитаемой истории; отдельная проверка намерения финального ответа без инструментов. Два продолжения для обещаний без действия, затем явный incomplete; учёт расходов, timeout и новых инструкций. Это классификация ответа, а не доказательство выполнения задачи. |
-| rook-core: hooks и secrets | Общий deadline ввода/вывода/ожидания, очистка группы, отказ для ошибочного matcher; named secrets не сохраняются в сыром spill. Poison recovery дополнен в текущем раунде. |
-| rook-tools и rook-contain | Capability I/O, защита от подмены родителя, ограничение памяти чтения, отказ edit batch с совпадающими путями, deadline команды и остановка job после закрытия stdout/stderr, консервативные allow-правила, корректные относительные HTTP redirects. |
-| rook-llm | Ограничения размера wire stream, аргументов, reasoning и числа блоков; ограниченный индекс tool call, синтетические отсутствующие ids, ошибка для отсутствующего имени. |
-| rook-mcp | Deadline включает тело HTTP и запись stdio-запроса; pending удаляется при отмене; tools/call не повторяется автоматически после потери ответа, соединение восстанавливается для следующего явного вызова. |
-| rook-acp и rook-lsp | Ошибка редактора не считается успешной записью, pending очищается, ранний отказ prompt не даёт двойного ответа, disk fallback использует общую границу; snake_case stop reason; UTF-16 позиции и отказ пустому символу. |
-| rookd, CLI, web | Доверенный Host плюс Origin, ограничение engines без вытеснения активных, reload без блокировки новых читателей; отдельный терминальный Failed и ненулевой код CLI для failed/cancelled, Error остаётся нетерминальным. |
-| Skills и зависимости | Ограничение чтения skill/variant внутри bundle и по объёму, allowed-tools как информационное поле; rustls 0.23.45, отключён ненужный heapless в postcard, cap-std, удалены дубли workspace members. |
-| Тесты и документы | Регрессии сохранены; mock providers отвечают на новый completion request, CLI тесты собирают актуальный rookd. Уточнены зависимости rook-contain и ограничения shell allow-правил. Устаревший agent-loop-assumptions.md заменён проверенным описанием текущего поведения, включая ограничение учёта токенов при отсутствии provider usage. Scratch-отчёты, логи и тестовые базы остаются локальными. |
+| rook-store | Dictionary generations and their atomic publication, repair of an unreadable dedup hit, GC refusing to run on incomplete reachability, the timer training only the dictionaries that are missing, the checkpoint clock, and format 2. No existing postcard structure was extended. |
+| rook-core: rewind, memory, claims | One checkpoint order across a parent and its children, ordinary forks excluded from delegations, the destination checked, memory updated by compare-and-swap with its history in the same transaction, leases and the guard against a stale one, project scope compared by path components. |
+| rook-core: agent | A visible marker where unreadable history was skipped; a separate check of whether a final answer without tools was meant. Two continuations for a promise with no action, then an explicit `incomplete`; spend, timeout and fresh instructions accounted for. This classifies an answer; it does not prove the task was done. |
+| rook-core: hooks and secrets | One deadline across input, output and the wait, the process group cleaned up, a refusal for a matcher that will not compile; named secrets never reach a raw spill file. Poison recovery was added in this round. |
+| rook-tools and rook-contain | Capability I/O, the parent-substitution guard, a bound on what a read holds in memory, an edit batch refused when two paths are the same file, a deadline on a command and a job stopped once stdout and stderr close, conservative allow rules, relative HTTP redirects resolved correctly. |
+| rook-llm | Bounds on the wire stream, on arguments, on reasoning and on the number of blocks; a bounded tool-call index, synthetic ids where they are missing, an error for a call with no name. |
+| rook-mcp | The deadline covers the HTTP body and writing a stdio request; a pending entry is removed on cancellation; `tools/call` is not retried automatically after an answer is lost, and the connection is rebuilt for the next explicit call. |
+| rook-acp and rook-lsp | An editor's error is not counted as a successful write, pending entries are cleaned up, an early prompt refusal does not produce two answers, the disk fallback uses the shared boundary; snake_case stop reasons; UTF-16 positions and a refusal for an empty symbol. |
+| rookd, CLI, web | A trusted `Host` and then `Origin`, a cap on engines that never evicts an active one, a reload that does not lock out new readers; a separate terminal `Failed` and a non-zero CLI status for failed and cancelled, with `Error` staying non-terminal. |
+| Skills and dependencies | Reading a skill or variant bounded inside its bundle and by size, `allowed-tools` as informational metadata; rustls 0.23.45, the unnecessary `heapless` feature of postcard turned off, cap-std, duplicate workspace members removed. |
+| Tests and documents | The regressions were kept; mock providers answer the new completion request, and the CLI tests build the current `rookd`. `rook-contain`'s dependencies and the limits of shell allow rules were made precise. A stale `agent-loop-assumptions.md` was replaced with a checked description of what the code does now, including the limits of token accounting when a provider reports no usage. Scratch reports, logs and test stores stay local. |
 
-## Ограничения
+## Limits
 
-Многофайловые restore/rewind и copy+remove не стали атомарной транзакцией: сбой
-диска или конкурентное изменение во время применения может оставить частичный
-результат. При ошибке fsync после rename новое имя уже может быть опубликовано;
-ошибка не означает, что запись гарантированно не произошла. Перемещение между
-файловыми системами может оставить две копии при прерывании после копирования.
-Проверка типа источника не является защитой от всех конкурентных замен внутри
-разрешённой границы. `spawn_blocking` сохраняет отзывчивость runtime, но уже
-начавшийся системный вызов не отменяется вместе с ожидающей future.
+A multi-file restore or rewind, and copy-then-remove, are not atomic
+transactions: a disk failure or a concurrent change while they are being applied
+can leave a partial result. If `fsync` fails after a rename, the new name may
+already be published — the error does not mean the write is guaranteed not to
+have happened. A move between filesystems can leave two copies if it is
+interrupted after the copy. Checking the type of a source is not a defence
+against every concurrent replacement inside the permitted boundary.
+`spawn_blocking` keeps the runtime responsive, but a system call that has
+already started is not cancelled along with the future waiting on it.
 
-## Проверки
+## What was run
 
-На окончательном варианте `cargo xtask ci` прошёл: fmt, Clippy с `-D warnings`,
-1195 тестов, 0 ошибок, 0 пропусков; полный прогон — 330,6 секунды. Включены
-все 28 PTY-тестов, недоступных автору исходного отчёта в его песочнице.
-Платформа выполнения — macOS arm64.
+On the final version `cargo xtask ci` passed: fmt, Clippy with `-D warnings`,
+1,195 tests, 0 failures, 0 skipped; the whole run took 330.6 seconds. That
+included all 28 PTY tests, which the author of the original report could not run
+in their sandbox. The machine was macOS on arm64.
 
-`cargo check --target x86_64-pc-windows-msvc -p rook-contain` и аналогичная
-проверка для `x86_64-unknown-freebsd` прошли. Это проверка компиляции;
-выполнение тестов на этих ОС здесь не заявляется.
+`cargo check --target x86_64-pc-windows-msvc -p rook-contain` passed, and so did
+the same check for `x86_64-unknown-freebsd`. That checks compilation; running
+the tests on those systems is not claimed here.
 
-`cargo xtask compaction`: 23,31 МиБ логических данных, 5,29 МиБ уникальных,
-0,63 МиБ standalone zstd, 0,14 МиБ со словарями (37,1×), 4,02 МиБ на диске
-(5,8×). Показатели совпали с уже исправленными README и storage docs.
+`cargo xtask compaction`: 23.31 MiB logical, 5.29 MiB distinct, 0.63 MiB with
+standalone zstd, 0.14 MiB with dictionaries (37.1×), 4.02 MiB on disk (5.8×).
+The figures matched the README and the storage documents, which had already been
+corrected.
 
-`cargo audit --json`: 0 известных уязвимостей и 0 предупреждений; база RustSec
-обновлена до коммита `0765f6f611cb93c5ab2681b9c97fb06e5df9e1d1` от 2026-09-18.
-`node --check web/dist/chat.js` и `git diff --check` также прошли.
+`cargo audit --json`: no known vulnerabilities and no warnings; the RustSec
+database was current to commit `0765f6f611cb93c5ab2681b9c97fb06e5df9e1d1` of
+2026-09-18. `node --check web/dist/chat.js` and `git diff --check` passed too.
