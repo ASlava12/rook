@@ -13,8 +13,10 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 
 use rook_core::agent::{AgentLoop, Progress};
+use rook_core::work::managed;
 use rook_llm::Delta;
 use rook_proto::AskQuestion;
+use rook_proto::work::{Action, Conversation, Run, Start, Status, Steer};
 use rook_proto::{ApprovalDecision, ChatEvent, ClientMessage};
 use rook_tools::ask::{AskRequest, ChannelAsker};
 use rook_tools::policy::{Approval, ChannelApprover};
@@ -161,13 +163,54 @@ async fn serve(
                 // window that is watching a turn means changing that turn's.
                 let theirs = attached(&state, &watching).await.filter(|l| l.running());
                 let setting = theirs.as_ref().map(|l| l.settings.clone()).unwrap_or(settings.clone());
-                let _ = match setting.set(&name, &value) {
-                    Ok(()) => outbound.send(setting.describe()),
-                    Err(message) => outbound.send(ChatEvent::Error { message }),
-                };
+                if let Err(message) = setting.set(&name, &value) {
+                    let _ = outbound.send(ChatEvent::Error { message });
+                    continue;
+                }
+                if let Some(session) = watching.as_ref().map(|w| w.session) {
+                    let rook = engine.read().await;
+                    if let Ok(Some(run)) = session_goal(&rook, session)
+                        && !run.status.terminal()
+                        && let Err(error) = managed::update(&rook, &run.id, |saved| {
+                            if let Some(c) = &mut saved.run.conversation {
+                                c.model = setting.model();
+                                c.effort = setting.effort().as_str().into();
+                                c.stance = setting.policy.stance().as_str().into();
+                            }
+                            Ok(())
+                        })
+                    {
+                        report(
+                            &outbound,
+                            format!("setting changed, but could not save it for restart: {error}"),
+                        );
+                    }
+                }
+                let _ = outbound.send(setting.describe());
             }
             ClientMessage::Cancel => {
                 let Some(session) = watching.as_ref().map(|w| w.session) else { continue };
+                let id = rook_store::format_session_id(session);
+                let goal = session_goal(&*engine.read().await, session);
+                match goal {
+                    Ok(Some(run)) if !run.status.terminal() => {
+                        match managed::control(&*engine.read().await, &id, Action::Pause) {
+                            Ok(_) => {
+                                let _ = outbound.send(ChatEvent::Agent {
+                                    text: "Pausing goal after the active operation; /continue resumes it."
+                                        .into(),
+                                });
+                            }
+                            Err(error) => report(&outbound, error.to_string()),
+                        }
+                        continue;
+                    }
+                    Err(error) => {
+                        report(&outbound, error);
+                        continue;
+                    }
+                    _ => {}
+                }
                 if let Some(live) = state.live.write().await.remove(&session) {
                     live.stop();
                     // The browser only leaves its working state on Done or
@@ -181,6 +224,9 @@ async fn serve(
                     continue;
                 };
                 let live = state.live.read().await.get(&id).cloned();
+                if let Some(previous) = watching.take() {
+                    previous.carrying.abort();
+                }
                 let running = live.as_ref().is_some_and(|l| l.running());
                 let _ = outbound.send(ChatEvent::Attached { session, running });
                 if let Some(live) = live {
@@ -214,6 +260,105 @@ async fn serve(
                     report(&outbound, format!("no session {:?}", session.unwrap_or_default()));
                     continue;
                 };
+                let requested_goal = text.strip_prefix("/goal ").map(str::trim).filter(|s| !s.is_empty());
+                let existing = match session_goal(&*engine.read().await, id) {
+                    Ok(run) => run.filter(|r| !r.status.terminal()),
+                    Err(error) => {
+                        report(&outbound, error);
+                        continue;
+                    }
+                };
+                if requested_goal.is_some() || existing.is_some() {
+                    if !options.attachments.is_empty() && existing.is_some() {
+                        report(&outbound, "Attachments cannot be added to a running goal.".into());
+                        continue;
+                    }
+                    let (goal_engine, _) = match where_it_belongs(&state, id).await {
+                        Ok(Some(theirs)) => theirs,
+                        Ok(None) => (engine.clone(), shared.clone()),
+                        Err(error) => {
+                            report(&outbound, error);
+                            continue;
+                        }
+                    };
+                    let promotion = if existing.is_none() {
+                        state.live.read().await.get(&id).filter(|live| live.running()).cloned()
+                    } else {
+                        None
+                    };
+                    let selected = promotion
+                        .as_ref()
+                        .map(|live| live.settings.clone())
+                        .unwrap_or_else(|| settings.clone());
+                    let previously_watched = if watching.as_ref().is_some_and(|w| w.session == id) {
+                        state.live.read().await.get(&id).cloned()
+                    } else {
+                        None
+                    };
+                    let result = {
+                        let rook = goal_engine.read().await;
+                        if let Some(run) = existing {
+                            (|| {
+                                if !rook_core::agent::carrying_on(&text) && text != rook_core::agent::CARRY_ON
+                                {
+                                    managed::steer(
+                                        &rook,
+                                        &run.id,
+                                        Steer {
+                                            id: rook_store::format_session_id(rook_store::new_session_id()),
+                                            text: text.clone(),
+                                        },
+                                    )?;
+                                    let _ = outbound.send(ChatEvent::Interjected { text: text.clone() });
+                                }
+                                if !run.status.runnable() {
+                                    managed::control(&rook, &run.id, Action::Resume)
+                                } else {
+                                    Ok(run)
+                                }
+                            })()
+                        } else {
+                            managed::start(
+                                &rook,
+                                Start {
+                                    goal: requested_goal.unwrap_or_default().into(),
+                                    workspace: None,
+                                    autonomous: false,
+                                    max_iterations: Some(0),
+                                    max_tokens: Some(0),
+                                    max_seconds: Some(0),
+                                    conversation: Some(Conversation {
+                                        session: rook_store::format_session_id(id),
+                                        model: selected.model(),
+                                        effort: selected.effort().as_str().into(),
+                                        stance: selected.policy.stance().as_str().into(),
+                                        options,
+                                    }),
+                                },
+                            )
+                        }
+                    };
+                    match result {
+                        Ok(run) => match crate::work::join_conversation(&state, &run).await {
+                            Ok(live) => {
+                                if let Some(previous) = &promotion {
+                                    previous.interjections.say(&text);
+                                    let _ = outbound.send(ChatEvent::Interjected { text: text.clone() });
+                                }
+                                let _ = outbound.send(live.settings.describe());
+                                if !previously_watched
+                                    .as_ref()
+                                    .is_some_and(|previous| Arc::ptr_eq(previous, &live))
+                                {
+                                    watching = Some(watch(&live, id, outbound.clone(), watching));
+                                }
+                            }
+                            Err(error) => report(&outbound, error),
+                        },
+                        Err(error) => report(&outbound, error.to_string()),
+                    }
+                    continue;
+                }
                 // Typed while that session's turn runs, it goes to the turn:
                 // the window had to wait or cancel, and cancelling loses
                 // everything the turn had done to say one sentence to it.
@@ -416,6 +561,27 @@ async fn begin(
     })
 }
 
+fn session_goal(rook: &rook_core::Rook, session: u128) -> Result<Option<Run>, String> {
+    managed::for_session(rook, session).map_err(|e| e.to_string())
+}
+
+/// Recovery recreates the same live conversation, so joining it uses the
+/// existing session picker, stream and approval controls.
+pub(crate) async fn resume_goal(state: &Arc<AppState>, run: &Run) -> Result<Arc<Live>, String> {
+    let conversation = run.conversation.as_ref().ok_or("not a conversation goal")?;
+    let session = rook_store::parse_session_id(&conversation.session).ok_or("invalid session")?;
+    let engine = state.engine_for(Some(std::path::Path::new(&run.workspace))).await?;
+    let shared = state.equipment_for(&engine).await;
+    let settings = Arc::new(Settings::new(&*engine.read().await));
+    settings.set("stance", &conversation.stance)?;
+    settings.set("effort", &conversation.effort)?;
+    if let Some(model) = &conversation.model {
+        settings.set("model", model)?;
+    }
+    Ok(begin(state, &engine, &shared, &settings, session, run.goal.clone(), conversation.options.clone())
+        .await)
+}
+
 /// How long one frame may take to reach a client before the socket counts as
 /// gone rather than slow.
 ///
@@ -608,6 +774,13 @@ impl Live {
             helper.abort();
         }
     }
+
+    pub(crate) async fn shutdown(&self) {
+        self.stop();
+        while !self.task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -628,11 +801,21 @@ async fn turn(
     prompt: String,
 ) {
     // Owned so the guard outlives this task's spawn point.
-    let rook = engine.read_owned().await;
+    let rook = engine.clone().read_owned().await;
     // Resolved by the caller, because the daemon has to register the turn
     // under its session before it starts one — a turn that names itself after
     // it is already running cannot be joined while it does so.
     let _ = outbound.send(ChatEvent::Started { session: rook_store::format_session_id(session) });
+
+    match session_goal(&rook, session) {
+        Ok(Some(run)) if run.status.runnable() => {
+            drop(rook);
+            goal_turn(&engine, &connection, &shared, &outbound, session, &run.id).await;
+            return;
+        }
+        Err(error) => return ended_badly(&rook, session, &outbound, error),
+        _ => {}
+    }
 
     // The connection's choice where it has made one, and the configured
     // endpoint otherwise. Read here rather than carried in: a turn takes the
@@ -644,15 +827,16 @@ async fn turn(
         Err(e) => return ended_badly(&rook, session, &outbound, e.to_string()),
     };
 
+    let equipment = shared.clone();
     let shared = shared.get_or_init(|| Shared::for_project(&rook)).await;
 
     let mut agent = AgentLoop::new(&rook, provider.into(), session);
     agent.policy = connection.settings.policy.clone();
     agent.effort = connection.settings.effort();
-    agent.approver = connection.approver;
-    agent.ask_via(connection.asker);
+    agent.approver = connection.approver.clone();
+    agent.ask_via(connection.asker.clone());
     agent.interjections = connection.interjections.clone();
-    agent.options = connection.options;
+    agent.options = connection.options.clone();
     rook_core::agent::equip(&mut agent, shared.servers.clone(), &shared.mcp, shared.jobs.clone());
 
     let emit = outbound.clone();
@@ -667,6 +851,16 @@ async fn turn(
         })
         .await;
 
+    // /goal can promote a turn already in flight. Keep its observer, approval
+    // channels and settings instead of ending the stream between stages.
+    if let Ok(Some(run)) = session_goal(&rook, session)
+        && run.status.runnable()
+    {
+        drop(agent);
+        drop(rook);
+        goal_turn(&engine, &connection, &equipment, &outbound, session, &run.id).await;
+        return;
+    }
     match result {
         Ok(outcome) => {
             for text in &outcome.facts_learned {
@@ -690,6 +884,116 @@ async fn turn(
         }
         Err(e) => ended_badly(&rook, session, &outbound, e.to_string()),
     }
+}
+
+async fn goal_turn(
+    engine: &Arc<tokio::sync::RwLock<rook_core::Rook>>,
+    connection: &Connection,
+    equipment: &tokio::sync::OnceCell<Shared>,
+    outbound: &mpsc::UnboundedSender<ChatEvent>,
+    session: u128,
+    id: &str,
+) {
+    let shared = {
+        let rook = engine.read().await;
+        equipment.get_or_init(|| Shared::for_project(&rook)).await
+    };
+    let _ = outbound.send(ChatEvent::Agent { text: "Goal started in this session; continuing automatically between stages. Ctrl-C pauses; /continue resumes.".into() });
+    let mut announced_retry = None;
+    loop {
+        let rook = engine.read().await;
+        let run = match managed::read(&rook, id) {
+            Ok(saved) => saved.run,
+            Err(error) => return ended_badly(&rook, session, outbound, error.to_string()),
+        };
+        if !run.status.runnable() {
+            return ended_goal(&rook, outbound, session, run);
+        }
+        if let Some(at) = run.next_attempt_at.filter(|at| *at > managed::now()) {
+            if announced_retry != Some(at) {
+                let _ = outbound.send(ChatEvent::Agent {
+                    text: format!("Goal saved; retry in {}s: {}", at - managed::now().min(at), run.reason),
+                });
+                announced_retry = Some(at);
+            }
+            drop(rook);
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            continue;
+        }
+        let result = managed::advance(
+            &rook,
+            id,
+            |session| {
+                let named = connection.settings.model();
+                let provider = rook_core::models::chosen(&rook.config, named.as_deref())?;
+                let mut agent = AgentLoop::new(&rook, provider.into(), session);
+                agent.policy = connection.settings.policy.clone();
+                agent.effort = connection.settings.effort();
+                agent.approver = connection.approver.clone();
+                agent.ask_via(connection.asker.clone());
+                agent.interjections = connection.interjections.clone();
+                agent.options = connection.options.clone();
+                if run.iterations > 0 {
+                    agent.options.attachments.clear();
+                }
+                rook_core::agent::equip(&mut agent, shared.servers.clone(), &shared.mcp, shared.jobs.clone());
+                Ok(agent)
+            },
+            |progress| {
+                if let Some(event) = as_event(progress, &rook.workspace) {
+                    let _ = outbound.send(event);
+                }
+            },
+        )
+        .await;
+        match result {
+            Ok(run) if !run.status.runnable() => return ended_goal(&rook, outbound, session, run),
+            Ok(run) if run.status == Status::Queued => {
+                let _ = outbound.send(ChatEvent::Agent {
+                    text: format!(
+                        "Continuing goal in this session (stage {}).",
+                        run.iterations.saturating_add(1)
+                    ),
+                });
+            }
+            Err(error) => {
+                let _ = managed::update(&rook, id, |s| {
+                    if s.run.status.runnable() {
+                        s.run.status = Status::Blocked;
+                        s.run.reason = error.to_string().chars().take(2048).collect();
+                    }
+                    Ok(())
+                });
+                return ended_badly(&rook, session, outbound, error.to_string());
+            }
+            _ => {}
+        }
+        // Release the engine between stages: keeping its read guard for days
+        // would prevent configuration reload and maintenance for the same days.
+        drop(rook);
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+}
+
+fn ended_goal(rook: &rook_core::Rook, outbound: &mpsc::UnboundedSender<ChatEvent>, session: u128, run: Run) {
+    let last = rook.completed_turn(session).ok().flatten();
+    let stopped = match run.status {
+        Status::Completed => "end_turn",
+        Status::Paused | Status::Cancelled => "work_paused",
+        _ => "blocked",
+    };
+    let _ = outbound.send(ChatEvent::Done {
+        reply: Some(if run.reply.is_empty() { run.reason.clone() } else { run.reply }),
+        steps: last.as_ref().map_or(0, |o| o.steps),
+        input_tokens: last.as_ref().map_or(0, |o| o.input_tokens),
+        output_tokens: last.as_ref().map_or(0, |o| o.output_tokens),
+        delegated: last.as_ref().map_or_else(Vec::new, |o| o.delegated.clone()),
+        compactions: last.as_ref().map_or(0, |o| o.compactions),
+        decisions: Vec::new(),
+        open_questions: if stopped == "blocked" { vec![run.reason] } else { Vec::new() },
+        files_changed: last.map_or_else(Vec::new, |o| o.files_changed),
+        stopped: stopped.into(),
+    });
 }
 
 /// What a window is told about one step of a turn.
@@ -771,8 +1075,8 @@ fn report(outbound: &mpsc::UnboundedSender<ChatEvent>, message: String) {
 /// language server, respawned every MCP server, and killed every background
 /// command the agent had started.
 pub struct Shared {
-    servers: Arc<rook_core::lsp::Servers>,
-    mcp: Arc<rook_core::McpSession>,
+    pub(crate) servers: Arc<rook_core::lsp::Servers>,
+    pub(crate) mcp: Arc<rook_core::McpSession>,
     pub jobs: Arc<rook_tools::jobs::Jobs>,
 }
 

@@ -20,6 +20,7 @@ pub enum ConfigError {
 #[serde(default)]
 pub struct Config {
     pub agent: AgentConfig,
+    pub work: WorkConfig,
     pub storage: StorageConfig,
     pub server: ServerConfig,
     pub sandbox: SandboxConfig,
@@ -277,6 +278,7 @@ impl Default for Config {
         // config a machine with no file at all gets.
         Self {
             agent: AgentConfig::default(),
+            work: WorkConfig::default(),
             storage: StorageConfig::default(),
             sandbox: SandboxConfig::default(),
             telemetry: TelemetryConfig::default(),
@@ -671,6 +673,45 @@ pub struct StorageConfig {
     pub gc_grace_secs: i64,
     /// Run prune + gc on daemon start and then on this interval.
     pub maintenance_interval_hours: u32,
+}
+
+/// Bounds for daemon-owned work; each model turn retains its own limits too.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorkConfig {
+    pub max_parallel_runs: usize,
+    pub max_runs: usize,
+    pub max_messages: usize,
+    pub max_message_bytes: usize,
+    pub max_goal_bytes: usize,
+    pub retained_iterations: usize,
+    pub max_iterations: u32,
+    pub max_tokens: u64,
+    pub max_seconds: u64,
+    pub retry_initial_secs: u64,
+    pub retry_max_secs: u64,
+    pub retry_window_secs: u64,
+    pub idle_iterations: u32,
+}
+
+impl Default for WorkConfig {
+    fn default() -> Self {
+        Self {
+            max_parallel_runs: 2,
+            max_runs: 64,
+            max_messages: 128,
+            max_message_bytes: 8192,
+            max_goal_bytes: 32768,
+            retained_iterations: 16,
+            max_iterations: 10_000,
+            max_tokens: 0,
+            max_seconds: 7 * 24 * 3600,
+            retry_initial_secs: 30,
+            retry_max_secs: 1800,
+            retry_window_secs: 24 * 3600,
+            idle_iterations: 8,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

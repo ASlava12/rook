@@ -30,6 +30,8 @@ use tokio::sync::mpsc;
 
 use crate::fmt;
 
+mod tasks;
+
 /// What is over the conversation, when anything is.
 ///
 /// Tabs were the shape before this, and their cost was constant: eight names
@@ -46,6 +48,7 @@ enum Overlay {
     /// Every call this conversation made, with what it was given and what came
     /// back. `^o`, from the conversation, for the call you are looking at.
     Calls,
+    Tasks,
     Sessions,
     Memory,
     Skills,
@@ -58,8 +61,9 @@ enum Overlay {
 
 impl Overlay {
     /// The panes the palette offers, in the order somebody reaches for them.
-    const PANES: [Overlay; 9] = [
+    const PANES: [Overlay; 10] = [
         Overlay::Calls,
+        Overlay::Tasks,
         Overlay::Sessions,
         Overlay::Models,
         Overlay::Docs,
@@ -74,6 +78,7 @@ impl Overlay {
         match self {
             Overlay::Palette => "commands",
             Overlay::Calls => "calls",
+            Overlay::Tasks => "tasks",
             Overlay::Sessions => "sessions",
             Overlay::Memory => "memory",
             Overlay::Skills => "skills",
@@ -90,6 +95,7 @@ impl Overlay {
         match self {
             Overlay::Palette => "everything reachable from here",
             Overlay::Calls => "what each call was given and what came back",
+            Overlay::Tasks => "background tasks: start, correct, pause and resume",
             Overlay::Sessions => "past conversations — enter continues one here",
             Overlay::Memory => "what the agent believes, and how to correct it",
             Overlay::Skills => "what applies in this workspace, and why",
@@ -108,6 +114,14 @@ impl Overlay {
         match self {
             Overlay::Palette => &[("↑↓ ", "choose  "), ("⏎ ", "open  "), ("esc ", "close  ")],
             Overlay::Calls => &[("j/k ", "move  "), ("r ", "reload  "), ("esc ", "close  ")],
+            Overlay::Tasks => &[
+                ("n ", "new  "),
+                ("Enter ", "correct  "),
+                ("p/r ", "pause/resume  "),
+                ("x ", "cancel  "),
+                ("d ", "forget  "),
+                ("Esc ", "back  "),
+            ],
             Overlay::Sessions => &[("j/k ", "move  "), ("⏎ ", "continue  "), ("r ", "reload  ")],
             Overlay::Memory => &[
                 ("j/k ", "move  "),
@@ -329,7 +343,7 @@ enum TurnEvent {
     Error(String),
     /// A turn the daemon is running, verbatim. Translated where the rest are
     /// handled rather than at the socket, so the two paths meet in one place.
-    FromDaemon(Box<ChatEvent>),
+    FromDaemon(u64, Box<ChatEvent>),
 }
 
 struct Selected {
@@ -591,6 +605,8 @@ struct Chat {
     /// used to answer it by marking whatever line the cursor was on.
     running_calls: rook_core::calls::Running,
     session: Option<u128>,
+    /// Ignore the previous session's queued stream until Attach acknowledges the switch.
+    joining: Option<u128>,
     busy: bool,
     pending: Option<ApprovalRequest>,
     asking: Option<Asking>,
@@ -1104,6 +1120,7 @@ struct App {
     source: crate::source::Source,
     runtime: tokio::runtime::Runtime,
     chat: Chat,
+    tasks: tasks::Tasks,
     /// Whether this window is taking the mouse, and so whether the terminal's
     /// own selection works.
     ///
@@ -1125,6 +1142,7 @@ struct App {
     files_here: Option<Vec<String>>,
     events: mpsc::UnboundedReceiver<TurnEvent>,
     to_loop: mpsc::UnboundedSender<TurnEvent>,
+    connection_epoch: u64,
     approver: Arc<ChannelApprover>,
     asker: Arc<ChannelAsker>,
     /// The same state the chat REPL keeps, so the slash commands are one
@@ -1255,7 +1273,9 @@ impl App {
         };
         let patience = config.agent.answer_timeout();
 
+        let tasks = tasks::Tasks::new(&source, &runtime, &config.work);
         let mut app = Self {
+            tasks,
             runtime,
             chat: Chat { history: remembered_prompts(), ..Chat::default() },
             files_here: None,
@@ -1273,6 +1293,7 @@ impl App {
             patience: config.agent.stream_idle(),
             events,
             to_loop,
+            connection_epoch: 0,
             approver: Arc::new(ChannelApprover::new(requests, patience)),
             asker: Arc::new(ChannelAsker::new(questions, config.agent.decide_alone_after())),
             shared: crate::chat::Session {
@@ -1473,6 +1494,7 @@ impl App {
         while !self.quit {
             terminal.draw(|f| self.draw(f))?;
             self.drain_turn_events();
+            self.tasks.poll();
             self.still_running();
             // Poll rather than block: a streaming turn has to keep redrawing
             // even while nobody is typing.
@@ -1626,7 +1648,10 @@ impl App {
                     self.chat.push("err", &message);
                     self.finished();
                 }
-                TurnEvent::FromDaemon(event) => self.heard_from_daemon(*event),
+                TurnEvent::FromDaemon(epoch, event) if epoch == self.connection_epoch => {
+                    self.heard_from_daemon(*event)
+                }
+                TurnEvent::FromDaemon(..) => {}
             }
             // After the event has been read, not before: the answer to "is it
             // still running?" is one of these, and clearing the question first
@@ -1641,6 +1666,17 @@ impl App {
     /// sets are close but not the same, and a mapping that pretended otherwise
     /// would have to invent a `Started` for a session id that arrives as text.
     fn heard_from_daemon(&mut self, event: ChatEvent) {
+        if let Some(joining) = self.chat.joining {
+            match &event {
+                ChatEvent::Attached { session, .. }
+                    if rook_store::parse_session_id(session) == Some(joining) =>
+                {
+                    self.chat.joining = None;
+                }
+                ChatEvent::Failed { .. } | ChatEvent::Error { .. } => self.chat.joining = None,
+                _ => return,
+            }
+        }
         match event {
             ChatEvent::Started { session } => {
                 self.chat.session = rook_store::parse_session_id(&session);
@@ -1821,7 +1857,7 @@ impl App {
             // the browser; quitting is what it means when there is nothing.
             // A turn the daemon runs is stopped by asking it: dropping the
             // socket here would leave the turn running with nobody reading it.
-            if let Some(say) = self.chat.remote.take() {
+            if let Some(say) = &self.chat.remote {
                 let _ = say.send(ClientMessage::Cancel);
                 self.chat.push("stat", "[stopping]");
                 return;
@@ -1836,6 +1872,10 @@ impl App {
         match key.code {
             KeyCode::F(2) => return self.cycle_stance(),
             KeyCode::F(3) => return self.cycle_effort(),
+            KeyCode::F(4) => {
+                self.overlay = Some(Overlay::Tasks);
+                return;
+            }
             _ => {}
         }
         // `^p` from anywhere, including from inside another overlay: a palette
@@ -1880,6 +1920,7 @@ impl App {
     fn on_paste(&mut self, text: &str) {
         match self.overlay {
             Some(Overlay::Palette) => self.palette.paste(text),
+            Some(Overlay::Tasks) => self.tasks.paste(text),
             // The one-line boxes take a paste as one line: a fact or a topic
             // with a newline in it is not two of them.
             Some(Overlay::Memory) => {
@@ -1894,6 +1935,12 @@ impl App {
     }
 
     fn on_overlay_key(&mut self, overlay: Overlay, key: crossterm::event::KeyEvent) {
+        if overlay == Overlay::Tasks {
+            if self.tasks.key(key) {
+                self.overlay = None;
+            }
+            return;
+        }
         if key.code == KeyCode::Esc {
             self.overlay = None;
             return;
@@ -2269,16 +2316,21 @@ impl App {
 
         let to_loop = self.to_loop.clone();
         let relay = to_loop.clone();
+        self.connection_epoch = self.connection_epoch.wrapping_add(1);
+        let epoch = self.connection_epoch;
         self.runtime.spawn(async move {
             while let Some(event) = incoming.recv().await {
-                if relay.send(TurnEvent::FromDaemon(Box::new(event))).is_err() {
+                if relay.send(TurnEvent::FromDaemon(epoch, Box::new(event))).is_err() {
                     break;
                 }
             }
         });
         self.turn = Some(self.runtime.spawn(async move {
             if let Err(e) = crate::remote::hold(&base, &workspace, &mut outgoing, heard).await {
-                fail(&to_loop, e.to_string());
+                let _ = to_loop.send(TurnEvent::FromDaemon(
+                    epoch,
+                    Box::new(ChatEvent::Failed { message: e.to_string() }),
+                ));
             }
         }));
         true
@@ -2362,6 +2414,55 @@ impl App {
     /// past the choices works here exactly as it does in the plain CLI.
     fn command(&mut self, command: &str) {
         let (name, rest) = command.split_once(' ').unwrap_or((command, ""));
+        if self.source.daemon_base().is_some() && name == "new" {
+            self.connection_epoch = self.connection_epoch.wrapping_add(1);
+            if let Some(observer) = self.turn.take() {
+                observer.abort();
+            }
+            self.chat.remote = None;
+            self.chat.busy = false;
+            self.chat.session = None;
+            self.chat.joining = None;
+            self.chat.pending = None;
+            self.chat.asking = None;
+            self.chat.log.clear();
+            self.chat.spent = None;
+            self.chat.running_calls = Default::default();
+            self.chat.push("stat", "New conversation. Other sessions keep working.");
+            return;
+        }
+        if self.source.daemon_base().is_some() && name == "session" && !rest.trim().is_empty() {
+            match self.source.session_named(rest.trim(), self.source.workspace()) {
+                Ok(id) => {
+                    self.reload();
+                    self.session_state.select(self.sessions.iter().position(|s| s.meta.id == id));
+                    self.continue_selected();
+                }
+                Err(error) => self.chat.push("err", &error.to_string()),
+            }
+            return;
+        }
+        if name == "goal" && rest.trim().is_empty() {
+            let said = match self.chat.session {
+                Some(session) => self
+                    .source
+                    .goal(session)
+                    .map(|goal| goal.unwrap_or_else(|| "no goal set — /goal <text> to start".into()))
+                    .unwrap_or_else(|e| e.to_string()),
+                None => "no goal set — /goal <text> to start".into(),
+            };
+            self.chat.push("stat", &said);
+            return;
+        }
+        if name == "task" {
+            let said = if self.source.here().is_some() {
+                "Durable tasks require the shared daemon: reopen with `rook tui` (without --alone).".into()
+            } else {
+                crate::commands::tasks::slash(rest, self.source.workspace()).unwrap_or_else(|e| e.to_string())
+            };
+            self.chat.push("stat", &said);
+            return;
+        }
         if name == "recovery" {
             let said = match self.chat.session {
                 Some(session) => {
@@ -2410,7 +2511,7 @@ impl App {
     /// command cannot: switching is this window's own state and the transcript
     /// is a routed read, so neither needs the store to be here.
     fn continue_selected(&mut self) {
-        if self.chat.busy {
+        if self.chat.busy && self.source.here().is_some() {
             self.chat.push("stat", "  a turn is running here — stop it or let it finish first");
             self.overlay = None;
             return;
@@ -2419,6 +2520,12 @@ impl App {
             return;
         };
         let (id, title) = (session.meta.id, session.meta.title.clone());
+        self.chat.busy = false;
+        self.chat.pending = None;
+        self.chat.asking = None;
+        self.chat.running_calls = Default::default();
+        self.chat.spent = None;
+        self.chat.joining = self.source.daemon_base().map(|_| id);
         self.chat.session = Some(id);
         self.recall_conversation(id);
         self.chat.push(
@@ -2575,9 +2682,40 @@ impl App {
         }
         self.chat.recalled = None;
         self.chat.draft.clear();
+        if let Some(command) = slash(&prompt)
+            && self.source.daemon_base().is_some()
+            && (command == "new" || command.starts_with("session ") || command == "goal")
+        {
+            self.command(command);
+            return;
+        }
+        if prompt.strip_prefix("/goal ").is_some_and(|goal| !goal.trim().is_empty())
+            && self.source.daemon_base().is_some()
+        {
+            self.chat.push("you", &prompt);
+            if self.chat.busy {
+                match self.chat.interject(&prompt, false, &self.shared.interjections) {
+                    Ok(()) => self.chat.push("stat", Chat::QUEUED),
+                    Err(error) => {
+                        self.chat.push("err", &error.to_string());
+                        self.chat.input.set(&prompt);
+                    }
+                }
+            } else {
+                self.chat.began();
+                self.send_to_daemon(prompt);
+            }
+            return;
+        }
         // Typed while a turn runs, it goes to the turn. It used to be dropped
         // where it was taken, so watching one go the wrong way left nothing to
         // do but stop it and start again.
+        if let Some(command) = slash(&prompt)
+            && (command == "task" || command.starts_with("task "))
+        {
+            self.command(command);
+            return;
+        }
         if self.chat.busy {
             self.chat.push("you", &prompt);
             // A slash command typed here used to be queued as its own text and
@@ -2966,6 +3104,7 @@ impl App {
             match overlay {
                 Overlay::Palette => self.draw_palette(f, area),
                 Overlay::Calls => self.draw_calls(f, area),
+                Overlay::Tasks => self.tasks.draw(f, area),
                 Overlay::Sessions => self.draw_sessions(f, area),
                 Overlay::Memory => self.draw_memory(f, area),
                 Overlay::Skills => self.draw_skills(f, area),
@@ -2984,9 +3123,9 @@ impl App {
             // that has stopped scrolling reads as an application that has
             // stopped responding, and this is the line that explains it.
             None if self.mouse => {
-                &[("^p ", "commands  "), ("^o ", "calls  "), ("^s ", "select  "), ("^c ", "stop  ")]
+                &[("^p ", "commands  "), ("F4 ", "tasks  "), ("^s ", "select  "), ("^c ", "stop  ")]
             }
-            None => &[("^p ", "commands  "), ("^o ", "calls  "), ("^s ", "wheel  "), ("^c ", "stop  ")],
+            None => &[("^p ", "commands  "), ("F4 ", "tasks  "), ("^s ", "wheel  "), ("^c ", "stop  ")],
         };
         let mut spans: Vec<Span> = vec![Span::raw(" ")];
         for (key, what) in keys {
@@ -4156,6 +4295,7 @@ impl App {
             Line::from(Span::styled("keys", Style::default().add_modifier(Modifier::BOLD))),
             key("  ^p          everything reachable, filtered as you type"),
             key("  ^o          what each call was given and what came back"),
+            key("  F4          background tasks: n starts, Enter corrects, p/r pauses/resumes"),
             key("  ^s          gives the mouse to the terminal, to select and copy what"),
             key("              was said · press it again to get the wheel back"),
             key("  @           names a file in the workspace · tab completes it"),

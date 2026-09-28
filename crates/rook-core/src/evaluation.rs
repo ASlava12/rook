@@ -112,7 +112,9 @@ impl Report {
     /// Whether every check passed — and nothing that would make that claim
     /// meaningless happened while they were being run.
     pub fn clean(&self) -> bool {
-        !self.scorecard_changed && self.checks.iter().all(|c| c.passed && c.touched.is_empty())
+        !self.checks.is_empty()
+            && !self.scorecard_changed
+            && self.checks.iter().all(|c| c.passed && c.touched.is_empty())
     }
 
     /// The one-line summary a turn is handed at the start of the next

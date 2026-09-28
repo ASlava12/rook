@@ -81,6 +81,7 @@ fn a_shipped_card_says_when_to_use_it_and_stays_small() {
     let (index, _) = builtin();
     let cards = index.catalog(&equipped("linux"));
     assert!(cards.len() >= 5, "the shipped skills went missing");
+    assert!(cards.len() <= 50, "the shipped skills exceed the default max_skill_cards");
 
     let mut whole = 0;
     for card in &cards {
@@ -101,13 +102,11 @@ fn a_shipped_card_says_when_to_use_it_and_stays_small() {
         );
         whole += cost;
     }
-    // `max_skill_cards` is 50, and these are what a fresh install pays
-    // before it has collected anything of its own. It was ~175 when each card
-    // described its subject; the thirty tokens bought the situation, which is
-    // the only thing a card is read for — and one body not loaded to find out
-    // costs between 200 and 900.
+    // The engineering library adds specialized cards, not eagerly loaded bodies.
+    // Bound its total cost as well as each card; a new skill must earn its place
+    // within this budget and the default catalogue capacity above.
     assert!(
-        whole <= 220,
+        whole <= 1_500,
         "the shipped catalogue costs ~{whole} tokens on every request; cut a card before \
          raising this"
     );

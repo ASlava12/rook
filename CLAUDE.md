@@ -208,7 +208,7 @@ is real and likely, as `in-place-edit`'s does with the editing tools; on
 needs goes in `requires`, where the code checks it and `rook skills why`
 explains it, rather than in a sentence the model has to evaluate. The budget is
 a test: `a_shipped_card_says_when_to_use_it_and_stays_small` caps one card at 50
-tokens and the shipped catalogue at 220, and
+tokens and the shipped catalogue at 1,500, with at most 50 shipped cards, and
 `a_shipped_body_is_bounded_so_loading_one_is_affordable` caps a body at 1,200 —
 past that the long part belongs in a bundled file the body names, which
 `load_skill` reports and nobody reads unless they need it.

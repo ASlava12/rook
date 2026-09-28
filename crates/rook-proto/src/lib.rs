@@ -20,6 +20,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod work;
+
 /// Bumped when the HTTP surface changes incompatibly. Clients send it in
 /// `X-Rook-Api`; the daemon refuses a mismatch rather than misbehaving quietly.
 pub const API_VERSION: u32 = 1;

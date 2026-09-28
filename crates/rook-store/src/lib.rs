@@ -963,6 +963,22 @@ impl Store {
         Ok(())
     }
 
+    /// Atomically publish related records and remove expired ones.
+    pub fn kv_update(&self, puts: &[(&str, &[u8])], removes: &[&str]) -> Result<()> {
+        let txn = self.db.begin_write()?;
+        {
+            let mut kv = txn.open_table(schema::KV)?;
+            for (key, value) in puts {
+                kv.insert(*key, *value)?;
+            }
+            for key in removes {
+                kv.remove(*key)?;
+            }
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
     pub fn kv_get(&self, key: &str) -> Result<Option<Vec<u8>>> {
         let txn = self.db.begin_read()?;
         let kv = txn.open_table(schema::KV)?;

@@ -217,3 +217,14 @@ answers from questions and appended hook data. The completion classifier records
 refusals/blockers as incomplete (`blocked`), without forcing a refused task to
 continue. Neither this classifier nor prompt framing is a deterministic security
 boundary; tool policy and containment remain independent enforcement layers.
+
+## Durable task supervision
+
+`rook-proto::work` defines task states and steering receipts.
+`rook-core::work::managed` owns durable transitions, budgets, retry deadlines,
+stage admission and completion verification. Session goals reuse their existing
+conversation; standalone runs use iteration sessions. `rookd::work` schedules these
+turns independently of HTTP/WebSocket lifetimes. TUI `/goal` uses the existing
+chat registry for streaming and approvals and continues in the same session, including after restart. CLI `task`, the optional
+TUI Tasks pane and the web Tasks view are clients of the same supervision API.
+See [durable work](durable-work.md) and [ADR-0014](adr/0014-durable-work.md).

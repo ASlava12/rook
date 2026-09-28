@@ -188,6 +188,10 @@ rook tui                                   # the conversation, with ^p for every
 rook checkpoint create before-refactor     # or `c` in the TUI's Checkpoints tab
 rook docs add redis                        # read its documentation once, answer from it after
 rookd                                      # http://127.0.0.1:7717 — web UI + API
+rook tui                                   # F4: background tasks, corrections and live receipts
+rook task start "Implement the plan and verify it" --yes  # optional CLI
+rook task steer TASK_ID "Keep API compatibility"          # durable correction + receipt
+rook task show TASK_ID                                    # progress and acknowledgements
 rook daemon status                         # where it is, and whether it is this build
 rook update                                # a newer release, if there is one; keeps the previous beside it
 rook daemon restart                        # after an upgrade; names any turn it ends
@@ -1536,3 +1540,8 @@ interactive approval or input is required. `ROOK_NOTIFY=off` disables the bell.
 Only a terminal on stderr receives it: redirected streams and JSON stdout stay
 free of notification escapes. Whether the bell is audible or visible depends
 on the terminal settings.
+
+In `rook tui`, `/goal <text>` starts lasting work in the current session.
+Send corrections in the same chat; Ctrl-C pauses and `/continue` resumes.
+For limits, restart recovery and session switching, see
+[Durable work](docs/durable-work.md) ([Русский](docs/ru/durable-work.md)).

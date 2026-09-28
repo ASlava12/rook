@@ -9,6 +9,7 @@
 mod api;
 mod chat;
 mod web;
+mod work;
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -35,6 +36,7 @@ struct Args {
 }
 
 pub struct AppState {
+    pub work: work::Tasks,
     /// An `Arc` so a websocket turn can take an owned read guard and outlive the
     /// request that spawned it.
     pub rook: Arc<RwLock<Rook>>,
@@ -340,6 +342,7 @@ async fn serve() -> Result<()> {
 
     let about = about(&rook);
     let state = Arc::new(AppState {
+        work: Default::default(),
         rook: Arc::new(RwLock::new(rook)),
         elsewhere: RwLock::new(std::collections::HashMap::new()),
         equipment: RwLock::new(std::collections::HashMap::new()),
@@ -364,6 +367,7 @@ async fn serve() -> Result<()> {
     ));
 
     let maintenance = tokio::spawn(maintain(state.clone(), config.storage.maintenance_interval_hours));
+    let work = tokio::spawn(work::supervise(state.clone()));
 
     let addr = SocketAddr::new(bind, port);
     let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("binding {addr}"))?;
@@ -383,6 +387,9 @@ async fn serve() -> Result<()> {
     // exists to prevent — which is what a restart hit, every time, on the
     // daemon it had just stopped.
     maintenance.abort();
+    work.abort();
+    let _ = work.await;
+    work::stop(&state).await;
     let _ = maintenance.await;
     drop(state);
     std::fs::remove_file(&address_file).ok();

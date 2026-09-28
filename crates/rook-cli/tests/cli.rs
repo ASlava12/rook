@@ -1299,3 +1299,205 @@ fn a_release_check_that_cannot_reach_github_says_so_rather_than_saying_up_to_dat
         "and never claims a version it did not read"
     );
 }
+
+/// Kill rookd while it waits for a model, then resume the same durable task.
+/// The correction is accepted with no worker available to acknowledge it.
+#[test]
+fn durable_work_and_pending_corrections_survive_a_daemon_restart() {
+    durable_recovery(false);
+}
+
+#[test]
+fn a_session_goal_and_pending_correction_survive_a_daemon_restart() {
+    durable_recovery(true);
+}
+
+fn durable_recovery(in_conversation: bool) {
+    rook_llm::init_tls();
+    use std::io::{Read, Write};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    let rook = Rook::new();
+    std::fs::write(rook.workspace.path().join("evidence.txt"), "done").unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+    listener.set_nonblocking(true).unwrap();
+    let release = Arc::new(AtomicBool::new(false));
+    let arrived = Arc::new(AtomicBool::new(false));
+    let stopped = Arc::new(AtomicBool::new(false));
+    struct Stop(Arc<AtomicBool>);
+    impl Drop for Stop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    let _stop = Stop(stopped.clone());
+    let gate = release.clone();
+    let ready = arrived.clone();
+    std::thread::spawn(move || {
+        while !stopped.load(Ordering::SeqCst) {
+            let Ok((mut socket, _)) = listener.accept() else {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                continue;
+            };
+            let gate = gate.clone();
+            let ready = ready.clone();
+            let stopped = stopped.clone();
+            std::thread::spawn(move || {
+                socket.set_read_timeout(Some(std::time::Duration::from_secs(60))).unwrap();
+                let mut bytes = Vec::new();
+                let mut chunk = [0; 16384];
+                let request = loop {
+                    let Ok(n) = socket.read(&mut chunk) else { return };
+                    if n == 0 {
+                        return;
+                    }
+                    bytes.extend_from_slice(&chunk[..n]);
+                    let text = String::from_utf8_lossy(&bytes);
+                    if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                        let length: usize = head
+                            .lines()
+                            .find_map(|line| {
+                                line.to_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .and_then(|v| v.trim().parse().ok())
+                            })
+                            .unwrap_or(0);
+                        if body.len() >= length {
+                            break serde_json::from_str::<serde_json::Value>(body).unwrap();
+                        }
+                    }
+                };
+                ready.store(true, Ordering::SeqCst);
+                while !gate.load(Ordering::SeqCst) {
+                    if stopped.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                let messages = request["messages"].as_array().unwrap();
+                let classify = messages
+                    .iter()
+                    .any(|m| m["content"].as_str().is_some_and(|s| s.starts_with("Classify whether")));
+                let checking = messages.iter().any(|m| {
+                    m["content"].as_str().is_some_and(|s| s.contains("the agent has just finished a turn"))
+                });
+                let read = messages.iter().any(|m| m["role"] == "tool");
+                let content = if classify {
+                    r#"{"action":"finish"}"#
+                } else if checking {
+                    "Evidence read.\nVERDICT: holds"
+                } else {
+                    "evidence.txt contains done."
+                };
+                let mut message = serde_json::json!({"role":"assistant", "content":content});
+                let finish = if !classify && !read {
+                    message["content"] = serde_json::json!("");
+                    message["tool_calls"] = serde_json::json!([{"index":0,"id":"read-evidence","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"evidence.txt\"}"}}]);
+                    "tool_calls"
+                } else {
+                    "stop"
+                };
+                let choice = if request["stream"] == true {
+                    serde_json::json!({"index":0,"delta":message,"finish_reason":finish})
+                } else {
+                    serde_json::json!({"index":0,"message":message,"finish_reason":finish})
+                };
+                let answer = serde_json::json!({"id":"test","model":"test","choices":[choice],"usage":{"prompt_tokens":10,"completion_tokens":5}}).to_string();
+                let (mime, body) = if request["stream"] == true {
+                    ("text/event-stream", format!("data: {answer}\n\ndata: [DONE]\n\n"))
+                } else {
+                    ("application/json", answer)
+                };
+                let _ = socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes());
+            });
+        }
+    });
+    rook.write_config(&format!("[agent]\nmodel = 'local'\ninstall_servers = false\none_script = false\n[models.local]\nmodel = 'test'\napi = 'openai'\nurl = '{endpoint}'\n[work]\nretry_initial_secs = 1\n"));
+    let conversation = in_conversation.then(|| {
+        let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+        let engine = rook_core::Rook::from_parts(
+            store,
+            rook_core::Config::default(),
+            rook_skills::Environment::bare("linux", "x86_64", "0.1.0"),
+            rook_skills::SkillIndex::discover(&[]).0,
+            rook.workspace.path().into(),
+        );
+        let session = engine.start_session("existing conversation").unwrap();
+        engine.log(session, rook_store::EventKind::UserMessage, "", "Preserve this conversation").unwrap();
+        rook_store::format_session_id(session)
+    });
+    let daemon = Daemon::start(&rook);
+    let run =
+        if let Some(session) = &conversation {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                reqwest::Client::new().post(format!("{}/api/work", daemon.address)).json(&serde_json::json!({
+                "goal":"Inspect evidence.txt and report the contents", "autonomous":false,
+                "conversation":{"session":session, "model":null, "effort":"high", "stance":"autonomous"},
+                "max_iterations":0, "max_tokens":0, "max_seconds":0,
+            })).send().await.unwrap().error_for_status().unwrap().json::<serde_json::Value>().await.unwrap()
+            })
+        } else {
+            rook.json(&["task", "start", "Inspect evidence.txt and report the contents", "--yes"])
+        };
+    let id = run["id"].as_str().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !arrived.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(arrived.load(Ordering::SeqCst), "must kill while a real model request is in flight");
+    let queued = rook.json(&[
+        "task",
+        "steer",
+        id,
+        "Include the filename",
+        "--message-id",
+        "correction-one",
+        "--wait-secs",
+        "0",
+    ]);
+    assert!(queued["applied_at"].is_null(), "a busy model has not heard it yet: {queued}");
+    let old = rook.json(&["task", "show", id]);
+    drop(daemon);
+    std::fs::remove_file(rook.home.path().join("rookd.addr")).unwrap();
+    let _daemon = Daemon::start(&rook);
+    let saved = rook.json(&["task", "show", id]);
+    assert_eq!(saved["instructions"][0]["id"], "correction-one");
+    assert_eq!(saved["session"], old["session"], "recovery uses its existing journal");
+    if let Some(session) = &conversation {
+        assert_eq!(saved["id"], *session);
+        assert_eq!(saved["session"], *session, "the restarted daemon continues the original conversation");
+    }
+    release.store(true, Ordering::SeqCst);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+    let finished = loop {
+        let current = rook.json(&["task", "show", id]);
+        if current["status"] == "completed" {
+            break current;
+        }
+        assert!(std::time::Instant::now() < deadline, "did not finish: {current}");
+        assert_ne!(current["status"], "blocked", "{current}");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+    assert!(finished["instructions"][0]["applied_at"].is_u64(), "{finished}");
+    assert!(finished["tokens"].as_u64().unwrap() > 0);
+    assert!(finished["verification"].as_str().unwrap().contains("holds"));
+    let duplicate = rook.json(&[
+        "task",
+        "steer",
+        id,
+        "Include the filename",
+        "--message-id",
+        "correction-one",
+        "--wait-secs",
+        "0",
+    ]);
+    assert_eq!(
+        duplicate, finished["instructions"][0],
+        "retrying a receipt must not create a second instruction"
+    );
+    rook.ok(&["task", "forget", id]);
+    assert_eq!(rook.json(&["task", "list"]), serde_json::json!([]));
+}

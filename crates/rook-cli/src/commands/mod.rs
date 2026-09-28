@@ -13,3 +13,5 @@ pub(crate) mod skills;
 pub(crate) mod store;
 pub(crate) mod update;
 pub(crate) mod work;
+
+pub(crate) mod tasks;

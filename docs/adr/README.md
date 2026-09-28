@@ -18,3 +18,4 @@ usually goes missing.
 | [0010](0010-no-todo-tool.md) | A line in the prompt instead of a checklist tool | accepted |
 | [0011](0011-containment-is-the-platforms.md) | Containment is the platform's, best-effort, and reported | accepted |
 | [0012](0012-hand-written-modules-no-bundler.md) | The web UI is hand-written ES modules, still with no bundler | accepted |
+| [0014](0014-durable-work.md) | Daemon-owned durable tasks and steering receipts | accepted |

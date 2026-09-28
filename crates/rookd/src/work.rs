@@ -1,0 +1,235 @@
+//! The daemon owns durable work; HTTP clients submit and observe it.
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use axum::{
+    Json, Router,
+    extract::{Path, State},
+    http::StatusCode,
+    routing::{get, post},
+};
+use rook_core::work::managed;
+use rook_proto::work::{Action, Run, Start, Status, Steer, Steering};
+use tokio::sync::Mutex;
+
+use crate::AppState;
+
+#[derive(Default)]
+pub struct Tasks(Mutex<HashMap<String, tokio::task::JoinHandle<()>>>);
+
+/// Starting and recovery use the same lock: a scheduler tick must not launch a
+/// second writer while the socket that submitted the goal is attaching to it.
+pub async fn join_conversation(state: &Arc<AppState>, run: &Run) -> Result<Arc<crate::chat::Live>, String> {
+    let _tasks = state.work.0.lock().await;
+    let session = rook_store::parse_session_id(&run.id).ok_or("invalid conversation")?;
+    if let Some(live) = state.live.read().await.get(&session).filter(|l| l.running()).cloned() {
+        return Ok(live);
+    }
+    let current = managed::read(&*state.rook.read().await, &run.id).map_err(|e| e.to_string())?.run;
+    if !current.status.runnable() {
+        return Err(current.reason);
+    }
+    let live = crate::chat::resume_goal(state, &current).await?;
+    state.remember(session, live.clone()).await;
+    Ok(live)
+}
+
+type Failure = (StatusCode, Json<rook_proto::ApiError>);
+fn failure(error: impl std::fmt::Display) -> Failure {
+    (StatusCode::BAD_REQUEST, Json(rook_proto::ApiError::new("work", error.to_string())))
+}
+
+pub fn routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/api/work", get(list).post(start))
+        .route("/api/work/{id}", get(show).delete(forget))
+        .route("/api/work/{id}/steer", post(steer))
+        .route("/api/work/{id}/control", post(control))
+}
+
+async fn list(State(state): State<Arc<AppState>>) -> Result<Json<Vec<Run>>, Failure> {
+    let mut runs = managed::list(&*state.rook.read().await).map_err(failure)?;
+    // Full instructions and history are fetched for one run, never all of them.
+    for run in &mut runs {
+        run.instructions.clear();
+        run.recent.clear();
+        run.reply.clear();
+        run.verification.clear();
+        if let Some(c) = &mut run.conversation {
+            c.options = Default::default();
+        }
+    }
+    Ok(Json(runs))
+}
+
+async fn show(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Result<Json<Run>, Failure> {
+    Ok(Json(managed::read(&*state.rook.read().await, &id).map_err(failure)?.run))
+}
+
+async fn start(State(state): State<Arc<AppState>>, Json(request): Json<Start>) -> Result<Json<Run>, Failure> {
+    let engine =
+        state.engine_for(request.workspace.as_deref().map(std::path::Path::new)).await.map_err(failure)?;
+    let run = managed::start(&*engine.read().await, request).map_err(failure)?;
+    Ok(Json(run))
+}
+
+async fn steer(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<Steer>,
+) -> Result<Json<Steering>, Failure> {
+    Ok(Json(managed::steer(&*state.rook.read().await, &id, request).map_err(failure)?))
+}
+
+async fn control(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(action): Json<Action>,
+) -> Result<Json<Run>, Failure> {
+    Ok(Json(managed::control(&*state.rook.read().await, &id, action).map_err(failure)?))
+}
+
+async fn forget(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, Failure> {
+    if state.work.0.lock().await.get(&id).is_some_and(|task| !task.is_finished()) {
+        return Err(failure("this run is still finishing its active operation"));
+    }
+    managed::forget(&*state.rook.read().await, &id).map_err(failure)?;
+    Ok(Json(serde_json::json!({"forgotten": id})))
+}
+
+/// No socket owns a worker. Restart reads the registry and resumes runnable
+/// states; unknown operation receipts block mutation in the core before replay.
+pub async fn supervise(state: Arc<AppState>) {
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+    loop {
+        tick.tick().await;
+        state.config_if_changed().await;
+        // Session goals use the existing chat registry, streaming, approvals
+        // and switching. A disconnected window is only a missing observer.
+        let conversations = managed::list(&*state.rook.read().await);
+        if let Ok(runs) = conversations {
+            for run in runs.into_iter().filter(|r| r.conversation.is_some() && r.status.runnable()) {
+                if let Err(error) = join_conversation(&state, &run).await {
+                    block(&state, &run.id, &error).await;
+                }
+            }
+        }
+        let mut tasks = state.work.0.lock().await;
+        let finished: Vec<_> =
+            tasks.iter().filter(|(_, h)| h.is_finished()).map(|(id, _)| id.clone()).collect();
+        for id in finished {
+            if let Some(handle) = tasks.remove(&id)
+                && let Err(error) = handle.await
+            {
+                block(&state, &id, &format!("worker stopped unexpectedly: {error}")).await;
+            }
+        }
+        let (runs, cap) = {
+            let rook = state.rook.read().await;
+            (managed::list(&rook), rook.config.work.max_parallel_runs)
+        };
+        let mut runs = match runs {
+            Ok(runs) => runs,
+            Err(error) => {
+                tracing::error!("cannot read durable work: {error}");
+                continue;
+            }
+        };
+        runs.sort_by_key(|run| run.updated_at);
+        for run in runs {
+            let live = if let Some(c) = &run.conversation {
+                let session = rook_store::parse_session_id(&c.session);
+                state.live.read().await.iter().any(|(id, live)| Some(*id) == session && live.running())
+            } else {
+                false
+            };
+            if run.status == Status::Cancelled && !tasks.contains_key(&run.id) && !live {
+                let rook = state.rook.read().await;
+                if let Ok(saved) = managed::read(&rook, &run.id)
+                    && saved.active.is_some()
+                {
+                    let _ = managed::update(&rook, &run.id, |s| {
+                        s.active = None;
+                        Ok(())
+                    });
+                }
+            }
+            if run.conversation.is_some() {
+                continue;
+            }
+            if tasks.len() >= cap {
+                continue;
+            }
+            if tasks.contains_key(&run.id)
+                || !run.status.runnable()
+                || run.next_attempt_at.is_some_and(|at| at > managed::now())
+            {
+                continue;
+            }
+            let shared = state.clone();
+            let id = run.id.clone();
+            tasks.insert(
+                id,
+                tokio::spawn(async move {
+                    if let Err(error) = iteration(&shared, &run).await {
+                        block(&shared, &run.id, &error).await;
+                    }
+                }),
+            );
+        }
+    }
+}
+
+async fn block(state: &AppState, id: &str, why: &str) {
+    let rook = state.rook.read().await;
+    if let Err(error) = managed::update(&rook, id, |saved| {
+        if saved.run.status.runnable() {
+            saved.run.status = Status::Blocked;
+            saved.run.reason = why.chars().take(2048).collect();
+        }
+        Ok(())
+    }) {
+        tracing::error!("cannot persist work failure: {error}");
+    }
+}
+
+async fn iteration(state: &Arc<AppState>, run: &Run) -> Result<(), String> {
+    let engine = state.engine_for(Some(std::path::Path::new(&run.workspace))).await?;
+    let equipment = state.equipment_for(&engine).await;
+    let rook = engine.read().await;
+    let shared = equipment.get_or_init(|| crate::chat::Shared::for_project(&rook)).await;
+    let _counted = state.turn_started();
+    managed::advance(
+        &rook,
+        &run.id,
+        |session| {
+            let provider = rook_core::models::configured(&rook.config)?;
+            let mut agent = rook_core::agent::AgentLoop::new(&rook, provider.into(), session);
+            rook_core::agent::equip(&mut agent, shared.servers.clone(), &shared.mcp, shared.jobs.clone());
+            Ok(agent)
+        },
+        |_| {},
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Drop worker futures before releasing the store and its published address.
+/// Their operation journals retain any interrupted effects for recovery.
+pub async fn stop(state: &AppState) {
+    let tasks: Vec<_> = state.work.0.lock().await.drain().map(|(_, task)| task).collect();
+    for task in &tasks {
+        task.abort();
+    }
+    for task in tasks {
+        let _ = task.await;
+    }
+    let conversations: Vec<_> = state.live.write().await.drain().map(|(_, live)| live).collect();
+    for live in conversations {
+        live.shutdown().await;
+    }
+}

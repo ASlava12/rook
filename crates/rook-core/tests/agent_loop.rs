@@ -548,13 +548,17 @@ async fn a_tool_call_runs_and_both_halves_reach_the_log() {
 
     let entries = f.rook.transcript(session, 0, 100, 8192).unwrap();
     let kinds: Vec<&str> = entries.iter().map(|e| e.kind.as_str()).collect();
-    assert_eq!(kinds, vec!["user", "tool-call", "tool-result", "assistant", "note"]);
-    assert!(entries[2].body.contains("line two"), "{}", entries[2].body);
+    assert_eq!(kinds, vec!["user", "note", "tool-call", "tool-result", "assistant", "note"]);
+    assert!(entries[3].body.contains("line two"), "{}", entries[3].body);
+    assert_eq!(entries[1].label, "usage", "tool-only usage is durable before the effect");
+    let meta = f.rook.store.get_session(session).unwrap().unwrap();
+    assert_eq!(meta.tokens_in, u64::from(outcome.input_tokens));
+    assert_eq!(meta.tokens_out, u64::from(outcome.output_tokens));
     // Read back, a call says what it was doing — the same words a front end
     // watching it live shows. It said `read_file` here, which answers "it read
     // something" and never "which file".
-    assert_eq!(entries[1].label, "read_file", "the log keeps the tool's own name");
-    assert_eq!(entries[1].doing, "read hello.txt", "and the entry says what it was for");
+    assert_eq!(entries[2].label, "read_file", "the log keeps the tool's own name");
+    assert_eq!(entries[2].doing, "read hello.txt", "and the entry says what it was for");
     assert!(entries[0].doing.is_empty(), "nothing else claims to be a call");
 }
 

@@ -1441,3 +1441,184 @@ fn shift_enter_writes_a_second_line_where_the_terminal_can_say_it_was_shift() {
     let sent = pty.screen_showing(100, 30, "▌ /nosuch alpha").join("\n");
     assert!(sent.contains("omega"), "both lines went as one message:\n{sent}");
 }
+
+#[test]
+fn durable_tasks_can_be_created_corrected_and_paused_without_typing_commands_or_ids() {
+    let _one = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join("config.toml"), "[work]\nmax_parallel_runs = 0\n").unwrap();
+    let _daemon = Daemon::start(home.path(), workspace.path());
+    let mut pty = tui(home.path(), workspace.path());
+    pty.screen(100, 30);
+    pty.send("\u{10}");
+    pty.screen_showing(100, 30, "what would you like to do");
+    pty.send("tasks\r");
+    pty.screen_showing(100, 30, "No tasks yet");
+    pty.send("n");
+    pty.screen_showing(100, 30, "new goal");
+    pty.send("\tinspect this project\r");
+    pty.screen_showing(100, 30, "Task started in background");
+    pty.send("\r");
+    pty.screen_showing(100, 30, "correction · Enter send");
+    pty.send("preserve the public API\r");
+    pty.screen_showing(100, 30, "Correction saved");
+    pty.screen_showing(100, 30, "preserve the public API");
+    pty.send("p");
+    pty.screen_showing(100, 30, "paused by user");
+    pty.send("\r");
+    pty.screen_showing(100, 30, "correction · Enter send");
+    pty.send("Keep this unsent draft");
+    for _ in 0..4 {
+        pty.screen(100, 30);
+    }
+    pty.screen_showing(100, 30, "Keep this unsent draft");
+    pty.send("\u{1b}");
+    pty.screen_showing(100, 30, "live task");
+    pty.send("x");
+    pty.screen_showing(100, 30, "Cancel this task?");
+    pty.send("y");
+    pty.screen_showing(100, 30, "cancelled by user");
+    pty.send("d");
+    pty.screen_showing(100, 30, "No tasks yet");
+    pty.send("q");
+    pty.screen_showing(100, 30, "F4");
+    pty.send("\u{1b}OS");
+    pty.screen_showing(100, 30, "No tasks yet");
+}
+
+#[test]
+fn goal_runs_in_the_current_session_and_can_be_left_corrected_and_resumed() {
+    let _one = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let (session, idle) = {
+        let store = rook_store::Store::open(home.path().join("store")).unwrap();
+        let rook = rook_core::Rook::from_parts(
+            store,
+            rook_core::Config::default(),
+            rook_skills::Environment::bare("linux", "x86_64", "0.1.0"),
+            rook_skills::SkillIndex::discover(&[]).0,
+            workspace.path().into(),
+        );
+        let idle = rook.start_session("idle conversation").unwrap();
+        let session = rook.start_session("existing goal conversation").unwrap();
+        rook.log(session, rook_store::EventKind::UserMessage, "", "EARLIER_REQUIREMENT: preserve the API")
+            .unwrap();
+        (rook_store::format_session_id(session), rook_store::format_session_id(idle))
+    };
+    let requests = a_model_that_asks_to_run(
+        home.path(),
+        "echo ready > goal-ready; while test ! -f goal-release; do sleep 0.1; done; if test -f goal-finished; then while test ! -f goal-resume-release; do sleep 0.1; done; fi; echo done > goal-finished",
+    );
+    let config = home.path().join("config.toml");
+    let text = std::fs::read_to_string(&config).unwrap().replace("mode = \"ask\"", "mode = \"auto\"");
+    std::fs::write(config, text).unwrap();
+    let _daemon = Daemon::start(home.path(), workspace.path());
+    struct Release<'a>(&'a std::path::Path);
+    impl Drop for Release<'_> {
+        fn drop(&mut self) {
+            let _ = std::fs::write(self.0.join("goal-release"), "continue");
+            let _ = std::fs::write(self.0.join("goal-resume-release"), "continue");
+        }
+    }
+    let _release = Release(workspace.path());
+    let base = std::fs::read_to_string(home.path().join("rookd.addr")).unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    rook_llm::init_tls();
+    let client = reqwest::Client::builder().no_proxy().timeout(PATIENCE).build().unwrap();
+    let goal = || {
+        runtime.block_on(async {
+            client
+                .get(format!("{}/api/work/{session}", base.trim()))
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .json::<serde_json::Value>()
+                .await
+                .unwrap()
+        })
+    };
+    let mut pty = tui(home.path(), workspace.path());
+    pty.screen(100, 30);
+    pty.send(&format!("/session {session}\r"));
+    pty.screen_showing(100, 30, "nothing is running in this session");
+    pty.send("/goal Finish the requested work\r");
+    pty.screen_showing(100, 30, "Goal started in this session");
+    let first = requests.recv_timeout(PATIENCE).unwrap();
+    assert!(first["messages"].to_string().contains("EARLIER_REQUIREMENT"));
+    let deadline = std::time::Instant::now() + PATIENCE;
+    while !workspace.path().join("goal-ready").exists() {
+        pty.screen(100, 30);
+        assert!(std::time::Instant::now() < deadline, "tool never started: {}", pty.diagnosis());
+    }
+    let run = goal();
+    assert_eq!(run["id"], session);
+    assert_eq!(run["session"], session);
+    for limit in ["max_iterations", "max_seconds", "max_tokens"] {
+        assert_eq!(run[limit], 0);
+    }
+    pty.send("\u{10}");
+    pty.screen_showing(100, 30, "what would you like to do");
+    pty.send("sessions\r");
+    pty.screen_showing(100, 30, "j/k");
+    pty.send("j\r");
+    pty.screen_showing(100, 30, "nothing is running in this session");
+    assert_eq!(goal()["status"], "running", "the session picker leaves the goal running");
+    pty.send(&format!("/session {session}\r"));
+    pty.screen_showing(100, 30, "joined a turn already running here");
+    pty.send("/new\r");
+    pty.screen_showing(100, 30, "Other sessions keep working");
+    pty.send(&format!("/session {idle}\r"));
+    pty.screen_showing(100, 30, "nothing is running in this session");
+    assert_eq!(goal()["status"], "running", "switching must not cancel the goal");
+    pty.send(&format!("/session {session}\r"));
+    pty.screen_showing(100, 30, "joined a turn already running here");
+    pty.send("PREFER_BLUE\r");
+    pty.screen_showing(100, 30, "↩ PREFER_BLUE");
+    assert!(goal()["instructions"][0]["applied_at"].is_null());
+    pty.send("\u{3}");
+    pty.screen_showing(100, 30, "Pausing goal");
+    assert_eq!(goal()["status"], "paused");
+    drop(pty);
+    std::fs::write(workspace.path().join("goal-release"), "continue").unwrap();
+    let deadline = std::time::Instant::now() + PATIENCE;
+    loop {
+        let health = runtime.block_on(async {
+            client
+                .get(format!("{}/api/health", base.trim()))
+                .send()
+                .await
+                .unwrap()
+                .json::<serde_json::Value>()
+                .await
+                .unwrap()
+        });
+        if health["turns_running"] == 0 {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "pause did not finish: {health}");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let mut pty = tui(home.path(), workspace.path());
+    pty.screen(100, 30);
+    pty.send(&format!("/session {session}\r"));
+    pty.screen_showing(100, 30, "nothing is running in this session");
+    pty.send("/continue\r");
+    pty.screen_showing(100, 30, "taken up");
+    let next = requests.recv_timeout(PATIENCE).unwrap();
+    assert!(next["messages"].to_string().contains("PREFER_BLUE"));
+    assert!(goal()["instructions"][0]["applied_at"].is_u64());
+    runtime.block_on(async {
+        client
+            .post(format!("{}/api/work/{session}/control", base.trim()))
+            .json(&"cancel")
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+    });
+}

@@ -101,6 +101,25 @@ reasoning.";
 const FILES_NAMED_TO_CHECKER: usize = 10;
 
 impl<'a> AgentLoop<'a> {
+    /// The work supervisor checks the complete, revised goal before ending a run.
+    /// This uses the same evidence-bearing read-only checker as a normal turn.
+    pub async fn verify_work(
+        &mut self,
+        goal: &str,
+        outcome: &mut TurnOutcome,
+        progress: &mut impl FnMut(Progress<'_>),
+    ) -> (String, Option<String>) {
+        // A restored turn receipt did not run admission in this process.
+        if self.by.is_none() && self.max_turn_secs > 0 {
+            self.by = Some(std::time::Instant::now() + std::time::Duration::from_secs(self.max_turn_secs));
+        }
+        if self.overspent(outcome) || self.out_of_time() {
+            return ("verification deferred: bounded turn exhausted its allowance".into(), None);
+        }
+        let (report, verdict) = self.goal_check(goal, outcome, progress).await;
+        (report, verdict.map(str::to_owned))
+    }
+
     /// Check a claim in a context that did not make it.
     ///
     /// The author is the worst judge of its own work: it knows what it meant,
@@ -164,7 +183,7 @@ impl<'a> AgentLoop<'a> {
         }
 
         let (doing, mut steps) = tokio::sync::mpsc::unbounded_channel::<(usize, String)>();
-        let running = self.run_checker(&instruction, doing);
+        let running = self.run_checker(&instruction, doing, self.left_to_spend(outcome));
         tokio::pin!(running);
         let checked = loop {
             tokio::select! {
@@ -273,7 +292,7 @@ impl<'a> AgentLoop<'a> {
                     ),
                 }
             }
-            Err(e) => (format!("could not check {claim:?}: {e}"), None),
+            Err(e) => (format!("could not check: {e}"), None),
         }
     }
 
@@ -475,10 +494,14 @@ impl<'a> AgentLoop<'a> {
         &self,
         instruction: &str,
         doing: tokio::sync::mpsc::UnboundedSender<(usize, String)>,
+        tokens: u64,
     ) -> Result<(String, TurnOutcome)> {
         let session = self.rook.fork_for_subtask(self.session, instruction)?;
         let mut child = AgentLoop::new(self.rook, self.provider.clone(), session);
         child.depth = self.depth + 1;
+        child.by = self.by;
+        child.max_turn_secs = self.max_turn_secs;
+        child.max_turn_tokens = tokens;
         child.tools = self.tools.without(CHANGES_FILES);
         child.tool_ctx = self.tool_ctx.clone();
         child.policy = self.policy.clone();
@@ -514,7 +537,8 @@ impl<'a> AgentLoop<'a> {
         // A small model narrates what it would run and stops, or reasons its
         // way to the end and forgets the line. Asked once, in the same session,
         // it usually does what it said; a second silence is reported as one.
-        if verdict_in(&outcome.reply).is_none() {
+        if verdict_in(&outcome.reply).is_none() && !child.overspent(&outcome) && !child.out_of_time() {
+            child.max_turn_tokens = child.left_to_spend(&outcome);
             let finished = Box::pin(child.run_with(VERDICT_NUDGE, &mut relay)).await?;
             outcome.reply = finished.reply;
             outcome.stopped = finished.stopped;

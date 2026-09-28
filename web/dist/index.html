@@ -102,6 +102,23 @@ form.ask button[disabled]{opacity:.5;cursor:default}
   background:var(--panel);color:var(--fg);font:inherit}
 .ask-form fieldset{border:0;padding:0;margin:0 0 .7rem}
 .scroll{max-height:74vh;overflow:auto}
+/* Durable tasks keep editable forms separate from the polled status. */
+.tasks{max-width:960px;overflow-wrap:anywhere}
+.tasks>.card{margin:1.2rem 0}
+.tasks>.card:empty{display:none}
+.task-form{display:grid;gap:.8rem;margin:.8rem 0}
+.task-form label{display:flex;flex-direction:column;gap:.3rem;color:var(--dim);font-size:.85rem}
+.task-form input,.task-form textarea{width:100%;min-width:0;border:1px solid var(--line);border-radius:6px;
+  background:var(--bg);color:var(--fg);padding:.55rem .7rem;font:inherit}
+.task-form textarea{resize:vertical;min-height:5rem}
+.task-form input[type=checkbox]{width:auto;align-self:flex-start;accent-color:var(--accent)}
+.tasks button{padding:.5rem .9rem;border:1px solid var(--line);border-radius:6px;background:var(--panel);
+  color:var(--fg);cursor:pointer;font:inherit;text-align:left}
+.tasks button[type=submit]{justify-self:start;background:var(--accent);color:var(--bg)}
+.tasks button[aria-pressed=true]{border-color:var(--accent)}
+.tasks button:disabled{opacity:.55;cursor:default}
+.tasks button:focus-visible,.tasks input:focus-visible,.tasks textarea:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+nav{overflow-x:auto}nav button{flex-shrink:0}
 </style>
 </head>
 <body>
@@ -111,6 +128,7 @@ form.ask button[disabled]{opacity:.5;cursor:default}
 </header>
 <nav>
   <button data-tab="chat" aria-selected="true">Chat</button>
+  <button data-tab="tasks">Tasks</button>
   <button data-tab="sessions">Sessions</button>
   <button data-tab="search">Search</button>
   <button data-tab="memory">Memory</button>

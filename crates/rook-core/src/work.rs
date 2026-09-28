@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::evaluation::Report;
 
+pub mod managed;
+
 /// Where the agent keeps what it is going to do next.
 ///
 /// Its own file, unlike `.rook/evaluation.toml`, and the difference is the
@@ -288,7 +290,7 @@ pub fn after(plan: &Plan, done: &[Iteration], notes: Option<&str>) -> Next {
         return Next::Again(opening(plan, notes));
     };
 
-    if plan.until_clean && last.report.clean() {
+    if plan.until_clean && !last.could_not_run() && last.report.clean() {
         return Next::Stop(format!(
             "every check passes after {} iteration{}",
             done.len(),
@@ -421,8 +423,9 @@ fn again(plan: &Plan, done: &[Iteration], last: &Iteration, notes: Option<&str>)
         // confusion: told it "changed no files" it looks for what it decided,
         // and the last turn decided nothing — it was cut off.
         Some(why) => said.push_str(&format!(
-            "\nThe last iteration did not finish — {why}. Nothing it may have started was \
-             recorded, so the workspace is as the iteration before left it.\n"
+            "\nThe last iteration did not finish — {why}. Completed operations may already \
+             have changed the workspace. Inspect its session and current files before retrying; \
+             do not assume a rollback occurred.\n"
         )),
         None if last.did_nothing() => said.push_str(
             "\nThe last iteration changed no files. If there is nothing left worth doing, say so \
@@ -581,6 +584,13 @@ mod tests {
         let Next::Again(prompt) = after(&plan(), &[], None) else { panic!("it has to start") };
         assert!(prompt.contains("make the tests pass"));
         assert!(prompt.contains("not by you"), "and says whose the evaluation is: {prompt}");
+    }
+
+    #[test]
+    fn preexisting_green_checks_cannot_complete_a_failed_turn() {
+        let done = vec![cut_off(1, vec![scored("tests", true)], "provider unavailable")];
+        assert!(matches!(after(&plan(), &done, None), Next::Again(_)));
+        assert!(!Report { checks: vec![], scorecard_changed: false }.clean());
     }
 
     #[test]

@@ -20,6 +20,7 @@ type Shared = Arc<AppState>;
 pub fn router(state: Shared) -> Router {
     let allowed = state.rook.try_read().map(|r| r.config.server.allowed_hosts.clone()).unwrap_or_default();
     Router::new()
+        .merge(crate::work::routes())
         .route("/api/health", get(health))
         .route("/api/store/stats", get(stats))
         .route("/api/store/objects", get(objects))
@@ -1220,6 +1221,7 @@ mod tests {
             arch: std::env::consts::ARCH.to_string(),
         };
         let state = Arc::new(AppState {
+            work: Default::default(),
             rook: Arc::new(tokio::sync::RwLock::new(rook)),
             elsewhere: tokio::sync::RwLock::new(std::collections::HashMap::new()),
             equipment: tokio::sync::RwLock::new(std::collections::HashMap::new()),

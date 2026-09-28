@@ -94,7 +94,8 @@ Three rules follow from that, and the shipped skills are held to all three by
 `crates/rook-skills/tests/builtin.rs`:
 
 - **`Use when …`**, or `Use before …` where the moment is a command about to be
-  run. One card is capped at 50 tokens and the shipped set at 220 together.
+  run. One card is capped at 50 estimated tokens and the shipped set at 1,500
+  together, with at most 50 cards to fit the default catalog capacity.
 - **A "not for …" clause only where the confusion is real.** `in-place-edit` says
   it is not for the editing tools, because reaching for `sed` when `edit_file`
   is right is the mistake it exists to catch. `rust-release` says nothing of the
@@ -111,12 +112,16 @@ turn out to be needed.
 
 ## What ships with Rook
 
-Five skills come in the box, under `skills/` in the source tree:
+Skills come in the box under `skills/` in the source tree. The
+[engineering catalog](engineering-skills.md) covers problem analysis, implementation,
+specialist work and verification, with guidance on choosing the relevant skills.
+These existing operational skills ship alongside it:
 
 | skill | reach for it when |
 |---|---|
 | `decision-matrix` | A fork has several defensible answers and the reasoning will be questioned later |
 | `in-place-edit` | A file is about to be changed with `sed`, `awk` or a shell redirect, on more than one platform |
+| `own-state` | A turn learns something worth retaining, or a remembered fact needs correction |
 | `project-instructions` | A project's `AGENTS.md` is being written or trimmed |
 | `rust-release` | A release of a Rust workspace is being cut |
 | `store-triage` | A store has grown, and `gc` or `prune` is about to be run on somebody's history |
@@ -227,12 +232,13 @@ body in when it decides it needs one.
 This matters more than it sounds. Full bodies for a large library cost thousands of
 tokens on every request, and on local models a tool-and-skill-heavy prompt is
 roughly an order of magnitude slower to process than plain text. A card is small
-next to the body it stands for: the ones Rook ships average about thirty-six tokens
-each against bodies of two hundred to nine hundred, and a test caps one card at
-fifty and the shipped set together at 220. Fifty cards of that size are around two
-thousand tokens on every request, which is what `agent.max_skill_cards` bounds
-— and why a card that describes its subject instead of naming its moment is
-worth rewriting rather than tolerating.
+next to the body it stands for. Tests cap one card at fifty estimated tokens,
+the shipped set together at 1,500, and the number of shipped cards at fifty.
+These estimates use text length rather than a model-specific tokenizer. The
+engineering library spends more catalog space than the original small operational
+set, while keeping full procedures on demand. `agent.max_skill_cards` bounds the
+number shown — and a card that describes its subject instead of naming its moment
+is still worth rewriting rather than tolerating.
 
 The catalog itself is bounded by `agent.max_skill_cards` (50), because it is paid
 for on every request and a machine that has collected skills for a year would

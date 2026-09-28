@@ -259,7 +259,9 @@ pub(crate) fn cmd_work(
                         at,
                         session: rook_store::format_session_id(session),
                         reply: why.clone(),
-                        changed: Vec::new(),
+                        changed: rook.changes(session, false).map(|changes| {
+                            changes.files.into_iter().map(|file| file.path).chain(changes.written_by_commands).collect()
+                        }).unwrap_or_default(),
                         steps: 0,
                         tokens: spent,
                         report,

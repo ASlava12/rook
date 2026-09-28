@@ -76,7 +76,12 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("context", "[window]", "what this conversation costs, and of what"),
     ("skills", "[name]", "skills that apply here, or one skill's body"),
     ("session", "[id|last]", "this one's totals, or continue another"),
-    ("goal", "[text]", "what this session is for; the agent is told"),
+    (
+        "task",
+        "[list|start|start-autonomous|show|steer|pause|resume|cancel|forget]",
+        "durable tasks via the daemon; available in the shared TUI",
+    ),
+    ("goal", "[text]", "start a lasting goal in this session (shared daemon), or show its goal"),
     ("stance", "[name]", "how much latitude: readonly, assist or autonomous"),
     ("effort", "[name]", "how much the model may think: low … max"),
     ("model", "[name]", "which endpoint from `[models]` the next turn runs on"),
@@ -305,7 +310,9 @@ async fn through_the_daemon(
             true => rook_core::agent::CARRY_ON.to_string(),
             false => line.trim().to_string(),
         };
-        if let Some(command) = line.strip_prefix('/') {
+        if let Some(command) = line.strip_prefix('/')
+            && !line.starts_with("/goal ")
+        {
             if let Some(result) = crate::turn_options::configure(command, &mut output) {
                 match result {
                     Ok(said) => print!("{said}"),
@@ -594,6 +601,9 @@ pub async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command
     match name {
         "quit" | "exit" | "q" => return Ok(Said { text: String::new(), quit: true }),
         "help" | "?" => say!("{}", help_text()),
+        "task" => say!(
+            "Use `rook task` from another terminal, or /task in `rook tui`. Durable tasks run in the shared daemon."
+        ),
         "recovery" => {
             if !rest.is_empty() {
                 let (operation, note) = rest

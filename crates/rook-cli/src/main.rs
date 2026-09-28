@@ -75,6 +75,7 @@ fn main() -> Result<()> {
         }
         Some(Command::Config(cmd)) => commands::config::cmd_config(cmd, cli.json),
         Some(Command::Eval { json }) => commands::work::cmd_eval(cli.workspace, json || cli.json),
+        Some(Command::Task(cmd)) => commands::tasks::run(cmd, cli.workspace, cli.yes, cli.json),
         Some(Command::Work { goal, most, tokens, keep_going, yes, resume }) => commands::work::cmd_work(
             cli.workspace,
             goal.join(" "),

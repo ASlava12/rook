@@ -1167,7 +1167,7 @@ impl Daemon {
         Ok(page.items)
     }
 
-    fn post<T: DeserializeOwned>(&self, path: &str, body: &serde_json::Value) -> Result<T> {
+    pub(crate) fn post<T: DeserializeOwned>(&self, path: &str, body: &serde_json::Value) -> Result<T> {
         let url = format!("{}{path}", self.base);
         self.runtime.block_on(async {
             let response =
@@ -1181,7 +1181,7 @@ impl Daemon {
         })
     }
 
-    fn delete<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+    pub(crate) fn delete<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         let url = format!("{}{path}", self.base);
         self.runtime.block_on(async {
             let response = self.http.delete(&url).send().await.with_context(|| format!("DELETE {url}"))?;
@@ -1194,7 +1194,7 @@ impl Daemon {
         })
     }
 
-    fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+    pub(crate) fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         self.get_within(path, ROUTED)
     }
 

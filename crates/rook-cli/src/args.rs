@@ -81,6 +81,9 @@ pub(crate) enum Command {
     /// Read the configuration, fill in what it does not say, and check it.
     #[command(subcommand)]
     Config(ConfigCmd),
+    /// Durable background tasks: survive disconnects and resume after daemon restart.
+    #[command(subcommand)]
+    Task(TaskCmd),
     /// Work at one goal across many turns, with the checks run between them.
     ///
     /// A turn ends and something has to decide whether there is another one.
@@ -538,5 +541,48 @@ pub(crate) enum CheckpointCmd {
         object: String,
         #[arg(long)]
         to: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum TaskCmd {
+    /// Start background work. Defaults: seven days, 10,000 bounded iterations.
+    Start {
+        #[arg(required = true)]
+        goal: Vec<String>,
+        #[arg(long)]
+        max_iterations: Option<u32>,
+        #[arg(long)]
+        tokens: Option<u64>,
+        #[arg(long)]
+        seconds: Option<u64>,
+    },
+    List,
+    Show {
+        id: String,
+    },
+    /// Save a correction; report separately when it enters the agent's context.
+    Steer {
+        id: String,
+        #[arg(required = true)]
+        text: Vec<String>,
+        /// Reuse this id after an uncertain network response to prevent duplicates.
+        #[arg(long)]
+        message_id: Option<String>,
+        /// Wait this long for acknowledgement. Zero just saves and returns.
+        #[arg(long, default_value_t = 30)]
+        wait_secs: u64,
+    },
+    Pause {
+        id: String,
+    },
+    Resume {
+        id: String,
+    },
+    Cancel {
+        id: String,
+    },
+    Forget {
+        id: String,
     },
 }

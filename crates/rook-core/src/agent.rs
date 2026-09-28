@@ -549,6 +549,8 @@ pub struct AgentLoop<'a> {
     /// it. Shared rather than owned because a loop is built per turn and this
     /// has to outlive one.
     pub interjections: std::sync::Arc<Interjections>,
+    /// A durable run supplies corrections at the same safe boundaries as chat.
+    pub managed_work: Option<String>,
     pub depth: u32,
     pub max_steps: u32,
     /// What is left of the turn's allowance, in tokens, its sub-agents
@@ -655,6 +657,7 @@ impl<'a> AgentLoop<'a> {
             asker: None,
             approver: std::sync::Arc::new(Unattended),
             interjections: Default::default(),
+            managed_work: None,
             depth: 0,
             max_steps: rook.config.agent.max_steps,
             max_turn_tokens: rook.config.agent.max_turn_tokens,
@@ -845,7 +848,13 @@ impl<'a> AgentLoop<'a> {
         // What the provider last said the request cost, and how many messages
         // that covered. See `measured`.
         let mut anchor: Option<(usize, usize)> = None;
-        while outcome.steps < self.max_steps {
+        'turn: while outcome.steps < self.max_steps {
+            if let Some(id) = &self.managed_work
+                && crate::work::managed::should_stop(self.rook, id)?
+            {
+                outcome.stopped = "work_paused".into();
+                break;
+            }
             // Before the request, because the request is what costs. A turn
             // that has reached its allowance has stopped converging, and the
             // step count says nothing about that: a step is worth whatever the
@@ -872,10 +881,8 @@ impl<'a> AgentLoop<'a> {
             // Before the request rather than after the tool results: this is the
             // one place a user message may go, and it is what makes a turn
             // steerable instead of only stoppable.
-            for said in self.interjections.take() {
-                self.rook.log(self.session, EventKind::UserMessage, "while running", &said).ok();
-                on_progress(Progress::Heard { text: &said });
-                messages.push(Message::user(&said));
+            for said in self.incoming()? {
+                self.hear(&said, &mut messages, &mut on_progress)?;
             }
 
             if crate::results::prune(self.rook, self.session, &mut messages)? > 0 {
@@ -1033,6 +1040,20 @@ impl<'a> AgentLoop<'a> {
                 cached: outcome.cached_tokens,
             });
 
+            // Tool-only responses still cost tokens. Persist their usage before
+            // effects, so a retry/restart cannot reset a durable task's budget.
+            if response.message.content.is_empty() {
+                self.rook.store.append_event(
+                    self.session,
+                    rook_store::NewEvent::new(
+                        EventKind::Note,
+                        rook_store::Kind::Message,
+                        b"tool-only response",
+                    )
+                    .label("usage")
+                    .usage(response.usage.input_tokens, response.usage.output_tokens),
+                )?;
+            }
             if !response.message.content.is_empty() {
                 self.rook.store.append_event(
                     self.session,
@@ -1045,6 +1066,13 @@ impl<'a> AgentLoop<'a> {
                     .usage(response.usage.input_tokens, response.usage.output_tokens),
                 )?;
                 outcome.reply = response.message.content.clone();
+            }
+
+            if let Some(id) = &self.managed_work
+                && crate::work::managed::should_stop(self.rook, id)?
+            {
+                outcome.stopped = "work_paused".into();
+                break;
             }
 
             // What goes back to the model at the next step, thinking and all.
@@ -1076,7 +1104,7 @@ impl<'a> AgentLoop<'a> {
                 // of it: the turn is not over, whatever the model thinks. Left
                 // in the queue it would reach the next prompt instead, folded
                 // into it, which is not where the person put it.
-                let said = self.interjections.take();
+                let said = self.incoming()?;
                 if said.is_empty() {
                     // Handed to the model once, so it can answer from them: a
                     // parent that started three readers and ended the turn was
@@ -1156,6 +1184,7 @@ impl<'a> AgentLoop<'a> {
                     // against the claim it was handed, or a sub-task checked
                     // against its errand, is a checker per step at every depth.
                     if self.policy.stance() == Stance::Autonomous
+                        && self.managed_work.is_none()
                         && self.depth == 0
                         && !self.checking
                         && !checked_goal
@@ -1229,18 +1258,11 @@ impl<'a> AgentLoop<'a> {
                             )
                             .await;
                         // A new instruction can arrive during the check too.
-                        let said = self.interjections.take();
+                        let said = self.incoming()?;
                         if !said.is_empty() {
                             messages.push(carried.clone());
                             for text in said {
-                                self.rook.log(
-                                    self.session,
-                                    EventKind::UserMessage,
-                                    "while running",
-                                    &text,
-                                )?;
-                                on_progress(Progress::Heard { text: &text });
-                                messages.push(Message::user(&text));
+                                self.hear(&text, &mut messages, &mut on_progress)?;
                             }
                             continue;
                         }
@@ -1315,9 +1337,7 @@ impl<'a> AgentLoop<'a> {
                 }
                 messages.push(carried.clone());
                 for text in said {
-                    self.rook.log(self.session, EventKind::UserMessage, "while running", &text).ok();
-                    on_progress(Progress::Heard { text: &text });
-                    messages.push(Message::user(&text));
+                    self.hear(&text, &mut messages, &mut on_progress)?;
                 }
                 continue;
             }
@@ -1340,6 +1360,14 @@ impl<'a> AgentLoop<'a> {
             messages.push(asked.clone());
 
             for call in &asked.tool_calls {
+                // Pausing during one call must not execute the rest of a batch
+                // that the model requested before the user pressed pause.
+                if let Some(id) = &self.managed_work
+                    && crate::work::managed::should_stop(self.rook, id)?
+                {
+                    outcome.stopped = "work_paused".into();
+                    break 'turn;
+                }
                 // The same call answered the same way twice is a loop, not a
                 // question: a model verified one claim five times over, told
                 // `fails` each time, until the sub-agent ceiling ended it. The
@@ -1445,7 +1473,7 @@ impl<'a> AgentLoop<'a> {
         // The two ceilings name themselves on the way out; the other two are
         // told apart here. All four leave through the same door below, which is
         // what asks the model for what it found rather than ending on a limit.
-        if !matches!(outcome.stopped.as_str(), "budget" | "time") {
+        if !matches!(outcome.stopped.as_str(), "budget" | "time" | "work_paused") {
             outcome.stopped = if stuck { "looping" } else { "max_steps" }.into();
         }
         // The limit is the model's, not the children's: what they were still
@@ -1459,7 +1487,10 @@ impl<'a> AgentLoop<'a> {
         // the sentence it kept repeating on the way into the loop — "I will
         // answer, first let me check" — which is an announcement and not an
         // answer, and it is what the person would otherwise be handed.
-        if (stuck || outcome.reply.trim().is_empty()) && !outcome.tools_called.is_empty() {
+        if outcome.stopped != "work_paused"
+            && (stuck || outcome.reply.trim().is_empty())
+            && !outcome.tools_called.is_empty()
+        {
             if let Some(left) = &left {
                 self.rook.log(self.session, EventKind::Note, "sub-agents", left).ok();
                 messages.push(Message::user(crate::sources::data(

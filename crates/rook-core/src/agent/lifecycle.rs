@@ -7,6 +7,29 @@ use crate::hooks;
 use rook_store::EventKind;
 
 impl AgentLoop<'_> {
+    pub(super) fn incoming(&self) -> Result<Vec<String>> {
+        let mut messages = self.interjections.take();
+        if let Some(id) = &self.managed_work {
+            messages.extend(crate::work::managed::pending(self.rook, id)?);
+        }
+        Ok(messages)
+    }
+
+    pub(super) fn hear(
+        &self,
+        text: &str,
+        messages: &mut Vec<rook_llm::Message>,
+        progress: &mut impl FnMut(Progress<'_>),
+    ) -> Result<()> {
+        self.rook.log(self.session, EventKind::UserMessage, "while running", text)?;
+        messages.push(rook_llm::Message::user(text));
+        if let Some(id) = &self.managed_work {
+            crate::work::managed::heard(self.rook, id, self.session, text)?;
+        }
+        progress(Progress::Heard { text });
+        Ok(())
+    }
+
     pub(super) fn prepare_recipe(&mut self, prompt: &str) -> Result<Option<String>> {
         self.effective_options = None;
         let prepared = crate::recipes::prepare(self.rook, prompt, &self.options)?;

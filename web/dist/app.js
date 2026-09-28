@@ -1,12 +1,14 @@
 // The shell: tabs, the health line, and which module draws which tab.
 import { $, el, api, state, nav, errorCard } from './lib.js';
 import { renderChat } from './chat.js';
+import { renderTasks } from './tasks.js';
 import { renderSessions } from './sessions.js';
 import { renderSearch, renderMemory, renderSkills, renderJobs, renderStore, renderCheckpoints, renderDocs, renderSecrets } from './views.js';
 
 const tabs = {
   chat: renderChat,
   sessions: renderSessions,
+  tasks: renderTasks,
   search: renderSearch,
   memory: renderMemory,
   skills: renderSkills,
