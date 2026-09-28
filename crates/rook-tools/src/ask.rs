@@ -209,6 +209,11 @@ pub struct AskRequest {
 pub struct ChannelAsker(crate::pending::Pending<AskRequest, Vec<Vec<String>>>);
 
 impl ChannelAsker {
+    /// Whether a live request still needs a person's answer.
+    pub fn is_waiting(&self) -> bool {
+        self.0.is_waiting()
+    }
+
     pub fn new(
         requests: tokio::sync::mpsc::UnboundedSender<AskRequest>,
         patience: std::time::Duration,

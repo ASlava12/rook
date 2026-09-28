@@ -188,8 +188,8 @@ rook tui                                   # the conversation, with ^p for every
 rook checkpoint create before-refactor     # or `c` in the TUI's Checkpoints tab
 rook docs add redis                        # read its documentation once, answer from it after
 rookd                                      # http://127.0.0.1:7717 — web UI + API
-rook tui                                   # F4: background tasks, corrections and live receipts
-rook task start "Implement the plan and verify it" --yes  # optional CLI
+rook tui                                   # F4: scheduled tasks and their sessions
+rook task schedule "Check CI failures" --when "weekdays 09:00" --timezone Europe/Moscow
 rook task steer TASK_ID "Keep API compatibility"          # durable correction + receipt
 rook task show TASK_ID                                    # progress and acknowledgements
 rook daemon status                         # where it is, and whether it is this build
@@ -225,6 +225,16 @@ In a conversation, slash commands reach the same engine the subcommands do:
 answer never enters the context the agent carries forward, though it is still in
 the transcript. Ctrl-C stops the turn in flight without leaving; whatever it
 already did stays in the log.
+
+In `rook tui`, **Ctrl+E** opens a list of installed console editors; choose with
+the arrows and press Enter. The last successfully used editor comes first, even
+after restarting Rook. `VISUAL` and `EDITOR` can also name a terminal editor with
+arguments (for example `emacs -nw`); commands are run directly, without a shell.
+The draft opens as a temporary Markdown file. Save and close the editor to put
+the text back in the input box, without sending it. Esc cancels the picker;
+End moves to the end of the input line. Draft files must be UTF-8 and at most
+1 MiB. On an editor/read error the original draft stays in the box and Rook
+shows the path of the retained file so edits can be recovered.
 
 Typing while a turn runs steers it rather than waiting for it: what you send
 reaches the model at its next step, so a turn heading the wrong way can be

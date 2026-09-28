@@ -20,6 +20,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod schedule;
 pub mod work;
 
 /// Bumped when the HTTP surface changes incompatibly. Clients send it in

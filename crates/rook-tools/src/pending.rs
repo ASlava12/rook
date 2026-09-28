@@ -49,6 +49,10 @@ impl<Q, A> Pending<Q, A> {
         Self { requests, waiting: Default::default(), next_id: AtomicU64::new(1), patience }
     }
 
+    pub fn is_waiting(&self) -> bool {
+        self.hold().values().any(|sender| !sender.is_closed())
+    }
+
     /// `build` is handed the id the answer must come back under.
     pub async fn ask(&self, build: impl FnOnce(String) -> Q) -> Result<A, Unanswered> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed).to_string();

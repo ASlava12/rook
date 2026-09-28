@@ -30,6 +30,7 @@ use tokio::sync::mpsc;
 
 use crate::fmt;
 
+mod editor;
 mod tasks;
 
 /// What is over the conversation, when anything is.
@@ -95,7 +96,7 @@ impl Overlay {
         match self {
             Overlay::Palette => "everything reachable from here",
             Overlay::Calls => "what each call was given and what came back",
-            Overlay::Tasks => "background tasks: start, correct, pause and resume",
+            Overlay::Tasks => "scheduled tasks and their session history",
             Overlay::Sessions => "past conversations — enter continues one here",
             Overlay::Memory => "what the agent believes, and how to correct it",
             Overlay::Skills => "what applies in this workspace, and why",
@@ -116,9 +117,9 @@ impl Overlay {
             Overlay::Calls => &[("j/k ", "move  "), ("r ", "reload  "), ("esc ", "close  ")],
             Overlay::Tasks => &[
                 ("n ", "new  "),
-                ("Enter ", "correct  "),
-                ("p/r ", "pause/resume  "),
-                ("x ", "cancel  "),
+                ("Enter ", "session  "),
+                ("p/e ", "disable/enable  "),
+                ("r ", "run now  "),
                 ("d ", "forget  "),
                 ("Esc ", "back  "),
             ],
@@ -1121,6 +1122,7 @@ struct App {
     runtime: tokio::runtime::Runtime,
     chat: Chat,
     tasks: tasks::Tasks,
+    editor: Option<editor::Picker>,
     /// Whether this window is taking the mouse, and so whether the terminal's
     /// own selection works.
     ///
@@ -1276,6 +1278,7 @@ impl App {
         let tasks = tasks::Tasks::new(&source, &runtime, &config.work);
         let mut app = Self {
             tasks,
+            editor: None,
             runtime,
             chat: Chat { history: remembered_prompts(), ..Chat::default() },
             files_here: None,
@@ -1501,9 +1504,51 @@ impl App {
             if event::poll(TICK)? {
                 self.on_event(event::read()?)?;
             }
+            if self.editor.as_ref().is_some_and(|picker| picker.launch) {
+                self.edit_draft(terminal)?;
+            }
         }
         if let Some(turn) = self.turn.take() {
             turn.abort();
+        }
+        Ok(())
+    }
+
+    fn edit_draft(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
+        let picker = self.editor.take().expect("editor selected");
+        let draft = self.chat.input.as_str().to_owned();
+        let workspace = self.source.workspace().to_path_buf();
+        let result = editor::edit(
+            &picker.editors[picker.at],
+            &draft,
+            &workspace,
+            self.mouse,
+            self.shift_enter,
+            || {
+                // Streaming continues while the editor owns stdin. Keep draining
+                // its events so an open editor cannot grow the channel forever.
+                self.drain_turn_events();
+                self.tasks.poll();
+            },
+        );
+        // Rebuild the full viewport, including a resize made in the editor.
+        // `clear()` asks the terminal for its cursor position, which some
+        // terminals (and bare PTYs) cannot report. We will place it ourselves.
+        terminal.resize(terminal.size()?.into())?;
+        match result {
+            Ok((text, warning)) => {
+                self.chat.input.set(&text);
+                self.chat.recalled = None;
+                self.files_here = None;
+                self.status = "draft updated; Enter sends".into();
+                if let Some(warning) = warning {
+                    self.chat.push("stat", &warning);
+                }
+            }
+            Err(error) => {
+                self.status = "editor failed; draft unchanged".into();
+                self.chat.push("stat", &format!("{error:#}"));
+            }
         }
         Ok(())
     }
@@ -1852,6 +1897,19 @@ impl App {
     }
 
     fn on_key(&mut self, key: crossterm::event::KeyEvent) {
+        if let Some(picker) = &mut self.editor {
+            match key.code {
+                KeyCode::Esc => self.editor = None,
+                KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => self.editor = None,
+                KeyCode::Up | KeyCode::Char('k') => picker.at = picker.at.saturating_sub(1),
+                KeyCode::Down | KeyCode::Char('j') if !picker.editors.is_empty() => {
+                    picker.at = (picker.at + 1).min(picker.editors.len() - 1);
+                }
+                KeyCode::Enter if !picker.editors.is_empty() => picker.launch = true,
+                _ => {}
+            }
+            return;
+        }
         if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('c') {
             // A running turn is what there is to stop, as in the chat REPL and
             // the browser; quitting is what it means when there is nothing.
@@ -1918,6 +1976,9 @@ impl App {
     /// a paste arriving there is dropped rather than typed into a box nobody can
     /// see.
     fn on_paste(&mut self, text: &str) {
+        if self.editor.is_some() {
+            return;
+        }
         match self.overlay {
             Some(Overlay::Palette) => self.palette.paste(text),
             Some(Overlay::Tasks) => self.tasks.paste(text),
@@ -1938,6 +1999,9 @@ impl App {
         if overlay == Overlay::Tasks {
             if self.tasks.key(key) {
                 self.overlay = None;
+                if let Some(session) = self.tasks.take_session() {
+                    self.command(&format!("session {session}"));
+                }
             }
             return;
         }
@@ -2105,7 +2169,10 @@ impl App {
                 // here as ctrl-h; unhandled it typed an `h` into the message.
                 KeyCode::Char('h') => return self.chat.input.backspace(),
                 KeyCode::Char('a') => return self.chat.input.home(),
-                KeyCode::Char('e') => return self.chat.input.end(),
+                KeyCode::Char('e') => {
+                    self.editor = Some(editor::Picker::discover());
+                    return;
+                }
                 KeyCode::Char('w') => return self.chat.input.kill_word(),
                 KeyCode::Char('u') => return self.chat.input.kill_to_start(),
                 KeyCode::Char('k') => return self.chat.input.kill_to_end(),
@@ -3122,10 +3189,20 @@ impl App {
             // how this window says which of the two it is holding: a wheel
             // that has stopped scrolling reads as an application that has
             // stopped responding, and this is the line that explains it.
-            None if self.mouse => {
-                &[("^p ", "commands  "), ("F4 ", "tasks  "), ("^s ", "select  "), ("^c ", "stop  ")]
-            }
-            None => &[("^p ", "commands  "), ("F4 ", "tasks  "), ("^s ", "wheel  "), ("^c ", "stop  ")],
+            None if self.mouse => &[
+                ("^p ", "commands  "),
+                ("F4 ", "tasks  "),
+                ("^e ", "editor  "),
+                ("^s ", "select  "),
+                ("^c ", "stop  "),
+            ],
+            None => &[
+                ("^p ", "commands  "),
+                ("F4 ", "tasks  "),
+                ("^e ", "editor  "),
+                ("^s ", "wheel  "),
+                ("^c ", "stop  "),
+            ],
         };
         let mut spans: Vec<Span> = vec![Span::raw(" ")];
         for (key, what) in keys {
@@ -3147,6 +3224,26 @@ impl App {
             Paragraph::new(Line::from(spans)).style(Style::default().fg(Color::DarkGray)),
             footer,
         );
+        if let Some(picker) = &self.editor {
+            let area = centred(f.area(), 70, 65);
+            f.render_widget(Clear, area);
+            let block = bordered(" external editor — ↑↓ choose · Enter open · Esc cancel ");
+            if picker.editors.is_empty() {
+                f.render_widget(Paragraph::new("No console editor found. Install nano, vim or micro, or set EDITOR to a terminal editor command.").wrap(Wrap { trim: false }).block(block), area);
+            } else {
+                let items: Vec<ListItem> =
+                    picker.editors.iter().map(|editor| ListItem::new(editor.label())).collect();
+                let mut state = ListState::default().with_selected(Some(picker.at));
+                f.render_stateful_widget(
+                    List::new(items)
+                        .block(block)
+                        .highlight_symbol("› ")
+                        .highlight_style(Style::default().fg(Color::Cyan)),
+                    area,
+                    &mut state,
+                );
+            }
+        }
     }
 
     /// Everything reachable from here, filtered as it is typed.
@@ -4295,7 +4392,8 @@ impl App {
             Line::from(Span::styled("keys", Style::default().add_modifier(Modifier::BOLD))),
             key("  ^p          everything reachable, filtered as you type"),
             key("  ^o          what each call was given and what came back"),
-            key("  F4          background tasks: n starts, Enter corrects, p/r pauses/resumes"),
+            key("  ^e          edit the draft in a console editor; last used comes first"),
+            key("  F4          scheduled tasks: n creates, Enter opens a session, r runs now"),
             key("  ^s          gives the mouse to the terminal, to select and copy what"),
             key("              was said · press it again to get the wheel back"),
             key("  @           names a file in the workspace · tab completes it"),
@@ -4325,7 +4423,7 @@ impl App {
             key("              /…        tab completes; the list shows as you type"),
             key("              PgUp/PgDn scroll back through the conversation"),
             key("              ↑ / ↓     the prompts already sent, newest first"),
-            key("              ← → home end · ctrl-a/e/w/u/k edit the line being typed"),
+            key("              ← → home end · ctrl-a/w/u/k edit the line being typed"),
             key("              F2 / F3   cycle approvals / reasoning effort"),
             key("              ctrl-c    stops a running turn, or quits when none is"),
         ];

@@ -81,7 +81,7 @@ pub(crate) enum Command {
     /// Read the configuration, fill in what it does not say, and check it.
     #[command(subcommand)]
     Config(ConfigCmd),
-    /// Durable background tasks: survive disconnects and resume after daemon restart.
+    /// Scheduled tasks: create schedules and inspect their sessions.
     #[command(subcommand)]
     Task(TaskCmd),
     /// Work at one goal across many turns, with the checks run between them.
@@ -546,7 +546,43 @@ pub(crate) enum CheckpointCmd {
 
 #[derive(Subcommand)]
 pub(crate) enum TaskCmd {
-    /// Start background work. Defaults: seven days, 10,000 bounded iterations.
+    /// Create a scheduled task. Prefer F4 in rook tui for an interactive form.
+    Schedule {
+        #[arg(required = true)]
+        goal: Vec<String>,
+        #[arg(long)]
+        when: String,
+        #[arg(long, default_value = "UTC")]
+        timezone: String,
+        #[arg(long, default_value = "assist")]
+        stance: String,
+        #[arg(long, default_value_t = 3600)]
+        seconds: u64,
+        #[arg(long, default_value_t = 100000)]
+        tokens: u64,
+        #[arg(long, default_value_t = 100)]
+        max_iterations: u32,
+        /// Reuse this id when retrying a submission after a lost response.
+        #[arg(long)]
+        id: Option<String>,
+    },
+    Enable {
+        id: String,
+    },
+    Disable {
+        id: String,
+    },
+    Run {
+        id: String,
+    },
+    Delete {
+        id: String,
+    },
+    CancelRun {
+        id: String,
+    },
+    /// Legacy immediate run; use /goal in a conversation.
+    #[command(hide = true)]
     Start {
         #[arg(required = true)]
         goal: Vec<String>,
@@ -562,6 +598,7 @@ pub(crate) enum TaskCmd {
         id: String,
     },
     /// Save a correction; report separately when it enters the agent's context.
+    #[command(hide = true)]
     Steer {
         id: String,
         #[arg(required = true)]
@@ -573,15 +610,19 @@ pub(crate) enum TaskCmd {
         #[arg(long, default_value_t = 30)]
         wait_secs: u64,
     },
+    #[command(hide = true)]
     Pause {
         id: String,
     },
+    #[command(hide = true)]
     Resume {
         id: String,
     },
+    #[command(hide = true)]
     Cancel {
         id: String,
     },
+    #[command(hide = true)]
     Forget {
         id: String,
     },

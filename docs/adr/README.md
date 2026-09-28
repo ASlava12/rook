@@ -19,3 +19,5 @@ usually goes missing.
 | [0011](0011-containment-is-the-platforms.md) | Containment is the platform's, best-effort, and reported | accepted |
 | [0012](0012-hand-written-modules-no-bundler.md) | The web UI is hand-written ES modules, still with no bundler | accepted |
 | [0014](0014-durable-work.md) | Daemon-owned durable tasks and steering receipts | accepted |
+
+- [0015: Tasks schedule session goals](0015-scheduled-tasks.md)

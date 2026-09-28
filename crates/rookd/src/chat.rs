@@ -729,6 +729,10 @@ const BACKLOG: usize = 2_000;
 const BROADCAST: usize = 4_096;
 
 impl Live {
+    pub(crate) fn needs_input(&self) -> bool {
+        self.running() && (self.approver.is_waiting() || self.asker.is_waiting())
+    }
+
     /// Assembled from parts, so the registry's own bookkeeping can be asked
     /// about without starting a turn to ask it.
     #[doc(hidden)]

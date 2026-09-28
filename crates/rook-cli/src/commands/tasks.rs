@@ -26,6 +26,32 @@ pub(crate) fn run(cmd: TaskCmd, workspace: Option<PathBuf>, yes: bool, json: boo
 fn execute(cmd: TaskCmd, workspace: Option<PathBuf>, yes: bool) -> Result<serde_json::Value> {
     let daemon = daemon()?;
     let value = match cmd {
+        TaskCmd::Schedule { goal, when, timezone, stance, seconds, tokens, max_iterations, id } => {
+            let workspace = workspace.unwrap_or(std::env::current_dir()?).canonicalize()?;
+            let id = id.unwrap_or_else(|| rook_store::format_session_id(rook_store::new_session_id()));
+            eprintln!("schedule {id}");
+            daemon.post(
+                "/api/tasks",
+                &serde_json::to_value(rook_proto::schedule::Create {
+                    id,
+                    spec: rook_proto::schedule::Spec {
+                        goal: goal.join(" "),
+                        workspace: workspace.display().to_string(),
+                        timing: when,
+                        timezone,
+                        stance: if yes { "autonomous".into() } else { stance },
+                        max_seconds: seconds,
+                        max_tokens: tokens,
+                        max_iterations,
+                    },
+                })?,
+            )?
+        }
+        TaskCmd::Enable { id } => schedule_control(&daemon, &id, rook_proto::schedule::Action::Enable)?,
+        TaskCmd::Disable { id } => schedule_control(&daemon, &id, rook_proto::schedule::Action::Disable)?,
+        TaskCmd::Run { id } => schedule_control(&daemon, &id, rook_proto::schedule::Action::RunNow)?,
+        TaskCmd::CancelRun { id } => schedule_control(&daemon, &id, rook_proto::schedule::Action::CancelRun)?,
+        TaskCmd::Delete { id } => daemon.delete(&schedule_path(&id)?)?,
         TaskCmd::Start { goal, max_iterations, tokens, seconds } => {
             let workspace = workspace.unwrap_or(std::env::current_dir()?).canonicalize()?;
             daemon.post(
@@ -41,8 +67,15 @@ fn execute(cmd: TaskCmd, workspace: Option<PathBuf>, yes: bool) -> Result<serde_
                 })?,
             )?
         }
-        TaskCmd::List => daemon.get("/api/work")?,
-        TaskCmd::Show { id } => daemon.get(&path(&id)?)?,
+        TaskCmd::List => daemon.get("/api/tasks")?,
+        TaskCmd::Show { id } => {
+            let tasks: Vec<rook_proto::schedule::Task> = daemon.get("/api/tasks")?;
+            if let Some(task) = tasks.into_iter().find(|t| t.id == id) {
+                serde_json::to_value(task)?
+            } else {
+                daemon.get(&path(&id)?)?
+            }
+        }
         TaskCmd::Steer { id, text, message_id, wait_secs } => {
             let path = path(&id)?;
             let message_id =
@@ -88,12 +121,36 @@ fn control(daemon: &Daemon, id: &str, action: Action) -> Result<serde_json::Valu
 fn describe(value: &serde_json::Value) -> String {
     if let Some(items) = value.as_array() {
         return if items.is_empty() {
-            "No durable tasks.".into()
+            "No scheduled tasks.".into()
         } else {
             items.iter().map(describe).collect::<Vec<_>>().join("\n\n")
         };
     }
-    if let Ok(run) = serde_json::from_value::<Run>(value.clone()) {
+    if let Ok(task) = serde_json::from_value::<rook_proto::schedule::Task>(value.clone()) {
+        let mut text = format!(
+            "{} · {} · {} · {}\n{}\n{}\nNext: {}",
+            task.id,
+            if task.enabled { "enabled" } else { "disabled" },
+            task.spec.timing,
+            task.spec.timezone,
+            task.spec.goal,
+            task.note,
+            task.next_at
+                .filter(|_| task.enabled)
+                .map(|n| rook_core::schedules::display_time(n, &task.spec.timezone))
+                .unwrap_or_else(|| "—".into())
+        );
+        for run in task.history.iter().rev() {
+            text.push_str(&format!(
+                "\n{} · {} · session {}\n{}",
+                rook_core::schedules::display_time(run.at, &task.spec.timezone),
+                run.status,
+                run.session,
+                run.reason
+            ));
+        }
+        text
+    } else if let Ok(run) = serde_json::from_value::<Run>(value.clone()) {
         let mut text = format!(
             "{} · {:?} · {} iterations · {} tokens\n{}\n{}\nworkspace: {}",
             run.id, run.status, run.iterations, run.tokens, run.goal, run.reason, run.workspace
@@ -139,6 +196,11 @@ pub(crate) fn slash(rest: &str, workspace: &Path) -> Result<String> {
             TaskCmd::Start { goal: vec![rest.into()], max_iterations: None, tokens: None, seconds: None }
         }
         "show" => TaskCmd::Show { id },
+        "enable" => TaskCmd::Enable { id },
+        "disable" => TaskCmd::Disable { id },
+        "run" => TaskCmd::Run { id },
+        "delete" => TaskCmd::Delete { id },
+        "cancel-run" => TaskCmd::CancelRun { id },
         "pause" => TaskCmd::Pause { id },
         "resume" => TaskCmd::Resume { id },
         "cancel" => TaskCmd::Cancel { id },
@@ -148,8 +210,22 @@ pub(crate) fn slash(rest: &str, workspace: &Path) -> Result<String> {
             TaskCmd::Steer { id: id.into(), text: vec![text.into()], message_id: None, wait_secs: 0 }
         }
         _ => bail!(
-            "/task list | start <goal> | start-autonomous <goal> | show <id> | steer <id> <text> | pause/resume/cancel/forget <id>"
+            "F4 creates schedules; /task list | show <id> | run/enable/disable/cancel-run/delete <id>. Use /goal for work in this session."
         ),
     };
     Ok(describe(&execute(cmd, Some(workspace.into()), command == "start-autonomous")?))
+}
+
+fn schedule_path(id: &str) -> Result<String> {
+    if rook_store::parse_session_id(id).is_none() {
+        bail!("invalid schedule id");
+    }
+    Ok(format!("/api/tasks/{id}"))
+}
+fn schedule_control(
+    daemon: &Daemon,
+    id: &str,
+    action: rook_proto::schedule::Action,
+) -> Result<serde_json::Value> {
+    daemon.post(&format!("{}/control", schedule_path(id)?), &serde_json::to_value(action)?)
 }

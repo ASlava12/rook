@@ -91,7 +91,7 @@ impl Pty {
                 return screen;
             }
             assert!(
-                std::time::Instant::now() < deadline,
+                self.child.try_wait().unwrap().is_none() && std::time::Instant::now() < deadline,
                 "{wanted:?} never appeared. {}\n{}",
                 self.diagnosis(),
                 screen.join("\n")
@@ -108,7 +108,8 @@ impl Pty {
             Ok(Some(status)) => format!("exited with {status}"),
             Err(e) => format!("unknown: {e}"),
         };
-        format!("{} bytes read, child {alive}", self.seen.len())
+        let tail: String = self.seen.chars().rev().take(2000).collect::<Vec<_>>().into_iter().rev().collect();
+        format!("{} bytes read, child {alive}; terminal tail: {tail:?}", self.seen.len())
     }
 
     /// Whether the pty is still open, so a child that exited ends the wait
@@ -1443,7 +1444,7 @@ fn shift_enter_writes_a_second_line_where_the_terminal_can_say_it_was_shift() {
 }
 
 #[test]
-fn durable_tasks_can_be_created_corrected_and_paused_without_typing_commands_or_ids() {
+fn scheduled_tasks_can_be_created_disabled_and_deleted_without_commands_or_ids() {
     let _one = one_at_a_time();
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
@@ -1456,29 +1457,41 @@ fn durable_tasks_can_be_created_corrected_and_paused_without_typing_commands_or_
     pty.send("tasks\r");
     pty.screen_showing(100, 30, "No tasks yet");
     pty.send("n");
-    pty.screen_showing(100, 30, "new goal");
-    pty.send("\tinspect this project\r");
-    pty.screen_showing(100, 30, "Task started in background");
-    pty.send("\r");
-    pty.screen_showing(100, 30, "correction · Enter send");
-    pty.send("preserve the public API\r");
-    pty.screen_showing(100, 30, "Correction saved");
-    pty.screen_showing(100, 30, "preserve the public API");
-    pty.send("p");
-    pty.screen_showing(100, 30, "paused by user");
-    pty.send("\r");
-    pty.screen_showing(100, 30, "correction · Enter send");
-    pty.send("Keep this unsent draft");
-    for _ in 0..4 {
+    pty.screen_showing(100, 30, "Goal (1/8)");
+    pty.send("Inspect this project");
+    for _ in 0..3 {
         pty.screen(100, 30);
     }
-    pty.screen_showing(100, 30, "Keep this unsent draft");
-    pty.send("\u{1b}");
-    pty.screen_showing(100, 30, "live task");
+    pty.screen_showing(100, 30, "Inspect this project");
+    pty.send("\r");
+    pty.screen_showing(100, 30, "Schedule (2/8)");
+    pty.send("\u{15}weekly fri 09:00\r");
+    pty.screen_showing(100, 30, "Timezone (3/8)");
+    pty.send("\u{15}Europe/Moscow\r");
+    pty.screen_showing(100, 30, "Workspace (4/8)");
+    pty.send("\r");
+    pty.screen_showing(100, 30, "Permissions (5/8)");
+    pty.send("\r");
+    pty.screen_showing(100, 30, "Seconds per run (6/8)");
+    pty.send("\r");
+    pty.screen_showing(100, 30, "Tokens per run (7/8)");
+    pty.send("\r");
+    pty.screen_showing(100, 30, "Iterations per run (8/8)");
+    pty.send("\r");
+    pty.screen_showing(100, 30, "Schedule saved");
+    pty.screen_showing(100, 30, "Europe/Moscow");
+    pty.send("p");
+    pty.screen_showing(100, 30, "Disabled; existing session continues");
+    pty.send("e");
+    pty.screen_showing(100, 30, "Enabled");
+    pty.send("r");
+    pty.screen_showing(100, 30, "Session queued");
+    pty.send("\r");
+    pty.screen_showing(100, 30, "Waiting for a worker");
     pty.send("x");
-    pty.screen_showing(100, 30, "Cancel this task?");
+    pty.screen_showing(100, 30, "Cancel the latest session?");
     pty.send("y");
-    pty.screen_showing(100, 30, "cancelled by user");
+    pty.screen_showing(100, 30, "Latest session cancelled");
     pty.send("d");
     pty.screen_showing(100, 30, "No tasks yet");
     pty.send("q");
@@ -1621,4 +1634,129 @@ fn goal_runs_in_the_current_session_and_can_be_left_corrected_and_resumed() {
             .error_for_status()
             .unwrap();
     });
+}
+
+#[test]
+fn external_editor_round_trips_the_draft_and_remembers_the_choice() {
+    use std::os::unix::fs::PermissionsExt;
+    let _one = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let editor = home.path().join("console editor");
+    std::fs::write(
+        &editor,
+        r##"#!/bin/sh
+set -eu
+[ "$1" = '--literal;$HOME' ]
+[ -t 0 ] && [ -t 1 ] && [ -t 2 ]
+case "$(/bin/stty -a)" in *-icanon*) exit 31;; esac
+printf '%s' "$2" > "$ROOK_HOME/edited-path"
+/bin/cat "$2" > "$ROOK_HOME/before"
+printf '\nEDITOR_READY\n'
+read -r action
+[ "$action" = save ]
+/bin/cat "$ROOK_HOME/replacement" > "$2"
+if [ -f "$ROOK_HOME/fail" ]; then exit 7; fi
+"##,
+    )
+    .unwrap();
+    std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let command = format!("'{}' '--literal;$HOME'", editor.display());
+    let spawn = |command: &str| {
+        Pty::spawn(
+            std::path::Path::new(env!("CARGO_BIN_EXE_rook")),
+            &["--workspace", workspace.path().to_str().unwrap(), "tui", "--alone"],
+            &[
+                ("ROOK_HOME", home.path().to_str().unwrap()),
+                ("ROOK_LOG", "error"),
+                ("TERM", "xterm-256color"),
+                ("VISUAL", ""),
+                ("EDITOR", command),
+            ],
+            100,
+            30,
+        )
+    };
+    let mut pty = spawn(&command);
+    pty.screen(100, 30);
+    let original = "original\nПривет";
+    pty.send(&format!("\x1b[200~{original}\x1b[201~"));
+    pty.screen_showing(100, 30, "Привет");
+    pty.send("\x05");
+    pty.screen_showing(100, 30, "external editor");
+    pty.send("\x1b");
+    pty.screen_showing(100, 30, "Привет");
+    assert!(!home.path().join("before").exists(), "Esc must not start an editor");
+    let replacement = "updated draft\nЮникод\n";
+    std::fs::write(home.path().join("replacement"), replacement).unwrap();
+    pty.send("\x05");
+    let choices = pty.screen_showing(100, 30, "console editor").join("\n");
+    assert!(choices.contains("› console editor"), "environment editor should be selected:\n{choices}");
+    pty.send("\r");
+    pty.screen_showing(100, 30, "EDITOR_READY");
+    assert_eq!(std::fs::read_to_string(home.path().join("before")).unwrap(), original);
+    pty.send("save\n");
+    let screen = pty.screen_showing(100, 30, "updated draft").join("\n");
+    assert!(screen.contains("Юникод"), "multiline Unicode must survive:\n{screen}");
+    assert!(!screen.contains("▌ updated draft"), "the editor must not submit the draft:\n{screen}");
+    let edited_path = std::fs::read_to_string(home.path().join("edited-path")).unwrap();
+    assert!(!std::path::Path::new(&edited_path).exists(), "successful drafts are temporary");
+    let saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(home.path().join("tui-editor.json")).unwrap()).unwrap();
+    assert_eq!(saved["program"], editor.to_str().unwrap());
+    drop(pty);
+
+    // A different environment preference cannot displace the last used one.
+    let mut pty = spawn("vi");
+    pty.screen(100, 30);
+    pty.send("surviving draft");
+    pty.screen_showing(100, 30, "surviving draft");
+    pty.send("\x05");
+    let choices = pty.screen_showing(100, 30, "console editor").join("\n");
+    assert!(choices.contains("› console editor"), "last used stays first after restart:\n{choices}");
+    std::fs::write(home.path().join("fail"), "").unwrap();
+    pty.send("\r");
+    pty.screen_showing(100, 30, "EDITOR_READY");
+    pty.send("save\n");
+    let screen = pty.screen_showing(100, 30, "original draft kept").join("\n");
+    assert!(screen.contains("surviving draft"), "failed editor must keep the input:\n{screen}");
+    let recovery =
+        std::path::PathBuf::from(std::fs::read_to_string(home.path().join("edited-path")).unwrap());
+    assert_eq!(std::fs::read_to_string(&recovery).unwrap(), replacement);
+    std::fs::remove_dir_all(recovery.parent().unwrap()).unwrap();
+    // Further typing proves raw-mode input and the screen were restored.
+    pty.send(" plus");
+    pty.screen_showing(100, 30, "surviving draft plus");
+}
+
+#[test]
+fn external_editor_picker_without_editors_can_be_cancelled() {
+    let _one = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let mut pty = Pty::spawn(
+        std::path::Path::new(env!("CARGO_BIN_EXE_rook")),
+        &["--workspace", workspace.path().to_str().unwrap(), "tui", "--alone"],
+        &[
+            ("ROOK_HOME", home.path().to_str().unwrap()),
+            ("ROOK_LOG", "error"),
+            ("TERM", "xterm-256color"),
+            ("VISUAL", ""),
+            ("EDITOR", ""),
+            ("PATH", workspace.path().to_str().unwrap()),
+        ],
+        100,
+        30,
+    );
+    pty.screen(100, 30);
+    pty.send("keep this draft");
+    pty.screen_showing(100, 30, "keep this draft");
+    pty.send("\x05");
+    pty.screen_showing(100, 30, "No console editor found");
+    pty.send("\r");
+    pty.screen_showing(100, 30, "No console editor found");
+    pty.send("\x1b");
+    pty.screen(100, 30);
+    pty.send(" here");
+    pty.screen_showing(100, 30, "keep this draft here");
 }

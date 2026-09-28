@@ -40,6 +40,7 @@ mod persistence;
 pub mod plugins;
 mod recipes;
 mod results;
+pub mod schedules;
 pub mod script;
 pub mod search;
 pub mod secrets;

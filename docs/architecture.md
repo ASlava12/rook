@@ -226,5 +226,5 @@ stage admission and completion verification. Session goals reuse their existing
 conversation; standalone runs use iteration sessions. `rookd::work` schedules these
 turns independently of HTTP/WebSocket lifetimes. TUI `/goal` uses the existing
 chat registry for streaming and approvals and continues in the same session, including after restart. CLI `task`, the optional
-TUI Tasks pane and the web Tasks view are clients of the same supervision API.
+Tasks now describe schedules, exposed through `/api/tasks`. The TUI and web views share this API; each occurrence reserves a session ID durably, then creates an ordinary goal session. `/api/work` remains the execution and legacy compatibility API. Calendar computation and persistence live in `rook-core::schedules`.
 See [durable work](durable-work.md) and [ADR-0014](adr/0014-durable-work.md).

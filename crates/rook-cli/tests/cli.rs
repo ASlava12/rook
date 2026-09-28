@@ -1304,15 +1304,20 @@ fn a_release_check_that_cannot_reach_github_says_so_rather_than_saying_up_to_dat
 /// The correction is accepted with no worker available to acknowledge it.
 #[test]
 fn durable_work_and_pending_corrections_survive_a_daemon_restart() {
-    durable_recovery(false);
+    durable_recovery(false, false);
 }
 
 #[test]
 fn a_session_goal_and_pending_correction_survive_a_daemon_restart() {
-    durable_recovery(true);
+    durable_recovery(true, false);
 }
 
-fn durable_recovery(in_conversation: bool) {
+#[test]
+fn a_scheduled_session_resumes_after_daemon_restart_without_a_duplicate_launch() {
+    durable_recovery(false, true);
+}
+
+fn durable_recovery(in_conversation: bool, scheduled: bool) {
     rook_llm::init_tls();
     use std::io::{Read, Write};
     use std::sync::{
@@ -1430,8 +1435,33 @@ fn durable_recovery(in_conversation: bool) {
         rook_store::format_session_id(session)
     });
     let daemon = Daemon::start(&rook);
+    let schedule = scheduled.then(|| {
+        rook.json(&[
+            "task",
+            "schedule",
+            "Inspect evidence.txt and report the contents",
+            "--when",
+            "every 1d",
+            "--timezone",
+            "Europe/Moscow",
+            "--stance",
+            "autonomous",
+        ])
+    });
     let run =
-        if let Some(session) = &conversation {
+        if let Some(task) = &schedule {
+            let task = rook.json(&["task", "run", task["id"].as_str().unwrap()]);
+            let session = task["pending"].as_str().unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            loop {
+                let output = rook.run(&["--json", "task", "show", session]);
+                if output.status.success() {
+                    break serde_json::from_slice(&output.stdout).unwrap();
+                }
+                assert!(std::time::Instant::now() < deadline, "scheduled run never started");
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        } else if let Some(session) = &conversation {
             tokio::runtime::Runtime::new().unwrap().block_on(async {
                 reqwest::Client::new().post(format!("{}/api/work", daemon.address)).json(&serde_json::json!({
                 "goal":"Inspect evidence.txt and report the contents", "autonomous":false,
@@ -1472,6 +1502,23 @@ fn durable_recovery(in_conversation: bool) {
     }
     release.store(true, Ordering::SeqCst);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+    if let Some(task) = &schedule {
+        let schedule_id = task["id"].as_str().unwrap();
+        loop {
+            let current = rook.json(&["task", "show", schedule_id]);
+            assert_eq!(current["history"].as_array().unwrap().len(), 1, "restart must not launch twice");
+            assert_eq!(current["history"][0]["session"], id);
+            if current["history"][0]["status"] == "Completed" {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "scheduled session did not finish: {current}");
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        rook.ok(&["task", "disable", schedule_id]);
+        rook.ok(&["task", "delete", schedule_id]);
+        assert_eq!(rook.json(&["task", "list"]), serde_json::json!([]));
+        return;
+    }
     let finished = loop {
         let current = rook.json(&["task", "show", id]);
         if current["status"] == "completed" {

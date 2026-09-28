@@ -15,11 +15,11 @@ clap = { version = "4.6.6", features = ["derive"] }
 crossterm = "0.29.0"
 ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "json"] }
-rook-acp = { version = "0.8.0", path = "../rook-acp" }
+rook-acp = { version = "0.9.0", path = "../rook-acp" }
 rook-core.workspace = true
 rook-llm.workspace = true
-rook-lsp = { version = "0.8.0", path = "../rook-lsp" }
-rook-mcp = { version = "0.8.0", path = "../rook-mcp" }
+rook-lsp = { version = "0.9.0", path = "../rook-lsp" }
+rook-mcp = { version = "0.9.0", path = "../rook-mcp" }
 rook-proto.workspace = true
 rook-skills.workspace = true
 rook-store.workspace = true
@@ -27,6 +27,8 @@ rook-tools.workspace = true
 rustyline = { version = "18.0.1", default-features = false, features = ["with-file-history", "custom-bindings"] }
 serde = "1.0.229"
 serde_json = "1.0.151"
+shlex = "2.0.1"
+tempfile = "3.24.0"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "signal"] }
 # Already in the tree, as what axum serves the browser's chat socket with. The
 # client side of the same protocol is how a second window runs a turn the
@@ -42,4 +44,3 @@ path = "src/main.rs"
 
 [dev-dependencies]
 libc = "0.2.180"
-tempfile = "3.24.0"

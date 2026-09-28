@@ -78,8 +78,8 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("session", "[id|last]", "this one's totals, or continue another"),
     (
         "task",
-        "[list|start|start-autonomous|show|steer|pause|resume|cancel|forget]",
-        "durable tasks via the daemon; available in the shared TUI",
+        "[list|show|run|enable|disable|cancel-run|delete]",
+        "scheduled tasks; F4 opens the form in the shared TUI",
     ),
     ("goal", "[text]", "start a lasting goal in this session (shared daemon), or show its goal"),
     ("stance", "[name]", "how much latitude: readonly, assist or autonomous"),
@@ -601,9 +601,9 @@ pub async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command
     match name {
         "quit" | "exit" | "q" => return Ok(Said { text: String::new(), quit: true }),
         "help" | "?" => say!("{}", help_text()),
-        "task" => say!(
-            "Use `rook task` from another terminal, or /task in `rook tui`. Durable tasks run in the shared daemon."
-        ),
+        "task" => {
+            say!("Use F4 in `rook tui` to manage scheduled tasks. /goal starts work in the current session.")
+        }
         "recovery" => {
             if !rest.is_empty() {
                 let (operation, note) = rest

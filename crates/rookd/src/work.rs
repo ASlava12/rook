@@ -41,6 +41,9 @@ fn failure(error: impl std::fmt::Display) -> Failure {
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
+        .route("/api/tasks", get(schedule_list).post(schedule_create))
+        .route("/api/tasks/{id}", axum::routing::delete(schedule_delete))
+        .route("/api/tasks/{id}/control", post(schedule_control))
         .route("/api/work", get(list).post(start))
         .route("/api/work/{id}", get(show).delete(forget))
         .route("/api/work/{id}/steer", post(steer))
@@ -107,6 +110,7 @@ pub async fn supervise(state: Arc<AppState>) {
     loop {
         tick.tick().await;
         state.config_if_changed().await;
+        schedule_tick(&state).await;
         // Session goals use the existing chat registry, streaming, approvals
         // and switching. A disconnected window is only a missing observer.
         let conversations = managed::list(&*state.rook.read().await);
@@ -231,5 +235,86 @@ pub async fn stop(state: &AppState) {
     let conversations: Vec<_> = state.live.write().await.drain().map(|(_, live)| live).collect();
     for live in conversations {
         live.shutdown().await;
+    }
+}
+
+async fn schedule_list(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<rook_proto::schedule::Task>>, Failure> {
+    let mut tasks = rook_core::schedules::list(&*state.rook.read().await).map_err(failure)?;
+    let live = state.live.read().await;
+    for task in &mut tasks {
+        if let Some(run) = task.history.last_mut()
+            && let Some(session) = rook_store::parse_session_id(&run.session)
+            && live.get(&session).is_some_and(|l| l.needs_input())
+        {
+            run.status = "Needs input".into();
+            run.reason = "Open this session to answer the pending question or approval".into();
+        }
+    }
+    Ok(Json(tasks))
+}
+async fn schedule_create(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<rook_proto::schedule::Create>,
+) -> Result<Json<rook_proto::schedule::Task>, Failure> {
+    Ok(Json(
+        rook_core::schedules::create(&*state.rook.read().await, request, managed::now()).map_err(failure)?,
+    ))
+}
+async fn schedule_control(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(action): Json<rook_proto::schedule::Action>,
+) -> Result<Json<rook_proto::schedule::Task>, Failure> {
+    Ok(Json(
+        rook_core::schedules::control(&*state.rook.read().await, &id, action, managed::now())
+            .map_err(failure)?,
+    ))
+}
+async fn schedule_delete(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, Failure> {
+    rook_core::schedules::delete(&*state.rook.read().await, &id).map_err(failure)?;
+    Ok(Json(serde_json::json!({"deleted": id})))
+}
+async fn schedule_tick(state: &Arc<AppState>) {
+    let pending = rook_core::schedules::due(&*state.rook.read().await, managed::now());
+    let pending = match pending {
+        Ok(tasks) => tasks,
+        Err(error) => {
+            tracing::error!("cannot read schedules: {error}");
+            return;
+        }
+    };
+    for task in pending {
+        let capacity = {
+            let rook = state.rook.read().await;
+            managed::list(&rook)
+                .map(|runs| {
+                    task.pending.as_ref().is_some_and(|id| runs.iter().any(|r| &r.id == id))
+                        || runs.iter().filter(|r| r.status.runnable()).count()
+                            < rook.config.work.max_parallel_runs
+                })
+                .unwrap_or(false)
+        };
+        if !capacity {
+            break;
+        }
+        match state.engine_for(Some(std::path::Path::new(&task.spec.workspace))).await {
+            Ok(engine) => {
+                if let Err(error) = rook_core::schedules::launch(&*engine.read().await, &task.id) {
+                    tracing::error!("cannot launch schedule {}: {error}", task.id);
+                }
+            }
+            Err(error) => {
+                if let Err(save_error) =
+                    rook_core::schedules::fail_pending(&*state.rook.read().await, &task.id, &error)
+                {
+                    tracing::error!("cannot record schedule failure: {save_error}");
+                }
+            }
+        }
     }
 }
