@@ -112,6 +112,10 @@ pub(crate) fn cmd_models(
 /// minute ago.
 pub(crate) fn cmd_config(cmd: ConfigCmd, json: bool) -> Result<()> {
     match cmd {
+        ConfigCmd::Edit => {
+            anyhow::ensure!(!json, "rook config edit is interactive; omit --json");
+            super::config_edit::run()
+        }
         ConfigCmd::Show => {
             let config = rook_core::Config::load()?;
             match json {

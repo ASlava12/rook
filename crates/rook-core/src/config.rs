@@ -1,5 +1,7 @@
 //! Configuration, with defaults chosen so an unconfigured install is still safe.
 
+pub mod edit;
+
 use serde::{Deserialize, Serialize};
 
 use rook_store::RetentionPolicy;

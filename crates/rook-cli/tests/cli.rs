@@ -1548,3 +1548,15 @@ fn durable_recovery(in_conversation: bool, scheduled: bool) {
     rook.ok(&["task", "forget", id]);
     assert_eq!(rook.json(&["task", "list"]), serde_json::json!([]));
 }
+
+#[test]
+fn config_edit_requires_a_terminal_and_never_creates_a_file_from_a_pipe() {
+    let rook = Rook::new();
+    let out = rook.run(&["config", "edit"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("interactive terminal"));
+    assert!(!rook.home.path().join("config.toml").exists());
+    let out = rook.run(&["config", "edit", "--json"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("omit --json"));
+}

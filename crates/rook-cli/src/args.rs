@@ -308,6 +308,8 @@ pub(crate) enum DocsCmd {
 
 #[derive(Subcommand)]
 pub(crate) enum ConfigCmd {
+    /// Edit settings interactively, with descriptions, defaults and add/remove forms.
+    Edit,
     /// Every setting in force, with the ones the file does not name filled in
     /// from the defaults. What the agent reads, rather than what was written.
     Show,

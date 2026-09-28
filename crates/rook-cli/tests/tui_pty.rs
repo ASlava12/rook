@@ -1760,3 +1760,121 @@ fn external_editor_picker_without_editors_can_be_cancelled() {
     pty.send(" here");
     pty.screen_showing(100, 30, "keep this draft here");
 }
+
+fn config_editor(home: &std::path::Path) -> Pty {
+    Pty::spawn(
+        std::path::Path::new(env!("CARGO_BIN_EXE_rook")),
+        &["config", "edit"],
+        &[("ROOK_HOME", home.to_str().unwrap()), ("ROOK_LOG", "error"), ("TERM", "xterm-256color")],
+        100,
+        30,
+    )
+}
+
+#[test]
+fn config_editor_explains_edits_saves_resets_and_discards_without_the_store() {
+    let _one = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let file = home.path().join("config.toml");
+    let original = "# personal notes\n[agent]\nmax_steps = 40 # limited on purpose\n";
+    std::fs::write(&file, original).unwrap();
+    let _locked = rook_store::Store::open(home.path().join("store")).unwrap();
+    let mut pty = config_editor(home.path());
+    pty.screen_showing(100, 30, "rook config edit");
+    pty.send("\r");
+    pty.screen_showing(100, 30, "agent  [saved]");
+    pty.send("/max_steps\r");
+    pty.screen_showing(100, 30, "Maximum tool/model steps");
+    pty.send("\r");
+    pty.screen_showing(100, 30, "Edit value");
+    pty.send("\x15banana\r");
+    pty.screen_showing(100, 30, "enter a whole number");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), original);
+    pty.send("\x1563\r");
+    pty.screen_showing(100, 30, "updated in draft");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), original, "Enter only updates the draft");
+    pty.send("\x13");
+    pty.screen_showing(100, 30, "Saved.");
+    assert_eq!(rook_core::Config::load_from(file.clone()).unwrap().agent.max_steps, 63);
+    assert!(std::fs::read_to_string(&file).unwrap().contains("# limited on purpose"));
+    pty.send("d");
+    pty.screen_showing(100, 30, "Remove from configuration?");
+    pty.send("y");
+    pty.screen_showing(100, 30, "Removed from draft");
+    pty.send("\x13");
+    pty.screen_showing(100, 30, "Saved.");
+    let saved = std::fs::read_to_string(&file).unwrap();
+    assert!(!saved.contains("max_steps"), "removing an override restores the default: {saved}");
+    assert!(saved.contains("# personal notes"));
+    pty.send("\r");
+    pty.screen_showing(100, 30, "Edit value");
+    pty.send("\x1588\r");
+    pty.screen_showing(100, 30, "updated in draft");
+    pty.send("q");
+    pty.screen_showing(100, 30, "Unsaved changes");
+    pty.send("d");
+    assert!(pty.child.wait().unwrap().success());
+    assert_eq!(std::fs::read_to_string(file).unwrap(), saved);
+}
+
+#[test]
+fn config_editor_adds_and_removes_an_mcp_server_without_starting_it() {
+    let _one = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let file = home.path().join("config.toml");
+    let mut pty = config_editor(home.path());
+    pty.screen_showing(100, 30, "rook config edit");
+    assert!(!file.exists(), "opening the editor does not create a config");
+    pty.send("/mcp\r\r");
+    pty.screen_showing(100, 30, "No entries.");
+    pty.send("a");
+    pty.screen_showing(100, 30, "Add entry");
+    pty.send("docs\r");
+    pty.screen_showing(100, 30, "Entry added to draft");
+    pty.send("\x13");
+    pty.screen_showing(100, 30, "set command or url");
+    assert!(!file.exists(), "incomplete server must not be saved");
+    pty.send("/command\r\r");
+    pty.screen_showing(100, 30, "Edit value");
+    pty.send("not-an-installed-command\r");
+    pty.screen_showing(100, 30, "updated in draft");
+    pty.send("\x13");
+    pty.screen_showing(100, 30, "Saved.");
+    let config = rook_core::Config::load_from(file.clone()).unwrap();
+    assert_eq!(config.mcp.len(), 1);
+    assert_eq!(config.mcp[0].name, "docs");
+    assert_eq!(config.mcp[0].command, "not-an-installed-command");
+    pty.send("\x1b");
+    pty.screen(100, 30); // clear search
+    pty.send("\x1b");
+    pty.screen_showing(100, 30, "mcp  [saved]");
+    pty.send("d");
+    pty.screen_showing(100, 30, "Remove from configuration?");
+    pty.send("y");
+    pty.screen_showing(100, 30, "Removed from draft");
+    pty.send("\x13");
+    pty.screen_showing(100, 30, "Saved.");
+    assert!(rook_core::Config::load_from(file).unwrap().mcp.is_empty());
+}
+
+#[test]
+fn config_editor_keeps_credentials_out_of_the_screen_including_the_edit_field() {
+    let _one = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[endpoints.private]\napi='openai'\nkey='DO_NOT_SHOW_THIS_KEY'\n",
+    )
+    .unwrap();
+    let mut pty = config_editor(home.path());
+    pty.screen_showing(100, 30, "rook config edit");
+    pty.send("/endpoints\r\r");
+    pty.screen_showing(100, 30, "endpoints  [saved]");
+    pty.send("\r");
+    pty.screen_showing(100, 30, "private  [saved]");
+    pty.send("/key\r");
+    pty.screen_showing(100, 30, "<hidden>");
+    pty.send("\r");
+    pty.screen_showing(100, 30, "Edit value");
+    assert!(!pty.seen.contains("DO_NOT_SHOW_THIS_KEY"), "secrets must not appear in terminal output");
+}

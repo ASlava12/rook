@@ -28,7 +28,7 @@ use crate::source::Source;
 /// sandbox rule that will not compile, a lock read through after a panic, a
 /// note that the log itself could not be opened.
 fn draws_the_screen(command: &Option<Command>) -> bool {
-    matches!(command, Some(Command::Tui { .. }))
+    matches!(command, Some(Command::Tui { .. } | Command::Config(args::ConfigCmd::Edit)))
 }
 
 fn main() -> Result<()> {

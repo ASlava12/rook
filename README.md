@@ -815,6 +815,30 @@ no network between the two and never sees a proxy at all.
 and asks every endpoint whether it is there. `rook config set agent.model
 desk-small` changes one line and leaves the comments around it alone.
 
+`rook config edit` opens an interactive editor for the user config without
+starting a model or taking the store lock. Each setting has notes beside it:
+what it does, its type, default, and choices. Unwritten settings appear with
+their defaults; entering a value adds the override. Keys and MCP environment
+variables/headers are hidden, including while typing.
+
+- **↑/↓**, **Enter**: choose a section or edit a value; booleans toggle.
+- **/**: filter the current section by name or description. Exact names come first.
+- **a**: add a model, endpoint, MCP/LSP server, hook, list item or map entry.
+- **d**: remove an entry, or remove a fixed setting's override to restore its default.
+- **←/→** in a choice field: cycle the allowed values; **Ctrl+U** clears the field.
+- **Ctrl+S**: validate and save. **Esc** goes back; **q** exits, with a choice to
+  save, discard or keep editing if there are unsaved changes.
+
+Changes stay in a draft until saved. Existing comments and unrelated values are
+preserved, writes are atomic, and a file changed by another editor is not
+overwritten. The form does not execute configured commands or test connections;
+use `rook config check` / `rook mcp ls` afterwards for connection checks. The
+daemon reads updated settings between turns; restart `rookd` for listener, MCP
+or LSP connection changes. Reopen a standalone TUI to reload its settings.
+Workspace overrides can still take precedence
+over the user configuration. Files are limited to 1 MiB, collections to 256
+entries, and input fields to 16 KiB.
+
 `rook models` asks the endpoint what it serves. Effort applies where the provider
 has the notion; sub-agents and `/btw` run at `low` regardless, since a bounded
 errand does not need the depth the main turn does.

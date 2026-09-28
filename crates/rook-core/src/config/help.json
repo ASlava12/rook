@@ -1,0 +1,606 @@
+{
+  "agent.model": {
+    "kind": "string",
+    "help": "Default model: a name under models, or provider/model (for example ollama/qwen3:8b)."
+  },
+  "agent.compact_at": {
+    "kind": "number",
+    "help": "Fraction of the context window used before compacting the conversation. Greater than 0 and at most 1."
+  },
+  "agent.max_steps": {
+    "kind": "integer",
+    "help": "Maximum tool/model steps in one turn. Durable goals may continue in another turn."
+  },
+  "agent.max_output_tokens": {
+    "kind": "integer",
+    "help": "How much the model may write in one reply, thinking included."
+  },
+  "agent.lazy_skills": {
+    "kind": "boolean",
+    "help": "Send skill cards rather than skill bodies, loading a body only when the model asks for it. Off means every enabled skill is always in context."
+  },
+  "agent.lazy_tools": {
+    "kind": "boolean",
+    "help": "Advertise brief tool descriptions and load full schemas when the model requests them."
+  },
+  "agent.effort": {
+    "kind": "string",
+    "help": "Reasoning effort: low, medium, high, xhigh or max. Higher effort can take more time and tokens."
+  },
+  "agent.plan_first": {
+    "kind": "boolean",
+    "help": "Ask for a brief plan before multi-step work. One line in the system prompt, not a checklist tool — see ADR-0010."
+  },
+  "agent.todo_tool": {
+    "kind": "boolean",
+    "help": "Give the model a plan tool and ask it to keep the list current, in place of the line plan_first adds."
+  },
+  "agent.one_script": {
+    "kind": "boolean",
+    "help": "Ask again when a reply slips into a writing system the conversation has not used. Off for work that mixes scripts on purpose — translating, or anything where the answer is meant to be in another one."
+  },
+  "agent.native_tools": {
+    "kind": "boolean",
+    "help": "Send tool definitions with the request. Off for an endpoint that refuses one carrying them — llama.cpp's server, some gateways — where the tools go in the prompt instead and the model's answer is read back."
+  },
+  "agent.context_window": {
+    "kind": "integer",
+    "help": "Overrides the provider's assumed context length, which is guesswork for anything self-hosted: a local model may serve 8k or a million."
+  },
+  "agent.max_parallel_subagents": {
+    "kind": "integer",
+    "help": "How many delegated sub-tasks may run at once. Bounded because each one spends tokens against the same budget and the same provider rate limit."
+  },
+  "agent.max_subagents_per_turn": {
+    "kind": "integer",
+    "help": "Maximum sub-agents started in one turn, including descendants. max_parallel_subagents separately limits how many run at once."
+  },
+  "agent.server_update_after_days": {
+    "kind": "integer",
+    "help": "Days after which a server rook lsp install fetched is offered for updating, once per session. 0 never offers."
+  },
+  "agent.install_servers": {
+    "kind": "boolean",
+    "help": "Offer to install a language server the workspace lacks, and to update one this agent fetched. Off, a missing server is simply not served."
+  },
+  "agent.stream_idle_timeout_secs": {
+    "kind": "integer",
+    "help": "How long the model may go silent mid-stream before the turn gives up. A dropped connection is indistinguishable from deep thought without it."
+  },
+  "agent.max_skill_cards": {
+    "kind": "integer",
+    "help": "Maximum skill cards included in the system prompt. Lower values reduce context cost; skills omitted from the catalog are still reachable through load_skill."
+  },
+  "agent.answer_timeout_secs": {
+    "kind": "integer",
+    "help": "Seconds to wait for an answer to a user question or approval request before treating it as unanswered."
+  },
+  "agent.decide_alone_after_secs": {
+    "kind": "integer",
+    "help": "How long a question put to the person waits before the agent answers it itself."
+  },
+  "agent.compaction_model": {
+    "kind": "string",
+    "help": "Model used to summarize older context. Empty uses agent.model. A smaller model can reduce the cost of long sessions."
+  },
+  "agent.errand_model": {
+    "kind": "string",
+    "help": "What a delegated errand runs on, when the call does not ask for better. Empty is the turn's own model."
+  },
+  "agent.max_reasoning_tokens": {
+    "kind": "integer",
+    "help": "Maximum reasoning tokens carried into the next request per thought. Longer thoughts keep their ends; the middle is elided. 0 omits reasoning from subsequent requests."
+  },
+  "agent.max_replayed_result_tokens": {
+    "kind": "integer",
+    "help": "How much of a tool's answer is carried back into each later request."
+  },
+  "agent.prune_tool_results_min_tokens": {
+    "kind": "integer",
+    "help": "Minimum estimated tokens saved before clearing old tool results. 0 disables."
+  },
+  "agent.prune_tool_results_keep_tokens": {
+    "kind": "integer",
+    "help": "Recent result tokens protected from pruning; at least eight results always survive."
+  },
+  "agent.max_worktrees": {
+    "kind": "integer",
+    "help": "Retained isolated worktrees per repository. Zero disables their creation."
+  },
+  "agent.max_turn_tokens": {
+    "kind": "integer",
+    "help": "Everything one turn may spend, its sub-agents included. 0 lifts it."
+  },
+  "agent.max_turn_secs": {
+    "kind": "integer",
+    "help": "How long one turn may run, its sub-agents included, before it stops and says so. 0 lifts it."
+  },
+  "agent.max_instructions_bytes": {
+    "kind": "integer",
+    "help": "Maximum bytes loaded from each AGENTS.md file. Limits how much repository-provided instruction text enters the context."
+  },
+  "agent.trusted_sources": {
+    "kind": "object",
+    "help": "Canonical absolute source paths mapped to BLAKE3 of the exact rendered instruction body. Empty means every discovered source is reference data."
+  },
+  "agent.prompt_cache_ttl": {
+    "kind": "string",
+    "help": "Prompt-cache lifetime for providers that support it: 5m or 1h. A longer lifetime costs more to write but can reuse prompts across longer pauses between turns.",
+    "choices": [
+      "5m",
+      "1h"
+    ]
+  },
+  "work.max_parallel_runs": {
+    "kind": "integer",
+    "help": "Maximum durable runs executing concurrently in this daemon."
+  },
+  "work.max_runs": {
+    "kind": "integer",
+    "help": "Maximum durable runs retained in the run registry."
+  },
+  "work.max_messages": {
+    "kind": "integer",
+    "help": "Maximum queued corrections for a durable run."
+  },
+  "work.max_message_bytes": {
+    "kind": "integer",
+    "help": "Maximum size of one correction in bytes."
+  },
+  "work.max_goal_bytes": {
+    "kind": "integer",
+    "help": "Maximum goal text size in bytes."
+  },
+  "work.retained_iterations": {
+    "kind": "integer",
+    "help": "Maximum iteration receipts retained per durable run."
+  },
+  "work.max_iterations": {
+    "kind": "integer",
+    "help": "Default iteration budget for a durable run. 0 removes this limit."
+  },
+  "work.max_tokens": {
+    "kind": "integer",
+    "help": "Default total token budget for a durable run. 0 removes this limit."
+  },
+  "work.max_seconds": {
+    "kind": "integer",
+    "help": "Default total duration budget for a durable run, in seconds. 0 removes this limit."
+  },
+  "work.retry_initial_secs": {
+    "kind": "integer",
+    "help": "Initial delay before retrying an unavailable provider, in seconds."
+  },
+  "work.retry_max_secs": {
+    "kind": "integer",
+    "help": "Maximum retry backoff delay, in seconds."
+  },
+  "work.retry_window_secs": {
+    "kind": "integer",
+    "help": "How long to retry a provider outage before requiring attention, in seconds."
+  },
+  "work.idle_iterations": {
+    "kind": "integer",
+    "help": "Consecutive iterations without progress before pausing the run."
+  },
+  "storage.compression_level": {
+    "kind": "integer",
+    "help": "zstd level for new objects. 9 is the default knee; 19 is for archives."
+  },
+  "storage.train_dictionaries_after": {
+    "kind": "integer",
+    "help": "How many objects of a kind a dictionary is trained from."
+  },
+  "storage.dictionary_bytes": {
+    "kind": "integer",
+    "help": "Target size of each trained compression dictionary in bytes."
+  },
+  "storage.retention": {
+    "kind": "object",
+    "help": "Retention rules for sessions and histories. Protected tags prevent automatic pruning."
+  },
+  "storage.gc_grace_secs": {
+    "kind": "integer",
+    "help": "Never collect an object written this recently, whatever the marking says. It is unreachable between being written and the event that names it, and maintenance runs on a timer while turns do."
+  },
+  "storage.maintenance_interval_hours": {
+    "kind": "integer",
+    "help": "Run prune + gc on daemon start and then on this interval."
+  },
+  "server.allowed_hosts": {
+    "kind": "array",
+    "help": "Explicit reverse-proxy authorities (host:port); never inferred from request headers."
+  },
+  "server.bind": {
+    "kind": "string",
+    "help": "Address the daemon listens on. Default is loopback. Restart the daemon after changing server settings."
+  },
+  "server.port": {
+    "kind": "integer",
+    "help": "Daemon port, from 0 to 65535. 0 chooses an available port. Restart the daemon to apply."
+  },
+  "server.max_projects": {
+    "kind": "integer",
+    "help": "How many projects the daemon keeps an engine for."
+  },
+  "server.allow_remote": {
+    "kind": "boolean",
+    "help": "Bound to loopback by default. An agent's transcript is the most sensitive thing on a developer's machine; it does not get exposed by accident."
+  },
+  "sandbox.stance": {
+    "kind": "string",
+    "help": "readonly refuses writes; assist asks before changes; autonomous follows deny/ask rules; free also permits system-wide changes."
+  },
+  "sandbox.allow": {
+    "kind": "array",
+    "help": "Patterns the agent may act on without asking. A plain string matches as a substring; /…/ is a regular expression."
+  },
+  "sandbox.ask": {
+    "kind": "array",
+    "help": "Patterns that always prompt, even in auto mode."
+  },
+  "sandbox.deny": {
+    "kind": "array",
+    "help": "Patterns refused outright, which no approval can override."
+  },
+  "sandbox.max_output_bytes": {
+    "kind": "integer",
+    "help": "Cap on a single command's captured output, before it is stored and summarised rather than pasted into context."
+  },
+  "sandbox.max_spill_bytes": {
+    "kind": "integer",
+    "help": "Maximum bytes retained from a command's full output when only its beginning and end fit in context. 0 disables retaining the full output."
+  },
+  "sandbox.max_output_files": {
+    "kind": "integer",
+    "help": "How many of those copies to keep. They are files rather than objects, so the store's own pruning never sees them; store maintain removes the oldest past this."
+  },
+  "sandbox.max_background_jobs": {
+    "kind": "integer",
+    "help": "How many commands may be left running at once. Each is a process nobody is waiting on, so the cap is what stops a turn from filling the machine with servers."
+  },
+  "sandbox.max_files_searched": {
+    "kind": "integer",
+    "help": "Files search may look at before giving up. Its hits are capped by the call; without this the looking is not, and a walk has no way to know whether it is in a workspace or a home directory until it is in one."
+  },
+  "sandbox.command_timeout_secs": {
+    "kind": "integer",
+    "help": "Default timeout for a command in seconds."
+  },
+  "sandbox.allow_outside_workspace": {
+    "kind": "boolean",
+    "help": "Lets file tools read and write outside the workspace, including through a symlink that leads out of it. Off by default: a workspace that cannot be left is the one boundary a prompt cannot argue its way past."
+  },
+  "sandbox.isolate": {
+    "kind": "string",
+    "help": "auto uses available OS isolation; required refuses commands when isolation is unavailable; off disables it.",
+    "choices": [
+      "auto",
+      "required",
+      "off"
+    ]
+  },
+  "sandbox.network": {
+    "kind": "boolean",
+    "help": "Whether a contained command may reach the network. On by default: a build fetches its dependencies, and a sandbox that breaks every build is one that gets turned off. Off, it is refused at the socket."
+  },
+  "sandbox.writable": {
+    "kind": "array",
+    "help": "Extra directories contained commands may write, in addition to the workspace and temporary directory. Use this for build caches such as ~/.cargo or ~/.npm. ~ expands to your home directory."
+  },
+  "telemetry.upload": {
+    "kind": "boolean",
+    "help": "Nothing leaves the machine. Present so the answer is discoverable rather than a question."
+  },
+  "telemetry.log_level": {
+    "kind": "string",
+    "help": "Local log verbosity. Use trace, debug, info, warn, error or off.",
+    "choices": [
+      "off",
+      "error",
+      "warn",
+      "info",
+      "debug",
+      "trace"
+    ]
+  },
+  "telemetry.max_log_bytes": {
+    "kind": "integer",
+    "help": "Hard cap on the local log directory."
+  },
+  "memory.enabled": {
+    "kind": "boolean",
+    "help": "Recall and maintain persistent memory for conversations."
+  },
+  "memory.context_budget_tokens": {
+    "kind": "integer",
+    "help": "Ceiling on what recalled facts may cost in a request. Memory that silently grows into the context window is the failure this prevents."
+  },
+  "web.enabled": {
+    "kind": "boolean",
+    "help": "Offer web_fetch and web_search tools. Disabled means the agent cannot use these tools to look up current information."
+  },
+  "web.timeout_secs": {
+    "kind": "integer",
+    "help": "How long one page has to arrive."
+  },
+  "web.search": {
+    "kind": "string",
+    "help": "Which search engine answers web_search: duckduckgo, searxng, brave, or empty for none."
+  },
+  "web.search_url": {
+    "kind": "string",
+    "help": "The SearxNG instance to ask. Its own, usually — the reason to prefer it is that the query does not leave the machine."
+  },
+  "web.docs_pages": {
+    "kind": "integer",
+    "help": "How many pages one docs gathering may fetch for a topic."
+  },
+  "web.docs_bytes": {
+    "kind": "integer",
+    "help": "The ceiling on what one kept set holds, applied while the pages arrive."
+  },
+  "proxy.url": {
+    "kind": "string",
+    "help": "Default outbound proxy: http://, https://, socks5:// or socks5h://. Use secret:name or env:NAME for credentials. Empty inherits the environment; direct disables the proxy."
+  },
+  "proxy.models": {
+    "kind": "string",
+    "help": "Requests to the model APIs. An endpoint may still name its own, which wins over this."
+  },
+  "proxy.web": {
+    "kind": "string",
+    "help": "web_fetch and web_search."
+  },
+  "proxy.mcp": {
+    "kind": "string",
+    "help": "MCP servers reached over http."
+  },
+  "proxy.install": {
+    "kind": "string",
+    "help": "Downloading a language server."
+  },
+  "endpoints.*.api": {
+    "kind": "string",
+    "help": "Which api it speaks: openai, anthropic or google. Not the vendor — see [ModelSource::api], which means the same thing."
+  },
+  "endpoints.*.url": {
+    "kind": "string",
+    "help": "Where it is, path included. Most openai-compatible servers want /v1 on the end and this is not the place to guess which do."
+  },
+  "endpoints.*.key": {
+    "kind": "string",
+    "help": "API key reference: prefer secret:name or env:NAME. A literal key also works; its value is hidden here."
+  },
+  "endpoints.*.parallel": {
+    "kind": "integer",
+    "help": "How many agents may be asking this server at once, across every model on it. One unless it says otherwise, and 0 lifts the limit."
+  },
+  "endpoints.*.key_in_the_clear": {
+    "kind": "boolean",
+    "help": "Send the key to this endpoint over plain http, where it is on this network rather than this machine — see [ModelSource::key_in_the_clear]."
+  },
+  "endpoints.*.proxy": {
+    "kind": "string",
+    "help": "How a request to this one leaves the machine, where it differs from [proxy] models. direct reaches it without a proxy on a machine that uses one for everything else."
+  },
+  "models.*.model": {
+    "kind": "string",
+    "help": "The model to ask for, as this endpoint spells it."
+  },
+  "models.*.endpoint": {
+    "kind": "string",
+    "help": "A name from [endpoints] to ask, where the address is written down once and several models share it."
+  },
+  "models.*.api": {
+    "kind": "string",
+    "help": "Which api it speaks: openai, anthropic or google."
+  },
+  "models.*.url": {
+    "kind": "string",
+    "help": "API base URL, including its required path. Many OpenAI-compatible servers require /v1. Check the server address; Rook does not guess missing path segments."
+  },
+  "models.*.key": {
+    "kind": "string",
+    "help": "API key reference: prefer secret:name or env:NAME. A literal key also works; its value is hidden here."
+  },
+  "models.*.context_window": {
+    "kind": "integer",
+    "help": "Overrides what the api assumes. Guesswork for anything self-hosted: a local model may serve 8k or a million."
+  },
+  "models.*.parallel": {
+    "kind": "integer",
+    "help": "How many agents may be asking this endpoint at once. One unless it says otherwise, and 0 lifts the limit."
+  },
+  "models.*.priority": {
+    "kind": "integer",
+    "help": "Where this sits in the order the agent falls through when the endpoint it was asked for cannot be reached. Lower is preferred."
+  },
+  "models.*.key_in_the_clear": {
+    "kind": "boolean",
+    "help": "Send the key to this endpoint over plain http, where it is on this network rather than this machine. Off, and it reaches no further than this network whatever it is set to."
+  },
+  "models.*.proxy": {
+    "kind": "string",
+    "help": "How a request to this source leaves the machine, where it differs from [proxy] models — see [ApiEndpoint::proxy], which means the same thing for a source that names an endpoint instead of carrying one."
+  },
+  "mcp.*.name": {
+    "kind": "string",
+    "help": "Unique server name. Tools appear as name__tool in the agent."
+  },
+  "mcp.*.command": {
+    "kind": "string",
+    "help": "Executable for a local stdio MCP server, such as npx, uvx or codegraph."
+  },
+  "mcp.*.args": {
+    "kind": "array",
+    "help": "Command arguments, one item per argument. No shell quoting or splitting is needed."
+  },
+  "mcp.*.env": {
+    "kind": "object",
+    "help": "Environment variables for the server process. Add each variable by name; values are hidden in the browser."
+  },
+  "mcp.*.cwd": {
+    "kind": "string",
+    "help": "Working directory for a local MCP server. Unset uses the workspace."
+  },
+  "mcp.*.url": {
+    "kind": "string",
+    "help": "HTTP MCP endpoint. Leave empty when using a local command."
+  },
+  "mcp.*.headers": {
+    "kind": "object",
+    "help": "HTTP request headers, such as Authorization. Values are hidden in the browser."
+  },
+  "mcp.*.startup_timeout_secs": {
+    "kind": "integer",
+    "help": "A server that never completes the handshake must fail fast rather than stalling the agent's startup."
+  },
+  "mcp.*.call_timeout_secs": {
+    "kind": "integer",
+    "help": "Maximum duration of one MCP tool call, in seconds."
+  },
+  "mcp.*.enabled": {
+    "kind": "boolean",
+    "help": "Connect this server for new agent sessions. Disabled entries remain in the configuration."
+  },
+  "lsp.*.language": {
+    "kind": "string",
+    "help": "What this server is for, e.g. rust. Used in messages only."
+  },
+  "lsp.*.command": {
+    "kind": "string",
+    "help": "Language-server executable to start for matching workspace files."
+  },
+  "lsp.*.args": {
+    "kind": "array",
+    "help": "Language-server command arguments, one item per argument."
+  },
+  "lsp.*.extensions": {
+    "kind": "array",
+    "help": "File extensions this server handles, without the dot."
+  },
+  "lsp.*.language_id": {
+    "kind": "string",
+    "help": "The LSP language id sent on didOpen; defaults to language."
+  },
+  "lsp.*.startup_timeout_secs": {
+    "kind": "integer",
+    "help": "Language-server initialization timeout in seconds."
+  },
+  "lsp.*.request_timeout_secs": {
+    "kind": "integer",
+    "help": "Language-server request timeout in seconds."
+  },
+  "lsp.*.diagnostics_wait_ms": {
+    "kind": "integer",
+    "help": "How long to wait for diagnostics after opening a file. They arrive as an unsolicited notification once the server has analysed it, so there is nothing to await other than time."
+  },
+  "lsp.*.enabled": {
+    "kind": "boolean",
+    "help": "Start this language server for matching workspaces."
+  },
+  "hooks.*.event": {
+    "kind": "string",
+    "help": "When the hook runs: session_start, prompt, pre_tool, post_tool or turn_end.",
+    "choices": [
+      "session_start",
+      "prompt",
+      "pre_tool",
+      "post_tool",
+      "turn_end"
+    ]
+  },
+  "hooks.*.match": {
+    "kind": "string",
+    "help": "Restricts the hook to matching subjects: a tool name for the tool events, the prompt otherwise. A plain string matches as a substring, /…/ is a regular expression."
+  },
+  "hooks.*.command": {
+    "kind": "string",
+    "help": "Shell command executed for the chosen event. Receives event JSON on stdin."
+  },
+  "hooks.*.timeout_secs": {
+    "kind": "integer",
+    "help": "Maximum hook runtime in seconds."
+  },
+  "storage.retention.max_session_age_days": {
+    "kind": "integer",
+    "help": "Prune sessions older than this many days. Remove the override to use the built-in retention period."
+  },
+  "storage.retention.max_sessions": {
+    "kind": "integer",
+    "help": "Maximum sessions retained. Protected sessions are excluded from pruning."
+  },
+  "storage.retention.max_total_bytes": {
+    "kind": "integer",
+    "help": "Target total store size in bytes. Protected data may prevent reaching the target."
+  },
+  "storage.retention.max_history_entries": {
+    "kind": "integer",
+    "help": "How many entries each appended-to history keeps: versions of one skill, states of the memory book, snapshots under one checkpoint name."
+  },
+  "storage.retention.protect_tags": {
+    "kind": "array",
+    "help": "Never pruned automatically, at any age."
+  },
+  "agent": {
+    "kind": "object",
+    "help": "Model, reasoning, context and per-turn limits."
+  },
+  "work": {
+    "kind": "object",
+    "help": "Default budgets and retry behaviour for durable goals."
+  },
+  "storage": {
+    "kind": "object",
+    "help": "Compression, cleanup and retention of local data."
+  },
+  "server": {
+    "kind": "object",
+    "help": "Daemon listener and shared workspaces. Restart the daemon to apply changes."
+  },
+  "sandbox": {
+    "kind": "object",
+    "help": "Approval rules, filesystem access, OS isolation and command limits."
+  },
+  "telemetry": {
+    "kind": "object",
+    "help": "Local logs and their size limit."
+  },
+  "memory": {
+    "kind": "object",
+    "help": "Persistent memory and its context budget."
+  },
+  "web": {
+    "kind": "object",
+    "help": "Web search, fetching and documentation gathering."
+  },
+  "proxy": {
+    "kind": "object",
+    "help": "Proxy routing for models, web tools, MCP and downloads. Empty inherits the environment; direct bypasses proxies."
+  },
+  "models": {
+    "kind": "object",
+    "help": "Named model configurations. Add a name, then set its model and endpoint or direct API address."
+  },
+  "endpoints": {
+    "kind": "object",
+    "help": "Reusable API addresses and credentials shared by models."
+  },
+  "mcp": {
+    "kind": "array",
+    "help": "External tool servers. Add a server, then choose a local command or HTTP URL. New connections use saved settings."
+  },
+  "lsp": {
+    "kind": "array",
+    "help": "Language servers. An empty list enables automatic discovery of installed servers."
+  },
+  "hooks": {
+    "kind": "array",
+    "help": "Commands run on agent events. Add a hook, then select its event and command."
+  },
+  "skill_sources": {
+    "kind": "array",
+    "help": "Repositories or directories used by skills search and install. One source per entry."
+  }
+}

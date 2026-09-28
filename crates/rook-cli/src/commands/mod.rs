@@ -1,6 +1,7 @@
 //! Command handlers grouped by the resource or workflow they own.
 
 pub(crate) mod config;
+mod config_edit;
 pub(crate) mod daemon;
 pub(crate) mod doctor;
 pub(crate) mod knowledge;
