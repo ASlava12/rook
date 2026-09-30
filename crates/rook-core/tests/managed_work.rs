@@ -61,7 +61,7 @@ fn steering_is_durable_idempotent_bounded_and_acknowledged_only_on_delivery() {
     );
     let receipt = work::steer(&rook, &run.id, correction("one", "use Russian")).unwrap();
     assert!(receipt.applied_at.is_none());
-    assert_eq!(work::pending(&rook, &run.id).unwrap().len(), 1);
+    assert_eq!(work::pending(&rook, &run.identity()).unwrap().len(), 1);
     assert_eq!(work::steer(&rook, &run.id, correction("one", "use Russian")).unwrap().id, "one");
     assert!(work::steer(&rook, &run.id, correction("one", "different")).is_err());
     assert!(work::steer(&rook, &run.id, correction("two", "another")).is_err());
@@ -71,14 +71,14 @@ fn steering_is_durable_idempotent_bounded_and_acknowledged_only_on_delivery() {
     let rook = engine(workspace.path(), store.path());
     assert_eq!(work::read(&rook, &run.id).unwrap().run.status, Status::Paused);
     let session = rook.start_session("receipt").unwrap();
-    let incoming = work::pending(&rook, &run.id).unwrap();
+    let incoming = work::pending(&rook, &run.identity()).unwrap();
     assert!(
-        work::accept(&rook, &run.id, session, &incoming[0]).unwrap().is_none(),
+        work::accept(&rook, &run.identity(), session, &incoming[0]).unwrap().is_none(),
         "pause keeps messages queued"
     );
     work::control(&rook, &run.id, Action::Resume).unwrap();
-    assert!(work::accept(&rook, &run.id, session, &incoming[0]).unwrap().is_some());
-    assert!(work::pending(&rook, &run.id).unwrap().is_empty());
+    assert!(work::accept(&rook, &run.identity(), session, &incoming[0]).unwrap().is_some());
+    assert!(work::pending(&rook, &run.identity()).unwrap().is_empty());
     assert!(rook.goal(session).unwrap().unwrap().contains("use Russian"));
     assert_eq!(
         work::read(&rook, &run.id).unwrap().run.instructions[0].session.as_deref(),
@@ -132,7 +132,7 @@ fn editing_or_withdrawing_a_queued_goal_command_does_not_change_the_goal_until_a
     .unwrap();
     assert_eq!(work::read(&rook, &run.id).unwrap().run.goal, "original goal");
     assert_eq!(rook.goal(session).unwrap().as_deref(), Some("original goal"));
-    work::accept(&rook, &run.id, session, "edited").unwrap();
+    work::accept(&rook, &run.identity(), session, "edited").unwrap();
     assert_eq!(work::read(&rook, &run.id).unwrap().run.goal, "final goal");
     assert!(rook.goal(session).unwrap().unwrap().starts_with("final goal"));
 }
@@ -213,6 +213,134 @@ async fn promotion_attaches_the_existing_turn_to_goal_steering_and_pause() {
     }
 }
 
+fn conversation_goal(rook: &Rook, session: u128, goal: &str) -> rook_proto::work::Run {
+    work::start(
+        rook,
+        Start {
+            conversation: Some(rook_proto::work::Conversation {
+                session: rook_store::format_session_id(session),
+                model: None,
+                effort: "high".into(),
+                stance: "assist".into(),
+                options: Default::default(),
+            }),
+            goal: goal.into(),
+            workspace: None,
+            autonomous: false,
+            max_iterations: None,
+            max_tokens: None,
+            max_seconds: None,
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_replaced_goal_cannot_lend_its_receipts_to_an_old_consumer_even_when_ids_match() {
+    let workspace = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let rook = engine(workspace.path(), store.path());
+    let session = rook.start_session("generation").unwrap();
+    let old = conversation_goal(&rook, session, "old goal");
+    work::steer(&rook, &old.id, correction("same", "old text")).unwrap();
+    let observed = work::pending(&rook, &old.identity()).unwrap();
+    work::control(&rook, &old.id, Action::Cancel).unwrap();
+    let replacement = conversation_goal(&rook, session, "replacement goal");
+    assert_eq!(old.id, replacement.id);
+    assert_ne!(old.identity(), replacement.identity());
+    work::steer(&rook, &replacement.id, correction("same", "/goal revised replacement")).unwrap();
+    drop(rook);
+    let rook = engine(workspace.path(), store.path());
+    assert!(work::should_stop(&rook, &old.identity()).unwrap());
+    assert!(work::pending(&rook, &old.identity()).unwrap().is_empty());
+    assert!(work::accept(&rook, &old.identity(), session, &observed[0]).unwrap().is_none());
+    assert_eq!(rook.goal(session).unwrap().as_deref(), Some("replacement goal"));
+    assert!(work::read(&rook, &replacement.id).unwrap().run.instructions[0].queued());
+    let other = rook.start_session("unrelated").unwrap();
+    assert!(work::accept(&rook, &replacement.identity(), other, "same").is_err());
+    assert!(rook.store.events(other, 0, 10).unwrap().is_empty());
+    let accepted = work::accept(&rook, &replacement.identity(), session, "same").unwrap().unwrap();
+    assert_eq!(accepted.receipt.reference, format!("goal.{}.same", replacement.generation));
+    assert_eq!(work::read(&rook, &replacement.id).unwrap().run.goal, "revised replacement");
+    work::control(&rook, &replacement.id, Action::Cancel).unwrap();
+    work::forget(&rook, &replacement.id).unwrap();
+    assert!(work::should_stop(&rook, &replacement.identity()).unwrap());
+    assert!(work::pending(&rook, &replacement.identity()).unwrap().is_empty());
+    assert!(work::accept(&rook, &replacement.identity(), session, "same").unwrap().is_none());
+}
+
+#[tokio::test]
+async fn replacing_a_promoted_goal_during_acceptance_stops_its_old_loop_before_another_request() {
+    let workspace = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let rook = engine(workspace.path(), store.path());
+    let session = rook.start_session("promoted replacement").unwrap();
+    let provider = Script::new(vec![answer("must not ask")]);
+    let mut agent = AgentLoop::new(&rook, provider.clone(), session);
+    let old = conversation_goal(&rook, session, "old goal");
+    work::steer(&rook, &old.id, correction("first", "first old message")).unwrap();
+    work::steer(&rook, &old.id, correction("same", "second old message")).unwrap();
+    let mut replacement = None;
+    let mut heard = Vec::new();
+    let outcome = agent
+        .run_with("Proceed", |progress| {
+            if let rook_core::agent::Progress::Heard { text, receipt } = progress {
+                heard.push(text.to_owned());
+                let receipt = receipt.unwrap();
+                assert_eq!(receipt.reference, format!("goal.{}.first", old.generation));
+                work::control(&rook, &old.id, Action::Cancel).unwrap();
+                let next = conversation_goal(&rook, session, "replacement goal");
+                work::steer(&rook, &next.id, correction("same", "NEW_GENERATION_TEXT")).unwrap();
+                replacement = Some(next);
+            }
+        })
+        .await
+        .unwrap();
+    let next = replacement.expect("replacement must happen between observed receipts");
+    assert_eq!(agent.managed_work, Some(old.identity()), "an attached loop never adopts a new generation");
+    assert_eq!(outcome.stopped, "work_paused");
+    assert_eq!(heard.len(), 1);
+    assert!(provider.seen.lock().unwrap().is_empty());
+    assert!(work::read(&rook, &next.id).unwrap().run.instructions[0].queued());
+    assert!(
+        !rook
+            .transcript(session, 0, 100, 8192)
+            .unwrap()
+            .iter()
+            .any(|e| e.body.contains("NEW_GENERATION_TEXT"))
+    );
+
+    let mut replacement_agent = AgentLoop::new(&rook, Script::new(vec![answer("done")]), session);
+    replacement_agent.run("Continue the replacement").await.unwrap();
+    assert_eq!(replacement_agent.managed_work, Some(next.identity()));
+    assert!(!work::read(&rook, &next.id).unwrap().run.instructions[0].queued());
+}
+
+#[tokio::test]
+async fn replacement_after_context_preparation_cannot_start_an_old_generations_model_request() {
+    let workspace = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let rook = engine(workspace.path(), store.path());
+    let session = rook.start_session("replacement at request boundary").unwrap();
+    let old = conversation_goal(&rook, session, "original goal");
+    let provider = Script::new(vec![answer("must not ask")]);
+    let mut agent = AgentLoop::new(&rook, provider.clone(), session);
+    let mut replaced = false;
+    let outcome = agent
+        .run_with("Proceed", |progress| {
+            if matches!(progress, rook_core::agent::Progress::Context { .. }) && !replaced {
+                work::control(&rook, &old.id, Action::Cancel).unwrap();
+                conversation_goal(&rook, session, "replacement goal");
+                replaced = true;
+            }
+        })
+        .await
+        .unwrap();
+    assert!(replaced, "the test must reach the last preparation boundary");
+    assert_eq!(outcome.stopped, "work_paused");
+    assert!(provider.seen.lock().unwrap().is_empty());
+}
+
 #[test]
 fn a_failed_transcript_append_leaves_the_instruction_queued_for_retry() {
     let workspace = tempfile::tempdir().unwrap();
@@ -221,17 +349,17 @@ fn a_failed_transcript_append_leaves_the_instruction_queued_for_retry() {
     let run = start(&rook);
     work::steer(&rook, &run.id, correction("retry", "keep this correction")).unwrap();
     let missing = rook_store::new_session_id();
-    assert!(work::accept(&rook, &run.id, missing, "retry").is_err());
-    assert_eq!(work::pending(&rook, &run.id).unwrap(), ["retry"]);
+    assert!(work::accept(&rook, &run.identity(), missing, "retry").is_err());
+    assert_eq!(work::pending(&rook, &run.identity()).unwrap(), ["retry"]);
     assert!(rook.goal(missing).unwrap().is_none());
     drop(rook);
     let rook = engine(workspace.path(), store.path());
     let session = rook.start_session("recovered").unwrap();
-    assert!(work::accept(&rook, &run.id, session, "retry").unwrap().is_some());
+    assert!(work::accept(&rook, &run.identity(), session, "retry").unwrap().is_some());
     drop(rook);
     let rook = engine(workspace.path(), store.path());
-    assert!(work::pending(&rook, &run.id).unwrap().is_empty());
-    assert!(work::accept(&rook, &run.id, session, "retry").unwrap().is_none());
+    assert!(work::pending(&rook, &run.identity()).unwrap().is_empty());
+    assert!(work::accept(&rook, &run.identity(), session, "retry").unwrap().is_none());
     let messages: Vec<_> = rook
         .store
         .events(session, 0, 100)
@@ -258,14 +386,14 @@ fn concurrent_acceptance_publishes_one_message_and_excludes_unaccepted_text_from
             .map(|_| {
                 scope.spawn(|| {
                     barrier.wait();
-                    work::accept(&rook, &run.id, session, "one").unwrap().is_some()
+                    work::accept(&rook, &run.identity(), session, "one").unwrap().is_some()
                 })
             })
             .collect();
         handles.into_iter().map(|handle| usize::from(handle.join().unwrap())).sum::<usize>()
     });
     assert_eq!(accepted, 1);
-    assert_eq!(work::pending(&rook, &run.id).unwrap(), ["two"]);
+    assert_eq!(work::pending(&rook, &run.identity()).unwrap(), ["two"]);
     let goal = rook.goal(session).unwrap().unwrap();
     assert!(goal.contains("ACCEPTED_TEXT"));
     assert!(!goal.contains("STILL_QUEUED_TEXT"));
@@ -290,7 +418,7 @@ async fn a_live_message_cannot_acknowledge_a_receipt_by_spelling_its_text_prefix
     let session = rook.start_session("typed receipts").unwrap();
     let provider = Script::new(vec![answer("Done")]);
     let mut agent = AgentLoop::new(&rook, provider.clone(), session);
-    agent.managed_work = Some(run.id.clone());
+    agent.managed_work = Some(run.identity());
     let spelled = "[work instruction one]\nthis is only user text";
     agent.interjections.say(spelled);
     let mut saw_live = false;
@@ -326,7 +454,7 @@ fn editing_keeps_submission_identity_and_acceptance_reads_the_latest_revision() 
     rook.config.work.max_message_bytes = 12;
     let run = start(&rook);
     work::steer(&rook, &run.id, correction("edit", "original")).unwrap();
-    let pending = work::pending(&rook, &run.id).unwrap();
+    let pending = work::pending(&rook, &run.identity()).unwrap();
     assert!(
         work::edit_instruction(&rook, &run.id, "edit", EditInstruction { revision: 0, text: "x".repeat(13) })
             .is_err()
@@ -345,7 +473,7 @@ fn editing_keeps_submission_identity_and_acceptance_reads_the_latest_revision() 
             .is_err()
     );
     let session = rook.start_session("edited").unwrap();
-    let text = work::accept(&rook, &run.id, session, &pending[0]).unwrap().unwrap();
+    let text = work::accept(&rook, &run.identity(), session, &pending[0]).unwrap().unwrap();
     assert_eq!(text.receipt.reference, format!("goal.{}.edit", run.generation));
     assert_eq!(text.receipt.revision, 1);
     assert_eq!(text.receipt.status, rook_proto::queue::Status::Accepted);
@@ -373,7 +501,7 @@ fn withdrawing_is_durable_and_a_submission_retry_cannot_requeue_it() {
     let rook = engine(workspace.path(), store.path());
     let run = start(&rook);
     work::steer(&rook, &run.id, correction("withdraw", "do this later")).unwrap();
-    let observed = work::pending(&rook, &run.id).unwrap();
+    let observed = work::pending(&rook, &run.identity()).unwrap();
     let receipt =
         work::withdraw_instruction(&rook, &run.id, "withdraw", WithdrawInstruction { revision: 0 }).unwrap();
     assert!(receipt.withdrawn_at.is_some());
@@ -381,7 +509,7 @@ fn withdrawing_is_durable_and_a_submission_retry_cannot_requeue_it() {
     assert_eq!(receipt.revision, 1);
     drop(rook);
     let rook = engine(workspace.path(), store.path());
-    assert!(work::pending(&rook, &run.id).unwrap().is_empty());
+    assert!(work::pending(&rook, &run.identity()).unwrap().is_empty());
     assert!(
         work::steer(&rook, &run.id, correction("withdraw", "do this later")).unwrap().withdrawn_at.is_some()
     );
@@ -389,7 +517,7 @@ fn withdrawing_is_durable_and_a_submission_retry_cannot_requeue_it() {
         work::withdraw_instruction(&rook, &run.id, "withdraw", WithdrawInstruction { revision: 0 }).unwrap();
     assert_eq!(again.revision, 1);
     let session = rook.start_session("stale pending snapshot").unwrap();
-    assert!(work::accept(&rook, &run.id, session, &observed[0]).unwrap().is_none());
+    assert!(work::accept(&rook, &run.identity(), session, &observed[0]).unwrap().is_none());
     assert!(rook.store.events(session, 0, 10).unwrap().is_empty());
 }
 
@@ -416,7 +544,7 @@ fn editing_or_withdrawing_races_acceptance_without_mutating_accepted_context() {
             });
             let accept = scope.spawn(|| {
                 barrier.wait();
-                work::accept(&rook, &run.id, session, &id)
+                work::accept(&rook, &run.identity(), session, &id)
             });
             (edit.join().unwrap(), accept.join().unwrap().unwrap().unwrap())
         });
@@ -436,7 +564,7 @@ fn editing_or_withdrawing_races_acceptance_without_mutating_accepted_context() {
             });
             let accept = scope.spawn(|| {
                 barrier.wait();
-                work::accept(&rook, &run.id, session, &id)
+                work::accept(&rook, &run.identity(), session, &id)
             });
             (withdraw.join().unwrap(), accept.join().unwrap().unwrap())
         });

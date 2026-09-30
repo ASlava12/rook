@@ -315,6 +315,36 @@ unchanged during this gate. The earlier targeted integration compile failure
 was a missing qualified `EventKind` in a new test; it was fixed before the
 passing targeted run and full gate.
 
+The seventh block pins a managed consumer to `RunIdentity` (run ID and
+generation), including a legacy generation derived from the existing creation
+time. `AgentLoop`, observed durable inputs, queue acceptance and safe-boundary
+checks all carry that identity. Missing or replaced runs stop their old
+consumer; old receipt IDs cannot consume an identically named receipt from a
+new goal. Acceptance checks the generation under the same mutation lock as
+replacement and also rejects a different conversation. Pre-promotion ordinary
+messages wait until the loop joins the current runnable goal; a stale goal
+consumer cannot accept them. The loop checks again after consuming a batch and
+immediately before a work-model request, since context preparation and callbacks
+can outlive the goal. Queue references share `Run::identity()` for the legacy
+fallback. No persisted fields or transport event shapes change. Embedded Rust
+callers now pass `run.identity()` to the consumer APIs rather than only its ID.
+
+Focused tests passed for replacing a promoted goal between observed messages,
+replacing it after context preparation but before the model request, identical
+receipt IDs across generations, reopen, forgotten goals, conversation isolation,
+legacy generation references, and retained ordinary messages across promotion,
+pause and replacement. The replacement's fresh loop accepts its own message;
+the stale loop issues no further work-model request. Logs:
+`/tmp/rook-pi-generation-managed-final.log` and
+`/tmp/rook-pi-generation-queue-final.log`.
+
+The seventh block's full isolated `cargo xtask ci` passed with exit status 0 in
+551.3 seconds, including the complete TUI suite and doctests
+(`/tmp/rook-pi-generation-ci.log`). Rust sources were unchanged during the gate.
+The combined CI/compaction process exited 0; storage remained at 4.02 MiB on
+disk, 37.1x dictionary compression and 5.8x end-to-end
+(`/tmp/rook-pi-generation-compaction.log`).
+
 Follow-up admission still needs a durable queue-to-execution reservation that
 names a complete ordinary turn or whole goal, and recovery distinguishing
 reserved, admitted and completed work. The new transaction is a prerequisite,
@@ -344,8 +374,11 @@ channels across the continuation and publish terminal `Done` only when the
 chain ends. Creating an `AgentLoop` per follow-up is necessary: its secrets,
 deadline, token allowance, failed claims and delegation counter are turn-local,
 whereas policy, approval/input channels and MCP/LSP/jobs equipment are shared.
-An agent attached to a managed run still holds only its run ID; generation-aware
-acceptance must be added before replacement-goal lifecycle guarantees are made.
+The seventh block establishes generation-aware message consumption; the future
+follow-up reservation and supervisor handoff still need their own generation
+checks and restart tests. Legacy in-memory input remains outside this durable
+identity contract. Do not infer completed follow-up lifecycle guarantees from
+these consumer checks.
 
 `/tmp/rook-pi-message-queue` retains its older staged baseline and preparation
 patch. Main is now authoritative; do not reapply that worktree or merge its diff

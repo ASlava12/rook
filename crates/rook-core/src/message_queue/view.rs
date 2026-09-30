@@ -13,7 +13,7 @@ fn stale() -> CoreError {
 }
 
 fn generation(run: &Run) -> String {
-    if run.generation.is_empty() { format!("legacy-{}", run.created_at) } else { run.generation.clone() }
+    run.identity().generation
 }
 
 fn reference(run: Option<&Run>, message: &Steering) -> String {
@@ -223,7 +223,7 @@ mod tests {
             Change::Edit { reference: saved.reference, revision: 0, text: "edited".into() },
         )
         .unwrap();
-        super::super::accept(&rook, session, "ordinary").unwrap();
+        super::super::accept(&rook, session, "ordinary", None).unwrap();
         let run = goal(&rook, session);
         let target = page(&rook, session, &Query::default()).unwrap().submission_target;
         let goal_request = Change::Submit {
@@ -346,7 +346,7 @@ mod tests {
             // The cursor still names an accepted receipt even though the next
             // pending-only page no longer displays that receipt.
             let last = page.items.last().unwrap();
-            super::super::accept(&rook, session, &last.receipt.id).unwrap();
+            super::super::accept(&rook, session, &last.receipt.id, None).unwrap();
             query.after = Some(after);
         }
         assert_eq!(seen, (0..16).map(|index| index.to_string()).collect::<Vec<_>>());
@@ -392,7 +392,7 @@ mod tests {
         let current = page(&rook, session, &Query::default()).unwrap();
         let new_work = &current.items[1];
         assert_eq!(new_work.receipt.text, "new goal correction");
-        managed::accept(&rook, &next.id, session, "same").unwrap();
+        managed::accept(&rook, &next.identity(), session, "same").unwrap();
         assert!(
             change(&rook, session, Change::Withdraw { reference: new_work.reference.clone(), revision: 0 })
                 .is_err()
@@ -420,5 +420,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(page(&rook, session, &Query::default()).unwrap().items[0].reference, item.reference);
+        let legacy = managed::read(&rook, &run.id).unwrap().run.identity();
+        assert_eq!(managed::pending(&rook, &legacy).unwrap(), ["one"]);
+        let accepted = managed::accept(&rook, &legacy, session, "one").unwrap().unwrap();
+        assert_eq!(accepted.receipt.reference, item.reference);
+        managed::control(&rook, &run.id, Action::Cancel).unwrap();
+        goal(&rook, session);
+        assert!(managed::should_stop(&rook, &legacy).unwrap());
     }
 }

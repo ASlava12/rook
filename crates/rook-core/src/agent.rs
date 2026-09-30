@@ -556,7 +556,7 @@ pub struct AgentLoop<'a> {
     /// has to outlive one.
     pub interjections: std::sync::Arc<Interjections>,
     /// A durable run supplies corrections at the same safe boundaries as chat.
-    pub managed_work: Option<String>,
+    pub managed_work: Option<rook_proto::work::RunIdentity>,
     pub depth: u32,
     pub max_steps: u32,
     /// What is left of the turn's allowance, in tokens, its sub-agents
@@ -856,9 +856,7 @@ impl<'a> AgentLoop<'a> {
         let mut anchor: Option<(usize, usize)> = None;
         'turn: while outcome.steps < self.max_steps {
             self.refresh_managed_work()?;
-            if let Some(id) = &self.managed_work
-                && crate::work::managed::should_stop(self.rook, id)?
-            {
+            if self.managed_stopped()? {
                 outcome.stopped = "work_paused".into();
                 break;
             }
@@ -890,6 +888,10 @@ impl<'a> AgentLoop<'a> {
             // steerable instead of only stoppable.
             for said in self.incoming()? {
                 self.hear(&said, &mut messages, &mut on_progress)?;
+            }
+            if self.managed_stopped()? {
+                outcome.stopped = "work_paused".into();
+                break;
             }
 
             if crate::results::prune(self.rook, self.session, &mut messages)? > 0 {
@@ -988,6 +990,13 @@ impl<'a> AgentLoop<'a> {
             // question it raises: whether to keep waiting or go and look.
             let patience =
                 rook_llm::first_token_patience(self.rook.config.agent.stream_idle(), request.prompt_bytes());
+            // Compaction and context callbacks can outlive the goal this loop
+            // attached to. Recheck immediately before asking the work model.
+            self.refresh_managed_work()?;
+            if self.managed_stopped()? {
+                outcome.stopped = "work_paused".into();
+                break;
+            }
             let mut timing = crate::diagnostics::Timer::start(
                 self.rook,
                 self.session,
@@ -1118,9 +1127,7 @@ impl<'a> AgentLoop<'a> {
             }
 
             self.refresh_managed_work()?;
-            if let Some(id) = &self.managed_work
-                && crate::work::managed::should_stop(self.rook, id)?
-            {
+            if self.managed_stopped()? {
                 outcome.stopped = "work_paused".into();
                 break;
             }
@@ -1155,6 +1162,10 @@ impl<'a> AgentLoop<'a> {
                 // in the queue it would reach the next prompt instead, folded
                 // into it, which is not where the person put it.
                 let said = self.incoming()?;
+                if self.managed_stopped()? {
+                    outcome.stopped = "work_paused".into();
+                    break;
+                }
                 if said.is_empty() {
                     // Handed to the model once, so it can answer from them: a
                     // parent that started three readers and ended the turn was
@@ -1309,6 +1320,10 @@ impl<'a> AgentLoop<'a> {
                             .await;
                         // A new instruction can arrive during the check too.
                         let said = self.incoming()?;
+                        if self.managed_stopped()? {
+                            outcome.stopped = "work_paused".into();
+                            break;
+                        }
                         if !said.is_empty() {
                             messages.push(carried.clone());
                             for text in said {
@@ -1413,9 +1428,7 @@ impl<'a> AgentLoop<'a> {
                 // Pausing during one call must not execute the rest of a batch
                 // that the model requested before the user pressed pause.
                 self.refresh_managed_work()?;
-                if let Some(id) = &self.managed_work
-                    && crate::work::managed::should_stop(self.rook, id)?
-                {
+                if self.managed_stopped()? {
                     outcome.stopped = "work_paused".into();
                     break 'turn;
                 }

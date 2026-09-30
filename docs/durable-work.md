@@ -143,6 +143,14 @@ destination and the original ID/text, including when the receipt has since been
 edited, withdrawn or accepted. Replacing a goal invalidates its old destination;
 the request is rejected instead of being redirected to the replacement.
 
+A running agent also pins the goal generation it joined. Reading a pending
+message ID does not authorize later acceptance from a replacement goal: the
+generation and conversation are checked again under the receipt mutation lock.
+An old consumer stops at a safe boundary if its goal was replaced or forgotten.
+While a goal is active, pending session messages from before promotion are
+retained until an agent has joined the current runnable goal. This does not interrupt an operation already
+in flight or make legacy in-memory submissions generation-qualified.
+
 There is one unconfirmed send per window. In the TUI, open `/queue`: **u** retries
 the saved send and **c** forgets the local retry. That retry survives a daemon
 restart while the TUI window stays open, but is not saved across TUI restarts.

@@ -2,7 +2,9 @@
 //! so a user's correction can be saved while the model or a tool is busy.
 use super::receipts::WRITING;
 
-use rook_proto::work::{Action, EditInstruction, Run, Start, Status, Steer, Steering, WithdrawInstruction};
+use rook_proto::work::{
+    Action, EditInstruction, Run, RunIdentity, Start, Status, Steer, Steering, WithdrawInstruction,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{CoreError, Result, Rook};
@@ -314,22 +316,37 @@ pub fn forget(rook: &Rook, id: &str) -> Result<()> {
 
 /// Pending receipt IDs. Text is read again at acceptance, under the same lock
 /// as queue edits; a previously observed string is never authority to deliver.
-pub fn pending(rook: &Rook, id: &str) -> Result<Vec<String>> {
-    Ok(read(rook, id)?.run.instructions.iter().filter(|m| m.queued()).map(|m| m.id.clone()).collect())
+pub fn pending(rook: &Rook, identity: &RunIdentity) -> Result<Vec<String>> {
+    let Some(saved) = read_identity(rook, identity)? else { return Ok(Vec::new()) };
+    Ok(saved.run.instructions.iter().filter(|m| m.queued()).map(|m| m.id.clone()).collect())
+}
+
+fn read_identity(rook: &Rook, identity: &RunIdentity) -> Result<Option<Saved>> {
+    let Some(bytes) = rook.store.kv_get(&key(&identity.id)?)? else { return Ok(None) };
+    let saved: Saved = serde_json::from_slice(&bytes)?;
+    Ok((saved.run.identity() == *identity).then_some(saved))
 }
 
 /// Accept exactly once and publish the transcript, goal and receipt in one
 /// durable transaction. Callers only put the returned text into model context.
 pub fn accept(
     rook: &Rook,
-    run: &str,
+    run: &RunIdentity,
     session: u128,
     id: &str,
 ) -> Result<Option<crate::message_queue::Accepted>> {
     let _lock = WRITING.lock().unwrap_or_else(|e| e.into_inner());
-    let mut saved = read(rook, run)?;
+    let Some(mut saved) = read_identity(rook, run)? else { return Ok(None) };
     if !saved.run.status.runnable() {
         return Ok(None);
+    }
+    if saved
+        .run
+        .conversation
+        .as_ref()
+        .is_some_and(|conversation| rook_store::parse_session_id(&conversation.session) != Some(session))
+    {
+        return Err(bad("instruction belongs to another conversation"));
     }
     let index = saved
         .run
@@ -354,7 +371,7 @@ pub fn accept(
     saved.run.updated_at = now();
     let current = goal(&saved.run);
     let encoded = crate::persistence::encode(&saved)?;
-    let record = key(run)?;
+    let record = key(&run.id)?;
     let goal_key = format!("goal/{session:032x}");
     use rook_store::{EventKind, Kind, NewEvent};
     rook.store.append_events_with_values(
@@ -368,8 +385,8 @@ pub fn accept(
     Ok(Some(crate::message_queue::Accepted { text, receipt }))
 }
 
-pub fn should_stop(rook: &Rook, id: &str) -> Result<bool> {
-    Ok(!read(rook, id)?.run.status.runnable())
+pub fn should_stop(rook: &Rook, identity: &RunIdentity) -> Result<bool> {
+    Ok(read_identity(rook, identity)?.is_none_or(|saved| !saved.run.status.runnable()))
 }
 
 fn clipped(text: &str, max: usize) -> String {
@@ -585,7 +602,7 @@ pub async fn advance<'a>(
             return Ok(read(rook, id)?.run);
         }
     };
-    agent.managed_work = Some(id.into());
+    agent.managed_work = Some(saved.run.identity());
     if saved.run.autonomous && saved.run.conversation.is_none() {
         agent.allow_everything_not_denied();
     }
@@ -678,7 +695,7 @@ pub async fn advance<'a>(
         None
     };
     let revision = read(rook, id)?.run.instructions.len();
-    let pending = !pending(rook, id)?.is_empty();
+    let pending = !pending(rook, &saved.run.identity())?.is_empty();
     let checks_pass = report.as_ref().is_none_or(|r| r.clean());
     let candidate = crate::agent::finished(&outcome.stopped)
         && checks_pass

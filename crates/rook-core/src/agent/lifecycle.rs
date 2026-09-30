@@ -9,7 +9,7 @@ use rook_store::EventKind;
 pub(super) enum Incoming {
     Live(String),
     Session { id: String },
-    Durable { run: String, id: String },
+    Durable { run: rook_proto::work::RunIdentity, id: String },
 }
 
 impl AgentLoop<'_> {
@@ -20,13 +20,20 @@ impl AgentLoop<'_> {
         if self.managed_work.is_none() && self.depth == 0 {
             self.managed_work = crate::work::managed::for_session(self.rook, self.session)?
                 .filter(|run| !run.status.terminal())
-                .map(|run| run.id);
+                .map(|run| run.identity());
         }
         Ok(())
     }
 
+    pub(super) fn managed_stopped(&self) -> Result<bool> {
+        self.managed_work.as_ref().map_or(Ok(false), |run| crate::work::managed::should_stop(self.rook, run))
+    }
+
     pub(super) fn incoming(&mut self) -> Result<Vec<Incoming>> {
         self.refresh_managed_work()?;
+        if self.managed_stopped()? {
+            return Ok(Vec::new());
+        }
         let mut messages: Vec<_> = self.interjections.take().into_iter().map(Incoming::Live).collect();
         messages.extend(
             crate::message_queue::pending(self.rook, self.session)?
@@ -55,7 +62,9 @@ impl AgentLoop<'_> {
                 (text.clone(), None)
             }
             Incoming::Session { id } => {
-                let Some(accepted) = crate::message_queue::accept(self.rook, self.session, id)? else {
+                let Some(accepted) =
+                    crate::message_queue::accept(self.rook, self.session, id, self.managed_work.as_ref())?
+                else {
                     return Ok(());
                 };
                 (accepted.text, Some(accepted.receipt))

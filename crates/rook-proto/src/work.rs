@@ -140,3 +140,23 @@ pub struct Run {
     pub reply: String,
     pub verification: String,
 }
+
+/// A running consumer must not adopt a replacement goal with the same ID.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunIdentity {
+    pub id: String,
+    pub generation: String,
+}
+
+impl Run {
+    pub fn identity(&self) -> RunIdentity {
+        RunIdentity {
+            id: self.id.clone(),
+            generation: if self.generation.is_empty() {
+                format!("legacy-{}", self.created_at)
+            } else {
+                self.generation.clone()
+            },
+        }
+    }
+}

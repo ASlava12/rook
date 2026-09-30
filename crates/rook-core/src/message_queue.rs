@@ -78,12 +78,21 @@ pub struct Accepted {
     pub receipt: rook_proto::queue::Notice,
 }
 
-pub(crate) fn accept(rook: &Rook, session: u128, id: &str) -> Result<Option<Accepted>> {
+pub(crate) fn accept(
+    rook: &Rook,
+    session: u128,
+    id: &str,
+    consumer: Option<&rook_proto::work::RunIdentity>,
+) -> Result<Option<Accepted>> {
     let _lock = receipts::WRITING.lock().unwrap_or_else(|e| e.into_inner());
-    if managed::for_session(rook, session)?
-        .is_some_and(|run| !run.status.terminal() && !run.status.runnable())
-    {
-        return Ok(None);
+    match consumer {
+        Some(identity) if managed::should_stop(rook, identity)? => return Ok(None),
+        None if managed::for_session(rook, session)?.is_some_and(|run| !run.status.terminal()) => {
+            // Promotion may happen after the loop read its input list. Attach
+            // to that goal before consuming pre-promotion session messages.
+            return Ok(None);
+        }
+        _ => {}
     }
     let mut messages = list(rook, session)?;
     let message = messages
@@ -142,10 +151,13 @@ mod tests {
         assert_eq!(submit(&rook, session, request("one", "original")).unwrap().text, "new text");
         assert!(submit(&rook, session, request("two", "withdraw me")).unwrap().withdrawn_at.is_some());
         assert_eq!(
-            accept(&rook, session, &observed[0]).unwrap().as_ref().map(|accepted| accepted.text.as_str()),
+            accept(&rook, session, &observed[0], None)
+                .unwrap()
+                .as_ref()
+                .map(|accepted| accepted.text.as_str()),
             Some("new text")
         );
-        assert!(accept(&rook, session, "two").unwrap().is_none());
+        assert!(accept(&rook, session, "two", None).unwrap().is_none());
         assert!(
             !edit(&rook, session, "one", EditInstruction { revision: 0, text: "new text".into() })
                 .unwrap()
@@ -154,7 +166,7 @@ mod tests {
         assert!(withdraw(&rook, session, "one", WithdrawInstruction { revision: 1 }).is_err());
         drop(rook);
         let rook = engine(dir.path());
-        assert!(accept(&rook, session, "one").unwrap().is_none());
+        assert!(accept(&rook, session, "one", None).unwrap().is_none());
         let events = rook.store.events(session, 0, 100).unwrap();
         assert_eq!(events.iter().filter(|e| e.record.kind == EventKind::UserMessage).count(), 1);
         rook.delete_session(session).unwrap();
@@ -180,6 +192,60 @@ mod tests {
     }
 
     #[test]
+    fn pre_promotion_messages_require_the_current_goal_consumer_and_survive_its_replacement() {
+        use rook_proto::work::{Action, Conversation, Start};
+        let dir = tempfile::tempdir().unwrap();
+        let rook = engine(dir.path());
+        let session = rook.start_session("promotion").unwrap();
+        submit(&rook, session, request("one", "before promotion")).unwrap();
+        submit(&rook, session, request("two", "still pending")).unwrap();
+        let start = || {
+            managed::start(
+                &rook,
+                Start {
+                    goal: "current goal".into(),
+                    workspace: None,
+                    conversation: Some(Conversation {
+                        session: rook_store::format_session_id(session),
+                        model: None,
+                        effort: "high".into(),
+                        stance: "assist".into(),
+                        options: Default::default(),
+                    }),
+                    autonomous: false,
+                    max_iterations: None,
+                    max_tokens: None,
+                    max_seconds: None,
+                },
+            )
+            .unwrap()
+        };
+        let old = start();
+        assert!(accept(&rook, session, "one", None).unwrap().is_none());
+        assert!(accept(&rook, session, "one", Some(&old.identity())).unwrap().is_some());
+        managed::control(&rook, &old.id, Action::Pause).unwrap();
+        assert!(accept(&rook, session, "two", Some(&old.identity())).unwrap().is_none());
+        managed::control(&rook, &old.id, Action::Cancel).unwrap();
+        let current = start();
+        assert_ne!(old.identity(), current.identity());
+        assert!(accept(&rook, session, "two", Some(&old.identity())).unwrap().is_none());
+        assert_eq!(pending(&rook, session).unwrap(), ["two"]);
+        let accepted = accept(&rook, session, "two", Some(&current.identity())).unwrap().unwrap();
+        assert_eq!(accepted.text, "still pending");
+        assert_eq!(accepted.receipt.reference, "session.two");
+        assert!(pending(&rook, session).unwrap().is_empty());
+        assert_eq!(
+            rook.store
+                .events(session, 0, 100)
+                .unwrap()
+                .iter()
+                .filter(|event| event.record.kind == EventKind::UserMessage)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
     fn withdrawing_and_accepting_an_ordinary_message_have_one_winner() {
         let dir = tempfile::tempdir().unwrap();
         let rook = engine(dir.path());
@@ -191,7 +257,7 @@ mod tests {
             let (accepted, withdrawn) = std::thread::scope(|scope| {
                 let accepting = scope.spawn(|| {
                     barrier.wait();
-                    accept(&rook, session, &id).unwrap()
+                    accept(&rook, session, &id, None).unwrap()
                 });
                 let withdrawing = scope.spawn(|| {
                     barrier.wait();
