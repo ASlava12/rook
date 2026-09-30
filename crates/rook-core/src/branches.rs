@@ -1,6 +1,7 @@
 //! Bounded, lazy conversation trees over existing session parent links.
 use crate::{CoreError, Result, Rook};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -10,6 +11,9 @@ pub struct Settings {
     pub scan_sessions: usize,
     pub ancestors: usize,
     pub edit_bytes: usize,
+    pub name_bytes: usize,
+    pub bookmark_entries: usize,
+    pub bookmark_bytes: usize,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -19,6 +23,9 @@ impl Default for Settings {
             scan_sessions: 256,
             ancestors: 32,
             edit_bytes: 1024 * 1024,
+            name_bytes: 256,
+            bookmark_entries: 64,
+            bookmark_bytes: 16384,
         }
     }
 }
@@ -30,6 +37,9 @@ impl Settings {
             ("scan_sessions", self.scan_sessions, 1, 4096),
             ("ancestors", self.ancestors, 1, 64),
             ("edit_bytes", self.edit_bytes, 1024, 8 * 1024 * 1024),
+            ("name_bytes", self.name_bytes, 1, 4096),
+            ("bookmark_entries", self.bookmark_entries, 1, 256),
+            ("bookmark_bytes", self.bookmark_bytes, 4096, 262144),
         ]
         .into_iter()
         .filter(|(_, value, low, high)| !(low..=high).contains(&value))
@@ -43,6 +53,9 @@ impl Settings {
             scan_sessions: self.scan_sessions.clamp(1, 4096),
             ancestors: self.ancestors.clamp(1, 64),
             edit_bytes: self.edit_bytes.clamp(1024, 8 * 1024 * 1024),
+            name_bytes: self.name_bytes.clamp(1, 4096),
+            bookmark_entries: self.bookmark_entries.clamp(1, 256),
+            bookmark_bytes: self.bookmark_bytes.clamp(4096, 262144),
         }
     }
 }
@@ -84,6 +97,134 @@ pub struct Forked {
     pub node: Node,
     pub source_event: u64,
     pub draft: Option<crate::attachments::EditDraft>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Bookmark {
+    pub seq: u64,
+    pub label: String,
+    pub available: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Bookmarks {
+    pub items: Vec<Bookmark>,
+}
+
+fn bookmark_key(session: u128) -> String {
+    // Session deletion removes companion keys with this suffix.
+    format!("bookmarks/{session:032x}")
+}
+
+fn decode_bookmarks(bytes: Option<&[u8]>, settings: Settings) -> Result<BTreeMap<u64, String>> {
+    let map: BTreeMap<u64, String> = bytes.map(serde_json::from_slice).transpose()?.unwrap_or_default();
+    if map.len() > settings.bookmark_entries
+        || map
+            .values()
+            .any(|label| label.is_empty() || label.len() > 128 || label.chars().any(char::is_control))
+    {
+        return Err(CoreError::Other(
+            "bookmark index exceeds configured limits or contains an invalid label".into(),
+        ));
+    }
+    Ok(map)
+}
+
+fn bookmark_page(rook: &Rook, session: u128, map: BTreeMap<u64, String>) -> Result<Bookmarks> {
+    let mut items = Vec::with_capacity(map.len());
+    for (seq, label) in map {
+        let available = rook.store.events(session, seq, 1)?.first().is_some_and(|event| event.seq == seq);
+        items.push(Bookmark { seq, label, available });
+    }
+    Ok(Bookmarks { items })
+}
+
+/// Read bounded, named event positions. Retained labels may point at events
+/// that were later pruned; such positions remain visible but cannot be opened.
+pub fn bookmarks(rook: &Rook, session: u128) -> Result<Bookmarks> {
+    if rook.store.get_session(session)?.is_none() {
+        return Err(CoreError::NoSession(rook_store::format_session_id(session)));
+    }
+    let limits = rook.config.branches.bounded();
+    let bytes = rook.store.kv_get_limited(&bookmark_key(session), limits.bookmark_bytes)?;
+    bookmark_page(rook, session, decode_bookmarks(bytes.as_deref(), limits)?)
+}
+
+/// Set a bookmark, or clear it with an empty label. The index is changed under
+/// one store transaction so concurrent windows cannot lose each other's labels.
+pub fn mark(rook: &Rook, session: u128, seq: u64, label: &str) -> Result<Bookmarks> {
+    let label = label.trim();
+    if label.len() > 128 || label.chars().any(char::is_control) {
+        return Err(CoreError::Other(
+            "bookmark label must be at most 128 UTF-8 bytes without control characters".into(),
+        ));
+    }
+    let limits = rook.config.branches.bounded();
+    let encoded = rook.store.kv_update_session(
+        session,
+        &bookmark_key(session),
+        limits.bookmark_bytes,
+        (!label.is_empty()).then_some(seq),
+        |old| {
+            let mut map = decode_bookmarks(old, limits)
+                .map_err(|error| rook_store::StoreError::Encoding(error.to_string()))?;
+            if label.is_empty() {
+                map.remove(&seq);
+            } else {
+                map.insert(seq, label.into());
+            }
+            if map.len() > limits.bookmark_entries {
+                return Err(rook_store::StoreError::Encoding(format!(
+                    "branches.bookmark_entries allows at most {} labels",
+                    limits.bookmark_entries
+                )));
+            }
+            serde_json::to_vec(&map).map_err(|error| rook_store::StoreError::Encoding(error.to_string()))
+        },
+    )?;
+    bookmark_page(rook, session, decode_bookmarks(Some(&encoded), limits)?)
+}
+
+/// Rename a session without overwriting its event counters or fork metadata.
+pub fn rename(rook: &Rook, session: u128, title: &str) -> Result<Node> {
+    let title = title.trim();
+    let maximum = rook.config.branches.bounded().name_bytes;
+    if title.is_empty() || title.len() > maximum || title.chars().any(char::is_control) {
+        return Err(CoreError::Other(format!(
+            "session name must be 1..={maximum} UTF-8 bytes without control characters"
+        )));
+    }
+    if !rook.store.update_session(session, |meta| {
+        meta.title = title.into();
+        meta.updated_at = rook_store::now_unix();
+    })? {
+        return Err(CoreError::NoSession(rook_store::format_session_id(session)));
+    }
+    let meta = rook
+        .store
+        .get_session(session)?
+        .ok_or_else(|| CoreError::NoSession(rook_store::format_session_id(session)))?;
+    node(rook, &meta)
+}
+
+/// A fork retains labels only for events that were actually copied.
+pub(crate) fn inherit(rook: &Rook, parent: u128, child: u128, at: u64) -> Result<()> {
+    let limits = rook.config.branches.bounded();
+    let bytes = rook.store.kv_get_limited(&bookmark_key(parent), limits.bookmark_bytes)?;
+    let map = decode_bookmarks(bytes.as_deref(), limits)?;
+    let mut copied = BTreeMap::new();
+    for (seq, label) in map {
+        if seq < at && rook.store.events(child, seq, 1)?.first().is_some_and(|event| event.seq == seq) {
+            copied.insert(seq, label);
+        }
+    }
+    if copied.is_empty() {
+        return Ok(());
+    }
+    let encoded = serde_json::to_vec(&copied)?;
+    rook.store
+        .kv_update_session(child, &bookmark_key(child), limits.bookmark_bytes, None, |_| Ok(encoded))?;
+    Ok(())
 }
 
 /// A user event is excluded and returned for editing; other selected events
@@ -307,6 +448,85 @@ mod tests {
     }
 
     #[test]
+    fn names_and_bookmarks_survive_reopen_and_forks_keep_only_copied_positions() {
+        let dir = tempfile::tempdir().unwrap();
+        let rook = engine(dir.path());
+        session(&rook, 1, None, "original");
+        for n in 0..3 {
+            rook.log(1, rook_store::EventKind::UserMessage, "", &format!("message {n}")).unwrap();
+        }
+        let renamed = rename(&rook, 1, "  План 👩‍💻  ").unwrap();
+        assert_eq!(renamed.title, "План 👩‍💻");
+        assert_eq!(renamed.next_seq, 3);
+        assert!(rename(&rook, 1, "\nmalformed").is_ok(), "outer whitespace is trimmed");
+        assert!(rename(&rook, 1, "line\nbreak").is_err());
+        assert!(rename(&rook, 1, &"x".repeat(257)).is_err());
+        assert_eq!(mark(&rook, 1, 0, "start").unwrap().items.len(), 1);
+        assert_eq!(mark(&rook, 1, 2, "future").unwrap().items.len(), 2);
+        assert!(mark(&rook, 1, 99, "absent").is_err());
+        let fork = rook.fork_session(1, 2).unwrap();
+        assert_eq!(bookmarks(&rook, fork.id).unwrap().items.iter().map(|b| b.seq).collect::<Vec<_>>(), [0]);
+        assert_eq!(bookmarks(&rook, 1).unwrap().items.iter().map(|b| b.seq).collect::<Vec<_>>(), [0, 2]);
+        drop(rook);
+        let reopened = engine(dir.path());
+        assert_eq!(page(&reopened, 1, &Default::default()).unwrap().selected.title, "malformed");
+        assert_eq!(bookmarks(&reopened, fork.id).unwrap().items[0].label, "start");
+        assert_eq!(mark(&reopened, 1, 0, "").unwrap().items.len(), 1);
+        reopened.delete_session(fork.id).unwrap();
+        assert!(reopened.store.kv_get(&bookmark_key(fork.id)).unwrap().is_none());
+    }
+
+    #[test]
+    fn bookmark_count_and_encoded_bytes_are_admitted_before_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rook = engine(dir.path());
+        session(&rook, 1, None, "root");
+        for n in 0..64 {
+            rook.log(1, rook_store::EventKind::UserMessage, "", &format!("event {n}")).unwrap();
+        }
+        rook.config.branches.bookmark_entries = 2;
+        mark(&rook, 1, 0, "first").unwrap();
+        mark(&rook, 1, 1, "second").unwrap();
+        assert!(mark(&rook, 1, 2, "third").unwrap_err().to_string().contains("bookmark_entries"));
+        assert_eq!(bookmarks(&rook, 1).unwrap().items.len(), 2);
+        rook.config.branches.bookmark_entries = 64;
+        rook.config.branches.bookmark_bytes = 4096;
+        let label = "я".repeat(64);
+        let prospective: BTreeMap<u64, String> = (0..64).map(|seq| (seq, label.clone())).collect();
+        assert!(serde_json::to_vec(&prospective).unwrap().len() > 4096, "test setup must exceed byte cap");
+        let mut refused = false;
+        for seq in 2..64 {
+            match mark(&rook, 1, seq, &label) {
+                Ok(_) => {}
+                Err(error) => {
+                    assert!(error.to_string().contains("exceeds 4096 bytes"));
+                    refused = true;
+                    break;
+                }
+            }
+        }
+        assert!(refused, "the encoded byte cap must be reached");
+        assert!(rook.store.kv_get(&bookmark_key(1)).unwrap().unwrap().len() <= 4096);
+    }
+
+    #[test]
+    fn concurrent_windows_keep_every_distinct_bookmark() {
+        let dir = tempfile::tempdir().unwrap();
+        let rook = engine(dir.path());
+        session(&rook, 1, None, "root");
+        for n in 0..16 {
+            rook.log(1, rook_store::EventKind::UserMessage, "", &format!("event {n}")).unwrap();
+        }
+        std::thread::scope(|threads| {
+            for seq in 0..16 {
+                let rook = &rook;
+                threads.spawn(move || mark(rook, 1, seq, &format!("bookmark {seq}")).unwrap());
+            }
+        });
+        assert_eq!(bookmarks(&rook, 1).unwrap().items.len(), 16);
+    }
+
+    #[test]
     fn branching_from_user_and_assistant_events_keeps_exact_boundaries_and_complete_drafts() {
         let dir = tempfile::tempdir().unwrap();
         let rook = engine(dir.path());
@@ -464,8 +684,11 @@ mod tests {
             scan_sessions: usize::MAX,
             ancestors: 0,
             edit_bytes: 0,
+            name_bytes: 0,
+            bookmark_entries: 0,
+            bookmark_bytes: 0,
         };
         let errors = limits.errors();
-        assert_eq!(errors.len(), 5);
+        assert_eq!(errors.len(), 8);
     }
 }

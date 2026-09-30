@@ -145,6 +145,16 @@ message editing restore an exact draft. Older readers ignore the field, and
 older messages without it remain editable as prepared text plus retained images.
 The encoded record is capped at 16 MiB. No postcard layout changes are required.
 
+Event bookmarks use a JSON companion at `bookmarks/{session-id-as-32-hex}`: an
+ordered map from event sequence to label. Reads and writes check its encoded
+byte limit before copying or committing it. A write also checks that the session
+and any newly labelled event still exist in the same transaction. Removing a
+session removes its bookmark companion. Pruning an event retains its label,
+which readers report as unavailable. A fork copies labels only for retained
+events. Session names remain in existing session metadata. Forking now streams
+source event records from a read snapshot into the child rather than collecting
+the complete range in memory; event and checkpoint ordering is unchanged.
+
 Tool images use existing event types and leave the postcard format unchanged.
 A `Note` labelled `rook:tool-images:v1` holds bounded image JSON immediately before
 its `ToolResult`; both events are appended in one transaction, so concurrent

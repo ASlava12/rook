@@ -113,7 +113,7 @@ export async function renderSessions() {
     const branches = el('details', {}, el('summary', {}, 'Conversation branches'));
     branches.addEventListener('toggle', () => {
       branches.querySelector('section')?.remove();
-      if (branches.open) branches.append(branchPanel(session, continueIn, quoteIntoDraft, branchFromEvent));
+      if (branches.open) branches.append(branchPanel(session, continueIn, quoteIntoDraft, branchFromEvent, () => renderSessions()));
     });
     right.append(branches);
     right.append(historyPanel(session, text => quoteIntoDraft(session, text), rewindTo, seq => branchFromEvent(session, seq)));

@@ -8,9 +8,13 @@ export function historyPanel(session, quote, rewind, branch) {
   const totals = el('p', { class: 'sub', 'aria-label': 'Recorded turn totals' });
   const rows = el('div', { class: 'scroll', 'aria-label': 'History events' });
   const detail = el('div', { 'aria-label': 'Selected event' });
+  const bookmarkRows = el('div', { class: 'scroll', 'aria-label': 'Saved bookmarks' });
+  const bookmarkPanel = el('details', {}, el('summary', {}, 'Bookmarks'), bookmarkRows);
+  const bookmarkEditor = el('div', { class: 'row', 'aria-label': 'Bookmark editor' });
   const paging = el('div', { class: 'row' });
   const root = el('section', { 'aria-label': 'Session history' });
   let pending = false, query = '', page = null;
+  let bookmarkItems = [];
   const button = (label, action, disabled = false) =>
     el('button', { type: 'button', disabled, onclick: action }, label);
   async function read(path, apply) {
@@ -39,6 +43,47 @@ export function historyPanel(session, quote, rewind, branch) {
     catch (error) { if (root.isConnected) notice.textContent = error.error || String(error); }
     finally { pending = false; }
   }
+  function drawBookmarks() {
+    bookmarkRows.replaceChildren(...(bookmarkItems.length ? bookmarkItems.map(mark =>
+      el('div', { class: 'row' },
+        button(`#${mark.seq} · ${mark.label}`, () => open(mark.seq), !mark.available),
+        !mark.available ? el('span', { class: 'sub' }, 'Event unavailable') : null,
+        button('Edit label', () => editBookmark(mark.seq)),
+        button('Remove', () => saveBookmark(mark.seq, '')))) :
+      [el('p', { class: 'sub' }, 'No bookmarks yet. Mark an event in the history below.')]));
+  }
+  async function refreshBookmarks() {
+    try {
+      const page = await api(`/api/sessions/${encodeURIComponent(session)}/bookmarks`);
+      bookmarkItems = page.items;
+      if (root.isConnected) drawBookmarks();
+    } catch (error) { if (root.isConnected) notice.textContent = error.error || String(error); }
+  }
+  async function saveBookmark(seq, label) {
+    if (pending) return;
+    pending = true;
+    bookmarkEditor.setAttribute('aria-busy', 'true');
+    try {
+      const page = await api(`/api/sessions/${encodeURIComponent(session)}/bookmarks`, { event: seq, label });
+      bookmarkItems = page.items;
+      if (root.isConnected) {
+        drawBookmarks();
+        bookmarkEditor.replaceChildren();
+        notice.textContent = label.trim() ? `Bookmarked event #${seq}.` : `Removed bookmark for event #${seq}.`;
+      }
+    } catch (error) { if (root.isConnected) notice.textContent = error.error || String(error); }
+    finally { pending = false; bookmarkEditor.removeAttribute('aria-busy'); }
+  }
+  function editBookmark(seq) {
+    const input = el('input', { type: 'text', maxlength: 128, 'aria-label': `Bookmark label for event #${seq}` });
+    input.value = bookmarkItems.find(mark => mark.seq === seq)?.label || '';
+    bookmarkEditor.replaceChildren(el('form', { class: 'row', onsubmit: event => {
+      event.preventDefault(); saveBookmark(seq, input.value);
+    } }, input, el('button', { type: 'submit' }, 'Save bookmark'),
+    button('Cancel', () => bookmarkEditor.replaceChildren())));
+    input.focus();
+  }
+  bookmarkPanel.addEventListener('toggle', () => { if (bookmarkPanel.open) refreshBookmarks(); });
   function open(seq, offset = 0) {
     read(`${base}/${seq}?offset=${offset}`, result => {
       const e = result.entry;
@@ -50,6 +95,7 @@ export function historyPanel(session, quote, rewind, branch) {
           button('Previous part', () => open(seq, result.previous_offset), result.previous_offset == null),
           button('Next part', () => open(seq, result.next_offset), result.next_offset == null),
           button('Quote into draft', () => insert(seq, result.offset)),
+          button('Mark event', () => editBookmark(seq)),
           branch ? button(e.kind === 'user' ? 'Edit in new branch' : 'Continue after event in new branch', () => branchAt(seq)) : null,
           rewind ? button(`Rewind to #${seq}`, () => rewind(seq)) : null));
     });
@@ -59,6 +105,7 @@ export function historyPanel(session, quote, rewind, branch) {
       el('div', { class: 'hd' }, button(`#${e.seq} · ${e.kind} ${e.label}`, () => open(e.seq, offset))),
       el('pre', {}, snippet),
       button('Quote into draft', () => insert(e.seq, offset)),
+      button('Mark event', () => editBookmark(e.seq)),
       branch ? button(e.kind === 'user' ? 'Edit in new branch' : 'Continue after event in new branch', () => branchAt(e.seq)) : null);
   }
   function load(params = '') {
@@ -126,7 +173,7 @@ export function historyPanel(session, quote, rewind, branch) {
     event.preventDefault();
     if (/^[0-9]{1,20}$/.test(number.value)) open(number.value);
   } }, number, el('button', { type: 'submit' }, 'Jump')),
-  notice, totals, paging, rows, detail);
+  bookmarkPanel, notice, totals, paging, rows, detail, bookmarkEditor);
   // Let the caller attach the panel before even a cached request can finish.
   queueMicrotask(() => { if (root.isConnected) load(); });
   return root;

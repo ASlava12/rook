@@ -15,6 +15,7 @@ The TUI opens this view with `/tree [session-id]`, `v` in the history viewer, or
 | Enter | Explore the selected branch |
 | h | Read that branch's saved history |
 | c | Continue that branch in the conversation pane |
+| e | Edit the selected branch's name |
 | n | Scan the next page of direct children |
 | u | Load earlier ancestors omitted by the page limit |
 | r | Refresh the currently explored branch |
@@ -27,6 +28,22 @@ and continues with an empty editor. Enter submits the edited prompt in the new
 branch; creating the branch does not call the model. Save or clear any existing
 draft and selected attachments first: the editor will not silently replace them.
 Lowercase `b` keeps its existing history back action.
+
+`rook session rename SESSION_ID TITLE` changes a branch name. In the TUI's
+history viewer, `m` labels the selected event and `l` opens saved bookmarks;
+Enter jumps to the selected bookmark, `m` edits its label, `x` removes it, and
+`b` returns to history. Branch names and bookmarks can also be edited in the
+browser's Conversation branches and History panels. The CLI equivalents are
+`rook session bookmarks SESSION_ID`, `rook session bookmark SESSION_ID EVENT LABEL`,
+and `rook session unbookmark SESSION_ID EVENT`. Use `--json` for structured
+output. The HTTP routes are `POST /api/sessions/SESSION_ID/rename` with a
+`title`, and `GET` or `POST /api/sessions/SESSION_ID/bookmarks` with an `event`
+and `label` for the mutation. An empty bookmark label removes the mark.
+
+Labels are saved against exact event numbers. A deleted or pruned event leaves
+its label visible as unavailable until removed. Forks inherit labels only for
+events they actually copy. These names and labels aid navigation; they are not
+inserted into model context.
 
 The browser history panels offer **Edit in new branch** for user messages and
 **Continue after event in new branch** for other entries. Retained historical
@@ -70,6 +87,9 @@ page_bytes = 131072
 scan_sessions = 256
 ancestors = 32
 edit_bytes = 1048576
+name_bytes = 256
+bookmark_entries = 64
+bookmark_bytes = 16384
 ```
 
 They cap children returned, encoded page size, session IDs examined per child
@@ -80,6 +100,10 @@ IDs and still work if the cursor session is deleted. Pages reflect current
 metadata rather than a frozen snapshot. Title/workspace previews are limited to
 256/512 UTF-8 bytes and expose truncation flags. This limits a single tree read;
 it does not change retention of sessions or history.
+
+`name_bytes` caps the full UTF-8 branch name. A bookmark label is limited to 128
+UTF-8 bytes; `bookmark_entries` and `bookmark_bytes` cap the number and encoded
+size of saved labels for one session. Concurrent edits are committed atomically.
 
 Oversized or invalid editor content is rejected before creating a branch; it is
 never replaced by a shortened history preview. Attachment records and the full
@@ -93,6 +117,5 @@ context) goes into the editor with an explicit notice, and their images remain
 attached. Older Rook readers ignore the added JSON metadata and replay the same
 model message. No postcard record layout changes.
 
-Optional summaries of the departed branch, session naming and event bookmarks
-remain part of the Pi adoption work. The tree view does not generate or silently
-insert a summary into model context.
+Optional summaries of the departed branch remain part of the Pi adoption work.
+The tree view does not generate or silently insert a summary into model context.

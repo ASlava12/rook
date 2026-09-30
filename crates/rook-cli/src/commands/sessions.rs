@@ -43,6 +43,51 @@ pub(crate) fn diagnostic_arguments(arguments: &str) -> Result<(bool, std::path::
 }
 
 pub(crate) fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, json: bool) -> Result<()> {
+    if let SessionCmd::Rename { id, title } = &cmd {
+        let renamed = source.rename_branch(source.session_named(id, workspace)?, title)?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&renamed)?);
+        } else {
+            println!("renamed {} to {}", renamed.id, renamed.title);
+        }
+        return Ok(());
+    }
+    if let SessionCmd::Bookmarks { id } = &cmd {
+        let page = source.bookmarks(source.session_named(id, workspace)?)?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&page)?);
+        } else if page.items.is_empty() {
+            println!("no bookmarks");
+        } else {
+            for bookmark in page.items {
+                println!(
+                    "#{} {}{}",
+                    bookmark.seq,
+                    bookmark.label,
+                    if bookmark.available { "" } else { " [event unavailable]" }
+                );
+            }
+        }
+        return Ok(());
+    }
+    if let SessionCmd::Bookmark { id, event, label } = &cmd {
+        let page = source.mark_bookmark(source.session_named(id, workspace)?, *event, label)?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&page)?);
+        } else {
+            println!("bookmarked event #{event}");
+        }
+        return Ok(());
+    }
+    if let SessionCmd::Unbookmark { id, event } = &cmd {
+        let page = source.mark_bookmark(source.session_named(id, workspace)?, *event, "")?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&page)?);
+        } else {
+            println!("removed bookmark for event #{event}");
+        }
+        return Ok(());
+    }
     if let SessionCmd::Branch { id, event } = &cmd {
         let forked = source.branch_from_event(source.session_named(id, workspace)?, *event)?;
         // Always structured: the complete draft and attachments must survive
@@ -205,7 +250,11 @@ pub(crate) fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, js
         return show_rewind(&source.rewind(session, *to, !keep_files)?, *keep_files, json);
     }
     match cmd {
-        SessionCmd::Branch { .. }
+        SessionCmd::Rename { .. }
+        | SessionCmd::Bookmarks { .. }
+        | SessionCmd::Bookmark { .. }
+        | SessionCmd::Unbookmark { .. }
+        | SessionCmd::Branch { .. }
         | SessionCmd::Tree { .. }
         | SessionCmd::Turns { .. }
         | SessionCmd::Queue { .. }

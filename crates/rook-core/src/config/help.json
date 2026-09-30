@@ -734,6 +734,18 @@
     "kind": "integer",
     "help": "Maximum complete UTF-8 text returned to the editor when branching from a user message. Range 1024–8388608; default 1048576. Oversized drafts are rejected before a branch is created, never shortened. Attachment records and replies also have a 16 MiB frame limit."
   },
+  "branches.name_bytes": {
+    "kind": "integer",
+    "help": "Maximum UTF-8 bytes in a session name. Range 1–4096; default 256. Names cannot contain control characters."
+  },
+  "branches.bookmark_entries": {
+    "kind": "integer",
+    "help": "Maximum labelled event positions in one session. Range 1–256; default 64."
+  },
+  "branches.bookmark_bytes": {
+    "kind": "integer",
+    "help": "Maximum encoded bytes in one session's bookmark index. Range 4096–262144; default 16384. Oversized updates are rejected."
+  },
   "transcript": {
     "kind": "object",
     "help": "Bounded pages, search scans and quotes from session history. Used by CLI, terminal and browser navigation."

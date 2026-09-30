@@ -1908,6 +1908,7 @@ impl Rook {
             &format!("{} @{at}", meta.title),
         )?;
         self.set_mark(FORK_AT, forked.id, at)?;
+        crate::branches::inherit(self, session, forked.id, at)?;
         crate::results::inherit(self, session, forked.id)?;
         crate::execution::inherit(self, session, forked.id)?;
         // Forking a delegated conversation is a separate branch, not a new

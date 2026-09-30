@@ -415,13 +415,20 @@ function receiveQueueDraft() {
   if (input) { input.value = state.chat.draft; input.focus(); }
 }
 
+function rememberRenamedBranch(updated) {
+  const saved = state.chat.sessions.find(session => session.id === updated.id);
+  if (saved) saved.title = updated.title;
+  else state.chat.sessions.unshift({ id: updated.id, title: updated.title, updated_at: Math.floor(Date.now() / 1000) });
+  renderPicker();
+}
+
 function renderPicker() {
   receiveQueueDraft();
   const branches = $('#branch-controls');
   if (branches && branches.dataset.session !== (state.chat.session || '')) {
     branches.dataset.session = state.chat.session || '';
     branches.querySelector('section')?.remove();
-    if (branches.open) branches.append(branchPanel(state.chat.session, continueIn, quoteIntoDraft, branchFromEvent));
+    if (branches.open) branches.append(branchPanel(state.chat.session, continueIn, quoteIntoDraft, branchFromEvent, rememberRenamedBranch));
   }
   const queue = $('#queue-controls');
   if (queue && queue.dataset.session !== (state.chat.session || '')) {
@@ -698,7 +705,7 @@ export async function renderChat() {
   const branches = el('details', { id: 'branch-controls' }, el('summary', {}, 'Conversation branches'));
   branches.addEventListener('toggle', () => {
     branches.querySelector('section')?.remove();
-    if (branches.open) branches.append(branchPanel(state.chat.session, continueIn, quoteIntoDraft, branchFromEvent));
+    if (branches.open) branches.append(branchPanel(state.chat.session, continueIn, quoteIntoDraft, branchFromEvent, rememberRenamedBranch));
   });
   mcp.addEventListener('toggle', () => {
     mcp.querySelector('section')?.remove();

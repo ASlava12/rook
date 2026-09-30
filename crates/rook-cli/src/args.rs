@@ -427,6 +427,26 @@ pub(crate) enum StoreCmd {
 
 #[derive(Subcommand)]
 pub(crate) enum SessionCmd {
+    /// Give a conversation branch a name.
+    Rename {
+        id: String,
+        title: String,
+    },
+    /// List labelled event positions in a conversation.
+    Bookmarks {
+        id: String,
+    },
+    /// Label one saved event for later navigation.
+    Bookmark {
+        id: String,
+        event: u64,
+        label: String,
+    },
+    /// Remove an event's bookmark.
+    Unbookmark {
+        id: String,
+        event: u64,
+    },
     /// Fork from an event; user messages are returned as an editable draft.
     Branch {
         id: String,

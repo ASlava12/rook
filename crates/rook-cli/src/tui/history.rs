@@ -12,12 +12,17 @@ pub(super) struct History {
     tree: Option<rook_core::branches::Page>,
     switch: Option<rook_core::branches::Node>,
     forked: Option<rook_core::branches::Forked>,
+    renamed: Option<rook_core::branches::Node>,
+    bookmarks: Option<rook_core::branches::Bookmarks>,
+    show_bookmarks: bool,
     hits: Option<Matches>,
     entry: Option<EntryPage>,
     at: usize,
     scroll: u16,
     input: Typing,
     editing: Option<bool>,
+    rename_target: Option<u128>,
+    mark_target: Option<u64>,
     needle: String,
     note: String,
     quote: Option<String>,
@@ -26,6 +31,9 @@ pub(super) struct History {
 }
 enum Command {
     Fork(u128, u64),
+    Rename(u128, String),
+    Bookmarks(u128),
+    Mark(u128, u64, String),
     Tree(u128, Option<String>),
     Turns(u128, Option<u64>),
     Page(u128, PageRequest),
@@ -35,6 +43,8 @@ enum Command {
 }
 enum Update {
     Fork(rook_core::branches::Forked),
+    Rename(rook_core::branches::Node),
+    Bookmarks(rook_core::branches::Bookmarks, bool),
     Tree(rook_core::branches::Page),
     Turns(rook_core::turns::Page),
     Page(u128, Page),
@@ -46,6 +56,11 @@ impl Command {
     fn read(self, source: &crate::source::Source) -> Result<Update> {
         Ok(match self {
             Self::Fork(session, seq) => Update::Fork(source.branch_from_event(session, seq)?),
+            Self::Rename(session, title) => Update::Rename(source.rename_branch(session, &title)?),
+            Self::Bookmarks(session) => Update::Bookmarks(source.bookmarks(session)?, true),
+            Self::Mark(session, seq, label) => {
+                Update::Bookmarks(source.mark_bookmark(session, seq, &label)?, false)
+            }
             Self::Tree(session, after) => Update::Tree(source.branch_page(session, after.as_deref())?),
             Self::Turns(session, before) => Update::Turns(source.turn_results(session, before)?),
             Self::Page(session, q) => Update::Page(session, source.transcript_page(session, &q)?),
@@ -88,12 +103,17 @@ impl History {
             tree: None,
             switch: None,
             forked: None,
+            renamed: None,
+            bookmarks: None,
+            show_bookmarks: false,
             hits: None,
             entry: None,
             at: 0,
             scroll: 0,
             input: Typing::default(),
             editing: None,
+            rename_target: None,
+            mark_target: None,
             needle: String::new(),
             note,
             quote: None,
@@ -120,10 +140,14 @@ impl History {
         self.switch = None;
         self.hits = None;
         self.entry = None;
+        self.bookmarks = None;
+        self.show_bookmarks = false;
         self.at = 0;
         self.scroll = 0;
         self.quote = None;
         self.editing = None;
+        self.rename_target = None;
+        self.mark_target = None;
         if let Some(session) = session {
             self.ask(command(session));
         } else {
@@ -155,6 +179,11 @@ impl History {
                 }
                 continue;
             }
+            // The write may have committed even if the viewer was closed while
+            // its reply was in flight. Keep the session picker in sync.
+            if let Ok(Update::Rename(node)) = &update {
+                self.renamed = Some(node.clone());
+            }
             if epoch != self.epoch {
                 continue;
             }
@@ -162,6 +191,39 @@ impl History {
             self.note.clear();
             match update {
                 Ok(Update::Fork(_)) => unreachable!("fork completion handled before stale read filtering"),
+                Ok(Update::Rename(node)) => {
+                    if let Some(tree) = &mut self.tree {
+                        for branch in tree
+                            .ancestors
+                            .iter_mut()
+                            .chain(std::iter::once(&mut tree.selected))
+                            .chain(tree.children.iter_mut())
+                        {
+                            if branch.id == node.id {
+                                *branch = node.clone();
+                            }
+                        }
+                    }
+                    self.note = format!("Renamed branch {}.", node.id);
+                    self.renamed = Some(node);
+                }
+                Ok(Update::Bookmarks(page, show)) => {
+                    self.bookmarks = Some(page);
+                    if show {
+                        self.show_bookmarks = true;
+                        self.at = 0;
+                        self.entry = None;
+                    } else if self.show_bookmarks {
+                        self.at = self
+                            .at
+                            .min(self.bookmarks.as_ref().map_or(0, |p| p.items.len().saturating_sub(1)));
+                    }
+                    self.note = if show {
+                        "Enter opens a bookmark · m edits · x removes · b returns to history".into()
+                    } else {
+                        "Bookmark updated.".into()
+                    };
+                }
                 Ok(Update::Tree(page)) => {
                     self.session = rook_store::parse_session_id(&page.selected.id);
                     self.at = page.ancestors.len();
@@ -210,6 +272,7 @@ impl History {
                     self.scroll = 0;
                 }
                 Ok(Update::Entry(entry)) => {
+                    self.show_bookmarks = false;
                     self.entry = Some(entry);
                     self.scroll = 0;
                 }
@@ -227,14 +290,24 @@ impl History {
     pub(super) fn take_forked(&mut self) -> Option<rook_core::branches::Forked> {
         self.forked.take()
     }
+    pub(super) fn take_renamed(&mut self) -> Option<rook_core::branches::Node> {
+        self.renamed.take()
+    }
     pub(super) fn wants_branch(&self, key: crossterm::event::KeyEvent) -> bool {
-        self.editing.is_none() && self.tree.is_none() && key.code == KeyCode::Char('B')
+        self.editing.is_none()
+            && self.rename_target.is_none()
+            && self.mark_target.is_none()
+            && self.tree.is_none()
+            && key.code == KeyCode::Char('B')
     }
     fn branch(&self) -> Option<&rook_core::branches::Node> {
         let page = self.tree.as_ref()?;
         page.ancestors.iter().chain(std::iter::once(&page.selected)).chain(page.children.iter()).nth(self.at)
     }
     fn target(&self) -> Option<(u64, u64)> {
+        if self.show_bookmarks {
+            return self.bookmarks.as_ref()?.items.get(self.at).map(|bookmark| (bookmark.seq, 0));
+        }
         if let Some(entry) = &self.entry {
             return Some((entry.entry.seq, entry.offset));
         }
@@ -247,17 +320,36 @@ impl History {
         self.page.as_ref()?.items.get(self.at).map(|e| (e.seq, 0))
     }
     pub(super) fn paste(&mut self, text: &str) {
-        if self.editing.is_some() && self.input.text.len() + text.len() <= 256 {
-            self.input.paste(&text.replace('\n', " "));
+        let maximum: usize = if self.rename_target.is_some() {
+            4096
+        } else if self.mark_target.is_some() {
+            128
+        } else {
+            256
+        };
+        if self.editing.is_some() || self.rename_target.is_some() || self.mark_target.is_some() {
+            if text.len() <= maximum.saturating_sub(self.input.text.len()) {
+                self.input.paste(&text.replace("\r\n", " ").replace(['\r', '\n'], " "));
+            } else {
+                self.note = format!("Input exceeds {maximum} bytes; paste was not inserted.");
+            }
         }
     }
     pub(super) fn key(&mut self, key: crossterm::event::KeyEvent) -> bool {
-        if let Some(jump) = self.editing {
+        if self.editing.is_some() || self.rename_target.is_some() || self.mark_target.is_some() {
             match key.code {
-                KeyCode::Esc => self.editing = None,
+                KeyCode::Esc => {
+                    self.editing = None;
+                    self.rename_target = None;
+                    self.mark_target = None;
+                }
                 KeyCode::Enter => {
                     if let Some(session) = self.session {
-                        let sent = if jump {
+                        let sent = if let Some(id) = self.rename_target {
+                            self.ask(Command::Rename(id, self.input.text.clone()))
+                        } else if let Some(seq) = self.mark_target {
+                            self.ask(Command::Mark(session, seq, self.input.text.clone()))
+                        } else if self.editing == Some(true) {
                             match self.input.text.trim().trim_start_matches('#').parse() {
                                 Ok(seq) => self.ask(Command::Entry(session, seq, 0)),
                                 Err(_) => {
@@ -278,6 +370,8 @@ impl History {
                         };
                         if sent {
                             self.editing = None;
+                            self.rename_target = None;
+                            self.mark_target = None;
                         }
                     }
                 }
@@ -290,7 +384,14 @@ impl History {
                 KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => self.input.set(""),
                 KeyCode::Char(c)
                     if !key.modifiers.contains(KeyModifiers::CONTROL)
-                        && self.input.text.len() + c.len_utf8() <= 256 =>
+                        && self.input.text.len() + c.len_utf8()
+                            <= if self.rename_target.is_some() {
+                                4096
+                            } else if self.mark_target.is_some() {
+                                128
+                            } else {
+                                256
+                            } =>
                 {
                     self.input.insert(c)
                 }
@@ -310,6 +411,15 @@ impl History {
         };
         if self.tree.is_some() {
             match key.code {
+                KeyCode::Char('e') => {
+                    let selected = self.branch().and_then(|branch| {
+                        rook_store::parse_session_id(&branch.id).map(|id| (id, branch.title.clone()))
+                    });
+                    if let Some((id, title)) = selected {
+                        self.input.set(&title);
+                        self.rename_target = Some(id);
+                    }
+                }
                 KeyCode::Enter => {
                     if let Some(id) = self.branch().and_then(|n| rook_store::parse_session_id(&n.id)) {
                         self.ask(Command::Tree(id, None));
@@ -353,7 +463,63 @@ impl History {
             }
             return false;
         }
+        if self.show_bookmarks {
+            match key.code {
+                KeyCode::Char('b') | KeyCode::Char('l') | KeyCode::Char('h') => {
+                    self.show_bookmarks = false;
+                    self.at = self.page.as_ref().map_or(0, |p| p.items.len().saturating_sub(1));
+                }
+                KeyCode::Enter => {
+                    if let Some(bookmark) = self.bookmarks.as_ref().and_then(|p| p.items.get(self.at)) {
+                        if bookmark.available {
+                            self.ask(Command::Entry(session, bookmark.seq, 0));
+                        } else {
+                            self.note = format!("Event #{} is no longer available.", bookmark.seq);
+                        }
+                    }
+                }
+                KeyCode::Char('m') => {
+                    if let Some(bookmark) = self.bookmarks.as_ref().and_then(|p| p.items.get(self.at)) {
+                        self.input.set(&bookmark.label);
+                        self.mark_target = Some(bookmark.seq);
+                    }
+                }
+                KeyCode::Char('x') => {
+                    if let Some(bookmark) = self.bookmarks.as_ref().and_then(|p| p.items.get(self.at)) {
+                        self.ask(Command::Mark(session, bookmark.seq, String::new()));
+                    }
+                }
+                KeyCode::Char('B') => {
+                    if let Some((seq, _)) = self.target() {
+                        self.ask(Command::Fork(session, seq));
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.at = self
+                        .at
+                        .saturating_add(1)
+                        .min(self.bookmarks.as_ref().map_or(0, |p| p.items.len().saturating_sub(1)));
+                }
+                KeyCode::Up | KeyCode::Char('k') => self.at = self.at.saturating_sub(1),
+                _ => {}
+            }
+            return false;
+        }
         match key.code {
+            KeyCode::Char('m') => {
+                if let Some((seq, _)) = self.target() {
+                    let label = self
+                        .bookmarks
+                        .as_ref()
+                        .and_then(|p| p.items.iter().find(|b| b.seq == seq))
+                        .map_or("", |b| b.label.as_str());
+                    self.input.set(label);
+                    self.mark_target = Some(seq);
+                }
+            }
+            KeyCode::Char('l') => {
+                self.ask(Command::Bookmarks(session));
+            }
             KeyCode::Char('B') => {
                 if let Some((seq, _)) = self.target() {
                     self.ask(Command::Fork(session, seq));
@@ -452,21 +618,26 @@ impl History {
     }
     pub(super) fn draw(&self, f: &mut Frame, area: Rect) {
         if let Some(page) = &self.tree {
+            let heading_height = self.rename_target.map_or(3, |_| self.input.box_height("", area.width, 8));
             let [heading, list, detail, help] = Layout::vertical([
-                Constraint::Length(3),
+                Constraint::Length(heading_height),
                 Constraint::Min(3),
                 Constraint::Length(6),
                 Constraint::Length(2),
             ])
             .areas(area);
-            f.render_widget(
-                Paragraph::new(
-                    "Explore a conversation branch. Switching leaves workspace files as they are.",
-                )
-                .wrap(Wrap { trim: false })
-                .block(bordered("conversation tree")),
-                heading,
-            );
+            if self.rename_target.is_some() {
+                self.input.draw_box(f, heading, "", "rename branch · Enter saves");
+            } else {
+                f.render_widget(
+                    Paragraph::new(
+                        "Explore a conversation branch. Switching leaves workspace files as they are.",
+                    )
+                    .wrap(Wrap { trim: false })
+                    .block(bordered("conversation tree")),
+                    heading,
+                );
+            }
             let rows = page
                 .ancestors
                 .iter()
@@ -516,29 +687,61 @@ impl History {
             f.render_widget(Paragraph::new(self.note.as_str()).wrap(Wrap { trim: false }), help);
             return;
         }
-        let [top, body, note] = Layout::vertical([
-            Constraint::Length(if self.turns.is_some() { 5 } else { 3 }),
-            Constraint::Min(3),
-            Constraint::Length(2),
-        ])
-        .areas(area);
-        let title = match self.editing {
-            Some(true) => "jump to event #",
-            Some(false) => "find literal text",
-            None if self.turns.is_some() => "turn results · t refresh · n older · h history",
-            None => "history · / find · g jump · q quote · B branch · t turn results",
+        let editing = self.editing.is_some() || self.mark_target.is_some();
+        let top_height = if editing {
+            self.input.box_height("", area.width, 8)
+        } else if self.turns.is_some() {
+            5
+        } else {
+            3
         };
-        let text = if self.editing.is_some() {
+        let [top, body, note] =
+            Layout::vertical([Constraint::Length(top_height), Constraint::Min(3), Constraint::Length(2)])
+                .areas(area);
+        let title = if self.mark_target.is_some() {
+            "bookmark label · Enter saves · empty removes"
+        } else if self.show_bookmarks {
+            "bookmarks · Enter opens · m edits · x removes · b history"
+        } else {
+            match self.editing {
+                Some(true) => "jump to event #",
+                Some(false) => "find literal text",
+                None if self.turns.is_some() => "turn results · t refresh · n older · h history",
+                None => "history · m mark · l bookmarks · / find · g jump · B branch",
+            }
+        };
+        let text = if self.editing.is_some() || self.mark_target.is_some() {
             self.input.text.clone()
         } else if let Some(turns) = &self.turns {
             rook_core::turns::describe(turns)
         } else {
             self.session.map(rook_store::format_session_id).unwrap_or_default()
         };
-        f.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }).block(bordered(title)), top);
+        if editing {
+            self.input.draw_box(f, top, "", title);
+        } else {
+            f.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }).block(bordered(title)), top);
+        }
         let [list, detail] =
             Layout::horizontal([Constraint::Percentage(38), Constraint::Percentage(62)]).areas(body);
-        let rows: Vec<ListItem> = if let Some(hits) = &self.hits {
+        let rows: Vec<ListItem> = if self.show_bookmarks {
+            self.bookmarks
+                .as_ref()
+                .map(|page| {
+                    page.items
+                        .iter()
+                        .map(|bookmark| {
+                            ListItem::new(format!(
+                                "#{} {}{}",
+                                bookmark.seq,
+                                bookmark.label,
+                                if bookmark.available { "" } else { " · unavailable" }
+                            ))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else if let Some(hits) = &self.hits {
             hits.hits
                 .iter()
                 .map(|h| ListItem::new(format!("#{} {} {}", h.seq, h.kind, h.snippet.replace('\n', " "))))
@@ -562,7 +765,15 @@ impl History {
                 .map(|p| {
                     p.items
                         .iter()
-                        .map(|e| ListItem::new(format!("#{} {} {}", e.seq, e.kind, e.label)))
+                        .map(|e| {
+                            let mark = self
+                                .bookmarks
+                                .as_ref()
+                                .and_then(|p| p.items.iter().find(|b| b.seq == e.seq))
+                                .map(|b| format!(" · {}", b.label))
+                                .unwrap_or_default();
+                            ListItem::new(format!("#{} {} {}{mark}", e.seq, e.kind, e.label))
+                        })
                         .collect()
                 })
                 .unwrap_or_default()
@@ -571,12 +782,35 @@ impl History {
         selected.select(Some(self.at));
         f.render_stateful_widget(
             List::new(rows)
-                .block(bordered(if self.hits.is_some() { "matches" } else { "events" }))
+                .block(bordered(if self.show_bookmarks {
+                    "bookmarks"
+                } else if self.hits.is_some() {
+                    "matches"
+                } else {
+                    "events"
+                }))
                 .highlight_style(Style::default().bg(Color::DarkGray)),
             list,
             &mut selected,
         );
-        let text = if let Some(page) = &self.entry {
+        let text = if self.show_bookmarks {
+            self.bookmarks
+                .as_ref()
+                .and_then(|p| p.items.get(self.at))
+                .map(|b| {
+                    format!(
+                        "#{} · {}\n\n{}",
+                        b.seq,
+                        b.label,
+                        if b.available {
+                            "Enter reads this event."
+                        } else {
+                            "The saved event is no longer available; x removes this label."
+                        }
+                    )
+                })
+                .unwrap_or_else(|| "No bookmarks in this session. Mark an event with m.".into())
+        } else if let Some(page) = &self.entry {
             format!(
                 "#{} · byte {} / {}{}\n\n{}",
                 page.entry.seq,

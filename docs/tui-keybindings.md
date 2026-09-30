@@ -13,6 +13,9 @@ In history, `Shift+B` branches from the selected event. A user message becomes a
 editable draft with its attachments; other events continue after that point.
 An existing draft must be saved or cleared first. Creating a branch does not
 submit a prompt or restore files; lowercase `b` still navigates back in history.
+The tree's `e` edits a branch name. In history, `m` labels the selected event
+and `l` opens bookmarks; Enter jumps to one, `m` edits it, `x` removes it, and
+`b` returns to history.
 
 Open `rook config edit`, enter `tui`, then `keys`. Each named action has its own
 description and list of shortcuts. Missing actions keep their defaults; an empty
@@ -60,6 +63,10 @@ Defaults preserve the existing palette, editor and history gestures:
 
 Long draft lines wrap to the input width, including pasted text without spaces.
 The box grows to ten rows and then scrolls vertically to keep the cursor visible.
+When rows are outside the box, its border shows how many are hidden above and
+below. Palette, memory, checkpoint-name and history input fields also grow for
+long pasted lines. A paste exceeding a history field's limit reports the limit
+instead of silently dropping the text.
 Up/Down move through the visual rows before entering prompt history. Resizing
 reflows the view; these soft wraps do not add newlines to the submitted prompt.
 

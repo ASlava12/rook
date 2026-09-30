@@ -2,7 +2,7 @@
 import { el, api } from './lib.js';
 import { historyPanel } from './history.js';
 
-export function branchPanel(session, continueBranch, quote, forkEvent) {
+export function branchPanel(session, continueBranch, quote, forkEvent, renamed) {
   const root = el('section', { 'aria-label': 'Conversation branches', style: 'overflow-wrap:anywhere' });
   const notice = el('p', { role: 'status', 'aria-live': 'polite', class: 'sub' });
   const rows = el('div', { class: 'scroll', 'aria-label': 'Branch nodes' });
@@ -13,15 +13,39 @@ export function branchPanel(session, continueBranch, quote, forkEvent) {
   function row(node, depth, selected) {
     const title = (node.title || '(untitled)') + (node.title_truncated ? '…' : '');
     const position = node.forked_at == null ? (node.parent && !node.delegated ? ' · boundary unknown' : '') : node.delegated ? ` · delegated at #${node.forked_at}` : ` · fork before #${node.forked_at}`;
-    return el('article', { class: 'entry', style: `margin-left:${Math.min(depth, 8)}rem`, 'aria-label': `Branch ${title}` },
-      el('div', { class: 'hd' }, `${selected ? 'Selected: ' : ''}${title}${node.delegated ? ' · delegated task' : ''}${position}`),
+    const edit = el('div', { class: 'row' });
+    const heading = el('div', { class: 'hd' }, `${selected ? 'Selected: ' : ''}${title}${node.delegated ? ' · delegated task' : ''}${position}`);
+    const article = el('article', { class: 'entry', style: `margin-left:${Math.min(depth, 8)}rem`, 'aria-label': `Branch ${title}` },
+      heading,
       el('p', { class: 'sub' }, `${node.id} · ${node.workspace}${node.workspace_truncated ? '…' : ''}`),
       el('div', { class: 'row' }, button('Explore branch', () => load(node.id)),
       button('Read history', () => {
         if (!pending) history.replaceChildren(historyPanel(node.id, text => quote(node.id, text), undefined,
           forkEvent ? seq => forkEvent(node.id, seq) : undefined));
       }),
-      button('Continue in chat', () => { if (!pending) continueBranch(node.id); })));
+      button('Continue in chat', () => { if (!pending) continueBranch(node.id); }),
+      button('Rename branch', () => {
+        if (pending) return;
+        const input = el('input', { type: 'text', value: node.title, maxlength: 4096, 'aria-label': `New name for branch ${node.id}` });
+        edit.replaceChildren(input, button('Save name', async () => {
+          if (pending) return;
+          pending = true;
+          root.setAttribute('aria-busy', 'true');
+          try {
+            const updated = await api(`/api/sessions/${encodeURIComponent(node.id)}/rename`, { title: input.value });
+            node.title = updated.title;
+            const shown = updated.title + (updated.title_truncated ? '…' : '');
+            heading.textContent = `${selected ? 'Selected: ' : ''}${shown}${node.delegated ? ' · delegated task' : ''}${position}`;
+            article.setAttribute('aria-label', `Branch ${shown}`);
+            edit.replaceChildren();
+            if (root.isConnected) notice.textContent = `Renamed branch ${node.id}.`;
+            renamed?.(updated);
+          } catch (error) { if (root.isConnected) notice.textContent = error.error || String(error); }
+          finally { pending = false; root.removeAttribute('aria-busy'); }
+        }), button('Cancel', () => edit.replaceChildren()));
+        input.focus();
+      })), edit);
+    return article;
   }
   async function load(id, after = null) {
     if (pending) return;

@@ -35,6 +35,8 @@ pub fn router(state: Shared) -> Router {
         .route("/api/sessions/{id}/turns", get(turns))
         .route("/api/sessions/{id}/tree", get(branches))
         .route("/api/sessions/{id}/branch", post(branch_from_event))
+        .route("/api/sessions/{id}/rename", post(rename_branch))
+        .route("/api/sessions/{id}/bookmarks", get(bookmarks).post(mark_bookmark))
         .route("/api/sessions/{id}/history", get(history_page))
         .route("/api/sessions/{id}/history/search", get(history_search))
         .route("/api/sessions/{id}/history/{seq}", get(history_entry))
@@ -379,6 +381,38 @@ async fn branch_from_event(
 ) -> ApiResult<rook_core::branches::Forked> {
     let session = session_id(&id)?;
     history_read(s, move |r| rook_core::branches::from_event(r, session, q.event)).await
+}
+#[derive(Deserialize)]
+struct RenameBranch {
+    title: String,
+}
+async fn rename_branch(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+    Json(q): Json<RenameBranch>,
+) -> ApiResult<rook_core::branches::Node> {
+    let session = session_id(&id)?;
+    history_read(s, move |r| rook_core::branches::rename(r, session, &q.title)).await
+}
+async fn bookmarks(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+) -> ApiResult<rook_core::branches::Bookmarks> {
+    let session = session_id(&id)?;
+    history_read(s, move |r| rook_core::branches::bookmarks(r, session)).await
+}
+#[derive(Deserialize)]
+struct MarkBookmark {
+    event: u64,
+    label: String,
+}
+async fn mark_bookmark(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+    Json(q): Json<MarkBookmark>,
+) -> ApiResult<rook_core::branches::Bookmarks> {
+    let session = session_id(&id)?;
+    history_read(s, move |r| rook_core::branches::mark(r, session, q.event, &q.label)).await
 }
 #[derive(Deserialize)]
 struct HistorySearch {

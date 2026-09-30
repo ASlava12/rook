@@ -167,6 +167,8 @@ impl Overlay {
             ],
             Overlay::History => &[
                 ("B ", "branch at event  "),
+                ("m/l ", "mark/bookmarks  "),
+                ("e ", "rename in tree  "),
                 ("v ", "branches  "),
                 ("t ", "turn results  "),
                 ("/ ", "find  "),
@@ -548,6 +550,7 @@ impl Typing {
 
     /// How far along its one line the cursor is: characters, not bytes. For the
     /// boxes that hold one line — the palette, a fact being added, a topic.
+    #[cfg(test)]
     fn column(&self) -> u16 {
         self.text[..self.at].chars().count() as u16
     }
@@ -558,6 +561,34 @@ impl Typing {
 
     fn rows(&self) -> u16 {
         self.geometry.get().measure(&self.text, self.at).0.min(u16::MAX as usize) as u16
+    }
+
+    fn box_height(&self, prompt: &str, width: u16, maximum_rows: u16) -> u16 {
+        self.geometry.set(wrapping::Geometry::new(prompt, width.saturating_sub(2)));
+        self.rows().clamp(1, maximum_rows) + 2
+    }
+
+    fn hidden_rows(&self, height: u16) -> (usize, usize) {
+        if height == 0 {
+            return (0, 0);
+        }
+        let total = usize::from(self.rows());
+        let first = self.caret().0.saturating_sub(usize::from(height - 1));
+        (first, total.saturating_sub(first + usize::from(height)))
+    }
+
+    fn draw_box(&self, f: &mut Frame, area: Rect, prompt: &str, title: &str) {
+        let inner = area.inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 });
+        let (lines, (row, column)) = self.view(prompt, inner.width, inner.height);
+        let (above, below) = self.hidden_rows(inner.height);
+        let title = match (above, below) {
+            (0, 0) => title.to_owned(),
+            _ => format!("{title} · ↑{above} ↓{below} rows"),
+        };
+        f.render_widget(Paragraph::new(lines).block(bordered(&title)), area);
+        if inner.width > 0 && inner.height > 0 {
+            f.set_cursor_position((inner.x + column, inner.y + row));
+        }
     }
 
     fn view(&self, prompt: &str, width: u16, height: u16) -> (Vec<Line<'static>>, (u16, u16)) {
@@ -1672,6 +1703,12 @@ impl App {
                         }
                     }
                 }
+            }
+            if let Some(renamed) = self.history.take_renamed()
+                && let Some(id) = rook_store::parse_session_id(&renamed.id)
+                && let Some(saved) = self.sessions.iter_mut().find(|saved| saved.meta.id == id)
+            {
+                saved.meta.title = renamed.title;
             }
             self.still_running();
             // Poll rather than block: a streaming turn has to keep redrawing
@@ -3633,17 +3670,9 @@ impl App {
     /// answering it in two places is how the commands ended up discoverable
     /// only from `/help`, which is where you look after giving up.
     fn draw_palette(&mut self, f: &mut Frame, area: Rect) {
-        let [entry, list] = Layout::vertical([Constraint::Length(3), Constraint::Min(3)]).areas(area);
-        let typed = self.palette.as_str().to_string();
-        f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled("› ", Style::default().fg(Color::Cyan)),
-                Span::raw(typed.clone()),
-            ]))
-            .block(bordered(" what would you like to do ")),
-            entry,
-        );
-        f.set_cursor_position((entry.x + 3 + self.palette.column(), entry.y + 1));
+        let height = self.palette.box_height("› ", area.width, 8);
+        let [entry, list] = Layout::vertical([Constraint::Length(height), Constraint::Min(3)]).areas(area);
+        self.palette.draw_box(f, entry, "› ", " what would you like to do ");
 
         let found = self.palette_entries();
         let items: Vec<ListItem> = found
@@ -3932,7 +3961,12 @@ impl App {
 
         let inner = input.inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 });
         let (typing, (row, column)) = self.chat.input.view(&prompt, inner.width, inner.height);
-        f.render_widget(Paragraph::new(typing).block(bordered("")), input);
+        let (above, below) = self.chat.input.hidden_rows(inner.height);
+        let title = match (above, below) {
+            (0, 0) => String::new(),
+            _ => format!(" draft · ↑{above} ↓{below} hidden rows · Home/End "),
+        };
+        f.render_widget(Paragraph::new(typing).block(bordered(&title)), input);
         // Wherever the box takes typing, which is everywhere but an approval:
         // a running turn takes what is typed as an interjection, and hiding the
         // caret there left somebody typing into a box with no sign of it. An
@@ -4135,7 +4169,7 @@ impl App {
     }
 
     fn draw_memory(&mut self, f: &mut Frame, area: Rect) {
-        let typing = if self.adding.is_some() { 3 } else { 0 };
+        let typing = self.adding.as_ref().map_or(0, |adding| adding.text.box_height("› ", area.width, 8));
         let [list, entry] = Layout::vertical([Constraint::Min(3), Constraint::Length(typing)]).areas(area);
 
         let dim = Style::default().fg(Color::DarkGray);
@@ -4195,15 +4229,7 @@ impl App {
 
         if let Some(adding) = &self.adding {
             let reach = if adding.global { "everywhere" } else { "in this workspace" };
-            f.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled("› ", Style::default().fg(Color::DarkGray)),
-                    Span::raw(adding.text.as_str().to_string()),
-                ]))
-                .block(bordered(&format!(" remember {reach} — enter saves, esc cancels "))),
-                entry,
-            );
-            f.set_cursor_position((entry.x + 3 + adding.text.column(), entry.y + 1));
+            adding.text.draw_box(f, entry, "› ", &format!(" remember {reach} — enter saves, esc cancels "));
         }
     }
 
@@ -4576,8 +4602,9 @@ impl App {
 
     fn draw_checkpoints(&mut self, f: &mut Frame, area: Rect) {
         let asking = self.naming.is_some() || self.restoring.is_some();
+        let height = self.naming.as_ref().map_or(3, |naming| naming.box_height("› ", area.width, 8));
         let [list, entry] =
-            Layout::vertical([Constraint::Min(3), Constraint::Length(if asking { 3 } else { 0 })])
+            Layout::vertical([Constraint::Min(3), Constraint::Length(if asking { height } else { 0 })])
                 .areas(area);
 
         let items: Vec<ListItem> = self
@@ -4622,15 +4649,7 @@ impl App {
         }
 
         if let Some(naming) = &self.naming {
-            f.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled("› ", Style::default().fg(Color::DarkGray)),
-                    Span::raw(naming.as_str().to_string()),
-                ]))
-                .block(bordered(" name this checkpoint — enter takes it, esc cancels ")),
-                entry,
-            );
-            f.set_cursor_position((entry.x + 3 + naming.column(), entry.y + 1));
+            naming.draw_box(f, entry, "› ", " name this checkpoint — enter takes it, esc cancels ");
         } else if let Some((name, _)) = &self.restoring {
             f.render_widget(
                 Paragraph::new(Line::from(Span::styled(

@@ -1031,25 +1031,25 @@ impl Store {
         meta.tokens_out = 0;
 
         {
+            // Keep a read snapshot while the new branch is written. The source
+            // range can contain millions of records; collecting it before the
+            // insert made a fork's memory grow with the entire transcript.
+            let snapshot = self.db.begin_read()?;
+            let source_events = snapshot.open_table(schema::EVENTS)?;
             let mut events = txn.open_table(schema::EVENTS)?;
             // Half-open: the fork keeps seqs [0, upto_seq), so rewinding to 0
             // keeps nothing rather than keeping the event being rewound past.
             let start = schema::event_key(source, 0);
             let end = schema::event_key(source, upto_seq);
-            let copied: Vec<(u64, Vec<u8>)> = events
-                .range(start.as_slice()..end.as_slice())?
-                .filter_map(|e| e.ok())
-                .filter_map(|(k, v)| {
-                    schema::parse_event_key(k.value()).map(|(_, seq)| (seq, v.value().to_vec()))
-                })
-                .collect();
-            for (seq, raw) in copied {
-                let record: EventRecord = postcard::from_bytes(&raw)?;
+            for entry in source_events.range(start.as_slice()..end.as_slice())? {
+                let (key, raw) = entry?;
+                let Some((_, seq)) = schema::parse_event_key(key.value()) else { continue };
+                let record: EventRecord = postcard::from_bytes(raw.value())?;
                 meta.tokens_in += record.tokens_in as u64;
                 meta.tokens_out += record.tokens_out as u64;
                 meta.event_count += 1;
                 meta.next_seq = seq + 1;
-                events.insert(schema::event_key(new_id, seq).as_slice(), raw.as_slice())?;
+                events.insert(schema::event_key(new_id, seq).as_slice(), raw.value())?;
                 if record.kind == EventKind::Checkpoint {
                     let mut kv = txn.open_table(schema::KV)?;
                     let order = kv
@@ -1141,5 +1141,64 @@ impl Store {
         let txn = self.db.begin_read()?;
         let kv = txn.open_table(schema::KV)?;
         Ok(kv.get(key)?.map(|v| v.value().to_vec()))
+    }
+
+    /// Read a companion only when its stored value fits the caller's bound.
+    pub fn kv_get_limited(&self, key: &str, maximum: usize) -> Result<Option<Vec<u8>>> {
+        let txn = self.db.begin_read()?;
+        let kv = txn.open_table(schema::KV)?;
+        match kv.get(key)? {
+            Some(value) if value.value().len() > maximum => {
+                Err(StoreError::Encoding(format!("companion {key} exceeds {maximum} bytes")))
+            }
+            Some(value) => Ok(Some(value.value().to_vec())),
+            None => Ok(None),
+        }
+    }
+
+    /// Mutate a bounded session companion under the store's write transaction.
+    /// Optional event validation is in that same transaction, so a bookmark
+    /// cannot be admitted after its target was deleted.
+    pub fn kv_update_session<F>(
+        &self,
+        session: u128,
+        key: &str,
+        maximum: usize,
+        event: Option<u64>,
+        change: F,
+    ) -> Result<Vec<u8>>
+    where
+        F: FnOnce(Option<&[u8]>) -> Result<Vec<u8>>,
+    {
+        let txn = self.db.begin_write()?;
+        {
+            let sessions = txn.open_table(schema::SESSIONS)?;
+            if sessions.get(schema::session_key(session).as_slice())?.is_none() {
+                return Err(StoreError::MissingSession(format_session_id(session)));
+            }
+        }
+        if let Some(seq) = event {
+            let events = txn.open_table(schema::EVENTS)?;
+            if events.get(schema::event_key(session, seq).as_slice())?.is_none() {
+                return Err(StoreError::Encoding(format!("bookmark event #{seq} no longer exists")));
+            }
+        }
+        let encoded = {
+            let mut kv = txn.open_table(schema::KV)?;
+            let encoded = {
+                let old = kv.get(key)?;
+                if old.as_ref().is_some_and(|value| value.value().len() > maximum) {
+                    return Err(StoreError::Encoding(format!("companion {key} exceeds {maximum} bytes")));
+                }
+                change(old.as_ref().map(|value| value.value()))?
+            };
+            if encoded.len() > maximum {
+                return Err(StoreError::Encoding(format!("companion {key} exceeds {maximum} bytes")));
+            }
+            kv.insert(key, encoded.as_slice())?;
+            encoded
+        };
+        txn.commit()?;
+        Ok(encoded)
     }
 }

@@ -360,6 +360,144 @@ fn event_branching_protects_the_draft_then_edits_and_sends_with_its_historical_i
 }
 
 #[test]
+fn branch_names_and_event_bookmarks_are_editable_in_local_and_daemon_tui() {
+    let _one = one_at_a_time();
+    for remote in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        {
+            let store = rook_store::Store::open(home.path().join("store")).unwrap();
+            store
+                .create_session(&rook_store::SessionMeta::new(
+                    1,
+                    "source",
+                    workspace.path().display().to_string(),
+                    1,
+                ))
+                .unwrap();
+            for text in ["FIRST_EVENT", "SECOND_EVENT"] {
+                store
+                    .append_event(
+                        1,
+                        rook_store::NewEvent::new(
+                            rook_store::EventKind::UserMessage,
+                            rook_store::Kind::Message,
+                            text.as_bytes(),
+                        ),
+                    )
+                    .unwrap();
+            }
+        }
+        let daemon = remote.then(|| Daemon::start(home.path(), workspace.path()));
+        let mut pty = if remote {
+            Pty::spawn(
+                std::path::Path::new(env!("CARGO_BIN_EXE_rook")),
+                &["--workspace", workspace.path().to_str().unwrap(), "tui"],
+                &[
+                    ("ROOK_HOME", home.path().to_str().unwrap()),
+                    ("ROOK_LOG", "error"),
+                    ("TERM", "xterm-256color"),
+                ],
+                100,
+                30,
+            )
+        } else {
+            tui(home.path(), workspace.path())
+        };
+        pty.screen(100, 30);
+        pty.send(&format!("/tree {}\r", rook_store::format_session_id(1)));
+        pty.screen_showing(100, 30, "conversation tree");
+        pty.send("e");
+        pty.screen_showing(100, 30, "rename branch");
+        let title = format!("TREE_NAME_{}TAIL_NAME", "abcdefghij".repeat(14));
+        pty.send(&format!("\u{15}\u{1b}[200~{title}\u{1b}[201~"));
+        let editing = pty.screen_showing(100, 30, "TAIL_NAME");
+        assert!(editing.iter().any(|line| line.contains("abcdefghij")), "the long title wraps: {editing:?}");
+        pty.send("\r");
+        pty.screen_showing(100, 30, "Renamed branch");
+        pty.send("h");
+        pty.screen_showing(100, 30, "SECOND_EVENT");
+        pty.send("m");
+        pty.screen_showing(100, 30, "bookmark label");
+        pty.send(&format!("\u{1b}[200~{}\u{1b}[201~", "x".repeat(129)));
+        pty.screen_showing(100, 30, "Input exceeds 128 bytes; paste was not inserted.");
+        pty.send("KEEP_ME\r");
+        pty.screen_showing(100, 30, "Bookmark updated");
+        pty.send("l");
+        pty.screen_showing(100, 30, "#1 KEEP_ME");
+        pty.send("\r");
+        pty.screen_showing(100, 30, "SECOND_EVENT");
+        pty.send("l");
+        pty.screen_showing(100, 30, "#1 KEEP_ME");
+        pty.send("x");
+        pty.screen_showing(100, 30, "No bookmarks in this session");
+        drop(pty);
+        drop(daemon);
+        let store = rook_store::Store::open(home.path().join("store")).unwrap();
+        assert_eq!(store.get_session(1).unwrap().unwrap().title, title);
+        assert_eq!(store.get_session(1).unwrap().unwrap().next_seq, 2);
+    }
+}
+
+#[test]
+fn a_capital_b_in_a_bookmark_label_does_not_branch_or_discard_the_draft() {
+    let _one = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    {
+        let store = rook_store::Store::open(home.path().join("store")).unwrap();
+        store
+            .create_session(&rook_store::SessionMeta::new(
+                1,
+                "source",
+                workspace.path().display().to_string(),
+                1,
+            ))
+            .unwrap();
+        store
+            .append_event(
+                1,
+                rook_store::NewEvent::new(
+                    rook_store::EventKind::UserMessage,
+                    rook_store::Kind::Message,
+                    b"FIRST_EVENT",
+                ),
+            )
+            .unwrap();
+    }
+    let mut pty = tui(home.path(), workspace.path());
+    pty.screen(100, 30);
+    pty.send(&format!("/session {}\r", rook_store::format_session_id(1)));
+    pty.screen_showing(100, 30, "source");
+    pty.send("KEEP_UNSENT_DRAFT");
+    pty.send("\u{6}"); // Ctrl+F opens history without submitting the draft.
+    pty.screen_showing(100, 30, "FIRST_EVENT");
+    pty.send("m");
+    pty.screen_showing(100, 30, "bookmark label");
+    pty.send("B");
+    pty.screen_showing(100, 30, "bookmark label");
+    pty.send("\r");
+    pty.screen_showing(100, 30, "Bookmark updated");
+    pty.send("\u{1b}");
+    pty.screen_showing(100, 30, "KEEP_UNSENT_DRAFT");
+    drop(pty);
+    let store = rook_store::Store::open(home.path().join("store")).unwrap();
+    let saved: serde_json::Value =
+        serde_json::from_slice(&store.kv_get(&format!("bookmarks/{:032x}", 1u128)).unwrap().unwrap())
+            .unwrap();
+    assert_eq!(saved["0"], "B");
+    assert!(
+        store.session_ids_after(None, 10).unwrap().into_iter().all(|id| store
+            .get_session(id)
+            .unwrap()
+            .unwrap()
+            .parent
+            != Some(1)),
+        "label typing must not fork the selected session"
+    );
+}
+
+#[test]
 fn branch_navigation_pages_reads_and_continues_without_submitting_the_draft_or_restoring_files() {
     let _one = one_at_a_time();
     for remote in [false, true] {
@@ -1145,6 +1283,42 @@ fn a_second_window_runs_its_turn_through_the_daemon() {
     let ran = pty.screen_showing(100, 30, "run_command").join("\n");
     assert!(ran.contains("run_command"), "and the call goes through:\n{ran}");
     drop(daemon);
+}
+
+#[test]
+fn a_long_single_line_paste_wraps_in_the_prompt_and_remains_editable() {
+    let _one = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let mut pty = Pty::spawn(
+        std::path::Path::new(env!("CARGO_BIN_EXE_rook")),
+        &["--workspace", workspace.path().to_str().unwrap(), "tui", "--alone"],
+        &[("ROOK_HOME", home.path().to_str().unwrap()), ("ROOK_LOG", "error"), ("TERM", "xterm-256color")],
+        40,
+        24,
+    );
+    pty.screen(40, 24);
+    let pasted = format!("START-{}-END", "abcdefghijklmnopqrstuvwxyz".repeat(15));
+    pty.send(&format!("\u{1b}[200~{pasted}\u{1b}[201~"));
+    let tail = pty.screen_showing(40, 24, "END");
+    assert!(tail.iter().any(|line| line.contains("END")), "tail of paste is visible: {tail:?}");
+    assert!(
+        tail.iter().any(|line| line.contains("hidden rows")),
+        "the viewport reports text outside it: {tail:?}"
+    );
+    assert!(
+        tail.iter().filter(|line| line.contains("abcdef") || line.contains("uvwxyz")).count() > 1,
+        "a long line uses multiple visual rows: {tail:?}"
+    );
+    pty.send("\u{1}"); // Ctrl+A goes back to the beginning without changing the draft.
+    let first = pty.screen_showing(40, 24, "START-");
+    assert!(
+        first.iter().any(|line| line.contains("START-")),
+        "the pasted prefix is still present: {first:?}"
+    );
+    pty.send("\u{1b}[F"); // End returns to the end.
+    let last = pty.screen_showing(40, 24, "END");
+    assert!(last.iter().any(|line| line.contains("END")), "the pasted suffix is still present: {last:?}");
 }
 
 #[test]

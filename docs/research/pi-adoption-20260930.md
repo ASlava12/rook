@@ -715,8 +715,35 @@ CI reported 621.3 seconds (`/tmp/rook-event-branch-ci3.log`). Sources stayed fix
 during that gate. Compaction retained 4.02 MiB on disk, 37.1x dictionary
 compression and 5.8x end-to-end (`/tmp/rook-event-branch-compaction.log`).
 
-The branch capability remains in progress: names, bookmarks and optional
-attributable summaries are still required. The existing store fork path also
-collects the copied event records in memory; bounded tree/draft reads do not
-establish a bounded-memory fork of a long history. Address this when completing
-branch handling. Other pending capabilities retain their full scope.
+The branch capability remains in progress: names, bookmarks, bounded-memory
+forking and optional attributable summaries follow in the next block. Other
+pending capabilities retain their full scope.
+
+## Branch names, event bookmarks and long TUI input
+
+Branches now have editable UTF-8 names in the CLI, TUI and browser. Event
+bookmarks are ordered, bounded per session, atomically updated under concurrent
+windows, and visible even when the event was later pruned. A fork inherits only
+marks whose source events it actually copied. The store fork path streams the
+source range from a read snapshot into the child rather than retaining every
+event record in a temporary vector. The index uses a bounded JSON companion;
+postcard records and the store format are unchanged.
+
+The TUI's palette, memory, checkpoint-name and history inputs now grow for long
+lines and show counts of hidden rows after reaching their viewport cap. The
+chat composer also reports hidden rows. Oversize history-field pastes report a
+limit instead of disappearing without feedback. A real PTY test covers a long
+bracketed paste in the composer, a long branch title and an over-limit label.
+
+Core tests cover reopen, fork boundaries, deletion, concurrent marks and both
+bookmark limits. The CLI test exercises local and daemon paths; the PTY test
+does the same for branch editing. An actual daemon and Chrome scenario covers
+browser rename, mark, jump and remove, followed by historical message branching
+and attachment retention. These focused tests passed. The final
+`cargo xtask ci` exited 0 in 639.2 seconds; its 58 PTY scenarios all passed.
+`cargo xtask compaction` also exited 0 and measured 4.02 MiB on disk, 37.1x
+dictionary compression and 5.8x end-to-end. Evidence:
+`/tmp/rook-branches-names-final-ci.log`,
+`/tmp/rook-branches-names-final-compaction.log`, and
+`/tmp/rook-branches-names-browser.log`. Optional attributable branch summaries
+remain in progress; the rest of the Pi scope remains open.

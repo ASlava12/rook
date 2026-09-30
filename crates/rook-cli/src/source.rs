@@ -984,6 +984,42 @@ impl Source {
         }
     }
 
+    pub(crate) fn rename_branch(&self, session: u128, title: &str) -> Result<rook_core::branches::Node> {
+        match self {
+            Self::Local(rook) => Ok(rook_core::branches::rename(rook, session, title)?),
+            Self::Daemon(d) => d.request_bounded(
+                &format!("/api/sessions/{}/rename", rook_store::format_session_id(session)),
+                Some(&serde_json::json!({ "title": title })),
+                8192,
+            ),
+        }
+    }
+
+    pub(crate) fn bookmarks(&self, session: u128) -> Result<rook_core::branches::Bookmarks> {
+        match self {
+            Self::Local(rook) => Ok(rook_core::branches::bookmarks(rook, session)?),
+            Self::Daemon(d) => {
+                d.get_bounded(&format!("/api/sessions/{}/bookmarks", rook_store::format_session_id(session)))
+            }
+        }
+    }
+
+    pub(crate) fn mark_bookmark(
+        &self,
+        session: u128,
+        event: u64,
+        label: &str,
+    ) -> Result<rook_core::branches::Bookmarks> {
+        match self {
+            Self::Local(rook) => Ok(rook_core::branches::mark(rook, session, event, label)?),
+            Self::Daemon(d) => d.request_bounded(
+                &format!("/api/sessions/{}/bookmarks", rook_store::format_session_id(session)),
+                Some(&serde_json::json!({ "event": event, "label": label })),
+                2 * 1024 * 1024,
+            ),
+        }
+    }
+
     pub(crate) fn turn_results(&self, session: u128, before: Option<u64>) -> Result<rook_core::turns::Page> {
         match self {
             Self::Local(rook) => {

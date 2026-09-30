@@ -13,6 +13,50 @@ struct Rook {
 }
 
 #[test]
+fn branch_names_and_bookmarks_have_the_same_cli_result_with_and_without_the_daemon() {
+    let rook = Rook::new();
+    let id = rook_store::new_session_id();
+    let name = rook_store::format_session_id(id);
+    {
+        let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+        store
+            .create_session(&rook_store::SessionMeta::new(
+                id,
+                "old",
+                rook.workspace.path().display().to_string(),
+                1,
+            ))
+            .unwrap();
+        for text in ["first", "second"] {
+            store
+                .append_event(
+                    id,
+                    rook_store::NewEvent::new(
+                        rook_store::EventKind::UserMessage,
+                        rook_store::Kind::Message,
+                        text.as_bytes(),
+                    ),
+                )
+                .unwrap();
+        }
+    }
+    assert_eq!(rook.json(&["session", "rename", &name, "План 👩‍💻"])["title"], "План 👩‍💻");
+    assert_eq!(rook.json(&["session", "bookmark", &name, "0", "Начало"])["items"][0]["label"], "Начало");
+    let daemon = Daemon::start(&rook);
+    assert_eq!(rook.json(&["session", "bookmarks", &name])["items"][0]["seq"], 0);
+    assert_eq!(
+        rook.json(&["session", "bookmark", &name, "1", "Вывод"])["items"].as_array().unwrap().len(),
+        2
+    );
+    assert_eq!(rook.json(&["session", "rename", &name, "New branch name"])["title"], "New branch name");
+    assert_eq!(rook.json(&["session", "unbookmark", &name, "0"])["items"][0]["seq"], 1);
+    assert!(!rook.run(&["session", "bookmark", &name, "999", "absent"]).status.success());
+    drop(daemon);
+    let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+    assert_eq!(store.get_session(id).unwrap().unwrap().title, "New branch name");
+}
+
+#[test]
 fn event_branches_return_complete_drafts_locally_and_through_the_daemon() {
     let rook = Rook::new();
     let id = rook_store::new_session_id();
