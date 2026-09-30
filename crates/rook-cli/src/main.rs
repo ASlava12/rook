@@ -39,7 +39,7 @@ fn main() -> Result<()> {
     // second thread: provider keys live there, and a shell that has them and a
     // desktop launcher that does not should not behave differently.
     rook_core::config::load_env_file();
-    let cli = Cli::parse();
+    let cli = parse_cli()?;
     // Defaults if the config is unreadable: logging must not be what reports a
     // broken config, and the command about to run will report it properly.
     rook_core::telemetry::init(
@@ -139,6 +139,19 @@ fn main() -> Result<()> {
             cli.json,
         ),
     }
+}
+
+#[inline(never)]
+fn parse_cli() -> Result<Cli> {
+    // Clap's generated nested subcommand parser crossed the Windows main
+    // thread's stack reserve when another session option was added. Parse on
+    // a sized stack before any command opens the store or starts the TUI.
+    std::thread::Builder::new()
+        .name("rook-arguments".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(Cli::parse)?
+        .join()
+        .map_err(|_| anyhow::anyhow!("argument parser stopped unexpectedly"))
 }
 
 fn workspace_of(given: &Option<PathBuf>) -> PathBuf {

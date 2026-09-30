@@ -72,12 +72,23 @@ The browser's **Carry reviewed summary** editor has **Load recorded excerpts**.
 This reads at most 128 recent source events and includes at most 12 bounded
 user/assistant excerpts with event numbers. It is a starting point for editing,
 not a model-generated conclusion. Earlier events and attachments can be absent.
+For a model-written starting point, add `--suggest` to the CLI draft command,
+type `/summary-suggest TARGET` in the REPL or TUI, or choose **Generate suggested
+summary** in the browser editor. The model receives only those bounded
+historical excerpts as data, and its answer is capped at 16 KiB before being
+kept as an editable draft. Generating it does not write to the target branch.
 Review and rewrite it, then use `rook session summary SOURCE TARGET TEXT`,
-`/summary TARGET TEXT`, or **Save summary and continue**. The saved history
+`/summary TARGET TEXT`, or **Save summary and continue**. To pin the source
+boundary printed with the draft, add `--source-through EVENT` to the CLI save
+command or use `/summary-at TARGET EVENT TEXT` in the REPL or TUI. The browser
+editor and TUI/daemon REPL draft flows pin it automatically; a changed source
+branch makes the save fail until a new draft is reviewed. The saved history
 identifies the source session and event boundary and tells the next turn to
 verify historical file and test observations in the current workspace. A
 browser draft is rejected if the source branch changed after it was loaded.
 The HTTP draft route is `GET /api/sessions/TARGET/summary-draft?source=SOURCE`;
+model suggestion is `POST /api/sessions/TARGET/summary-suggest` with
+`{"source":"SOURCE"}`. Both return the same draft metadata.
 `POST /api/sessions/TARGET/summary` accepts optional `source_through` with the
 existing `source` and `text` fields. Both source and target must belong to the
 same workspace. The summary body is limited to 16 KiB UTF-8 bytes.
@@ -152,4 +163,5 @@ that attribution. The next model request sees the summary as source data, with
 an explicit warning that historical file observations and test results need
 verification in the current workspace. Browsing and ordinary branch switching
 do not create or carry a summary. Automatic draft generation from the departed
-branch remains pending.
+branch during navigation, scoped to events after the common ancestor, remains
+pending; the explicit suggestion command above is available now.

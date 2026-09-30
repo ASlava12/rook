@@ -1283,6 +1283,8 @@ struct App {
     /// implementation rather than two that drift.
     shared: crate::chat::Session,
     history: history::History,
+    /// Source boundary of the model draft currently offered for review.
+    summary_boundary: Option<(u128, u128, u64)>,
     turn: Option<tokio::task::JoinHandle<()>>,
     /// `None` is the ordinary state: the conversation, whole.
     overlay: Option<Overlay>,
@@ -1426,6 +1428,7 @@ impl App {
             queue,
             tasks,
             history,
+            summary_boundary: None,
             editor: None,
             runtime,
             chat: Chat {
@@ -1653,6 +1656,21 @@ impl App {
             self.drain_turn_events();
             self.tasks.poll();
             self.history.poll();
+            if let Some((target, result)) = self.history.take_suggestion() {
+                match result {
+                    Ok(draft) => {
+                        let source = rook_store::parse_session_id(&draft.source_session);
+                        if source == self.chat.session {
+                            self.summary_boundary =
+                                source.map(|source| (source, target, draft.source_through));
+                            self.chat.push("stat", &format!("{}\n\nReview and edit this draft, then use /summary {} <reviewed text>. The source boundary is pinned until a newer draft replaces it.", draft.text, rook_store::format_session_id(target)));
+                        } else {
+                            self.chat.push("stat", "Summary suggestion finished for a conversation no longer open; request it again from the source branch.");
+                        }
+                    }
+                    Err(error) => self.chat.push("err", &format!("Summary suggestion failed: {error}")),
+                }
+            }
             self.mcp.poll();
             if let Some(text) = self.queue.poll(self.chat.session) {
                 if !self.chat.input.text.is_empty() {
@@ -2867,23 +2885,61 @@ impl App {
                 return self.chat.push("err", "use /summary-draft TARGET_SESSION");
             };
             match self.source.branch_summary_draft(from, target) {
-                Ok(draft) => self.chat.push("stat", &draft.text),
+                Ok(draft) => {
+                    self.summary_boundary = Some((from, target, draft.source_through));
+                    self.chat.push("stat", &format!("{}\n\nReview and edit this draft, then use /summary {} <reviewed text>. The source boundary is pinned.", draft.text, rook_store::format_session_id(target)));
+                }
                 Err(error) => self.chat.push("err", &error.to_string()),
             }
             return;
         }
-        if name == "summary" {
+        if name == "summary-suggest" {
             let Some(from) = self.chat.session else {
                 return self.chat.push("err", "open a source conversation first");
             };
-            let Some((target, text)) = rest.trim().split_once(' ') else {
-                return self.chat.push("err", "use /summary TARGET_SESSION reviewed text");
+            let Some(target) = rook_store::parse_session_id(rest.trim()) else {
+                return self.chat.push("err", "use /summary-suggest TARGET_SESSION");
+            };
+            if self.history.suggest(from, target) {
+                self.chat.push("stat", "Generating a bounded historical summary draft for review…");
+            } else {
+                self.chat.push("err", "History worker is busy; try again after the current read finishes.");
+            }
+            return;
+        }
+        if name == "summary" || name == "summary-at" {
+            let Some(from) = self.chat.session else {
+                return self.chat.push("err", "open a source conversation first");
+            };
+            let Some((target, remaining)) = rest.trim().split_once(' ') else {
+                return self.chat.push("err", "use /summary TARGET_SESSION reviewed text, or /summary-at TARGET_SESSION SOURCE_EVENT reviewed text");
             };
             let Some(target) = rook_store::parse_session_id(target) else {
                 return self.chat.push("err", "invalid target session ID");
             };
-            match self.source.transfer_branch_summary(from, target, text) {
-                Ok(event) => self.chat.push("stat", &format!("Saved attributed summary in {} at event #{event}. Switch with /tree; verify historical file and test claims in the current workspace.", rook_store::format_session_id(target))),
+            let (through, text) = if name == "summary-at" {
+                let Some((seq, text)) = remaining.split_once(' ') else {
+                    return self
+                        .chat
+                        .push("err", "use /summary-at TARGET_SESSION SOURCE_EVENT reviewed text");
+                };
+                let Ok(seq) = seq.parse::<u64>() else {
+                    return self.chat.push("err", "invalid source event number");
+                };
+                (Some(seq), text)
+            } else {
+                (
+                    self.summary_boundary.and_then(|(source, to, through)| {
+                        (source == from && to == target).then_some(through)
+                    }),
+                    remaining,
+                )
+            };
+            match self.source.transfer_branch_summary_at(from, target, through, text) {
+                Ok(event) => {
+                    self.summary_boundary = None;
+                    self.chat.push("stat", &format!("Saved attributed summary in {} at event #{event}. Switch with /tree; verify historical file and test claims in the current workspace.", rook_store::format_session_id(target)));
+                }
                 Err(error) => self.chat.push("err", &error.to_string()),
             }
             return;
@@ -3221,8 +3277,12 @@ impl App {
             && (command == "queue"
                 || command == "summary"
                 || command.starts_with("summary ")
+                || command == "summary-at"
+                || command.starts_with("summary-at ")
                 || command == "summary-draft"
                 || command.starts_with("summary-draft ")
+                || command == "summary-suggest"
+                || command.starts_with("summary-suggest ")
                 || command == "mcp"
                 || command.starts_with("mcp ")
                 || command == "task"

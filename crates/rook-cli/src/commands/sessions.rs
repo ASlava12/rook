@@ -43,10 +43,14 @@ pub(crate) fn diagnostic_arguments(arguments: &str) -> Result<(bool, std::path::
 }
 
 pub(crate) fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, json: bool) -> Result<()> {
-    if let SessionCmd::SummaryDraft { source: from, target } = &cmd {
+    if let SessionCmd::SummaryDraft { source: from, target, suggest } = &cmd {
         let from = source.session_named(from, workspace)?;
         let to = source.session_named(target, workspace)?;
-        let draft = source.branch_summary_draft(from, to)?;
+        let draft = if *suggest {
+            source.branch_summary_suggest(from, to)?
+        } else {
+            source.branch_summary_draft(from, to)?
+        };
         if json {
             println!("{}", serde_json::to_string_pretty(&draft)?);
         } else {
@@ -57,10 +61,10 @@ pub(crate) fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, js
         }
         return Ok(());
     }
-    if let SessionCmd::Summary { source: from, target, text } = &cmd {
+    if let SessionCmd::Summary { source: from, target, text, source_through } = &cmd {
         let from = source.session_named(from, workspace)?;
         let to = source.session_named(target, workspace)?;
-        let event = source.transfer_branch_summary(from, to, text)?;
+        let event = source.transfer_branch_summary_at(from, to, *source_through, text)?;
         if json {
             println!(
                 "{}",

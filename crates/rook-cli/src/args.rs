@@ -431,12 +431,18 @@ pub(crate) enum SessionCmd {
     SummaryDraft {
         source: String,
         target: String,
+        /// Ask the configured model to condense the excerpts into an editable draft.
+        #[arg(long)]
+        suggest: bool,
     },
     /// Carry a reviewed summary from one branch into another as attributed history.
     Summary {
         source: String,
         target: String,
         text: String,
+        /// Reject saving if the source gained events after the draft was read.
+        #[arg(long)]
+        source_through: Option<u64>,
     },
     /// Give a conversation branch a name.
     Rename {

@@ -26,10 +26,12 @@ pub(super) struct History {
     needle: String,
     note: String,
     quote: Option<String>,
+    suggestion: Option<(u128, Result<rook_core::branches::SummaryDraft, String>)>,
     send: Option<SyncSender<(u64, Command)>>,
     receive: Receiver<(u64, Result<Update>)>,
 }
 enum Command {
+    Suggest(u128, u128),
     Fork(u128, u64),
     Rename(u128, String),
     Bookmarks(u128),
@@ -42,6 +44,7 @@ enum Command {
     Quote(u128, u64, u64),
 }
 enum Update {
+    Suggested(u128, Result<rook_core::branches::SummaryDraft, String>),
     Fork(rook_core::branches::Forked),
     Rename(rook_core::branches::Node),
     Bookmarks(rook_core::branches::Bookmarks, bool),
@@ -55,6 +58,10 @@ enum Update {
 impl Command {
     fn read(self, source: &crate::source::Source) -> Result<Update> {
         Ok(match self {
+            Self::Suggest(from, target) => Update::Suggested(
+                target,
+                source.branch_summary_suggest(from, target).map_err(|error| error.to_string()),
+            ),
             Self::Fork(session, seq) => Update::Fork(source.branch_from_event(session, seq)?),
             Self::Rename(session, title) => Update::Rename(source.rename_branch(session, &title)?),
             Self::Bookmarks(session) => Update::Bookmarks(source.bookmarks(session)?, true),
@@ -117,6 +124,7 @@ impl History {
             needle: String::new(),
             note,
             quote: None,
+            suggestion: None,
             send,
             receive,
         }
@@ -167,6 +175,13 @@ impl History {
             self.note = "History reader is busy or unavailable; try again.".into();
             false
         }
+    }
+    pub(super) fn suggest(&mut self, source: u128, target: u128) -> bool {
+        if self.pending {
+            return false;
+        }
+        self.epoch = self.epoch.wrapping_add(1);
+        self.ask(Command::Suggest(source, target))
     }
     pub(super) fn poll(&mut self) {
         while let Ok((epoch, update)) = self.receive.try_recv() {
@@ -277,12 +292,18 @@ impl History {
                     self.scroll = 0;
                 }
                 Ok(Update::Quote(text)) => self.quote = Some(text),
+                Ok(Update::Suggested(target, result)) => self.suggestion = Some((target, result)),
                 Err(e) => self.note = e.to_string(),
             }
         }
     }
     pub(super) fn take_quote(&mut self) -> Option<String> {
         self.quote.take()
+    }
+    pub(super) fn take_suggestion(
+        &mut self,
+    ) -> Option<(u128, Result<rook_core::branches::SummaryDraft, String>)> {
+        self.suggestion.take()
     }
     pub(super) fn take_session(&mut self) -> Option<rook_core::branches::Node> {
         self.switch.take()

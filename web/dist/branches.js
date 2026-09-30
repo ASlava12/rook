@@ -45,6 +45,21 @@ export function branchPanel(session, continueBranch, quote, forkEvent, renamed) 
           } catch (error) {
             if (root.isConnected) notice.textContent = error.error || String(error);
           } finally { pending = false; input.disabled = false; root.removeAttribute('aria-busy'); }
+        }), button('Generate suggested summary', async () => {
+          if (pending) return;
+          pending = true; input.disabled = true; root.setAttribute('aria-busy', 'true');
+          try {
+            const draft = await api(`/api/sessions/${encodeURIComponent(node.id)}/summary-suggest`,
+              { source: departed });
+            if (root.isConnected) {
+              input.value = draft.text;
+              sourceThrough = draft.source_through;
+              notice.textContent = `Model suggestion from ${draft.scanned_events} recent source events through #${sourceThrough}; review and edit before saving.` +
+                (draft.omitted_earlier ? ' Earlier events were omitted.' : '');
+            }
+          } catch (error) {
+            if (root.isConnected) notice.textContent = error.error || String(error);
+          } finally { pending = false; input.disabled = false; root.removeAttribute('aria-busy'); }
         }), button('Save summary and continue', async () => {
           if (pending) return;
           const text = input.value.trim();

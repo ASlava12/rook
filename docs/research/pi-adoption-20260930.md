@@ -916,3 +916,41 @@ This is a display change using
 the existing local and daemon queue-page paths; no stored or wire format changed.
 The queue admission and lifecycle gaps above, branch synthesis, and all Pending
 rows remain open.
+
+## Model-assisted branch summary draft
+
+An explicit request can now ask the configured model to condense the existing
+bounded source excerpts. The model receives at most the 128-event/12-excerpt
+evidence draft as untrusted historical data, with no tools. The response is
+limited while streaming, before a second copy is retained, and the returned
+draft names the source session and event boundary with a current-workspace
+verification warning. Generation never writes the target branch. A person
+reviews and edits the text, then saves it through the existing attributed
+`branch-summary` event. Pinned source boundaries reject a source that changed
+between draft and save. Stored records and old API payloads remain compatible.
+
+CLI `session summary-draft SOURCE TARGET --suggest`, local and daemon REPL/TUI
+`/summary-suggest TARGET`, HTTP `POST .../summary-suggest`, and the browser's
+**Generate suggested summary** button share the core behavior. CLI
+`session summary ... --source-through EVENT` and interactive `/summary-at`
+allow an explicit reviewed boundary; browser, TUI and daemon REPL drafts pin it
+automatically. The TUI runs model generation off its drawing thread. The CLI
+argument parser now runs on a sized stack because the additional option
+exceeded the Windows main thread's reserve during Clap parsing.
+
+The focused core test passed for attribution, byte bound and no target write.
+The real local plus daemon CLI suggestion test passed with a scripted provider,
+including no automatic save. Live browser and TUI interaction checks are still
+needed before the branch row is Complete. Pi also scopes its branch summary to
+the path since the common ancestor and offers it during navigation; Rook still
+uses recent source excerpts and an explicit command/button. Queue gaps and all
+Pending rows remain in scope.
+
+The first full `cargo xtask ci` exited 1 on Clippy's `needless_question_mark`
+in the new CLI parser wrapper. The corrected tree passed a full gate with exit
+0 (`ci: ok`, 389.8 seconds). After TUI and daemon REPL excerpt drafts were made
+to pin their source boundary too, the final full `cargo xtask ci` exited 0
+(`ci: ok`, 454.0 seconds). `node --check web/dist/branches.js` exited 0.
+This block changes neither store formats nor storage algorithms, so no new
+compaction measurement was required. The Windows PTY target contains zero
+runnable tests; live TUI interaction remains unverified here.

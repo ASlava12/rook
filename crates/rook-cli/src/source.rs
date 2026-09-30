@@ -995,14 +995,22 @@ impl Source {
         }
     }
 
-    pub(crate) fn transfer_branch_summary(&self, source: u128, target: u128, text: &str) -> Result<u64> {
+    pub(crate) fn transfer_branch_summary_at(
+        &self,
+        source: u128,
+        target: u128,
+        through: Option<u64>,
+        text: &str,
+    ) -> Result<u64> {
         match self {
-            Self::Local(rook) => Ok(rook_core::branches::transfer_summary(rook, source, target, text)?),
+            Self::Local(rook) => {
+                Ok(rook_core::branches::transfer_summary_at(rook, source, target, through, text)?)
+            }
             Self::Daemon(d) => {
                 let reply: serde_json::Value = d.request_bounded(
                     &format!("/api/sessions/{}/summary", rook_store::format_session_id(target)),
                     Some(
-                        &serde_json::json!({ "source": rook_store::format_session_id(source), "text": text }),
+                        &serde_json::json!({ "source": rook_store::format_session_id(source), "text": text, "source_through": through }),
                     ),
                     8192,
                 )?;
@@ -1023,6 +1031,34 @@ impl Source {
                 rook_store::format_session_id(target),
                 rook_store::format_session_id(source)
             )),
+        }
+    }
+
+    pub(crate) fn branch_summary_suggest(
+        &self,
+        source: u128,
+        target: u128,
+    ) -> Result<rook_core::branches::SummaryDraft> {
+        match self {
+            Self::Local(rook) => {
+                let draft = rook_core::branches::draft_summary(rook, source, target)?;
+                let config = rook.config.clone();
+                let generated = std::thread::Builder::new()
+                    .name("branch-summarizer".into())
+                    .stack_size(8 * 1024 * 1024)
+                    .spawn(move || -> Result<_> {
+                        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+                        Ok(runtime.block_on(rook_core::branches::suggest_summary(&config, draft))?)
+                    })?
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("branch summarizer stopped unexpectedly"))??;
+                Ok(generated)
+            }
+            Self::Daemon(d) => d.request_bounded(
+                &format!("/api/sessions/{}/summary-suggest", rook_store::format_session_id(target)),
+                Some(&serde_json::json!({ "source": rook_store::format_session_id(source) })),
+                24 * 1024,
+            ),
         }
     }
 

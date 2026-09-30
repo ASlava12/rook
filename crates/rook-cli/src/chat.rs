@@ -78,6 +78,10 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("queue", "", "inspect pending messages; the TUI opens an editable queue"),
     ("turns", "[before]", "recorded turn results and cumulative token usage"),
     ("tree", "[session-id]", "browse conversation branches; switching leaves files unchanged"),
+    ("summary-draft", "<target-session>", "show bounded excerpts from this branch for review"),
+    ("summary-suggest", "<target-session>", "ask the model for a historical summary draft"),
+    ("summary", "<target-session> <text>", "carry a reviewed, attributed summary"),
+    ("summary-at", "<target-session> <event> <text>", "carry only if the source still ends at this event"),
     ("context", "[window]", "what this conversation costs, and of what"),
     ("skills", "[name]", "skills that apply here, or one skill's body"),
     ("session", "[id|last]", "this one's totals, or continue another"),
@@ -299,6 +303,7 @@ async fn through_the_daemon(
     let mut watching = crate::remote::Watching::new(yes, false, view_bytes);
     let mut session = resume;
     let mut output = rook_proto::TurnOptions::default();
+    let mut summary_boundary: Option<(u128, u128, u64)> = None;
 
     loop {
         // Blocking on stdin inside an async function, which is what a REPL is:
@@ -329,6 +334,33 @@ async fn through_the_daemon(
             let (name, rest) = command.split_once(' ').unwrap_or((command, ""));
             match name {
                 "quit" | "exit" => break,
+                "summary-suggest" => {
+                    let Some(from) = session.as_deref().and_then(rook_store::parse_session_id) else {
+                        eprintln!("open a source conversation first");
+                        continue;
+                    };
+                    let Some(target) = rook_store::parse_session_id(rest.trim()) else {
+                        eprintln!("use /summary-suggest TARGET_SESSION");
+                        continue;
+                    };
+                    let here = workspace.to_path_buf();
+                    let result = tokio::task::spawn_blocking(move || {
+                        crate::source::Source::open(Some(here))?.branch_summary_suggest(from, target)
+                    })
+                    .await?;
+                    match result {
+                        Ok(draft) => {
+                            summary_boundary = Some((from, target, draft.source_through));
+                            print!(
+                                "{}\nReview, then /summary {} <reviewed text>; source boundary #{} is pinned.\n",
+                                draft.text,
+                                rook_store::format_session_id(target),
+                                draft.source_through
+                            );
+                        }
+                        Err(error) => eprintln!("{error}"),
+                    }
+                }
                 "summary-draft" => {
                     let Some(from) = session.as_deref().and_then(rook_store::parse_session_id) else {
                         eprintln!("open a source conversation first");
@@ -338,32 +370,72 @@ async fn through_the_daemon(
                         eprintln!("use /summary-draft TARGET_SESSION");
                         continue;
                     };
-                    let source = crate::source::Source::open(Some(workspace.to_path_buf()))?;
-                    match source.branch_summary_draft(from, target) {
-                        Ok(draft) => print!("{}", draft.text),
+                    let here = workspace.to_path_buf();
+                    let result = tokio::task::spawn_blocking(move || {
+                        crate::source::Source::open(Some(here))?.branch_summary_draft(from, target)
+                    })
+                    .await?;
+                    match result {
+                        Ok(draft) => {
+                            summary_boundary = Some((from, target, draft.source_through));
+                            print!(
+                                "{}\nReview, then /summary {} <reviewed text>; source boundary #{} is pinned.\n",
+                                draft.text,
+                                rook_store::format_session_id(target),
+                                draft.source_through
+                            );
+                        }
                         Err(error) => eprintln!("{error}"),
                     }
                 }
-                "summary" => {
+                "summary" | "summary-at" => {
                     let Some(from) = session.as_deref().and_then(rook_store::parse_session_id) else {
                         eprintln!("open a source conversation first");
                         continue;
                     };
-                    let Some((target, text)) = rest.trim().split_once(' ') else {
-                        eprintln!("use /summary TARGET_SESSION reviewed text");
+                    let Some((target, remaining)) = rest.trim().split_once(' ') else {
+                        eprintln!("use /{name} TARGET_SESSION [SOURCE_EVENT] reviewed text");
                         continue;
                     };
                     let Some(target) = rook_store::parse_session_id(target) else {
                         eprintln!("invalid target session ID");
                         continue;
                     };
-                    let source = crate::source::Source::open(Some(workspace.to_path_buf()))?;
-                    match source.transfer_branch_summary(from, target, text) {
+                    let (through, text) = if name == "summary-at" {
+                        let Some((seq, text)) = remaining.split_once(' ') else {
+                            eprintln!("use /summary-at TARGET_SESSION SOURCE_EVENT reviewed text");
+                            continue;
+                        };
+                        let Ok(seq) = seq.parse::<u64>() else {
+                            eprintln!("invalid source event number");
+                            continue;
+                        };
+                        (Some(seq), text)
+                    } else {
+                        (
+                            summary_boundary.and_then(|(source, to, through)| {
+                                (source == from && to == target).then_some(through)
+                            }),
+                            remaining,
+                        )
+                    };
+                    let text = text.to_string();
+                    let here = workspace.to_path_buf();
+                    let result = tokio::task::spawn_blocking(move || {
+                        crate::source::Source::open(Some(here))?
+                            .transfer_branch_summary_at(from, target, through, &text)
+                    })
+                    .await?;
+                    let saved = result.is_ok();
+                    match result {
                         Ok(event) => println!(
                             "saved attributed summary at event #{event} in {}",
                             rook_store::format_session_id(target)
                         ),
                         Err(error) => eprintln!("{error}"),
+                    }
+                    if saved {
+                        summary_boundary = None;
                     }
                 }
                 "followup" => {
@@ -796,6 +868,40 @@ pub async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command
                 "{}",
                 rook_core::branches::describe(&rook_core::branches::page(rook, id, &Default::default())?)
             );
+        }
+        "summary-draft" | "summary-suggest" => {
+            let target = rook_store::parse_session_id(rest)
+                .ok_or_else(|| anyhow::anyhow!("use /{name} TARGET_SESSION"))?;
+            let draft = rook_core::branches::draft_summary(rook, *session, target)?;
+            let draft = if name == "summary-suggest" {
+                rook_core::branches::suggest_summary(&rook.config, draft).await?
+            } else {
+                draft
+            };
+            say!("{}", draft.text);
+            say!(
+                "Review before saving. Source ends at #{}; /summary-at {} {} <reviewed text> pins this boundary.",
+                draft.source_through,
+                rook_store::format_session_id(target),
+                draft.source_through
+            );
+        }
+        "summary" | "summary-at" => {
+            let (target, remaining) = rest
+                .split_once(' ')
+                .ok_or_else(|| anyhow::anyhow!("use /{name} TARGET_SESSION [SOURCE_EVENT] reviewed text"))?;
+            let target = rook_store::parse_session_id(target)
+                .ok_or_else(|| anyhow::anyhow!("invalid target session ID"))?;
+            let (through, text) = if name == "summary-at" {
+                let (seq, text) = remaining.split_once(' ').ok_or_else(|| {
+                    anyhow::anyhow!("use /summary-at TARGET_SESSION SOURCE_EVENT reviewed text")
+                })?;
+                (Some(seq.parse::<u64>()?), text)
+            } else {
+                (None, remaining)
+            };
+            let event = rook_core::branches::transfer_summary_at(rook, *session, target, through, text)?;
+            say!("Saved attributed summary in {} at event #{event}.", rook_store::format_session_id(target));
         }
         "turns" => {
             let before = if rest.trim().is_empty() { None } else { Some(rest.trim().parse::<u64>()?) };

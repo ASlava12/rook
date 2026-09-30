@@ -13,6 +13,102 @@ struct Rook {
 }
 
 #[test]
+fn model_branch_suggestion_is_reviewable_locally_and_through_daemon() {
+    rook_llm::init_tls();
+    use std::io::{Read, Write};
+    let rook = Rook::new();
+    let source = rook_store::new_session_id();
+    let target = rook_store::new_session_id();
+    let from = rook_store::format_session_id(source);
+    let to = rook_store::format_session_id(target);
+    {
+        let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+        for id in [source, target] {
+            store
+                .create_session(&rook_store::SessionMeta::new(
+                    id,
+                    "branch",
+                    rook.workspace.path().display().to_string(),
+                    1,
+                ))
+                .unwrap();
+        }
+        store
+            .append_event(
+                source,
+                rook_store::NewEvent::new(
+                    rook_store::EventKind::UserMessage,
+                    rook_store::Kind::Message,
+                    b"Explore option A",
+                ),
+            )
+            .unwrap();
+    }
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let mut requests = Vec::new();
+        for _ in 0..2 {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket.set_read_timeout(Some(std::time::Duration::from_secs(30))).unwrap();
+            let mut bytes = Vec::new();
+            let mut chunk = [0; 4096];
+            let request = loop {
+                let n = socket.read(&mut chunk).unwrap();
+                assert!(n > 0 && bytes.len() + n < 64 * 1024, "bounded model request");
+                bytes.extend_from_slice(&chunk[..n]);
+                let text = String::from_utf8_lossy(&bytes);
+                if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                    let length: usize = head
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .and_then(|n| n.trim().parse().ok())
+                        })
+                        .unwrap_or(0);
+                    if body.len() >= length {
+                        break serde_json::from_str::<serde_json::Value>(body).unwrap();
+                    }
+                }
+            };
+            requests.push(request);
+            let answer = serde_json::json!({
+                "id":"summary-test", "model":"test",
+                "choices":[{"index":0,"delta":{"role":"assistant","content":"Option A was explored; outcome remains unverified."},"finish_reason":"stop"}],
+                "usage":{"prompt_tokens":10,"completion_tokens":8}
+            }).to_string();
+            let body = format!("data: {answer}\n\ndata: [DONE]\n\n");
+            socket.write_all(format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()
+            ).as_bytes()).unwrap();
+        }
+        requests
+    });
+    rook.write_config(&format!(
+        "[agent]\nmodel='local'\n[models.local]\nmodel='test'\napi='openai'\nurl='{endpoint}'\n"
+    ));
+    let preliminary = rook.json(&["session", "summary-draft", &from, &to]);
+    assert_eq!(preliminary["source_through"], 0);
+    let local = rook.json(&["session", "summary-draft", &from, &to, "--suggest"]);
+    assert_eq!(local["source_session"], from);
+    assert_eq!(local["source_through"], 0);
+    assert!(local["text"].as_str().unwrap().contains("Option A was explored"));
+    let daemon = Daemon::start(&rook);
+    let remote = rook.json(&["session", "summary-draft", &from, &to, "--suggest"]);
+    assert_eq!(remote, local);
+    let requests = server.join().unwrap();
+    assert_eq!(requests.len(), 2);
+    for request in requests {
+        assert!(request.to_string().contains("Explore option A"));
+        assert!(!request.to_string().contains("state of current workspace"));
+    }
+    let history = rook.json(&["session", "history", &to]);
+    assert!(!history.to_string().contains("Option A was explored"), "suggestion must not save itself");
+    drop(daemon);
+}
+
+#[test]
 fn branch_summaries_keep_source_attribution_locally_and_through_daemon() {
     let rook = Rook::new();
     let source = rook_store::new_session_id();

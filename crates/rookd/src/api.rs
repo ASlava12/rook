@@ -37,6 +37,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/sessions/{id}/branch", post(branch_from_event))
         .route("/api/sessions/{id}/summary", post(branch_summary))
         .route("/api/sessions/{id}/summary-draft", get(branch_summary_draft))
+        .route("/api/sessions/{id}/summary-suggest", post(branch_summary_suggest))
         .route("/api/sessions/{id}/rename", post(rename_branch))
         .route("/api/sessions/{id}/bookmarks", get(bookmarks).post(mark_bookmark))
         .route("/api/sessions/{id}/history", get(history_page))
@@ -415,6 +416,19 @@ async fn branch_summary_draft(
     let target = session_id(&id)?;
     let source = session_id(&q.source)?;
     history_read(s, move |r| rook_core::branches::draft_summary(r, source, target)).await
+}
+async fn branch_summary_suggest(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+    Json(q): Json<BranchSummaryQuery>,
+) -> ApiResult<rook_core::branches::SummaryDraft> {
+    let target = session_id(&id)?;
+    let source = session_id(&q.source)?;
+    let Json((draft, config)) = history_read(s, move |r| {
+        Ok((rook_core::branches::draft_summary(r, source, target)?, r.config.clone()))
+    })
+    .await?;
+    Ok(Json(rook_core::branches::suggest_summary(&config, draft).await?))
 }
 async fn branch_summary(
     State(s): State<Shared>,
