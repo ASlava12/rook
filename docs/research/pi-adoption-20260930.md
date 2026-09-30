@@ -7,7 +7,7 @@ Source: Pi `ee602414c703be8da722ec56de7f2399e62581ac`; starting Rook:
 | Capability | State | Completion evidence needed |
 |---|---|---|
 | Bounded live delivery and snapshot recovery | Complete | Queue/replay/input limits, WebSocket backpressure, atomic recovery, current controls, PTY reconnect/goal checks, browser form preservation and full CI passed |
-| Editable steering and follow-up queue | Pending | Core/CLI/API/TUI/browser, durable IDs, goal vs ordinary-turn boundaries, revoke/accept races, restart |
+| Editable steering and follow-up queue | In progress | Core/CLI/API/TUI/browser, durable IDs, goal vs ordinary-turn boundaries, revoke/accept races, restart |
 | Configurable keyboard actions and prompt undo | Complete | Shared registry/config/help, bounded Unicode edit tests, remapped-key and external-editor PTY checks, full CI passed |
 | Branch navigation and optional branch summary | Pending | Existing session/event IDs, bounded tree/history, explicit workspace semantics, attributable summary |
 | Inline tool cards | Pending | Compact/expanded results, errors/duration/diffs, bounded loading, TUI/browser verification |
@@ -90,16 +90,41 @@ as a staged baseline, with this feature in its unstaged diff. It must not be
 merged as a diff against its old HEAD. Main is now the authoritative integrated
 tree; subsequent fixes belong there. The other capabilities retain their scope.
 
-## Queue investigation
+## Queue implementation
 
 CodeGraph located `Interjections` but resolved no caller edges; directed source
 reading established the two existing paths. Ordinary turns use an in-memory
-`Vec<String>` and take the whole batch; durable work stores IDs but reads pending
-text before extracting the receipt ID back from a rendered prefix when marking
-acceptance. Neither path supports editing/revoking
-an unaccepted message or separating steering from follow-up. The next block must
-make acceptance atomic with its durable receipt and transcript admission, preserve
-IDs through retries/restart, and keep ordinary turns distinct from `/goal`.
+`Vec<String>`. Durable work had separately persisted a transcript message and its
+acceptance receipt, recognizing the receipt by parsing a prefix from message text.
+
+The first queue change makes durable acceptance one immediate store transaction:
+the transcript message, goal note, current goal value and updated receipt commit
+together. The loop carries receipt IDs separately from ordinary text, reloads the
+current instruction under the queue mutation lock, and only injects the text
+returned by successful acceptance. Paused work leaves instructions queued; stale
+or concurrent acceptance cannot duplicate a message. Unaccepted corrections no
+longer enter the goal through an accepted correction's goal update.
+
+Focused managed-work and store tests passed for concurrent acceptance, rollback on
+transcript failure, restart and retry without duplication, and a plain message
+spelling a receipt prefix without acknowledging it. The full isolated CI passed
+with exit status 0 (529.3 seconds; `/tmp/rook-pi-queue-foundation-ci.log`).
+`cargo xtask compaction` also passed; 4.02 MiB on disk, 37.1x dictionary compression
+and 5.8x end-to-end match the existing README/storage measurements.
+
+This is a prerequisite, not completion of the editable queue. Still required:
+shared ordinary-turn/goal queue semantics, editable and revocable IDs, explicit
+steering/follow-up boundaries, core/CLI/API/TUI/browser controls, edit/accept
+races, bounded views and restart verification.
+
+The next preparation is in `/tmp/rook-pi-message-queue`, branch `pi-message-queue`.
+Its staged files are the atomic-acceptance baseline; the unstaged diff adds
+revision-checked edit/withdraw operations and goal HTTP routes, original-submission
+fingerprints, withdrawn-state handling, and race/restart tests. Validation is
+still pending there, and ordinary sessions, follow-up execution and frontend
+controls are not implemented. The prepared store-format bump prevents older
+runners treating withdrawn instructions as queued; it is not in the atomic
+acceptance commit. Do not merge this worktree as a diff against its old HEAD.
 
 ## Validation environment
 

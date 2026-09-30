@@ -6,27 +6,44 @@ use crate::error::{CoreError, Result};
 use crate::hooks;
 use rook_store::EventKind;
 
+pub(super) enum Incoming {
+    Live(String),
+    Durable { run: String, id: String },
+}
+
 impl AgentLoop<'_> {
-    pub(super) fn incoming(&self) -> Result<Vec<String>> {
-        let mut messages = self.interjections.take();
-        if let Some(id) = &self.managed_work {
-            messages.extend(crate::work::managed::pending(self.rook, id)?);
+    pub(super) fn incoming(&self) -> Result<Vec<Incoming>> {
+        let mut messages: Vec<_> = self.interjections.take().into_iter().map(Incoming::Live).collect();
+        if let Some(run) = &self.managed_work {
+            messages.extend(
+                crate::work::managed::pending(self.rook, run)?
+                    .into_iter()
+                    .map(|id| Incoming::Durable { run: run.clone(), id }),
+            );
         }
         Ok(messages)
     }
 
     pub(super) fn hear(
         &self,
-        text: &str,
+        incoming: &Incoming,
         messages: &mut Vec<rook_llm::Message>,
         progress: &mut impl FnMut(Progress<'_>),
     ) -> Result<()> {
-        self.rook.log(self.session, EventKind::UserMessage, "while running", text)?;
+        let text = match incoming {
+            Incoming::Live(text) => {
+                self.rook.log(self.session, EventKind::UserMessage, "while running", text)?;
+                text.clone()
+            }
+            Incoming::Durable { run, id } => {
+                let Some(text) = crate::work::managed::accept(self.rook, run, self.session, id)? else {
+                    return Ok(());
+                };
+                text
+            }
+        };
+        progress(Progress::Heard { text: &text });
         messages.push(rook_llm::Message::user(text));
-        if let Some(id) = &self.managed_work {
-            crate::work::managed::heard(self.rook, id, self.session, text)?;
-        }
-        progress(Progress::Heard { text });
         Ok(())
     }
 

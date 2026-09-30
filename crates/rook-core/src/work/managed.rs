@@ -321,40 +321,53 @@ pub fn forget(rook: &Rook, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Pending receipt IDs. Text is read again at acceptance, under the same lock
+/// as queue edits; a previously observed string is never authority to deliver.
 pub fn pending(rook: &Rook, id: &str) -> Result<Vec<String>> {
     Ok(read(rook, id)?
         .run
         .instructions
         .iter()
         .filter(|m| m.applied_at.is_none())
-        .map(|m| format!("[work instruction {}]\n{}", m.id, m.text))
+        .map(|m| m.id.clone())
         .collect())
 }
 
-pub fn heard(rook: &Rook, run: &str, session: u128, text: &str) -> Result<()> {
-    let Some(id) = text
-        .lines()
-        .next()
-        .and_then(|s| s.strip_prefix("[work instruction "))
-        .and_then(|s| s.strip_suffix(']'))
-    else {
-        return Ok(());
-    };
-    let current = update(rook, run, |saved| {
-        let message = saved
-            .run
-            .instructions
-            .iter_mut()
-            .find(|m| m.id == id)
-            .ok_or_else(|| bad("unknown instruction receipt"))?;
-        if message.applied_at.is_none() {
-            message.applied_at = Some(now());
-            message.session = Some(rook_store::format_session_id(session));
-        }
-        Ok(goal(&saved.run))
-    })?;
-    rook.set_goal(session, &current)?;
-    Ok(())
+/// Accept exactly once and publish the transcript, goal and receipt in one
+/// durable transaction. Callers only put the returned text into model context.
+pub fn accept(rook: &Rook, run: &str, session: u128, id: &str) -> Result<Option<String>> {
+    let _lock = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+    let mut saved = read(rook, run)?;
+    if !saved.run.status.runnable() {
+        return Ok(None);
+    }
+    let message = saved
+        .run
+        .instructions
+        .iter_mut()
+        .find(|m| m.id == id)
+        .ok_or_else(|| bad("unknown instruction receipt"))?;
+    if message.applied_at.is_some() {
+        return Ok(None);
+    }
+    let text = format!("[work instruction {}]\n{}", message.id, message.text);
+    message.applied_at = Some(now());
+    message.session = Some(rook_store::format_session_id(session));
+    saved.run.updated_at = now();
+    let current = goal(&saved.run);
+    let encoded = crate::persistence::encode(&saved)?;
+    let record = key(run)?;
+    let goal_key = format!("goal/{session:032x}");
+    use rook_store::{EventKind, Kind, NewEvent};
+    rook.store.append_events_with_values(
+        session,
+        [
+            NewEvent::new(EventKind::Note, Kind::Message, current.as_bytes()).label("goal"),
+            NewEvent::new(EventKind::UserMessage, Kind::Message, text.as_bytes()).label("while running"),
+        ],
+        &[(&record, &encoded), (&goal_key, current.as_bytes())],
+    )?;
+    Ok(Some(text))
 }
 
 pub fn should_stop(rook: &Rook, id: &str) -> Result<bool> {
@@ -374,7 +387,7 @@ fn clipped(text: &str, max: usize) -> String {
 
 fn goal(run: &Run) -> String {
     let mut text = run.goal.clone();
-    for message in &run.instructions {
+    for message in run.instructions.iter().filter(|m| m.applied_at.is_some()) {
         text.push_str(&format!("\n\nUser correction {}:\n{}", message.id, message.text));
     }
     text

@@ -736,7 +736,7 @@ impl Store {
     /// Append one event. The body is stored as an object, so a repeated payload
     /// costs only the ~50-byte log record.
     pub fn append_event(&self, session: u128, event: NewEvent<'_>) -> Result<u64> {
-        self.append_events(session, [event]).map(|[seq]| seq)
+        self.append_events_with_values(session, [event], &[]).map(|[seq]| seq)
     }
 
     /// Keep a companion payload and its event adjacent even while another
@@ -748,18 +748,26 @@ impl Store {
         before: NewEvent<'_>,
         event: NewEvent<'_>,
     ) -> Result<[u64; 2]> {
-        self.append_events(session, [before, event])
+        self.append_events_with_values(session, [before, event], &[])
     }
 
-    fn append_events<const N: usize>(&self, session: u128, batch: [NewEvent<'_>; N]) -> Result<[u64; N]> {
+    /// Commit events and their caller-owned state together. Nonempty values
+    /// make the transaction durable before returning, so a receipt cannot
+    /// survive without the event it acknowledges, or vice versa.
+    pub fn append_events_with_values<const N: usize>(
+        &self,
+        session: u128,
+        batch: [NewEvent<'_>; N],
+        values: &[(&str, &[u8])],
+    ) -> Result<[u64; N]> {
         // A checkpoint and a compaction are the two events a session can be
         // returned to, so they are the two that have to be on the disk rather
         // than in the page cache — and because an `Immediate` commit carries
         // everything before it, making these durable makes the turn that led up
         // to them durable too. Everything else rides along.
-        let ordinary =
-            batch.iter().all(|event| !matches!(event.kind, EventKind::Checkpoint | EventKind::Compaction))
-                && self.unflushed.load(Ordering::Relaxed).saturating_add(N as u64) <= EVENTS_PER_FLUSH;
+        let ordinary = values.is_empty()
+            && batch.iter().all(|event| !matches!(event.kind, EventKind::Checkpoint | EventKind::Compaction))
+            && self.unflushed.load(Ordering::Relaxed).saturating_add(N as u64) <= EVENTS_PER_FLUSH;
 
         let mut txn = self.db.begin_write()?;
         if ordinary {
@@ -821,6 +829,12 @@ impl Store {
                 )?;
             }
             sequences[index] = seq;
+        }
+        if !values.is_empty() {
+            let mut kv = txn.open_table(schema::KV)?;
+            for (key, value) in values {
+                kv.insert(*key, *value)?;
+            }
         }
         txn.commit()?;
         match ordinary {

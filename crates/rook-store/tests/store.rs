@@ -20,6 +20,27 @@ fn tmp_store() -> (tempfile::TempDir, Store) {
 }
 
 #[test]
+fn receipt_values_and_events_commit_together_and_failed_appends_publish_neither() {
+    let (dir, store) = tmp_store();
+    let session = rook_store::new_session_id();
+    store.kv_set("receipt", b"queued").unwrap();
+    let event = || NewEvent::new(EventKind::UserMessage, Kind::Message, b"correction");
+    assert!(store.append_events_with_values(session, [event()], &[("receipt", b"accepted")]).is_err());
+    assert_eq!(store.kv_get("receipt").unwrap().unwrap(), b"queued");
+    assert!(store.get_session(session).unwrap().is_none());
+    store.create_session(&SessionMeta::new(session, "atomic", "/tmp", rook_store::now_unix())).unwrap();
+    let [seq] = store.append_events_with_values(session, [event()], &[("receipt", b"accepted")]).unwrap();
+    assert_eq!(seq, 0);
+    assert_eq!(store.not_on_disk_yet(), 0, "a receipt is durable at return, without a later flush");
+    drop(store);
+    let reopened = Store::open(dir.path()).unwrap();
+    assert_eq!(reopened.kv_get("receipt").unwrap().unwrap(), b"accepted");
+    let events = reopened.events(session, 0, 10).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(reopened.get(&events[0].record.body).unwrap(), b"correction");
+}
+
+#[test]
 fn companion_events_stay_adjacent_under_concurrent_appends_and_fork_together() {
     let (_dir, store) = tmp_store();
     let session = rook_store::new_session_id();

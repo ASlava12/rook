@@ -72,7 +72,12 @@ fn steering_is_durable_idempotent_bounded_and_acknowledged_only_on_delivery() {
     assert_eq!(work::read(&rook, &run.id).unwrap().run.status, Status::Paused);
     let session = rook.start_session("receipt").unwrap();
     let incoming = work::pending(&rook, &run.id).unwrap();
-    work::heard(&rook, &run.id, session, &incoming[0]).unwrap();
+    assert!(
+        work::accept(&rook, &run.id, session, &incoming[0]).unwrap().is_none(),
+        "pause keeps messages queued"
+    );
+    work::control(&rook, &run.id, Action::Resume).unwrap();
+    assert!(work::accept(&rook, &run.id, session, &incoming[0]).unwrap().is_some());
     assert!(work::pending(&rook, &run.id).unwrap().is_empty());
     assert!(rook.goal(session).unwrap().unwrap().contains("use Russian"));
     assert_eq!(
@@ -83,6 +88,103 @@ fn steering_is_durable_idempotent_bounded_and_acknowledged_only_on_delivery() {
     work::forget(&rook, &run.id).unwrap();
     assert!(work::list(&rook).unwrap().is_empty());
     assert!(rook.store.kv_get(&format!("work/managed/{}", run.id)).unwrap().is_none());
+}
+
+#[test]
+fn a_failed_transcript_append_leaves_the_instruction_queued_for_retry() {
+    let workspace = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let rook = engine(workspace.path(), store.path());
+    let run = start(&rook);
+    work::steer(&rook, &run.id, correction("retry", "keep this correction")).unwrap();
+    let missing = rook_store::new_session_id();
+    assert!(work::accept(&rook, &run.id, missing, "retry").is_err());
+    assert_eq!(work::pending(&rook, &run.id).unwrap(), ["retry"]);
+    assert!(rook.goal(missing).unwrap().is_none());
+    drop(rook);
+    let rook = engine(workspace.path(), store.path());
+    let session = rook.start_session("recovered").unwrap();
+    assert!(work::accept(&rook, &run.id, session, "retry").unwrap().is_some());
+    drop(rook);
+    let rook = engine(workspace.path(), store.path());
+    assert!(work::pending(&rook, &run.id).unwrap().is_empty());
+    assert!(work::accept(&rook, &run.id, session, "retry").unwrap().is_none());
+    let messages: Vec<_> = rook
+        .store
+        .events(session, 0, 100)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.record.kind == rook_store::EventKind::UserMessage)
+        .collect();
+    assert_eq!(messages.len(), 1, "retry after restart never appends the correction twice");
+    assert!(rook.goal(session).unwrap().unwrap().contains("keep this correction"));
+}
+
+#[test]
+fn concurrent_acceptance_publishes_one_message_and_excludes_unaccepted_text_from_the_goal() {
+    let workspace = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let rook = engine(workspace.path(), store.path());
+    let run = start(&rook);
+    work::steer(&rook, &run.id, correction("one", "ACCEPTED_TEXT")).unwrap();
+    work::steer(&rook, &run.id, correction("two", "STILL_QUEUED_TEXT")).unwrap();
+    let session = rook.start_session("race").unwrap();
+    let barrier = std::sync::Barrier::new(8);
+    let accepted = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                scope.spawn(|| {
+                    barrier.wait();
+                    work::accept(&rook, &run.id, session, "one").unwrap().is_some()
+                })
+            })
+            .collect();
+        handles.into_iter().map(|handle| usize::from(handle.join().unwrap())).sum::<usize>()
+    });
+    assert_eq!(accepted, 1);
+    assert_eq!(work::pending(&rook, &run.id).unwrap(), ["two"]);
+    let goal = rook.goal(session).unwrap().unwrap();
+    assert!(goal.contains("ACCEPTED_TEXT"));
+    assert!(!goal.contains("STILL_QUEUED_TEXT"));
+    assert_eq!(
+        rook.store
+            .events(session, 0, 100)
+            .unwrap()
+            .iter()
+            .filter(|e| e.record.kind == rook_store::EventKind::UserMessage)
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_live_message_cannot_acknowledge_a_receipt_by_spelling_its_text_prefix() {
+    let workspace = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let rook = engine(workspace.path(), store.path());
+    let run = start(&rook);
+    work::steer(&rook, &run.id, correction("one", "AUTHENTIC_CORRECTION")).unwrap();
+    let session = rook.start_session("typed receipts").unwrap();
+    let provider = Script::new(vec![answer("Done")]);
+    let mut agent = AgentLoop::new(&rook, provider.clone(), session);
+    agent.managed_work = Some(run.id.clone());
+    let spelled = "[work instruction one]\nthis is only user text";
+    agent.interjections.say(spelled);
+    let mut saw_live = false;
+    agent
+        .run_with("Continue", |progress| {
+            if let rook_core::agent::Progress::Heard { text } = progress
+                && text == spelled
+            {
+                saw_live = true;
+                assert!(work::read(&rook, &run.id).unwrap().run.instructions[0].applied_at.is_none());
+            }
+        })
+        .await
+        .unwrap();
+    assert!(saw_live);
+    assert!(work::read(&rook, &run.id).unwrap().run.instructions[0].applied_at.is_some());
+    assert!(provider.seen.lock().unwrap()[0].contains("AUTHENTIC_CORRECTION"));
 }
 
 struct Script {
