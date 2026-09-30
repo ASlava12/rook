@@ -156,6 +156,53 @@ fn branch_summaries_keep_source_attribution_locally_and_through_daemon() {
 }
 
 #[test]
+fn branch_summary_draft_scopes_fork_events_locally_and_through_daemon() {
+    let rook = Rook::new();
+    let source = rook_store::new_session_id();
+    let source_name = rook_store::format_session_id(source);
+    {
+        let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+        store
+            .create_session(&rook_store::SessionMeta::new(
+                source,
+                "source",
+                rook.workspace.path().display().to_string(),
+                1,
+            ))
+            .unwrap();
+        for text in ["shared history", "source-only finding"] {
+            store
+                .append_event(
+                    source,
+                    rook_store::NewEvent::new(
+                        rook_store::EventKind::UserMessage,
+                        rook_store::Kind::Message,
+                        text.as_bytes(),
+                    ),
+                )
+                .unwrap();
+        }
+    }
+    let fork = rook.ok(&["session", "fork", &source_name, "--at", "1"]);
+    let target_name = fork.split_whitespace().last().unwrap();
+    let check = || {
+        let draft = rook.json(&["session", "summary-draft", &source_name, target_name]);
+        assert_eq!(draft["scope_known"], true);
+        assert_eq!(draft["common_ancestor"], source_name);
+        assert_eq!(draft["source_from"], 1);
+        assert_eq!(draft["source_through"], 1);
+        assert_eq!(draft["scanned_events"], 1);
+        assert!(draft["text"].as_str().unwrap().contains("source-only finding"));
+        assert!(!draft["text"].as_str().unwrap().contains("shared history"));
+        draft
+    };
+    let local = check();
+    let daemon = Daemon::start(&rook);
+    assert_eq!(check(), local);
+    drop(daemon);
+}
+
+#[test]
 fn branch_names_and_bookmarks_have_the_same_cli_result_with_and_without_the_daemon() {
     let rook = Rook::new();
     let id = rook_store::new_session_id();

@@ -941,10 +941,9 @@ exceeded the Windows main thread's reserve during Clap parsing.
 The focused core test passed for attribution, byte bound and no target write.
 The real local plus daemon CLI suggestion test passed with a scripted provider,
 including no automatic save. Live browser and TUI interaction checks are still
-needed before the branch row is Complete. Pi also scopes its branch summary to
-the path since the common ancestor and offers it during navigation; Rook still
-uses recent source excerpts and an explicit command/button. Queue gaps and all
-Pending rows remain in scope.
+needed before the branch row is Complete. Pi also offers its branch summary
+during navigation; Rook still requires an explicit command/button. Queue gaps
+and all Pending rows remain in scope.
 
 The first full `cargo xtask ci` exited 1 on Clippy's `needless_question_mark`
 in the new CLI parser wrapper. The corrected tree passed a full gate with exit
@@ -954,3 +953,26 @@ to pin their source boundary too, the final full `cargo xtask ci` exited 0
 This block changes neither store formats nor storage algorithms, so no new
 compaction measurement was required. The Windows PTY target contains zero
 runnable tests; live TUI interaction remains unverified here.
+
+## Branch summary scoped to the shared prefix
+
+The evidence draft now traverses bounded session ancestry, locates the nearest
+common ancestor, and takes the earliest exclusive fork boundary on both paths.
+Only source events after that shared prefix are eligible for the existing
+128-event/12-excerpt scan. A source with no text after a known boundary yields
+an error instead of presenting copied history as a branch delta. Unrelated
+complete lineages allow the whole source. Old forks with missing boundaries
+remain usable, but both the draft and browser notice explicitly say that the
+divergence is unknown and excerpts may include shared history. Cyclic or
+overlong ancestry is rejected. The scope fields are additive JSON fields with
+defaults for older daemon replies; saved `branch-summary` events and store
+formats are unchanged.
+
+The core tests cover sibling and nested forks, source/target ancestor direction,
+no unique text, legacy boundary marks, and older JSON. The CLI integration test
+checks that local and real-daemon drafts exclude the shared event and agree on
+`source_from`. The browser script passes `node --check`. The full
+`cargo xtask ci` exited 0 (`ci: ok`, 423.8 seconds). No storage implementation
+or format changed, so compaction was not rerun. The optional offer during navigation and live
+TUI/browser checks are still required for the branch row. The queue gaps and
+all Pending rows remain open.

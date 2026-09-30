@@ -3,7 +3,7 @@ use crate::{CoreError, Result, Rook};
 use futures_util::StreamExt;
 use rook_llm::{Delta, Effort, Message, Provider, Request, StopReason};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -131,10 +131,76 @@ pub struct SummaryDraft {
     pub text: String,
     pub scanned_events: usize,
     pub omitted_earlier: bool,
+    /// Inclusive first event after the shared prefix, when `scope_known`.
+    #[serde(default)]
+    pub source_from: u64,
+    #[serde(default)]
+    pub common_ancestor: Option<String>,
+    /// False for old or broken ancestry without enough fork boundaries.
+    #[serde(default)]
+    pub scope_known: bool,
+}
+
+struct Lineage {
+    /// Leaf first. A boundary belongs to the edge from this node to its parent.
+    nodes: Vec<(u128, Option<u64>)>,
+    complete: bool,
+}
+
+fn lineage(rook: &Rook, first: u128) -> Result<Lineage> {
+    let mut nodes = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut current = Some(first);
+    while let Some(id) = current {
+        if nodes.len() == 4096 {
+            return Err(CoreError::Other(
+                "branch ancestry exceeds 4096 sessions; cannot establish summary scope".into(),
+            ));
+        }
+        if !seen.insert(id) {
+            return Err(CoreError::Other(
+                "cycle in session parent links; cannot establish summary scope".into(),
+            ));
+        }
+        let Some(meta) = rook.store.get_session(id)? else {
+            return Ok(Lineage { nodes, complete: false });
+        };
+        let boundary = if meta.parent.is_some() { rook.forked_at(id)? } else { None };
+        nodes.push((id, boundary));
+        current = meta.parent;
+    }
+    Ok(Lineage { nodes, complete: true })
+}
+
+/// The source's first event absent from the target. An unknown legacy edge
+/// falls back to an explicitly unscoped draft, never a claimed branch delta.
+fn summary_scope(rook: &Rook, source: u128, target: u128) -> Result<(u64, Option<String>, bool)> {
+    let from = lineage(rook, source)?;
+    let to = lineage(rook, target)?;
+    let source_positions: BTreeMap<u128, usize> =
+        from.nodes.iter().enumerate().map(|(index, (id, _))| (*id, index)).collect();
+    for (target_index, (id, _)) in to.nodes.iter().enumerate() {
+        let Some(&source_index) = source_positions.get(id) else { continue };
+        let common = Some(rook_store::format_session_id(*id));
+        let edges = from.nodes[..source_index].iter().chain(&to.nodes[..target_index]);
+        let mut earliest = u64::MAX;
+        for (_, boundary) in edges {
+            let Some(boundary) = boundary else { return Ok((0, common, false)) };
+            earliest = earliest.min(*boundary);
+        }
+        return Ok((earliest, common, true));
+    }
+    Ok((0, None, from.complete && to.complete))
 }
 
 pub fn draft_summary(rook: &Rook, source: u128, target: u128) -> Result<SummaryDraft> {
     let (source_meta, _) = summary_pair(rook, source, target)?;
+    let (source_from, common_ancestor, scope_known) = summary_scope(rook, source, target)?;
+    if scope_known && source_from > source_meta.next_seq {
+        return Err(CoreError::Other(
+            "branch fork boundary exceeds the source history; inspect session metadata".into(),
+        ));
+    }
     let source_through = source_meta
         .next_seq
         .checked_sub(1)
@@ -142,7 +208,12 @@ pub fn draft_summary(rook: &Rook, source: u128, target: u128) -> Result<SummaryD
     const SCAN: usize = 128;
     const EXCERPTS: usize = 12;
     const EXCERPT_BYTES: usize = 768;
-    let events = rook.store.events_before(source, source_meta.next_seq, SCAN)?;
+    let events: Vec<_> = rook
+        .store
+        .events_before(source, source_meta.next_seq, SCAN)?
+        .into_iter()
+        .filter(|event| event.seq >= source_from)
+        .collect();
     let mut excerpts = Vec::new();
     for event in events.iter().rev() {
         let role = match event.record.kind {
@@ -159,14 +230,27 @@ pub fn draft_summary(rook: &Rook, source: u128, target: u128) -> Result<SummaryD
     }
     if excerpts.is_empty() {
         return Err(CoreError::Other(
-            "no recent text messages to draft from; write a summary manually".into(),
+            "no text messages after the shared branch boundary in the bounded scan; write a summary manually"
+                .into(),
         ));
     }
     excerpts.reverse();
+    let scope = if scope_known {
+        match &common_ancestor {
+            Some(ancestor) => format!(
+                "events #{}..#{} after the shared prefix with {ancestor}",
+                source_from, source_through
+            ),
+            None => format!("events #0..#{source_through}; no common ancestor was found"),
+        }
+    } else {
+        format!(
+            "through event #{source_through}; divergence boundary unknown, so excerpts may include shared history"
+        )
+    };
     let mut text = format!(
-        "Recorded excerpts from session {} through event #{}; review and rewrite before carrying. File and test observations are historical and must be verified in the current workspace.\n\n",
-        rook_store::format_session_id(source),
-        source_through
+        "Recorded excerpts from session {} ({scope}); review and rewrite before carrying. File and test observations are historical and must be verified in the current workspace.\n\n",
+        rook_store::format_session_id(source)
     );
     for excerpt in excerpts {
         if text.len() + excerpt.len() + 1 > SUMMARY_BYTES {
@@ -180,7 +264,10 @@ pub fn draft_summary(rook: &Rook, source: u128, target: u128) -> Result<SummaryD
         source_through,
         text,
         scanned_events: events.len(),
-        omitted_earlier: source_meta.next_seq > events.len() as u64,
+        omitted_earlier: source_meta.next_seq.saturating_sub(source_from) > events.len() as u64,
+        source_from,
+        common_ancestor,
+        scope_known,
     })
 }
 
@@ -207,9 +294,14 @@ async fn suggest_summary_with(provider: &dyn Provider, mut draft: SummaryDraft) 
     ]);
     request.effort = Some(Effort::Low);
     let mut stream = provider.stream(request).await.map_err(|e| CoreError::Other(e.to_string()))?;
+    let scope = if draft.scope_known {
+        format!("events #{}..#{}", draft.source_from, draft.source_through)
+    } else {
+        format!("through event #{}; divergence boundary unknown", draft.source_through)
+    };
     let prefix = format!(
-        "Suggested historical summary of session {} through event #{}; review and edit before carrying. File and test observations require verification in the current workspace.\n\n",
-        draft.source_session, draft.source_through
+        "Suggested historical summary of session {} ({scope}); review and edit before carrying. File and test observations require verification in the current workspace.\n\n",
+        draft.source_session
     );
     let remaining = SUMMARY_BYTES.saturating_sub(prefix.len());
     let mut said = String::new();
@@ -782,6 +874,78 @@ mod tests {
         rook.log(1, rook_store::EventKind::UserMessage, "", "new evidence").unwrap();
         assert!(transfer_summary_at(&rook, 1, 2, Some(draft.source_through), &draft.text).is_err());
         assert_eq!(rook.store.get_session(2).unwrap().unwrap().next_seq, 1);
+    }
+
+    #[test]
+    fn branch_summary_uses_only_events_after_the_shared_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let rook = engine(dir.path());
+        session(&rook, 1, None, "root");
+        for n in 0..6 {
+            rook.log(1, rook_store::EventKind::UserMessage, "", &format!("shared parent event {n}")).unwrap();
+        }
+        let source = rook.fork_session(1, 3).unwrap();
+        rook.log(source.id, rook_store::EventKind::UserMessage, "", "source-only event").unwrap();
+        let target = rook.fork_session(1, 5).unwrap();
+        rook.log(target.id, rook_store::EventKind::UserMessage, "", "target-only event").unwrap();
+
+        let draft = draft_summary(&rook, source.id, target.id).unwrap();
+        assert!(draft.scope_known);
+        assert_eq!(draft.common_ancestor.as_deref(), Some(rook_store::format_session_id(1).as_str()));
+        assert_eq!(draft.source_from, 3);
+        assert_eq!(draft.source_through, 3);
+        assert_eq!(draft.scanned_events, 1);
+        assert!(!draft.omitted_earlier);
+        assert!(draft.text.contains("source-only event"));
+        assert!(!draft.text.contains("shared parent event"));
+        assert!(!draft.text.contains("target-only event"));
+
+        let nested = rook.fork_session(source.id, 4).unwrap();
+        rook.log(nested.id, rook_store::EventKind::AssistantMessage, "", "nested source event").unwrap();
+        let nested_draft = draft_summary(&rook, nested.id, target.id).unwrap();
+        assert_eq!(nested_draft.source_from, 3, "the earliest fork edge limits the shared prefix");
+        assert!(nested_draft.text.contains("source-only event"));
+        assert!(nested_draft.text.contains("nested source event"));
+
+        let descendant = rook.fork_session(source.id, 4).unwrap();
+        rook.log(source.id, rook_store::EventKind::UserMessage, "", "after target fork").unwrap();
+        let parent_draft = draft_summary(&rook, source.id, descendant.id).unwrap();
+        assert_eq!(parent_draft.source_from, 4);
+        assert!(parent_draft.text.contains("after target fork"));
+        assert!(!parent_draft.text.contains("source-only event"));
+        assert!(
+            draft_summary(&rook, descendant.id, source.id).is_err(),
+            "no unique descendant text must not summarize shared history"
+        );
+    }
+
+    #[test]
+    fn old_forks_without_boundaries_do_not_claim_a_branch_delta() {
+        let dir = tempfile::tempdir().unwrap();
+        let rook = engine(dir.path());
+        session(&rook, 1, None, "root");
+        session(&rook, 2, Some(1), "old child");
+        rook.log(2, rook_store::EventKind::UserMessage, "", "historical text").unwrap();
+        let draft = draft_summary(&rook, 2, 1).unwrap();
+        assert!(!draft.scope_known);
+        assert_eq!(draft.common_ancestor.as_deref(), Some(rook_store::format_session_id(1).as_str()));
+        assert!(draft.text.contains("divergence boundary unknown"));
+        assert!(draft.text.contains("may include shared history"));
+    }
+
+    #[test]
+    fn older_summary_draft_json_defaults_new_scope_fields() {
+        let draft: SummaryDraft = serde_json::from_value(serde_json::json!({
+            "source_session": "old",
+            "source_through": 3,
+            "text": "historical",
+            "scanned_events": 2,
+            "omitted_earlier": false
+        }))
+        .unwrap();
+        assert_eq!(draft.source_from, 0);
+        assert_eq!(draft.common_ancestor, None);
+        assert!(!draft.scope_known);
     }
 
     #[test]

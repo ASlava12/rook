@@ -11,6 +11,9 @@ export function branchPanel(session, continueBranch, quote, forkEvent, renamed) 
   const history = el('div', { 'aria-label': 'Branch history' });
   let pending = false;
   const button = (text, action, disabled = false) => el('button', { type: 'button', disabled, onclick: action }, text);
+  const draftScope = draft => !draft.scope_known ? '; branch divergence boundary unknown'
+    : draft.common_ancestor ? `, starting at #${draft.source_from} after the shared prefix`
+      : '; no common ancestor';
   function row(node, depth, selected) {
     const title = (node.title || '(untitled)') + (node.title_truncated ? '…' : '');
     const position = node.forked_at == null ? (node.parent && !node.delegated ? ' · boundary unknown' : '') : node.delegated ? ` · delegated at #${node.forked_at}` : ` · fork before #${node.forked_at}`;
@@ -39,7 +42,9 @@ export function branchPanel(session, continueBranch, quote, forkEvent, renamed) 
             if (root.isConnected) {
               input.value = draft.text;
               sourceThrough = draft.source_through;
-              notice.textContent = `Loaded ${draft.scanned_events} recent source events through #${sourceThrough}; review and rewrite the excerpts before saving.` +
+              notice.textContent = `Loaded ${draft.scanned_events} source events through #${sourceThrough}` +
+                draftScope(draft) +
+                '; review and rewrite the excerpts before saving.' +
                 (draft.omitted_earlier ? ' Earlier events were omitted.' : '');
             }
           } catch (error) {
@@ -54,7 +59,9 @@ export function branchPanel(session, continueBranch, quote, forkEvent, renamed) 
             if (root.isConnected) {
               input.value = draft.text;
               sourceThrough = draft.source_through;
-              notice.textContent = `Model suggestion from ${draft.scanned_events} recent source events through #${sourceThrough}; review and edit before saving.` +
+              notice.textContent = `Model suggestion from ${draft.scanned_events} source events through #${sourceThrough}` +
+                draftScope(draft) +
+                '; review and edit before saving.' +
                 (draft.omitted_earlier ? ' Earlier events were omitted.' : '');
             }
           } catch (error) {

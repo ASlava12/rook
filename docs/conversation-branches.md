@@ -72,6 +72,12 @@ The browser's **Carry reviewed summary** editor has **Load recorded excerpts**.
 This reads at most 128 recent source events and includes at most 12 bounded
 user/assistant excerpts with event numbers. It is a starting point for editing,
 not a model-generated conclusion. Earlier events and attachments can be absent.
+When saved fork boundaries identify a shared prefix, excerpts start at the
+source's first event after that prefix. For unrelated sessions, the whole source
+is eligible. Older forks without a known boundary are labelled as unscoped;
+their excerpts may include shared history. The draft response includes
+`source_from`, `common_ancestor`, and `scope_known`. If the bounded scan finds
+no text after a known boundary, write a summary manually.
 For a model-written starting point, add `--suggest` to the CLI draft command,
 type `/summary-suggest TARGET` in the REPL or TUI, or choose **Generate suggested
 summary** in the browser editor. The model receives only those bounded
