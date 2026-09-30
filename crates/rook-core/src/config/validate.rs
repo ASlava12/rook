@@ -7,10 +7,20 @@ impl Config {
     /// so a broken file can still be inspected and repaired.
     pub fn validation_errors(&self) -> Vec<String> {
         let mut errors = Vec::new();
+        for (name, value, low, high) in [
+            ("max_requests", self.user_input.max_requests, 1, 4096),
+            ("max_bytes", self.user_input.max_bytes, 4096, 32 * 1024 * 1024),
+        ] {
+            if !(low..=high).contains(&value) {
+                errors.push(format!("user_input.{name}: expected {low}..={high}"));
+            }
+        }
         if let Err(key_errors) = self.tui.bindings() {
             errors.extend(key_errors);
         }
         for (name, value, low, high) in [
+            ("chat_replay_events", self.server.chat_replay_events, 1, 4096),
+            ("chat_replay_bytes", self.server.chat_replay_bytes, 4096, 32 * 1024 * 1024),
             ("chat_queue_events", self.server.chat_queue_events, 1, 4096),
             ("chat_queue_bytes", self.server.chat_queue_bytes, 4096, 32 * 1024 * 1024),
         ] {

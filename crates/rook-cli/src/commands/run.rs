@@ -237,15 +237,17 @@ async fn through_the_daemon(
 
     eprintln!("using the running rookd at {}", daemon.base);
     let (to_daemon, mut outgoing) = tokio::sync::mpsc::unbounded_channel();
-    let (incoming, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let (incoming, mut events) = crate::remote::channel(workspace)?;
+    let view_bytes = incoming.byte_limit();
     let (base, here) = (daemon.base.clone(), workspace.to_path_buf());
     let socket =
         tokio::spawn(async move { crate::remote::hold(&base, &here, &mut outgoing, incoming).await });
     to_daemon.send(ClientMessage::Prompt { session, text: asked.to_string(), options })?;
 
-    let mut watching = crate::remote::Watching::new(yes, json);
+    let mut watching = crate::remote::Watching::new(yes, json, view_bytes);
     let mut ended = None;
-    while let Some(event) = events.recv().await {
+    while let Some(frame) = events.recv().await {
+        let Ok(event) = serde_json::from_str::<ChatEvent>(&frame.text) else { continue };
         if let Some(over) = watching.saw(event, &to_daemon) {
             ended = Some(over);
             break;
@@ -285,6 +287,7 @@ async fn through_the_daemon(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "session": started,
+                "live_view_truncated": over.truncated,
                 "reply": said,
                 "steps": steps,
                 "input_tokens": input_tokens,

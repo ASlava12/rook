@@ -951,7 +951,7 @@ impl Approver for Unattended {
 }
 
 /// What a front end is being asked to decide.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct ApprovalRequest {
     pub id: String,
     pub tool: String,
@@ -970,16 +970,26 @@ pub struct ApprovalRequest {
 pub struct ChannelApprover(crate::pending::Pending<ApprovalRequest, Approval>);
 
 impl ChannelApprover {
-    /// Whether a live request still needs a person's answer.
-    pub fn is_waiting(&self) -> bool {
-        self.0.is_waiting()
+    pub fn changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.0.changes()
+    }
+
+    /// Current unanswered requests for a reconnecting view.
+    pub fn current(&self) -> Vec<ApprovalRequest> {
+        self.0.current()
     }
 
     pub fn new(
         requests: tokio::sync::mpsc::UnboundedSender<ApprovalRequest>,
         patience: std::time::Duration,
+        limits: crate::pending::Limits,
     ) -> Self {
-        Self(crate::pending::Pending::new(requests, patience))
+        Self(crate::pending::Pending::new(requests, patience, limits))
+    }
+
+    /// Whether a live request still needs a person's answer.
+    pub fn is_waiting(&self) -> bool {
+        self.0.is_waiting()
     }
 
     pub fn answer(&self, id: &str, approval: Approval) {
@@ -1012,8 +1022,7 @@ impl Approver for ChannelApprover {
             // and two more attempts, and twenty more minutes of the same wait,
             // went into an environment that was never at fault.
             Err(unanswered) => Approval::Unanswered(format!(
-                "`{}` needs someone to approve it and {unanswered} — no window was open to \
-                 answer. Nothing ran and nothing timed out, so there is no fault to look for in \
+                "`{}` needs someone to approve it and {unanswered}. Nothing ran and nothing timed out, so there is no fault to look for in \
                  the command or in the environment. Carry on with whatever needs no approval, or \
                  stop and say what you were about to do; no other tool and no sub-agent can get \
                  past this.",
@@ -1041,7 +1050,7 @@ mod waiting {
     async fn a_call_nobody_was_there_to_approve_is_not_reported_as_a_refusal() {
         let (requests, _held) = tokio::sync::mpsc::unbounded_channel::<ApprovalRequest>();
         // Whole seconds, because that is the unit the message is written in.
-        let approver = ChannelApprover::new(requests, std::time::Duration::from_secs(1));
+        let approver = ChannelApprover::new(requests, std::time::Duration::from_secs(1), Default::default());
         let risk = Risk::Execute("pwd".into());
 
         let answer = approver.ask("run_command", &risk, None).await;

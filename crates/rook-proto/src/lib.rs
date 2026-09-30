@@ -193,6 +193,21 @@ pub enum ApprovalDecision {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChatEvent {
+    /// Authoritative pending input ids; request bodies follow as Approval/Ask.
+    /// Only sent to clients opting into live snapshots at websocket upgrade.
+    Inputs {
+        approvals: Vec<String>,
+        questions: Vec<String>,
+    },
+    /// Replace the live view with the events that follow. This never rewinds
+    /// the workspace or changes the draft. Older output is in session history.
+    Snapshot {
+        session: String,
+        running: bool,
+        truncated: bool,
+        approvals: Vec<String>,
+        questions: Vec<String>,
+    },
     Started {
         session: String,
     },

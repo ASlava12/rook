@@ -23,7 +23,8 @@ use rook_tools::policy::{Approval, ChannelApprover};
 
 use crate::AppState;
 
-mod delivery;
+use rook_core::delivery;
+mod replay;
 
 /// `?workspace=` names the project this conversation is in, defaulting to the
 /// daemon's own. A connection is bound to one for its life, because a project is
@@ -31,6 +32,8 @@ mod delivery;
 #[derive(serde::Deserialize)]
 pub struct Where {
     workspace: Option<std::path::PathBuf>,
+    #[serde(default)]
+    live_snapshots: bool,
 }
 
 pub async fn upgrade(
@@ -45,7 +48,7 @@ pub async fn upgrade(
     let equipment = state.equipment_for(&engine).await;
     ws.max_message_size(rook_core::attachments::MAX_FRAME_BYTES)
         .max_frame_size(rook_core::attachments::MAX_FRAME_BYTES)
-        .on_upgrade(move |socket| serve(socket, engine, equipment, state))
+        .on_upgrade(move |socket| serve(socket, engine, equipment, state, here.live_snapshots))
 }
 
 /// Refuses the upgrade before anything else looks at the request.
@@ -120,6 +123,7 @@ async fn serve(
     engine: Arc<tokio::sync::RwLock<rook_core::Rook>>,
     shared: Arc<tokio::sync::OnceCell<Shared>>,
     state: Arc<AppState>,
+    live_snapshots: bool,
 ) {
     let (sink, mut stream) = socket.split();
     let limits = engine.read().await.config.server.clone();
@@ -247,7 +251,7 @@ async fn serve(
                     if running {
                         let _ = outbound.send(live.settings.describe()).await;
                     }
-                    watching = Some(watch(&live, id, outbound.clone(), watching));
+                    watching = Some(watch(&live, id, outbound.clone(), watching, live_snapshots));
                 }
             }
             ClientMessage::Prompt { session, text, options } => {
@@ -302,15 +306,12 @@ async fn serve(
                     } else {
                         None
                     };
+                    let starting = existing.is_none() && promotion.is_none();
                     let selected = promotion
                         .as_ref()
                         .map(|live| live.settings.clone())
                         .unwrap_or_else(|| settings.clone());
-                    let previously_watched = if watching.as_ref().is_some_and(|w| w.session == id) {
-                        state.live.read().await.get(&id).cloned()
-                    } else {
-                        None
-                    };
+                    let previously_watched = watching.as_ref().and_then(|w| w.live.upgrade());
                     let mut interjected = false;
                     let result = {
                         let rook = goal_engine.read().await;
@@ -371,7 +372,14 @@ async fn serve(
                                     .as_ref()
                                     .is_some_and(|previous| Arc::ptr_eq(previous, &live))
                                 {
-                                    watching = Some(watch(&live, id, outbound.clone(), watching));
+                                    watching = Some(carry_view(
+                                        &live,
+                                        id,
+                                        outbound.clone(),
+                                        watching,
+                                        live_snapshots,
+                                        !starting,
+                                    ));
                                 }
                             }
                             Err(error) => report_window(&outbound, error).await,
@@ -391,7 +399,11 @@ async fn serve(
                     }
                     live.interjections.say(&text);
                     let _ = outbound.send(ChatEvent::Interjected { text }).await;
-                    watching = Some(watch(&live, id, outbound.clone(), watching));
+                    // Steering the turn already on screen is not a rejoin:
+                    // replacing its view erases local submission receipts.
+                    if !watching.as_ref().is_some_and(|w| w.live.ptr_eq(&Arc::downgrade(&live))) {
+                        watching = Some(watch(&live, id, outbound.clone(), watching, live_snapshots));
+                    }
                     continue;
                 }
                 // Before the turn, because a setting changed while the daemon
@@ -415,7 +427,7 @@ async fn serve(
                     }
                 };
                 let live = begin(&state, &engine, &shared, &settings, id, text, options).await;
-                watching = Some(watch(&live, id, outbound.clone(), watching));
+                watching = Some(carry_view(&live, id, outbound.clone(), watching, live_snapshots, false));
                 state.remember(id, live).await;
             }
         }
@@ -462,6 +474,7 @@ pub(crate) async fn where_it_belongs(
 /// A window's view of one live turn.
 struct Watching {
     session: u128,
+    live: std::sync::Weak<Live>,
     carrying: tokio::task::JoinHandle<()>,
 }
 
@@ -480,39 +493,101 @@ fn watch(
     session: u128,
     to_window: delivery::Sender,
     previous: Option<Watching>,
+    live_snapshots: bool,
+) -> Watching {
+    carry_view(live, session, to_window, previous, live_snapshots, true)
+}
+
+fn carry_view(
+    live: &Arc<Live>,
+    session: u128,
+    to_window: delivery::Sender,
+    previous: Option<Watching>,
+    live_snapshots: bool,
+    mut replace: bool,
 ) -> Watching {
     if let Some(previous) = previous {
         previous.carrying.abort();
     }
-    let (mut coming, missed) = live.join();
+    let watched = Arc::downgrade(live);
+    let live = live.clone();
     let carrying = tokio::spawn(async move {
-        for event in missed {
-            if to_window.send(event).await.is_err() {
+        let mut approvals_changed = live.approver.changes();
+        let mut questions_changed = live.asker.changes();
+        loop {
+            let (mut coming, missed, truncated) = live.join();
+            // Starting a new turn keeps this window's prior conversation and
+            // optimistic prompt. Reconnect/lag replaces the view; a fresh
+            // turn does so only if it already outgrew the replay budget.
+            if live_snapshots && (replace || truncated) {
+                let approvals = missed.iter().filter_map(|e| match e { ChatEvent::Approval { id, .. } => Some(id.clone()), _ => None }).collect();
+                let questions = missed.iter().filter_map(|e| match e { ChatEvent::Ask { id, .. } => Some(id.clone()), _ => None }).collect();
+                if to_window.send(ChatEvent::Snapshot {
+                    session: rook_store::format_session_id(session), running: live.running(), truncated,
+                    approvals, questions,
+                }).await.is_err() { return; }
+            } else if truncated && to_window.send(ChatEvent::Text {
+                text: "\n[live view refreshed; recent output follows; saved conversation is in history]\n".into(),
+            }).await.is_err() { return; }
+            if to_window.send(live.settings.describe()).await.is_err() {
                 return;
             }
-        }
-        loop {
-            match coming.recv().await {
-                Ok(event) => {
-                    if to_window.send(event).await.is_err() {
-                        return;
-                    }
+            for event in missed {
+                if to_window.send(event).await.is_err() {
+                    return;
                 }
-                // Behind by more than the channel holds. The turn is fine and
-                // this window is not: say so rather than silently skipping,
-                // because a gap in a transcript reads as work that never
-                // happened.
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
-                    let text = format!("\n[{missed} events not shown — this window fell behind]\n");
-                    if to_window.send(ChatEvent::Text { text }).await.is_err() {
-                        return;
-                    }
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
             }
+            loop {
+                tokio::select! {
+                    changed = approvals_changed.changed(), if live_snapshots => {
+                        if changed.is_err() || send_inputs(&live, &to_window).await.is_err() { return; }
+                    }
+                    changed = questions_changed.changed(), if live_snapshots => {
+                        if changed.is_err() || send_inputs(&live, &to_window).await.is_err() { return; }
+                    }
+                    notification = coming.recv() => match notification {
+                        Ok(sequence) => {
+                            let event = live.backlog.lock().unwrap_or_else(|e| e.into_inner()).get(sequence);
+                            let Some(event) = event else { break };
+                            // Current requests arrive from their authoritative map,
+                            // including resolution; an old relay event is not state.
+                            if live_snapshots && matches!(event, ChatEvent::Approval { .. } | ChatEvent::Ask { .. }) { continue; }
+                            if to_window.send(event).await.is_err() { return; }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => break,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                    },
+                }
+            }
+            // The observer has fallen out of the retained range. Rejoin at
+            // one atomic snapshot/subscription boundary; the turn keeps going.
+            replace = true;
         }
     });
-    Watching { session, carrying }
+    Watching { session, live: watched, carrying }
+}
+
+async fn send_inputs(live: &Live, to_window: &delivery::Sender) -> Result<(), delivery::Closed> {
+    let events = live.inputs();
+    let approvals = events
+        .iter()
+        .filter_map(|event| match event {
+            ChatEvent::Approval { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+    let questions = events
+        .iter()
+        .filter_map(|event| match event {
+            ChatEvent::Ask { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+    to_window.send(ChatEvent::Inputs { approvals, questions }).await?;
+    for event in events {
+        to_window.send(event).await?;
+    }
+    Ok(())
 }
 
 /// Start a turn that belongs to the daemon.
@@ -525,6 +600,7 @@ async fn begin(
     prompt: String,
     options: rook_proto::TurnOptions,
 ) -> Arc<Live> {
+    let input_limits = engine.read().await.config.user_input;
     let patience = engine.read().await.config.agent.answer_timeout();
     // A question waits longer than an approval, and for the opposite reason:
     // an unanswered approval is denied and nothing was changed, while a turn
@@ -535,12 +611,17 @@ async fn begin(
     // What the turn writes into. One receiver, which fans it out to every
     // window attached and to the backlog for the next one.
     let (from_turn, events) = mpsc::unbounded_channel::<ChatEvent>();
-    let (approver, relay) = approver(from_turn.clone(), patience);
-    let (asker, ask_relay) = asker(from_turn.clone(), deciding);
+    let (approver, relay) = approver(from_turn.clone(), patience, input_limits);
+    let (asker, ask_relay) = asker(from_turn.clone(), deciding, input_limits);
     let interjections: Arc<rook_core::agent::Interjections> = Default::default();
 
-    let (said, _) = tokio::sync::broadcast::channel::<ChatEvent>(BROADCAST);
-    let backlog: Arc<std::sync::Mutex<std::collections::VecDeque<ChatEvent>>> = Default::default();
+    let (said, _) = tokio::sync::broadcast::channel::<u64>(BROADCAST);
+    let replay_limits = engine.read().await.config.server.clone();
+    let backlog = Arc::new(std::sync::Mutex::new(replay::Replay::new(
+        replay_limits.chat_replay_events,
+        replay_limits.chat_replay_bytes,
+        replay_limits.chat_queue_bytes,
+    )));
 
     // Counted while it runs: a daemon asked to stop should say what stopping
     // would interrupt rather than find out after.
@@ -657,14 +738,14 @@ pub struct Live {
     /// when it finishes and `Cancel` can end them when it does not — the same
     /// three either way, without either owner having to be the only one.
     helpers: Vec<tokio::task::AbortHandle>,
-    said: tokio::sync::broadcast::Sender<ChatEvent>,
+    said: tokio::sync::broadcast::Sender<u64>,
     /// What was said before anyone attached, oldest first.
     ///
     /// Bounded, like everything else that accumulates here: a turn that runs
     /// for an hour with no window open would otherwise hold every token it
     /// produced. Past the bound the oldest go, because the end of a turn is
     /// what somebody joining it wants.
-    backlog: Arc<std::sync::Mutex<std::collections::VecDeque<ChatEvent>>>,
+    backlog: Arc<std::sync::Mutex<replay::Replay>>,
     approver: Arc<ChannelApprover>,
     asker: Arc<ChannelAsker>,
     interjections: Arc<rook_core::agent::Interjections>,
@@ -692,8 +773,8 @@ pub struct Live {
 async fn everything_it_says(
     running_turn: impl std::future::Future<Output = ()>,
     mut events: mpsc::UnboundedReceiver<ChatEvent>,
-    said: tokio::sync::broadcast::Sender<ChatEvent>,
-    backlog: Arc<std::sync::Mutex<std::collections::VecDeque<ChatEvent>>>,
+    said: tokio::sync::broadcast::Sender<u64>,
+    backlog: Arc<std::sync::Mutex<replay::Replay>>,
     ending: Vec<tokio::task::AbortHandle>,
 ) {
     tokio::pin!(running_turn);
@@ -724,27 +805,20 @@ async fn everything_it_says(
 /// One thing a turn said, to everyone who will ever want it: the windows
 /// attached now, and the backlog for a window that attaches later.
 fn fan_out(
-    backlog: &std::sync::Mutex<std::collections::VecDeque<ChatEvent>>,
-    said: &tokio::sync::broadcast::Sender<ChatEvent>,
+    backlog: &std::sync::Mutex<replay::Replay>,
+    said: &tokio::sync::broadcast::Sender<u64>,
     event: ChatEvent,
 ) {
-    {
-        let mut kept = backlog.lock().unwrap_or_else(|e| e.into_inner());
-        if kept.len() >= BACKLOG {
-            kept.pop_front();
-        }
-        kept.push_back(event.clone());
-    }
-    // An error here is nobody attached, which is ordinary now.
-    let _ = said.send(event);
+    let mut kept = backlog.lock().unwrap_or_else(|e| e.into_inner());
+    let sequence = kept.push(event);
+    // Payload lives only in the bounded replay. The broadcast ring contains
+    // sequence notifications, so old broadcasts cannot pin evicted payloads.
+    let _ = said.send(sequence);
 }
 
-/// Enough to read the end of a long turn, and far short of holding all of one.
-const BACKLOG: usize = 2_000;
-
 /// How far behind a window may fall before it is told rather than quietly
-/// skipped. A delta is a few words, so this is a paragraph or two of slack for
-/// a tab the browser has throttled.
+/// skipped. Only sequence numbers live in this ring; payloads live in the
+/// count/byte-bounded replay and a lagging observer takes a fresh snapshot.
 const BROADCAST: usize = 4_096;
 
 impl Live {
@@ -759,7 +833,7 @@ impl Live {
     pub fn for_test(
         task: tokio::task::JoinHandle<()>,
         helpers: Vec<tokio::task::AbortHandle>,
-        said: tokio::sync::broadcast::Sender<ChatEvent>,
+        said: tokio::sync::broadcast::Sender<u64>,
         approver: Arc<ChannelApprover>,
         asker: Arc<ChannelAsker>,
     ) -> Self {
@@ -781,13 +855,43 @@ impl Live {
 
     /// Everything said so far, then everything said from now on.
     ///
-    /// Subscribed before the backlog is read, so an event that lands between
-    /// the two is seen twice rather than not at all — a repeated line is a
-    /// blemish and a missing one is a turn that looks stuck.
-    fn join(&self) -> (tokio::sync::broadcast::Receiver<ChatEvent>, Vec<ChatEvent>) {
+    /// The replay boundary and subscription are atomic with publication.
+    /// Input controls come from live requests; a historical approval is not
+    /// evidence that anything still waits for a person's decision.
+    fn join(&self) -> (tokio::sync::broadcast::Receiver<u64>, Vec<ChatEvent>, bool) {
+        let kept = self.backlog.lock().unwrap_or_else(|e| e.into_inner());
         let live = self.said.subscribe();
-        let missed = self.backlog.lock().unwrap_or_else(|e| e.into_inner()).iter().cloned().collect();
-        (live, missed)
+        let (events, truncated) = kept.snapshot();
+        let mut missed: Vec<_> = events
+            .into_iter()
+            .filter(|event| !matches!(event, ChatEvent::Approval { .. } | ChatEvent::Ask { .. }))
+            .collect();
+        missed.extend(self.inputs());
+        (live, missed, truncated)
+    }
+
+    fn inputs(&self) -> Vec<ChatEvent> {
+        let mut missed = Vec::new();
+        for request in self.approver.current() {
+            missed.push(ChatEvent::Approval {
+                id: request.id,
+                tool: request.tool,
+                action: request.action,
+                preview: request.preview,
+                kind: request.kind,
+            });
+        }
+        for request in self.asker.current() {
+            missed.push(ChatEvent::Ask {
+                id: request.id,
+                questions: request
+                    .questions
+                    .into_iter()
+                    .map(|q| AskQuestion { question: q.question, choices: q.choices, multi: q.multi })
+                    .collect(),
+            });
+        }
+        missed
     }
 
     /// End the turn and everything that was carrying it.
@@ -1212,6 +1316,7 @@ impl Settings {
 pub(crate) fn asker(
     outbound: mpsc::UnboundedSender<ChatEvent>,
     patience: std::time::Duration,
+    limits: rook_tools::pending::Limits,
 ) -> (Arc<ChannelAsker>, tokio::task::JoinHandle<()>) {
     let (requests, mut incoming) = mpsc::unbounded_channel::<AskRequest>();
     let relay = tokio::spawn(async move {
@@ -1226,13 +1331,14 @@ pub(crate) fn asker(
             }
         }
     });
-    (Arc::new(ChannelAsker::new(requests, patience)), relay)
+    (Arc::new(ChannelAsker::new(requests, patience, limits)), relay)
 }
 
 /// Relays approval requests to the browser and routes the answers back.
 pub(crate) fn approver(
     outbound: mpsc::UnboundedSender<ChatEvent>,
     patience: std::time::Duration,
+    limits: rook_tools::pending::Limits,
 ) -> (Arc<ChannelApprover>, tokio::task::JoinHandle<()>) {
     let (requests, mut incoming) = mpsc::unbounded_channel::<rook_tools::policy::ApprovalRequest>();
     let relay = tokio::spawn(async move {
@@ -1249,7 +1355,7 @@ pub(crate) fn approver(
             }
         }
     });
-    (Arc::new(ChannelApprover::new(requests, patience)), relay)
+    (Arc::new(ChannelApprover::new(requests, patience, limits)), relay)
 }
 
 #[cfg(test)]
@@ -1293,10 +1399,11 @@ mod tests {
 
     /// A live turn with nothing actually running in it, to ask the questions a
     /// window joining one asks.
-    fn parked(said: tokio::sync::broadcast::Sender<ChatEvent>) -> Live {
+    fn parked(said: tokio::sync::broadcast::Sender<u64>) -> Live {
         let (to_turn, _held) = mpsc::unbounded_channel::<ChatEvent>();
-        let (approver, relay) = approver(to_turn.clone(), std::time::Duration::from_secs(1));
-        let (asker, ask_relay) = asker(to_turn, std::time::Duration::from_secs(1));
+        let (approver, relay) =
+            approver(to_turn.clone(), std::time::Duration::from_secs(1), Default::default());
+        let (asker, ask_relay) = asker(to_turn, std::time::Duration::from_secs(1), Default::default());
         Live {
             task: tokio::spawn(std::future::pending()),
             helpers: vec![relay.abort_handle(), ask_relay.abort_handle()],
@@ -1319,22 +1426,23 @@ mod tests {
     /// for an hour with nobody watching would otherwise hold every token.
     #[tokio::test]
     async fn joining_a_running_turn_gives_what_was_missed_and_then_the_rest() {
-        let (said, _) = tokio::sync::broadcast::channel::<ChatEvent>(16);
+        let (said, _) = tokio::sync::broadcast::channel::<u64>(16);
         let live = parked(said.clone());
 
         // Said before anybody was watching.
         for i in 0..3 {
             let event = text(&format!("before {i}"));
             let mut kept = live.backlog.lock().unwrap();
-            kept.push_back(event);
+            kept.push(event);
         }
 
-        let (mut coming, missed) = live.join();
+        let (mut coming, missed, _) = live.join();
         assert_eq!(missed.len(), 3, "everything said before the window arrived");
         assert!(matches!(&missed[0], ChatEvent::Text { text } if text == "before 0"), "oldest first");
 
-        let _ = said.send(text("after"));
-        let next = coming.recv().await.expect("and then what happens next");
+        fan_out(&live.backlog, &said, text("after"));
+        let sequence = coming.recv().await.expect("and then what happens next");
+        let next = live.backlog.lock().unwrap().get(sequence).unwrap();
         assert!(matches!(&next, ChatEvent::Text { text } if text == "after"));
 
         assert!(live.running(), "a turn nobody is watching is still running");
@@ -1344,24 +1452,54 @@ mod tests {
         assert!(!live.running(), "and `Cancel` is the thing that ends it");
     }
 
-    /// The backlog is what a window joining late reads, so it keeps the end of
-    /// the turn rather than the start of it.
-    #[test]
-    fn the_backlog_keeps_the_end_of_a_turn_rather_than_all_of_it() {
-        let backlog: std::sync::Mutex<std::collections::VecDeque<ChatEvent>> = Default::default();
-        for i in 0..BACKLOG + 50 {
-            let mut kept = backlog.lock().unwrap();
-            if kept.len() >= BACKLOG {
-                kept.pop_front();
-            }
-            kept.push_back(text(&format!("{i}")));
-        }
-        let kept = backlog.lock().unwrap();
-        assert_eq!(kept.len(), BACKLOG, "bounded, and reached — or this proves nothing");
+    #[tokio::test]
+    async fn joining_replays_current_questions_even_if_their_old_events_are_gone() {
+        use rook_tools::ask::{Asker, Question};
+        let (said, _) = tokio::sync::broadcast::channel(16);
+        let live = parked(said);
+        let questions = [Question { question: "Which branch?".into(), choices: vec![], multi: false }];
+        let mut asking = Box::pin(live.asker.ask(&questions));
         assert!(
-            matches!(kept.back(), Some(ChatEvent::Text { text }) if text == &format!("{}", BACKLOG + 49)),
-            "the newest is the one kept"
+            std::future::poll_fn(|cx| std::task::Poll::Ready(asking.as_mut().poll(cx).is_pending())).await
         );
+        live.backlog.lock().unwrap().push(ChatEvent::Ask { id: "obsolete".into(), questions: vec![] });
+        let (_, replay, _) = live.join();
+        assert_eq!(replay.len(), 1, "an obsolete request must not be replayed");
+        let ChatEvent::Ask { id, questions } = &replay[0] else { panic!("current question missing") };
+        assert_eq!(questions[0].question, "Which branch?");
+        assert_ne!(id, "obsolete");
+        live.asker.answer(id, vec![vec!["main".into()]]);
+        assert_eq!(asking.await[0].chosen, ["main"]);
+        assert!(live.join().1.is_empty(), "answered questions are no longer controls");
+        live.stop();
+    }
+
+    #[tokio::test]
+    async fn concurrent_publication_and_join_deliver_every_event_exactly_once() {
+        for _ in 0..20 {
+            let (said, _) = tokio::sync::broadcast::channel(1024);
+            let live = Arc::new(parked(said));
+            let publishing = live.clone();
+            let publisher = std::thread::spawn(move || {
+                for i in 0..400 {
+                    fan_out(&publishing.backlog, &publishing.said, text(&i.to_string()));
+                }
+            });
+            let (mut coming, mut replay, _) = live.join();
+            publisher.join().unwrap();
+            while let Ok(sequence) = coming.try_recv() {
+                replay.push(live.backlog.lock().unwrap().get(sequence).unwrap());
+            }
+            let values: Vec<_> = replay
+                .into_iter()
+                .map(|event| {
+                    let ChatEvent::Text { text } = event else { panic!("expected text") };
+                    text.parse::<usize>().unwrap()
+                })
+                .collect();
+            assert_eq!(values, (0..400).collect::<Vec<_>>(), "no duplicate or gap at the join boundary");
+            live.stop();
+        }
     }
 
     /// A sink that accepts a frame and then never finishes another, which is
@@ -1463,6 +1601,151 @@ mod tests {
         assert!(matches!(received.last(), Some(Message::Text(text)) if text.contains("cancelled")));
     }
 
+    #[tokio::test]
+    async fn answering_a_question_clears_it_in_every_view_without_new_turn_output() {
+        use rook_tools::ask::{Asker, Question};
+        let (said, _) = tokio::sync::broadcast::channel(8);
+        let live = Arc::new(parked(said));
+        let questions = [Question { question: "Choose a branch".into(), choices: vec![], multi: false }];
+        let mut asking = Box::pin(live.asker.ask(&questions));
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(asking.as_mut().poll(cx).is_pending())).await
+        );
+        let id = live.asker.current()[0].id.clone();
+        let (one, mut first) = delivery::channel(8, 4096);
+        let (two, mut second) = delivery::channel(8, 4096);
+        let first_watch = watch(&live, 7, one, None, true);
+        let second_watch = watch(&live, 7, two, None, true);
+        for frames in [&mut first, &mut second] {
+            loop {
+                let frame = tokio::time::timeout(std::time::Duration::from_secs(30), frames.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let event: ChatEvent = serde_json::from_str(&frame.text).unwrap();
+                if matches!(event, ChatEvent::Ask { id: seen, .. } if seen == id) {
+                    break;
+                }
+            }
+        }
+        live.asker.answer(&id, vec![vec!["main".into()]]);
+        assert_eq!(asking.await[0].chosen, ["main"]);
+        assert!(
+            live.backlog.lock().unwrap().snapshot().0.is_empty(),
+            "no progress event triggers this update"
+        );
+        for frames in [&mut first, &mut second] {
+            loop {
+                let frame = tokio::time::timeout(std::time::Duration::from_secs(30), frames.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let event: ChatEvent = serde_json::from_str(&frame.text).unwrap();
+                if let ChatEvent::Inputs { approvals, questions } = event {
+                    assert!(approvals.is_empty() && questions.is_empty());
+                    break;
+                }
+            }
+        }
+        first_watch.carrying.abort();
+        second_watch.carrying.abort();
+        live.stop();
+    }
+
+    #[tokio::test]
+    async fn shortened_live_endings_report_partial_history_without_breaking_legacy_clients() {
+        let old: Where = serde_json::from_str("{}").unwrap();
+        assert!(!old.live_snapshots, "old clients do not opt into new event variants");
+        for snapshots in [false, true] {
+            let (said, _) = tokio::sync::broadcast::channel(8);
+            let mut live = parked(said);
+            live.backlog = Arc::new(std::sync::Mutex::new(replay::Replay::new(8, 8192, 4096)));
+            let live = Arc::new(live);
+            let (out, mut frames) = delivery::channel(8, 4096);
+            let watching = watch(&live, 7, out, None, snapshots);
+            // Wait for initial replay before publishing: the test is about
+            // an attached live subscriber, not only a later reconnect.
+            loop {
+                let frame = tokio::time::timeout(std::time::Duration::from_secs(30), frames.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if matches!(
+                    serde_json::from_str::<ChatEvent>(&frame.text).unwrap(),
+                    ChatEvent::Settings { .. }
+                ) {
+                    break;
+                }
+            }
+            fan_out(&live.backlog, &live.said, ChatEvent::Failed { message: "x".repeat(5000) });
+            let mut marked = false;
+            loop {
+                let frame = tokio::time::timeout(std::time::Duration::from_secs(30), frames.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let event: ChatEvent = serde_json::from_str(&frame.text).unwrap();
+                assert!(snapshots || !matches!(event, ChatEvent::Snapshot { .. } | ChatEvent::Inputs { .. }));
+                match event {
+                    ChatEvent::Snapshot { truncated: true, .. } => marked = true,
+                    ChatEvent::Text { text } if text.contains("live view refreshed") => marked = true,
+                    ChatEvent::Failed { message } => {
+                        assert!(marked, "shortened results must be marked before the client exits");
+                        assert!(message.contains("error shortened"));
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            watching.carrying.abort();
+            live.stop();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_lagging_view_converges_to_a_snapshot_and_the_terminal_outcome() {
+        let (said, _) = tokio::sync::broadcast::channel(2);
+        let mut live = parked(said);
+        live.backlog = Arc::new(std::sync::Mutex::new(replay::Replay::new(3, 4096, 4096)));
+        let live = Arc::new(live);
+        let (out, mut frames) = delivery::channel(1, 4096);
+        let watching = carry_view(&live, 7, out, None, true, false);
+        let first = frames.recv().await.unwrap();
+        let event: ChatEvent = serde_json::from_str(&first.text).unwrap();
+        assert!(matches!(event, ChatEvent::Settings { .. }), "a fresh turn does not erase the conversation");
+        // The sole queue slot remains in flight while more events are
+        // produced than either the replay or notification ring can retain.
+        for n in 0..20 {
+            fan_out(&live.backlog, &live.said, text(&format!("part {n}")));
+        }
+        fan_out(&live.backlog, &live.said, ChatEvent::Cancelled);
+        let (kept, truncated) = live.backlog.lock().unwrap().snapshot();
+        assert!(truncated);
+        assert_eq!(kept.len(), 3, "the retained event limit was actually reached");
+        drop(first);
+        let mut recovered = false;
+        let mut finished = false;
+        for _ in 0..10 {
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(30), frames.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let event: ChatEvent = serde_json::from_str(&frame.text).unwrap();
+            if matches!(event, ChatEvent::Snapshot { truncated: true, .. }) {
+                recovered = true;
+            }
+            if matches!(event, ChatEvent::Cancelled) {
+                finished = true;
+                break;
+            }
+        }
+        assert!(recovered, "a skipped delta must trigger snapshot replacement");
+        assert!(finished, "the recovered view must receive the terminal result");
+        assert!(live.running(), "resynchronizing a view must not cancel daemon-owned work");
+        watching.carrying.abort();
+        live.stop();
+    }
+
     /// A turn's last word reaches the window that was watching it all along.
     ///
     /// The turn puts its ending in the queue as it returns, and nothing else
@@ -1475,8 +1758,8 @@ mod tests {
     #[tokio::test]
     async fn a_turns_last_word_reaches_the_window_that_was_watching_all_along() {
         let (from_turn, events) = mpsc::unbounded_channel::<ChatEvent>();
-        let (said, mut watching) = tokio::sync::broadcast::channel::<ChatEvent>(8);
-        let backlog: Arc<std::sync::Mutex<std::collections::VecDeque<ChatEvent>>> = Default::default();
+        let (said, mut watching) = tokio::sync::broadcast::channel::<u64>(8);
+        let backlog: Arc<std::sync::Mutex<replay::Replay>> = Default::default();
 
         let turn = {
             let out = from_turn.clone();
@@ -1489,11 +1772,13 @@ mod tests {
 
         everything_it_says(turn, events, said, backlog.clone(), vec![]).await;
 
-        let watched: Vec<ChatEvent> = std::iter::from_fn(|| watching.try_recv().ok()).collect();
+        let watched: Vec<ChatEvent> = std::iter::from_fn(|| watching.try_recv().ok())
+            .map(|sequence| backlog.lock().unwrap().get(sequence).unwrap())
+            .collect();
         assert_eq!(watched.len(), 2, "the window watching saw {watched:?}");
         assert!(matches!(watched.last(), Some(ChatEvent::Cancelled)), "it ended on {watched:?}");
 
-        let kept: Vec<ChatEvent> = backlog.lock().unwrap().iter().cloned().collect();
+        let kept: Vec<ChatEvent> = backlog.lock().unwrap().snapshot().0;
         assert!(
             matches!(kept.last(), Some(ChatEvent::Cancelled)),
             "a window attaching afterwards reads {kept:?} and would wait for an ending that had passed"
@@ -1526,8 +1811,10 @@ mod tests {
         let session = rook.start_session("a turn that cannot start").unwrap();
 
         let (outbound, mut heard) = mpsc::unbounded_channel::<ChatEvent>();
-        let (approver, _relay) = approver(outbound.clone(), std::time::Duration::from_secs(1));
-        let (asker, _ask_relay) = asker(outbound.clone(), std::time::Duration::from_secs(1));
+        let (approver, _relay) =
+            approver(outbound.clone(), std::time::Duration::from_secs(1), Default::default());
+        let (asker, _ask_relay) =
+            asker(outbound.clone(), std::time::Duration::from_secs(1), Default::default());
         let engine = Arc::new(tokio::sync::RwLock::new(rook));
         turn(
             engine.clone(),

@@ -866,6 +866,7 @@ fn a_second_window_runs_its_turn_through_the_daemon() {
     let asked = pty.screen_showing(100, 30, "the-very-end").join("\n");
 
     assert!(asked.contains("approval"), "the daemon's approval arrives here:\n{asked}");
+    assert!(asked.contains("run it"), "starting a new turn must retain its prompt on screen:\n{asked}");
     assert!(asked.contains("the-very-end"), "with the command whole:\n{asked}");
     // The connection reports its settings when it opens and again for each one
     // this window sets, and printing each put `stance: assist · effort: high`
@@ -879,6 +880,43 @@ fn a_second_window_runs_its_turn_through_the_daemon() {
     let ran = pty.screen_showing(100, 30, "run_command").join("\n");
     assert!(ran.contains("run_command"), "and the call goes through:\n{ran}");
     drop(daemon);
+}
+
+#[test]
+fn a_reopened_window_recovers_pending_approval_without_losing_its_draft() {
+    let _one = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    a_model_that_asks_to_run(home.path(), "echo recovered-approval");
+    // Force actual eviction, so the recovery marker proves that the new
+    // snapshot path ran rather than the old transcript-only attachment.
+    let config = home.path().join("config.toml");
+    let configured = std::fs::read_to_string(&config).unwrap()
+        + "\n[server]\nchat_replay_events = 1\nchat_replay_bytes = 4096\n";
+    std::fs::write(config, configured).unwrap();
+    let _daemon = Daemon::start(home.path(), workspace.path());
+    let mut first = tui(home.path(), workspace.path());
+    first.screen(100, 30);
+    first.send("recover this turn\r");
+    first.screen_showing(100, 30, "recovered-approval");
+    drop(first);
+
+    let mut reopened = tui(home.path(), workspace.path());
+    reopened.screen(100, 30);
+    reopened.send("черновик next");
+    reopened.screen_showing(100, 30, "черновик next");
+    reopened.send("\u{10}");
+    reopened.screen_showing(100, 30, "what would you like to do");
+    reopened.send("sessions\r");
+    reopened.screen_showing(100, 30, "continue");
+    reopened.send("\r");
+    let recovered = reopened.screen_showing(100, 30, "recovered-approval").join("\n");
+    assert!(recovered.contains("live view refreshed"), "bounded snapshot was applied:\n{recovered}");
+    assert!(recovered.contains("approval"), "the current request survived disconnection:\n{recovered}");
+    assert!(recovered.contains("черновик next"), "the unsent draft survived recovery:\n{recovered}");
+    reopened.send("y");
+    let answered = reopened.screen_showing(100, 30, "run_command").join("\n");
+    assert!(answered.contains("черновик next"), "answering does not submit the draft:\n{answered}");
 }
 
 /// `rookd`, for the test above. Port 0 so two tests can never collide, and the

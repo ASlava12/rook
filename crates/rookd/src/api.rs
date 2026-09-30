@@ -1487,8 +1487,10 @@ mod tests {
         let (said, _) = tokio::sync::broadcast::channel(4);
         let (to_turn, _held) = tokio::sync::mpsc::unbounded_channel();
         let running = |finished: bool| {
-            let (approver, relay) = crate::chat::approver(to_turn.clone(), std::time::Duration::from_secs(1));
-            let (asker, ask_relay) = crate::chat::asker(to_turn.clone(), std::time::Duration::from_secs(1));
+            let (approver, relay) =
+                crate::chat::approver(to_turn.clone(), std::time::Duration::from_secs(1), Default::default());
+            let (asker, ask_relay) =
+                crate::chat::asker(to_turn.clone(), std::time::Duration::from_secs(1), Default::default());
             std::sync::Arc::new(crate::chat::Live::for_test(
                 match finished {
                     true => tokio::spawn(std::future::ready(())),

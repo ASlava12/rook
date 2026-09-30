@@ -1,12 +1,16 @@
-//! Per-window backpressure, including encoded bytes held by the socket writer.
+//! Shared chat transport admission; leases survive forwarding until a view consumes the frame.
 use std::io::Write;
 use std::sync::Arc;
 
 use rook_proto::ChatEvent;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 
+#[derive(Debug, thiserror::Error)]
+#[error("chat delivery closed or frame exceeds server.chat_queue_bytes")]
+pub struct Closed;
+
 #[derive(Clone)]
-pub(super) struct Sender {
+pub struct Sender {
     frames: mpsc::Sender<Frame>,
     slots: Arc<Semaphore>,
     bytes: Arc<Semaphore>,
@@ -14,21 +18,21 @@ pub(super) struct Sender {
     failed: watch::Sender<bool>,
 }
 
-pub(super) struct Receiver {
+pub struct Receiver {
     frames: mpsc::Receiver<Frame>,
     failed: watch::Receiver<bool>,
     slots: Arc<Semaphore>,
     bytes: Arc<Semaphore>,
 }
 
-pub(super) struct Frame {
-    pub(super) text: String,
+pub struct Frame {
+    pub text: String,
     // Permits stay with the frame until the socket finishes sending it.
     _slot: OwnedSemaphorePermit,
     _bytes: OwnedSemaphorePermit,
 }
 
-pub(super) fn channel(events: usize, bytes: usize) -> (Sender, Receiver) {
+pub fn channel(events: usize, bytes: usize) -> (Sender, Receiver) {
     // Also guard hand-written configurations that bypass offline validation.
     let events = events.clamp(1, 4096);
     let limit = bytes.clamp(4096, 32 * 1024 * 1024);
@@ -43,29 +47,49 @@ pub(super) fn channel(events: usize, bytes: usize) -> (Sender, Receiver) {
 }
 
 impl Sender {
-    pub(super) async fn send(&self, event: ChatEvent) -> Result<(), ()> {
-        let slot = self.slots.clone().acquire_owned().await.map_err(|_| ())?;
+    pub fn byte_limit(&self) -> usize {
+        self.limit
+    }
+
+    /// Admission precedes copying a received frame. The websocket separately
+    /// caps its one incoming message at this same byte limit.
+    pub async fn send_text(&self, text: &str) -> Result<(), Closed> {
+        let slot = self.slots.clone().acquire_owned().await.map_err(|_| Closed)?;
+        if text.len() > self.limit {
+            self.failed.send_replace(true);
+            self.slots.close();
+            self.bytes.close();
+            return Err(Closed);
+        }
+        let bytes = self.bytes.clone().acquire_many_owned(text.len() as u32).await.map_err(|_| Closed)?;
+        self.frames
+            .send(Frame { text: text.to_owned(), _slot: slot, _bytes: bytes })
+            .await
+            .map_err(|_| Closed)
+    }
+
+    pub async fn send(&self, event: ChatEvent) -> Result<(), Closed> {
+        let slot = self.slots.clone().acquire_owned().await.map_err(|_| Closed)?;
         // Count escaped JSON without allocating it; byte admission precedes
         // encoding, so waiting producers cannot accumulate encoded frames.
-        let mut count = Counter { remaining: self.limit, used: 0 };
-        if serde_json::to_writer(&mut count, &event).is_err() {
+        let Some(size) = encoded_size(&event, self.limit) else {
             // A partial event is not an approval or a terminal result. Close
             // this view instead of silently dropping an oversized event.
             self.failed.send_replace(true);
             self.slots.close();
             self.bytes.close();
-            return Err(());
-        }
-        let bytes = self.bytes.clone().acquire_many_owned(count.used as u32).await.map_err(|_| ())?;
-        let mut encoded = Vec::with_capacity(count.used);
-        serde_json::to_writer(&mut encoded, &event).map_err(|_| ())?;
-        let text = String::from_utf8(encoded).map_err(|_| ())?;
-        self.frames.send(Frame { text, _slot: slot, _bytes: bytes }).await.map_err(|_| ())
+            return Err(Closed);
+        };
+        let bytes = self.bytes.clone().acquire_many_owned(size as u32).await.map_err(|_| Closed)?;
+        let mut encoded = Vec::with_capacity(size);
+        serde_json::to_writer(&mut encoded, &event).map_err(|_| Closed)?;
+        let text = String::from_utf8(encoded).map_err(|_| Closed)?;
+        self.frames.send(Frame { text, _slot: slot, _bytes: bytes }).await.map_err(|_| Closed)
     }
 }
 
 impl Receiver {
-    pub(super) async fn recv(&mut self) -> Option<Frame> {
+    pub async fn recv(&mut self) -> Option<Frame> {
         if *self.failed.borrow() {
             return None;
         }
@@ -83,6 +107,12 @@ impl Drop for Receiver {
         self.slots.close();
         self.bytes.close();
     }
+}
+
+pub fn encoded_size(event: &ChatEvent, limit: usize) -> Option<usize> {
+    let mut count = Counter { remaining: limit, used: 0 };
+    serde_json::to_writer(&mut count, event).ok()?;
+    Some(count.used)
 }
 
 struct Counter {
@@ -172,5 +202,37 @@ mod tests {
         drop(out);
         assert!(incoming.recv().await.unwrap().text.contains("cancelled"));
         assert!(incoming.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn forwarding_a_frame_keeps_its_admission_until_the_view_consumes_it() {
+        let (send, mut receive) = channel(1, 4096);
+        send.send_text("first").await.unwrap();
+        let frame = receive.recv().await.unwrap();
+        // The relay itself is unbounded, but cannot accumulate leased frames.
+        let (relay, mut view) = mpsc::unbounded_channel();
+        assert!(relay.send(frame).is_ok());
+        let second = send.send_text("second");
+        tokio::pin!(second);
+        assert!(futures_util::poll!(&mut second).is_pending());
+        let processing = view.recv().await.unwrap();
+        assert!(futures_util::poll!(&mut second).is_pending());
+        drop(processing);
+        second.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn received_text_obeys_the_shared_byte_budget_before_copying() {
+        let (send, mut receive) = channel(8, 4096);
+        let text = "x".repeat(3000);
+        assert!(text.len() * 2 > 4096);
+        send.send_text(&text).await.unwrap();
+        let next = send.send_text(&text);
+        tokio::pin!(next);
+        assert!(futures_util::poll!(&mut next).is_pending());
+        let processing = receive.recv().await.unwrap();
+        assert!(futures_util::poll!(&mut next).is_pending());
+        drop(processing);
+        next.await.unwrap();
     }
 }

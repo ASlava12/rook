@@ -37,6 +37,7 @@ pub struct Config {
     pub mcp_connections: crate::mcp_connections::Settings,
     pub transcript: crate::transcript::Settings,
     pub tui: crate::keybindings::Settings,
+    pub user_input: rook_tools::pending::Limits,
     /// Language servers, as `[[lsp]]` tables. When empty, known servers found
     /// on `PATH` are used.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -303,6 +304,7 @@ impl Default for Config {
             mcp_connections: Default::default(),
             transcript: Default::default(),
             tui: Default::default(),
+            user_input: Default::default(),
             server: Default::default(),
             lsp: Vec::new(),
             mcp: Vec::new(),
@@ -739,6 +741,9 @@ impl Default for WorkConfig {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ServerConfig {
+    /// Retained recent events for a reconnecting chat view.
+    pub chat_replay_events: usize,
+    pub chat_replay_bytes: usize,
     /// Maximum queued and in-flight frames per chat connection.
     pub chat_queue_events: usize,
     /// Maximum encoded bytes queued or in flight per chat connection.
@@ -954,6 +959,8 @@ impl Default for StorageConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
+            chat_replay_events: 2000,
+            chat_replay_bytes: 8 * 1024 * 1024,
             chat_queue_events: 256,
             chat_queue_bytes: 4 * 1024 * 1024,
             bind: "127.0.0.1".into(),

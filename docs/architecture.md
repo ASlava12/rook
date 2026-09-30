@@ -125,11 +125,29 @@ read what it did.
 Each chat socket bounds queued and in-flight JSON by both frame count and encoded
 bytes (`server.chat_queue_events`, `server.chat_queue_bytes`). Byte admission
 counts JSON escaping before allocating the encoded frame. Permits remain held
-until socket delivery finishes; only that window's relay waits for capacity,
-without holding an engine or live-registry lock. An oversized event closes the
-view without truncating an approval or cancelling its daemon-owned turn. This
-queue bound is separate from the live broadcast/backlog and does not yet provide
-snapshot recovery after the relay falls behind.
+until socket delivery finishes. Terminal clients use the same core admission
+queue and retain its leases through TUI forwarding until the event is processed.
+Their socket reader has a separate write half, so waiting for display capacity
+does not prevent sending Cancel or an answer. Only the view's relay waits for
+capacity; it holds no engine or live-registry lock.
+
+The live replay has independent event and encoded-byte limits
+(`server.chat_replay_events`, `server.chat_replay_bytes`). Broadcast notifications
+carry sequence numbers rather than retaining payloads. Joining snapshots and
+subscribes under one lock. Missing sequences make a slow observer replace its
+view from a fresh snapshot; current metrics and the terminal outcome take
+priority over old transcript fragments. Oversized terminal details are shortened
+and marked partial before delivery. Durable session history remains separate.
+
+Current approvals/questions come from bounded pending maps, not old replay
+events. Answer, timeout and cancellation remove them, and revision notifications
+clear resolved controls in other windows without waiting for model output.
+`user_input.max_requests` and `user_input.max_bytes` apply separately to question
+and approval channels. Snapshots preserve the unsent draft and answers still being
+edited for active questions. New frontends request `live_snapshots=true`; legacy
+clients receive ordinary events and a text marker for partial replay. An input
+or settings frame exceeding the socket budget closes that view without silently
+truncating a control or cancelling the daemon-owned turn.
 
 ## The agent loop
 

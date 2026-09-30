@@ -380,7 +380,8 @@ enum TurnEvent {
     Error(String),
     /// A turn the daemon is running, verbatim. Translated where the rest are
     /// handled rather than at the socket, so the two paths meet in one place.
-    FromDaemon(u64, Box<ChatEvent>),
+    FromDaemon(u64, Box<rook_core::delivery::Frame>),
+    DaemonFailed(u64, String),
 }
 
 struct Selected {
@@ -1401,8 +1402,12 @@ impl App {
             events,
             to_loop,
             connection_epoch: 0,
-            approver: Arc::new(ChannelApprover::new(requests, patience)),
-            asker: Arc::new(ChannelAsker::new(questions, config.agent.decide_alone_after())),
+            approver: Arc::new(ChannelApprover::new(requests, patience, config.user_input)),
+            asker: Arc::new(ChannelAsker::new(
+                questions,
+                config.agent.decide_alone_after(),
+                config.user_input,
+            )),
             shared: crate::chat::Session {
                 output: Default::default(),
                 policy: rook_core::agent::policy_for(&config),
@@ -1818,10 +1823,15 @@ impl App {
                     self.chat.push("err", &message);
                     self.finished();
                 }
-                TurnEvent::FromDaemon(epoch, event) if epoch == self.connection_epoch => {
-                    self.heard_from_daemon(*event)
+                TurnEvent::FromDaemon(epoch, frame) if epoch == self.connection_epoch => {
+                    if let Ok(event) = serde_json::from_str::<ChatEvent>(&frame.text) {
+                        self.heard_from_daemon(event);
+                    }
                 }
-                TurnEvent::FromDaemon(..) => {}
+                TurnEvent::DaemonFailed(epoch, message) if epoch == self.connection_epoch => {
+                    self.heard_from_daemon(ChatEvent::Failed { message });
+                }
+                TurnEvent::FromDaemon(..) | TurnEvent::DaemonFailed(..) => {}
             }
             // After the event has been read, not before: the answer to "is it
             // still running?" is one of these, and clearing the question first
@@ -1848,6 +1858,33 @@ impl App {
             }
         }
         match event {
+            ChatEvent::Inputs { approvals, questions } => {
+                self.chat.pending = self.chat.pending.take().filter(|r| approvals.contains(&r.id));
+                self.chat.asking = self.chat.asking.take().filter(|r| questions.contains(&r.id));
+            }
+            ChatEvent::Snapshot { session, running, truncated, approvals, questions } => {
+                self.chat.session = rook_store::parse_session_id(&session);
+                self.chat.log.clear();
+                self.chat.running_calls = Default::default();
+                self.chat.scroll = 0;
+                self.chat.drawn = 0;
+                self.chat.spent = None;
+                self.chat.carried = 0;
+                self.chat.last_effort = None;
+                self.chat.pending = self.chat.pending.take().filter(|r| approvals.contains(&r.id));
+                self.chat.asking = self.chat.asking.take().filter(|r| questions.contains(&r.id));
+                self.chat.began();
+                self.chat.busy = running;
+                if running {
+                    self.flush_interjections();
+                    self.chat.push("stat", "[joined a turn already running here]");
+                } else {
+                    self.chat.push("stat", "[nothing is running in this session]");
+                }
+                if truncated {
+                    self.chat.push("stat", "[live view refreshed; saved conversation is in history]");
+                }
+            }
             ChatEvent::Started { session } => {
                 self.chat.session = rook_store::parse_session_id(&session);
                 self.flush_interjections();
@@ -1911,10 +1948,16 @@ impl App {
             }
             ChatEvent::Interjected { text } => self.chat.push("stat", &format!("  ↩ {text}")),
             ChatEvent::Approval { id, tool, action, preview, kind } => {
+                if self.chat.pending.is_some() {
+                    return;
+                }
                 crate::notify::attention();
                 self.chat.pending = Some(ApprovalRequest { id, tool, action, preview, kind })
             }
             ChatEvent::Ask { id, questions } => {
+                if self.chat.asking.is_some() {
+                    return;
+                }
                 crate::notify::attention();
                 self.chat.asking = Some(Asking {
                     id,
@@ -2481,8 +2524,14 @@ impl App {
             return false;
         };
         let (say, mut outgoing) = mpsc::unbounded_channel::<ClientMessage>();
-        let (heard, mut incoming) = mpsc::unbounded_channel::<ChatEvent>();
         let workspace = self.source.workspace().to_path_buf();
+        let (heard, mut incoming) = match crate::remote::channel(&workspace) {
+            Ok(channel) => channel,
+            Err(error) => {
+                self.chat.push("err", &error.to_string());
+                return false;
+            }
+        };
 
         // The settings this window is showing, said before a prompt: a
         // connection starts at the daemon's own and a stance cycled here would
@@ -2520,10 +2569,7 @@ impl App {
         });
         self.turn = Some(self.runtime.spawn(async move {
             if let Err(e) = crate::remote::hold(&base, &workspace, &mut outgoing, heard).await {
-                let _ = to_loop.send(TurnEvent::FromDaemon(
-                    epoch,
-                    Box::new(ChatEvent::Failed { message: e.to_string() }),
-                ));
+                let _ = to_loop.send(TurnEvent::DaemonFailed(epoch, e.to_string()));
             }
         }));
         true

@@ -294,6 +294,10 @@ fn oauth_limits_are_the_same_in_offline_config_and_protocol_setup() {
 #[test]
 fn chat_delivery_limits_are_bounded_and_checked_offline() {
     for (field, value) in [
+        ("chat_replay_events", 0),
+        ("chat_replay_events", 4097),
+        ("chat_replay_bytes", 4095),
+        ("chat_replay_bytes", 33_554_433),
         ("chat_queue_events", 0),
         ("chat_queue_events", 4097),
         ("chat_queue_bytes", 4095),
@@ -303,4 +307,14 @@ fn chat_delivery_limits_are_bounded_and_checked_offline() {
         assert!(config.validation_errors().iter().any(|error| error.contains(field)), "{field}={value}");
     }
     assert!(rook_core::Config::default().validation_errors().is_empty());
+}
+
+#[test]
+fn pending_input_limits_are_validated_before_saving_or_connecting() {
+    for (field, value) in
+        [("max_requests", 0), ("max_requests", 4097), ("max_bytes", 4095), ("max_bytes", 33_554_433)]
+    {
+        let config: rook_core::Config = toml::from_str(&format!("[user_input]\n{field}={value}\n")).unwrap();
+        assert!(config.validation_errors().iter().any(|e| e.contains(&format!("user_input.{field}"))));
+    }
 }

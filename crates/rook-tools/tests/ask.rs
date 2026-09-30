@@ -157,7 +157,7 @@ async fn a_channel_asker_pairs_the_answers_back_onto_their_questions() {
     use rook_tools::ask::{AskRequest, ChannelAsker};
 
     let (tx, mut requests) = tokio::sync::mpsc::unbounded_channel::<AskRequest>();
-    let asker = Arc::new(ChannelAsker::new(tx, std::time::Duration::from_secs(5)));
+    let asker = Arc::new(ChannelAsker::new(tx, std::time::Duration::from_secs(5), Default::default()));
 
     let front_end = {
         let asker = asker.clone();
@@ -179,7 +179,7 @@ async fn a_front_end_that_never_answers_leaves_the_questions_skipped() {
     use rook_tools::ask::{AskRequest, ChannelAsker};
 
     let (tx, _requests) = tokio::sync::mpsc::unbounded_channel::<AskRequest>();
-    let asker = ChannelAsker::new(tx, std::time::Duration::from_millis(20));
+    let asker = ChannelAsker::new(tx, std::time::Duration::from_millis(20), Default::default());
 
     let answers = asker.ask(&[question("Which target?", &[], false)]).await;
 
@@ -193,7 +193,7 @@ async fn short_answers_do_not_shift_onto_the_wrong_questions() {
     use rook_tools::ask::{AskRequest, ChannelAsker};
 
     let (tx, mut requests) = tokio::sync::mpsc::unbounded_channel::<AskRequest>();
-    let asker = Arc::new(ChannelAsker::new(tx, std::time::Duration::from_secs(5)));
+    let asker = Arc::new(ChannelAsker::new(tx, std::time::Duration::from_secs(5), Default::default()));
     let front_end = {
         let asker = asker.clone();
         tokio::spawn(async move {

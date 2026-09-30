@@ -6,7 +6,7 @@ Source: Pi `ee602414c703be8da722ec56de7f2399e62581ac`; starting Rook:
 
 | Capability | State | Completion evidence needed |
 |---|---|---|
-| Bounded live delivery and snapshot recovery | In progress | Slow-reader byte/count bounds, snapshot convergence, current questions/approvals, terminal results, reconnect without cancelling work |
+| Bounded live delivery and snapshot recovery | Complete | Queue/replay/input limits, WebSocket backpressure, atomic recovery, current controls, PTY reconnect/goal checks, browser form preservation and full CI passed |
 | Editable steering and follow-up queue | Pending | Core/CLI/API/TUI/browser, durable IDs, goal vs ordinary-turn boundaries, revoke/accept races, restart |
 | Configurable keyboard actions and prompt undo | Complete | Shared registry/config/help, bounded Unicode edit tests, remapped-key and external-editor PTY checks, full CI passed |
 | Branch navigation and optional branch summary | Pending | Existing session/event IDs, bounded tree/history, explicit workspace semantics, attributable summary |
@@ -41,44 +41,65 @@ but that was not a green gate. The combined tree subsequently passed
 including doctests. The gate reported 677.6 seconds. This isolated target must
 not be reused by another checkout while it is validating this tree.
 
-## Snapshot recovery in progress
+## Snapshot recovery completed
 
-Worktree `/tmp/rook-pi-snapshot-recovery`, branch `pi-snapshot-recovery`, has the
-first integrated source changes staged as a baseline. Its **unstaged** diff is
-the next snapshot change; export that diff rather than diffing against HEAD.
-`/tmp/rook-pi-snapshot-in-progress.patch` is an intermediate export and must be
-refreshed after further edits.
+The second integrated block provides:
 
-The implementation now has:
+- Current-input count/byte bounds and cleanup on answer, expiry or cancellation.
+  Revision notifications clear resolved controls across windows without further
+  model output; reconnect reads current requests rather than historical controls.
+- Atomic replay/subscription, count/byte-bounded replay and sequence-only
+  broadcast notifications. Missing events trigger replacement snapshots.
+- Retained current metrics and terminal outcomes. Shortened oversized endings
+  force a partial snapshot even for an already attached reader. CLI JSON exposes
+  `live_view_truncated`; its retained Unicode text tail is also bounded.
+- Shared transport leases held through terminal reception and TUI forwarding
+  until actual processing. A separate socket reader allows cancellation and
+  answers while the display queue is full; disconnect aborts that reader.
+- CLI/TUI/browser handling and `live_snapshots=true` negotiation. Legacy clients
+  receive ordinary events and a partial-history text marker.
 
-- Configurable current-input count/byte bounds and cleanup on answer, expiry or
-  cancellation; reconnect reads the current requests, not historical controls.
-- An atomic replay/subscription boundary, count/byte-bounded replay, sequence-only
-  broadcast notifications and replacement snapshots when a view falls behind.
-- Retained current metrics and terminal outcomes, with explicitly marked partial
-  history and shortened oversized terminal details. CLI JSON exposes whether
-  its live view was truncated.
-- Input resolution notifications across windows, without waiting for more model
-  output. The TUI keeps the current question while other pending requests wait.
-- Snapshot handling in CLI, TUI and browser. The protocol is requested through
-  `live_snapshots=true`; older clients receive ordinary events.
+Focused checks passed for queue/replay/input limits, atomic joins, lag convergence,
+terminal results, config validation, legacy protocol behavior and a real WebSocket
+whose consumer holds its queue full while sending Cancel. A real-daemon PTY check
+closed a window on a pending approval, rejoined with a typed Unicode draft and
+answered the recovered request. The existing steering PTY found an unnecessary
+reattachment on every ordinary steering message; keeping the same live subscription
+fixed the erased local receipt, and that scenario then passed.
 
-Server tests passed for lag convergence, terminal delivery, atomic joins,
-current request replay, byte/count bounds and resolution across two views. The
-current CLI reporting tests passed. A Chrome check using real browser modules
-and injected protocol events passed for transcript replacement, prompt/form
-preservation, duplicate input events, sending an answer, remote resolution and
-terminal state. Its harness and log are `/tmp/rook-pi-browser-check/recovery.cjs`
-and `/tmp/rook-pi-browser-recovery.log`. It does not replace a real-daemon TUI test.
-Clippy found a test-only redundant clone; fix it and finish validation before
-integrating this block.
+A Chrome check using actual browser modules and injected protocol events passed
+for transcript replacement, prompt/form preservation, duplicate input events,
+sending an answer, remote resolution and terminal state. Its temporary harness
+and log are `/tmp/rook-pi-browser-check/recovery.cjs` and
+`/tmp/rook-pi-browser-recovery.log`. This is not a live-model browser benchmark.
+The first integrated gate exposed a missing reattachment status in the goal
+PTY scenario: the snapshot erased the earlier Attached notice. The TUI and
+browser now restore that status, and the existing goal switch/pause/resume PTY
+passed on the correction. Fresh turns also keep the current conversation and
+submitted prompt; only reattachment or an actual replay gap replaces the view.
+The browser scenario passed again after this change.
 
-Remaining work for this capability includes real-daemon TUI recovery checks,
-configuration and compatibility checks, documentation and full CI after merge.
-Also audit the terminal client's unbounded forwarding queues: server bounds alone
-do not bound a paused TUI's local event backlog. Carry a byte/count lease through
-remote reception and TUI event handling before calling end-to-end delivery done.
-The other capabilities in the table retain their full scope.
+The final integrated `CARGO_TARGET_DIR=/tmp/rook-pi-ci-target cargo xtask ci`
+passed with exit status 0, including the full TUI suite and doctests. The gate
+reported 501.9 seconds; output is in `/tmp/rook-pi-snapshot-final-ci.log`.
+The earlier gate finished with exit status 1 for the missing goal reattachment
+notice; it is retained as failure evidence, not counted as a pass.
+
+The preparation worktree `/tmp/rook-pi-snapshot-recovery` retains the first block
+as a staged baseline, with this feature in its unstaged diff. It must not be
+merged as a diff against its old HEAD. Main is now the authoritative integrated
+tree; subsequent fixes belong there. The other capabilities retain their scope.
+
+## Queue investigation
+
+CodeGraph located `Interjections` but resolved no caller edges; directed source
+reading established the two existing paths. Ordinary turns use an in-memory
+`Vec<String>` and take the whole batch; durable work stores IDs but reads pending
+text before extracting the receipt ID back from a rendered prefix when marking
+acceptance. Neither path supports editing/revoking
+an unaccepted message or separating steering from follow-up. The next block must
+make acceptance atomic with its durable receipt and transcript admission, preserve
+IDs through retries/restart, and keep ordinary turns distinct from `/goal`.
 
 ## Validation environment
 

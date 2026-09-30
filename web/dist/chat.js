@@ -13,6 +13,7 @@ let socket = null;
 // The assistant's current block, re-rendered from its whole text on every
 // delta so a fence or a list that arrives in pieces still ends up drawn.
 let current = null;
+let retainedInputs = new Map();
 
 const chatOut = () => $('#stream');
 
@@ -70,6 +71,7 @@ function stillGoing(text) {
 }
 
 function done() {
+  retainedInputs.clear();
   state.chat.busy = false;
   state.chat.waiting = false;
   current = null;
@@ -88,10 +90,43 @@ function done() {
 
 export function connect() {
   if (socket && socket.readyState <= 1) return socket;
-  socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/chat`);
+  socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/chat?live_snapshots=true`);
   socket.onmessage = (event) => {
     const e = JSON.parse(event.data);
     switch (e.type) {
+      case 'inputs': {
+        const active = new Set([
+          ...e.approvals.map(id => `approval:${id}`),
+          ...e.questions.map(id => `question:${id}`),
+        ]);
+        for (const node of document.querySelectorAll('#stream [data-input-key]')) {
+          if (!active.has(node.dataset.inputKey)) node.replaceWith(el('div', { class: 'stat' }, 'request resolved'));
+        }
+        retainedInputs = new Map([...retainedInputs].filter(([key]) => active.has(key)));
+        state.chat.waiting = active.size > 0;
+        setTitle();
+        break;
+      }
+      case 'snapshot': {
+        const active = new Set([
+          ...e.approvals.map(id => `approval:${id}`),
+          ...e.questions.map(id => `question:${id}`),
+        ]);
+        const out = chatOut();
+        const visible = out ? [...out.querySelectorAll('[data-input-key]')] : [];
+        const candidates = [...retainedInputs, ...visible.map(node => [node.dataset.inputKey, node])];
+        retainedInputs = new Map(candidates.filter(([key]) => active.has(key)));
+        if (out) out.replaceChildren();
+        current = null; callStatus = null;
+        state.chat.session = e.session;
+        state.chat.spent = null; state.chat.context = null; state.chat.modelRequest = null;
+        state.chat.waiting = false;
+        if (e.running) working(); else done();
+        say('stat', e.running ? '[joined a turn already running here]' : '[nothing is running in this session]');
+        if (e.truncated) say('stat', '[live view refreshed; saved conversation is in history]');
+        renderSettings(); renderPicker();
+        break;
+      }
       case 'started': state.chat.session = e.session; state.chat.spent = null; state.chat.context = null; state.chat.modelRequest = null; renderSettings(); renderPicker(); break;
       // Joined a turn this page did not start. Said out loud either way: a
       // page that quietly starts streaming looks like it is answering
@@ -212,7 +247,24 @@ function answered() {
   setTitle();
 }
 
+// A recovered request with the same id is the same form. Keep partially typed
+// answers and selected choices while replacing the surrounding live transcript.
+function reuseInput(kind, id) {
+  const key = `${kind}:${id}`, out = chatOut();
+  if (!out) return false;
+  const existing = [...out.querySelectorAll('[data-input-key]')]
+    .find(node => node.dataset.inputKey === key);
+  const kept = existing || retainedInputs.get(key);
+  if (!kept) return false;
+  retainedInputs.delete(key);
+  if (!existing) out.append(kept);
+  state.chat.waiting = true;
+  setTitle();
+  return true;
+}
+
 function askApproval(request) {
+  if (reuseInput('approval', request.id)) return;
   waitingOn(`${request.tool} wants to ${request.action}`);
   const decide = (decision) => {
     send({ type: 'approval', id: request.id, decision });
@@ -230,11 +282,13 @@ function askApproval(request) {
     el('button', { onclick: () => decide('for_run') }, 'Always this one'),
     ...(kinds ? [el('button', { onclick: () => decide('kind_for_run') }, `Every ${kinds}`)] : []),
     el('button', { onclick: () => decide('deny') }, 'Deny'));
+  if (box) box.dataset.inputKey = `approval:${request.id}`;
 }
 
 // One form for every question in the call: the agent asked them together
 // because they are independent, and a chain of dialogs would undo that.
 function askUser(request) {
+  if (reuseInput('question', request.id)) return;
   waitingOn(request.questions[0] ? request.questions[0].question : 'a question');
   const fields = request.questions.map((q, i) => {
     const name = `q${request.id}_${i}`;
@@ -264,6 +318,7 @@ function askUser(request) {
     ...fields,
     el('button', { type: 'submit' }, 'Answer'),
     el('button', { type: 'button', onclick: () => submit(request.questions.map(() => [])) }, 'Skip'));
+  form.dataset.inputKey = `question:${request.id}`;
   const out = chatOut();
   if (out) { out.append(form); out.scrollTop = out.scrollHeight; }
 }

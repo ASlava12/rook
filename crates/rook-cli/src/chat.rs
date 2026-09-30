@@ -283,7 +283,8 @@ async fn through_the_daemon(
 
     eprintln!("using the running rookd at {}", daemon.base);
     let (to_daemon, mut outgoing) = tokio::sync::mpsc::unbounded_channel();
-    let (incoming, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let (incoming, mut events) = crate::remote::channel(workspace)?;
+    let view_bytes = incoming.byte_limit();
     let (base, here) = (daemon.base.clone(), workspace.to_path_buf());
     let socket =
         tokio::spawn(async move { crate::remote::hold(&base, &here, &mut outgoing, incoming).await });
@@ -291,7 +292,7 @@ async fn through_the_daemon(
     let mut editor = editor()?;
     let history = rook_core::paths::home().join("history");
     let _ = editor.load_history(&history);
-    let mut watching = crate::remote::Watching::new(yes, false);
+    let mut watching = crate::remote::Watching::new(yes, false, view_bytes);
     let mut session = resume;
     let mut output = rook_proto::TurnOptions::default();
 
@@ -415,7 +416,8 @@ async fn through_the_daemon(
             text: line,
             options: crate::turn_options::for_turn(&mut output),
         })?;
-        while let Some(event) = events.recv().await {
+        while let Some(frame) = events.recv().await {
+            let Ok(event) = serde_json::from_str::<ChatEvent>(&frame.text) else { continue };
             if let Some(over) = watching.saw(event, &to_daemon) {
                 crate::notify::attention();
                 let ChatEvent::Done { steps, input_tokens, output_tokens, compactions, .. } = over.done

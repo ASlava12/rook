@@ -13,7 +13,7 @@ fn approver(
     patience: Duration,
 ) -> (Arc<ChannelApprover>, tokio::sync::mpsc::UnboundedReceiver<ApprovalRequest>) {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    (Arc::new(ChannelApprover::new(tx, patience)), rx)
+    (Arc::new(ChannelApprover::new(tx, patience, Default::default())), rx)
 }
 
 /// Answering while others are still being asked, so an insert and a removal

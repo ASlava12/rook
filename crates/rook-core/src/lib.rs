@@ -21,6 +21,7 @@ pub mod changes;
 mod completion;
 pub mod config;
 pub mod context;
+pub mod delivery;
 pub mod diagnostics;
 pub mod docs;
 pub mod error;

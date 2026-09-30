@@ -1,4 +1,9 @@
 {
+  "server.chat_replay_events": {"kind":"integer","help":"Maximum recent events retained for reconnecting chat views (1..=4096; default 2000). Older events remain in session history."},
+  "server.chat_replay_bytes": {"kind":"integer","help":"Maximum encoded event bytes retained for live replay (4096..=33554432; default 8388608). A partial view is marked and oversized terminal details are shortened."},
+  "user_input": {"kind":"table","help":"Bounds on currently unanswered questions and approvals, per channel. Applied in the daemon and standalone TUI."},
+  "user_input.max_requests": {"kind":"integer","help":"Maximum pending requests per question or approval channel (1..=4096; default 128). Excess requests fail without authorizing an action."},
+  "user_input.max_bytes": {"kind":"integer","help":"Maximum serialized request bytes retained per question or approval channel (4096..=33554432; default 1048576). Admission precedes retaining a copy for reconnect."},
   "tui": {"kind":"table","help":"Local terminal keyboard actions and bounded prompt undo. Reopen the TUI after changing these settings."},
   "tui.undo_events": {"kind":"integer","help":"Maximum retained undo and redo edits in the prompt (1..=4096; default 256)."},
   "tui.undo_bytes": {"kind":"integer","help":"Maximum retained text bytes across prompt undo and redo (4096..=16777216; default 1048576)."},

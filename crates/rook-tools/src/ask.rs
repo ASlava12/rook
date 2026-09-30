@@ -198,7 +198,7 @@ fn render(answers: &[Answer]) -> String {
 }
 
 /// What a front end is being asked to put to the user.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct AskRequest {
     pub id: String,
     pub questions: Vec<Question>,
@@ -209,16 +209,26 @@ pub struct AskRequest {
 pub struct ChannelAsker(crate::pending::Pending<AskRequest, Vec<Vec<String>>>);
 
 impl ChannelAsker {
-    /// Whether a live request still needs a person's answer.
-    pub fn is_waiting(&self) -> bool {
-        self.0.is_waiting()
+    pub fn changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.0.changes()
+    }
+
+    /// Current unanswered requests for a reconnecting view.
+    pub fn current(&self) -> Vec<AskRequest> {
+        self.0.current()
     }
 
     pub fn new(
         requests: tokio::sync::mpsc::UnboundedSender<AskRequest>,
         patience: std::time::Duration,
+        limits: crate::pending::Limits,
     ) -> Self {
-        Self(crate::pending::Pending::new(requests, patience))
+        Self(crate::pending::Pending::new(requests, patience, limits))
+    }
+
+    /// Whether a live request still needs a person's answer.
+    pub fn is_waiting(&self) -> bool {
+        self.0.is_waiting()
     }
 
     /// One entry per question, in the order they were asked; an empty one is a

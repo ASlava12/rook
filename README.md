@@ -242,6 +242,17 @@ named actions and the bounded undo history under `tui` in `rook config edit`;
 the palette and help show the active shortcuts. See
 [terminal keys and prompt undo](docs/tui-keybindings.md).
 
+A window joining a running session recovers its recent output and currently
+pending approvals/questions. A slow window refreshes from a bounded live
+snapshot, preserving its unsent draft; resolving a question in another window
+removes the stale control. Closing the window leaves the daemon's turn running.
+If older live output no longer fits, the refresh says so; saved conversation
+history remains available through `rook session show` and the history pane.
+Remote `rook run --json` reports partial live output as `live_view_truncated`.
+Tune delivery and replay under `server.chat_queue_events`, `server.chat_queue_bytes`,
+`server.chat_replay_events` and `server.chat_replay_bytes` in `rook config edit`.
+`user_input` controls the count and byte limits for unanswered requests.
+
 Typing while a turn runs steers it rather than waiting for it: what you send
 reaches the model at its next step, so a turn heading the wrong way can be
 corrected without throwing away what it has already done — and if the turn has
