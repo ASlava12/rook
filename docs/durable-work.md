@@ -264,11 +264,22 @@ Explicit cancellation pauses automatic follow-ups across restart. Use `/continue
 or another explicit prompt to resume the session; changing a setting alone does
 not resume it. A failed recovery also pauses the driver and reports its reason in
 the queue. An unaccepted stopped reservation can be withdrawn and resubmitted;
-accepted messages remain immutable. An unfinished predecessor continued under a
-new execution ID, or a replacement goal, does not silently acquire messages
-addressed to the old boundary. Inspect and withdraw/resubmit those pending
-messages explicitly. Continuation lineage, goal-promotion handoff and aggregate
-outcome reporting keep the queue capability in progress in the adoption tracker.
+accepted messages remain immutable.
+
+For ordinary work, `/continue` (also `/go on` and `/carry on`) keeps the original
+completion boundary across execution IDs and daemon restarts. Messages queued
+before or during a continuation wait until that work finishes; another step or
+time limit does not release them. A new unrelated prompt starts a separate
+boundary. Execution IDs, prompt receipts and outcomes remain distinct: an optional
+JSON `continuation` field holds one root ID, not a growing ancestor list.
+
+If `/goal` promotes a running follow-up, the daemon keeps its observer, approvals
+and settings through the first supervised stage. That stage uses the new goal's
+options, including its attachments. A replacement goal never inherits the old
+goal's pending follow-ups. Inspect and withdraw/resubmit those messages explicitly
+if they still apply. The final stream summary describes only the last turn;
+aggregate outcome reporting and the remaining parity work keep the queue
+capability in progress in the adoption tracker.
 
 ## Steering receipts
 

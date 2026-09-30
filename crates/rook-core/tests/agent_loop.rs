@@ -7739,4 +7739,75 @@ async fn a_step_limit_does_not_release_a_followup() {
     assert_eq!(outcome.stopped, "max_steps");
     assert!(agent.run_followups(|_| {}).await.unwrap().is_none());
     assert!(view::read(&f.rook, session, "session.later").unwrap().receipt.queued());
+    let boundary = view::page(&f.rook, session, &Query::default()).unwrap().follow_up_target.unwrap();
+    let original_turn = f.rook.execution(session).unwrap()[0].turn.clone();
+
+    // Another limited continuation keeps the same boundary, including for a
+    // message added while that continuation is running.
+    let mut continued = AgentLoop::new(
+        &f.rook,
+        Arc::new(ScriptedProvider::new(vec![
+            call("list_dir", serde_json::json!({"path":"."})),
+            reply("another limit summary"),
+        ])),
+        session,
+    );
+    let mut added = false;
+    let outcome = continued
+        .run_with(rook_core::agent::CARRY_ON, |p| {
+            if matches!(p, Progress::Context { .. }) && !added {
+                added = true;
+                assert_eq!(
+                    view::page(&f.rook, session, &Query::default()).unwrap().follow_up_target.as_deref(),
+                    Some(boundary.as_str())
+                );
+                view::change(
+                    &f.rook,
+                    session,
+                    Change::FollowUp {
+                        target: boundary.clone(),
+                        id: "second".into(),
+                        text: "last task".into(),
+                    },
+                )
+                .unwrap();
+            }
+        })
+        .await
+        .unwrap();
+    assert!(added);
+    assert_eq!(outcome.stopped, "max_steps");
+    let execution = &f.rook.execution(session).unwrap()[0];
+    assert_ne!(execution.turn, original_turn);
+    assert_eq!(execution.continuation.as_deref(), Some(original_turn.as_str()));
+    assert!(!rook_core::message_queue::followups::ready(&f.rook, session).unwrap());
+
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        reply("original finished"),
+        reply("new task finished"),
+        reply("last task finished"),
+    ]));
+    let seen = provider.share();
+    let outcome = AgentLoop::new(&f.rook, provider, session).run(rook_core::agent::CARRY_ON).await.unwrap();
+    assert_eq!(outcome.reply, "last task finished");
+    let requests = seen.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    let text =
+        |at: usize| requests[at].messages.iter().map(|m| m.content.as_str()).collect::<Vec<_>>().join("\n");
+    assert!(!text(0).contains("new task"));
+    assert!(text(1).contains("new task"));
+    assert!(!text(1).contains("last task"));
+    assert!(text(2).contains("last task"));
+    for reference in ["session.later", "session.second"] {
+        assert!(view::read(&f.rook, session, reference).unwrap().receipt.applied_at.is_some());
+    }
+    let users = f
+        .rook
+        .store
+        .events(session, 0, 1000)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.record.kind == rook_store::EventKind::UserMessage)
+        .count();
+    assert_eq!(users, 5, "original, two continuations and two follow-ups each admit once");
 }

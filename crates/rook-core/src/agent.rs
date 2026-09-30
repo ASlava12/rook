@@ -788,6 +788,11 @@ impl<'a> AgentLoop<'a> {
     ) -> Result<TurnOutcome> {
         let _workspace = crate::worktrees::Lease::acquire(&self.rook.workspace, false)?;
         let prepared_prompt = self.prepare_recipe(prompt)?;
+        let continuing = self.depth == 0
+            && !self.checking
+            && self.managed_work.is_none()
+            && prepared_prompt.is_none()
+            && (carrying_on(prompt) || prompt == CARRY_ON);
         let prompt = prepared_prompt.as_deref().unwrap_or(prompt);
         crate::attachments::prepare(prompt, &self.turn_options().attachments)?;
         let contract = crate::output::Contract::compile(self.turn_options(), &self.rook.workspace)?;
@@ -802,7 +807,12 @@ impl<'a> AgentLoop<'a> {
         // Keep the top-level turn marked through final validation and file I/O too.
         let journal = match self.reserved_execution.take() {
             Some(journal) => journal,
-            None => crate::execution::Journal::start(self.rook, self.session, self.tool_ctx.jobs.as_deref())?,
+            None => crate::execution::Journal::start(
+                self.rook,
+                self.session,
+                self.tool_ctx.jobs.as_deref(),
+                continuing,
+            )?,
         };
         if let Some(outcome) = journal.recovered_outcome()? {
             journal.finish(&outcome.stopped, self.tool_ctx.jobs.as_deref())?;

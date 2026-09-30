@@ -46,6 +46,10 @@ pub struct Execution {
     pub prompt: Option<PromptAdmission>,
     #[serde(default)]
     pub follow_up: Option<String>,
+    /// Explicit continuations share a completion boundary, but retain their
+    /// own execution and prompt receipts. Missing means this turn starts it.
+    #[serde(default)]
+    pub continuation: Option<String>,
     pub completed_operations: u64,
     pub last_result_seq: Option<u64>,
     pub pending: Option<Operation>,
@@ -63,6 +67,12 @@ pub struct PromptAdmission {
     pub context: Option<String>,
     #[serde(default)]
     pub prompt_context: Option<String>,
+}
+
+impl Execution {
+    pub(crate) fn completion_boundary(&self) -> &str {
+        self.continuation.as_deref().unwrap_or(&self.turn)
+    }
 }
 
 fn key(session: u128) -> String {
@@ -197,6 +207,7 @@ pub(crate) fn inherit(rook: &Rook, parent: u128, child: u128) -> Result<()> {
         start_seq: 0,
         prompt: None,
         follow_up: None,
+        continuation: None,
         completed_operations: 0,
         last_result_seq: None,
         pending: None,
@@ -220,6 +231,7 @@ impl Journal {
         rook: &Rook,
         session: u128,
         jobs: Option<&rook_tools::jobs::Jobs>,
+        continuing: bool,
     ) -> Result<Arc<Self>> {
         let _queue = crate::work::receipts::WRITING.lock().unwrap_or_else(|e| e.into_inner());
         let mut active = ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
@@ -240,6 +252,10 @@ impl Journal {
             refresh(&rook.store, &rook.output_dir, session, state, jobs)?;
         }
         let turn = ulid::Ulid::generate().to_string();
+        let continuation = previous
+            .as_ref()
+            .filter(|state| continuing && state.status != "evaluated")
+            .map(|state| state.completion_boundary().to_owned());
         let mut state = Execution {
             version: 1,
             session: rook_store::format_session_id(session),
@@ -253,6 +269,7 @@ impl Journal {
             start_seq: meta.next_seq,
             prompt: None,
             follow_up: None,
+            continuation,
             completed_operations: 0,
             last_result_seq: None,
             pending: None,
@@ -330,6 +347,7 @@ impl Journal {
             start_seq: meta.next_seq,
             prompt: None,
             follow_up: Some(message.id.clone()),
+            continuation: None,
             completed_operations: 0,
             last_result_seq: None,
             pending: None,
@@ -630,7 +648,7 @@ impl Journal {
             if crate::agent::finished(&outcome.stopped) && state.unknown.is_empty() {
                 for message in &mut messages {
                     if let Some(follow) = &mut message.follow_up
-                        && follow.after == format!("turn.{}", self.turn)
+                        && follow.after == format!("turn.{}", state.completion_boundary())
                         && follow.reserved.is_none()
                     {
                         follow.ready = true;
@@ -825,7 +843,7 @@ impl Rook {
         if let Some(reason) = self.recovery_block(session)? {
             return Err(CoreError::Other(reason));
         }
-        let journal = Journal::start(self, session, jobs)?;
+        let journal = Journal::start(self, session, jobs, false)?;
         journal.admit("Evaluate the work scorecard")?;
         if card.checks.len() > 256 {
             return Err(CoreError::Other("work recovery supports at most 256 checks".into()));
@@ -1004,7 +1022,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let rook = engine(dir.path());
         let session = rook.start_session("prompt reservation").unwrap();
-        let journal = Journal::start(&rook, session, None).unwrap();
+        let journal = Journal::start(&rook, session, None, false).unwrap();
         assert!(load(&rook.store, session).unwrap().unwrap().prompt.is_none());
         rook.log(session, EventKind::Note, "hook", "setup before admission").unwrap();
         let barrier = std::sync::Barrier::new(2);
@@ -1048,9 +1066,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let rook = engine(dir.path());
         let session = rook.start_session("ownership").unwrap();
-        let old = Journal::start(&rook, session, None).unwrap();
+        let old = Journal::start(&rook, session, None, false).unwrap();
         old.finish("failed", None).unwrap();
-        let current = Journal::start(&rook, session, None).unwrap();
+        let current = Journal::start(&rook, session, None, false).unwrap();
         assert!(old.admit_prompt(&rook, "stale", "stale", "", None, None).is_err());
         assert!(load(&rook.store, session).unwrap().unwrap().prompt.is_none());
         assert!(rook.store.events(session, 0, 100).unwrap().is_empty());
@@ -1059,6 +1077,10 @@ mod tests {
         assert_eq!(state.turn, current.turn);
         let mut legacy = serde_json::to_value(state).unwrap();
         legacy.as_object_mut().unwrap().remove("prompt");
-        assert!(serde_json::from_value::<Execution>(legacy).unwrap().prompt.is_none());
+        legacy.as_object_mut().unwrap().remove("continuation");
+        let legacy = serde_json::from_value::<Execution>(legacy).unwrap();
+        assert!(legacy.prompt.is_none());
+        assert!(legacy.continuation.is_none());
+        assert_eq!(legacy.completion_boundary(), legacy.turn);
     }
 }

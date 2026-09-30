@@ -499,6 +499,51 @@ handoff. Durable per-turn outcome history and aggregate reports, read-only TUI
 detail scrolling, legacy caller admission identity and old API mutation notices
 remain outstanding. The full Pi adoption scope remains the table above.
 
+## Ordinary continuation and goal handoff (tenth block)
+
+Explicit `/continue` keeps an ordinary task's completion boundary across fresh
+executions and process restarts. The execution JSON stores one optional root ID;
+it does not accumulate ancestors or change postcard records. New prompt and
+execution receipts remain independent. Follow-ups submitted during a continuation
+use the same root, and only successful completion releases them. Unrelated
+prompts, recipe-expanded prompts, checker executions and fresh follow-up
+reservations do not inherit an ordinary boundary.
+
+The goal worker now keeps the same observer when a completed goal's follow-up is
+promoted to a replacement goal. Existing promotion steering reaches the running
+turn at a safe boundary, then the worker advances the new goal. The first managed
+stage loads that goal's persisted options rather than the old connection's
+options. Pending follow-ups addressed to the old generation remain unaccepted.
+
+Focused checks passed for repeated step limits, queueing during continuation,
+reopen with and without explicit continuation, legacy JSON defaults, and separate
+prompt receipts. An actual daemon scenario kills the unfinished ordinary
+predecessor, verifies it does not restart autonomously, then uses `/continue` and
+observes ordered follow-ups with their original receipt identities. Logs:
+`/tmp/rook-lineage-unit.log`, `/tmp/rook-lineage-loop.log`, and
+`/tmp/rook-lineage-daemon.log`.
+
+The actual goal-handoff scenario observes both independent completion checks,
+promotes a held follow-up, checks the new attachment in the first managed stage,
+and receives the final result on the original socket. A second queued old-goal
+message remains unreserved and unaccepted. Its passing log is
+`/tmp/rook-handoff-test2.log`. The first fixture incorrectly expected promotion to
+skip steering of the current turn; it was corrected to exercise the existing
+promotion boundary before asserting the next managed stage's options. That first
+failure is retained in `/tmp/rook-handoff-test.log`.
+
+The final isolated `cargo xtask ci` exited 0 in 601.9 seconds, including all
+daemon scenarios, the complete PTY suite and doctests
+(`/tmp/rook-lineage-final-ci.log`). Rust sources stayed unchanged during the
+gate. `cargo xtask compaction` also exited 0, retaining 4.02 MiB on disk, 37.1x
+dictionary compression and 5.8x end-to-end (`/tmp/rook-lineage-compaction.log`).
+
+The queue remains in progress. Durable per-turn outcome history and aggregate
+reports, read-only TUI detail scrolling, legacy caller admission identity, old API
+mutation notices and remaining cross-lifecycle/frontend parity checks are still
+outstanding. Ordinary-to-goal promotion does not migrate pending follow-ups into
+a different goal scope. The full adoption scope remains the table above.
+
 ## Validation environment
 
 macOS showed long cold-start pauses before test code executed: a process sample

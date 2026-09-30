@@ -21,6 +21,11 @@ impl Drop for Model {
 }
 impl Model {
     fn new() -> Self {
+        Self::with_messages(Vec::new())
+    }
+    fn with_messages(messages: Vec<Value>) -> Self {
+        assert!(messages.len() <= 16);
+        let messages = Arc::new(messages);
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/v1", listener.local_addr().unwrap());
         listener.set_nonblocking(true).unwrap();
@@ -38,6 +43,7 @@ impl Model {
                 };
                 connections += 1;
                 let (halt, gate, count, send) = (halt.clone(), gate.clone(), count.clone(), send.clone());
+                let messages = messages.clone();
                 std::thread::spawn(move || {
                     socket.set_read_timeout(Some(std::time::Duration::from_secs(90))).unwrap();
                     let mut bytes = Vec::new();
@@ -68,7 +74,7 @@ impl Model {
                             }
                         }
                     };
-                    let content = if request["stream"] == true {
+                    let message = if request["stream"] == true {
                         let ordinal = count.fetch_add(1, Ordering::SeqCst) + 1;
                         send.try_send(request.clone()).unwrap();
                         while gate.load(Ordering::SeqCst) < ordinal {
@@ -77,15 +83,17 @@ impl Model {
                             }
                             std::thread::sleep(std::time::Duration::from_millis(10));
                         }
-                        format!("Completed answer {ordinal}")
+                        messages.get(ordinal - 1).cloned().unwrap_or_else(
+                            || json!({"role":"assistant","content":format!("Completed answer {ordinal}")}),
+                        )
                     } else {
-                        r#"{"action":"finish"}"#.into()
+                        json!({"role":"assistant","content":r#"{"action":"finish"}"#})
                     };
-                    let message = json!({"role":"assistant","content":content});
+                    let reason = if message.get("tool_calls").is_some() { "tool_calls" } else { "stop" };
                     let choice = if request["stream"] == true {
-                        json!({"index":0,"delta":message,"finish_reason":"stop"})
+                        json!({"index":0,"delta":message,"finish_reason":reason})
                     } else {
-                        json!({"index":0,"message":message,"finish_reason":"stop"})
+                        json!({"index":0,"message":message,"finish_reason":reason})
                     };
                     let answer=json!({"id":"test","model":"test","choices":[choice],"usage":{"prompt_tokens":1,"completion_tokens":1}}).to_string();
                     let (mime, body) = if request["stream"] == true {
@@ -324,4 +332,260 @@ fn killed_followups_resume_once_with_saved_settings_and_cancelled_ones_stay_stop
         runtime.block_on(get(&client, &format!("{}/api/sessions/{session}/recovery", daemon.address)))[0]["turn"],
         cancelled_turn
     );
+}
+
+#[test]
+fn continuing_a_killed_predecessor_releases_its_followups_only_after_completion() {
+    rook_llm::init_tls();
+    let rook = Rook::new();
+    let model = Model::new();
+    rook.write_config(&config(&model.url, "initial", "ask", rook.workspace.path()));
+    let session = {
+        let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+        let id = rook_store::new_session_id();
+        store
+            .create_session(&rook_store::SessionMeta::new(
+                id,
+                "continuation",
+                rook.workspace.path().display().to_string(),
+                rook_store::now_unix(),
+            ))
+            .unwrap();
+        rook_store::format_session_id(id)
+    };
+    let daemon = Daemon::start(&rook);
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let client =
+        reqwest::Client::builder().no_proxy().timeout(std::time::Duration::from_secs(90)).build().unwrap();
+    let socket = runtime.block_on(async {
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!(
+            "{}/api/chat",
+            daemon.address.replacen("http", "ws", 1)
+        ))
+        .await
+        .unwrap();
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                json!({"type":"prompt","session":session,"text":"ORIGINAL_TASK"}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        socket
+    });
+    model.next();
+    let queue = format!("{}/api/sessions/{session}/queue", daemon.address);
+    runtime.block_on(enqueue(&client, &queue, "one"));
+    let before =
+        runtime.block_on(get(&client, &format!("{}/api/sessions/{session}/recovery", daemon.address)));
+    let original = before[0]["turn"].as_str().unwrap().to_owned();
+    drop(socket);
+    drop(daemon);
+    std::fs::remove_file(rook.home.path().join("rookd.addr")).unwrap();
+    let daemon = Daemon::start(&rook);
+    assert!(
+        model.requests.recv_timeout(std::time::Duration::from_secs(3)).is_err(),
+        "an unfinished ordinary predecessor is not an automatic follow-up"
+    );
+    let mut socket = runtime.block_on(async {
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!(
+            "{}/api/chat",
+            daemon.address.replacen("http", "ws", 1)
+        ))
+        .await
+        .unwrap();
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                json!({"type":"prompt","session":session,"text":"/continue"}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        socket
+    });
+    let resumed = model.next();
+    let messages = resumed["messages"].to_string();
+    assert!(messages.contains(rook_core::agent::CARRY_ON));
+    assert!(!messages.contains("TASK_one"));
+    let state =
+        runtime.block_on(get(&client, &format!("{}/api/sessions/{session}/recovery", daemon.address)));
+    assert_ne!(state[0]["turn"], original);
+    assert_eq!(state[0]["continuation"], original);
+    let queue = format!("{}/api/sessions/{session}/queue", daemon.address);
+    let page = runtime.block_on(get(&client, &queue));
+    assert_eq!(page["follow_up_target"], format!("turn.{original}"));
+    runtime.block_on(enqueue(&client, &queue, "late"));
+    model.release.store(2, Ordering::SeqCst);
+    let first = model.next()["messages"].to_string();
+    assert!(first.contains("TASK_one"));
+    assert!(!first.contains("TASK_late"));
+    model.release.store(3, Ordering::SeqCst);
+    assert!(model.next()["messages"].to_string().contains("TASK_late"));
+    model.release.store(4, Ordering::SeqCst);
+    let boundaries = runtime.block_on(async {
+        let mut boundaries = Vec::new();
+        loop {
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(90), socket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            if let Ok(text) = frame.to_text() {
+                let event: Value = serde_json::from_str(text).unwrap();
+                if event["type"] == "follow_up" {
+                    assert!(boundaries.len() < 2);
+                    boundaries.push(event["id"].as_str().unwrap().to_owned());
+                }
+                if event["type"] == "done" {
+                    assert_eq!(event["stopped"], "end_turn");
+                    break;
+                }
+            }
+        }
+        boundaries
+    });
+    assert_eq!(boundaries, ["one", "late"]);
+    for name in ["one", "late"] {
+        assert!(
+            runtime.block_on(get(&client, &format!("{queue}/session.{name}")))["receipt"]["applied_at"]
+                .is_number()
+        );
+    }
+    drop(socket);
+    drop(daemon);
+    let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+    let id = rook_store::parse_session_id(&session).unwrap();
+    let prompts = store
+        .events(id, 0, 1000)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.record.kind == rook_store::EventKind::UserMessage)
+        .map(|e| String::from_utf8(store.get(&e.record.body).unwrap()).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(prompts, ["ORIGINAL_TASK", rook_core::agent::CARRY_ON, "TASK_one", "TASK_late"]);
+}
+
+#[test]
+fn a_followup_promoted_to_a_goal_keeps_its_observer_and_uses_the_new_goals_options() {
+    rook_llm::init_tls();
+    let rook = Rook::new();
+    std::fs::write(rook.workspace.path().join("evidence.txt"), "fixture evidence").unwrap();
+    let reply = |text: &str| json!({"role":"assistant","content":text});
+    let read = json!({"role":"assistant","content":"", "tool_calls":[{"index":0,"id":"evidence","type":"function","function":{"name":"read_file","arguments":r#"{"path":"evidence.txt"}"#}}]});
+    let model = Model::with_messages(vec![
+        reply("first goal finished"),
+        read.clone(),
+        reply("Read evidence.txt.\nVERDICT: holds"),
+        reply("follow-up finished"),
+        reply("promotion acknowledged"),
+        reply("new goal finished"),
+        read,
+        reply("Read evidence.txt.\nVERDICT: holds"),
+    ]);
+    rook.write_config(&config(&model.url, "initial", "ask", rook.workspace.path()));
+    let session = {
+        let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+        let id = rook_store::new_session_id();
+        store
+            .create_session(&rook_store::SessionMeta::new(
+                id,
+                "goal handoff",
+                rook.workspace.path().display().to_string(),
+                rook_store::now_unix(),
+            ))
+            .unwrap();
+        rook_store::format_session_id(id)
+    };
+    let daemon = Daemon::start(&rook);
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let client =
+        reqwest::Client::builder().no_proxy().timeout(std::time::Duration::from_secs(90)).build().unwrap();
+    let mut socket = runtime.block_on(async {
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!(
+            "{}/api/chat",
+            daemon.address.replacen("http", "ws", 1)
+        ))
+        .await
+        .unwrap();
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                json!({"type":"prompt","session":session,"text":"/goal FIRST_GOAL"}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        socket
+    });
+    assert!(model.next()["messages"].to_string().contains("FIRST_GOAL"));
+    let queue = format!("{}/api/sessions/{session}/queue", daemon.address);
+    let work = format!("{}/api/work/{session}", daemon.address);
+    let first_goal = runtime.block_on(get(&client, &work));
+    let queued = runtime.block_on(enqueue(&client, &queue, "one"));
+    runtime.block_on(enqueue(&client, &queue, "stale"));
+    assert_eq!(
+        queued["receipt"]["follow_up"]["after"],
+        format!("goal.{}", first_goal["generation"].as_str().unwrap())
+    );
+    model.release.store(1, Ordering::SeqCst);
+    assert!(model.next()["messages"].to_string().contains("The claim:"));
+    assert!(
+        runtime.block_on(get(&client, &format!("{queue}/session.one")))["receipt"]["applied_at"].is_null()
+    );
+    model.release.store(2, Ordering::SeqCst);
+    assert!(model.next()["messages"].as_array().unwrap().iter().any(|m| m["role"] == "tool"));
+    model.release.store(3, Ordering::SeqCst);
+    assert!(model.next()["messages"].to_string().contains("TASK_one"));
+    assert_eq!(runtime.block_on(get(&client, &work))["status"], "completed");
+    runtime.block_on(async {
+        socket.send(tokio_tungstenite::tungstenite::Message::Text(json!({
+            "type":"prompt","session":session,"text":"/goal SECOND_GOAL",
+            "options":{"attachments":[{"type":"text","name":"new-goal-note","text":"NEW_GOAL_ATTACHMENT"}]}
+        }).to_string().into())).await.unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(90);
+        loop {
+            let current = get(&client, &work).await;
+            if current["generation"] != first_goal["generation"] {
+                assert_eq!(current["goal"], "SECOND_GOAL");
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "new goal was not admitted");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    });
+    model.release.store(4, Ordering::SeqCst);
+    // Promotion steers the already-running turn at its next safe boundary.
+    // Attachments belong to the new goal's first supervised stage.
+    let promoted = model.next()["messages"].to_string();
+    assert!(promoted.contains("[work instruction"), "{promoted}");
+    assert!(promoted.contains("/goal SECOND_GOAL"), "{promoted}");
+    model.release.store(5, Ordering::SeqCst);
+    let new_work = model.next()["messages"].to_string();
+    assert!(new_work.contains("SECOND_GOAL"), "{new_work}");
+    assert!(
+        new_work.contains("NEW_GOAL_ATTACHMENT"),
+        "the new generation must use its own options: {new_work}"
+    );
+    model.release.store(6, Ordering::SeqCst);
+    assert!(model.next()["messages"].to_string().contains("The claim:"));
+    model.release.store(7, Ordering::SeqCst);
+    assert!(model.next()["messages"].as_array().unwrap().iter().any(|m| m["role"] == "tool"));
+    model.release.store(8, Ordering::SeqCst);
+    runtime.block_on(async {
+        loop {
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(90), socket.next()).await.unwrap().unwrap().unwrap();
+            if let Ok(text) = frame.to_text() {
+                let event: Value = serde_json::from_str(text).unwrap();
+                if event["type"] == "done" {
+                    assert_eq!(event["reply"], "new goal finished", "the observer must not receive a terminal ending at the old goal or follow-up boundary: {event}");
+                    assert_eq!(event["stopped"], "end_turn");
+                    break;
+                }
+            }
+        }
+    });
+    let final_goal = runtime.block_on(get(&client, &work));
+    assert_ne!(final_goal["generation"], first_goal["generation"]);
+    assert_eq!(final_goal["status"], "completed");
+    assert_eq!(final_goal["iterations"], 1);
+    let stale = runtime.block_on(get(&client, &format!("{queue}/session.stale")));
+    assert!(stale["receipt"]["applied_at"].is_null());
+    assert!(stale["receipt"]["follow_up"]["reserved"].is_null());
+    assert_eq!(stale["receipt"]["follow_up"]["after"], queued["receipt"]["follow_up"]["after"]);
 }

@@ -1104,7 +1104,12 @@ async fn goal_turn(
             Err(error) => return ended_badly(&rook, session, outbound, error.to_string()),
         };
         if !run.status.runnable() {
-            return ended_goal(&rook, outbound, session, run, connection, shared).await;
+            if !ended_goal(&rook, outbound, session, run, connection, shared).await {
+                return;
+            }
+            announced_retry = None;
+            drop(rook);
+            continue;
         }
         if let Some(at) = run.next_attempt_at.filter(|at| *at > managed::now()) {
             if announced_retry != Some(at) {
@@ -1130,7 +1135,10 @@ async fn goal_turn(
                 agent.effort = connection.settings.effort();
                 agent.approver = connection.approver.clone();
                 agent.ask_via(connection.asker.clone());
-                agent.options = connection.options.clone();
+                agent.options = run
+                    .conversation
+                    .as_ref()
+                    .map_or_else(|| connection.options.clone(), |conversation| conversation.options.clone());
                 if run.iterations > 0 {
                     agent.options.attachments.clear();
                 }
@@ -1146,7 +1154,10 @@ async fn goal_turn(
         .await;
         match result {
             Ok(run) if !run.status.runnable() => {
-                return ended_goal(&rook, outbound, session, run, connection, shared).await;
+                if !ended_goal(&rook, outbound, session, run, connection, shared).await {
+                    return;
+                }
+                announced_retry = None;
             }
             Ok(run) if run.status == Status::Queued => {
                 let _ = outbound.send(ChatEvent::Agent {
@@ -1183,11 +1194,14 @@ async fn ended_goal(
     run: Run,
     connection: &Connection,
     shared: &Shared,
-) {
+) -> bool {
     let followups_ready = if run.status == Status::Completed {
         match rook_core::message_queue::followups::ready(rook, session) {
             Ok(ready) => ready,
-            Err(error) => return ended_badly(rook, session, outbound, error.to_string()),
+            Err(error) => {
+                ended_badly(rook, session, outbound, error.to_string());
+                return false;
+            }
         }
     } else {
         false
@@ -1196,7 +1210,10 @@ async fn ended_goal(
         let named = connection.settings.model();
         let provider = match rook_core::models::chosen(&rook.config, named.as_deref()) {
             Ok(provider) => provider,
-            Err(error) => return ended_badly(rook, session, outbound, error.to_string()),
+            Err(error) => {
+                ended_badly(rook, session, outbound, error.to_string());
+                return false;
+            }
         };
         let mut agent = AgentLoop::new(rook, provider.into(), session);
         followups::configure(&mut agent, connection.settings.clone());
@@ -1205,21 +1222,33 @@ async fn ended_goal(
         agent.approver = connection.approver.clone();
         agent.ask_via(connection.asker.clone());
         rook_core::agent::equip(&mut agent, shared.servers.clone(), &shared.mcp, shared.jobs.clone());
-        match agent
+        let result = agent
             .run_followups(|progress| {
                 if let Some(event) = as_event(progress, &rook.workspace) {
                     let _ = outbound.send(event);
                 }
             })
-            .await
-        {
+            .await;
+        // /goal may replace the completed generation while its follow-up is
+        // running. Keep the observer and shared controls through that handoff;
+        // the outer loop will also report a newly paused goal accurately.
+        match session_goal(rook, session) {
+            Ok(Some(current)) if current.identity() != run.identity() => return true,
+            Err(error) => {
+                ended_badly(rook, session, outbound, error);
+                return false;
+            }
+            _ => {}
+        }
+        match result {
             Ok(Some(outcome)) => {
                 ended_outcome(outbound, outcome);
-                return;
+                return false;
             }
             Ok(None) => {}
             Err(error) => {
-                return ended_badly(rook, session, outbound, error.to_string());
+                ended_badly(rook, session, outbound, error.to_string());
+                return false;
             }
         }
     }
@@ -1241,6 +1270,7 @@ async fn ended_goal(
         files_changed: last.map_or_else(Vec::new, |o| o.files_changed),
         stopped: stopped.into(),
     });
+    false
 }
 
 /// What a window is told about one step of a turn.

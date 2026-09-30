@@ -16,7 +16,7 @@ pub(crate) fn target(rook: &Rook, session: u128) -> Result<Option<String>> {
     }) {
         return Ok(Some(format!("goal.{}", run.identity().generation)));
     }
-    Ok(execution.map(|state| format!("turn.{}", state.turn)))
+    Ok(execution.map(|state| format!("turn.{}", state.completion_boundary())))
 }
 
 pub(crate) fn submit(rook: &Rook, session: u128, after: &str, request: Steer) -> Result<Steering> {
@@ -63,7 +63,8 @@ pub(crate) fn next(rook: &Rook, session: u128, messages: &[Steering]) -> Result<
     }
     let identity = goal.as_ref().map(|run| run.identity());
     let completed = rook.completed_turn(session)?.is_some_and(|o| crate::agent::finished(&o.stopped));
-    let turn = crate::execution::current(rook, session)?.map(|state| format!("turn.{}", state.turn));
+    let turn = crate::execution::current(rook, session)?
+        .map(|state| format!("turn.{}", state.completion_boundary()));
     let candidate = messages.iter().position(|message| {
         let Some(follow) = &message.follow_up else { return false };
         if !message.queued() || follow.reserved.is_some() || follow.goal != identity {
@@ -247,7 +248,7 @@ mod tests {
         enqueue(&rook, session, "late");
         assert!(!view::read(&rook, session, "session.late").unwrap().receipt.follow_up.unwrap().ready);
         let (journal, _) = Journal::reserve_follow_up(&rook, session).unwrap().unwrap();
-        assert!(Journal::start(&rook, session, None).is_err());
+        assert!(Journal::start(&rook, session, None, false).is_err());
         assert!(
             view::change(
                 &rook,
@@ -440,11 +441,53 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let rook = engine(dir.path());
         let session = rook.start_session("bounded hook context").unwrap();
-        let journal = Journal::start(&rook, session, None).unwrap();
+        let journal = Journal::start(&rook, session, None, false).unwrap();
         let context = "x".repeat(1024 * 1024 + 1);
         assert!(context.len() > 1024 * 1024);
         assert!(journal.admit_prompt(&rook, "a", "a", "", Some(&context), None).is_err());
         assert!(rook.store.events(session, 0, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn explicit_continuations_keep_one_boundary_across_reopen_but_a_new_task_does_not() {
+        for continuing in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let rook = engine(dir.path());
+            let session = rook.start_session("continued boundary").unwrap();
+            let original = Journal::start(&rook, session, None, false).unwrap();
+            original.admit_prompt(&rook, "first", "first", "", Some(""), None).unwrap();
+            let request = enqueue(&rook, session, "later");
+            let boundary = target(&rook, session).unwrap().unwrap();
+            original.finish("max_steps", None).unwrap();
+            drop(original);
+            drop(rook);
+            for _ in 0..3 {
+                let rook = engine(dir.path());
+                let next = Journal::start(&rook, session, None, continuing).unwrap();
+                let now = target(&rook, session).unwrap().unwrap();
+                assert_eq!(now == boundary, continuing);
+                assert_ne!(
+                    format!("turn.{}", crate::execution::current(&rook, session).unwrap().unwrap().turn),
+                    boundary
+                );
+                assert!(!ready(&rook, session).unwrap());
+                next.finish("max_steps", None).unwrap();
+            }
+            let rook = engine(dir.path());
+            let next = Journal::start(&rook, session, None, continuing).unwrap();
+            next.admit_prompt(&rook, "final", "final", "", Some(""), None).unwrap();
+            let outcome:crate::agent::TurnOutcome=serde_json::from_value(serde_json::json!({
+                "steps":1,"stopped":"end_turn","reply":"finished", "input_tokens":0,"output_tokens":0,"cached_tokens":0,
+                "tools_called":[],"skills_loaded":[],"skills_written":[],"facts_learned":[],"facts_forgotten":[],"delegated":[],"compactions":0
+            })).unwrap();
+            next.record_outcome(&outcome).unwrap();
+            next.finish("end_turn", None).unwrap();
+            drop(next);
+            assert_eq!(ready(&rook, session).unwrap(), continuing);
+            let retried = view::change(&rook, session, request).unwrap();
+            assert_eq!(retried.receipt.follow_up.as_ref().unwrap().after, boundary);
+            assert!(retried.receipt.queued());
+        }
     }
 
     #[test]
