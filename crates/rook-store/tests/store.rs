@@ -795,7 +795,7 @@ fn a_legacy_store_upgrades_its_format_marker_before_retraining() {
     let store = Store::open(dir.path()).unwrap();
     let marker: serde_json::Value =
         serde_json::from_slice(&std::fs::read(dir.path().join("format.json")).unwrap()).unwrap();
-    assert_eq!(marker["format"], 2);
+    assert_eq!(marker["format"], 3);
     let id = store.put(Kind::Message, b"still readable").unwrap();
     assert_eq!(store.get(&id).unwrap(), b"still readable");
 }
@@ -983,4 +983,23 @@ fn an_object_whose_dictionary_is_only_missing_from_disk_is_left_alone() {
     assert!(s.get(&id).is_err(), "nothing can be read without the dictionary");
     let (removed, _) = s.collect_undecodable(false).unwrap();
     assert_eq!(removed, 0, "and nothing is deleted for it: the file can be put back");
+}
+
+#[test]
+fn state_only_session_transactions_cannot_outlive_a_deleted_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let session = rook_store::new_session_id();
+    let key = format!("message-queue/{session:032x}");
+    assert!(store.append_events_with_values(session, [], &[(&key, b"pending")]).is_err());
+    assert!(store.kv_get(&key).unwrap().is_none());
+    store.create_session(&rook_store::SessionMeta::new(session, "queue", "/tmp", 0)).unwrap();
+    store.append_events_with_values(session, [], &[(&key, b"pending")]).unwrap();
+    assert_eq!(store.not_on_disk_yet(), 0);
+    let meta = store.get_session(session).unwrap().unwrap();
+    assert_eq!(meta.event_count, 0);
+    assert!(meta.updated_at > 0);
+    store.delete_session(session).unwrap();
+    assert!(store.append_events_with_values(session, [], &[(&key, b"late")]).is_err());
+    assert!(store.kv_get(&key).unwrap().is_none());
 }

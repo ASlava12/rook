@@ -1,14 +1,13 @@
 //! Durable runs. Store mutations are serialized independently of a running turn,
 //! so a user's correction can be saved while the model or a tool is busy.
-use std::sync::Mutex;
+use super::receipts::WRITING;
 
-use rook_proto::work::{Action, Run, Start, Status, Steer, Steering};
+use rook_proto::work::{Action, EditInstruction, Run, Start, Status, Steer, Steering, WithdrawInstruction};
 use serde::{Deserialize, Serialize};
 
 use crate::{CoreError, Result, Rook};
 
 const INDEX: &str = "work/managed-index";
-static WRITING: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Active {
@@ -231,47 +230,32 @@ pub fn start(rook: &Rook, request: Start) -> Result<Run> {
 }
 
 pub fn steer(rook: &Rook, id: &str, request: Steer) -> Result<Steering> {
-    if request.id.is_empty()
-        || request.id.len() > 64
-        || !request.id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-    {
-        return Err(bad("instruction id must be 1–64 letters, digits, hyphens or underscores"));
-    }
-    if request.text.trim().is_empty() || request.text.len() > rook.config.work.max_message_bytes {
-        return Err(bad(format!(
-            "instruction must contain text and fit in {} bytes",
-            rook.config.work.max_message_bytes
-        )));
-    }
     update(rook, id, |saved| {
-        if let Some(existing) = saved.run.instructions.iter().find(|m| m.id == request.id) {
-            if existing.text != request.text.trim() {
-                return Err(bad("instruction id was already used for different text"));
-            }
-            return Ok(existing.clone());
-        }
-        if saved.run.status.terminal() {
-            return Err(bad("this run has ended; start a new goal"));
-        }
-        if saved.run.instructions.len() >= rook.config.work.max_messages {
-            return Err(bad("instruction limit reached for this run"));
-        }
-        let instruction = Steering {
-            id: request.id,
-            text: request.text.trim().into(),
-            submitted_at: now(),
-            applied_at: None,
-            session: None,
-        };
-        if saved.run.conversation.is_some()
-            && let Some(goal) =
-                instruction.text.strip_prefix("/goal ").map(str::trim).filter(|s| !s.is_empty())
-        {
-            saved.run.goal = goal.into();
-        }
-        saved.run.instructions.push(instruction.clone());
+        let receipt = super::receipts::submit(
+            rook,
+            &mut saved.run.instructions,
+            request,
+            !saved.run.status.terminal(),
+        )?;
         saved.idle = 0;
-        Ok(instruction)
+        Ok(receipt)
+    })
+}
+
+pub fn edit_instruction(rook: &Rook, run: &str, id: &str, request: EditInstruction) -> Result<Steering> {
+    update(rook, run, |saved| {
+        super::receipts::edit(rook, &mut saved.run.instructions, id, request, !saved.run.status.terminal())
+    })
+}
+
+pub fn withdraw_instruction(
+    rook: &Rook,
+    run: &str,
+    id: &str,
+    request: WithdrawInstruction,
+) -> Result<Steering> {
+    update(rook, run, |saved| {
+        super::receipts::withdraw(&mut saved.run.instructions, id, request, !saved.run.status.terminal())
     })
 }
 
@@ -324,13 +308,7 @@ pub fn forget(rook: &Rook, id: &str) -> Result<()> {
 /// Pending receipt IDs. Text is read again at acceptance, under the same lock
 /// as queue edits; a previously observed string is never authority to deliver.
 pub fn pending(rook: &Rook, id: &str) -> Result<Vec<String>> {
-    Ok(read(rook, id)?
-        .run
-        .instructions
-        .iter()
-        .filter(|m| m.applied_at.is_none())
-        .map(|m| m.id.clone())
-        .collect())
+    Ok(read(rook, id)?.run.instructions.iter().filter(|m| m.queued()).map(|m| m.id.clone()).collect())
 }
 
 /// Accept exactly once and publish the transcript, goal and receipt in one
@@ -347,10 +325,15 @@ pub fn accept(rook: &Rook, run: &str, session: u128, id: &str) -> Result<Option<
         .iter_mut()
         .find(|m| m.id == id)
         .ok_or_else(|| bad("unknown instruction receipt"))?;
-    if message.applied_at.is_some() {
+    if !message.queued() {
         return Ok(None);
     }
     let text = format!("[work instruction {}]\n{}", message.id, message.text);
+    if saved.run.conversation.is_some()
+        && let Some(goal) = message.text.strip_prefix("/goal ").map(str::trim).filter(|s| !s.is_empty())
+    {
+        saved.run.goal = goal.into();
+    }
     message.applied_at = Some(now());
     message.session = Some(rook_store::format_session_id(session));
     saved.run.updated_at = now();
@@ -716,8 +699,17 @@ pub async fn advance<'a>(
         });
         let excess = s.run.recent.len().saturating_sub(rook.config.work.retained_iterations);
         s.run.recent.drain(..excess);
-        let corrected =
-            s.run.instructions.len() != revision || s.run.instructions.iter().any(|m| m.applied_at.is_none());
+        let session_pending = s
+            .run
+            .conversation
+            .as_ref()
+            .and_then(|c| rook_store::parse_session_id(&c.session))
+            .map(|session| crate::message_queue::pending(rook, session))
+            .transpose()?
+            .is_some_and(|messages| !messages.is_empty());
+        let corrected = s.run.instructions.len() != revision
+            || s.run.instructions.iter().any(|m| m.queued())
+            || session_pending;
         if outcome.tools_called.is_empty() && !corrected {
             s.idle = s.idle.saturating_add(1);
         } else {

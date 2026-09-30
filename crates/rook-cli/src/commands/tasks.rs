@@ -87,7 +87,7 @@ fn execute(cmd: TaskCmd, workspace: Option<PathBuf>, yes: bool) -> Result<serde_
                 &serde_json::to_value(Steer { id: message_id.clone(), text: text.join(" ") })?,
             )?;
             let until = std::time::Instant::now() + std::time::Duration::from_secs(wait_secs.min(86_400));
-            while receipt.applied_at.is_none() && std::time::Instant::now() < until {
+            while receipt.queued() && std::time::Instant::now() < until {
                 std::thread::sleep(std::time::Duration::from_millis(500));
                 let run: Run = daemon.get(&path)?;
                 if let Some(found) = run.instructions.into_iter().find(|m| m.id == message_id) {
@@ -181,6 +181,8 @@ fn describe(value: &serde_json::Value) -> String {
 fn receipt_state(receipt: &Steering) -> &'static str {
     if receipt.applied_at.is_some() {
         "taken into the agent's context (execution is not yet confirmed)"
+    } else if receipt.withdrawn_at.is_some() {
+        "withdrawn before acceptance"
     } else {
         "saved; awaiting the agent's next safe boundary (use task show to check)"
     }

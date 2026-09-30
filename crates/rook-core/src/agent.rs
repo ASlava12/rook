@@ -854,6 +854,7 @@ impl<'a> AgentLoop<'a> {
         // that covered. See `measured`.
         let mut anchor: Option<(usize, usize)> = None;
         'turn: while outcome.steps < self.max_steps {
+            self.refresh_managed_work()?;
             if let Some(id) = &self.managed_work
                 && crate::work::managed::should_stop(self.rook, id)?
             {
@@ -1115,6 +1116,7 @@ impl<'a> AgentLoop<'a> {
                 outcome.reply = response.message.content.clone();
             }
 
+            self.refresh_managed_work()?;
             if let Some(id) = &self.managed_work
                 && crate::work::managed::should_stop(self.rook, id)?
             {
@@ -1409,6 +1411,7 @@ impl<'a> AgentLoop<'a> {
             for call in &asked.tool_calls {
                 // Pausing during one call must not execute the rest of a batch
                 // that the model requested before the user pressed pause.
+                self.refresh_managed_work()?;
                 if let Some(id) = &self.managed_work
                     && crate::work::managed::should_stop(self.rook, id)?
                 {

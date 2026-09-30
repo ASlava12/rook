@@ -2,7 +2,7 @@
 use async_trait::async_trait;
 use rook_core::{Rook, agent::AgentLoop, work::managed as work};
 use rook_llm::{Message, Provider, Request, Response, StopReason, ToolCall, Usage};
-use rook_proto::work::{Action, Start, Status, Steer};
+use rook_proto::work::{Action, EditInstruction, Start, Status, Steer, WithdrawInstruction};
 use std::sync::{Arc, Mutex};
 
 fn engine(workspace: &std::path::Path, store: &std::path::Path) -> Rook {
@@ -88,6 +88,129 @@ fn steering_is_durable_idempotent_bounded_and_acknowledged_only_on_delivery() {
     work::forget(&rook, &run.id).unwrap();
     assert!(work::list(&rook).unwrap().is_empty());
     assert!(rook.store.kv_get(&format!("work/managed/{}", run.id)).unwrap().is_none());
+}
+
+#[test]
+fn editing_or_withdrawing_a_queued_goal_command_does_not_change_the_goal_until_acceptance() {
+    let workspace = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let rook = engine(workspace.path(), store.path());
+    let session = rook.start_session("goal edits").unwrap();
+    let id = rook_store::format_session_id(session);
+    rook_core::message_queue::submit(&rook, session, correction("before", "prior ordinary guidance"))
+        .unwrap();
+    let run = work::start(
+        &rook,
+        Start {
+            conversation: Some(rook_proto::work::Conversation {
+                session: id,
+                model: None,
+                effort: "high".into(),
+                stance: "assist".into(),
+                options: Default::default(),
+            }),
+            goal: "original goal".into(),
+            workspace: None,
+            autonomous: false,
+            max_iterations: None,
+            max_tokens: None,
+            max_seconds: None,
+        },
+    )
+    .unwrap();
+    assert!(rook_core::message_queue::submit(&rook, session, correction("late", "belongs to goal")).is_err());
+    work::steer(&rook, &run.id, correction("withdrawn", "/goal unwanted goal")).unwrap();
+    work::withdraw_instruction(&rook, &run.id, "withdrawn", WithdrawInstruction { revision: 0 }).unwrap();
+    assert_eq!(work::read(&rook, &run.id).unwrap().run.goal, "original goal");
+    work::steer(&rook, &run.id, correction("edited", "/goal first draft")).unwrap();
+    work::edit_instruction(
+        &rook,
+        &run.id,
+        "edited",
+        EditInstruction { revision: 0, text: "/goal final goal".into() },
+    )
+    .unwrap();
+    assert_eq!(work::read(&rook, &run.id).unwrap().run.goal, "original goal");
+    assert_eq!(rook.goal(session).unwrap().as_deref(), Some("original goal"));
+    work::accept(&rook, &run.id, session, "edited").unwrap();
+    assert_eq!(work::read(&rook, &run.id).unwrap().run.goal, "final goal");
+    assert!(rook.goal(session).unwrap().unwrap().starts_with("final goal"));
+}
+
+#[tokio::test]
+async fn an_ordinary_turn_admits_durable_steering_without_becoming_a_goal() {
+    let workspace = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let rook = engine(workspace.path(), store.path());
+    let session = rook.start_session("ordinary queue").unwrap();
+    rook_core::message_queue::submit(&rook, session, correction("one", "ORIGINAL_GUIDANCE")).unwrap();
+    rook_core::message_queue::edit(
+        &rook,
+        session,
+        "one",
+        EditInstruction { revision: 0, text: "EDITED_GUIDANCE".into() },
+    )
+    .unwrap();
+    rook_core::message_queue::submit(&rook, session, correction("two", "WITHDRAWN_GUIDANCE")).unwrap();
+    rook_core::message_queue::withdraw(&rook, session, "two", WithdrawInstruction { revision: 0 }).unwrap();
+    let provider = Script::new(vec![answer("Done")]);
+    let mut agent = AgentLoop::new(&rook, provider.clone(), session);
+    agent.run("Proceed").await.unwrap();
+    let seen = provider.seen.lock().unwrap().join("\n");
+    assert!(seen.contains("EDITED_GUIDANCE"));
+    assert!(!seen.contains("ORIGINAL_GUIDANCE"));
+    assert!(!seen.contains("WITHDRAWN_GUIDANCE"));
+    assert!(work::for_session(&rook, session).unwrap().is_none());
+    assert!(!rook_core::message_queue::list(&rook, session).unwrap()[0].queued());
+}
+
+#[tokio::test]
+async fn promotion_attaches_the_existing_turn_to_goal_steering_and_pause() {
+    for paused in [false, true] {
+        let workspace = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let rook = engine(workspace.path(), store.path());
+        let session = rook.start_session("promoted").unwrap();
+        rook_core::message_queue::submit(&rook, session, correction("before", "PRE_PROMOTION_GUIDANCE"))
+            .unwrap();
+        let provider = Script::new(vec![answer("More work remains")]);
+        let mut agent = AgentLoop::new(&rook, provider.clone(), session);
+        assert!(agent.managed_work.is_none());
+        let run = work::start(
+            &rook,
+            Start {
+                conversation: Some(rook_proto::work::Conversation {
+                    session: rook_store::format_session_id(session),
+                    model: None,
+                    effort: "high".into(),
+                    stance: "assist".into(),
+                    options: Default::default(),
+                }),
+                goal: "inspect the project".into(),
+                workspace: None,
+                autonomous: false,
+                max_iterations: None,
+                max_tokens: None,
+                max_seconds: None,
+            },
+        )
+        .unwrap();
+        work::steer(&rook, &run.id, correction("after", "POST_PROMOTION_GUIDANCE")).unwrap();
+        if paused {
+            work::control(&rook, &run.id, Action::Pause).unwrap();
+        }
+        let outcome = agent.run("Proceed").await.unwrap();
+        if paused {
+            assert_eq!(outcome.stopped, "work_paused");
+            assert!(provider.seen.lock().unwrap().is_empty(), "a promoted paused turn makes no request");
+        } else {
+            let seen = provider.seen.lock().unwrap().join("\n");
+            assert!(seen.contains("PRE_PROMOTION_GUIDANCE"));
+            assert!(seen.contains("POST_PROMOTION_GUIDANCE"));
+        }
+        assert_eq!(rook_core::message_queue::list(&rook, session).unwrap()[0].queued(), paused);
+        assert_eq!(work::read(&rook, &run.id).unwrap().run.instructions[0].queued(), paused);
+    }
 }
 
 #[test]
@@ -185,6 +308,153 @@ async fn a_live_message_cannot_acknowledge_a_receipt_by_spelling_its_text_prefix
     assert!(saw_live);
     assert!(work::read(&rook, &run.id).unwrap().run.instructions[0].applied_at.is_some());
     assert!(provider.seen.lock().unwrap()[0].contains("AUTHENTIC_CORRECTION"));
+}
+
+#[test]
+fn editing_keeps_submission_identity_and_acceptance_reads_the_latest_revision() {
+    let workspace = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let mut rook = engine(workspace.path(), store.path());
+    rook.config.work.max_message_bytes = 12;
+    let run = start(&rook);
+    work::steer(&rook, &run.id, correction("edit", "original")).unwrap();
+    let pending = work::pending(&rook, &run.id).unwrap();
+    assert!(
+        work::edit_instruction(&rook, &run.id, "edit", EditInstruction { revision: 0, text: "x".repeat(13) })
+            .is_err()
+    );
+    let edit = EditInstruction { revision: 0, text: "corrected".into() };
+    let edited = work::edit_instruction(&rook, &run.id, "edit", edit.clone()).unwrap();
+    assert_eq!(edited.revision, 1);
+    assert_eq!(work::edit_instruction(&rook, &run.id, "edit", edit.clone()).unwrap().revision, 1);
+    assert_eq!(work::steer(&rook, &run.id, correction("edit", "original")).unwrap().text, "corrected");
+    assert!(
+        work::steer(&rook, &run.id, correction("edit", "corrected")).is_err(),
+        "submission identity still names the original request"
+    );
+    assert!(
+        work::edit_instruction(&rook, &run.id, "edit", EditInstruction { revision: 0, text: "stale".into() })
+            .is_err()
+    );
+    let session = rook.start_session("edited").unwrap();
+    let text = work::accept(&rook, &run.id, session, &pending[0]).unwrap().unwrap();
+    assert!(text.ends_with("corrected"));
+    assert!(!text.contains("original"));
+    assert!(
+        work::edit_instruction(&rook, &run.id, "edit", edit).unwrap().applied_at.is_some(),
+        "retrying the acknowledged edit returns its receipt without editing accepted context"
+    );
+    assert!(
+        work::edit_instruction(
+            &rook,
+            &run.id,
+            "edit",
+            EditInstruction { revision: 1, text: "too late".into() }
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn withdrawing_is_durable_and_a_submission_retry_cannot_requeue_it() {
+    let workspace = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let rook = engine(workspace.path(), store.path());
+    let run = start(&rook);
+    work::steer(&rook, &run.id, correction("withdraw", "do this later")).unwrap();
+    let observed = work::pending(&rook, &run.id).unwrap();
+    let receipt =
+        work::withdraw_instruction(&rook, &run.id, "withdraw", WithdrawInstruction { revision: 0 }).unwrap();
+    assert!(receipt.withdrawn_at.is_some());
+    assert!(receipt.applied_at.is_none());
+    assert_eq!(receipt.revision, 1);
+    drop(rook);
+    let rook = engine(workspace.path(), store.path());
+    assert!(work::pending(&rook, &run.id).unwrap().is_empty());
+    assert!(
+        work::steer(&rook, &run.id, correction("withdraw", "do this later")).unwrap().withdrawn_at.is_some()
+    );
+    let again =
+        work::withdraw_instruction(&rook, &run.id, "withdraw", WithdrawInstruction { revision: 0 }).unwrap();
+    assert_eq!(again.revision, 1);
+    let session = rook.start_session("stale pending snapshot").unwrap();
+    assert!(work::accept(&rook, &run.id, session, &observed[0]).unwrap().is_none());
+    assert!(rook.store.events(session, 0, 10).unwrap().is_empty());
+}
+
+#[test]
+fn editing_or_withdrawing_races_acceptance_without_mutating_accepted_context() {
+    let workspace = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let rook = engine(workspace.path(), store.path());
+    let run = start(&rook);
+    let session = rook.start_session("queue races").unwrap();
+    for n in 0..16 {
+        let id = format!("edit-{n}");
+        work::steer(&rook, &run.id, correction(&id, "before")).unwrap();
+        let barrier = std::sync::Barrier::new(2);
+        let (edit, accepted) = std::thread::scope(|scope| {
+            let edit = scope.spawn(|| {
+                barrier.wait();
+                work::edit_instruction(
+                    &rook,
+                    &run.id,
+                    &id,
+                    EditInstruction { revision: 0, text: "after".into() },
+                )
+            });
+            let accept = scope.spawn(|| {
+                barrier.wait();
+                work::accept(&rook, &run.id, session, &id)
+            });
+            (edit.join().unwrap(), accept.join().unwrap().unwrap().unwrap())
+        });
+        assert!(accepted.ends_with(if edit.is_ok() { "after" } else { "before" }));
+        let receipt =
+            work::read(&rook, &run.id).unwrap().run.instructions.into_iter().find(|m| m.id == id).unwrap();
+        assert!(accepted.ends_with(&receipt.text));
+        assert!(receipt.applied_at.is_some());
+
+        let id = format!("withdraw-{n}");
+        work::steer(&rook, &run.id, correction(&id, "queued")).unwrap();
+        let barrier = std::sync::Barrier::new(2);
+        let (withdrawn, accepted) = std::thread::scope(|scope| {
+            let withdraw = scope.spawn(|| {
+                barrier.wait();
+                work::withdraw_instruction(&rook, &run.id, &id, WithdrawInstruction { revision: 0 })
+            });
+            let accept = scope.spawn(|| {
+                barrier.wait();
+                work::accept(&rook, &run.id, session, &id)
+            });
+            (withdraw.join().unwrap(), accept.join().unwrap().unwrap())
+        });
+        assert_ne!(withdrawn.is_ok(), accepted.is_some(), "exactly one side wins for {id}");
+        let receipt =
+            work::read(&rook, &run.id).unwrap().run.instructions.into_iter().find(|m| m.id == id).unwrap();
+        assert_ne!(receipt.withdrawn_at.is_some(), receipt.applied_at.is_some());
+    }
+}
+
+#[test]
+fn older_receipts_acquire_edit_metadata_without_changing_submission_identity() {
+    let workspace = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let rook = engine(workspace.path(), store.path());
+    let run = start(&rook);
+    let legacy = serde_json::from_value(serde_json::json!({
+        "id": "legacy", "text": "original", "submitted_at": 1,
+        "applied_at": null, "session": null,
+    }))
+    .unwrap();
+    work::update(&rook, &run.id, |saved| {
+        saved.run.instructions.push(legacy);
+        Ok(())
+    })
+    .unwrap();
+    work::edit_instruction(&rook, &run.id, "legacy", EditInstruction { revision: 0, text: "edited".into() })
+        .unwrap();
+    assert_eq!(work::steer(&rook, &run.id, correction("legacy", "original")).unwrap().text, "edited");
 }
 
 struct Script {

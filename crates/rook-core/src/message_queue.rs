@@ -1,0 +1,196 @@
+//! Durable steering for ordinary sessions. These receipts do not create a work
+//! run or authorize another turn. Pending messages survive until the session is
+//! explicitly continued, including when the daemon restarts.
+use rook_proto::work::{EditInstruction, Steer, Steering, WithdrawInstruction};
+use rook_store::{EventKind, Kind, NewEvent};
+
+use crate::{
+    CoreError, Result, Rook,
+    work::{managed, receipts},
+};
+
+fn key(session: u128) -> String {
+    // Store::delete_session also removes companions with this suffix.
+    format!("message-queue/{session:032x}")
+}
+
+pub fn list(rook: &Rook, session: u128) -> Result<Vec<Steering>> {
+    if rook.store.get_session(session)?.is_none() {
+        return Err(CoreError::Other("no such session".into()));
+    }
+    rook.store
+        .kv_get(&key(session))?
+        .map(|bytes| serde_json::from_slice(&bytes).map_err(Into::into))
+        .unwrap_or_else(|| Ok(Vec::new()))
+}
+
+fn update<T>(rook: &Rook, session: u128, change: impl FnOnce(&mut Vec<Steering>) -> Result<T>) -> Result<T> {
+    let _lock = receipts::WRITING.lock().unwrap_or_else(|e| e.into_inner());
+    let mut messages = list(rook, session)?;
+    let value = change(&mut messages)?;
+    let encoded = crate::persistence::encode(&messages)?;
+    rook.store.append_events_with_values(session, [], &[(&key(session), &encoded)])?;
+    Ok(value)
+}
+
+pub fn submit(rook: &Rook, session: u128, request: Steer) -> Result<Steering> {
+    update(rook, session, |messages| {
+        // Check under the same lock as goal admission. Existing receipt retries
+        // still work after promotion, but new corrections belong to the goal.
+        if !messages.iter().any(|m| m.id == request.id)
+            && managed::for_session(rook, session)?.is_some_and(|run| !run.status.terminal())
+        {
+            return Err(CoreError::Other(
+                "this session has an active goal; submit the correction to its work queue".into(),
+            ));
+        }
+        receipts::submit(rook, messages, request, true)
+    })
+}
+
+pub fn edit(rook: &Rook, session: u128, id: &str, request: EditInstruction) -> Result<Steering> {
+    update(rook, session, |messages| receipts::edit(rook, messages, id, request, true))
+}
+
+pub fn withdraw(rook: &Rook, session: u128, id: &str, request: WithdrawInstruction) -> Result<Steering> {
+    update(rook, session, |messages| receipts::withdraw(messages, id, request, true))
+}
+
+pub(crate) fn pending(rook: &Rook, session: u128) -> Result<Vec<String>> {
+    Ok(list(rook, session)?.into_iter().filter(Steering::queued).map(|m| m.id).collect())
+}
+
+pub(crate) fn accept(rook: &Rook, session: u128, id: &str) -> Result<Option<String>> {
+    let _lock = receipts::WRITING.lock().unwrap_or_else(|e| e.into_inner());
+    if managed::for_session(rook, session)?
+        .is_some_and(|run| !run.status.terminal() && !run.status.runnable())
+    {
+        return Ok(None);
+    }
+    let mut messages = list(rook, session)?;
+    let message = messages
+        .iter_mut()
+        .find(|m| m.id == id)
+        .ok_or_else(|| CoreError::Other("unknown instruction receipt".into()))?;
+    if !message.queued() {
+        return Ok(None);
+    }
+    message.applied_at = Some(managed::now());
+    message.session = Some(rook_store::format_session_id(session));
+    let text = message.text.clone();
+    let encoded = crate::persistence::encode(&messages)?;
+    rook.store.append_events_with_values(
+        session,
+        [NewEvent::new(EventKind::UserMessage, Kind::Message, text.as_bytes()).label("while running")],
+        &[(&key(session), &encoded)],
+    )?;
+    Ok(Some(text))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn engine(dir: &std::path::Path) -> Rook {
+        Rook::from_parts(
+            rook_store::Store::open(dir.join("store")).unwrap(),
+            crate::Config::default(),
+            rook_skills::Environment::bare("linux", "x86_64", "0.7.2"),
+            rook_skills::SkillIndex::discover(&[]).0,
+            dir.into(),
+        )
+    }
+
+    fn request(id: &str, text: &str) -> Steer {
+        Steer { id: id.into(), text: text.into() }
+    }
+
+    #[test]
+    fn ordinary_receipts_survive_restart_without_creating_a_goal_and_accept_the_latest_text_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let rook = engine(dir.path());
+        let session = rook.start_session("ordinary").unwrap();
+        submit(&rook, session, request("one", "original")).unwrap();
+        let observed = pending(&rook, session).unwrap();
+        edit(&rook, session, "one", EditInstruction { revision: 0, text: "new text".into() }).unwrap();
+        assert!(edit(&rook, session, "one", EditInstruction { revision: 0, text: "stale".into() }).is_err());
+        submit(&rook, session, request("two", "withdraw me")).unwrap();
+        withdraw(&rook, session, "two", WithdrawInstruction { revision: 0 }).unwrap();
+        drop(rook);
+        let rook = engine(dir.path());
+        assert!(managed::for_session(&rook, session).unwrap().is_none());
+        assert!(rook.goal(session).unwrap().is_none());
+        assert_eq!(submit(&rook, session, request("one", "original")).unwrap().text, "new text");
+        assert!(submit(&rook, session, request("two", "withdraw me")).unwrap().withdrawn_at.is_some());
+        assert_eq!(accept(&rook, session, &observed[0]).unwrap().as_deref(), Some("new text"));
+        assert!(accept(&rook, session, "two").unwrap().is_none());
+        assert!(
+            !edit(&rook, session, "one", EditInstruction { revision: 0, text: "new text".into() })
+                .unwrap()
+                .queued()
+        );
+        assert!(withdraw(&rook, session, "one", WithdrawInstruction { revision: 1 }).is_err());
+        drop(rook);
+        let rook = engine(dir.path());
+        assert!(accept(&rook, session, "one").unwrap().is_none());
+        let events = rook.store.events(session, 0, 100).unwrap();
+        assert_eq!(events.iter().filter(|e| e.record.kind == EventKind::UserMessage).count(), 1);
+        rook.delete_session(session).unwrap();
+        assert!(rook.store.kv_get(&key(session)).unwrap().is_none(), "retention removes the queue too");
+        assert!(submit(&rook, session, request("late", "after deletion")).is_err());
+    }
+
+    #[test]
+    fn ordinary_receipt_limits_include_tombstones_so_a_retry_cannot_reanimate_a_withdrawal() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rook = engine(dir.path());
+        rook.config.work.max_messages = 1;
+        rook.config.work.max_message_bytes = 4;
+        let session = rook.start_session("bounded").unwrap();
+        assert!(submit(&rook, session, request("big", "abcde")).is_err());
+        assert!(list(&rook, session).unwrap().is_empty());
+        submit(&rook, session, request("one", "🙂")).unwrap();
+        assert_eq!(list(&rook, session).unwrap().len(), rook.config.work.max_messages);
+        withdraw(&rook, session, "one", WithdrawInstruction { revision: 0 }).unwrap();
+        assert!(submit(&rook, session, request("two", "more")).is_err());
+        assert!(submit(&rook, session, request("one", "🙂")).unwrap().withdrawn_at.is_some());
+        assert!(edit(&rook, session, "one", EditInstruction { revision: 1, text: "🙂a".into() }).is_err());
+    }
+
+    #[test]
+    fn withdrawing_and_accepting_an_ordinary_message_have_one_winner() {
+        let dir = tempfile::tempdir().unwrap();
+        let rook = engine(dir.path());
+        let session = rook.start_session("race").unwrap();
+        for index in 0..16 {
+            let id = index.to_string();
+            submit(&rook, session, request(&id, "racing")).unwrap();
+            let barrier = std::sync::Barrier::new(2);
+            let (accepted, withdrawn) = std::thread::scope(|scope| {
+                let accepting = scope.spawn(|| {
+                    barrier.wait();
+                    accept(&rook, session, &id).unwrap()
+                });
+                let withdrawing = scope.spawn(|| {
+                    barrier.wait();
+                    withdraw(&rook, session, &id, WithdrawInstruction { revision: 0 })
+                });
+                (accepting.join().unwrap(), withdrawing.join().unwrap())
+            });
+            assert_ne!(accepted.is_some(), withdrawn.is_ok());
+            let receipt = list(&rook, session).unwrap().into_iter().find(|m| m.id == id).unwrap();
+            assert_ne!(receipt.applied_at.is_some(), receipt.withdrawn_at.is_some());
+            assert!(!receipt.queued());
+        }
+        let accepted = list(&rook, session).unwrap().iter().filter(|m| m.applied_at.is_some()).count();
+        assert_eq!(
+            rook.store
+                .events(session, 0, 100)
+                .unwrap()
+                .iter()
+                .filter(|e| e.record.kind == EventKind::UserMessage)
+                .count(),
+            accepted
+        );
+    }
+}

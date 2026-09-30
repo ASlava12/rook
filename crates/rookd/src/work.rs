@@ -9,7 +9,7 @@ use axum::{
     routing::{get, post},
 };
 use rook_core::work::managed;
-use rook_proto::work::{Action, Run, Start, Status, Steer, Steering};
+use rook_proto::work::{Action, EditInstruction, Run, Start, Status, Steer, Steering, WithdrawInstruction};
 use tokio::sync::Mutex;
 
 use crate::AppState;
@@ -41,13 +41,66 @@ fn failure(error: impl std::fmt::Display) -> Failure {
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
+        .route("/api/sessions/{id}/instructions", get(session_instructions).post(session_submit))
+        .route(
+            "/api/sessions/{id}/instructions/{message}",
+            axum::routing::put(session_edit).delete(session_withdraw),
+        )
         .route("/api/tasks", get(schedule_list).post(schedule_create))
         .route("/api/tasks/{id}", axum::routing::delete(schedule_delete))
         .route("/api/tasks/{id}/control", post(schedule_control))
         .route("/api/work", get(list).post(start))
         .route("/api/work/{id}", get(show).delete(forget))
         .route("/api/work/{id}/steer", post(steer))
+        .route(
+            "/api/work/{id}/instructions/{message}",
+            axum::routing::put(edit_instruction).delete(withdraw_instruction),
+        )
         .route("/api/work/{id}/control", post(control))
+}
+
+fn session_id(id: &str) -> Result<u128, Failure> {
+    rook_store::parse_session_id(id).ok_or_else(|| failure("invalid session id"))
+}
+
+async fn session_instructions(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<Steering>>, Failure> {
+    Ok(Json(rook_core::message_queue::list(&*state.rook.read().await, session_id(&id)?).map_err(failure)?))
+}
+
+async fn session_submit(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<Steer>,
+) -> Result<Json<Steering>, Failure> {
+    Ok(Json(
+        rook_core::message_queue::submit(&*state.rook.read().await, session_id(&id)?, request)
+            .map_err(failure)?,
+    ))
+}
+
+async fn session_edit(
+    State(state): State<Arc<AppState>>,
+    Path((id, message)): Path<(String, String)>,
+    Json(request): Json<EditInstruction>,
+) -> Result<Json<Steering>, Failure> {
+    Ok(Json(
+        rook_core::message_queue::edit(&*state.rook.read().await, session_id(&id)?, &message, request)
+            .map_err(failure)?,
+    ))
+}
+
+async fn session_withdraw(
+    State(state): State<Arc<AppState>>,
+    Path((id, message)): Path<(String, String)>,
+    Json(request): Json<WithdrawInstruction>,
+) -> Result<Json<Steering>, Failure> {
+    Ok(Json(
+        rook_core::message_queue::withdraw(&*state.rook.read().await, session_id(&id)?, &message, request)
+            .map_err(failure)?,
+    ))
 }
 
 async fn list(State(state): State<Arc<AppState>>) -> Result<Json<Vec<Run>>, Failure> {
@@ -90,6 +143,24 @@ async fn control(
     Json(action): Json<Action>,
 ) -> Result<Json<Run>, Failure> {
     Ok(Json(managed::control(&*state.rook.read().await, &id, action).map_err(failure)?))
+}
+
+async fn edit_instruction(
+    State(state): State<Arc<AppState>>,
+    Path((id, message)): Path<(String, String)>,
+    Json(request): Json<EditInstruction>,
+) -> Result<Json<Steering>, Failure> {
+    Ok(Json(managed::edit_instruction(&*state.rook.read().await, &id, &message, request).map_err(failure)?))
+}
+
+async fn withdraw_instruction(
+    State(state): State<Arc<AppState>>,
+    Path((id, message)): Path<(String, String)>,
+    Json(request): Json<WithdrawInstruction>,
+) -> Result<Json<Steering>, Failure> {
+    Ok(Json(
+        managed::withdraw_instruction(&*state.rook.read().await, &id, &message, request).map_err(failure)?,
+    ))
 }
 
 async fn forget(

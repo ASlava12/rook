@@ -776,6 +776,22 @@ impl Store {
             // handle, and the cost of being wrong is a flush we did not need.
             let _ = txn.set_durability(redb::Durability::None);
         }
+        if N == 0 {
+            // Queue submissions have no transcript event yet. Serialize their
+            // session check with deletion so retention cannot leave orphaned KV
+            // state behind, and count a new instruction as session activity.
+            let mut sessions = txn.open_table(schema::SESSIONS)?;
+            let key = schema::session_key(session);
+            let mut meta: SessionMeta = match sessions.get(key.as_slice())? {
+                Some(value) => postcard::from_bytes(value.value())?,
+                None => return Err(StoreError::MissingSession(format_session_id(session))),
+            };
+            if !values.is_empty() {
+                meta.updated_at = now_unix();
+                let encoded = postcard::to_stdvec(&meta)?;
+                sessions.insert(key.as_slice(), encoded.as_slice())?;
+            }
+        }
         let mut sequences = [0; N];
         for (index, event) in batch.into_iter().enumerate() {
             let body_id = self.put_tx(&txn, event.body_kind, event.body)?;

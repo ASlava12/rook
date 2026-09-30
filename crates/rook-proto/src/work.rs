@@ -33,6 +33,33 @@ pub struct Steering {
     /// Set only when the agent takes the message into its context, not on receipt.
     pub applied_at: Option<u64>,
     pub session: Option<String>,
+    /// Optimistic revision for edits; accepted messages are immutable.
+    #[serde(default)]
+    pub revision: u64,
+    #[serde(default)]
+    pub withdrawn_at: Option<u64>,
+    /// Submission retries compare the original content even after an edit.
+    #[serde(default)]
+    pub submitted_hash: Option<String>,
+}
+
+impl Steering {
+    pub fn queued(&self) -> bool {
+        self.applied_at.is_none() && self.withdrawn_at.is_none()
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EditInstruction {
+    pub revision: u64,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WithdrawInstruction {
+    pub revision: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

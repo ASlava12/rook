@@ -101,6 +101,45 @@ Creation supports `--stance`, `--seconds`, `--tokens`, `--max-iterations` and
 steering/control commands remain for compatibility with existing runs; they
 are not the Tasks panel. Use `/goal` for immediate conversational work.
 
+## Steering receipts
+
+Messages sent while an ordinary daemon-owned turn is running are saved in its
+session queue. Saving does not start another turn or create a goal. If the turn
+stops before accepting them, they remain queued for an explicit continuation.
+Goal corrections keep their work-run queue, including while paused. Both queues
+use the same revision and withdrawal rules; only pending messages are mutable.
+A message is accepted at a safe model-request boundary, after tool results. The
+accepted text and its receipt commit together before the acknowledgement.
+
+| Operation | Ordinary session | Goal or standalone work |
+| --- | --- | --- |
+| Read receipts | `GET /api/sessions/{id}/instructions` | `GET /api/work/{id}` → `instructions` |
+| Submit | `POST /api/sessions/{id}/instructions` | `POST /api/work/{id}/steer` |
+| Edit | `PUT /api/sessions/{id}/instructions/{message}` | `PUT /api/work/{id}/instructions/{message}` |
+| Withdraw | `DELETE /api/sessions/{id}/instructions/{message}` | `DELETE /api/work/{id}/instructions/{message}` |
+
+Submit JSON is `{"id":"client-generated-id","text":"guidance"}`. Edit sends
+`{"revision":0,"text":"revised guidance"}`; withdrawal sends `{"revision":0}`.
+Read the current receipt before changing it. A successful mutation increments
+`revision`; a stale revision is rejected. Repeating that same successful edit or
+withdrawal confirms its receipt. Retrying an original submission with its ID
+returns its latest receipt even if edited, withdrawn or accepted, rather than
+queuing another message. A new correction needs a new ID.
+
+Receipts contain `applied_at` and `withdrawn_at`; both null means queued.
+Acceptance is immutable and cannot recall actions already performed. A queued
+`/goal new text` changes the goal only when accepted, so editing or withdrawing
+it before that point has the expected effect. Corrections submitted before
+promotion remain in the session queue and are consumed by the promoted session.
+New submissions during a goal use the work queue.
+
+`work.max_messages` bounds retained receipts per queue, including accepted and
+withdrawn ones needed to recognize retries. At the limit, use a new session or
+raise the setting. `work.max_message_bytes` limits each message before copying it
+into a receipt. Deleting or pruning an ordinary session removes its queue too.
+The HTTP controls are available now; an interactive queue editor and follow-up
+execution after a complete turn or goal are still being implemented.
+
 ## Keep the daemon available
 
 The machine must be awake with `rookd` running and model access available.

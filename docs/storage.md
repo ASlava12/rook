@@ -122,6 +122,14 @@ preserves dictionary generations; opening format 1 upgrades its marker under the
 store lock. Older binaries then refuse the store instead of overwriting a dictionary
 or failing to load retired generations. This upgrade does not recover lost data.
 
+Format 3 adds editable steering receipts and durable ordinary-session queues in
+JSON companion values; existing postcard records are unchanged. Older receipts
+default to revision zero and no withdrawal. Older binaries must refuse the new
+store because they would treat a withdrawn instruction as pending. Opening an
+older store advances its marker under the store lock; a format-2 binary cannot
+subsequently open it. Queue mutations and acceptance are immediate transactions;
+acceptance stores the transcript message and receipt together.
+
 Tool images use existing event types and leave the postcard format unchanged.
 A `Note` labelled `rook:tool-images:v1` holds bounded image JSON immediately before
 its `ToolResult`; both events are appended in one transaction, so concurrent

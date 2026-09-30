@@ -362,10 +362,23 @@ async fn serve(
                     match result {
                         Ok(run) => match crate::work::join_conversation(&state, &run).await {
                             Ok(live) => {
-                                if let Some(previous) = &promotion {
-                                    previous.interjections.say(&text);
-                                    let _ =
-                                        outbound.send(ChatEvent::Interjected { text: text.clone() }).await;
+                                if promotion.is_some() {
+                                    let receipt = managed::steer(
+                                        &*goal_engine.read().await,
+                                        &run.id,
+                                        Steer {
+                                            id: rook_store::format_session_id(rook_store::new_session_id()),
+                                            text: text.clone(),
+                                        },
+                                    );
+                                    match receipt {
+                                        Ok(_) => {
+                                            let _ = outbound
+                                                .send(ChatEvent::Interjected { text: text.clone() })
+                                                .await;
+                                        }
+                                        Err(error) => report_window(&outbound, error.to_string()).await,
+                                    }
                                 }
                                 let _ = outbound.send(live.settings.describe()).await;
                                 if !previously_watched
@@ -397,7 +410,18 @@ async fn serve(
                         report_window(&outbound, "Attachments cannot be added to a running turn; wait for it to finish or stop it first.".into()).await;
                         continue;
                     }
-                    live.interjections.say(&text);
+                    let receipt = rook_core::message_queue::submit(
+                        &*engine.read().await,
+                        id,
+                        Steer {
+                            id: rook_store::format_session_id(rook_store::new_session_id()),
+                            text: text.clone(),
+                        },
+                    );
+                    if let Err(error) = receipt {
+                        report_window(&outbound, error.to_string()).await;
+                        continue;
+                    }
                     let _ = outbound.send(ChatEvent::Interjected { text }).await;
                     // Steering the turn already on screen is not a rejoin:
                     // replacing its view erases local submission receipts.
@@ -613,7 +637,6 @@ async fn begin(
     let (from_turn, events) = mpsc::unbounded_channel::<ChatEvent>();
     let (approver, relay) = approver(from_turn.clone(), patience, input_limits);
     let (asker, ask_relay) = asker(from_turn.clone(), deciding, input_limits);
-    let interjections: Arc<rook_core::agent::Interjections> = Default::default();
 
     let (said, _) = tokio::sync::broadcast::channel::<u64>(BROADCAST);
     let replay_limits = engine.read().await.config.server.clone();
@@ -628,13 +651,7 @@ async fn begin(
     let counted = state.turn_started();
     let running_turn = turn(
         engine.clone(),
-        Connection {
-            approver: approver.clone(),
-            asker: asker.clone(),
-            settings: settings.clone(),
-            interjections: interjections.clone(),
-            options,
-        },
+        Connection { approver: approver.clone(), asker: asker.clone(), settings: settings.clone(), options },
         shared.clone(),
         from_turn,
         session,
@@ -652,16 +669,7 @@ async fn begin(
         }
     });
 
-    Arc::new(Live {
-        task,
-        helpers,
-        said,
-        backlog,
-        approver,
-        asker,
-        interjections,
-        settings: settings.clone(),
-    })
+    Arc::new(Live { task, helpers, said, backlog, approver, asker, settings: settings.clone() })
 }
 
 fn session_goal(rook: &rook_core::Rook, session: u128) -> Result<Option<Run>, String> {
@@ -748,7 +756,6 @@ pub struct Live {
     backlog: Arc<std::sync::Mutex<replay::Replay>>,
     approver: Arc<ChannelApprover>,
     asker: Arc<ChannelAsker>,
-    interjections: Arc<rook_core::agent::Interjections>,
     /// What this turn is actually running under.
     ///
     /// The connection that started it chose them, and once a turn outlived its
@@ -844,7 +851,6 @@ impl Live {
             backlog: Default::default(),
             approver,
             asker,
-            interjections: Default::default(),
             settings: Arc::new(Settings::for_test()),
         }
     }
@@ -916,7 +922,6 @@ struct Connection {
     approver: Arc<ChannelApprover>,
     asker: Arc<ChannelAsker>,
     settings: Arc<Settings>,
-    interjections: Arc<rook_core::agent::Interjections>,
 }
 
 async fn turn(
@@ -962,7 +967,6 @@ async fn turn(
     agent.effort = connection.settings.effort();
     agent.approver = connection.approver.clone();
     agent.ask_via(connection.asker.clone());
-    agent.interjections = connection.interjections.clone();
     agent.options = connection.options.clone();
     rook_core::agent::equip(&mut agent, shared.servers.clone(), &shared.mcp, shared.jobs.clone());
 
@@ -1058,7 +1062,6 @@ async fn goal_turn(
                 agent.effort = connection.settings.effort();
                 agent.approver = connection.approver.clone();
                 agent.ask_via(connection.asker.clone());
-                agent.interjections = connection.interjections.clone();
                 agent.options = connection.options.clone();
                 if run.iterations > 0 {
                     agent.options.attachments.clear();
@@ -1411,7 +1414,6 @@ mod tests {
             backlog: Default::default(),
             approver,
             asker,
-            interjections: Default::default(),
             settings: Arc::new(Settings::for_test()),
         }
     }
@@ -1823,7 +1825,6 @@ mod tests {
                 approver,
                 asker,
                 settings: Arc::new(Settings::for_test()),
-                interjections: Default::default(),
             },
             Default::default(),
             outbound,

@@ -93,7 +93,7 @@ tree; subsequent fixes belong there. The other capabilities retain their scope.
 ## Queue implementation
 
 CodeGraph located `Interjections` but resolved no caller edges; directed source
-reading established the two existing paths. Ordinary turns use an in-memory
+reading established the two original paths. Ordinary turns used an in-memory
 `Vec<String>`. Durable work had separately persisted a transcript message and its
 acceptance receipt, recognizing the receipt by parsing a prefix from message text.
 
@@ -112,19 +112,53 @@ with exit status 0 (529.3 seconds; `/tmp/rook-pi-queue-foundation-ci.log`).
 `cargo xtask compaction` also passed; 4.02 MiB on disk, 37.1x dictionary compression
 and 5.8x end-to-end match the existing README/storage measurements.
 
-This is a prerequisite, not completion of the editable queue. Still required:
-shared ordinary-turn/goal queue semantics, editable and revocable IDs, explicit
-steering/follow-up boundaries, core/CLI/API/TUI/browser controls, edit/accept
-races, bounded views and restart verification.
+The second queue block is integrated in the main checkout and passed the full
+gate. Session steering and durable-work steering share receipt transitions
+and a mutation lock: revision-checked edits and withdrawals, original-submission
+hashes, and idempotent retries after editing or withdrawal. Accepted messages are
+immutable. A queued `/goal` command now changes the goal only on acceptance.
 
-The next preparation is in `/tmp/rook-pi-message-queue`, branch `pi-message-queue`.
-Its staged files are the atomic-acceptance baseline; the unstaged diff adds
-revision-checked edit/withdraw operations and goal HTTP routes, original-submission
-fingerprints, withdrawn-state handling, and race/restart tests. Validation is
-still pending there, and ordinary sessions, follow-up execution and frontend
-controls are not implemented. The prepared store-format bump prevents older
-runners treating withdrawn instructions as queued; it is not in the atomic
-acceptance commit. Do not merge this worktree as a diff against its old HEAD.
+Daemon-owned ordinary turns persist corrections in a session companion value;
+queueing alone does not start a turn or create a goal. The agent consumes the
+latest text at request boundaries, and the transcript and acceptance receipt
+commit atomically. Session queue mutations validate the session in the same store
+transaction, preventing orphaned queue values after deletion. Session deletion
+also removes the queue. Existing `work.max_messages` and `max_message_bytes`
+limits cover the queues, with accepted/withdrawn receipts retained for retry
+recognition. Reaching the receipt cap requires a new session or a configured
+higher cap; receipts are not silently discarded.
+
+Both queues have HTTP read/submit/edit/withdraw paths, documented in
+`durable-work.md`. Ordinary daemon chat submissions from all existing frontends
+now use the durable queue. Promotion attaches an already constructed AgentLoop to
+its goal at safe boundaries, including pause. Corrections queued before promotion
+remain in the session queue; new ones use the goal queue. Goal completion checks
+also consider remaining pre-promotion corrections. The obsolete daemon-owned
+in-memory input field was removed; local/embedded `Interjections` still exists.
+
+Format 3 prevents old runners interpreting withdrawn instructions as pending.
+JSON defaults read older receipts without adding fields to postcard records.
+Focused checks passed for queue bounds, Unicode byte limits, race winners,
+revision conflicts, restart/retry, deletion cleanup, goal-command editing and
+both sets of HTTP routes. The first full gate found the unused old daemon field
+and stopped at Clippy; it was removed before the next gate. The subsequent full
+isolated CI passed with exit status 0 in 529.8 seconds
+(`/tmp/rook-pi-session-queue-final-ci.log`), including real daemon/TUI steering and
+goal lifecycle checks. The combined CI/compaction process exited 0. Compaction
+(`/tmp/rook-pi-session-queue-compaction.log`) retained the published measurements:
+4.02 MiB on disk, 37.1x dictionary compression, and 5.8x end-to-end. No check was
+waived. The failed first gate is `/tmp/rook-pi-session-queue-ci.log`.
+
+The queue capability remains in progress. Still required: interactive queue
+controls across CLI/TUI/browser, bounded views and draft restoration, explicit
+follow-up boundaries after a complete ordinary turn or whole goal, stable scope
+identity across successive goals, client-generated submission IDs on the live
+protocol, and their restart/compaction/delegation/acceptance tests.
+
+`/tmp/rook-pi-message-queue` retains its older staged baseline and preparation
+patch. Main is now authoritative; do not reapply that worktree or merge its diff
+against the old HEAD. Main additionally includes promotion/pause handling and
+removal of the obsolete daemon field, which are not in that preparation tree.
 
 ## Validation environment
 

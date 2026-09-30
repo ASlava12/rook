@@ -154,11 +154,11 @@
   },
   "work.max_messages": {
     "kind": "integer",
-    "help": "Maximum queued corrections for a durable run."
+    "help": "Maximum retained correction receipts per durable run or ordinary session, including accepted and withdrawn messages for retry safety."
   },
   "work.max_message_bytes": {
     "kind": "integer",
-    "help": "Maximum size of one correction in bytes."
+    "help": "Maximum size of one queued correction in bytes, in goals and ordinary sessions."
   },
   "work.max_goal_bytes": {
     "kind": "integer",

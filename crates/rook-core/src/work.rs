@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::evaluation::Report;
 
 pub mod managed;
+pub(crate) mod receipts;
 
 /// Where the agent keeps what it is going to do next.
 ///

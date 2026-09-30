@@ -8,12 +8,31 @@ use rook_store::EventKind;
 
 pub(super) enum Incoming {
     Live(String),
+    Session { id: String },
     Durable { run: String, id: String },
 }
 
 impl AgentLoop<'_> {
-    pub(super) fn incoming(&self) -> Result<Vec<Incoming>> {
+    pub(super) fn refresh_managed_work(&mut self) -> Result<()> {
+        // /goal can promote a turn after its AgentLoop has been constructed.
+        // Attach at every safe boundary so pause and steering apply to that
+        // already-running turn too, before the supervisor starts its next stage.
+        if self.managed_work.is_none() && self.depth == 0 {
+            self.managed_work = crate::work::managed::for_session(self.rook, self.session)?
+                .filter(|run| !run.status.terminal())
+                .map(|run| run.id);
+        }
+        Ok(())
+    }
+
+    pub(super) fn incoming(&mut self) -> Result<Vec<Incoming>> {
+        self.refresh_managed_work()?;
         let mut messages: Vec<_> = self.interjections.take().into_iter().map(Incoming::Live).collect();
+        messages.extend(
+            crate::message_queue::pending(self.rook, self.session)?
+                .into_iter()
+                .map(|id| Incoming::Session { id }),
+        );
         if let Some(run) = &self.managed_work {
             messages.extend(
                 crate::work::managed::pending(self.rook, run)?
@@ -34,6 +53,12 @@ impl AgentLoop<'_> {
             Incoming::Live(text) => {
                 self.rook.log(self.session, EventKind::UserMessage, "while running", text)?;
                 text.clone()
+            }
+            Incoming::Session { id } => {
+                let Some(text) = crate::message_queue::accept(self.rook, self.session, id)? else {
+                    return Ok(());
+                };
+                text
             }
             Incoming::Durable { run, id } => {
                 let Some(text) = crate::work::managed::accept(self.rook, run, self.session, id)? else {

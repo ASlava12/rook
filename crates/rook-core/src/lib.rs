@@ -38,6 +38,7 @@ pub mod mcp_connections;
 pub mod mcp_server;
 pub mod memory;
 pub mod mention;
+pub mod message_queue;
 pub mod model_catalog;
 pub mod models;
 mod output;

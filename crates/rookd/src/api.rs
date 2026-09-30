@@ -1662,6 +1662,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn instruction_routes_edit_and_withdraw_with_revisions_in_both_queue_scopes() {
+        let f = fixture();
+        let session = rook_store::format_session_id(f.session);
+        let (status, run) = post(&f, "/api/work", serde_json::json!({"goal":"inspect the project"})).await;
+        assert_eq!(status, StatusCode::OK, "{run}");
+        let work = format!("/api/work/{}", run["id"].as_str().unwrap());
+        for (submit, instructions, read, is_work) in [
+            (
+                format!("/api/sessions/{session}/instructions"),
+                format!("/api/sessions/{session}/instructions"),
+                format!("/api/sessions/{session}/instructions"),
+                false,
+            ),
+            (format!("{work}/steer"), format!("{work}/instructions"), work, true),
+        ] {
+            let original = serde_json::json!({"id":"one", "text":"original guidance"});
+            let (status, receipt) = post(&f, &submit, original.clone()).await;
+            assert_eq!(status, StatusCode::OK, "{receipt}");
+            assert_eq!(receipt["revision"], 0);
+            for (method, body, expected) in [
+                ("PUT", serde_json::json!({"revision":0,"text":"edited guidance"}), StatusCode::OK),
+                ("PUT", serde_json::json!({"revision":0,"text":"stale guidance"}), StatusCode::BAD_REQUEST),
+                ("DELETE", serde_json::json!({"revision":0}), StatusCode::BAD_REQUEST),
+                ("DELETE", serde_json::json!({"revision":1}), StatusCode::OK),
+                ("DELETE", serde_json::json!({"revision":1}), StatusCode::OK),
+                ("PUT", serde_json::json!({"revision":2,"text":"revive"}), StatusCode::BAD_REQUEST),
+            ] {
+                let response = f
+                    .router
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .header("host", "localhost")
+                            .method(method)
+                            .uri(format!("{instructions}/one"))
+                            .header("content-type", "application/json")
+                            .body(Body::from(body.to_string()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let status = response.status();
+                let bytes = axum::body::to_bytes(response.into_body(), 4 << 20).await.unwrap();
+                assert_eq!(status, expected, "{method} {body}: {}", String::from_utf8_lossy(&bytes));
+            }
+            let (status, receipt) = post(&f, &submit, original).await;
+            assert_eq!(status, StatusCode::OK, "{receipt}");
+            assert_eq!(receipt["revision"], 2);
+            assert_eq!(receipt["text"], "edited guidance");
+            assert!(receipt["withdrawn_at"].is_number());
+            let (status, saved) = get(&f, &read).await;
+            assert_eq!(status, StatusCode::OK);
+            let messages = if is_work { &saved["instructions"] } else { &saved };
+            assert_eq!(messages.as_array().unwrap().len(), 1);
+            assert_eq!(messages[0], receipt);
+        }
+    }
+
+    #[tokio::test]
     async fn health_names_the_api_version_a_client_must_match() {
         let f = fixture();
         let (status, body) = get(&f, "/api/health").await;
