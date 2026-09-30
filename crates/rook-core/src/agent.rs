@@ -356,6 +356,7 @@ pub enum Progress<'a> {
     /// end of.
     Heard {
         text: &'a str,
+        receipt: Option<&'a rook_proto::queue::Notice>,
     },
     /// The model has been asked and has not begun to answer.
     ///

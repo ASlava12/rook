@@ -241,6 +241,8 @@ pub enum ChatEvent {
     /// socket, and as a child working when it was not. It is a child working.
     Agent {
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        receipt: Option<queue::Notice>,
     },
     Tool {
         name: String,
@@ -297,6 +299,8 @@ pub enum ChatEvent {
     /// can show it landed rather than leaving the box looking ignored.
     Interjected {
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        receipt: Option<queue::Notice>,
     },
     Approval {
         id: String,

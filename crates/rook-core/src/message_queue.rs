@@ -36,6 +36,14 @@ fn update<T>(rook: &Rook, session: u128, change: impl FnOnce(&mut Vec<Steering>)
 }
 
 pub fn submit(rook: &Rook, session: u128, request: Steer) -> Result<Steering> {
+    submit_noticed(rook, session, request).map(|(receipt, _)| receipt)
+}
+
+pub fn submit_noticed(
+    rook: &Rook,
+    session: u128,
+    request: Steer,
+) -> Result<(Steering, rook_proto::queue::Notice)> {
     update(rook, session, |messages| {
         // Check under the same lock as goal admission. Existing receipt retries
         // still work after promotion, but new corrections belong to the goal.
@@ -46,7 +54,9 @@ pub fn submit(rook: &Rook, session: u128, request: Steer) -> Result<Steering> {
                 "this session has an active goal; submit the correction to its work queue".into(),
             ));
         }
-        receipts::submit(rook, messages, request, true)
+        let receipt = receipts::submit(rook, messages, request, true)?;
+        let notice = view::notice(session, None, &receipt);
+        Ok((receipt, notice))
     })
 }
 
@@ -62,7 +72,13 @@ pub(crate) fn pending(rook: &Rook, session: u128) -> Result<Vec<String>> {
     Ok(list(rook, session)?.into_iter().filter(Steering::queued).map(|m| m.id).collect())
 }
 
-pub(crate) fn accept(rook: &Rook, session: u128, id: &str) -> Result<Option<String>> {
+/// Text and identity from one successful acceptance, never a subsequent read.
+pub struct Accepted {
+    pub text: String,
+    pub receipt: rook_proto::queue::Notice,
+}
+
+pub(crate) fn accept(rook: &Rook, session: u128, id: &str) -> Result<Option<Accepted>> {
     let _lock = receipts::WRITING.lock().unwrap_or_else(|e| e.into_inner());
     if managed::for_session(rook, session)?
         .is_some_and(|run| !run.status.terminal() && !run.status.runnable())
@@ -80,13 +96,14 @@ pub(crate) fn accept(rook: &Rook, session: u128, id: &str) -> Result<Option<Stri
     message.applied_at = Some(managed::now());
     message.session = Some(rook_store::format_session_id(session));
     let text = message.text.clone();
+    let receipt = view::notice(session, None, message);
     let encoded = crate::persistence::encode(&messages)?;
     rook.store.append_events_with_values(
         session,
         [NewEvent::new(EventKind::UserMessage, Kind::Message, text.as_bytes()).label("while running")],
         &[(&key(session), &encoded)],
     )?;
-    Ok(Some(text))
+    Ok(Some(Accepted { text, receipt }))
 }
 
 #[cfg(test)]
@@ -124,7 +141,10 @@ mod tests {
         assert!(rook.goal(session).unwrap().is_none());
         assert_eq!(submit(&rook, session, request("one", "original")).unwrap().text, "new text");
         assert!(submit(&rook, session, request("two", "withdraw me")).unwrap().withdrawn_at.is_some());
-        assert_eq!(accept(&rook, session, &observed[0]).unwrap().as_deref(), Some("new text"));
+        assert_eq!(
+            accept(&rook, session, &observed[0]).unwrap().as_ref().map(|accepted| accepted.text.as_str()),
+            Some("new text")
+        );
         assert!(accept(&rook, session, "two").unwrap().is_none());
         assert!(
             !edit(&rook, session, "one", EditInstruction { revision: 0, text: "new text".into() })

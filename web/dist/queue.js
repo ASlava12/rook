@@ -11,7 +11,7 @@ export function takeRestored(session) {
   return text;
 }
 
-export function queuePanel(session, receiveDraft) {
+export function queuePanel(session, receiveDraft, receiveReceipt) {
   const root = el('section', { class: 'queue-controls', 'aria-label': 'Message queue' });
   if (!session) { root.append(el('p', {}, 'Start or open a session first.')); return root; }
   const base = `/api/sessions/${encodeURIComponent(session)}/queue`;
@@ -80,7 +80,8 @@ export function queuePanel(session, receiveDraft) {
         }
         busy(true);
         try {
-          await api(base, { action: 'edit', reference, revision: entry.receipt.revision, text: input.value });
+          const saved = await api(base, { action: 'edit', reference, revision: entry.receipt.revision, text: input.value });
+          receiveReceipt?.(session, saved);
           editing = false;
           detail.replaceChildren();
           notice.textContent = 'Message updated.';
@@ -102,6 +103,7 @@ export function queuePanel(session, receiveDraft) {
     busy(true);
     try {
       const result = await api(base, { action: 'withdraw', reference: entry.reference, revision: entry.receipt.revision });
+      receiveReceipt?.(session, result);
       if (toDraft) {
         restored.text = result.receipt.text;
         receiveDraft();

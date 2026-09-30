@@ -208,6 +208,7 @@ async fn serve(
                             Ok(_) => {
                                 let _ = outbound
                                     .send(ChatEvent::Agent {
+                                        receipt: None,
                                         text:
                                             "Pausing goal after the active operation; /continue resumes it."
                                                 .into(),
@@ -312,14 +313,14 @@ async fn serve(
                         .map(|live| live.settings.clone())
                         .unwrap_or_else(|| settings.clone());
                     let previously_watched = watching.as_ref().and_then(|w| w.live.upgrade());
-                    let mut interjected = false;
+                    let mut interjected = None;
                     let result = {
                         let rook = goal_engine.read().await;
                         if let Some(run) = existing {
                             (|| {
                                 if !rook_core::agent::carrying_on(&text) && text != rook_core::agent::CARRY_ON
                                 {
-                                    managed::steer(
+                                    let (_, notice) = managed::steer_noticed(
                                         &rook,
                                         &run.id,
                                         Steer {
@@ -327,7 +328,7 @@ async fn serve(
                                             text: text.clone(),
                                         },
                                     )?;
-                                    interjected = true;
+                                    interjected = Some(notice);
                                 }
                                 if !run.status.runnable() {
                                     managed::control(&rook, &run.id, Action::Resume)
@@ -356,14 +357,16 @@ async fn serve(
                             )
                         }
                     };
-                    if interjected {
-                        let _ = outbound.send(ChatEvent::Interjected { text: text.clone() }).await;
+                    if let Some(receipt) = interjected {
+                        let _ = outbound
+                            .send(ChatEvent::Interjected { receipt: Some(receipt), text: text.clone() })
+                            .await;
                     }
                     match result {
                         Ok(run) => match crate::work::join_conversation(&state, &run).await {
                             Ok(live) => {
                                 if promotion.is_some() {
-                                    let receipt = managed::steer(
+                                    let receipt = managed::steer_noticed(
                                         &*goal_engine.read().await,
                                         &run.id,
                                         Steer {
@@ -372,9 +375,12 @@ async fn serve(
                                         },
                                     );
                                     match receipt {
-                                        Ok(_) => {
+                                        Ok((_, receipt)) => {
                                             let _ = outbound
-                                                .send(ChatEvent::Interjected { text: text.clone() })
+                                                .send(ChatEvent::Interjected {
+                                                    receipt: Some(receipt),
+                                                    text: text.clone(),
+                                                })
                                                 .await;
                                         }
                                         Err(error) => report_window(&outbound, error.to_string()).await,
@@ -410,7 +416,7 @@ async fn serve(
                         report_window(&outbound, "Attachments cannot be added to a running turn; wait for it to finish or stop it first.".into()).await;
                         continue;
                     }
-                    let receipt = rook_core::message_queue::submit(
+                    let receipt = rook_core::message_queue::submit_noticed(
                         &*engine.read().await,
                         id,
                         Steer {
@@ -418,11 +424,14 @@ async fn serve(
                             text: text.clone(),
                         },
                     );
-                    if let Err(error) = receipt {
-                        report_window(&outbound, error.to_string()).await;
-                        continue;
-                    }
-                    let _ = outbound.send(ChatEvent::Interjected { text }).await;
+                    let (_, receipt) = match receipt {
+                        Ok(value) => value,
+                        Err(error) => {
+                            report_window(&outbound, error.to_string()).await;
+                            continue;
+                        }
+                    };
+                    let _ = outbound.send(ChatEvent::Interjected { receipt: Some(receipt), text }).await;
                     // Steering the turn already on screen is not a rejoin:
                     // replacing its view erases local submission receipts.
                     if !watching.as_ref().is_some_and(|w| w.live.ptr_eq(&Arc::downgrade(&live))) {
@@ -829,6 +838,20 @@ fn fan_out(
 const BROADCAST: usize = 4_096;
 
 impl Live {
+    pub(crate) fn queue_notice(&self, receipt: rook_proto::queue::Notice, text: String) {
+        if self.running() {
+            let status = match receipt.status {
+                rook_proto::queue::Status::Queued => "queued",
+                rook_proto::queue::Status::Accepted => "accepted",
+                rook_proto::queue::Status::Withdrawn => "withdrawn",
+            };
+            fan_out(
+                &self.backlog,
+                &self.said,
+                ChatEvent::Agent { text: format!("Message {status}: {text}"), receipt: Some(receipt) },
+            );
+        }
+    }
     pub(crate) fn needs_input(&self) -> bool {
         self.running() && (self.approver.is_waiting() || self.asker.is_waiting())
     }
@@ -1029,7 +1052,7 @@ async fn goal_turn(
         let rook = engine.read().await;
         equipment.get_or_init(|| Shared::for_project(&rook)).await
     };
-    let _ = outbound.send(ChatEvent::Agent { text: "Goal started in this session; continuing automatically between stages. Ctrl-C pauses; /continue resumes.".into() });
+    let _ = outbound.send(ChatEvent::Agent { receipt: None, text: "Goal started in this session; continuing automatically between stages. Ctrl-C pauses; /continue resumes.".into() });
     let mut announced_retry = None;
     loop {
         let rook = engine.read().await;
@@ -1043,6 +1066,7 @@ async fn goal_turn(
         if let Some(at) = run.next_attempt_at.filter(|at| *at > managed::now()) {
             if announced_retry != Some(at) {
                 let _ = outbound.send(ChatEvent::Agent {
+                    receipt: None,
                     text: format!("Goal saved; retry in {}s: {}", at - managed::now().min(at), run.reason),
                 });
                 announced_retry = Some(at);
@@ -1080,6 +1104,7 @@ async fn goal_turn(
             Ok(run) if !run.status.runnable() => return ended_goal(&rook, outbound, session, run),
             Ok(run) if run.status == Status::Queued => {
                 let _ = outbound.send(ChatEvent::Agent {
+                    receipt: None,
                     text: format!(
                         "Continuing goal in this session (stage {}).",
                         run.iterations.saturating_add(1)
@@ -1148,18 +1173,21 @@ fn as_event(progress: Progress<'_>, workspace: &std::path::Path) -> Option<ChatE
         // window itself, so the same work read as two different things
         // depending on which side of a socket somebody was watching from.
         Progress::Delegated { task, done, total } => {
-            ChatEvent::Agent { text: format!("  [{done}/{total}] {task}") }
+            ChatEvent::Agent { receipt: None, text: format!("  [{done}/{total}] {task}") }
         }
         // Counted from one, because the reader is a person and the first
         // sub-agent is the first, not the zeroth.
-        Progress::Delegating { at, doing } => {
-            ChatEvent::Agent { text: format!("    {}", rook_core::calls::delegating(at, doing)) }
-        }
+        Progress::Delegating { at, doing } => ChatEvent::Agent {
+            receipt: None,
+            text: format!("    {}", rook_core::calls::delegating(at, doing)),
+        },
         Progress::Working { call, said } => {
             ChatEvent::ToolWorking { name: call.to_string(), said: said.to_string() }
         }
         // What the person said while it ran, at the moment it is taken up.
-        Progress::Heard { text } => ChatEvent::Agent { text: format!("  ✓ taken up: {text}") },
+        Progress::Heard { text, receipt } => {
+            ChatEvent::Agent { receipt: receipt.cloned(), text: format!("  ✓ taken up: {text}") }
+        }
         Progress::ToolDone { name, failed } => ChatEvent::ToolDone { name: name.to_string(), failed },
         Progress::Step { at, of } => ChatEvent::Step { at, of },
         // A model that has been asked and has not begun to answer, said the
@@ -1870,6 +1898,31 @@ mod tests {
         assert!(serde_json::from_value::<ChatEvent>(value).is_ok());
     }
 
+    #[test]
+    fn acceptance_metadata_survives_the_wire_without_turning_text_into_authority() {
+        let receipt = rook_proto::queue::Notice {
+            session: "session".into(),
+            reference: "goal.generation.message".into(),
+            revision: 7,
+            status: rook_proto::queue::Status::Accepted,
+        };
+        let event = as_event(
+            Progress::Heard { text: "edited text", receipt: Some(&receipt) },
+            std::path::Path::new("."),
+        );
+        let json = serde_json::to_value(event.unwrap()).unwrap();
+        assert_eq!(json["type"], "agent", "legacy clients still understand the event kind");
+        let ChatEvent::Agent { text, receipt: Some(actual) } = serde_json::from_value(json).unwrap() else {
+            panic!("missing identity")
+        };
+        assert_eq!(actual, receipt);
+        assert!(text.contains("edited text"));
+        let legacy: ChatEvent =
+            serde_json::from_value(serde_json::json!({"type":"agent","text":"[work instruction message]"}))
+                .unwrap();
+        assert!(matches!(legacy, ChatEvent::Agent { receipt: None, .. }));
+    }
+
     /// A sub-agent working is told apart from the model thinking.
     ///
     /// A turn run in the window itself said `Agent` and a turn run through the
@@ -1881,7 +1934,7 @@ mod tests {
     async fn a_sub_agent_working_is_not_reported_as_the_model_thinking() {
         let here = std::path::Path::new("/tmp");
         let working = as_event(rook_core::agent::Progress::Delegating { at: 0, doing: "run pwd" }, here);
-        let Some(ChatEvent::Agent { text }) = working else {
+        let Some(ChatEvent::Agent { text, .. }) = working else {
             panic!("a sub-agent's step came back as {working:?}");
         };
         assert!(text.contains("run pwd"), "and it says what the sub-agent is doing: {text:?}");
@@ -1889,7 +1942,10 @@ mod tests {
 
         let counted =
             as_event(rook_core::agent::Progress::Delegated { task: "audit", done: 2, total: 3 }, here);
-        assert!(matches!(counted, Some(ChatEvent::Agent { .. })), "and so is the count of them: {counted:?}");
+        assert!(
+            matches!(counted, Some(ChatEvent::Agent { receipt: None, .. })),
+            "and so is the count of them: {counted:?}"
+        );
 
         // The model's own thinking stays what it is.
         let thought = rook_llm::Delta::Reasoning("let me see".into());

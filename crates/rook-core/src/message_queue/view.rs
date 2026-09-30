@@ -23,6 +23,12 @@ fn reference(run: Option<&Run>, message: &Steering) -> String {
     }
 }
 
+/// Build while holding the receipt mutation lock, so a replacement goal cannot
+/// lend its generation to a receipt accepted by the previous goal.
+pub(crate) fn notice(session: u128, run: Option<&Run>, message: &Steering) -> rook_proto::queue::Notice {
+    rook_proto::queue::Notice::new(rook_store::format_session_id(session), reference(run, message), message)
+}
+
 fn entry(reference: String, message: &Steering, limit: usize) -> Entry {
     let end = crate::context::at_boundary(&message.text, limit.min(message.text.len()));
     Entry {

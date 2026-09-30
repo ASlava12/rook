@@ -89,10 +89,20 @@ async fn queue_change(
     Path(id): Path<String>,
     Json(change): Json<rook_proto::queue::Change>,
 ) -> Result<Json<rook_proto::queue::Entry>, Failure> {
-    Ok(Json(
-        rook_core::message_queue::view::change(&*state.rook.read().await, session_id(&id)?, change)
-            .map_err(failure)?,
-    ))
+    let session = session_id(&id)?;
+    let entry = rook_core::message_queue::view::change(&*state.rook.read().await, session, change)
+        .map_err(failure)?;
+    if let Some(live) = state.live.read().await.get(&session).cloned() {
+        live.queue_notice(
+            rook_proto::queue::Notice::new(
+                rook_store::format_session_id(session),
+                entry.reference.clone(),
+                &entry.receipt,
+            ),
+            entry.receipt.text.clone(),
+        );
+    }
+    Ok(Json(entry))
 }
 
 async fn session_instructions(

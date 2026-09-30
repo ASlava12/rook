@@ -473,7 +473,7 @@ async fn prompt(
                 // What the person said while it ran, at the moment it is taken
                 // up. Until now a message typed mid-turn was queued with no end
                 // to the wait in sight.
-                Progress::Heard { text } => protocol::agent_thought_chunk(
+                Progress::Heard { text, .. } => protocol::agent_thought_chunk(
                     &session_id,
                     &format!(
                         "  ✓ taken up: {text}

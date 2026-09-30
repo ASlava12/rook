@@ -49,25 +49,25 @@ impl AgentLoop<'_> {
         messages: &mut Vec<rook_llm::Message>,
         progress: &mut impl FnMut(Progress<'_>),
     ) -> Result<()> {
-        let text = match incoming {
+        let (text, receipt) = match incoming {
             Incoming::Live(text) => {
                 self.rook.log(self.session, EventKind::UserMessage, "while running", text)?;
-                text.clone()
+                (text.clone(), None)
             }
             Incoming::Session { id } => {
-                let Some(text) = crate::message_queue::accept(self.rook, self.session, id)? else {
+                let Some(accepted) = crate::message_queue::accept(self.rook, self.session, id)? else {
                     return Ok(());
                 };
-                text
+                (accepted.text, Some(accepted.receipt))
             }
             Incoming::Durable { run, id } => {
-                let Some(text) = crate::work::managed::accept(self.rook, run, self.session, id)? else {
+                let Some(accepted) = crate::work::managed::accept(self.rook, run, self.session, id)? else {
                     return Ok(());
                 };
-                text
+                (accepted.text, Some(accepted.receipt))
             }
         };
-        progress(Progress::Heard { text: &text });
+        progress(Progress::Heard { text: &text, receipt: receipt.as_ref() });
         messages.push(rook_llm::Message::user(text));
         Ok(())
     }

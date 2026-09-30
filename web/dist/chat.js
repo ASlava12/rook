@@ -33,6 +33,30 @@ function say(kind, text) {
   return block(kind, text);
 }
 
+// Receipt metadata is kept on bounded scrollback nodes, not in a second history.
+function receiptNotice(receipt, text) {
+  if (receipt.session !== state.chat.session) return;
+  const out = chatOut();
+  if (!out) return;
+  let row = [...out.querySelectorAll('[data-receipt]')].find(node => node.dataset.receipt === receipt.reference);
+  if (row) {
+    const revision = BigInt(row.dataset.revision);
+    const incoming = BigInt(receipt.revision);
+    if (incoming < revision || (incoming === revision && row.dataset.status !== 'queued')) return;
+  } else row = say('stat', '');
+  row.dataset.receipt = receipt.reference;
+  row.dataset.revision = String(receipt.revision);
+  row.dataset.status = receipt.status;
+  row.textContent = `[${receipt.reference} · r${receipt.revision} · ${receipt.status}] ${text}`;
+  current = null;
+}
+
+function receiveQueueReceipt(session, entry) {
+  const r = entry.receipt;
+  receiptNotice({ session, reference: entry.reference, revision: r.revision,
+    status: r.applied_at !== null ? 'accepted' : r.withdrawn_at !== null ? 'withdrawn' : 'queued' }, r.text);
+}
+
 function saidByModel(text) {
   if (!current || !current.isConnected) {
     current = block('md', '');
@@ -146,7 +170,7 @@ export function connect() {
       case 'text': saidByModel(e.text); break;
       case 'reasoning': say('think', e.text); break;
       // A sub-agent working, which is not the model thinking.
-      case 'agent': say('agent', e.text); break;
+      case 'agent': if (e.receipt) receiptNotice(e.receipt, e.text); else say('agent', e.text); break;
       // `doing` says which file, which command; a daemon older than the
       // field sends nothing and the name is what it always said.
       case 'tool': callStatus = null; say('tool', `· ${e.doing || e.name}`); break;
@@ -171,7 +195,10 @@ export function connect() {
       case 'failed': say('err', e.message); done(); break;
       case 'error': say('err', e.message); break;
       case 'cancelled': say('stat', '[stopped]'); done(); break;
-      case 'interjected': say('you', `› ${e.text}`); say('stat', '(the turn will see this at its next step)'); break;
+      case 'interjected':
+        if (e.receipt) receiptNotice(e.receipt, e.text);
+        else { say('you', `› ${e.text}`); say('stat', '(the turn will see this at its next step)'); }
+        break;
       case 'approval': askApproval(e); break;
       case 'ask': askUser(e); break;
       // Which step of the budget it is on, where the button already says it
@@ -380,7 +407,7 @@ function renderPicker() {
   if (queue && queue.dataset.session !== (state.chat.session || '')) {
     queue.dataset.session = state.chat.session || '';
     queue.querySelector('section')?.remove();
-    if (queue.open) queue.append(queuePanel(state.chat.session, receiveQueueDraft));
+    if (queue.open) queue.append(queuePanel(state.chat.session, receiveQueueDraft, receiveQueueReceipt));
   }
   const mcp = $('#mcp-controls');
   if (mcp && mcp.dataset.session !== (state.chat.session || '')) {
@@ -615,7 +642,7 @@ export async function renderChat() {
   const queue = el('details', { id: 'queue-controls' }, el('summary', {}, 'Message queue'));
   queue.addEventListener('toggle', () => {
     queue.querySelector('section')?.remove();
-    if (queue.open) queue.append(queuePanel(state.chat.session, receiveQueueDraft));
+    if (queue.open) queue.append(queuePanel(state.chat.session, receiveQueueDraft, receiveQueueReceipt));
   });
   $('#view').replaceChildren(el('div', { class: 'card' },
     el('div', { class: 'row', id: 'picker' }),

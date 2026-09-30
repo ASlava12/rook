@@ -231,6 +231,10 @@ pub fn start(rook: &Rook, request: Start) -> Result<Run> {
 }
 
 pub fn steer(rook: &Rook, id: &str, request: Steer) -> Result<Steering> {
+    steer_noticed(rook, id, request).map(|(receipt, _)| receipt)
+}
+
+pub fn steer_noticed(rook: &Rook, id: &str, request: Steer) -> Result<(Steering, rook_proto::queue::Notice)> {
     update(rook, id, |saved| {
         let receipt = super::receipts::submit(
             rook,
@@ -239,7 +243,9 @@ pub fn steer(rook: &Rook, id: &str, request: Steer) -> Result<Steering> {
             !saved.run.status.terminal(),
         )?;
         saved.idle = 0;
-        Ok(receipt)
+        let session = rook_store::parse_session_id(&saved.run.id).ok_or_else(|| bad("invalid run id"))?;
+        let notice = crate::message_queue::view::notice(session, Some(&saved.run), &receipt);
+        Ok((receipt, notice))
     })
 }
 
@@ -314,18 +320,24 @@ pub fn pending(rook: &Rook, id: &str) -> Result<Vec<String>> {
 
 /// Accept exactly once and publish the transcript, goal and receipt in one
 /// durable transaction. Callers only put the returned text into model context.
-pub fn accept(rook: &Rook, run: &str, session: u128, id: &str) -> Result<Option<String>> {
+pub fn accept(
+    rook: &Rook,
+    run: &str,
+    session: u128,
+    id: &str,
+) -> Result<Option<crate::message_queue::Accepted>> {
     let _lock = WRITING.lock().unwrap_or_else(|e| e.into_inner());
     let mut saved = read(rook, run)?;
     if !saved.run.status.runnable() {
         return Ok(None);
     }
-    let message = saved
+    let index = saved
         .run
         .instructions
-        .iter_mut()
-        .find(|m| m.id == id)
+        .iter()
+        .position(|m| m.id == id)
         .ok_or_else(|| bad("unknown instruction receipt"))?;
+    let message = &mut saved.run.instructions[index];
     if !message.queued() {
         return Ok(None);
     }
@@ -337,6 +349,8 @@ pub fn accept(rook: &Rook, run: &str, session: u128, id: &str) -> Result<Option<
     }
     message.applied_at = Some(now());
     message.session = Some(rook_store::format_session_id(session));
+    let receipt =
+        crate::message_queue::view::notice(session, Some(&saved.run), &saved.run.instructions[index]);
     saved.run.updated_at = now();
     let current = goal(&saved.run);
     let encoded = crate::persistence::encode(&saved)?;
@@ -351,7 +365,7 @@ pub fn accept(rook: &Rook, run: &str, session: u128, id: &str) -> Result<Option<
         ],
         &[(&record, &encoded), (&goal_key, current.as_bytes())],
     )?;
-    Ok(Some(text))
+    Ok(Some(crate::message_queue::Accepted { text, receipt }))
 }
 
 pub fn should_stop(rook: &Rook, id: &str) -> Result<bool> {

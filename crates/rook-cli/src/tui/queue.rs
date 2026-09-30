@@ -34,6 +34,7 @@ pub(super) struct Queue {
     input: Typing,
     note: String,
     restored: Option<(u128, String)>,
+    notice: Option<(rook_proto::queue::Notice, String)>,
     send: Option<SyncSender<(u128, Command)>>,
     receive: Receiver<(u128, Result<Update>)>,
 }
@@ -66,6 +67,7 @@ impl Queue {
             input: Typing::default(),
             note,
             restored: None,
+            notice: None,
             send,
             receive,
         }
@@ -109,6 +111,10 @@ impl Queue {
         self.ask(Command::Page(Query { after, include_finished: self.all }));
     }
 
+    pub(super) fn take_notice(&mut self) -> Option<(rook_proto::queue::Notice, String)> {
+        self.notice.take()
+    }
+
     pub(super) fn poll(&mut self, current: Option<u128>) -> Option<String> {
         while let Ok((session, result)) = self.receive.try_recv() {
             self.pending = false;
@@ -136,6 +142,14 @@ impl Queue {
                 }
                 Ok(Update::Changed(entry, restore)) => {
                     self.editing = false;
+                    self.notice = Some((
+                        rook_proto::queue::Notice::new(
+                            rook_store::format_session_id(session),
+                            entry.reference.clone(),
+                            &entry.receipt,
+                        ),
+                        entry.receipt.text.clone(),
+                    ));
                     if restore {
                         self.restored = Some((session, entry.receipt.text));
                     }

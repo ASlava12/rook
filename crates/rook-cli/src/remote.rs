@@ -247,6 +247,17 @@ impl Watching {
                 };
                 let _ = to_daemon.send(ClientMessage::Approval { id, decision });
             }
+            ChatEvent::Agent { text, receipt: Some(receipt) }
+            | ChatEvent::Interjected { text, receipt: Some(receipt) } => {
+                if !self.json {
+                    let _ = writeln!(
+                        out,
+                        "\n[{} · r{} · {:?}] {text}",
+                        receipt.reference, receipt.revision, receipt.status
+                    );
+                    let _ = out.flush();
+                }
+            }
             ChatEvent::Error { message } => {
                 eprintln!("{message}");
             }

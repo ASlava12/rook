@@ -364,7 +364,7 @@ enum TurnEvent {
     /// nothing more, so the person was left watching a queue with no visible
     /// end: a request already sent cannot be added to, and how long that step
     /// has left is not something this side knows. This is the end of that wait.
-    Heard(String),
+    Heard(String, Option<rook_proto::queue::Notice>),
     /// A sub-agent's progress. Its own kind rather than more reasoning: work
     /// happening in another agent is not the model thinking out loud, and it
     /// was drawn in the same grey as the thoughts it was buried in.
@@ -702,6 +702,9 @@ struct Chat {
     /// offering an alternative to.
     draft: String,
     log: Vec<(&'static str, String)>,
+    /// Metadata lives exactly as long as its scrollback row, never in an
+    /// independent growing receipt history.
+    receipt_lines: std::collections::BTreeMap<usize, rook_proto::queue::Notice>,
     /// Calls announced and not yet finished. A message announces several
     /// before any of them runs, so this is what pairs a finish with its line —
     /// core's, because the chat REPL and `rook run` ask the same question and
@@ -1031,18 +1034,55 @@ impl Chat {
             })
     }
 
-    /// Mark the oldest line still waiting as taken up.
-    ///
-    /// Oldest first, because the turn takes them in the order they were said,
-    /// so the ticks land on the same lines the queue emptied.
-    fn taken_up(&mut self, _text: &str) {
-        let waiting = self
-            .log
-            .iter_mut()
-            .find(|(kind, body)| *kind == "stat" && (body == Self::QUEUED || body == Self::RAN));
-        if let Some((_, body)) = waiting {
-            *body = Self::TAKEN.to_string();
+    fn taken_up(&mut self, text: &str, receipt: Option<rook_proto::queue::Notice>) {
+        if let Some(receipt) = receipt {
+            self.receipt_notice(receipt, &format!("✓ taken up: {text}"));
+            return;
         }
+        // In-memory local input has no receipt and cannot be edited. Match its
+        // actual text; an unrelated acknowledgement must not tick the oldest row.
+        let mut submitted = None;
+        for (kind, body) in &mut self.log {
+            if *kind == "you" {
+                submitted = Some(body.as_str() == text);
+            } else if *kind == "stat"
+                && (body == Self::QUEUED || body == Self::RAN)
+                && submitted == Some(true)
+            {
+                *body = Self::TAKEN.to_string();
+                break;
+            }
+        }
+    }
+
+    fn receipt_notice(&mut self, receipt: rook_proto::queue::Notice, text: &str) {
+        if self.session.map(rook_store::format_session_id).as_deref() != Some(&receipt.session) {
+            return;
+        }
+        let previous = self.receipt_lines.iter().find(|(_, old)| old.reference == receipt.reference);
+        let line = if let Some((&line, old)) = previous {
+            if receipt.revision < old.revision
+                || (receipt.revision == old.revision && old.status != rook_proto::queue::Status::Queued)
+            {
+                return;
+            }
+            line
+        } else {
+            self.log.len()
+        };
+        let status = match receipt.status {
+            rook_proto::queue::Status::Queued => "queued",
+            rook_proto::queue::Status::Accepted => "accepted",
+            rook_proto::queue::Status::Withdrawn => "withdrawn",
+        };
+        let body = format!("  [{} · r{} · {status}] {text}", receipt.reference, receipt.revision);
+        if line < self.log.len() {
+            self.log[line] = ("stat", body);
+        } else {
+            self.log.push(("stat", body));
+        }
+        self.receipt_lines.insert(line, receipt);
+        self.trim();
     }
 
     fn push(&mut self, kind: &'static str, text: &str) {
@@ -1171,6 +1211,10 @@ impl Chat {
         let mut total: usize = self.log.iter().map(|(_, body)| body.len()).sum();
         while total > MAX_SCROLLBACK && self.log.len() > 1 {
             total -= self.log.remove(0).1.len();
+            self.receipt_lines = std::mem::take(&mut self.receipt_lines)
+                .into_iter()
+                .filter_map(|(line, notice)| line.checked_sub(1).map(|line| (line, notice)))
+                .collect();
         }
     }
 }
@@ -1638,6 +1682,9 @@ impl App {
                 }
                 self.chat.push("stat", "Message withdrawn and appended to draft; it has not been sent.");
             }
+            if let Some((receipt, text)) = self.queue.take_notice() {
+                self.chat.receipt_notice(receipt, &text);
+            }
             if let Some(quote) = self.history.take_quote()
                 && self.overlay == Some(Overlay::History)
             {
@@ -1817,7 +1864,7 @@ impl App {
                 TurnEvent::Waiting(secs) => {
                     self.chat.waiting_for = Some(std::time::Duration::from_secs(secs))
                 }
-                TurnEvent::Heard(text) => self.chat.taken_up(&text),
+                TurnEvent::Heard(text, receipt) => self.chat.taken_up(&text, receipt),
                 TurnEvent::Step(at, of) => self.chat.step = Some((at, of)),
                 TurnEvent::ToolDone(name, failed) => self.chat.tool_done(&name, failed),
                 TurnEvent::Context { used, size } => {
@@ -1890,6 +1937,7 @@ impl App {
             ChatEvent::Snapshot { session, running, truncated, approvals, questions } => {
                 self.chat.session = rook_store::parse_session_id(&session);
                 self.chat.log.clear();
+                self.chat.receipt_lines.clear();
                 self.chat.running_calls = Default::default();
                 self.chat.scroll = 0;
                 self.chat.drawn = 0;
@@ -1949,7 +1997,10 @@ impl App {
             ChatEvent::Reasoning { text } => self.chat.push("think", &text),
             // The same kind a turn run here uses, so a sub-agent's work reads
             // the same whichever side of the socket it happens on.
-            ChatEvent::Agent { text } => self.chat.push("agent", &text),
+            ChatEvent::Agent { text, receipt } => match receipt {
+                Some(receipt) => self.chat.receipt_notice(receipt, &text),
+                None => self.chat.push("agent", &text),
+            },
             ChatEvent::Tool { name, doing } => {
                 let said = from_daemon(&name, &doing);
                 self.chat.tool_started(&name, &said)
@@ -1971,7 +2022,10 @@ impl App {
             ChatEvent::Spent { input_tokens, output_tokens, cached_tokens } => {
                 self.chat.spent = Some((input_tokens, output_tokens, cached_tokens))
             }
-            ChatEvent::Interjected { text } => self.chat.push("stat", &format!("  ↩ {text}")),
+            ChatEvent::Interjected { text, receipt } => match receipt {
+                Some(receipt) => self.chat.receipt_notice(receipt, &format!("↩ {text}")),
+                None => self.chat.push("stat", &format!("  ↩ {text}")),
+            },
             ChatEvent::Approval { id, tool, action, preview, kind } => {
                 if self.chat.pending.is_some() {
                     return;
@@ -2706,6 +2760,7 @@ impl App {
             self.chat.pending = None;
             self.chat.asking = None;
             self.chat.log.clear();
+            self.chat.receipt_lines.clear();
             self.chat.spent = None;
             self.chat.running_calls = Default::default();
             self.chat.push("stat", "New conversation. Other sessions keep working.");
@@ -2883,6 +2938,7 @@ impl App {
     fn recall_conversation(&mut self, session: u128) {
         const RECALLED: usize = 60;
         self.chat.log.clear();
+        self.chat.receipt_lines.clear();
         self.chat.scroll = 0;
         let events = self
             .sessions
@@ -3067,7 +3123,14 @@ impl App {
                 None => Chat::QUEUED,
             };
             match self.chat.interject(&prompt, self.source.here().is_some(), &self.shared.interjections) {
-                Ok(()) => self.chat.push("stat", queued),
+                Ok(()) => self.chat.push(
+                    "stat",
+                    if self.source.here().is_some() {
+                        queued
+                    } else {
+                        "  sent to daemon · /queue shows its current receipt"
+                    },
+                ),
                 Err(error) => {
                     self.chat.push("err", &error.to_string());
                     self.chat.input.set(&prompt);
@@ -3193,7 +3256,9 @@ impl App {
                         // This is that number, from the turn that will enforce
                         // it.
                         Progress::Waiting { patience, .. } => TurnEvent::Waiting(patience),
-                        Progress::Heard { text } => TurnEvent::Heard(text.to_string()),
+                        Progress::Heard { text, receipt } => {
+                            TurnEvent::Heard(text.to_string(), receipt.cloned())
+                        }
                         Progress::Step { at, of } => TurnEvent::Step(at, of),
                         Progress::ToolDone { name, failed } => TurnEvent::ToolDone(name.to_string(), failed),
                         Progress::Delta(Delta::Effort(report)) => TurnEvent::Effort(report.describe()),
@@ -4976,6 +5041,63 @@ mod tests {
         assert_eq!(pending.take(), ["local turn"]);
     }
 
+    #[test]
+    fn receipt_updates_follow_identity_revision_and_session_instead_of_submission_order() {
+        use rook_proto::queue::{Notice, Status};
+        let mut chat = super::Chat { session: Some(42), ..Default::default() };
+        let notice = |reference: &str, revision, status| Notice {
+            session: rook_store::format_session_id(42),
+            reference: reference.into(),
+            revision,
+            status,
+        };
+        chat.push("you", "withdraw this first");
+        chat.push("stat", super::Chat::QUEUED);
+        chat.push("you", "accept the second");
+        chat.push("stat", super::Chat::QUEUED);
+        chat.receipt_notice(notice("session.first", 0, Status::Queued), "original first");
+        chat.receipt_notice(notice("session.second", 0, Status::Queued), "original second");
+        chat.receipt_notice(notice("session.first", 1, Status::Withdrawn), "withdraw this first");
+        chat.taken_up("edited second", Some(notice("session.second", 1, Status::Accepted)));
+        let accepted = chat.log.clone();
+        chat.receipt_notice(notice("session.second", 1, Status::Queued), "late edit acknowledgement");
+        chat.receipt_notice(notice("session.first", 0, Status::Queued), "late submission");
+        let mut other = notice("session.second", 2, Status::Accepted);
+        other.session = rook_store::format_session_id(43);
+        chat.receipt_notice(other, "another conversation");
+        assert_eq!(chat.log, accepted, "late or cross-session events cannot change current receipts");
+        assert!(chat.log[4].1.contains("withdrawn"));
+        assert!(chat.log[5].1.contains("edited second"));
+        assert_eq!(chat.log[1].1, super::Chat::QUEUED, "receipt events never tick an unrelated local row");
+        chat.taken_up("never submitted here", None);
+        assert_eq!(chat.log, accepted, "unidentified text is not FIFO authority either");
+    }
+
+    #[test]
+    fn receipt_metadata_is_evicted_with_its_bounded_scrollback_row() {
+        use rook_proto::queue::{Notice, Status};
+        let mut chat = super::Chat { session: Some(42), ..Default::default() };
+        let text = "x".repeat(super::MAX_SCROLLBACK / 3);
+        assert!(text.len() * 6 > super::MAX_SCROLLBACK, "the setup exceeds the cap");
+        for n in 0..6 {
+            chat.receipt_notice(
+                Notice {
+                    session: rook_store::format_session_id(42),
+                    reference: format!("session.{n}"),
+                    revision: 0,
+                    status: Status::Accepted,
+                },
+                &text,
+            );
+        }
+        assert!(chat.log.len() < 6, "rows must actually be evicted");
+        assert_eq!(chat.receipt_lines.len(), chat.log.len());
+        assert!(!chat.receipt_lines.values().any(|r| r.reference == "session.0"));
+        for (index, notice) in &chat.receipt_lines {
+            assert!(chat.log[*index].1.contains(&notice.reference));
+        }
+    }
+
     /// A line typed while a turn runs is marked when the turn takes it up.
     ///
     /// The window promised "the turn will see this at its next step" and then
@@ -4992,18 +5114,18 @@ mod tests {
 
         // Oldest first, because the turn takes them in the order they were
         // said, so the ticks land on the lines the queue emptied.
-        chat.taken_up("/goal ship the prototype");
+        chat.taken_up("/goal ship the prototype", None);
         let marks: Vec<&str> =
             chat.log.iter().filter(|(k, _)| *k == "stat").map(|(_, b)| b.as_str()).collect();
         assert_eq!(marks, vec![super::Chat::TAKEN, super::Chat::QUEUED], "the first one only");
 
-        chat.taken_up("and hurry");
+        chat.taken_up("and hurry", None);
         let marks: Vec<&str> =
             chat.log.iter().filter(|(k, _)| *k == "stat").map(|(_, b)| b.as_str()).collect();
         assert_eq!(marks, vec![super::Chat::TAKEN, super::Chat::TAKEN], "and then the second");
 
         // Nothing left waiting, and nothing else is disturbed.
-        chat.taken_up("a third nobody queued");
+        chat.taken_up("a third nobody queued", None);
         assert_eq!(chat.log.iter().filter(|(k, _)| *k == "you").count(), 2, "the messages are untouched");
     }
 

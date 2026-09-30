@@ -185,15 +185,77 @@ end-to-end (`/tmp/rook-pi-queue-controls-compaction.log`). A CSS selector correc
 during the test phase was additionally exercised by the real-daemon browser
 check; Rust sources were unchanged during the gate.
 
+The fourth block carries receipt identity, revision and state through live
+notifications. Acceptance returns both text and metadata from the same committed
+mutation, including the goal generation; it never rereads a newer goal to label
+an older acknowledgement. Optional metadata on the existing `agent` and
+`interjected` events keeps the wire event kinds readable by older clients.
+CLI output reports identity; TUI and browser update the matching receipt row.
+Queued events cannot overwrite a terminal status at the same revision, older
+revisions cannot overwrite newer ones, and events from another session are
+ignored. Metadata is evicted with bounded scrollback rather than accumulated in
+an independent receipt history. Local unidentified input now matches the actual
+submitted text, rather than ticking the oldest provisional marker.
+
+The combined queue mutation endpoint publishes edits/withdrawals to attached
+running views. Local TUI and browser controls also apply their mutation responses
+directly, including when no turn runs. The legacy scope-specific HTTP mutation
+endpoints still require refreshing the queue; live prompt IDs are still assigned
+by the daemon. This block does not claim idempotent live submission or complete
+local/embedded parity.
+
+Focused core and TUI identity/bound tests passed. Chrome scenarios passed for
+identity, revision ordering, terminal-state precedence, session isolation and
+actual scrollback eviction, as well as the previous queue controls. The real
+scratch daemon/browser check passed including the withdrawn receipt mark.
+Logs: `/tmp/rook-pi-receipt-core.log`, `/tmp/rook-pi-receipt-tui.log`,
+`/tmp/rook-pi-receipt-browser-identities.log` and
+`/tmp/rook-pi-receipt-browser-live.log`. The real PTY scenario edits and withdraws
+messages while a tool waits, observes HTTP changes in the TUI, then checks the
+next actual request and accepted mark; it passed locally and through the daemon
+(`/tmp/rook-pi-receipt-pty-held.log`). Its first failures identified a missing TLS
+initialization in the new test client, and a mock repeatedly returning tools so
+fast that the acknowledgement scrolled away before inspection. Initializing the
+client and holding the second tool at an explicit release boundary fixed the
+test setup. No production timeout was raised.
+
+The fourth block's full isolated CI passed in 543.2 seconds, including the full
+TUI suite, goal lifecycle and doctests (`/tmp/rook-pi-receipt-ci.log`). The combined
+CI/compaction process exited 0. Compaction retained the published measurements:
+4.02 MiB on disk, 37.1x dictionary compression and 5.8x end-to-end
+(`/tmp/rook-pi-receipt-compaction.log`). CodeGraph's fresh structural query stayed
+CPU-active without returning a slice for over seven minutes; that diagnostic
+process was stopped, and directed source reads supplied the call-path evidence.
+
 The queue capability remains in progress. Still required: explicit follow-up
 boundaries after a complete ordinary turn or whole goal, client-generated live
-submission IDs, identity-based acceptance/withdrawal notifications, local embedded
-input parity, and restart/compaction/delegation/acceptance tests for those paths.
-The TUI's read-only message detail still needs scrolling; its editor already has
-a cursor viewport. Existing provisional chat markers still acknowledge the oldest
-local message without receipt identity, which must be corrected before calling
-the live queue complete. Generation-qualified view references solve stale queue
-edits but do not yet establish the live submission lifecycle across goals.
+submission IDs with goal-generation-aware admission/retry, local embedded input
+parity, and restart/compaction/delegation/acceptance tests for those paths. The
+TUI's read-only message detail still needs scrolling; its editor already has a
+cursor viewport. Generation-qualified references and notifications do not yet
+establish the live submission lifecycle across goals.
+
+### Next queue admission boundary
+
+Directed reads identified the existing pieces to reuse for follow-ups:
+`execution::Journal::start` reserves one execution per session and persists its
+turn ID; `Rook::completed_turn` verifies that the saved outcome belongs to that
+turn. `AgentLoop::begin_turn` currently logs the user prompt before admitting it
+to the journal. Follow-up admission therefore needs one durable reservation and
+one transcript write, with recovery distinguishing reserved, admitted and
+completed work. Simply accepting the existing steering receipt and calling
+`run_with` would log the prompt twice and leave a crash gap between acceptance
+and execution. This is a pending implementation requirement, not current behavior.
+
+Eligibility must use `agent::finished` for an ordinary completed turn, and the
+whole managed run's `Status::Completed` for `/goal`; stage endings, limits,
+pause/cancellation and provider retries are not completion boundaries. Live
+observers currently treat `Done` as terminal, and replay stops accepting events
+after it, so a follow-up chain also needs an explicit continuation boundary that
+preserves the session's observer and controls. Stable caller IDs must name both
+the submission and its intended goal generation; a retry after replacement must
+never silently retarget a new goal. All these changes still require CLI/API/TUI/
+browser parity and restart/race tests before the queue capability is complete.
 
 `/tmp/rook-pi-message-queue` retains its older staged baseline and preparation
 patch. Main is now authoritative; do not reapply that worktree or merge its diff

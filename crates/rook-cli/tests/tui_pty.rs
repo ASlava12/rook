@@ -513,7 +513,7 @@ fn steering_during_a_tool_reaches_the_next_request(through_daemon: bool) {
     let workspace = tempfile::tempdir().unwrap();
     let requests = a_model_that_asks_to_run(
         home.path(),
-        "echo ready > steering-ready; while test ! -f steering-release; do sleep 0.1; done; echo done > steering-finished",
+        "if test -f steering-finished; then while test ! -f steering-final-release; do sleep 0.1; done; fi; echo ready > steering-ready; while test ! -f steering-release; do sleep 0.1; done; echo done > steering-finished",
     );
     let config = home.path().join("config.toml");
     let text = std::fs::read_to_string(&config).unwrap().replace("mode = \"ask\"", "mode = \"auto\"");
@@ -525,6 +525,7 @@ fn steering_during_a_tool_reaches_the_next_request(through_daemon: bool) {
     impl Drop for ReleaseTool<'_> {
         fn drop(&mut self) {
             let _ = std::fs::write(self.0.join("steering-release"), "continue");
+            let _ = std::fs::write(self.0.join("steering-final-release"), "continue");
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
             while self.0.join("steering-ready").exists()
                 && !self.0.join("steering-finished").exists()
@@ -568,24 +569,84 @@ fn steering_during_a_tool_reaches_the_next_request(through_daemon: bool) {
     pty.screen_showing(100, 30, "Quote inserted in draft");
     assert!(requests.try_recv().is_err(), "quoting must not start another model request");
     pty.send("\r");
-    pty.screen_showing(100, 30, "the turn will see this");
+    pty.screen_showing(100, 30, if through_daemon { "· queued]" } else { "the turn will see this" });
     pty.send("PREFER_BLUE\r");
-    pty.screen_showing(100, 30, "the turn will see this");
+    pty.screen_showing(100, 30, if through_daemon { "· queued]" } else { "the turn will see this" });
     pty.send("/schema-retries 1\r");
-    pty.screen_showing(100, 30, "done · the turn hears it");
+    pty.screen_showing(
+        100,
+        30,
+        if through_daemon { "↩ /schema-retries 1" } else { "done · the turn hears it" },
+    );
     if through_daemon {
         // Receipt by rookd, rather than only the TUI's optimistic local echo.
         pty.screen_showing(100, 30, "↩ /schema-retries 1");
     }
+    let expected_color = if through_daemon {
+        rook_llm::init_tls();
+        pty.send("WITHDRAW_BEFORE_ACCEPTANCE\r");
+        pty.screen_showing(100, 30, "↩ WITHDRAW_BEFORE_ACCEPTANCE");
+        let base = std::fs::read_to_string(home.path().join("rookd.addr")).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let client = reqwest::Client::builder().no_proxy().timeout(PATIENCE).build().unwrap();
+            let sessions: serde_json::Value = client
+                .get(format!("{}/api/sessions", base.trim()))
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            let session = sessions["items"][0]["id"].as_str().unwrap();
+            let url = format!("{}/api/sessions/{session}/queue", base.trim());
+            let page: serde_json::Value =
+                client.get(&url).send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+            for (text, action) in [("PREFER_BLUE", "edit"), ("WITHDRAW_BEFORE_ACCEPTANCE", "withdraw")] {
+                let entry =
+                    page["items"].as_array().unwrap().iter().find(|e| e["receipt"]["text"] == text).unwrap();
+                let mut change =
+                    serde_json::json!({"action":action,"reference":entry["reference"],"revision":0});
+                if action == "edit" {
+                    change["text"] = "PREFER_GREEN".into();
+                }
+                let response: serde_json::Value = client
+                    .post(&url)
+                    .json(&change)
+                    .send()
+                    .await
+                    .unwrap()
+                    .error_for_status()
+                    .unwrap()
+                    .json()
+                    .await
+                    .unwrap();
+                assert_eq!(response["receipt"]["revision"], 1);
+            }
+        });
+        // HTTP changes are visible in the already-running TUI via typed notices.
+        let screen = pty.screen_showing(100, 30, "· withdrawn]").join("\n");
+        assert!(screen.contains("PREFER_GREEN"), "the edited receipt must update its own row: {screen}");
+        "PREFER_GREEN"
+    } else {
+        "PREFER_BLUE"
+    };
     std::fs::write(workspace.path().join("steering-release"), "continue").unwrap();
 
     let next = requests.recv_timeout(PATIENCE).unwrap();
+    if through_daemon {
+        assert!(!next["messages"].to_string().contains("WITHDRAW_BEFORE_ACCEPTANCE"));
+        assert!(!next["messages"].to_string().contains("PREFER_BLUE"));
+        pty.screen_showing(100, 30, "· accepted]");
+    }
     let messages = next["messages"].as_array().unwrap();
     assert!(
         !next["messages"].to_string().contains("/diagnostics"),
         "local export is not a model instruction"
     );
-    for text in ["EARLY_NOTE", "PREFER_BLUE", "/schema-retries 1", "QUOTE_DRAFT"] {
+    for text in ["EARLY_NOTE", expected_color, "/schema-retries 1", "QUOTE_DRAFT"] {
         assert!(
             messages.iter().any(|m| m["role"] == "user"
                 && m["content"].as_str().is_some_and(|body| body.lines().any(|line| line == text))),
