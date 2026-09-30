@@ -242,7 +242,12 @@ async fn through_the_daemon(
     let (base, here) = (daemon.base.clone(), workspace.to_path_buf());
     let socket =
         tokio::spawn(async move { crate::remote::hold(&base, &here, &mut outgoing, incoming).await });
-    to_daemon.send(ClientMessage::Prompt { session, text: asked.to_string(), options })?;
+    to_daemon.send(ClientMessage::Prompt {
+        session,
+        text: asked.to_string(),
+        id: Some(rook_store::format_session_id(rook_store::new_session_id())),
+        options,
+    })?;
 
     let mut watching = crate::remote::Watching::new(yes, json, view_bytes);
     let mut ended = None;

@@ -143,6 +143,146 @@ async fn enqueue(client: &reqwest::Client, url: &str, id: &str) -> Value {
 }
 
 #[test]
+fn socket_corrections_reuse_caller_receipts_and_old_frames_still_work() {
+    rook_llm::init_tls();
+    let rook = Rook::new();
+    let model = Model::new();
+    rook.write_config(&config(&model.url, "initial", "ask", rook.workspace.path()));
+    let (session, goal_session) = {
+        let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+        let create = |title| {
+            let id = rook_store::new_session_id();
+            store
+                .create_session(&rook_store::SessionMeta::new(
+                    id,
+                    title,
+                    rook.workspace.path().display().to_string(),
+                    rook_store::now_unix(),
+                ))
+                .unwrap();
+            rook_store::format_session_id(id)
+        };
+        (create("socket correction identity"), create("socket goal correction identity"))
+    };
+    let daemon = Daemon::start(&rook);
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let mut socket = runtime.block_on(async {
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!(
+            "{}/api/chat",
+            daemon.address.replacen("http", "ws", 1)
+        ))
+        .await
+        .unwrap();
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                json!({"type":"prompt","session":session,"text":"FIRST_TASK"}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        socket
+    });
+    model.next(); // The model is blocked; every subsequent prompt is a correction.
+    runtime.block_on(async {
+        for (id, text) in [
+            (Some("caller-one"), "the correction"),
+            (Some("caller-one"), "the correction"),
+            (Some("caller-one"), "different text"),
+            (None, "legacy correction"),
+        ] {
+            let mut prompt = json!({"type":"prompt","session":session,"text":text});
+            if let Some(id) = id {
+                prompt["id"] = id.into();
+            }
+            socket
+                .send(tokio_tungstenite::tungstenite::Message::Text(prompt.to_string().into()))
+                .await
+                .unwrap();
+        }
+        let mut acknowledged = 0;
+        let mut rejected = false;
+        while acknowledged < 3 || !rejected {
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(30), socket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let event: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            match event["type"].as_str() {
+                Some("interjected") => acknowledged += 1,
+                Some("failed") if event["message"].as_str().unwrap_or("").contains("different text") => {
+                    rejected = true;
+                }
+                _ => {}
+            }
+        }
+        let queue =
+            get(&client, &format!("{}/api/sessions/{session}/queue?include_finished=true", daemon.address))
+                .await;
+        let items = queue["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2, "retry and rejected conflict must not create another receipt: {queue}");
+        assert_eq!(items[0]["receipt"]["id"], "caller-one");
+        assert_eq!(items[0]["receipt"]["text"], "the correction");
+        assert_eq!(items[1]["receipt"]["text"], "legacy correction");
+        assert_ne!(items[1]["receipt"]["id"], "caller-one");
+    });
+    let mut goal_socket = runtime.block_on(async {
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!(
+            "{}/api/chat",
+            daemon.address.replacen("http", "ws", 1)
+        ))
+        .await
+        .unwrap();
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                json!({"type":"prompt","session":goal_session,"text":"/goal FIRST_GOAL"}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        socket
+    });
+    runtime.block_on(async {
+        let work_url = format!("{}/api/work/{goal_session}", daemon.address);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let response = client.get(&work_url).send().await.unwrap();
+            if response.status().is_success() {
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "goal was not created");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let correction =
+            json!({"type":"prompt","session":goal_session,"text":"goal correction","id":"goal-caller"});
+        for _ in 0..2 {
+            goal_socket
+                .send(tokio_tungstenite::tungstenite::Message::Text(correction.to_string().into()))
+                .await
+                .unwrap();
+        }
+        let mut references = Vec::new();
+        while references.len() < 2 {
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(30), goal_socket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let event: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            if event["type"] == "interjected" {
+                references.push(event["receipt"]["reference"].as_str().unwrap().to_string());
+            }
+        }
+        assert_eq!(references[0], references[1]);
+        let work = get(&client, &work_url).await;
+        let messages = work["instructions"].as_array().unwrap();
+        assert_eq!(messages.len(), 1, "goal retry must retain one receipt: {work}");
+        assert_eq!(messages[0]["id"], "goal-caller");
+    });
+    model.release.store(1, Ordering::SeqCst);
+    model.release.store(2, Ordering::SeqCst);
+}
+
+#[test]
 fn killed_followups_resume_once_with_saved_settings_and_cancelled_ones_stay_stopped() {
     rook_llm::init_tls();
     let rook = Rook::new();

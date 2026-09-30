@@ -818,3 +818,27 @@ lifecycle/frontend parity remain outstanding, as do all Pending rows above.
 The full `cargo xtask ci` exited 0 (`ci: ok`, 394.8 seconds). A final
 `cargo xtask compaction` exited 0 with 4.02 MiB on disk, 37.1x dictionary
 compression and 5.8x end-to-end. No postcard schema or store format changed.
+
+## Socket correction receipt identity
+
+The chat socket's `prompt` frame now accepts an optional caller-owned `id`.
+For a correction while an ordinary turn or a conversation goal is running,
+the daemon uses this ID in the existing durable steering receipt. Repeating
+the same ID and original text returns the same receipt, including after an
+edit or acceptance; conflicting text is rejected. Older frames without `id`
+still get a generated ID. The daemon validates a supplied ID's 64-byte bound
+and alphabet before copying it. CLI and TUI socket senders generate IDs for
+their frames; the browser already sends its in-flight corrections through the
+scoped HTTP queue.
+
+A real-daemon socket test passed for duplicate and conflicting corrections in
+both ordinary and goal scopes, and for a legacy frame without an ID. The
+socket ID alone does not pin a goal generation, and the CLI/TUI do not retain
+that ID for manual retry after an uncertain disconnect. Use the scoped queue
+with its saved target for that case. Initial prompt, `/goal` admission and
+first-session creation still lack caller-owned retry identity. Queue remains
+In progress; branch draft generation and all Pending rows remain open.
+
+The focused daemon test exited 0. The full `cargo xtask ci` exited 0
+(`ci: ok`, 412.1 seconds). No storage code or format changed, so the previous
+block's compaction check remains the latest one.

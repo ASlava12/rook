@@ -165,10 +165,14 @@ HTTP request a 30-second deadline. **Forget pending send** removes the local
 retry, not a server receipt: inspect the queue before sending the text again.
 Forgetting does not withdraw a message that already reached the server.
 
-Initial prompts, `/goal` control commands, plain REPL prompts, and the TUI's
-early input before its first session ID still use their existing admission path.
-They do not yet have idempotent retries. Retry an uncertain queued correction
-through the queue controls; sending it as a new prompt is a new request.
+The chat socket accepts an optional `id` on `prompt`. A correction sent while a
+turn or goal is running reuses its receipt when the same ID and original text
+are sent again; a different text with that ID is rejected. Older socket clients
+can omit `id`. The CLI and TUI generate an ID for each socket prompt, but they
+do not retain it for a manual resend after an uncertain disconnect. Use the
+queue controls and their saved ID and target for that case, especially across
+a goal replacement. Initial prompts, `/goal` control commands and early TUI
+input before its first session ID still lack idempotent admission.
 
 The CLI exposes the same operations locally and through the daemon:
 

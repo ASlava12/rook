@@ -264,7 +264,21 @@ async fn serve(
                     watching = Some(watch(&live, id, outbound.clone(), watching, live_snapshots));
                 }
             }
-            ClientMessage::Prompt { session, text, options } => {
+            ClientMessage::Prompt { session, text, id: submission_id, options } => {
+                if submission_id.as_ref().is_some_and(|id| {
+                    id.is_empty()
+                        || id.len() > 64
+                        || !id
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+                }) {
+                    report_window(
+                        &outbound,
+                        "instruction id must be 1–64 letters, digits, hyphens or underscores".into(),
+                    )
+                    .await;
+                    continue;
+                }
                 // The browser types it too, and it is the same thing there.
                 let text = match rook_core::agent::carrying_on(&text) {
                     true => rook_core::agent::CARRY_ON.to_string(),
@@ -332,10 +346,7 @@ async fn serve(
                                     let (_, notice) = managed::steer_noticed(
                                         &rook,
                                         &run.id,
-                                        Steer {
-                                            id: rook_store::format_session_id(rook_store::new_session_id()),
-                                            text: text.clone(),
-                                        },
+                                        Steer { id: correction_id(&submission_id), text: text.clone() },
                                     )?;
                                     interjected = Some(notice);
                                 }
@@ -378,10 +389,7 @@ async fn serve(
                                     let receipt = managed::steer_noticed(
                                         &*goal_engine.read().await,
                                         &run.id,
-                                        Steer {
-                                            id: rook_store::format_session_id(rook_store::new_session_id()),
-                                            text: text.clone(),
-                                        },
+                                        Steer { id: correction_id(&submission_id), text: text.clone() },
                                     );
                                     match receipt {
                                         Ok((_, receipt)) => {
@@ -429,10 +437,7 @@ async fn serve(
                     let receipt = rook_core::message_queue::submit_noticed(
                         &*engine.read().await,
                         id,
-                        Steer {
-                            id: rook_store::format_session_id(rook_store::new_session_id()),
-                            text: text.clone(),
-                        },
+                        Steer { id: correction_id(&submission_id), text: text.clone() },
                     );
                     let (_, receipt) = match receipt {
                         Ok(value) => value,
@@ -484,6 +489,10 @@ async fn serve(
     }
     drop(outbound);
     let _ = writer.await;
+}
+
+fn correction_id(supplied: &Option<String>) -> String {
+    supplied.clone().unwrap_or_else(|| rook_store::format_session_id(rook_store::new_session_id()))
 }
 
 /// Where a session's turns run: the workspace it was started in, always.

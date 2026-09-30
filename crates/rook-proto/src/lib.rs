@@ -142,6 +142,10 @@ pub enum ClientMessage {
     Prompt {
         session: Option<String>,
         text: String,
+        /// Caller-owned receipt ID when this prompt corrects a running turn.
+        /// Older clients omit it; a retry must reuse the same ID and text.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
         #[serde(default)]
         options: TurnOptions,
     },

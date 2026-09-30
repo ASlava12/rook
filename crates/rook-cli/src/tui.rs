@@ -1006,6 +1006,7 @@ impl Chat {
             .send(ClientMessage::Prompt {
                 session: Some(rook_store::format_session_id(session)),
                 text: text.to_owned(),
+                id: Some(rook_store::format_session_id(rook_store::new_session_id())),
                 // Attachments and output settings belong to the next new turn.
                 options: Default::default(),
             })
@@ -2630,6 +2631,7 @@ impl App {
         let opening = ClientMessage::Prompt {
             session: self.chat.session.map(rook_store::format_session_id),
             text: prompt,
+            id: Some(rook_store::format_session_id(rook_store::new_session_id())),
             options: crate::turn_options::for_turn(&mut self.shared.output.borrow_mut()),
         };
         // On the socket this window already has, if it has one: attaching to a
@@ -5106,11 +5108,13 @@ mod tests {
         chat.interject("after the session ID", false, &pending).unwrap();
         assert!(pending.take().is_empty(), "rookd never reads the local runner's queue");
         for expected in ["before the session ID", "after the session ID"] {
-            let super::ClientMessage::Prompt { session, text, options } = receiver.try_recv().unwrap() else {
+            let super::ClientMessage::Prompt { session, text, id, options } = receiver.try_recv().unwrap()
+            else {
                 panic!("expected a prompt addressed to the running session")
             };
             assert_eq!(session, Some(rook_store::format_session_id(42)));
             assert_eq!(text, expected);
+            assert!(id.is_some());
             assert!(options.attachments.is_empty());
             assert!(options.output.is_none());
             assert!(options.recipe.is_none());
@@ -6285,6 +6289,7 @@ and the next line"
         assert!(this_window_decides(&ClientMessage::Prompt {
             session: None,
             text: "audit the three projects".into(),
+            id: None,
             options: Default::default()
         }));
         assert!(!this_window_decides(&ClientMessage::Attach { session: "01M26DDB".into() }));
