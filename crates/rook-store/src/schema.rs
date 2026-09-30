@@ -7,7 +7,7 @@ use crate::object::ObjectId;
 /// store written by a newer format rather than silently corrupting it.
 // Older runners would replay a withdrawn instruction as pending. Refuse that
 // downgrade rather than silently executing work the user has recalled.
-pub const FORMAT_VERSION: u32 = 3;
+pub const FORMAT_VERSION: u32 = 4;
 
 /// hash -> postcard(ObjectMeta)
 pub const OBJECTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("objects");

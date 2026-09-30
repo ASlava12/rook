@@ -572,6 +572,8 @@ fn steering_during_a_tool_reaches_the_next_request(through_daemon: bool) {
     pty.screen_showing(100, 30, "↩ QUOTE_DRAFT");
     pty.send("PREFER_BLUE\r");
     pty.screen_showing(100, 30, "↩ PREFER_BLUE");
+    pty.send("/followup AFTER_THIS_TURN\r");
+    pty.screen_showing(100, 30, "↩ AFTER_THIS_TURN");
     pty.send("/schema-retries 1\r");
     pty.screen_showing(100, 30, "↩ /schema-retries 1");
     if through_daemon {
@@ -632,6 +634,10 @@ fn steering_during_a_tool_reaches_the_next_request(through_daemon: bool) {
     std::fs::write(workspace.path().join("steering-release"), "continue").unwrap();
 
     let next = requests.recv_timeout(PATIENCE).unwrap();
+    assert!(
+        !next["messages"].to_string().contains("AFTER_THIS_TURN"),
+        "follow-up must wait for completion, not the next tool boundary"
+    );
     if through_daemon {
         assert!(!next["messages"].to_string().contains("WITHDRAW_BEFORE_ACCEPTANCE"));
         assert!(!next["messages"].to_string().contains("PREFER_BLUE"));

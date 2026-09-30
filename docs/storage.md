@@ -130,6 +130,13 @@ older store advances its marker under the store lock; a format-2 binary cannot
 subsequently open it. Queue mutations and acceptance are immediate transactions;
 acceptance stores the transcript message and receipt together.
 
+Format 4 adds follow-ups to the ordinary queue. Format-3 runners would treat
+these messages as steering, so they must refuse the upgraded store. Follow-up
+metadata and execution reservations use JSON companions; postcard records stay
+unchanged. Reserving an execution updates the queue and execution together.
+Admission commits the goal note, user message, queue acceptance, goal value and
+actual prompt sequence in the execution receipt in one transaction.
+
 Tool images use existing event types and leave the postcard format unchanged.
 A `Note` labelled `rook:tool-images:v1` holds bounded image JSON immediately before
 its `ToolResult`; both events are appended in one transaction, so concurrent

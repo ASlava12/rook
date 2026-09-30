@@ -7619,3 +7619,124 @@ fn learned_windows_are_bounded_isolated_and_a_refusal_wins_over_a_later_catalog(
     f.rook.learn_window(&explicit, 4096);
     assert_eq!(f.rook.window_to_budget(&explicit), 16384, "configured limit is not replaced by learning");
 }
+
+#[tokio::test]
+async fn followups_wait_for_a_new_turn_and_accept_the_latest_revision_once() {
+    use rook_core::{agent::Progress, message_queue::view};
+    use rook_proto::queue::{Change, Query};
+    let f = fixture();
+    let session = f.rook.start_session("followups").unwrap();
+    let provider =
+        Arc::new(ScriptedProvider::new(vec![reply("first done"), reply("second done"), reply("third done")]));
+    let seen = provider.share();
+    let mut agent = AgentLoop::new(&f.rook, provider, session);
+    let mut submitted = false;
+    let mut requests = Vec::new();
+    let mut accepted = Vec::new();
+    let outcome = agent
+        .run_with("FIRST_PROMPT", |progress| {
+            if matches!(progress, Progress::Context { .. }) && !submitted {
+                submitted = true;
+                let target =
+                    view::page(&f.rook, session, &Query::default()).unwrap().follow_up_target.unwrap();
+                for (id, text) in
+                    [("one", "OLD_FOLLOWUP"), ("two", "THIRD_PROMPT"), ("three", "WITHDRAWN_FOLLOWUP")]
+                {
+                    let request =
+                        Change::FollowUp { target: target.clone(), id: id.into(), text: text.into() };
+                    view::change(&f.rook, session, request.clone()).unwrap();
+                    requests.push(request);
+                }
+                view::change(
+                    &f.rook,
+                    session,
+                    Change::Edit {
+                        reference: "session.one".into(),
+                        revision: 0,
+                        text: "SECOND_PROMPT".into(),
+                    },
+                )
+                .unwrap();
+                view::change(
+                    &f.rook,
+                    session,
+                    Change::Withdraw { reference: "session.three".into(), revision: 0 },
+                )
+                .unwrap();
+            }
+            if let Progress::Heard { receipt: Some(receipt), .. } = progress {
+                accepted.push(receipt.reference.clone());
+            }
+        })
+        .await
+        .unwrap();
+    assert!(submitted);
+    assert_eq!(outcome.reply, "third done");
+    assert_eq!(accepted, ["session.one", "session.two"]);
+    {
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 3);
+        let text =
+            |i: usize| seen[i].messages.iter().map(|m| m.content.as_str()).collect::<Vec<_>>().join("\n");
+        assert!(!text(0).contains("SECOND_PROMPT"));
+        assert!(text(1).contains("SECOND_PROMPT"));
+        assert!(!text(1).contains("THIRD_PROMPT"));
+        assert!(text(2).contains("THIRD_PROMPT"));
+        assert!(!text(2).contains("OLD_FOLLOWUP"));
+        assert!(!text(2).contains("WITHDRAWN_FOLLOWUP"));
+    }
+    for request in requests {
+        view::change(&f.rook, session, request).unwrap();
+    }
+    let users = f
+        .rook
+        .store
+        .events(session, 0, 100)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.record.kind == rook_store::EventKind::UserMessage)
+        .count();
+    assert_eq!(users, 3, "retries must not repeat an admitted prompt");
+    assert!(agent.run_followups(|_| {}).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn a_step_limit_does_not_release_a_followup() {
+    use rook_core::{agent::Progress, message_queue::view};
+    use rook_proto::queue::{Change, Query};
+    let mut config = Config::default();
+    config.agent.max_steps = 1;
+    let f = fixture_with(config);
+    let session = f.rook.start_session("limited").unwrap();
+    let mut agent = AgentLoop::new(
+        &f.rook,
+        Arc::new(ScriptedProvider::new(vec![
+            call("list_dir", serde_json::json!({"path":"."})),
+            reply("limit summary"),
+        ])),
+        session,
+    );
+    agent.max_steps = 1;
+    let mut submitted = false;
+    let outcome = agent
+        .run_with("inspect", |p| {
+            if matches!(p, Progress::Context { .. }) && !submitted {
+                submitted = true;
+                let target =
+                    view::page(&f.rook, session, &Query::default()).unwrap().follow_up_target.unwrap();
+                view::change(
+                    &f.rook,
+                    session,
+                    Change::FollowUp { target, id: "later".into(), text: "new task".into() },
+                )
+                .unwrap();
+            }
+        })
+        .await
+        .unwrap();
+    assert!(submitted);
+    assert_eq!(outcome.steps, 1);
+    assert_eq!(outcome.stopped, "max_steps");
+    assert!(agent.run_followups(|_| {}).await.unwrap().is_none());
+    assert!(view::read(&f.rook, session, "session.later").unwrap().receipt.queued());
+}

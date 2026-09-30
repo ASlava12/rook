@@ -194,6 +194,10 @@ pub enum ApprovalDecision {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChatEvent {
+    /// A queued turn begins without ending this session observer.
+    FollowUp {
+        id: String,
+    },
     /// Authoritative pending input ids; request bodies follow as Approval/Ask.
     /// Only sent to clients opting into live snapshots at websocket upgrade.
     Inputs {

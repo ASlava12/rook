@@ -33,18 +33,20 @@ export function queuePanel(session, receiveDraft, receiveReceipt) {
     for (const input of detail.querySelectorAll('textarea')) input.readOnly = value;
   }
   const queued = receipt => receipt.applied_at === null && receipt.withdrawn_at === null;
+  const editable = receipt => queued(receipt) && !receipt.follow_up?.reserved;
+  const mode = receipt => receipt.follow_up ? `follow-up after ${receipt.follow_up.after}${receipt.follow_up.reserved ? ' · reserved' : ''}${receipt.follow_up.blocked ? ` · stopped: ${receipt.follow_up.blocked}` : ''}` : 'steering';
   const status = receipt => receipt.withdrawn_at !== null ? 'withdrawn' : receipt.applied_at !== null ? 'accepted' : 'queued';
   function display(page) {
     next = page.next;
     maxBytes = page.max_message_bytes;
     detail.replaceChildren();
     rows.replaceChildren(...page.items.map(entry => el('article', { class: 'entry' },
-      el('strong', {}, `${status(entry.receipt)} · revision ${entry.receipt.revision}`),
+      el('strong', {}, `${mode(entry.receipt)} · ${status(entry.receipt)} · revision ${entry.receipt.revision}`),
       el('p', { class: 'sub' }, entry.reference),
       el('pre', {}, entry.receipt.text),
       entry.truncated ? el('p', {}, 'Preview shortened; open the message for full text.') : null,
       el('button', { type: 'button', onclick: () => open(entry.reference, false) }, 'Open message'),
-      queued(entry.receipt) ? el('button', { type: 'button', onclick: () => open(entry.reference, true) }, 'Edit message') : null,
+      editable(entry.receipt) ? el('button', { type: 'button', onclick: () => open(entry.reference, true) }, 'Edit message') : null,
       queued(entry.receipt) ? el('button', { type: 'button', onclick: () => withdraw(entry, false) }, 'Withdraw message') : null,
       queued(entry.receipt) ? el('button', { type: 'button', onclick: () => withdraw(entry, true) }, 'Withdraw to draft') : null)));
     if (!page.items.length) rows.append(el('p', {}, 'No messages on this page.'));
@@ -66,8 +68,8 @@ export function queuePanel(session, receiveDraft, receiveReceipt) {
     try {
       const entry = await api(`${base}/${encodeURIComponent(reference)}`);
       if (!root.isConnected) return;
-      if (!edit || !queued(entry.receipt)) {
-        detail.replaceChildren(el('p', {}, `${status(entry.receipt)} · revision ${entry.receipt.revision}`), el('pre', {}, entry.receipt.text));
+      if (!edit || !editable(entry.receipt)) {
+        detail.replaceChildren(el('p', {}, `${mode(entry.receipt)} · ${status(entry.receipt)} · revision ${entry.receipt.revision}`), el('pre', {}, entry.receipt.text));
         return;
       }
       editing = true;
@@ -126,7 +128,7 @@ export function queuePanel(session, receiveDraft, receiveReceipt) {
     const attempted = pendingSubmission();
     if (attempted || submissionError()) {
       const sendState = el('p', { role: 'status' }, attempted
-        ? `Unconfirmed send to session ${attempted.session}: ${attempted.id}. Retry uses the saved target and text.`
+        ? `Unconfirmed ${attempted.action === 'follow_up' ? 'follow-up' : 'steering'} to session ${attempted.session}: ${attempted.id}. Retry uses the saved target and text.`
         : submissionError());
       const retry = el('button', { type: 'button', onclick: async () => {
         retry.disabled = forget.disabled = true;
@@ -148,7 +150,7 @@ export function queuePanel(session, receiveDraft, receiveReceipt) {
     }
   };
   root.refreshSubmission();
-  root.append(el('p', {}, 'Pending messages can be changed until the agent accepts them. Editing does not start a turn.'),
+  root.append(el('p', {}, 'Steering updates the running turn. Follow-ups start separate turns after completion; a pause, error or limit keeps them queued. Follow-ups can be edited until reserved. Editing does not start a turn.'),
     el('div', { class: 'row' }, refresh, more, el('label', {}, all, ' Include accepted and withdrawn')), notice, rows, detail);
   setTimeout(() => { if (root.isConnected) load(); }, 0);
   return root;

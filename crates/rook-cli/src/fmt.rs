@@ -261,6 +261,7 @@ impl Watching {
             // What the tool knows and nobody else does: how long it has been
             // running and how long since it printed. A quarter of a minute of a
             // silent command reads as a hang otherwise.
+            Progress::FollowUp { id } => format!("\nStarting follow-up {id}\n"),
             Progress::Working { said, .. } => self.calls.working(said),
             // The same, for the wait nothing else reports: the model has been
             // asked and has not begun to answer. A terminal has no line to

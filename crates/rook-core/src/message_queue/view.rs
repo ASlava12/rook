@@ -43,6 +43,7 @@ fn entry(reference: String, message: &Steering, limit: usize) -> Entry {
             revision: message.revision,
             withdrawn_at: message.withdrawn_at,
             submitted_hash: message.submitted_hash.clone(),
+            follow_up: message.follow_up.clone(),
         },
     }
 }
@@ -59,6 +60,7 @@ pub fn page(rook: &Rook, session: u128, query: &Query) -> Result<Page> {
     let mut page = Page {
         items: Vec::new(),
         submission_target,
+        follow_up_target: super::followups::target(rook, session)?,
         next: None,
         total: 0,
         max_message_bytes: rook.config.work.max_message_bytes.min(8 * 1024 * 1024),
@@ -115,6 +117,11 @@ pub fn read(rook: &Rook, session: u128, address: &str) -> Result<Entry> {
 
 pub fn change(rook: &Rook, session: u128, change: Change) -> Result<Entry> {
     let change = match change {
+        Change::FollowUp { target, id, text } => {
+            let receipt =
+                super::followups::submit(rook, session, &target, rook_proto::work::Steer { id, text })?;
+            return Ok(Entry { reference: reference(None, &receipt), receipt, truncated: false });
+        }
         Change::Submit { target, id, text } => {
             return submit(rook, session, &target, rook_proto::work::Steer { id, text });
         }
@@ -122,14 +129,15 @@ pub fn change(rook: &Rook, session: u128, change: Change) -> Result<Entry> {
     };
     let address = match &change {
         Change::Edit { reference, .. } | Change::Withdraw { reference, .. } => reference.clone(),
-        Change::Submit { .. } => return Err(stale()),
+        Change::Submit { .. } | Change::FollowUp { .. } => return Err(stale()),
     };
     let apply = |messages: &mut [Steering], id: &str, open: bool| match change {
-        Change::Submit { .. } => Err(stale()),
+        Change::Submit { .. } | Change::FollowUp { .. } => Err(stale()),
         Change::Edit { revision, text, .. } => {
             receipts::edit(rook, messages, id, EditInstruction { revision, text }, open)
         }
         Change::Withdraw { revision, .. } => {
+            super::check_withdraw(rook, session, messages, id)?;
             receipts::withdraw(messages, id, WithdrawInstruction { revision }, open)
         }
     };

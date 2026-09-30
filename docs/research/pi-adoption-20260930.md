@@ -385,6 +385,56 @@ patch. Main is now authoritative; do not reapply that worktree or merge its diff
 against the old HEAD. Main additionally includes promotion/pause handling and
 removal of the obsolete daemon field, which are not in that preparation tree.
 
+## Live follow-up integration (eighth block)
+
+Follow-ups now have an explicit completion target and captured goal identity in
+JSON queue receipts. They are excluded from steering. The engine reserves the
+queue item and execution together, then admits its goal note, prompt, acceptance
+and exact prompt sequence in one transaction after hooks allow it. Admission
+rechecks goal identity to reject a replacement between reservation and admission.
+Format 4 prevents an older runner from consuming these records as steering.
+
+The live root loop and completed-goal worker drain eligible follow-ups using fresh
+AgentLoops with shared policy, approvals, MCP/LSP and jobs. Pauses, limits and
+failed work do not release them. The typed `follow_up` event retains the observer
+and distinguishes consecutive answers. CLI `--follow-up`, TUI/REPL `/followup`,
+and the browser button use the common queue; retry identity includes mode and
+completion target. Browser reload retains this identity in the existing outbox.
+
+This is live execution integration, not completed queue recovery. Outstanding:
+ordinary idle-session supervision with persisted effective workspace/model/effort/stance;
+applying frontend model/effort changes at each new follow-up boundary;
+resuming a reserved interrupted execution without duplicate prompt/hooks or
+unknown-operation replay; explicit continuation lineage for interrupted ordinary
+predecessors; worker handoff when a follow-up promotes itself to a new goal;
+per-turn outcome history and aggregate reporting (the current final summary is
+only the last turn). Queue detail scrolling and legacy admission identity gaps
+remain as previously listed. New goals must not inherit stale follow-ups.
+Pending messages survive reopen; a stopped unaccepted reservation can be withdrawn
+and resubmitted. No autonomous restart guarantee is claimed by this block.
+
+Focused checks cover turn separation, latest edit/withdrawal, identical retries,
+step-limit exclusion, whole-goal completion, replacement during reservation,
+exclusive execution ownership, durable interrupted reservation, atomic admission,
+shared caps and rollback of multi-event admission. Local and daemon PTY checks
+also submit `/followup` during a held tool and prove the next request excludes it.
+The browser outbox test covers reload/lost replies with the exact mode, target,
+ID and text. A real rookd and Chrome with a scripted HTTP provider completed two
+separate turns, one accepted follow-up and an identical HTTP retry. The first
+browser fixture answered the non-streaming completion classifier with SSE; the
+corrected fixture serves JSON and proves actual completion rather than bypassing
+that classifier. Logs: `/tmp/rook-pi-followup-browser-outbox.log`,
+`/tmp/rook-pi-followup-browser-live4.log`, `/tmp/rook-pi-followup-pty.log`.
+
+The initial full gate found a test mutex held over an await and a channel error
+variant grown past Clippy's size threshold; both were fixed. The final isolated
+`cargo xtask ci` exited 0 in 543.1 seconds, including the complete PTY suite,
+atomic rollback test and doctests (`/tmp/rook-pi-followup-final-ci.log`). Rust
+sources were unchanged during that gate. `cargo xtask compaction` also exited 0:
+4.02 MiB on disk, 37.1x dictionary compression and 5.8x end-to-end, unchanged
+(`/tmp/rook-pi-followup-compaction.log`). The queue capability remains in progress
+until the recovery and continuation work listed above is verified.
+
 ## Validation environment
 
 macOS showed long cold-start pauses before test code executed: a process sample

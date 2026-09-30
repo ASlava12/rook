@@ -64,6 +64,7 @@ pub(crate) fn submit(
         revision: 0,
         withdrawn_at: None,
         submitted_hash: Some(submitted_hash),
+        follow_up: None,
     };
     messages.push(instruction.clone());
     Ok(instruction)
@@ -89,6 +90,11 @@ pub(crate) fn edit(
     }
     if !open || !message.queued() {
         return Err(bad("only a queued instruction can be edited; send a new correction instead"));
+    }
+    if message.follow_up.as_ref().is_some_and(|f| f.reserved.is_some()) {
+        return Err(bad(
+            "follow-up already reserved; withdraw an unaccepted stopped attempt and submit a new message",
+        ));
     }
     if message.revision != request.revision {
         return Err(bad("instruction changed in another window; refresh it before editing"));

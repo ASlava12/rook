@@ -467,6 +467,11 @@ async fn prompt(
                 // The editor has the call open already; this says it is still
                 // going and whether anything is happening in it, which is the
                 // one thing an open call does not say by itself.
+                Progress::FollowUp { id } => protocol::agent_thought_chunk(
+                    &session_id,
+                    &format!("Starting follow-up {id}\n"),
+                    &part(1),
+                ),
                 Progress::Working { call, said } => {
                     protocol::agent_thought_chunk(&session_id, &format!("  {call}: {said}\n"), &part(1))
                 }

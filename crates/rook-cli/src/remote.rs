@@ -235,6 +235,12 @@ impl Watching {
                     let _ = out.flush();
                 }
             }
+            ChatEvent::FollowUp { id } => {
+                if !self.json {
+                    let _ = writeln!(out, "\nStarting follow-up {id}");
+                    let _ = out.flush();
+                }
+            }
             ChatEvent::Approval { id, tool, action, .. } => {
                 let decision = match self.yes {
                     true => rook_proto::ApprovalDecision::ForRun,

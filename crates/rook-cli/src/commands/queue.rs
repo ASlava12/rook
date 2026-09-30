@@ -9,10 +9,19 @@ pub(crate) fn execute(
     command: Option<&QueueCmd>,
 ) -> Result<serde_json::Value> {
     Ok(match command {
-        Some(QueueCmd::Submit { id, target, text }) => {
+        Some(QueueCmd::Submit { id, target, text, follow_up }) => {
             let target = match target {
                 Some(target) => target.clone(),
-                None => source.queue_page(session, &Query::default())?.submission_target,
+                None => {
+                    let page = source.queue_page(session, &Query::default())?;
+                    if *follow_up {
+                        page.follow_up_target.ok_or_else(|| {
+                            anyhow::anyhow!("start a turn or goal before queuing a follow-up")
+                        })?
+                    } else {
+                        page.submission_target
+                    }
+                }
             };
             anyhow::ensure!(
                 !target.is_empty(),
@@ -23,9 +32,13 @@ pub(crate) fn execute(
             // Keep the retry identity visible even if this process is stopped
             // after the server commits but before its response arrives.
             eprintln!("Submission ID {id}; target {target}");
-            let change = Change::Submit { target: target.clone(), id: id.clone(), text: text.join(" ") };
+            let change = if *follow_up {
+                Change::FollowUp { target: target.clone(), id: id.clone(), text: text.join(" ") }
+            } else {
+                Change::Submit { target: target.clone(), id: id.clone(), text: text.join(" ") }
+            };
             let entry = source.queue_change(session, change).map_err(|error| anyhow::anyhow!(
-                "{error}; repeat the identical text with --id {id} --target {target} to resolve this submission without duplicating it"
+                "{error}; repeat the identical text and submission mode with --id {id} --target {target} to resolve this submission without duplicating it"
             ))?;
             serde_json::to_value(entry)?
         }
@@ -75,7 +88,16 @@ fn describe_entry(entry: &Entry) -> String {
     format!(
         "{} · {} · revision {}\n{}{}",
         entry.reference,
-        status(&entry.receipt),
+        if let Some(follow) = &entry.receipt.follow_up {
+            format!(
+                "follow-up after {} · {}{}",
+                follow.after,
+                status(&entry.receipt),
+                follow.blocked.as_ref().map(|reason| format!(" · stopped: {reason}")).unwrap_or_default()
+            )
+        } else {
+            status(&entry.receipt).into()
+        },
         entry.receipt.revision,
         entry.receipt.text,
         if entry.truncated { "\n[preview shortened; use show to read the complete message]" } else { "" }

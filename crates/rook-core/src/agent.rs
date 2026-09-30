@@ -28,6 +28,7 @@ mod checks;
 mod compaction;
 mod delegation;
 mod effects;
+mod followups;
 pub(crate) mod history;
 mod lifecycle;
 mod output;
@@ -284,6 +285,10 @@ const CHANGES_THINGS: &[&str] =
 /// the model stops asking for a tool, not when the tool has run. A front end
 /// with only the deltas shows every call as still working.
 pub enum Progress<'a> {
+    /// A new queued turn starts on the same live observer and control channel.
+    FollowUp {
+        id: &'a str,
+    },
     Delta(&'a Delta),
     ToolDone {
         name: &'a str,
@@ -487,6 +492,7 @@ enum Reported {
 
 pub struct AgentLoop<'a> {
     execution: Option<std::sync::Weak<crate::execution::Journal>>,
+    reserved_execution: Option<std::sync::Arc<crate::execution::Journal>>,
     launched_job: std::sync::Mutex<Option<String>>,
     pub options: rook_proto::TurnOptions,
     effective_options: Option<rook_proto::TurnOptions>,
@@ -638,6 +644,7 @@ impl<'a> AgentLoop<'a> {
         let budget = ContextBudget::new(window, rook.config.agent.compact_at);
         Self {
             execution: None,
+            reserved_execution: None,
             launched_job: Default::default(),
             options: Default::default(),
             effective_options: None,
@@ -748,6 +755,29 @@ impl<'a> AgentLoop<'a> {
         prompt: &str,
         mut on_progress: F,
     ) -> Result<TurnOutcome> {
+        let original_provider = self.provider.clone();
+        let original_limits = (self.max_steps, self.max_turn_tokens, self.max_turn_secs);
+        let outcome = self.run_once(prompt, &mut on_progress).await?;
+        if self.depth == 0
+            && !self.checking
+            && crate::agent::finished(&outcome.stopped)
+            && self.managed_work.is_none()
+            && crate::message_queue::followups::ready(self.rook, self.session)?
+        {
+            let mut next = self.continuation(original_provider);
+            (next.max_steps, next.max_turn_tokens, next.max_turn_secs) = original_limits;
+            if let Some(followed) = next.run_followups(&mut on_progress).await? {
+                return Ok(followed);
+            }
+        }
+        Ok(outcome)
+    }
+
+    async fn run_once<F: FnMut(Progress<'_>)>(
+        &mut self,
+        prompt: &str,
+        mut on_progress: F,
+    ) -> Result<TurnOutcome> {
         let _workspace = crate::worktrees::Lease::acquire(&self.rook.workspace, false)?;
         let prepared_prompt = self.prepare_recipe(prompt)?;
         let prompt = prepared_prompt.as_deref().unwrap_or(prompt);
@@ -762,8 +792,10 @@ impl<'a> AgentLoop<'a> {
             }
         }
         // Keep the top-level turn marked through final validation and file I/O too.
-        let journal =
-            crate::execution::Journal::start(self.rook, self.session, self.tool_ctx.jobs.as_deref())?;
+        let journal = match self.reserved_execution.take() {
+            Some(journal) => journal,
+            None => crate::execution::Journal::start(self.rook, self.session, self.tool_ctx.jobs.as_deref())?,
+        };
         self.execution = Some(std::sync::Arc::downgrade(&journal));
         // From here until the turn ends, this session is marked as having one in
         // flight. Only the turn a person asked for: a sub-agent's session ends

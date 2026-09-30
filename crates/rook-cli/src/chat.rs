@@ -74,6 +74,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("output", "[path|off]", "save the final answer inside the workspace"),
     ("schema", "[file|off]", "validate the final answer against JSON Schema"),
     ("schema-retries", "[0..3]", "format-only correction attempts"),
+    ("followup", "<text>", "queue a new turn after the current turn or goal finishes"),
     ("queue", "", "inspect pending messages; the TUI opens an editable queue"),
     ("context", "[window]", "what this conversation costs, and of what"),
     ("skills", "[name]", "skills that apply here, or one skill's body"),
@@ -326,6 +327,32 @@ async fn through_the_daemon(
             let (name, rest) = command.split_once(' ').unwrap_or((command, ""));
             match name {
                 "quit" | "exit" => break,
+                "followup" => {
+                    if let Some(session) = session.as_deref().and_then(rook_store::parse_session_id) {
+                        let text = rest.to_string();
+                        let result = tokio::task::spawn_blocking(move || -> Result<String> {
+                            let source = crate::source::Source::open(None)?;
+                            let command = crate::args::QueueCmd::Submit {
+                                id: None,
+                                target: None,
+                                text: vec![text],
+                                follow_up: true,
+                            };
+                            crate::commands::queue::describe(&crate::commands::queue::execute(
+                                &source,
+                                session,
+                                Some(&command),
+                            )?)
+                        })
+                        .await?;
+                        match result {
+                            Ok(text) => println!("{text}"),
+                            Err(error) => eprintln!("{error}"),
+                        }
+                    } else {
+                        eprintln!("start or resume a session first");
+                    }
+                }
                 "queue" => {
                     if let Some(session) = session.as_deref() {
                         let client = reqwest::Client::builder()
@@ -577,6 +604,7 @@ async fn turn(
             let _ = out.flush();
         }
         // The same line the TUI shows, in the front end that had none.
+        Progress::FollowUp { id } => println!("\nStarting follow-up {id}"),
         Progress::Working { said, .. } => {
             print!("{}", calls.working(said));
             let _ = out.flush();
@@ -666,6 +694,21 @@ pub async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command
     match name {
         "quit" | "exit" | "q" => return Ok(Said { text: String::new(), quit: true }),
         "help" | "?" => say!("{}", help_text()),
+        "followup" => {
+            let page = rook_core::message_queue::view::page(rook, *session, &Default::default())?;
+            let target =
+                page.follow_up_target.ok_or_else(|| anyhow::anyhow!("start a turn or goal first"))?;
+            let entry = rook_core::message_queue::view::change(
+                rook,
+                *session,
+                rook_proto::queue::Change::FollowUp {
+                    target,
+                    id: rook_store::format_session_id(rook_store::new_session_id()),
+                    text: rest.into(),
+                },
+            )?;
+            say!("{}", crate::commands::queue::describe(&serde_json::to_value(entry)?)?);
+        }
         "queue" => {
             let page = rook_core::message_queue::view::page(rook, *session, &Default::default())?;
             say!("{}", crate::commands::queue::describe(&serde_json::to_value(page)?)?);

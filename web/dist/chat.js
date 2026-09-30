@@ -174,6 +174,10 @@ export function connect() {
         renderPicker();
         if (e.running) { say('stat', '[joined a turn already running here]'); working(); }
         break;
+      case 'follow_up':
+        say('stat', `Starting follow-up ${e.id}`); callStatus = null;
+        state.chat.spent = null; state.chat.context = null; state.chat.modelRequest = null;
+        working(); renderSettings(); break;
       case 'text': saidByModel(e.text); break;
       case 'reasoning': say('think', e.text); break;
       // A sub-agent working, which is not the model thinking.
@@ -528,6 +532,7 @@ export async function renderChat() {
   const stream = el('div', { class: 'stream', id: 'stream' });
   const input = el('textarea', { id: 'chat-input', rows: 3, 'aria-label': 'Prompt', placeholder: 'Ask the agent… (Enter sends, Shift+Enter adds a line, Esc stops)', autofocus: true }, state.chat.draft || '');
   const sendButton = el('button', { id: 'send', type: 'submit' }, 'Send');
+  const followupButton = el('button', { type: 'submit', value: 'follow_up', title: 'Start a separate turn after this turn or goal finishes' }, 'Queue follow-up');
   const stopButton = el('button', { id: 'stop', type: 'button', hidden: true, onclick: stop }, 'Stop');
 
   let loadingAttachments = false;
@@ -551,6 +556,7 @@ export async function renderChat() {
     askToNotify();
     const submittingSession = state.chat.session;
     const wasBusy = state.chat.busy;
+    const followUp = event.submitter?.value === 'follow_up';
     let options;
     try {
       const schema = outputSchema.value.trim();
@@ -597,10 +603,11 @@ export async function renderChat() {
         output_schema: schema ? JSON.parse(schema) : null, schema_retries: retries };
     } catch (error) { say('err', String(error)); return; }
     finally { loadingAttachments = false; }
-    if (pendingSubmission() || submissionError() || (wasBusy && !text.startsWith('/goal '))) {
+    if (followUp || pendingSubmission() || submissionError() || (wasBusy && !text.startsWith('/goal '))) {
       try {
         if (options.attachments.length) throw new Error('Queued corrections cannot include attachments');
-        const submission = submitSteering(submittingSession, text);
+        if (followUp && (options.recipe || options.output || options.output_schema)) throw new Error('Follow-ups currently accept text only; clear recipe and output settings first');
+        const submission = submitSteering(submittingSession, text, followUp ? 'follow_up' : 'submit');
         $('#queue-controls section')?.refreshSubmission?.();
         const result = await submission;
         receiveQueueReceipt(result.session, result.entry);
@@ -624,7 +631,7 @@ export async function renderChat() {
     if (state.chat.busy) return;
     say('you', `› ${text}`);
     working();
-  } }, input, sendButton, stopButton);
+  } }, input, sendButton, followupButton, stopButton);
   // Naming a file meant knowing the path and typing it, which in a browser
   // means leaving the page to go and look. The ranking is the daemon's, so the
   // page offers the same list the terminal does.

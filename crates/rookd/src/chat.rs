@@ -1017,28 +1017,30 @@ async fn turn(
         return;
     }
     match result {
-        Ok(outcome) => {
-            for text in &outcome.facts_learned {
-                let _ = outbound.send(ChatEvent::Remembered { text: text.clone() });
-            }
-            for text in &outcome.facts_forgotten {
-                let _ = outbound.send(ChatEvent::Forgot { text: text.clone() });
-            }
-            let _ = outbound.send(ChatEvent::Done {
-                reply: Some(outcome.reply.clone()),
-                steps: outcome.steps,
-                input_tokens: outcome.input_tokens,
-                output_tokens: outcome.output_tokens,
-                delegated: outcome.delegated,
-                compactions: outcome.compactions,
-                decisions: outcome.decisions,
-                open_questions: outcome.open_questions,
-                files_changed: outcome.files_changed,
-                stopped: outcome.stopped,
-            });
-        }
+        Ok(outcome) => ended_outcome(&outbound, outcome),
         Err(e) => ended_badly(&rook, session, &outbound, e.to_string()),
     }
+}
+
+fn ended_outcome(outbound: &mpsc::UnboundedSender<ChatEvent>, outcome: rook_core::agent::TurnOutcome) {
+    for text in &outcome.facts_learned {
+        let _ = outbound.send(ChatEvent::Remembered { text: text.clone() });
+    }
+    for text in &outcome.facts_forgotten {
+        let _ = outbound.send(ChatEvent::Forgot { text: text.clone() });
+    }
+    let _ = outbound.send(ChatEvent::Done {
+        reply: Some(outcome.reply.clone()),
+        steps: outcome.steps,
+        input_tokens: outcome.input_tokens,
+        output_tokens: outcome.output_tokens,
+        delegated: outcome.delegated,
+        compactions: outcome.compactions,
+        decisions: outcome.decisions,
+        open_questions: outcome.open_questions,
+        files_changed: outcome.files_changed,
+        stopped: outcome.stopped,
+    });
 }
 
 async fn goal_turn(
@@ -1062,7 +1064,7 @@ async fn goal_turn(
             Err(error) => return ended_badly(&rook, session, outbound, error.to_string()),
         };
         if !run.status.runnable() {
-            return ended_goal(&rook, outbound, session, run);
+            return ended_goal(&rook, outbound, session, run, connection, shared).await;
         }
         if let Some(at) = run.next_attempt_at.filter(|at| *at > managed::now()) {
             if announced_retry != Some(at) {
@@ -1102,7 +1104,9 @@ async fn goal_turn(
         )
         .await;
         match result {
-            Ok(run) if !run.status.runnable() => return ended_goal(&rook, outbound, session, run),
+            Ok(run) if !run.status.runnable() => {
+                return ended_goal(&rook, outbound, session, run, connection, shared).await;
+            }
             Ok(run) if run.status == Status::Queued => {
                 let _ = outbound.send(ChatEvent::Agent {
                     receipt: None,
@@ -1131,7 +1135,50 @@ async fn goal_turn(
     }
 }
 
-fn ended_goal(rook: &rook_core::Rook, outbound: &mpsc::UnboundedSender<ChatEvent>, session: u128, run: Run) {
+async fn ended_goal(
+    rook: &rook_core::Rook,
+    outbound: &mpsc::UnboundedSender<ChatEvent>,
+    session: u128,
+    run: Run,
+    connection: &Connection,
+    shared: &Shared,
+) {
+    let followups_ready = if run.status == Status::Completed {
+        match rook_core::message_queue::followups::ready(rook, session) {
+            Ok(ready) => ready,
+            Err(error) => return ended_badly(rook, session, outbound, error.to_string()),
+        }
+    } else {
+        false
+    };
+    if followups_ready {
+        let named = connection.settings.model();
+        let provider = match rook_core::models::chosen(&rook.config, named.as_deref()) {
+            Ok(provider) => provider,
+            Err(error) => return ended_badly(rook, session, outbound, error.to_string()),
+        };
+        let mut agent = AgentLoop::new(rook, provider.into(), session);
+        agent.policy = connection.settings.policy.clone();
+        agent.effort = connection.settings.effort();
+        agent.approver = connection.approver.clone();
+        agent.ask_via(connection.asker.clone());
+        rook_core::agent::equip(&mut agent, shared.servers.clone(), &shared.mcp, shared.jobs.clone());
+        match agent
+            .run_followups(|progress| {
+                if let Some(event) = as_event(progress, &rook.workspace) {
+                    let _ = outbound.send(event);
+                }
+            })
+            .await
+        {
+            Ok(Some(outcome)) => {
+                ended_outcome(outbound, outcome);
+                return;
+            }
+            Ok(None) => {}
+            Err(error) => return ended_badly(rook, session, outbound, error.to_string()),
+        }
+    }
     let last = rook.completed_turn(session).ok().flatten();
     let stopped = match run.status {
         Status::Completed => "end_turn",
@@ -1182,6 +1229,7 @@ fn as_event(progress: Progress<'_>, workspace: &std::path::Path) -> Option<ChatE
             receipt: None,
             text: format!("    {}", rook_core::calls::delegating(at, doing)),
         },
+        Progress::FollowUp { id } => ChatEvent::FollowUp { id: id.into() },
         Progress::Working { call, said } => {
             ChatEvent::ToolWorking { name: call.to_string(), said: said.to_string() }
         }

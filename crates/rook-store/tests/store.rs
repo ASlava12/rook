@@ -860,7 +860,7 @@ fn a_legacy_store_upgrades_its_format_marker_before_retraining() {
     let store = Store::open(dir.path()).unwrap();
     let marker: serde_json::Value =
         serde_json::from_slice(&std::fs::read(dir.path().join("format.json")).unwrap()).unwrap();
-    assert_eq!(marker["format"], 3);
+    assert_eq!(marker["format"], 4);
     let id = store.put(Kind::Message, b"still readable").unwrap();
     assert_eq!(store.get(&id).unwrap(), b"still readable");
 }
@@ -1067,4 +1067,32 @@ fn state_only_session_transactions_cannot_outlive_a_deleted_session() {
     store.delete_session(session).unwrap();
     assert!(store.append_events_with_values(session, [], &[(&key, b"late")]).is_err());
     assert!(store.kv_get(&key).unwrap().is_none());
+}
+
+#[test]
+fn failed_multi_event_admission_rolls_back_queue_goal_and_execution_values() {
+    let (_dir, store) = tmp_store();
+    let session = rook_store::new_session_id();
+    store.create_session(&SessionMeta::new(session, "follow-up", "/tmp", rook_store::now_unix())).unwrap();
+    store.kv_set("queue", b"reserved").unwrap();
+    store.kv_set("goal", b"old").unwrap();
+    let result = store.append_events_with_receipt(
+        session,
+        [
+            NewEvent::new(EventKind::Note, Kind::Message, b"goal").label("goal"),
+            NewEvent::new(EventKind::UserMessage, Kind::Message, b"prompt"),
+        ],
+        "execution",
+        &[("queue", b"accepted"), ("goal", b"new")],
+        |[note, prompt]| {
+            assert_eq!((note, prompt), (0, 1));
+            Err(rook_store::StoreError::Encoding("injected failure".into()))
+        },
+    );
+    assert!(result.is_err());
+    assert!(store.events(session, 0, 10).unwrap().is_empty());
+    assert_eq!(store.kv_get("queue").unwrap().unwrap(), b"reserved");
+    assert_eq!(store.kv_get("goal").unwrap().unwrap(), b"old");
+    assert!(store.kv_get("execution").unwrap().is_none());
+    assert_eq!(store.get_session(session).unwrap().unwrap().next_seq, 0);
 }

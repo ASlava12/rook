@@ -26,12 +26,15 @@ pub struct Page {
     /// resolving it again on retry could steer a replacement goal.
     #[serde(default)]
     pub submission_target: String,
+    #[serde(default)]
+    pub follow_up_target: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Change {
     Submit { target: String, id: String, text: String },
+    FollowUp { target: String, id: String, text: String },
     Edit { reference: String, revision: u64, text: String },
     Withdraw { reference: String, revision: u64 },
 }

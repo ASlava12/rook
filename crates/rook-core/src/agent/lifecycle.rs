@@ -149,16 +149,21 @@ impl AgentLoop<'_> {
             .ok_or_else(|| CoreError::Other("execution receipt is missing".into()))?;
         // The actual prompt sequence and admission receipt commit together,
         // even when another writer appends a note during the hooks.
-        self.began_at_seq = if self.turn_options().attachments.is_empty() {
-            journal.admit_prompt(&self.vault.redact(prompt), prompt, "")?
+        let (sequence, receipt) = if self.turn_options().attachments.is_empty() {
+            journal.admit_prompt(self.rook, &self.vault.redact(prompt), prompt, "")?
         } else {
             let message = crate::attachments::prepare(prompt, &self.turn_options().attachments)?;
             journal.admit_prompt(
+                self.rook,
                 &self.vault.redact(prompt),
                 &serde_json::to_string(&message)?,
                 crate::attachments::LABEL,
             )?
         };
+        self.began_at_seq = sequence;
+        if let Some(receipt) = receipt {
+            on_progress(Progress::Heard { text: prompt, receipt: Some(&receipt) });
+        }
         // Set here and not in `new`: a front end builds the loop and may hold
         // it before there is a prompt, and what is being bounded is the turn.
         // Only at the top, because a sub-agent is given the parent's and a

@@ -41,6 +41,19 @@ pub struct Steering {
     /// Submission retries compare the original content even after an edit.
     #[serde(default)]
     pub submitted_hash: Option<String>,
+    #[serde(default)]
+    pub follow_up: Option<FollowUp>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FollowUp {
+    /// Opaque completion boundary, resolved once at submission.
+    pub after: String,
+    pub goal: Option<RunIdentity>,
+    #[serde(default)]
+    pub ready: bool,
+    pub reserved: Option<String>,
+    pub blocked: Option<String>,
 }
 
 impl Steering {
@@ -142,7 +155,7 @@ pub struct Run {
 }
 
 /// A running consumer must not adopt a replacement goal with the same ID.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunIdentity {
     pub id: String,
     pub generation: String,

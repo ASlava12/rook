@@ -559,6 +559,9 @@ pub(crate) enum SessionCmd {
 pub(crate) enum QueueCmd {
     /// Queue steering without starting a turn. Keep both ID and target for retry.
     Submit {
+        /// Start a new turn after the current turn or whole goal completes.
+        #[arg(long)]
+        follow_up: bool,
         #[arg(long, requires = "target")]
         id: Option<String>,
         #[arg(long, requires = "id")]

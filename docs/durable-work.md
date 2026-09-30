@@ -212,8 +212,44 @@ with the current build.
 The target, reference and revision are rechecked under the mutation lock. The
 older scope-specific routes below remain available for compatibility; new clients
 should use the combined view and mutation routes for generation protection.
-Follow-up execution after a complete ordinary turn or whole goal is still being
-implemented; this panel currently manages steering messages.
+The same panel also manages follow-ups, described below.
+
+## Follow-up turns
+
+A follow-up waits for the entire ordinary turn or `/goal` to complete and then
+starts a fresh turn in the same session. Use `/followup <text>` in the TUI or
+REPL, **Queue follow-up** beside Send in the browser, or:
+
+```sh
+rook session queue SESSION_ID submit --follow-up "Then document the result"
+```
+
+The HTTP operation is `{"action":"follow_up","target":"TARGET","id":"ID","text":"..."}`.
+Use the page's `follow_up_target`, retaining it together with the ID, original
+text and mode for retries. The target identifies the preceding execution or goal
+generation. Follow-up references remain `session.ID`. Text is bounded by the same
+receipt and byte limits as steering. This first integration accepts text only;
+attachments, recipes and output contracts belong to an ordinary prompt.
+
+During live execution, successful completion drains eligible follow-ups in order.
+A limit, error, pause or cancellation does not count as completion. A goal's
+individual stage ending does not count either. Editing and withdrawal use the
+same queue controls; edits stop once execution is reserved. Each follow-up gets
+fresh turn limits and temporary secrets while retaining shared policy, approval
+channels and MCP/LSP connections. A `follow_up` stream event marks the new turn;
+the observer remains attached, and terminal `done` is sent when the chain stops.
+The final summary describes the last turn; earlier output stays in the transcript.
+
+Restart recovery is still being integrated. The queue, reserved execution ID and
+accepted prompt are durable, but the daemon does not yet scan idle ordinary
+sessions to restart follow-ups. Submitting to an idle session saves the message;
+it does not itself start a worker. An interrupted reserved message is not retried
+automatically. Inspect session recovery; an unaccepted stopped reservation can
+be withdrawn and resubmitted. An already accepted message is immutable. An
+unfinished predecessor continued under a new execution ID, or a replacement goal,
+does not silently acquire messages addressed to the old boundary. Inspect and
+withdraw/resubmit those pending messages explicitly. These limitations keep the
+queue capability in progress in the adoption tracker.
 
 ## Steering receipts
 

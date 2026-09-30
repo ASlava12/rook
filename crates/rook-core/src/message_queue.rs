@@ -1,6 +1,7 @@
-//! Durable steering for ordinary sessions. These receipts do not create a work
-//! run or authorize another turn. Pending messages survive until the session is
-//! explicitly continued, including when the daemon restarts.
+//! Durable session messages. Steering updates an existing turn; follow-ups
+//! authorize a separate turn at their captured completion boundary. Both use
+//! bounded receipts, revision checks and atomic acceptance.
+pub mod followups;
 pub mod view;
 
 use rook_proto::work::{EditInstruction, Steer, Steering, WithdrawInstruction};
@@ -11,7 +12,7 @@ use crate::{
     work::{managed, receipts},
 };
 
-fn key(session: u128) -> String {
+pub(crate) fn key(session: u128) -> String {
     // Store::delete_session also removes companions with this suffix.
     format!("message-queue/{session:032x}")
 }
@@ -20,7 +21,11 @@ pub fn list(rook: &Rook, session: u128) -> Result<Vec<Steering>> {
     if rook.store.get_session(session)?.is_none() {
         return Err(CoreError::Other("no such session".into()));
     }
-    rook.store
+    read_from(&rook.store, session)
+}
+
+pub(crate) fn read_from(store: &rook_store::Store, session: u128) -> Result<Vec<Steering>> {
+    store
         .kv_get(&key(session))?
         .map(|bytes| serde_json::from_slice(&bytes).map_err(Into::into))
         .unwrap_or_else(|| Ok(Vec::new()))
@@ -45,6 +50,11 @@ pub fn submit_noticed(
     request: Steer,
 ) -> Result<(Steering, rook_proto::queue::Notice)> {
     update(rook, session, |messages| {
+        if messages.iter().any(|m| m.id == request.id && m.follow_up.is_some()) {
+            return Err(CoreError::Other(
+                "this ID belongs to a follow-up; retry with its original mode and target".into(),
+            ));
+        }
         // Check under the same lock as goal admission. Existing receipt retries
         // still work after promotion, but new corrections belong to the goal.
         if !messages.iter().any(|m| m.id == request.id)
@@ -65,11 +75,30 @@ pub fn edit(rook: &Rook, session: u128, id: &str, request: EditInstruction) -> R
 }
 
 pub fn withdraw(rook: &Rook, session: u128, id: &str, request: WithdrawInstruction) -> Result<Steering> {
-    update(rook, session, |messages| receipts::withdraw(messages, id, request, true))
+    update(rook, session, |messages| {
+        check_withdraw(rook, session, messages, id)?;
+        receipts::withdraw(messages, id, request, true)
+    })
+}
+
+pub(crate) fn check_withdraw(rook: &Rook, session: u128, messages: &[Steering], id: &str) -> Result<()> {
+    if messages.iter().any(|m| m.id == id && m.follow_up.as_ref().is_some_and(|f| f.reserved.is_some()))
+        && crate::execution::is_active(rook, session)
+    {
+        return Err(CoreError::Other(
+            "follow-up is starting; stop the active execution before withdrawing an unaccepted message"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn pending(rook: &Rook, session: u128) -> Result<Vec<String>> {
-    Ok(list(rook, session)?.into_iter().filter(Steering::queued).map(|m| m.id).collect())
+    Ok(list(rook, session)?
+        .into_iter()
+        .filter(|m| m.queued() && m.follow_up.is_none())
+        .map(|m| m.id)
+        .collect())
 }
 
 /// Text and identity from one successful acceptance, never a subsequent read.
@@ -99,7 +128,7 @@ pub(crate) fn accept(
         .iter_mut()
         .find(|m| m.id == id)
         .ok_or_else(|| CoreError::Other("unknown instruction receipt".into()))?;
-    if !message.queued() {
+    if !message.queued() || message.follow_up.is_some() {
         return Ok(None);
     }
     message.applied_at = Some(managed::now());

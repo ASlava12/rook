@@ -373,6 +373,7 @@ enum TurnEvent {
     Step(u32, u32),
     /// What the call in flight says about itself while it runs.
     Working(String),
+    FollowUp(String),
     /// How long the turn will wait for a model that has not begun to answer.
     /// Said by the turn, because the size of the prompt it is waiting on is not
     /// something a window can see.
@@ -1863,6 +1864,10 @@ impl App {
                 TurnEvent::Reasoning(text) => self.chat.push("think", &text),
                 TurnEvent::Tool { name, said } => self.chat.tool_started(&name, &said),
                 TurnEvent::Agent(line) => self.chat.push("agent", &line),
+                TurnEvent::FollowUp(id) => {
+                    self.chat.began();
+                    self.chat.push("stat", &format!("Starting follow-up {id}"));
+                }
                 TurnEvent::Working(said) => self.chat.working = Some(said),
                 TurnEvent::Waiting(secs) => {
                     self.chat.waiting_for = Some(std::time::Duration::from_secs(secs))
@@ -1996,6 +2001,10 @@ impl App {
                 }
             }
             ChatEvent::Text { text } => self.chat.push("text", &text),
+            ChatEvent::FollowUp { id } => {
+                self.chat.began();
+                self.chat.push("stat", &format!("Starting follow-up {id}"));
+            }
             ChatEvent::ToolWorking { said, .. } => self.chat.working = Some(said),
             ChatEvent::Reasoning { text } => self.chat.push("think", &text),
             // The same kind a turn run here uses, so a sub-agent's work reads
@@ -3059,6 +3068,21 @@ impl App {
         }
         self.chat.recalled = None;
         self.chat.draft.clear();
+        if let Some(text) = prompt.strip_prefix("/followup ") {
+            let result = self
+                .chat
+                .session
+                .ok_or_else(|| anyhow::anyhow!("start or open a session first"))
+                .and_then(|session| self.queue.submit(session, text.trim(), true));
+            match result {
+                Ok(()) => self.chat.push("stat", "Submitting follow-up; /queue shows its status."),
+                Err(error) => {
+                    self.chat.push("err", &error.to_string());
+                    self.chat.input.set(&prompt);
+                }
+            }
+            return;
+        }
         if let Some(command) = slash(&prompt)
             && self.source.daemon_base().is_some()
             && (command == "new" || command.starts_with("session ") || command == "goal")
@@ -3126,7 +3150,7 @@ impl App {
                 None => Chat::QUEUED,
             };
             let result = match self.chat.session {
-                Some(session) => self.queue.submit(session, &prompt),
+                Some(session) => self.queue.submit(session, &prompt, false),
                 None => {
                     self.chat.interject(&prompt, self.source.here().is_some(), &self.shared.interjections)
                 }
@@ -3257,6 +3281,7 @@ impl App {
                         Progress::Delegating { at, doing } => {
                             TurnEvent::Agent(format!("    {}", rook_core::calls::delegating(at, doing)))
                         }
+                        Progress::FollowUp { id } => TurnEvent::FollowUp(id.into()),
                         Progress::Working { said, .. } => TurnEvent::Working(said.to_string()),
                         // The window draws its own line for a silent model and
                         // has since before this existed; what it could not do

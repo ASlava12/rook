@@ -781,12 +781,29 @@ impl Store {
         key: &str,
         receipt: impl FnOnce(u64) -> Result<Vec<u8>>,
     ) -> Result<u64> {
-        let [seq] = self.append_events_transaction(session, [event], true, |txn, [seq]| {
-            let bytes = receipt(seq)?;
-            txn.open_table(schema::KV)?.insert(key, bytes.as_slice())?;
-            Ok(())
-        })?;
+        let [seq] = self.append_events_with_receipt(session, [event], key, &[], |[seq]| receipt(seq))?;
         Ok(seq)
+    }
+
+    /// An event-derived receipt and other caller-owned state share one commit.
+    /// The encoder must not call another store write while this transaction is held.
+    pub fn append_events_with_receipt<const N: usize>(
+        &self,
+        session: u128,
+        batch: [NewEvent<'_>; N],
+        key: &str,
+        values: &[(&str, &[u8])],
+        receipt: impl FnOnce([u64; N]) -> Result<Vec<u8>>,
+    ) -> Result<[u64; N]> {
+        self.append_events_transaction(session, batch, true, |txn, sequences| {
+            let bytes = receipt(sequences)?;
+            txn.open_table(schema::KV)?.insert(key, bytes.as_slice())?;
+            let mut kv = txn.open_table(schema::KV)?;
+            for (key, value) in values {
+                kv.insert(*key, *value)?;
+            }
+            Ok(())
+        })
     }
 
     fn append_events_transaction<const N: usize>(
