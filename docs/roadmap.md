@@ -1791,6 +1791,15 @@ recorded so the design question survives the session that raised it.
 
 ## Next
 
+**Pi: interaction and long-session delivery.** The
+[September 30 review](research/pi-reference-review-20260930.md) compares the
+pinned Pi CLI and its separate durable harness with the current Rook. First
+candidates: bounded client delivery with snapshot recovery, distinct editable
+steering/follow-up queues, and configurable keyboard actions with prompt undo.
+Branch navigation, inline tool cards, context provenance and local HTML export
+follow. These are proposals, not implemented capabilities; the review includes
+existing equivalents, integration constraints and acceptance checks.
+
 **Keep triaging the reference backlog.** `cargo xtask refs advance` moves a
 pointer and prints what landed; the log in
 [references/PORTED.md](../references/PORTED.md) says what was done with each
