@@ -14,6 +14,7 @@ async-trait = "0.1.92"
 clap = { version = "4.6.6", features = ["derive"] }
 crossterm = "0.29.0"
 ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info"] }
+unicode-segmentation = "1.13.3"
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "json"] }
 rook-acp = { version = "0.10.0", path = "../rook-acp" }
 rook-core.workspace = true

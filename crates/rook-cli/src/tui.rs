@@ -39,6 +39,7 @@ mod mcp;
 mod mcp_auth;
 mod queue;
 mod tasks;
+mod wrapping;
 
 /// What is over the conversation, when anything is.
 ///
@@ -412,6 +413,7 @@ struct Selected {
 #[derive(Default)]
 struct Typing {
     text: String,
+    geometry: std::cell::Cell<wrapping::Geometry>,
     edits: draft::History,
     /// A byte offset, always on a character boundary — the moves below are what
     /// keeps it there, and the text is whatever somebody typed, which includes
@@ -473,49 +475,23 @@ impl Typing {
         self.at = 0;
     }
 
-    /// The start of the row the cursor is in, and the end of it.
-    fn row_start(&self, at: usize) -> usize {
-        self.text[..at].rfind('\n').map_or(0, |nl| nl + 1)
-    }
-
-    fn row_end(&self, at: usize) -> usize {
-        self.text[at..].find('\n').map_or(self.text.len(), |nl| at + nl)
-    }
-
-    /// Up a row, keeping the column where the row above is long enough.
-    ///
-    /// False when there is no row above, which is when the key means the
-    /// previous prompt instead — the box holds several rows now, and Up walking
-    /// straight into the history took a half-written message with it.
+    /// Only the first/last visual row falls through to prompt history.
     fn up(&mut self) -> bool {
-        self.edits.boundary();
-        let start = self.row_start(self.at);
-        if start == 0 {
-            return false;
-        }
-        let column = self.text[start..self.at].chars().count();
-        // `start - 1` is the newline that ends the row above.
-        self.at = self.along(self.row_start(start - 1), start - 1, column);
-        true
+        self.vertical(false)
     }
 
-    /// Down a row. False when there is none, where the key means the next
-    /// prompt.
     fn down(&mut self) -> bool {
-        self.edits.boundary();
-        let end = self.row_end(self.at);
-        if end == self.text.len() {
-            return false;
-        }
-        let column = self.text[self.row_start(self.at)..self.at].chars().count();
-        self.at = self.along(end + 1, self.row_end(end + 1), column);
-        true
+        self.vertical(true)
     }
 
-    /// `column` characters along the row from `from`, or its end — a short row
-    /// takes the cursor to where it ends rather than past it.
-    fn along(&self, from: usize, to: usize, column: usize) -> usize {
-        self.text[from..to].char_indices().nth(column).map_or(to, |(at, _)| from + at)
+    fn vertical(&mut self, down: bool) -> bool {
+        self.edits.boundary();
+        if let Some(at) = self.geometry.get().vertical(&self.text, self.at, down) {
+            self.at = at;
+            true
+        } else {
+            false
+        }
     }
 
     fn end(&mut self) {
@@ -569,52 +545,17 @@ impl Typing {
         self.text[..self.at].chars().count() as u16
     }
 
-    /// Where the cursor is drawn in the message box, which holds newlines: the
-    /// row it is on and how far along that row.
     fn caret(&self) -> (usize, usize) {
-        let before = &self.text[..self.at];
-        let row = before.matches('\n').count();
-        let column = Line::from(before.rsplit('\n').next().unwrap_or_default()).width();
-        (row, column)
+        self.geometry.get().measure(&self.text, self.at).1
     }
 
     fn rows(&self) -> u16 {
-        (self.text.matches('\n').count() + 1).min(u16::MAX as usize) as u16
+        self.geometry.get().measure(&self.text, self.at).0.min(u16::MAX as usize) as u16
     }
 
-    /// Only the visible cells are retained. Long JSON quotes can exceed u16
-    /// columns, and terminal cursor coordinates must never inherit that offset.
     fn view(&self, prompt: &str, width: u16, height: u16) -> (Vec<Line<'static>>, (u16, u16)) {
-        let (row, column) = self.caret();
-        let gutter = Line::from(prompt).width();
-        let scroll = row.saturating_sub(height.saturating_sub(1) as usize);
-        let horizontal = (gutter + column).saturating_sub(width.saturating_sub(1) as usize);
-        let mut lines = Vec::new();
-        for (at, text) in self.text.split('\n').enumerate().skip(scroll).take(height as usize) {
-            let mark = if at == 0 { prompt.to_owned() } else { " ".repeat(gutter) };
-            let line =
-                Line::from(vec![Span::styled(mark, Style::default().fg(Color::DarkGray)), Span::raw(text)]);
-            let start = if at == row { horizontal } else { 0 };
-            let mut cells = 0;
-            let mut spans = Vec::new();
-            for part in line.styled_graphemes(Style::default()) {
-                let size = Span::raw(part.symbol).width();
-                let end = cells + size;
-                if cells >= start + width as usize {
-                    break;
-                }
-                if cells >= start && end <= start + width as usize {
-                    spans.push(Span::styled(part.symbol.to_owned(), part.style));
-                } else if cells < start && end > start {
-                    // Preserve a wide grapheme's remaining cells at the edge,
-                    // without rendering half of it or shifting the caret.
-                    spans.push(Span::raw(" ".repeat((end - start).min(width as usize))));
-                }
-                cells = end;
-            }
-            lines.push(Line::from(spans));
-        }
-        (lines, ((row - scroll) as u16, (gutter + column - horizontal) as u16))
+        self.geometry.set(wrapping::Geometry::new(prompt, width));
+        self.geometry.get().view(&self.text, self.caret(), prompt, height)
     }
 
     /// Text arriving from the terminal in one piece, newlines and all.
@@ -3709,6 +3650,20 @@ impl App {
             _ if !completing.is_empty() => ((completing.len() + 2) as u16).min((area.height / 2).max(3)),
             _ => 0,
         };
+        let prompt = match (self.chat.busy && self.chat.asking.is_none(), self.chat.since) {
+            (true, Some(since)) => format!(
+                "  working… {}{}{}  ",
+                crate::fmt::elapsed(since.elapsed()),
+                match self.chat.step {
+                    Some((at, of)) => format!(" · step {at}/{of}"),
+                    None => String::new(),
+                },
+                self.chat.silence(self.waiting_for())
+            ),
+            (true, None) => "  working… ".to_string(),
+            _ => "› ".to_string(),
+        };
+        self.chat.input.geometry.set(wrapping::Geometry::new(&prompt, area.width.saturating_sub(2)));
         // The box grows with what is in it, because a pasted paragraph is one
         // prompt and a person editing it has to see it. Capped, since the
         // conversation is what the window is for: past this the box scrolls.
@@ -3897,19 +3852,6 @@ impl App {
             f.render_widget(Paragraph::new(lines).block(bordered(" files · tab completes ")), ask);
         }
 
-        let prompt = match (self.chat.busy && self.chat.asking.is_none(), self.chat.since) {
-            (true, Some(since)) => format!(
-                "  working… {}{}{}  ",
-                crate::fmt::elapsed(since.elapsed()),
-                match self.chat.step {
-                    Some((at, of)) => format!(" · step {at}/{of}"),
-                    None => String::new(),
-                },
-                self.chat.silence(self.waiting_for())
-            ),
-            (true, None) => "  working… ".to_string(),
-            _ => "› ".to_string(),
-        };
         let inner = input.inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 });
         let (typing, (row, column)) = self.chat.input.view(&prompt, inner.width, inner.height);
         f.render_widget(Paragraph::new(typing).block(bordered("")), input);
@@ -5643,23 +5585,90 @@ and the next line"
     #[test]
     fn long_quoted_drafts_keep_the_tail_and_unicode_caret_inside_the_viewport() {
         let mut typing = Typing::default();
-        typing.paste(&format!("draft\n{}界🙂END", "x".repeat(70000)));
+        let text = format!("draft\n{}界🙂END", "x".repeat(70000));
+        typing.paste(&text);
         assert!(typing.caret().1 > u16::MAX as usize);
         let (lines, cursor) = typing.view("› ", 20, 2);
-        assert_eq!(cursor, (1, 19));
+        assert!(typing.rows() > 4000, "the draft exceeds the viewport many times");
+        assert_eq!(cursor.0, 1);
+        assert!(cursor.1 < 20);
         assert_eq!(lines.len(), 2);
         assert!(lines.iter().all(|line| line.width() <= 20));
-        assert!(lines[1].to_string().ends_with("界🙂END"));
+        let tail: String = lines.iter().map(|line| line.to_string()[2..].to_string()).collect();
+        assert!(tail.ends_with("界🙂END"));
+        assert_eq!(typing.as_str(), text);
         typing.home();
         let (lines, cursor) = typing.view("› ", 20, 2);
         assert_eq!(cursor, (0, 2));
         assert!(lines[0].to_string().contains("draft"));
         typing.set("界🙂e\u{301}");
-        assert_eq!(typing.caret(), (0, 5), "display columns, not bytes or code points");
-        let (lines, cursor) = typing.view("› ", 4, 1);
-        assert_eq!(cursor, (0, 3));
-        assert_eq!(lines[0].width(), 3);
-        assert!(lines[0].to_string().ends_with("e\u{301}"));
+        let (lines, cursor) = typing.view("", 4, 3);
+        assert_eq!(cursor, (1, 3));
+        assert_eq!(lines.iter().map(ToString::to_string).collect::<String>(), "界🙂e\u{301}");
+    }
+
+    #[test]
+    fn a_long_single_line_wraps_and_arrows_edit_its_visual_rows_before_history() {
+        let text = "abcdefghijklmnopqrstuvwxyz";
+        let mut typing = Typing::default();
+        typing.paste(text);
+        let (lines, cursor) = typing.view("› ", 12, 10);
+        assert_eq!(typing.rows(), 3);
+        assert_eq!(drawn(&lines), ["› abcdefghi", "  jklmnopqr", "  stuvwxyz"]);
+        assert_eq!(cursor, (2, 10));
+        assert!(typing.up());
+        assert_eq!(typing.at, 17);
+        assert!(typing.up());
+        assert_eq!(typing.at, 8);
+        assert!(!typing.up());
+        assert!(typing.down());
+        assert_eq!(typing.at, 17);
+        typing.insert('!');
+        assert_eq!(typing.as_str(), "abcdefghijklmnopq!rstuvwxyz");
+        typing.undo();
+        assert_eq!(typing.as_str(), text);
+        typing.end();
+        let (lines, cursor) = typing.view("› ", 40, 10);
+        assert_eq!(lines.len(), 1, "resizing recomputes wraps");
+        assert_eq!(cursor, (0, 28));
+        assert!(!typing.up(), "history is reachable again with just one visual row");
+        assert_eq!(typing.take(), text, "soft wraps never enter the submitted prompt");
+    }
+
+    #[test]
+    fn pasted_unicode_graphemes_survive_wrapping_and_tiny_viewports() {
+        let text = "я界🙂e\u{301}👩‍💻".repeat(12);
+        let mut typing = Typing::default();
+        typing.paste(&text);
+        let (lines, cursor) = typing.view("› ", 14, 50);
+        assert!(lines.len() > 5, "the paste must wrap several times");
+        assert!(lines.iter().all(|line| line.width() < 14));
+        assert_eq!(cursor.0 as usize, lines.len() - 1);
+        let displayed: String =
+            lines.iter().flat_map(|line| line.spans.iter().skip(1)).map(|s| s.content.as_ref()).collect();
+        assert_eq!(displayed, text, "wide and combining graphemes must not disappear at the edge");
+        for width in 0..5 {
+            for height in 0..3 {
+                let (lines, (row, col)) = typing.view("working… long status", width, height);
+                assert!(lines.len() <= height as usize);
+                assert!(lines.iter().all(|line| line.width() <= width as usize));
+                if width > 0 && height > 0 {
+                    assert!(row < height && col < width);
+                }
+                assert_eq!(typing.as_str(), text);
+            }
+        }
+        typing.set("a\tb\n");
+        let (lines, cursor) = typing.view("", 20, 4);
+        assert_eq!(drawn(&lines), ["a    b", ""]);
+        assert_eq!(cursor, (1, 0));
+        assert_eq!(typing.take(), "a\tb\n");
+        // External editor replacements and queue edits bypass paste normalization.
+        typing.set("one\r\ntwo\r\n");
+        let (lines, cursor) = typing.view("", 20, 4);
+        assert_eq!(drawn(&lines), ["one", "two", ""]);
+        assert_eq!(cursor, (2, 0));
+        assert_eq!(typing.take(), "one\r\ntwo\r\n");
     }
 
     /// Naming a file meant knowing its path and typing it, so the short way to

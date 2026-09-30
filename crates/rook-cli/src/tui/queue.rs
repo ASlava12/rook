@@ -452,11 +452,11 @@ impl Queue {
         } else if self.editing {
             let block = Block::bordered().title(" Edit pending message · Ctrl-S saves ");
             let inside = block.inner(body);
-            let (lines, (x, y)) = self.input.view("", inside.width, inside.height);
+            let (lines, (row, column)) = self.input.view("", inside.width, inside.height);
             f.render_widget(block, body);
             f.render_widget(Paragraph::new(lines), inside);
             if inside.width > 0 && inside.height > 0 {
-                f.set_cursor_position((inside.x + x, inside.y + y));
+                f.set_cursor_position((inside.x + column, inside.y + row));
             }
         } else {
             let text = self

@@ -44,6 +44,11 @@ Defaults preserve the existing palette, editor and history gestures:
 | Submit | Enter |
 | Newline | Ctrl+J, Shift+Enter, Alt+Enter |
 
+Long draft lines wrap to the input width, including pasted text without spaces.
+The box grows to ten rows and then scrolls vertically to keep the cursor visible.
+Up/Down move through the visual rows before entering prompt history. Resizing
+reflows the view; these soft wraps do not add newlines to the submitted prompt.
+
 Undo and redo change only the draft. `/undo` and session rewind continue to
 restore workspace changes. Pasting a paragraph, completing a mention, clearing
 the prompt or returning text from the external editor creates one undoable edit.

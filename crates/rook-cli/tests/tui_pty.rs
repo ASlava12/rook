@@ -1246,6 +1246,37 @@ fn a_pasted_paragraph_stays_in_the_box_as_one_message() {
     assert!(sent.contains("omega"), "the whole paste went as one message:\n{sent}");
 }
 
+/// A long pasted line used to leave only a horizontally scrolled tail in a
+/// one-row input. Both ends must be visible without changing the draft bytes.
+#[test]
+fn a_long_pasted_line_wraps_in_the_input_and_survives_editing_and_submission() {
+    let _one = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let mut pty = tui(home.path(), workspace.path());
+    pty.screen(100, 30);
+    let text = format!("/nosuch HEAD_{}_TAIL", "abcdefghij".repeat(24));
+    assert!(text.len() > 2 * 100, "the paste must exceed two terminal rows");
+    pty.send(&format!("\u{1b}[200~{text}\u{1b}[201~"));
+    let held = pty.screen_showing(100, 30, "_TAIL");
+    let head = held.iter().position(|line| line.contains("› /nosuch HEAD_")).expect("head of paste visible");
+    let tail = held.iter().position(|line| line.contains("_TAIL")).unwrap();
+    assert!(tail > head, "long paste should span visual rows: {held:?}");
+    assert!(!held.iter().any(|line| line.contains("▌ /nosuch")), "pasting must not submit");
+    // Up must stay in this draft, rather than recall history at a soft wrap.
+    pty.send("\u{1b}[A!");
+    pty.screen_showing(100, 30, "!");
+    pty.send("\u{7f}\u{1b}[F"); // Backspace, End
+    pty.screen_showing(100, 30, "_TAIL");
+    pty.send("\r");
+    let sent = pty.screen_showing(100, 30, "unknown command /nosuch").join("\n");
+    assert!(sent.contains("HEAD_") && sent.contains("_TAIL"), "the transcript retains both ends: {sent}");
+    pty.send("\u{1b}[A"); // recall the submitted prompt
+    let recalled = pty.screen_showing(100, 30, "› /nosuch HEAD_").join("\n");
+    assert!(recalled.contains("_TAIL"), "the submitted prompt must retain its tail: {recalled}");
+    assert_eq!(std::fs::read_to_string(home.path().join("history")).unwrap(), format!("{text}\n"));
+}
+
 /// A conversation shows a call as one line, which is right while a turn runs
 /// and not enough afterwards: "it edited `service.toml`" does not say what it
 /// wrote there. Reaching the bytes meant the sessions pane, a session to select
