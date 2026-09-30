@@ -146,7 +146,9 @@ fn companion_events_stay_adjacent_under_concurrent_appends_and_fork_together() {
     });
     let events = store.events(session, 0, 1000).unwrap();
     assert_eq!(events.len(), 160);
-    for pair in events.chunks_exact(2) {
+    let (pairs, remainder) = events.as_chunks::<2>();
+    assert!(remainder.is_empty());
+    for pair in pairs {
         assert_eq!(pair[0].record.kind, EventKind::Note);
         assert_eq!(pair[1].record.kind, EventKind::ToolResult);
         assert_eq!(pair[0].record.body, pair[1].record.body);

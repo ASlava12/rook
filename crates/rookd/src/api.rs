@@ -35,6 +35,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/sessions/{id}/turns", get(turns))
         .route("/api/sessions/{id}/tree", get(branches))
         .route("/api/sessions/{id}/branch", post(branch_from_event))
+        .route("/api/sessions/{id}/summary", post(branch_summary))
         .route("/api/sessions/{id}/rename", post(rename_branch))
         .route("/api/sessions/{id}/bookmarks", get(bookmarks).post(mark_bookmark))
         .route("/api/sessions/{id}/history", get(history_page))
@@ -393,6 +394,24 @@ async fn rename_branch(
 ) -> ApiResult<rook_core::branches::Node> {
     let session = session_id(&id)?;
     history_read(s, move |r| rook_core::branches::rename(r, session, &q.title)).await
+}
+#[derive(Deserialize)]
+struct BranchSummary {
+    source: String,
+    text: String,
+}
+async fn branch_summary(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+    Json(q): Json<BranchSummary>,
+) -> ApiResult<serde_json::Value> {
+    let target = session_id(&id)?;
+    let source = session_id(&q.source)?;
+    history_read(s, move |r| {
+        let event = rook_core::branches::transfer_summary(r, source, target, &q.text)?;
+        Ok(serde_json::json!({ "event": event }))
+    })
+    .await
 }
 async fn bookmarks(
     State(s): State<Shared>,

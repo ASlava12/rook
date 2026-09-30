@@ -3,6 +3,7 @@ import { el, api } from './lib.js';
 import { historyPanel } from './history.js';
 
 export function branchPanel(session, continueBranch, quote, forkEvent, renamed) {
+  const departed = session;
   const root = el('section', { 'aria-label': 'Conversation branches', style: 'overflow-wrap:anywhere' });
   const notice = el('p', { role: 'status', 'aria-live': 'polite', class: 'sub' });
   const rows = el('div', { class: 'scroll', 'aria-label': 'Branch nodes' });
@@ -24,6 +25,31 @@ export function branchPanel(session, continueBranch, quote, forkEvent, renamed) 
           forkEvent ? seq => forkEvent(node.id, seq) : undefined));
       }),
       button('Continue in chat', () => { if (!pending) continueBranch(node.id); }),
+      button('Carry reviewed summary', () => {
+        if (pending || !departed || node.id === departed) return;
+        const input = el('textarea', { rows: 5, 'aria-label': `Summary of departed branch ${departed}` });
+        edit.replaceChildren(el('p', { class: 'sub' },
+          `Summarize saved conversation ${departed} for ${node.id}. Historical file and test claims must be checked in the current workspace.`),
+        input, button('Save summary and continue', async () => {
+          if (pending) return;
+          const text = input.value.trim();
+          if (!text || new TextEncoder().encode(text).length > 16384) {
+            notice.textContent = 'Summary must be 1–16384 UTF-8 bytes.';
+            return;
+          }
+          pending = true; root.setAttribute('aria-busy', 'true');
+          try {
+            const saved = await api(`/api/sessions/${encodeURIComponent(node.id)}/summary`, { source: departed, text });
+            if (root.isConnected) {
+              notice.textContent = `Saved source-attributed summary at event #${saved.event}.`;
+              continueBranch(node.id);
+            }
+          } catch (error) {
+            if (root.isConnected) notice.textContent = `${error.error || String(error)} Check target history before retrying an uncertain save.`;
+          } finally { pending = false; root.removeAttribute('aria-busy'); }
+        }), button('Cancel', () => edit.replaceChildren()));
+        input.focus();
+      }, !departed || node.id === departed),
       button('Rename branch', () => {
         if (pending) return;
         const input = el('input', { type: 'text', value: node.title, maxlength: 4096, 'aria-label': `New name for branch ${node.id}` });

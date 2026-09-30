@@ -16,6 +16,9 @@ submit a prompt or restore files; lowercase `b` still navigates back in history.
 The tree's `e` edits a branch name. In history, `m` labels the selected event
 and `l` opens bookmarks; Enter jumps to one, `m` edits it, `x` removes it, and
 `b` returns to history.
+`/summary TARGET_SESSION reviewed text` copies an explicitly sourced historical
+summary from the open conversation into another branch; it does not switch or
+restore files. See [conversation branches](conversation-branches.md).
 
 Open `rook config edit`, enter `tui`, then `keys`. Each named action has its own
 description and list of shortcuts. Missing actions keep their defaults; an empty

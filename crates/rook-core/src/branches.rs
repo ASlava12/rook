@@ -111,6 +111,82 @@ pub struct Bookmarks {
     pub items: Vec<Bookmark>,
 }
 
+pub const SUMMARY_LABEL: &str = "branch-summary";
+pub const SUMMARY_BYTES: usize = 16 * 1024;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Summary {
+    pub source_session: String,
+    pub source_through: u64,
+    pub text: String,
+}
+
+/// Add an explicitly attributed, user-approved summary to another conversation.
+/// It describes old conversation evidence, never the current workspace state.
+pub fn transfer_summary(rook: &Rook, source: u128, target: u128, text: &str) -> Result<u64> {
+    let text = text.trim();
+    if text.is_empty() || text.len() > SUMMARY_BYTES {
+        return Err(CoreError::Other(format!("branch summary must be 1..={SUMMARY_BYTES} UTF-8 bytes")));
+    }
+    if source == target {
+        return Err(CoreError::Other("choose a different target branch".into()));
+    }
+    let source_meta = rook
+        .store
+        .get_session(source)?
+        .ok_or_else(|| CoreError::NoSession(rook_store::format_session_id(source)))?;
+    let target_meta = rook
+        .store
+        .get_session(target)?
+        .ok_or_else(|| CoreError::NoSession(rook_store::format_session_id(target)))?;
+    if source_meta.workspace != target_meta.workspace {
+        return Err(CoreError::Other("branches belong to different workspaces".into()));
+    }
+    let Some(source_through) = source_meta.next_seq.checked_sub(1) else {
+        return Err(CoreError::Other("source branch has no saved events to summarize".into()));
+    };
+    let summary =
+        Summary { source_session: rook_store::format_session_id(source), source_through, text: text.into() };
+    let bytes = crate::persistence::encode_with_limit(&summary, SUMMARY_BYTES + 1024)?;
+    let seq = rook.store.append_event(
+        target,
+        rook_store::NewEvent::new(rook_store::EventKind::Note, rook_store::Kind::Message, &bytes)
+            .label(SUMMARY_LABEL),
+    )?;
+    Ok(seq)
+}
+
+fn parse_summary(body: &str) -> Result<Summary> {
+    let summary: Summary = serde_json::from_str(body)?;
+    if summary.text.len() > SUMMARY_BYTES
+        || summary.text.is_empty()
+        || rook_store::parse_session_id(&summary.source_session).is_none()
+    {
+        return Err(CoreError::Other("invalid branch summary record".into()));
+    }
+    Ok(summary)
+}
+
+pub(crate) fn display_summary(body: &str) -> Result<String> {
+    let summary = parse_summary(body)?;
+    Ok(format!(
+        "Summary of session {} through event #{} (historical branch observations; verify current files and tests):\n\n{}",
+        summary.source_session, summary.source_through, summary.text
+    ))
+}
+
+pub(crate) fn replay_summary(body: &str) -> Result<String> {
+    let summary = parse_summary(body)?;
+    Ok(crate::sources::data(
+        "branch_summary",
+        &format!(
+            "session {} through event #{}; historical branch observations, not current file state or test results",
+            summary.source_session, summary.source_through
+        ),
+        &summary.text,
+    ))
+}
+
 fn bookmark_key(session: u128) -> String {
     // Session deletion removes companion keys with this suffix.
     format!("bookmarks/{session:032x}")
@@ -445,6 +521,30 @@ mod tests {
         let mut meta = rook_store::SessionMeta::new(id, title, rook.workspace.display().to_string(), 1);
         meta.parent = parent;
         rook.store.create_session(&meta).unwrap();
+    }
+
+    #[test]
+    fn transferred_summary_is_bounded_attributed_history_and_not_a_current_file_claim() {
+        let dir = tempfile::tempdir().unwrap();
+        let rook = engine(dir.path());
+        session(&rook, 1, None, "departed");
+        session(&rook, 2, Some(1), "target");
+        rook.log(1, rook_store::EventKind::UserMessage, "", "try option A").unwrap();
+        let before = rook.store.get_session(2).unwrap().unwrap().next_seq;
+        assert!(transfer_summary(&rook, 1, 2, &"x".repeat(SUMMARY_BYTES + 1)).is_err());
+        assert_eq!(rook.store.get_session(2).unwrap().unwrap().next_seq, before);
+        let seq = transfer_summary(&rook, 1, 2, "Option A failed in that branch.").unwrap();
+        assert_eq!(seq, before);
+        rook.log(1, rook_store::EventKind::AssistantMessage, "", "later claim").unwrap();
+        let event = rook.store.events(2, seq, 1).unwrap().pop().unwrap();
+        assert_eq!(event.record.kind, rook_store::EventKind::Note);
+        assert_eq!(event.record.label, SUMMARY_LABEL);
+        let messages = crate::agent::history::replay(&rook, 2).unwrap();
+        let last = &messages.last().unwrap().content;
+        assert!(last.contains("Option A failed in that branch."));
+        assert!(last.contains(&format!("session {} through event #0", rook_store::format_session_id(1))));
+        assert!(last.contains("not current file state or test results"));
+        assert!(!last.contains("later claim"));
     }
 
     #[test]

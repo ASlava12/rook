@@ -427,6 +427,12 @@ pub(crate) enum StoreCmd {
 
 #[derive(Subcommand)]
 pub(crate) enum SessionCmd {
+    /// Carry a reviewed summary from one branch into another as attributed history.
+    Summary {
+        source: String,
+        target: String,
+        text: String,
+    },
     /// Give a conversation branch a name.
     Rename {
         id: String,

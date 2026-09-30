@@ -13,6 +13,47 @@ struct Rook {
 }
 
 #[test]
+fn branch_summaries_keep_source_attribution_locally_and_through_daemon() {
+    let rook = Rook::new();
+    let source = rook_store::new_session_id();
+    let target = rook_store::new_session_id();
+    let source_name = rook_store::format_session_id(source);
+    let target_name = rook_store::format_session_id(target);
+    {
+        let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+        for id in [source, target] {
+            store
+                .create_session(&rook_store::SessionMeta::new(
+                    id,
+                    "branch",
+                    rook.workspace.path().display().to_string(),
+                    1,
+                ))
+                .unwrap();
+        }
+        store
+            .append_event(
+                source,
+                rook_store::NewEvent::new(
+                    rook_store::EventKind::UserMessage,
+                    rook_store::Kind::Message,
+                    b"old branch",
+                ),
+            )
+            .unwrap();
+    }
+    let first = rook.json(&["session", "summary", &source_name, &target_name, "Earlier tests passed there"]);
+    assert_eq!(first["event"], 0);
+    let daemon = Daemon::start(&rook);
+    let second = rook.json(&["session", "summary", &source_name, &target_name, "A second finding"]);
+    assert_eq!(second["event"], 1);
+    let history = rook.json(&["session", "history", &target_name]);
+    assert!(history.to_string().contains(&source_name));
+    assert!(history.to_string().contains("historical branch observations"));
+    drop(daemon);
+}
+
+#[test]
 fn branch_names_and_bookmarks_have_the_same_cli_result_with_and_without_the_daemon() {
     let rook = Rook::new();
     let id = rook_store::new_session_id();

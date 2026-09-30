@@ -117,5 +117,23 @@ context) goes into the editor with an explicit notice, and their images remain
 attached. Older Rook readers ignore the added JSON metadata and replay the same
 model message. No postcard record layout changes.
 
-Optional summaries of the departed branch remain part of the Pi adoption work.
-The tree view does not generate or silently insert a summary into model context.
+To carry a reviewed summary when leaving a branch, use **Carry reviewed summary**
+on the target node in the browser. In the CLI, run
+`rook session summary SOURCE_SESSION TARGET_SESSION "summary text"`; in the
+TUI or REPL, open the source conversation and enter
+`/summary TARGET_SESSION summary text`. This saves a `branch-summary` event in
+the target, then the browser continues there. CLI/TUI/REPL can switch separately
+with their existing session controls. The HTTP equivalent is
+`POST /api/sessions/TARGET_SESSION/summary` with
+`{"source":"SOURCE_SESSION","text":"summary text"}`. The response gives the
+saved event number. An uncertain response must be checked in target history
+before retrying, since another save creates another event.
+
+The text is explicitly user reviewed, at most 16 KiB of UTF-8, and both sessions
+must belong to the same workspace. The saved record identifies the source
+session and its last saved event when the summary was submitted. History shows
+that attribution. The next model request sees the summary as source data, with
+an explicit warning that historical file observations and test results need
+verification in the current workspace. Browsing and ordinary branch switching
+do not create or carry a summary. Automatic draft generation from the departed
+branch remains pending.

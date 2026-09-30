@@ -110,7 +110,7 @@ pub fn estimate_tokens(text: &str) -> usize {
     text.len().div_ceil(4)
 }
 
-/// Whether an event of this kind becomes a message the model sees.
+/// Whether an ordinary event of this kind becomes a message the model sees.
 ///
 /// One answer for everything that has to agree with the replay in
 /// `AgentLoop::history`: what a turn carries, what compaction summarises, and
@@ -119,6 +119,12 @@ pub fn estimate_tokens(text: &str) -> usize {
 pub fn reaches_the_model(kind: rook_store::EventKind) -> bool {
     use rook_store::EventKind::*;
     matches!(kind, UserMessage | AssistantMessage | ToolCall | ToolResult | SkillLoaded | Reasoning)
+}
+
+/// Companion notes with this label are also replayed as source data.
+pub(crate) fn record_reaches_the_model(kind: rook_store::EventKind, label: &str) -> bool {
+    reaches_the_model(kind)
+        || (kind == rook_store::EventKind::Note && label == crate::branches::SUMMARY_LABEL)
 }
 
 /// How much of a thought is carried into the next request.
@@ -200,15 +206,6 @@ pub fn shorten_result(text: &str, budget_tokens: usize) -> String {
     let head = at_boundary(text, room * 3 / 4);
     let tail = from_end(text, room - room * 3 / 4);
     format!("{}{marker}{}", &text[..head], &text[tail..])
-}
-
-/// The same question asked of a kind's printed name, which is what a transcript
-/// entry carries.
-///
-/// Through the enum rather than a second list of names: the doc above says one
-/// answer, and two lists that must agree are two answers waiting to differ.
-pub fn kind_reaches_the_model(kind: &str) -> bool {
-    rook_store::EventKind::named(kind).is_some_and(reaches_the_model)
 }
 
 #[cfg(test)]
@@ -299,18 +296,9 @@ mod tests {
         assert_eq!(super::floor_char_boundary(text, 2), 1);
     }
 
-    /// The two used to be two lists of the same answer, and the module's own
-    /// doc says there should be one.
     #[test]
-    fn a_kind_answers_the_same_by_name_as_by_variant() {
-        for kind in rook_store::EventKind::ALL {
-            assert_eq!(
-                super::kind_reaches_the_model(kind.as_str()),
-                super::reaches_the_model(kind),
-                "{} answers differently by name",
-                kind.as_str()
-            );
-        }
-        assert!(!super::kind_reaches_the_model("not-a-kind"));
+    fn only_attributed_branch_notes_join_model_context() {
+        assert!(super::record_reaches_the_model(rook_store::EventKind::Note, crate::branches::SUMMARY_LABEL));
+        assert!(!super::record_reaches_the_model(rook_store::EventKind::Note, "ordinary note"));
     }
 }

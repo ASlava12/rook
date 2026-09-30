@@ -5544,17 +5544,16 @@ async fn a_file_a_command_wrote_is_named_in_what_the_session_changed() {
     let session = f.rook.start_session("commands").unwrap();
     std::fs::write(f.workspace.path().join("config.rs"), "port = 8080\n").unwrap();
 
-    let script = vec![
-        call("run_command", serde_json::json!({ "command": "printf 'port = 9000\\n' > config.rs" })),
-        reply("changed it"),
-    ];
+    let command =
+        if cfg!(windows) { "echo port = 9000>config.rs" } else { "printf 'port = 9000\\n' > config.rs" };
+    let script = vec![call("run_command", serde_json::json!({ "command": command })), reply("changed it")];
     let mut agent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
     agent.allow_everything_not_denied();
     agent.run("set the port to 9000").await.unwrap();
 
     assert_eq!(
         std::fs::read_to_string(f.workspace.path().join("config.rs")).unwrap(),
-        "port = 9000\n",
+        if cfg!(windows) { "port = 9000\r\n" } else { "port = 9000\n" },
         "the precondition: the command wrote the file"
     );
 

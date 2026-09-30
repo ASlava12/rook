@@ -111,6 +111,15 @@ fn event(rook: &Rook, session: u128, seq: u64) -> Result<Event> {
 /// Their fixed format bounds are checked before any whole-record decode.
 fn display(rook: &Rook, event: &Event) -> Result<Option<Vec<u8>>> {
     if event.record.kind == EventKind::Note {
+        if event.record.label == crate::branches::SUMMARY_LABEL {
+            let limit = crate::branches::SUMMARY_BYTES + 1024;
+            let size = rook.store.stat_object(&event.record.body)?.map(|m| m.size_raw).unwrap_or(0);
+            if size > limit as u64 {
+                return Err(CoreError::Other("stored branch summary exceeds its byte limit".into()));
+            }
+            let data = rook.store.get_range(&event.record.body, 0, limit)?;
+            return Ok(Some(crate::branches::display_summary(&String::from_utf8_lossy(&data))?.into_bytes()));
+        }
         if matches!(
             event.record.label.as_str(),
             crate::provider_history::LABEL | crate::provider_history::CALL

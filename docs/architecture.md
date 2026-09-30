@@ -73,6 +73,12 @@ under their format limits and shows only visible text, never base64 images or
 opaque provider state. Quoting reads history and edits the frontend draft; it
 neither appends an event nor starts or interrupts a turn.
 
+An explicitly reviewed branch summary is a bounded Note in the target session.
+Its record names the source session and last source event. Replay treats the
+summary as attributed source data, while transcript reading renders that
+attribution for people. It does not imply that files or tests still match the
+departed branch. Ordinary branch navigation does not create this event.
+
 Managed MCP equipment lives in `rook-core::mcp_connections`. Initial admission
 bounds declarations and concurrent handshakes; reports contain no endpoint,
 command, headers, environment or server-authored error text. A reconnect reloads

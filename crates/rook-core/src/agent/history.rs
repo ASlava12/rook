@@ -137,6 +137,15 @@ pub(crate) fn replay(rook: &crate::Rook, session: u128) -> Result<Vec<Message>> 
         {
             old.finish(&mut messages);
         }
+        if event.record.kind == EventKind::Note
+            && event.record.label == crate::branches::SUMMARY_LABEL
+            && rook
+                .store
+                .stat_object(&event.record.body)?
+                .is_some_and(|size| size.size_raw > (crate::branches::SUMMARY_BYTES + 1024) as u64)
+        {
+            return Err(crate::CoreError::Other("branch summary record exceeds its byte limit".into()));
+        }
         let body = match rook.store.get(&event.record.body) {
             Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
             // Preserve a visible gap: dropping an unreadable instruction
@@ -170,6 +179,10 @@ pub(crate) fn replay(rook: &crate::Rook, session: u128) -> Result<Vec<Message>> 
         last_at = event.record.ts;
 
         match event.record.kind {
+            EventKind::Note if event.record.label == crate::branches::SUMMARY_LABEL => {
+                close_open_call(&mut messages, &mut open_call);
+                messages.push(Message::user(crate::branches::replay_summary(&body)?));
+            }
             EventKind::UserMessage => {
                 close_open_call(&mut messages, &mut open_call);
                 messages.push(if event.record.label == crate::attachments::LABEL {

@@ -108,7 +108,8 @@ impl<'a> AgentLoop<'a> {
             .transcript(self.session, from_seq, usize::MAX, 8_000)?
             .into_iter()
             .filter(|e| {
-                crate::context::kind_reaches_the_model(&e.kind)
+                rook_store::EventKind::named(&e.kind)
+                    .is_some_and(|kind| crate::context::record_reaches_the_model(kind, &e.label))
                     || (e.kind == "note" && e.label == crate::provider_history::LABEL)
             })
             .collect();

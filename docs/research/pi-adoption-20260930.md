@@ -747,3 +747,31 @@ dictionary compression and 5.8x end-to-end. Evidence:
 `/tmp/rook-branches-names-final-compaction.log`, and
 `/tmp/rook-branches-names-browser.log`. Optional attributable branch summaries
 remain in progress; the rest of the Pi scope remains open.
+
+## Reviewed branch-summary transfer (next branch block)
+
+A user can explicitly carry a reviewed, 16 KiB UTF-8 summary from one session
+to another in the same workspace. The target records a `branch-summary` Note
+with the source session and its last saved event; replay wraps the text as
+source data and says that historical file and test observations require
+verification in the current workspace. History displays the attribution rather
+than the raw record. No postcard field or store format changed. Oversized text
+is refused before storage encoding, and replay/history check the record size
+before reading it. The CLI command and HTTP route share core validation. TUI
+and REPL accept `/summary TARGET_SESSION text`; the browser offers an optional
+review editor on each other branch before continuing there.
+
+This block does not generate the draft summary from abandoned events. That
+remains the branch capability's open item, along with final cross-frontend
+verification. Queue work and all Pending rows above remain in scope.
+
+The core replay/boundary test and CLI integration test passed. The latter wrote
+one summary locally and another through an actual daemon, then read attributed
+target history. `node --check web/dist/branches.js` passed. On this Windows
+runner the PTY target contains zero runnable tests, so a live TUI interaction
+was not established here. The first full gate found a new Clippy warning in an
+existing store test. The second full gate found an unused public helper after
+the context refactor and a Unix-only command in an existing agent-loop test;
+both failed checks were fixed and passed individually. The final `cargo xtask ci`
+exited 0 (`ci: ok`, 335.5 seconds). `cargo xtask compaction` exited 0 and kept
+the published 4.02 MiB, 37.1x dictionary and 5.8x end-to-end measurements.

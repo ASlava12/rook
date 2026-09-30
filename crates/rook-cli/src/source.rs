@@ -995,6 +995,22 @@ impl Source {
         }
     }
 
+    pub(crate) fn transfer_branch_summary(&self, source: u128, target: u128, text: &str) -> Result<u64> {
+        match self {
+            Self::Local(rook) => Ok(rook_core::branches::transfer_summary(rook, source, target, text)?),
+            Self::Daemon(d) => {
+                let reply: serde_json::Value = d.request_bounded(
+                    &format!("/api/sessions/{}/summary", rook_store::format_session_id(target)),
+                    Some(
+                        &serde_json::json!({ "source": rook_store::format_session_id(source), "text": text }),
+                    ),
+                    8192,
+                )?;
+                reply["event"].as_u64().ok_or_else(|| anyhow::anyhow!("summary response has no event number"))
+            }
+        }
+    }
+
     pub(crate) fn bookmarks(&self, session: u128) -> Result<rook_core::branches::Bookmarks> {
         match self {
             Self::Local(rook) => Ok(rook_core::branches::bookmarks(rook, session)?),

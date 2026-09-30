@@ -2838,6 +2838,22 @@ impl App {
             self.history.open_tree(session);
             return;
         }
+        if name == "summary" {
+            let Some(from) = self.chat.session else {
+                return self.chat.push("err", "open a source conversation first");
+            };
+            let Some((target, text)) = rest.trim().split_once(' ') else {
+                return self.chat.push("err", "use /summary TARGET_SESSION reviewed text");
+            };
+            let Some(target) = rook_store::parse_session_id(target) else {
+                return self.chat.push("err", "invalid target session ID");
+            };
+            match self.source.transfer_branch_summary(from, target, text) {
+                Ok(event) => self.chat.push("stat", &format!("Saved attributed summary in {} at event #{event}. Switch with /tree; verify historical file and test claims in the current workspace.", rook_store::format_session_id(target))),
+                Err(error) => self.chat.push("err", &error.to_string()),
+            }
+            return;
+        }
         if name == "turns" {
             let before = if rest.trim().is_empty() {
                 None
@@ -3169,6 +3185,8 @@ impl App {
         // do but stop it and start again.
         if let Some(command) = slash(&prompt)
             && (command == "queue"
+                || command == "summary"
+                || command.starts_with("summary ")
                 || command == "mcp"
                 || command.starts_with("mcp ")
                 || command == "task"
