@@ -890,3 +890,29 @@ more time under load; the isolated test exited 0. The second full
 `cargo xtask ci` exited 0 (`ci: ok`, 389.3 seconds). `cargo xtask compaction`
 exited 0 with 4.02 MiB on disk, 37.1x dictionary compression and 5.8x
 end-to-end. Stored receipt and session formats remain unchanged.
+
+## Pinned next-message preview in the TUI
+
+During a running turn, the first pending message now stays in a short panel
+above the prompt while model output grows or the conversation is scrolled back.
+The TUI obtains its ordering and count from the existing bounded combined queue
+page, off the terminal thread, and retains only 160 characters of the first
+message. It refreshes after receipt changes and every two seconds to catch
+another client. An unconfirmed local submission appears immediately; before the
+first session ID is assigned, the in-memory interjection has a bounded preview.
+Opening `/queue` or submitting during a background read is deferred until that
+read finishes, preserving the draft and the panel action. Background refreshes
+pause while the queue panel is open so editing keys are not delayed. Small
+terminals keep the composer and approval controls ahead of the optional preview.
+
+Focused tests cover ordering, session isolation, stale snapshot rejection,
+opening the queue during refresh, and submitting during refresh. The first
+`cargo xtask ci` exited 1 because the `no_panics` gate rejected a new bare
+`unreachable!`; the preview now handles that variant without a panic. The
+targeted `no_panics` and TUI queue suites each exited 0, and the final full
+`cargo xtask ci` exited 0 (`ci: ok`, 384.3 seconds). The Windows PTY target
+contains zero runnable tests, so a live TUI screen check remains for Unix.
+This is a display change using
+the existing local and daemon queue-page paths; no stored or wire format changed.
+The queue admission and lifecycle gaps above, branch synthesis, and all Pending
+rows remain open.

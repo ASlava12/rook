@@ -106,6 +106,13 @@ are not the Tasks panel. Use `/goal` for immediate conversational work.
 Open **message queue** from Ctrl-P, or type `/queue`, in the TUI. The panel shows
 pending messages from both the ordinary session and its current goal. It remains
 usable while a turn runs; one background worker performs queue requests.
+While a turn runs, the first queued message is also pinned immediately above
+the prompt. The pinned line remains visible as the model writes and while the
+chat is scrolled back. It shows a short preview and pending count from the
+bounded queue view; `/queue` opens the full, editable message. The view refreshes
+after receipt changes and periodically for changes from another window. Before
+the first session ID is available, a local pending message gets the same short
+preview.
 
 - **e** loads the selected message for editing. Ctrl-S saves, Enter adds a line,
   and Escape cancels the edit. A conflict retains the unsaved text.

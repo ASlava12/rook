@@ -8,6 +8,7 @@ enum Command {
     Prepare(bool),
     Submit(Change),
     Page(Query),
+    Peek,
     Read(String, bool),
     Change(Change, bool),
 }
@@ -15,6 +16,7 @@ enum Update {
     Prepared(String, usize),
     Submitted(Entry),
     Page(Page),
+    Peek(Preview),
     Read(Entry, bool),
     Changed(Entry, bool),
 }
@@ -24,6 +26,30 @@ struct DetailIndex {
     rows: usize,
     /// One byte offset every 256 rendered rows, bounded by message bytes.
     checkpoints: Vec<(usize, usize)>,
+}
+#[derive(Default)]
+struct Preview {
+    next: Option<String>,
+    total: usize,
+}
+
+impl Preview {
+    fn from_page(page: Page) -> Self {
+        // The page is already bounded by the store. Retain only one short line
+        // in the TUI so a queued paste never gets copied into every frame.
+        Self {
+            next: page.items.first().map(|entry| {
+                entry
+                    .receipt
+                    .text
+                    .chars()
+                    .take(160)
+                    .map(|ch| if ch.is_control() { ' ' } else { ch })
+                    .collect()
+            }),
+            total: page.total,
+        }
+    }
 }
 impl Command {
     fn run(self, source: &crate::source::Source, session: u128) -> Result<Update> {
@@ -43,6 +69,7 @@ impl Command {
             }
             Self::Submit(change) => Update::Submitted(source.queue_change(session, change)?),
             Self::Page(query) => Update::Page(source.queue_page(session, &query)?),
+            Self::Peek => Update::Peek(Preview::from_page(source.queue_page(session, &Query::default())?)),
             Self::Read(reference, edit) => Update::Read(source.queue_read(session, &reference)?, edit),
             Self::Change(change, restore) => Update::Changed(source.queue_change(session, change)?, restore),
         })
@@ -55,7 +82,14 @@ pub(super) struct Queue {
     max_text: usize,
     session: Option<u128>,
     pending: bool,
+    pending_peek: bool,
+    submit_after_peek: bool,
+    open_after_pending: Option<u128>,
     page: Option<Page>,
+    preview: Preview,
+    preview_session: Option<u128>,
+    preview_dirty: bool,
+    preview_at: Option<std::time::Instant>,
     entry: Option<Entry>,
     at: usize,
     detail_scroll: Cell<usize>,
@@ -94,7 +128,14 @@ impl Queue {
             max_text: max_text.min(8 * 1024 * 1024),
             session: None,
             pending: false,
+            pending_peek: false,
+            submit_after_peek: false,
+            open_after_pending: None,
             page: None,
+            preview: Preview::default(),
+            preview_session: None,
+            preview_dirty: true,
+            preview_at: None,
             entry: None,
             at: 0,
             detail_scroll: Cell::new(0),
@@ -115,6 +156,7 @@ impl Queue {
         // Do not discard a mutation's result by switching this worker to another
         // session while it is in flight. Closing the panel does not cancel it.
         if self.pending {
+            self.open_after_pending = session;
             self.note = "Finishing the current queue operation…".into();
             return;
         }
@@ -141,7 +183,7 @@ impl Queue {
     /// retained here, so retries can never resolve a different goal generation.
     pub(super) fn submit(&mut self, session: u128, text: &str, follow_up: bool) -> Result<()> {
         anyhow::ensure!(
-            !self.pending && self.attempt.is_none() && !self.editing,
+            (!self.pending || self.pending_peek) && self.attempt.is_none() && !self.editing,
             "queue request pending; /queue opens it (u retries a failed send); your new draft is retained"
         );
         anyhow::ensure!(
@@ -158,7 +200,12 @@ impl Queue {
                 Change::Submit { target: String::new(), id, text: text.into() }
             },
         ));
-        self.retry();
+        self.preview_dirty = true;
+        if self.pending_peek {
+            self.submit_after_peek = true;
+        } else {
+            self.retry();
+        }
         Ok(())
     }
 
@@ -191,16 +238,72 @@ impl Queue {
         let Some(session) = self.session else {
             return;
         };
+        let quiet = matches!(command, Command::Peek);
         match self.send.as_ref().map(|send| send.try_send((session, command)).is_ok()) {
             Some(true) => {
                 self.pending = true;
-                self.note = "Reading or updating the queue…".into();
+                self.pending_peek = quiet;
+                if !quiet {
+                    self.note = "Reading or updating the queue…".into();
+                }
             }
-            _ => self.note = "Queue worker unavailable; reopen the window.".into(),
+            _ if !quiet => self.note = "Queue worker unavailable; reopen the window.".into(),
+            _ => {}
         }
     }
     fn refresh(&mut self, after: Option<String>) {
         self.ask(Command::Page(Query { after, include_finished: self.all }));
+    }
+
+    /// Read a bounded queue snapshot off the terminal thread. Receipt notices
+    /// invalidate it promptly; a short interval also catches other clients.
+    pub(super) fn sync_preview(&mut self, current: Option<u128>, busy: bool) {
+        if self.preview_session != current {
+            self.preview = Preview::default();
+            self.preview_session = current;
+            self.preview_dirty = true;
+            self.preview_at = None;
+        }
+        if !busy || current.is_none() || self.pending {
+            return;
+        }
+        if !self.preview_dirty
+            && self.preview_at.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(2))
+        {
+            return;
+        }
+        self.session = current;
+        self.ask(Command::Peek);
+        if self.pending {
+            self.preview_dirty = false;
+            self.preview_at = Some(std::time::Instant::now());
+        }
+    }
+
+    pub(super) fn preview(&self, current: Option<u128>) -> Option<(usize, &str)> {
+        if self.preview_session != current {
+            return None;
+        }
+        if let Some(next) = self.preview.next.as_deref() {
+            return Some((self.preview.total + usize::from(self.attempt.is_some()), next));
+        }
+        if self.preview.total > 0 {
+            return Some((self.preview.total, "Open /queue to inspect the next message"));
+        }
+        self.attempt.as_ref().and_then(|(session, change)| {
+            if Some(*session) != current {
+                return None;
+            }
+            match change {
+                Change::Submit { text, .. } | Change::FollowUp { text, .. } => Some((1, text.as_str())),
+                _ => None,
+            }
+        })
+    }
+
+    pub(super) fn invalidate_preview(&mut self) {
+        self.preview_dirty = true;
+        self.preview = Preview::default();
     }
 
     pub(super) fn take_notice(&mut self) -> Option<(rook_proto::queue::Notice, String)> {
@@ -210,6 +313,7 @@ impl Queue {
     pub(super) fn poll(&mut self, current: Option<u128>) -> Option<String> {
         while let Ok((session, result)) = self.receive.try_recv() {
             self.pending = false;
+            self.pending_peek = false;
             match result {
                 Ok(Update::Prepared(target, limit)) => {
                     if let Some((
@@ -229,6 +333,7 @@ impl Queue {
                 }
                 Ok(Update::Submitted(entry)) => {
                     self.attempt = None;
+                    self.invalidate_preview();
                     self.notice = Some((
                         rook_proto::queue::Notice::new(
                             rook_store::format_session_id(session),
@@ -254,6 +359,11 @@ impl Queue {
                             .unwrap_or_default()
                     );
                 }
+                Ok(Update::Peek(preview)) => {
+                    if Some(session) == current && !self.preview_dirty {
+                        self.preview = preview;
+                    }
+                }
                 Ok(Update::Read(entry, edit)) => {
                     self.detail_scroll.set(0);
                     self.detail_index.get_mut().width = 0;
@@ -275,6 +385,7 @@ impl Queue {
                 }
                 Ok(Update::Changed(entry, restore)) => {
                     self.editing = false;
+                    self.invalidate_preview();
                     self.notice = Some((
                         rook_proto::queue::Notice::new(
                             rook_store::format_session_id(session),
@@ -300,6 +411,15 @@ impl Queue {
                     }
                 }
             }
+        }
+        if !self.pending && std::mem::take(&mut self.submit_after_peek) {
+            self.retry();
+        }
+        if !self.pending
+            && let Some(session) = self.open_after_pending.take()
+            && Some(session) == current
+        {
+            self.open(Some(session));
         }
         if self.restored.as_ref().is_some_and(|(session, _)| Some(*session) == current) {
             self.restored.take().map(|(_, text)| text)
@@ -577,7 +697,14 @@ mod tests {
             Queue {
                 session: None,
                 pending: false,
+                pending_peek: false,
+                submit_after_peek: false,
+                open_after_pending: None,
                 page: None,
+                preview: Preview::default(),
+                preview_session: None,
+                preview_dirty: true,
+                preview_at: None,
                 entry: None,
                 at: 0,
                 detail_scroll: Cell::new(0),
@@ -608,6 +735,61 @@ mod tests {
             .map(|y| (0..52).map(|x| buffer[(x, y)].symbol()).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn pinned_preview_tracks_first_receipt_and_ignores_stale_snapshots() {
+        let (mut queue, commands, updates) = window(4096);
+        queue.sync_preview(Some(42), true);
+        assert!(matches!(commands.try_recv(), Ok((42, Command::Peek))));
+        let page: Page = serde_json::from_value(serde_json::json!({
+            "items": [{"reference": "session.first", "truncated": false,
+                "receipt": {"id": "first", "text": "first\nmessage", "submitted_at": 1,
+                            "applied_at": null, "session": null}}],
+            "next": null, "total": 2, "max_message_bytes": 4096,
+            "submission_target": "session"
+        }))
+        .unwrap();
+        updates.send((42, Ok(Update::Peek(Preview::from_page(page))))).unwrap();
+        queue.poll(Some(42));
+        assert_eq!(queue.preview(Some(42)), Some((2, "first message")));
+
+        queue.invalidate_preview();
+        assert_eq!(queue.preview(Some(42)), None);
+        queue.sync_preview(Some(42), true);
+        assert!(matches!(commands.try_recv(), Ok((42, Command::Peek))));
+        queue.invalidate_preview();
+        updates.send((42, Ok(Update::Peek(Preview { next: Some("stale".into()), total: 1 })))).unwrap();
+        queue.poll(Some(42));
+        assert_eq!(queue.preview(Some(42)), None);
+
+        queue.sync_preview(Some(43), true);
+        assert!(matches!(commands.try_recv(), Ok((43, Command::Peek))));
+        assert_eq!(queue.preview(Some(42)), None);
+    }
+
+    #[test]
+    fn opening_queue_during_background_preview_still_loads_the_panel() {
+        let (mut queue, commands, updates) = window(4096);
+        queue.sync_preview(Some(42), true);
+        assert!(matches!(commands.try_recv(), Ok((42, Command::Peek))));
+        queue.open(Some(42));
+        updates.send((42, Ok(Update::Peek(Preview::default())))).unwrap();
+        queue.poll(Some(42));
+        assert!(matches!(commands.try_recv(), Ok((42, Command::Page(_)))));
+    }
+
+    #[test]
+    fn submission_waits_for_background_preview_without_losing_the_draft() {
+        let (mut queue, commands, updates) = window(4096);
+        queue.sync_preview(Some(42), true);
+        assert!(matches!(commands.try_recv(), Ok((42, Command::Peek))));
+        queue.submit(42, "send this next", false).unwrap();
+        assert_eq!(queue.preview(Some(42)), Some((1, "send this next")));
+        updates.send((42, Ok(Update::Peek(Preview::default())))).unwrap();
+        queue.poll(Some(42));
+        assert!(matches!(commands.try_recv(), Ok((42, Command::Prepare(false)))));
+        assert!(queue.attempt.is_some());
     }
 
     #[test]

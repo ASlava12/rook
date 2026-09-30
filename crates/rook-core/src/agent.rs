@@ -156,6 +156,17 @@ impl Interjections {
     pub fn take(&self) -> Vec<String> {
         std::mem::take(&mut *self.0.lock().unwrap_or_else(|e| e.into_inner()))
     }
+
+    /// A short UI hint for input held before the first session ID arrives.
+    /// The full pending text stays in the existing queue.
+    pub fn preview(&self) -> Option<(usize, String)> {
+        let pending = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let first = pending.first()?;
+        Some((
+            pending.len(),
+            first.chars().take(160).map(|ch| if ch.is_control() { ' ' } else { ch }).collect(),
+        ))
+    }
 }
 
 /// Whether a turn ended because it was done.

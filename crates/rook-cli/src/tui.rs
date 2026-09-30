@@ -1668,6 +1668,7 @@ impl App {
                 self.chat.push("err", &status);
             }
             if let Some((receipt, text)) = self.queue.take_notice() {
+                self.queue.invalidate_preview();
                 self.chat.receipt_notice(receipt, &text);
             }
             if let Some(quote) = self.history.take_quote()
@@ -1713,6 +1714,8 @@ impl App {
                 saved.meta.title = renamed.title;
             }
             self.still_running();
+            self.queue
+                .sync_preview(self.chat.session, self.chat.busy && self.overlay != Some(Overlay::Queue));
             // Poll rather than block: a streaming turn has to keep redrawing
             // even while nobody is typing.
             if event::poll(TICK)? {
@@ -1887,7 +1890,12 @@ impl App {
                 TurnEvent::Waiting(secs) => {
                     self.chat.waiting_for = Some(std::time::Duration::from_secs(secs))
                 }
-                TurnEvent::Heard(text, receipt) => self.chat.taken_up(&text, receipt),
+                TurnEvent::Heard(text, receipt) => {
+                    if receipt.is_some() {
+                        self.queue.invalidate_preview();
+                    }
+                    self.chat.taken_up(&text, receipt);
+                }
                 TurnEvent::Step(at, of) => self.chat.step = Some((at, of)),
                 TurnEvent::ToolDone(name, failed) => self.chat.tool_done(&name, failed),
                 TurnEvent::Context { used, size } => {
@@ -2025,7 +2033,10 @@ impl App {
             // The same kind a turn run here uses, so a sub-agent's work reads
             // the same whichever side of the socket it happens on.
             ChatEvent::Agent { text, receipt } => match receipt {
-                Some(receipt) => self.chat.receipt_notice(receipt, &text),
+                Some(receipt) => {
+                    self.queue.invalidate_preview();
+                    self.chat.receipt_notice(receipt, &text);
+                }
                 None => self.chat.push("agent", &text),
             },
             ChatEvent::Tool { name, doing } => {
@@ -2050,7 +2061,10 @@ impl App {
                 self.chat.spent = Some((input_tokens, output_tokens, cached_tokens))
             }
             ChatEvent::Interjected { text, receipt } => match receipt {
-                Some(receipt) => self.chat.receipt_notice(receipt, &format!("↩ {text}")),
+                Some(receipt) => {
+                    self.queue.invalidate_preview();
+                    self.chat.receipt_notice(receipt, &format!("↩ {text}"));
+                }
                 None => self.chat.push("stat", &format!("  ↩ {text}")),
             },
             ChatEvent::Approval { id, tool, action, preview, kind } => {
@@ -3816,9 +3830,25 @@ impl App {
         // conversation is what the window is for: past this the box scrolls.
         const MOST_ROWS: u16 = 10;
         let typed = self.chat.input.rows().clamp(1, MOST_ROWS) + 2;
-        let [log, ask, input] =
-            Layout::vertical([Constraint::Min(3), Constraint::Length(blocking), Constraint::Length(typed)])
-                .areas(area);
+        let early = self.chat.busy.then(|| self.shared.interjections.preview()).flatten();
+        let queued = self
+            .chat
+            .busy
+            .then(|| self.queue.preview(self.chat.session))
+            .flatten()
+            .or_else(|| early.as_ref().map(|(count, text)| (*count, text.as_str())));
+        let pinned = if queued.is_some() && area.height >= typed.saturating_add(blocking).saturating_add(6) {
+            3
+        } else {
+            0
+        };
+        let [log, preview, ask, input] = Layout::vertical([
+            Constraint::Min(3),
+            Constraint::Length(pinned),
+            Constraint::Length(blocking),
+            Constraint::Length(typed),
+        ])
+        .areas(area);
 
         let mut lines: Vec<Line> = Vec::new();
         for (kind, body) in &self.chat.log {
@@ -3939,6 +3969,17 @@ impl App {
             back => format!(" {project}{session} — {back} lines back, End returns "),
         };
         f.render_widget(body.block(bordered(&title)).scroll((scroll, 0)), log);
+
+        if let Some((count, next)) = queued.filter(|_| pinned > 0) {
+            let title = format!(" next to send · {count} queued · /queue manages ");
+            let line: String =
+                next.chars().take(160).map(|ch| if ch.is_control() { ' ' } else { ch }).collect();
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(line, Style::default().fg(Color::Cyan))))
+                    .block(bordered(&title)),
+                preview,
+            );
+        }
 
         if let Some(request) = &self.chat.pending {
             let mut lines = vec![Line::from(Span::styled(
