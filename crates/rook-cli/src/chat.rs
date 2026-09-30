@@ -76,6 +76,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("schema-retries", "[0..3]", "format-only correction attempts"),
     ("followup", "<text>", "queue a new turn after the current turn or goal finishes"),
     ("queue", "", "inspect pending messages; the TUI opens an editable queue"),
+    ("turns", "[before]", "recorded turn results and cumulative token usage"),
     ("context", "[window]", "what this conversation costs, and of what"),
     ("skills", "[name]", "skills that apply here, or one skill's body"),
     ("session", "[id|last]", "this one's totals, or continue another"),
@@ -354,14 +355,25 @@ async fn through_the_daemon(
                         eprintln!("start or resume a session first");
                     }
                 }
-                "queue" => {
+                "queue" | "turns" => {
                     if let Some(session) = session.as_deref() {
+                        let cursor = if name == "turns" && !rest.trim().is_empty() {
+                            match rest.trim().parse::<u64>() {
+                                Ok(before) => format!("?before={before}"),
+                                Err(_) => {
+                                    eprintln!("use /turns [event-number]");
+                                    continue;
+                                }
+                            }
+                        } else {
+                            String::new()
+                        };
                         let client = reqwest::Client::builder()
                             .no_proxy()
                             .timeout(std::time::Duration::from_secs(30))
                             .build()?;
                         let mut response = client
-                            .get(format!("{}/api/sessions/{session}/queue", daemon.base))
+                            .get(format!("{}/api/sessions/{session}/{name}{cursor}", daemon.base))
                             .send()
                             .await?
                             .error_for_status()?;
@@ -369,11 +381,21 @@ async fn through_the_daemon(
                         while let Some(chunk) = response.chunk().await? {
                             anyhow::ensure!(
                                 chunk.len() <= (2 * 1024 * 1024usize).saturating_sub(bytes.len()),
-                                "queue response exceeds 2 MiB"
+                                "session response exceeds 2 MiB"
                             );
                             bytes.extend_from_slice(&chunk);
                         }
-                        println!("{}", crate::commands::queue::describe(&serde_json::from_slice(&bytes)?)?);
+                        if name == "turns" {
+                            println!(
+                                "{}",
+                                crate::commands::sessions::describe_turns(&serde_json::from_slice(&bytes)?)
+                            );
+                        } else {
+                            println!(
+                                "{}",
+                                crate::commands::queue::describe(&serde_json::from_slice(&bytes)?)?
+                            );
+                        }
                     } else {
                         eprintln!("start or resume a session first");
                     }
@@ -709,6 +731,11 @@ pub async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command
                 },
             )?;
             say!("{}", crate::commands::queue::describe(&serde_json::to_value(entry)?)?);
+        }
+        "turns" => {
+            let before = if rest.trim().is_empty() { None } else { Some(rest.trim().parse::<u64>()?) };
+            let page = rook_core::turns::page(rook, *session, &rook_core::turns::Query { before })?;
+            say!("{}", crate::commands::sessions::describe_turns(&page));
         }
         "queue" => {
             let page = rook_core::message_queue::view::page(rook, *session, &Default::default())?;

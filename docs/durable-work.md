@@ -278,8 +278,41 @@ and settings through the first supervised stage. That stage uses the new goal's
 options, including its attachments. A replacement goal never inherits the old
 goal's pending follow-ups. Inspect and withdraw/resubmit those messages explicitly
 if they still apply. The final stream summary describes only the last turn;
-aggregate outcome reporting and the remaining parity work keep the queue
-capability in progress in the adoption tracker.
+recorded outcomes have a separate report below. Remaining parity work keeps the
+queue capability in progress in the adoption tracker.
+
+### Recorded turn results
+
+`rook session turns SESSION_ID` lists saved outcomes newest first; `--json`
+returns the same report as `GET /api/sessions/SESSION_ID/turns`. Pass the returned
+`before` as `--before NUMBER` (HTTP: `?before=NUMBER`) to scan older results.
+In the TUI, `/turns` opens this view; `t` also opens it from conversation history.
+`n` scans older results, Enter reads the complete saved outcome, and `h` returns
+to history. The REPL accepts `/turns [before]`. In the browser history panel,
+choose **Turn results**, **Older results** or **Latest results**. Reading leaves
+the draft and running work intact.
+
+Each outcome retains its execution ID, prompt event, follow-up/continuation
+identity, stop reason, token counts, steps, timestamps and reply preview. The
+complete outcome is a byte-pageable history event. Totals count recorded outcomes
+in this session, including turns stopped by a limit. Successful completion is
+counted separately. Cache tokens are a subset of input, not extra tokens to add.
+Elapsed seconds sum execution wall-clock spans, including downtime on recovery;
+they are not CPU time. Token counts are provider reports, not currency estimates.
+
+The report states its first covered prompt. Historical turns without outcome
+records, attempts that never saved an outcome, and usage before a lost process
+resumed are not reconstructed. Inherited branch outcomes remain readable in
+history but do not count as new executions in the child. These limits mean
+recorded outcome totals are not a complete accounting of every attempted model
+request. The latest execution receipt remains the place to inspect interruptions.
+
+Results, the latest recovery outcome, queue readiness and a constant-size ledger
+commit together. Replaying that execution's saved outcome does not count it again.
+Pages reuse `transcript.page_entries`, `page_bytes` and `search_events`; an empty
+page can still return a cursor through tool-heavy history. Complete result bodies
+use the existing 8 MiB recovery encoding limit. These notes do not enter model
+context. Session retention and deletion cover these records too.
 
 ## Steering receipts
 

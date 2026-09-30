@@ -644,6 +644,10 @@ impl Journal {
     pub(crate) fn record_outcome(&self, outcome: &crate::agent::TurnOutcome) -> Result<()> {
         let _queue = crate::work::receipts::WRITING.lock().unwrap_or_else(|e| e.into_inner());
         self.update(|state| {
+            let mut ledger = crate::turns::ledger(&self.store, self.session)?;
+            if ledger.last_turn.as_deref() == Some(self.turn.as_str()) {
+                return Ok(());
+            }
             let mut messages = crate::message_queue::read_from(&self.store, self.session)?;
             if crate::agent::finished(&outcome.stopped) && state.unknown.is_empty() {
                 for message in &mut messages {
@@ -655,15 +659,18 @@ impl Journal {
                     }
                 }
             }
+            let summary = crate::turns::prepare(state, outcome, &mut ledger)?;
+            let outcome = crate::persistence::encode(&(self.turn.as_str(), outcome))?;
             self.store.append_events_with_values(
                 self.session,
-                [],
+                [
+                    NewEvent::new(EventKind::Note, Kind::Message, &summary).label(crate::turns::LABEL),
+                    NewEvent::new(EventKind::Note, Kind::Message, &outcome).label(crate::turns::RESULT),
+                ],
                 &[
-                    (
-                        &format!("execution-outcome/{:032x}", self.session),
-                        &crate::persistence::encode(&(self.turn.as_str(), outcome))?,
-                    ),
+                    (&format!("execution-outcome/{:032x}", self.session), &outcome),
                     (&crate::message_queue::key(self.session), &crate::persistence::encode(&messages)?),
+                    (&crate::turns::key(self.session), &crate::persistence::encode(&ledger)?),
                 ],
             )?;
             Ok(())

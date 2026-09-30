@@ -55,6 +55,7 @@ pub mod service;
 mod sources;
 pub mod telemetry;
 pub mod transcript;
+pub mod turns;
 pub mod upgrade;
 pub mod work;
 mod worktrees;

@@ -5,6 +5,7 @@ import { el, api } from './lib.js';
 export function historyPanel(session, quote, rewind) {
   const base = `/api/sessions/${encodeURIComponent(session)}/history`;
   const notice = el('p', { class: 'sub', role: 'status', 'aria-live': 'polite' });
+  const totals = el('p', { class: 'sub', 'aria-label': 'Recorded turn totals' });
   const rows = el('div', { class: 'scroll', 'aria-label': 'History events' });
   const detail = el('div', { 'aria-label': 'Selected event' });
   const paging = el('div', { class: 'row' });
@@ -36,7 +37,7 @@ export function historyPanel(session, quote, rewind) {
       detail.replaceChildren(
         el('h3', {}, `#${e.seq} · ${e.kind} ${e.label}`),
         el('p', { class: 'sub' }, `Bytes ${result.offset}–${result.next_offset ?? result.total_bytes} of ${result.total_bytes}`),
-        el('pre', {}, e.body),
+        el('pre', { class: 'body' }, e.body),
         el('div', { class: 'row' },
           button('Previous part', () => open(seq, result.previous_offset), result.previous_offset == null),
           button('Next part', () => open(seq, result.next_offset), result.next_offset == null),
@@ -53,6 +54,7 @@ export function historyPanel(session, quote, rewind) {
   function load(params = '') {
     read(base + params, result => {
       page = result;
+      totals.textContent = '';
       detail.replaceChildren();
       rows.replaceChildren(...result.items.map(e => row(e)));
       notice.textContent = result.items.length ? `Events #${result.items[0].seq}–#${result.items.at(-1).seq}` : 'No events on this page.';
@@ -65,12 +67,37 @@ export function historyPanel(session, quote, rewind) {
   function search(cursor = {}) {
     const params = new URLSearchParams({ q: query, ...cursor });
     read(`${base}/search?${params}`, result => {
+      totals.textContent = '';
       detail.replaceChildren();
       rows.replaceChildren(...result.hits.map(e => row(e, e.snippet, e.offset)));
       notice.textContent = `${result.hits.length} matching events on this scan; scanned ${result.scanned_events} events / ${result.scanned_bytes} bytes. ` +
         (result.next ? 'Continue searching for more results.' : 'Search complete.');
       paging.replaceChildren(button('Continue search', () => search(result.next), result.next == null),
         button('Back to history', () => load(page?.items.length ? `?from=${page.items[0].seq}` : '')));
+      rows.scrollTop = 0;
+    });
+  }
+  function turns(before = null) {
+    const path = `/api/sessions/${encodeURIComponent(session)}/turns` +
+      (before == null ? '' : `?before=${before}`);
+    read(path, result => {
+      const t = result.totals;
+      detail.replaceChildren();
+      totals.textContent = `Recorded turns: ${t.turns} (${t.completed} completed). Tokens in/out/cache: ${t.input_tokens}/${t.output_tokens}/${t.cached_tokens}. ` +
+        `${t.steps} steps, ${t.elapsed_seconds}s.${t.saturated ? ' Counters saturated.' : ''} ` +
+        `Coverage starts at ${result.coverage_from == null ? 'no recorded outcome' : `event #${result.coverage_from}`}; inherited branch turns and attempts without a saved outcome are excluded.`;
+      rows.replaceChildren(...result.items.map(entry => {
+        const s = entry.summary;
+        const body = `${s.turn} · ${s.stopped}\n${s.steps} steps · tokens in/out/cache: ${s.input_tokens}/${s.output_tokens}/${s.cached_tokens} · ${s.files_changed} files\n` +
+          `Prompt #${s.prompt_seq ?? 'unknown'} · result #${entry.result_seq}` +
+          (s.follow_up ? ` · follow-up ${s.follow_up}` : '') +
+          (s.continuation ? ` · continues ${s.continuation}` : '') + `\n\n${s.reply}` +
+          (s.reply_truncated ? '\n[preview; open result for full outcome]' : '');
+        return row({ seq: entry.result_seq, kind: 'turn', label: s.stopped, body });
+      }));
+      if (!result.items.length) rows.append(el('p', {}, 'No recorded outcomes on this scan page. Scan older events when available.'));
+      paging.replaceChildren(button('Older results', () => turns(result.before), result.before == null),
+        button('Latest results', () => turns()), button('Back to history', () => load()));
       rows.scrollTop = 0;
     });
   }
@@ -83,12 +110,13 @@ export function historyPanel(session, quote, rewind) {
       notice.textContent = 'Search needs 1–256 bytes of text.'; return;
     }
     query = needle.value; search();
-  } }, needle, el('button', { type: 'submit' }, 'Search'), button('Refresh latest', () => load())),
+  } }, needle, el('button', { type: 'submit' }, 'Search'), button('Refresh latest', () => load()),
+    button('Turn results', () => turns())),
   el('form', { class: 'row', onsubmit: event => {
     event.preventDefault();
     if (/^[0-9]{1,20}$/.test(number.value)) open(number.value);
   } }, number, el('button', { type: 'submit' }, 'Jump')),
-  notice, paging, rows, detail);
+  notice, totals, paging, rows, detail);
   // Let the caller attach the panel before even a cached request can finish.
   queueMicrotask(() => { if (root.isConnected) load(); });
   return root;

@@ -501,10 +501,14 @@ async fn a_plain_turn_is_logged_end_to_end() {
     let kinds: Vec<&str> = entries.iter().map(|e| e.kind.as_str()).collect();
     assert_eq!(
         kinds,
-        vec!["user", "assistant", "note"],
-        "both sides and the completion check must be in the log"
+        vec!["user", "assistant", "note", "note", "note"],
+        "both sides, the completion check and the result pair must be in the log"
     );
     assert_eq!(entries[0].body, "say hello");
+    assert_eq!(entries[3].label, "turn-summary");
+    assert_eq!(entries[4].label, "turn-result");
+    let (_, saved): (String, rook_core::agent::TurnOutcome) = serde_json::from_str(&entries[4].body).unwrap();
+    assert_eq!(saved.reply, outcome.reply);
 }
 
 #[tokio::test]
@@ -554,7 +558,9 @@ async fn a_tool_call_runs_and_both_halves_reach_the_log() {
     // Timing receipts supplement the conversation; keep its original ordering assertions.
     let entries: Vec<_> = entries.into_iter().filter(|e| e.label != "rook:timing:v1").collect();
     let kinds: Vec<&str> = entries.iter().map(|e| e.kind.as_str()).collect();
-    assert_eq!(kinds, vec!["user", "note", "tool-call", "tool-result", "assistant", "note"]);
+    assert_eq!(kinds, vec!["user", "note", "tool-call", "tool-result", "assistant", "note", "note", "note"]);
+    assert_eq!(entries[6].label, "turn-summary");
+    assert_eq!(entries[7].label, "turn-result");
     assert!(entries[3].body.contains("line two"), "{}", entries[3].body);
     assert_eq!(entries[1].label, "usage", "tool-only usage is durable before the effect");
     let meta = f.rook.store.get_session(session).unwrap().unwrap();
@@ -7810,4 +7816,10 @@ async fn a_step_limit_does_not_release_a_followup() {
         .filter(|e| e.record.kind == rook_store::EventKind::UserMessage)
         .count();
     assert_eq!(users, 5, "original, two continuations and two follow-ups each admit once");
+    let report = rook_core::turns::page(&f.rook, session, &Default::default()).unwrap();
+    assert_eq!(report.totals.turns, 5);
+    assert_eq!(report.totals.completed, 3);
+    assert_eq!(report.items.len(), 5);
+    assert_eq!(report.items[0].summary.reply, "last task finished");
+    assert_eq!(report.items[4].summary.stopped, "max_steps");
 }

@@ -443,6 +443,14 @@ fn continuing_a_killed_predecessor_releases_its_followups_only_after_completion(
         boundaries
     });
     assert_eq!(boundaries, ["one", "late"]);
+    let report = runtime.block_on(get(&client, &format!("{}/api/sessions/{session}/turns", daemon.address)));
+    assert_eq!(report["totals"]["turns"], 3);
+    assert_eq!(report["totals"]["completed"], 3);
+    assert_eq!(report["items"][0]["summary"]["follow_up"], "late");
+    assert_eq!(report["items"][1]["summary"]["follow_up"], "one");
+    assert_eq!(report["items"][2]["summary"]["continuation"], original);
+    let remote = rook.json(&["session", "turns", &session]);
+    assert_eq!(remote, report);
     for name in ["one", "late"] {
         assert!(
             runtime.block_on(get(&client, &format!("{queue}/session.{name}")))["receipt"]["applied_at"]
@@ -451,6 +459,7 @@ fn continuing_a_killed_predecessor_releases_its_followups_only_after_completion(
     }
     drop(socket);
     drop(daemon);
+    assert_eq!(rook.json(&["session", "turns", &session]), report);
     let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
     let id = rook_store::parse_session_id(&session).unwrap();
     let prompts = store

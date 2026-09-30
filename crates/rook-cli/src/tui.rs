@@ -162,6 +162,7 @@ impl Overlay {
                 ("Esc ", "close"),
             ],
             Overlay::History => &[
+                ("t ", "turn results  "),
                 ("/ ", "find  "),
                 ("g ", "jump  "),
                 ("n/p ", "page  "),
@@ -2740,6 +2741,19 @@ impl App {
                 None => "no goal set — /goal <text> to start".into(),
             };
             self.chat.push("stat", &said);
+            return;
+        }
+        if name == "turns" {
+            let before = if rest.trim().is_empty() {
+                None
+            } else {
+                match rest.trim().parse::<u64>() {
+                    Ok(before) => Some(before),
+                    Err(_) => return self.chat.push("err", "use /turns [event-number]"),
+                }
+            };
+            self.overlay = Some(Overlay::History);
+            self.history.open_turns(self.chat.session, before);
             return;
         }
         if name == "queue" {

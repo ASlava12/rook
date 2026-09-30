@@ -1,5 +1,11 @@
 # Terminal keys and prompt undo
 
+`/turns` opens recorded results and token totals for the current session. In the
+history viewer, `t` opens the same view, `n` scans older results, Enter opens the
+full stored outcome, and `h` returns to history. Esc closes without changing the
+draft. See [recorded turn results](durable-work.md#recorded-turn-results) for
+accounting scope and pagination limits.
+
 Open `rook config edit`, enter `tui`, then `keys`. Each named action has its own
 description and list of shortcuts. Missing actions keep their defaults; an empty
 list disables a shortcut. Conflicting shortcuts, unknown action names and invalid

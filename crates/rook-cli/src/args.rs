@@ -427,6 +427,12 @@ pub(crate) enum StoreCmd {
 
 #[derive(Subcommand)]
 pub(crate) enum SessionCmd {
+    /// Recorded turn results and cumulative token usage; newest page first.
+    Turns {
+        id: String,
+        #[arg(long)]
+        before: Option<u64>,
+    },
     /// Inspect, edit or withdraw queued messages without starting a turn.
     Queue {
         id: String,

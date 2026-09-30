@@ -7,6 +7,18 @@ use anyhow::Result;
 use rook_core::SessionSummary;
 use std::path::Path;
 
+pub(crate) fn describe_turns(page: &rook_core::turns::Page) -> String {
+    let mut text = rook_core::turns::describe(page);
+    for entry in &page.items {
+        text.push_str("\n\n");
+        text.push_str(&rook_core::turns::entry_text(entry));
+    }
+    if let Some(before) = page.before {
+        text.push_str(&format!("\n\nOlder results: --before {before} (REPL: /turns {before})"));
+    }
+    text
+}
+
 pub(crate) fn diagnostic_arguments(arguments: &str) -> Result<(bool, std::path::PathBuf)> {
     let arguments = arguments.trim();
     let (logs, rest) = if arguments == "--logs" {
@@ -31,6 +43,15 @@ pub(crate) fn diagnostic_arguments(arguments: &str) -> Result<(bool, std::path::
 }
 
 pub(crate) fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, json: bool) -> Result<()> {
+    if let SessionCmd::Turns { id, before } = &cmd {
+        let page = source.turn_results(source.session_named(id, workspace)?, *before)?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&page)?);
+        } else {
+            println!("{}", describe_turns(&page));
+        }
+        return Ok(());
+    }
     if let SessionCmd::Queue { id, action } = &cmd {
         let session = source.session_named(id, workspace)?;
         let value = super::queue::execute(source, session, action.as_ref())?;
@@ -169,7 +190,8 @@ pub(crate) fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, js
         return show_rewind(&source.rewind(session, *to, !keep_files)?, *keep_files, json);
     }
     match cmd {
-        SessionCmd::Queue { .. }
+        SessionCmd::Turns { .. }
+        | SessionCmd::Queue { .. }
         | SessionCmd::History { .. }
         | SessionCmd::Find { .. }
         | SessionCmd::Entry { .. }

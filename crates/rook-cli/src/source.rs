@@ -949,6 +949,19 @@ impl Source {
         })
     }
 
+    pub(crate) fn turn_results(&self, session: u128, before: Option<u64>) -> Result<rook_core::turns::Page> {
+        match self {
+            Self::Local(rook) => {
+                Ok(rook_core::turns::page(rook, session, &rook_core::turns::Query { before })?)
+            }
+            Self::Daemon(d) => d.get_bounded(&format!(
+                "/api/sessions/{}/turns{}",
+                rook_store::format_session_id(session),
+                before.map(|n| format!("?before={n}")).unwrap_or_default()
+            )),
+        }
+    }
+
     pub fn transcript_page(
         &self,
         session: u128,

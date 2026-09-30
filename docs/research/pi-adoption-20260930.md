@@ -544,6 +544,64 @@ mutation notices and remaining cross-lifecycle/frontend parity checks are still
 outstanding. Ordinary-to-goal promotion does not migrate pending follow-ups into
 a different goal scope. The full adoption scope remains the table above.
 
+## Recorded turn history and totals (eleventh block)
+
+Each saved outcome now appends an immutable summary/result pair and updates a
+constant-size ledger in the same transaction as the latest recovery outcome and
+follow-up readiness. The execution ID prevents duplicate accounting on retry.
+The existing full-outcome JSON limit remains 8 MiB; summaries have bounded reply
+previews, and result bodies are readable through existing byte-pageable history.
+Both notes stay outside model context. Postcard schemas and store format 4 are
+unchanged; session deletion and retention include the ledger and event objects.
+
+`rook session turns`, TUI/REPL `/turns`, the history viewer's `t` action, the HTTP
+turn-results route and the browser history panel expose the same recorded
+outcomes and cumulative counters. Pagination bounds decoded records and encoded
+page bytes, scans only `transcript.search_events` metadata records, and returns
+an advancing cursor even through pages without outcomes. TUI reads use the
+existing bounded history worker and discard responses from a previous session.
+The browser preserves totals while opening full results and wraps long bodies.
+
+Accounting is explicitly scoped to saved outcomes in the selected session.
+The report identifies its first covered prompt, excludes inherited branch
+outcomes from new-execution totals, and distinguishes completed turns from limits.
+Token counts are provider reports, cached input is not added twice, and elapsed
+time is a sum of execution wall-clock spans. Pre-upgrade history, attempts without
+a saved outcome, and usage lost before a process resumed are not backfilled.
+Full accounting of interrupted attempts and live-chain totals remains outstanding;
+the final live Done event still describes the final turn.
+
+Focused tests passed for restart, idempotent recording, independent fork totals,
+session deletion, byte/entry/scan bounds, cursor progress, escaped Unicode and
+rollback before committing an oversized result (`/tmp/rook-turn-results-tests.log`).
+The agent-loop suite initially found two assertions that expected the old event
+shape; both now check the additional summary/result pair explicitly. The loop's
+continuation scenario also checks all saved outcomes and separate completion counts.
+That initial failure is `/tmp/rook-turn-results-loop.log`.
+
+The actual killed-daemon continuation scenario checks result identity and matches
+HTTP output to CLI reads both with and without the daemon
+(`/tmp/rook-turn-results-daemon.log`). Local and daemon PTY scenarios passed for
+paging, full-result inspection, direct `/turns`, history switching and preserved
+drafts (`/tmp/rook-turn-results-pty2.log`). The first PTY fixture sent Escape and
+the next text without allowing terminal escape disambiguation; separating those
+actions fixed the fixture (`/tmp/rook-turn-results-pty.log`). Chrome with an actual
+daemon and scripted provider passed totals, paging, full results, viewport fit
+and draft preservation (`/tmp/rook-turn-results-browser2.log`); the rendered page
+was inspected. Its harness is `/tmp/rook-pi-browser-check/turn-results-live.cjs`.
+
+The full Pi scope remains unchanged. The queue still needs the remaining admission
+identity/parity work, read-only queue detail scrolling, old API mutation notices,
+and cross-lifecycle coverage; the other pending capabilities remain in the table.
+
+The final isolated `cargo xtask ci` exited 0 in 635.4 seconds, including the full
+PTY suite, daemon recovery/result parity scenario, agent-loop tests and doctests
+(`/tmp/rook-turn-results-final-ci.log`). Rust sources stayed unchanged during
+the gate. `cargo xtask compaction` also exited 0, retaining 4.02 MiB on disk,
+37.1x dictionary compression and 5.8x end-to-end
+(`/tmp/rook-turn-results-compaction.log`). JavaScript syntax and the corrected
+real-daemon browser scenario passed before the gate.
+
 ## Validation environment
 
 macOS showed long cold-start pauses before test code executed: a process sample

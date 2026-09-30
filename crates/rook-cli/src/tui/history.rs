@@ -8,6 +8,7 @@ pub(super) struct History {
     epoch: u64,
     pending: bool,
     page: Option<Page>,
+    turns: Option<rook_core::turns::Page>,
     hits: Option<Matches>,
     entry: Option<EntryPage>,
     at: usize,
@@ -21,12 +22,14 @@ pub(super) struct History {
     receive: Receiver<(u64, Result<Update>)>,
 }
 enum Command {
+    Turns(u128, Option<u64>),
     Page(u128, PageRequest),
     Search(u128, String, Cursor),
     Entry(u128, u64, u64),
     Quote(u128, u64, u64),
 }
 enum Update {
+    Turns(rook_core::turns::Page),
     Page(Page),
     Search(Matches),
     Entry(EntryPage),
@@ -35,6 +38,7 @@ enum Update {
 impl Command {
     fn read(self, source: &crate::source::Source) -> Result<Update> {
         Ok(match self {
+            Self::Turns(session, before) => Update::Turns(source.turn_results(session, before)?),
             Self::Page(session, q) => Update::Page(source.transcript_page(session, &q)?),
             Self::Search(session, q, cursor) => {
                 Update::Search(source.transcript_search(session, &q, cursor)?)
@@ -71,6 +75,7 @@ impl History {
             epoch: 0,
             pending: false,
             page: None,
+            turns: None,
             hits: None,
             entry: None,
             at: 0,
@@ -85,10 +90,17 @@ impl History {
         }
     }
     pub(super) fn open(&mut self, session: Option<u128>) {
+        self.open_mode(session, false, None);
+    }
+    pub(super) fn open_turns(&mut self, session: Option<u128>, before: Option<u64>) {
+        self.open_mode(session, true, before);
+    }
+    fn open_mode(&mut self, session: Option<u128>, turns: bool, before: Option<u64>) {
         self.epoch = self.epoch.wrapping_add(1);
         self.session = session;
         self.pending = false;
         self.page = None;
+        self.turns = None;
         self.hits = None;
         self.entry = None;
         self.at = 0;
@@ -96,7 +108,11 @@ impl History {
         self.quote = None;
         self.editing = None;
         if let Some(session) = session {
-            self.ask(Command::Page(session, PageRequest::default()));
+            self.ask(if turns {
+                Command::Turns(session, before)
+            } else {
+                Command::Page(session, PageRequest::default())
+            });
         } else {
             self.note = "This conversation has no saved session yet.".into();
         }
@@ -123,7 +139,19 @@ impl History {
             self.pending = false;
             self.note.clear();
             match update {
+                Ok(Update::Turns(page)) => {
+                    self.turns = Some(page);
+                    self.page = None;
+                    self.hits = None;
+                    self.entry = None;
+                    self.at = 0;
+                    self.scroll = 0;
+                    self.note =
+                        "t refreshes results · n scans older · h opens history · Enter reads full result"
+                            .into();
+                }
                 Ok(Update::Page(page)) => {
+                    self.turns = None;
                     self.at = page.items.len().saturating_sub(1);
                     self.page = Some(page);
                     self.hits = None;
@@ -131,6 +159,7 @@ impl History {
                     self.scroll = 0;
                 }
                 Ok(Update::Search(hits)) => {
+                    self.turns = None;
                     self.note = if hits.next.is_some() {
                         "Search page complete; n continues the scan."
                     } else {
@@ -160,6 +189,9 @@ impl History {
         }
         if let Some(hits) = &self.hits {
             return hits.hits.get(self.at).map(|h| (h.seq, h.offset));
+        }
+        if let Some(turns) = &self.turns {
+            return turns.items.get(self.at).map(|e| (e.result_seq, 0));
         }
         self.page.as_ref()?.items.get(self.at).map(|e| (e.seq, 0))
     }
@@ -234,6 +266,16 @@ impl History {
                 self.input.set("");
             }
             KeyCode::Char('r') => {
+                self.ask(if self.turns.is_some() {
+                    Command::Turns(session, None)
+                } else {
+                    Command::Page(session, PageRequest::default())
+                });
+            }
+            KeyCode::Char('t') => {
+                self.ask(Command::Turns(session, None));
+            }
+            KeyCode::Char('h') => {
                 self.ask(Command::Page(session, PageRequest::default()));
             }
             KeyCode::Char('b') => {
@@ -246,6 +288,7 @@ impl History {
                     .hits
                     .as_ref()
                     .map(|h| h.hits.len())
+                    .or_else(|| self.turns.as_ref().map(|p| p.items.len()))
                     .or_else(|| self.page.as_ref().map(|p| p.items.len()))
                     .unwrap_or(0);
                 self.at = if matches!(key.code, KeyCode::Down | KeyCode::Char('j')) {
@@ -273,6 +316,8 @@ impl History {
                     entry.next_offset.map(|offset| Command::Entry(session, entry.entry.seq, offset))
                 } else if let Some(hits) = &self.hits {
                     hits.next.map(|cursor| Command::Search(session, self.needle.clone(), cursor))
+                } else if let Some(turns) = &self.turns {
+                    turns.before.map(|before| Command::Turns(session, Some(before)))
                 } else {
                     self.page.as_ref().and_then(|p| p.next).map(|from| {
                         Command::Page(session, PageRequest { from: Some(from), ..Default::default() })
@@ -301,25 +346,45 @@ impl History {
         false
     }
     pub(super) fn draw(&self, f: &mut Frame, area: Rect) {
-        let [top, body, note] =
-            Layout::vertical([Constraint::Length(3), Constraint::Min(3), Constraint::Length(2)]).areas(area);
+        let [top, body, note] = Layout::vertical([
+            Constraint::Length(if self.turns.is_some() { 5 } else { 3 }),
+            Constraint::Min(3),
+            Constraint::Length(2),
+        ])
+        .areas(area);
         let title = match self.editing {
             Some(true) => "jump to event #",
             Some(false) => "find literal text",
-            None => "history · / find · g jump · q quote to draft",
+            None if self.turns.is_some() => "turn results · t refresh · n older · h history",
+            None => "history · / find · g jump · q quote · t turn results",
         };
         let text = if self.editing.is_some() {
             self.input.text.clone()
+        } else if let Some(turns) = &self.turns {
+            rook_core::turns::describe(turns)
         } else {
             self.session.map(rook_store::format_session_id).unwrap_or_default()
         };
-        f.render_widget(Paragraph::new(text).block(bordered(title)), top);
+        f.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }).block(bordered(title)), top);
         let [list, detail] =
             Layout::horizontal([Constraint::Percentage(38), Constraint::Percentage(62)]).areas(body);
         let rows: Vec<ListItem> = if let Some(hits) = &self.hits {
             hits.hits
                 .iter()
                 .map(|h| ListItem::new(format!("#{} {} {}", h.seq, h.kind, h.snippet.replace('\n', " "))))
+                .collect()
+        } else if let Some(turns) = &self.turns {
+            turns
+                .items
+                .iter()
+                .map(|e| {
+                    ListItem::new(format!(
+                        "#{} {}{}",
+                        e.result_seq,
+                        e.summary.stopped,
+                        e.summary.follow_up.as_ref().map(|id| format!(" · {id}")).unwrap_or_default()
+                    ))
+                })
                 .collect()
         } else {
             self.page
@@ -357,6 +422,10 @@ impl History {
                 .unwrap_or_else(|| {
                     "No matches on this scan page. n continues when a cursor is available.".into()
                 })
+        } else if let Some(turns) = &self.turns {
+            turns.items.get(self.at).map(rook_core::turns::entry_text).unwrap_or_else(|| {
+                "No recorded outcomes on this scan page. n scans older events when available.".into()
+            })
         } else {
             self.page
                 .as_ref()

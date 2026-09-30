@@ -2146,6 +2146,93 @@ fn daemon_history_search_jump_and_pages_preserve_the_draft() {
     history_browsing_preserves_the_session(true);
 }
 
+fn turn_results_preserve_the_draft(through_daemon: bool) {
+    let _one = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join("config.toml"), "[transcript]\npage_entries=1\n").unwrap();
+    let session = rook_store::new_session_id();
+    let name = rook_store::format_session_id(session);
+    {
+        let store = rook_store::Store::open(home.path().join("store")).unwrap();
+        store
+            .create_session(&rook_store::SessionMeta::new(
+                session,
+                "results fixture",
+                workspace.path().display().to_string(),
+                rook_store::now_unix(),
+            ))
+            .unwrap();
+        for n in 0..3 {
+            let summary = serde_json::json!({
+                "session":name,"turn":format!("turn{n}"),"follow_up":format!("queued{n}"),"continuation":null,
+                "prompt_seq":0,"started_at":1,"ended_at":2,"stopped":"end_turn","steps":1,
+                "input_tokens":11,"output_tokens":7,"cached_tokens":3,"files_changed":0,
+                "reply":format!("RESULT_PREVIEW_{n}"),"reply_truncated":true
+            })
+            .to_string();
+            let body = format!("RESULT_FULL_{n}");
+            store
+                .append_events_with_values(
+                    session,
+                    [
+                        rook_store::NewEvent::new(
+                            rook_store::EventKind::Note,
+                            rook_store::Kind::Message,
+                            summary.as_bytes(),
+                        )
+                        .label("turn-summary"),
+                        rook_store::NewEvent::new(
+                            rook_store::EventKind::Note,
+                            rook_store::Kind::Message,
+                            body.as_bytes(),
+                        )
+                        .label("turn-result"),
+                    ],
+                    &[],
+                )
+                .unwrap();
+        }
+        let ledger = serde_json::json!({"last_turn":"turn2","coverage_from":0,"totals":{
+            "turns":3,"completed":3,"steps":3,"input_tokens":33,"output_tokens":21,"cached_tokens":9,"elapsed_seconds":3,"saturated":false
+        }}).to_string();
+        store.kv_set(&format!("turn-ledger/{session:032x}"), ledger.as_bytes()).unwrap();
+    }
+    let daemon = through_daemon.then(|| Daemon::start(home.path(), workspace.path()));
+    let mut pty = tui(home.path(), workspace.path());
+    pty.screen(100, 30);
+    pty.send(&format!("/session {name}\r"));
+    pty.screen_showing(100, 30, "continuing");
+    pty.send("/turns\r");
+    pty.screen_showing(100, 30, "Recorded turns: 3");
+    pty.screen_showing(100, 30, "RESULT_PREVIEW_2");
+    pty.send("n");
+    pty.screen_showing(100, 30, "RESULT_PREVIEW_1");
+    pty.send("\r");
+    pty.screen_showing(100, 30, "RESULT_FULL_1");
+    pty.send("\x1b");
+    pty.screen(100, 30); // let the terminal distinguish Escape from an Alt chord
+    pty.send("PRESERVED_RESULTS_DRAFT\x06");
+    pty.screen_showing(100, 30, "history ·");
+    pty.send("t");
+    pty.screen_showing(100, 30, "RESULT_PREVIEW_2");
+    pty.send("\x1b");
+    pty.screen_showing(100, 30, "PRESERVED_RESULTS_DRAFT");
+    drop(pty);
+    drop(daemon);
+    let store = rook_store::Store::open(home.path().join("store")).unwrap();
+    assert_eq!(store.get_session(session).unwrap().unwrap().next_seq, 6);
+}
+
+#[test]
+fn local_turn_results_are_paged_readable_and_preserve_the_draft() {
+    turn_results_preserve_the_draft(false);
+}
+#[test]
+fn daemon_turn_results_are_paged_readable_and_preserve_the_draft() {
+    turn_results_preserve_the_draft(true);
+}
+
 fn mcp_panel_reconnects_from_current_config(through_daemon: bool) {
     let _one = one_at_a_time();
     let home = tempfile::tempdir().unwrap();
