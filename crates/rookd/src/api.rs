@@ -1761,10 +1761,34 @@ mod tests {
             ),
             (format!("{work}/steer"), format!("{work}/instructions"), work, true),
         ] {
+            let observed_session = if is_work {
+                rook_store::parse_session_id(run["id"].as_str().unwrap()).unwrap()
+            } else {
+                f.session
+            };
+            let (said, mut notices) = tokio::sync::broadcast::channel(16);
+            let (to_turn, _held) = tokio::sync::mpsc::unbounded_channel();
+            let (approver, approval_relay) =
+                crate::chat::approver(to_turn.clone(), std::time::Duration::from_secs(1), Default::default());
+            let (asker, ask_relay) =
+                crate::chat::asker(to_turn, std::time::Duration::from_secs(1), Default::default());
+            f.state
+                .remember(
+                    observed_session,
+                    std::sync::Arc::new(crate::chat::Live::for_test(
+                        tokio::spawn(std::future::pending()),
+                        vec![approval_relay.abort_handle(), ask_relay.abort_handle()],
+                        said,
+                        approver,
+                        asker,
+                    )),
+                )
+                .await;
             let original = serde_json::json!({"id":"one", "text":"original guidance"});
             let (status, receipt) = post(&f, &submit, original.clone()).await;
             assert_eq!(status, StatusCode::OK, "{receipt}");
             assert_eq!(receipt["revision"], 0);
+            assert!(notices.try_recv().is_ok(), "legacy submission must notify an attached view");
             for (method, body, expected) in [
                 ("PUT", serde_json::json!({"revision":0,"text":"edited guidance"}), StatusCode::OK),
                 ("PUT", serde_json::json!({"revision":0,"text":"stale guidance"}), StatusCode::BAD_REQUEST),
@@ -1790,12 +1814,18 @@ mod tests {
                 let status = response.status();
                 let bytes = axum::body::to_bytes(response.into_body(), 4 << 20).await.unwrap();
                 assert_eq!(status, expected, "{method} {body}: {}", String::from_utf8_lossy(&bytes));
+                assert_eq!(
+                    notices.try_recv().is_ok(),
+                    expected == StatusCode::OK,
+                    "only a committed {method} mutation may publish a notice"
+                );
             }
             let (status, receipt) = post(&f, &submit, original).await;
             assert_eq!(status, StatusCode::OK, "{receipt}");
             assert_eq!(receipt["revision"], 2);
             assert_eq!(receipt["text"], "edited guidance");
             assert!(receipt["withdrawn_at"].is_number());
+            assert!(notices.try_recv().is_ok(), "idempotent legacy submission still has a current receipt");
             let (status, saved) = get(&f, &read).await;
             assert_eq!(status, StatusCode::OK);
             let messages = if is_work { &saved["instructions"] } else { &saved };

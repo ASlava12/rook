@@ -126,8 +126,10 @@ session; it never appends to the other session while that session is selected.
 
 Live daemon chat receipts show their opaque reference, revision and current
 state. Acceptance metadata comes from the transaction that saved the accepted
-text. Editing or withdrawing through the combined queue API updates attached
-running views; late queued notifications cannot overwrite accepted or withdrawn
+text. Submission, editing and withdrawal through either the combined queue API
+or the older session/work instruction routes update attached running views. The
+older routes keep their original response shape. Late queued notifications
+cannot overwrite accepted or withdrawn
 state. These marks mean inclusion in context, not successful execution of the
 instruction. The queue panel remains the authoritative read after reconnect or
 when the retained live view is shortened; refresh it to inspect older receipts.

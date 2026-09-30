@@ -222,6 +222,34 @@ mod tests {
     }
 
     #[test]
+    fn legacy_goal_mutations_report_the_generation_that_was_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let rook = engine(dir.path());
+        let session = rook.start_session("goal notices").unwrap();
+        let run = goal(&rook, session);
+        managed::steer(&rook, &run.id, steer("one", "first")).unwrap();
+        let (edited, notice) = managed::edit_instruction_noticed(
+            &rook,
+            &run.id,
+            "one",
+            EditInstruction { revision: 0, text: "second".into() },
+        )
+        .unwrap();
+        let reference = format!("goal.{}.one", run.identity().generation);
+        assert_eq!(notice.reference, reference);
+        assert_eq!(notice.session, rook_store::format_session_id(session));
+        assert_eq!(notice.revision, edited.revision);
+        assert_eq!(notice.status, rook_proto::queue::Status::Queued);
+        let (withdrawn, notice) =
+            managed::withdraw_instruction_noticed(&rook, &run.id, "one", WithdrawInstruction { revision: 1 })
+                .unwrap();
+        assert_eq!(notice.reference, reference);
+        assert_eq!(notice.revision, withdrawn.revision);
+        assert_eq!(notice.status, rook_proto::queue::Status::Withdrawn);
+        assert_eq!(withdrawn.text, "second");
+    }
+
+    #[test]
     fn scoped_submissions_survive_lost_replies_restart_and_goal_replacement_without_retargeting() {
         let dir = tempfile::tempdir().unwrap();
         let rook = engine(dir.path());

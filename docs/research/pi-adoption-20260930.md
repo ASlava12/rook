@@ -798,3 +798,23 @@ Both focused queue-render tests exited 0. The final `cargo xtask ci` exited 0
 (`ci: ok`, 388.0 seconds), including the queue unit tests. No store format or
 retention code changed, so the preceding block's compaction measurement remains
 the latest storage check.
+
+## Legacy queue mutation notices
+
+The older session and managed-work HTTP instruction routes now publish receipt
+updates to attached live views for submission, edit and withdrawal. They keep
+their original JSON response shapes. Each notice carries the text, revision and
+reference returned by the same committed mutation. Goal references capture the
+run generation while its update lock is held, so a replacement goal cannot be
+used to label an older mutation. Failed revisions publish nothing. The combined
+queue route shares the same live publication helper. Receipt-only embedded Rust
+functions remain available for compatibility.
+
+Focused core checks passed for ordinary and goal notice identity, and the HTTP
+route test passed with a running observer in both scopes, checking successful
+and rejected mutations. Queue admission identity for legacy callers and broader
+lifecycle/frontend parity remain outstanding, as do all Pending rows above.
+
+The full `cargo xtask ci` exited 0 (`ci: ok`, 394.8 seconds). A final
+`cargo xtask compaction` exited 0 with 4.02 MiB on disk, 37.1x dictionary
+compression and 5.8x end-to-end. No postcard schema or store format changed.

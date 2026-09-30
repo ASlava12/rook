@@ -251,20 +251,59 @@ pub fn steer_noticed(rook: &Rook, id: &str, request: Steer) -> Result<(Steering,
     })
 }
 
+/// Receipt-only compatibility API for embedded callers.
+#[doc(hidden)]
 pub fn edit_instruction(rook: &Rook, run: &str, id: &str, request: EditInstruction) -> Result<Steering> {
+    edit_instruction_noticed(rook, run, id, request).map(|(receipt, _)| receipt)
+}
+
+pub fn edit_instruction_noticed(
+    rook: &Rook,
+    run: &str,
+    id: &str,
+    request: EditInstruction,
+) -> Result<(Steering, rook_proto::queue::Notice)> {
     update(rook, run, |saved| {
-        super::receipts::edit(rook, &mut saved.run.instructions, id, request, !saved.run.status.terminal())
+        let receipt = super::receipts::edit(
+            rook,
+            &mut saved.run.instructions,
+            id,
+            request,
+            !saved.run.status.terminal(),
+        )?;
+        let session = rook_store::parse_session_id(&saved.run.id).ok_or_else(|| bad("invalid run id"))?;
+        let notice = crate::message_queue::view::notice(session, Some(&saved.run), &receipt);
+        Ok((receipt, notice))
     })
 }
 
+/// Receipt-only compatibility API for embedded callers.
+#[doc(hidden)]
 pub fn withdraw_instruction(
     rook: &Rook,
     run: &str,
     id: &str,
     request: WithdrawInstruction,
 ) -> Result<Steering> {
+    withdraw_instruction_noticed(rook, run, id, request).map(|(receipt, _)| receipt)
+}
+
+pub fn withdraw_instruction_noticed(
+    rook: &Rook,
+    run: &str,
+    id: &str,
+    request: WithdrawInstruction,
+) -> Result<(Steering, rook_proto::queue::Notice)> {
     update(rook, run, |saved| {
-        super::receipts::withdraw(&mut saved.run.instructions, id, request, !saved.run.status.terminal())
+        let receipt = super::receipts::withdraw(
+            &mut saved.run.instructions,
+            id,
+            request,
+            !saved.run.status.terminal(),
+        )?;
+        let session = rook_store::parse_session_id(&saved.run.id).ok_or_else(|| bad("invalid run id"))?;
+        let notice = crate::message_queue::view::notice(session, Some(&saved.run), &receipt);
+        Ok((receipt, notice))
     })
 }
 

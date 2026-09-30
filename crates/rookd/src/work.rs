@@ -65,6 +65,17 @@ fn session_id(id: &str) -> Result<u128, Failure> {
     rook_store::parse_session_id(id).ok_or_else(|| failure("invalid session id"))
 }
 
+async fn publish_receipt(
+    state: &Arc<AppState>,
+    session: u128,
+    receipt: &Steering,
+    notice: rook_proto::queue::Notice,
+) {
+    if let Some(live) = state.live.read().await.get(&session).filter(|live| live.running()).cloned() {
+        live.queue_notice(notice, receipt.text.clone());
+    }
+}
+
 async fn queue_page(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -95,16 +106,17 @@ async fn queue_change(
     let session = session_id(&id)?;
     let entry = rook_core::message_queue::view::change(&*state.rook.read().await, session, change)
         .map_err(failure)?;
-    if let Some(live) = state.live.read().await.get(&session).cloned() {
-        live.queue_notice(
-            rook_proto::queue::Notice::new(
-                rook_store::format_session_id(session),
-                entry.reference.clone(),
-                &entry.receipt,
-            ),
-            entry.receipt.text.clone(),
-        );
-    }
+    publish_receipt(
+        &state,
+        session,
+        &entry.receipt,
+        rook_proto::queue::Notice::new(
+            rook_store::format_session_id(session),
+            entry.reference.clone(),
+            &entry.receipt,
+        ),
+    )
+    .await;
     Ok(Json(entry))
 }
 
@@ -120,10 +132,12 @@ async fn session_submit(
     Path(id): Path<String>,
     Json(request): Json<Steer>,
 ) -> Result<Json<Steering>, Failure> {
-    Ok(Json(
-        rook_core::message_queue::submit(&*state.rook.read().await, session_id(&id)?, request)
-            .map_err(failure)?,
-    ))
+    let session = session_id(&id)?;
+    let (receipt, notice) =
+        rook_core::message_queue::submit_noticed(&*state.rook.read().await, session, request)
+            .map_err(failure)?;
+    publish_receipt(&state, session, &receipt, notice).await;
+    Ok(Json(receipt))
 }
 
 async fn session_edit(
@@ -131,10 +145,12 @@ async fn session_edit(
     Path((id, message)): Path<(String, String)>,
     Json(request): Json<EditInstruction>,
 ) -> Result<Json<Steering>, Failure> {
-    Ok(Json(
-        rook_core::message_queue::edit(&*state.rook.read().await, session_id(&id)?, &message, request)
-            .map_err(failure)?,
-    ))
+    let session = session_id(&id)?;
+    let (receipt, notice) =
+        rook_core::message_queue::edit_noticed(&*state.rook.read().await, session, &message, request)
+            .map_err(failure)?;
+    publish_receipt(&state, session, &receipt, notice).await;
+    Ok(Json(receipt))
 }
 
 async fn session_withdraw(
@@ -142,10 +158,12 @@ async fn session_withdraw(
     Path((id, message)): Path<(String, String)>,
     Json(request): Json<WithdrawInstruction>,
 ) -> Result<Json<Steering>, Failure> {
-    Ok(Json(
-        rook_core::message_queue::withdraw(&*state.rook.read().await, session_id(&id)?, &message, request)
-            .map_err(failure)?,
-    ))
+    let session = session_id(&id)?;
+    let (receipt, notice) =
+        rook_core::message_queue::withdraw_noticed(&*state.rook.read().await, session, &message, request)
+            .map_err(failure)?;
+    publish_receipt(&state, session, &receipt, notice).await;
+    Ok(Json(receipt))
 }
 
 async fn list(State(state): State<Arc<AppState>>) -> Result<Json<Vec<Run>>, Failure> {
@@ -179,7 +197,11 @@ async fn steer(
     Path(id): Path<String>,
     Json(request): Json<Steer>,
 ) -> Result<Json<Steering>, Failure> {
-    Ok(Json(managed::steer(&*state.rook.read().await, &id, request).map_err(failure)?))
+    let session = session_id(&id)?;
+    let (receipt, notice) =
+        managed::steer_noticed(&*state.rook.read().await, &id, request).map_err(failure)?;
+    publish_receipt(&state, session, &receipt, notice).await;
+    Ok(Json(receipt))
 }
 
 async fn control(
@@ -195,7 +217,12 @@ async fn edit_instruction(
     Path((id, message)): Path<(String, String)>,
     Json(request): Json<EditInstruction>,
 ) -> Result<Json<Steering>, Failure> {
-    Ok(Json(managed::edit_instruction(&*state.rook.read().await, &id, &message, request).map_err(failure)?))
+    let session = session_id(&id)?;
+    let (receipt, notice) =
+        managed::edit_instruction_noticed(&*state.rook.read().await, &id, &message, request)
+            .map_err(failure)?;
+    publish_receipt(&state, session, &receipt, notice).await;
+    Ok(Json(receipt))
 }
 
 async fn withdraw_instruction(
@@ -203,9 +230,12 @@ async fn withdraw_instruction(
     Path((id, message)): Path<(String, String)>,
     Json(request): Json<WithdrawInstruction>,
 ) -> Result<Json<Steering>, Failure> {
-    Ok(Json(
-        managed::withdraw_instruction(&*state.rook.read().await, &id, &message, request).map_err(failure)?,
-    ))
+    let session = session_id(&id)?;
+    let (receipt, notice) =
+        managed::withdraw_instruction_noticed(&*state.rook.read().await, &id, &message, request)
+            .map_err(failure)?;
+    publish_receipt(&state, session, &receipt, notice).await;
+    Ok(Json(receipt))
 }
 
 async fn forget(

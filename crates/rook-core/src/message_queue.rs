@@ -70,14 +70,42 @@ pub fn submit_noticed(
     })
 }
 
+/// Receipt-only compatibility API for embedded callers.
+#[doc(hidden)]
 pub fn edit(rook: &Rook, session: u128, id: &str, request: EditInstruction) -> Result<Steering> {
-    update(rook, session, |messages| receipts::edit(rook, messages, id, request, true))
+    edit_noticed(rook, session, id, request).map(|(receipt, _)| receipt)
 }
 
+pub fn edit_noticed(
+    rook: &Rook,
+    session: u128,
+    id: &str,
+    request: EditInstruction,
+) -> Result<(Steering, rook_proto::queue::Notice)> {
+    update(rook, session, |messages| {
+        let receipt = receipts::edit(rook, messages, id, request, true)?;
+        let notice = view::notice(session, None, &receipt);
+        Ok((receipt, notice))
+    })
+}
+
+/// Receipt-only compatibility API for embedded callers.
+#[doc(hidden)]
 pub fn withdraw(rook: &Rook, session: u128, id: &str, request: WithdrawInstruction) -> Result<Steering> {
+    withdraw_noticed(rook, session, id, request).map(|(receipt, _)| receipt)
+}
+
+pub fn withdraw_noticed(
+    rook: &Rook,
+    session: u128,
+    id: &str,
+    request: WithdrawInstruction,
+) -> Result<(Steering, rook_proto::queue::Notice)> {
     update(rook, session, |messages| {
         check_withdraw(rook, session, messages, id)?;
-        receipts::withdraw(messages, id, request, true)
+        let receipt = receipts::withdraw(messages, id, request, true)?;
+        let notice = view::notice(session, None, &receipt);
+        Ok((receipt, notice))
     })
 }
 
@@ -160,6 +188,27 @@ mod tests {
 
     fn request(id: &str, text: &str) -> Steer {
         Steer { id: id.into(), text: text.into() }
+    }
+
+    #[test]
+    fn legacy_session_mutations_report_the_committed_receipt_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let rook = engine(dir.path());
+        let session = rook.start_session("legacy notices").unwrap();
+        submit(&rook, session, request("one", "first")).unwrap();
+        let (edited, notice) =
+            edit_noticed(&rook, session, "one", EditInstruction { revision: 0, text: "second".into() })
+                .unwrap();
+        assert_eq!(notice.reference, "session.one");
+        assert_eq!(notice.session, rook_store::format_session_id(session));
+        assert_eq!(notice.revision, edited.revision);
+        assert_eq!(notice.status, rook_proto::queue::Status::Queued);
+        let (withdrawn, notice) =
+            withdraw_noticed(&rook, session, "one", WithdrawInstruction { revision: 1 }).unwrap();
+        assert_eq!(notice.reference, "session.one");
+        assert_eq!(notice.revision, withdrawn.revision);
+        assert_eq!(notice.status, rook_proto::queue::Status::Withdrawn);
+        assert_eq!(withdrawn.text, "second");
     }
 
     #[test]
