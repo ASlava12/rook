@@ -240,16 +240,35 @@ channels and MCP/LSP connections. A `follow_up` stream event marks the new turn;
 the observer remains attached, and terminal `done` is sent when the chain stops.
 The final summary describes the last turn; earlier output stays in the transcript.
 
-Restart recovery is still being integrated. The queue, reserved execution ID and
-accepted prompt are durable, but the daemon does not yet scan idle ordinary
-sessions to restart follow-ups. Submitting to an idle session saves the message;
-it does not itself start a worker. An interrupted reserved message is not retried
-automatically. Inspect session recovery; an unaccepted stopped reservation can
-be withdrawn and resubmitted. An already accepted message is immutable. An
-unfinished predecessor continued under a new execution ID, or a replacement goal,
-does not silently acquire messages addressed to the old boundary. Inspect and
-withdraw/resubmit those pending messages explicitly. These limitations keep the
-queue capability in progress in the adoption tracker.
+The daemon scans idle sessions for eligible follow-ups, including after restart.
+It checks at most `work.followup_scan_sessions` session IDs per one-second tick
+(default 128, range 1..4096), continuing from its cursor; active work respects
+`work.max_parallel_runs`. Sessions previously opened for daemon execution retain
+their workspace, selected model, effort and stance. Frontend setting changes are
+saved immediately and used at the next follow-up boundary. Rules come from the
+current configuration on restart; temporary approval grants are not persisted.
+Tool-initiated stance changes are saved at turn boundaries. A session run only by
+a local CLI has no daemon settings snapshot: send an explicit prompt through the
+daemon to establish one. The daemon does not invent settings for those sessions.
+
+After a lost process, a reserved follow-up can resume with its original execution
+ID and admitted prompt. Saved session and prompt hook context is restored without
+running those hooks again. If its outcome was already recorded, recovery reuses
+that outcome. Unknown side effects block recovery and appear in the queue status;
+inspect and resolve them through `/recovery` before proceeding. Older admissions
+without saved hook context, or setup effects completed before admission, require
+explicit inspection. Recovery starts a fresh turn allowance, not the remaining
+wall-clock time from the lost process.
+
+Explicit cancellation pauses automatic follow-ups across restart. Use `/continue`
+or another explicit prompt to resume the session; changing a setting alone does
+not resume it. A failed recovery also pauses the driver and reports its reason in
+the queue. An unaccepted stopped reservation can be withdrawn and resubmitted;
+accepted messages remain immutable. An unfinished predecessor continued under a
+new execution ID, or a replacement goal, does not silently acquire messages
+addressed to the old boundary. Inspect and withdraw/resubmit those pending
+messages explicitly. Continuation lineage, goal-promotion handoff and aggregate
+outcome reporting keep the queue capability in progress in the adoption tracker.
 
 ## Steering receipts
 

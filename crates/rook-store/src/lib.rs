@@ -733,6 +733,22 @@ impl Store {
         Ok(out)
     }
 
+    /// Bounded key-only scan; an exclusive cursor also survives session deletion.
+    pub fn session_ids_after(&self, after: Option<u128>, limit: usize) -> Result<Vec<u128>> {
+        let Some(start) = after.map_or(Some(0), |id| id.checked_add(1)) else { return Ok(Vec::new()) };
+        let txn = self.db.begin_read()?;
+        let sessions = txn.open_table(schema::SESSIONS)?;
+        let start = schema::session_key(start);
+        let mut ids = Vec::new();
+        for entry in sessions.range(start.as_slice()..)?.take(limit) {
+            let (key, _) = entry?;
+            let mut bytes = [0; 16];
+            bytes.copy_from_slice(key.value());
+            ids.push(u128::from_be_bytes(bytes));
+        }
+        Ok(ids)
+    }
+
     /// Append one event. The body is stored as an object, so a repeated payload
     /// costs only the ~50-byte log record.
     pub fn append_event(&self, session: u128, event: NewEvent<'_>) -> Result<u64> {

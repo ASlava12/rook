@@ -61,12 +61,20 @@ pub fn page(rook: &Rook, session: u128, query: &Query) -> Result<Page> {
         items: Vec::new(),
         submission_target,
         follow_up_target: super::followups::target(rook, session)?,
+        follow_up_status: if ordinary.iter().any(|m| m.follow_up.is_some())
+            && rook.recovery_block(session)?.is_some()
+        {
+            Some("Follow-up awaits /recovery; inspect unknown operations.".into())
+        } else {
+            None
+        },
         next: None,
         total: 0,
         max_message_bytes: rook.config.work.max_message_bytes.min(8 * 1024 * 1024),
     };
     let mut reached = query.after.is_none();
-    let mut used = 512;
+    // Reserve metadata space for the daemon's bounded recovery status too.
+    let mut used = 1024;
     let mut full = false;
     for (run, message) in ordinary
         .iter()

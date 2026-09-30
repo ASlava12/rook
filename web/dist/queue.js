@@ -58,7 +58,7 @@ export function queuePanel(session, receiveDraft, receiveReceipt) {
       const query = new URLSearchParams({ include_finished: String(all.checked) });
       if (after) query.set('after', after);
       const page = await api(`${base}?${query}`);
-      if (root.isConnected) { display(page); notice.textContent = `${page.total} matching receipts. Acceptance means included in context, not executed.`; }
+      if (root.isConnected) { display(page); notice.textContent = `${page.follow_up_status ? `${page.follow_up_status} ` : ''}${page.total} matching receipts. Acceptance means included in context, not executed.`; }
     } catch (error) { notice.textContent = error.error || String(error); }
     finally { busy(false); }
   }

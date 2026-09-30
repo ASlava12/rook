@@ -15,7 +15,7 @@ use tokio::sync::Mutex;
 use crate::AppState;
 
 #[derive(Default)]
-pub struct Tasks(Mutex<HashMap<String, tokio::task::JoinHandle<()>>>);
+pub struct Tasks(pub(crate) Mutex<HashMap<String, tokio::task::JoinHandle<()>>>);
 
 /// Starting and recovery use the same lock: a scheduler tick must not launch a
 /// second writer while the socket that submitted the goal is attaching to it.
@@ -70,10 +70,13 @@ async fn queue_page(
     Path(id): Path<String>,
     Query(query): Query<rook_proto::queue::Query>,
 ) -> Result<Json<rook_proto::queue::Page>, Failure> {
-    Ok(Json(
-        rook_core::message_queue::view::page(&*state.rook.read().await, session_id(&id)?, &query)
-            .map_err(failure)?,
-    ))
+    let rook = state.rook.read().await;
+    let session = session_id(&id)?;
+    let mut page = rook_core::message_queue::view::page(&rook, session, &query).map_err(failure)?;
+    if page.follow_up_status.is_none() {
+        page.follow_up_status = crate::chat::followups::status(&rook, session);
+    }
+    Ok(Json(page))
 }
 async fn queue_read(
     State(state): State<Arc<AppState>>,
@@ -220,6 +223,7 @@ async fn forget(
 /// states; unknown operation receipts block mutation in the core before replay.
 pub async fn supervise(state: Arc<AppState>) {
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+    let mut followup_cursor = None;
     loop {
         tick.tick().await;
         state.config_if_changed().await;
@@ -235,6 +239,12 @@ pub async fn supervise(state: Arc<AppState>) {
             }
         }
         let mut tasks = state.work.0.lock().await;
+        crate::chat::followups::supervise(
+            &state,
+            tasks.values().filter(|h| !h.is_finished()).count(),
+            &mut followup_cursor,
+        )
+        .await;
         let finished: Vec<_> =
             tasks.iter().filter(|(_, h)| h.is_finished()).map(|(id, _)| id.clone()).collect();
         for id in finished {

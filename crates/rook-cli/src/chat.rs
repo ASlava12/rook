@@ -330,8 +330,9 @@ async fn through_the_daemon(
                 "followup" => {
                     if let Some(session) = session.as_deref().and_then(rook_store::parse_session_id) {
                         let text = rest.to_string();
+                        let workspace = workspace.to_path_buf();
                         let result = tokio::task::spawn_blocking(move || -> Result<String> {
-                            let source = crate::source::Source::open(None)?;
+                            let source = crate::source::Source::open(Some(workspace))?;
                             let command = crate::args::QueueCmd::Submit {
                                 id: None,
                                 target: None,

@@ -1927,3 +1927,6 @@ fn managed_mcp_commands_reload_one_connection_in_the_running_daemon() {
     assert_eq!(disabled["servers"][0]["state"], "disabled");
     assert_eq!(disabled["servers"][0]["tools"], 0);
 }
+
+#[path = "scenarios/followups.rs"]
+mod followups;

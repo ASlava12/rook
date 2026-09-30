@@ -359,6 +359,10 @@ impl<'a> AgentLoop<'a> {
                 crate::sources::data("workspace_listing", "workspace sketch", &sketch)
             ));
         }
+        if let Some(context) = &self.prompt_context {
+            volatile
+                .push_str(&format!("\n\n{}", crate::sources::data("hook_context", "prompt hook", context)));
+        }
         // Marked, because it is folded into the person's own message before it
         // is sent — dialects that will not take two user turns in a row get one
         // — and what it carries is not the person speaking: the date, facts

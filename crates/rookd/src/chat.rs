@@ -24,6 +24,7 @@ use rook_tools::policy::{Approval, ChannelApprover};
 use crate::AppState;
 
 use rook_core::delivery;
+pub(crate) mod followups;
 mod replay;
 
 /// `?workspace=` names the project this conversation is in, defaulting to the
@@ -177,6 +178,10 @@ async fn serve(
                 let mut persistence_error = None;
                 if let Some(session) = watching.as_ref().map(|w| w.session) {
                     let rook = engine.read().await;
+                    if let Err(error) = setting.save_followups(&rook, session, false) {
+                        persistence_error =
+                            Some(format!("setting changed, but could not save follow-ups: {error}"));
+                    }
                     if let Ok(Some(run)) = session_goal(&rook, session)
                         && !run.status.terminal()
                         && let Err(error) = managed::update(&rook, &run.id, |saved| {
@@ -224,6 +229,10 @@ async fn serve(
                         continue;
                     }
                     _ => {}
+                }
+                let _admission = state.work.0.lock().await;
+                if let Err(error) = followups::pause(&*engine.read().await, session, None) {
+                    report_window(&outbound, format!("Could not save the pause for restart: {error}")).await;
                 }
                 let cancelled = state.live.write().await.remove(&session);
                 if let Some(live) = cancelled {
@@ -407,6 +416,7 @@ async fn serve(
                     }
                     continue;
                 }
+                let _admission = state.work.0.lock().await;
                 // Typed while that session's turn runs, it goes to the turn:
                 // the window had to wait or cancel, and cancelling loses
                 // everything the turn had done to say one sentence to it.
@@ -459,7 +469,8 @@ async fn serve(
                         continue;
                     }
                 };
-                let live = begin(&state, &engine, &shared, &settings, id, text, options).await;
+                let live =
+                    begin(&state, &engine, &shared, &settings, id, StartTurn::Prompt(text), options).await;
                 watching = Some(carry_view(&live, id, outbound.clone(), watching, live_snapshots, false));
                 state.remember(id, live).await;
             }
@@ -624,13 +635,18 @@ async fn send_inputs(live: &Live, to_window: &delivery::Sender) -> Result<(), de
 }
 
 /// Start a turn that belongs to the daemon.
+enum StartTurn {
+    Prompt(String),
+    FollowUps,
+}
+
 async fn begin(
     state: &Arc<AppState>,
     engine: &Arc<tokio::sync::RwLock<rook_core::Rook>>,
     shared: &Arc<tokio::sync::OnceCell<Shared>>,
     settings: &Arc<Settings>,
     session: u128,
-    prompt: String,
+    prompt: StartTurn,
     options: rook_proto::TurnOptions,
 ) -> Arc<Live> {
     let input_limits = engine.read().await.config.user_input;
@@ -698,8 +714,16 @@ pub(crate) async fn resume_goal(state: &Arc<AppState>, run: &Run) -> Result<Arc<
     if let Some(model) = &conversation.model {
         settings.set("model", model)?;
     }
-    Ok(begin(state, &engine, &shared, &settings, session, run.goal.clone(), conversation.options.clone())
-        .await)
+    Ok(begin(
+        state,
+        &engine,
+        &shared,
+        &settings,
+        session,
+        StartTurn::Prompt(run.goal.clone()),
+        conversation.options.clone(),
+    )
+    .await)
 }
 
 /// How long one frame may take to reach a client before the socket counts as
@@ -954,7 +978,7 @@ async fn turn(
     shared: Arc<tokio::sync::OnceCell<Shared>>,
     outbound: mpsc::UnboundedSender<ChatEvent>,
     session: u128,
-    prompt: String,
+    prompt: StartTurn,
 ) {
     // Owned so the guard outlives this task's spawn point.
     let rook = engine.clone().read_owned().await;
@@ -963,6 +987,11 @@ async fn turn(
     // it is already running cannot be joined while it does so.
     let _ = outbound.send(ChatEvent::Started { session: rook_store::format_session_id(session) });
 
+    if let Err(error) =
+        connection.settings.save_followups(&rook, session, matches!(&prompt, StartTurn::Prompt(_)))
+    {
+        return ended_badly(&rook, session, &outbound, error);
+    }
     match session_goal(&rook, session) {
         Ok(Some(run)) if run.status.runnable() => {
             drop(rook);
@@ -987,6 +1016,7 @@ async fn turn(
     let shared = shared.get_or_init(|| Shared::for_project(&rook)).await;
 
     let mut agent = AgentLoop::new(&rook, provider.into(), session);
+    followups::configure(&mut agent, connection.settings.clone());
     agent.policy = connection.settings.policy.clone();
     agent.effort = connection.settings.effort();
     agent.approver = connection.approver.clone();
@@ -998,14 +1028,19 @@ async fn turn(
     // Cloned out before the loop borrows the agent: a call's phrase names paths
     // the way somebody standing in this project would.
     let workspace = rook.workspace.clone();
-    let result = agent
-        .run_with(&prompt, |progress| {
-            if let Some(event) = as_event(progress, &workspace) {
-                let _ = emit.send(event);
-            }
-        })
-        .await;
+    let mut progress = |progress: Progress<'_>| {
+        if let Some(event) = as_event(progress, &workspace) {
+            let _ = emit.send(event);
+        }
+    };
+    let result = match prompt {
+        StartTurn::Prompt(prompt) => agent.run_with(&prompt, &mut progress).await.map(Some),
+        StartTurn::FollowUps => agent.run_followups(&mut progress).await,
+    };
 
+    if let Err(error) = connection.settings.save_followups(&rook, session, false) {
+        return ended_badly(&rook, session, &outbound, error);
+    }
     // /goal can promote a turn already in flight. Keep its observer, approval
     // channels and settings instead of ending the stream between stages.
     if let Ok(Some(run)) = session_goal(&rook, session)
@@ -1017,8 +1052,13 @@ async fn turn(
         return;
     }
     match result {
-        Ok(outcome) => ended_outcome(&outbound, outcome),
-        Err(e) => ended_badly(&rook, session, &outbound, e.to_string()),
+        Ok(Some(outcome)) => ended_outcome(&outbound, outcome),
+        Ok(None) => {
+            let _ = outbound.send(ChatEvent::Cancelled);
+        }
+        Err(e) => {
+            ended_badly(&rook, session, &outbound, e.to_string());
+        }
     }
 }
 
@@ -1085,6 +1125,7 @@ async fn goal_turn(
                 let named = connection.settings.model();
                 let provider = rook_core::models::chosen(&rook.config, named.as_deref())?;
                 let mut agent = AgentLoop::new(&rook, provider.into(), session);
+                followups::configure(&mut agent, connection.settings.clone());
                 agent.policy = connection.settings.policy.clone();
                 agent.effort = connection.settings.effort();
                 agent.approver = connection.approver.clone();
@@ -1158,6 +1199,7 @@ async fn ended_goal(
             Err(error) => return ended_badly(rook, session, outbound, error.to_string()),
         };
         let mut agent = AgentLoop::new(rook, provider.into(), session);
+        followups::configure(&mut agent, connection.settings.clone());
         agent.policy = connection.settings.policy.clone();
         agent.effort = connection.settings.effort();
         agent.approver = connection.approver.clone();
@@ -1176,7 +1218,9 @@ async fn ended_goal(
                 return;
             }
             Ok(None) => {}
-            Err(error) => return ended_badly(rook, session, outbound, error.to_string()),
+            Err(error) => {
+                return ended_badly(rook, session, outbound, error.to_string());
+            }
         }
     }
     let last = rook.completed_turn(session).ok().flatten();
@@ -1269,6 +1313,9 @@ fn ended_badly(
     outbound: &mpsc::UnboundedSender<ChatEvent>,
     message: String,
 ) {
+    if let Err(error) = followups::pause(rook, session, Some(message.clone())) {
+        tracing::warn!("could not pause follow-ups after failure: {error}");
+    }
     if let Err(e) = rook.log(session, rook_store::EventKind::Note, "failed", &message) {
         tracing::warn!("could not record why the turn ended: {e}");
     }
@@ -1906,7 +1953,7 @@ mod tests {
             Default::default(),
             outbound,
             session,
-            "find the leak".into(),
+            StartTurn::Prompt("find the leak".into()),
         )
         .await;
 

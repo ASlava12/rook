@@ -54,14 +54,17 @@ pub(crate) fn submit(rook: &Rook, session: u128, after: &str, request: Steer) ->
 /// Called under the queue writer lock. Readiness is a durable observation of a
 /// completed predecessor; subsequent turns must finish too before draining more.
 pub(crate) fn next(rook: &Rook, session: u128, messages: &[Steering]) -> Result<Option<usize>> {
+    if !messages.iter().any(|m| m.queued() && m.follow_up.as_ref().is_some_and(|f| f.reserved.is_none())) {
+        return Ok(None);
+    }
     let goal = managed::for_session(rook, session)?;
-    if goal.as_ref().is_some_and(|r| !r.status.terminal()) || rook.recovery_block(session)?.is_some() {
+    if goal.as_ref().is_some_and(|r| !r.status.terminal()) {
         return Ok(None);
     }
     let identity = goal.as_ref().map(|run| run.identity());
     let completed = rook.completed_turn(session)?.is_some_and(|o| crate::agent::finished(&o.stopped));
     let turn = crate::execution::current(rook, session)?.map(|state| format!("turn.{}", state.turn));
-    Ok(messages.iter().position(|message| {
+    let candidate = messages.iter().position(|message| {
         let Some(follow) = &message.follow_up else { return false };
         if !message.queued() || follow.reserved.is_some() || follow.goal != identity {
             return false;
@@ -80,14 +83,60 @@ pub(crate) fn next(rook: &Rook, session: u128, messages: &[Steering]) -> Result<
             }
             _ => completed && turn.as_deref() == Some(follow.after.as_str()),
         }
-    }))
+    });
+    // Recovery examines the session family. Do it only for eligible work,
+    // not for every historical queue on every supervisor tick.
+    if candidate.is_some() && rook.recovery_block(session)?.is_some() {
+        return Ok(None);
+    }
+    Ok(candidate)
+}
+
+/// A lost process leaves no explicit stop reason on its reserved message.
+/// A cancelled/failed live attempt does, and must never be restarted by a tick.
+pub(crate) fn resumable(rook: &Rook, session: u128, messages: &[Steering]) -> Result<Option<usize>> {
+    if !messages.iter().any(|m| {
+        m.withdrawn_at.is_none()
+            && m.follow_up.as_ref().is_some_and(|f| f.reserved.is_some() && f.blocked.is_none())
+    }) {
+        return Ok(None);
+    }
+    let Some(state) = crate::execution::current(rook, session)? else { return Ok(None) };
+    if !matches!(state.status.as_str(), "interrupted" | "reviewed") {
+        return Ok(None);
+    }
+    // Before prompt admission, a completed setup operation is not authority
+    // to run configured hooks twice. Such a receipt needs explicit inspection.
+    if state.prompt.is_none() && state.completed_operations > 0 {
+        return Ok(None);
+    }
+    let goal = managed::for_session(rook, session)?;
+    if goal.as_ref().is_some_and(|g| !g.status.terminal()) {
+        return Ok(None);
+    }
+    let identity = goal.as_ref().map(|g| g.identity());
+    let candidate = messages.iter().position(|message| {
+        let Some(follow) = &message.follow_up else { return false };
+        state.follow_up.as_deref() == Some(message.id.as_str())
+            && follow.reserved.as_deref() == Some(state.turn.as_str())
+            && follow.blocked.is_none()
+            && message.withdrawn_at.is_none()
+            && follow.goal == identity
+            && (!follow.after.starts_with("goal.")
+                || goal.as_ref().is_some_and(|g| g.status == rook_proto::work::Status::Completed))
+    });
+    if candidate.is_some() && rook.recovery_block(session)?.is_some() {
+        return Ok(None);
+    }
+    Ok(candidate)
 }
 
 /// A scheduler can recover queued, unreserved follow-ups after the owner exits.
 /// A reserved execution is inspected through the execution recovery journal.
 pub fn ready(rook: &Rook, session: u128) -> Result<bool> {
     let _lock = crate::work::receipts::WRITING.lock().unwrap_or_else(|e| e.into_inner());
-    Ok(next(rook, session, &super::list(rook, session)?)?.is_some())
+    let messages = super::list(rook, session)?;
+    Ok(resumable(rook, session, &messages)?.is_some() || next(rook, session, &messages)?.is_some())
 }
 
 pub(crate) fn arm(messages: &mut [Steering], after: &str, goal: &Option<RunIdentity>) {
@@ -213,7 +262,7 @@ mod tests {
         );
         let replacement = goal(&rook, session);
         assert_ne!(replacement.identity(), run.identity());
-        assert!(journal.admit_prompt(&rook, "next task", "next task", "").is_err());
+        assert!(journal.admit_prompt(&rook, "next task", "next task", "", None, None).is_err());
         drop(journal);
         status(&rook, &replacement, Status::Completed);
         assert!(!ready(&rook, session).unwrap());
@@ -258,9 +307,9 @@ mod tests {
         enqueue(&rook, session, "next");
         status(&rook, &run, Status::Completed);
         let (journal, _) = Journal::reserve_follow_up(&rook, session).unwrap().unwrap();
-        let (seq, notice) = journal.admit_prompt(&rook, "next task", "next task", "").unwrap();
+        let (seq, notice) = journal.admit_prompt(&rook, "next task", "next task", "", None, None).unwrap();
         assert_eq!(notice.unwrap().reference, "session.next");
-        assert_eq!(journal.admit_prompt(&rook, "next task", "next task", "").unwrap().0, seq);
+        assert_eq!(journal.admit_prompt(&rook, "next task", "next task", "", None, None).unwrap().0, seq);
         assert_eq!(rook.goal(session).unwrap().as_deref(), Some("next task"));
         let state = crate::execution::current(&rook, session).unwrap().unwrap();
         assert_eq!(state.prompt.unwrap().seq, seq);
@@ -304,5 +353,131 @@ mod tests {
         );
         assert!(super::super::pending(&rook, session).unwrap().is_empty());
         assert!(super::super::accept(&rook, session, "one", None).unwrap().is_none());
+    }
+
+    fn lost_owner(rook: &Rook, session: u128) {
+        let mut state = crate::execution::current(rook, session).unwrap().unwrap();
+        state.status = "running".into();
+        state.owner = "lost-process".into();
+        super::super::update(rook, session, |messages| {
+            for message in messages {
+                if let Some(follow) = &mut message.follow_up
+                    && follow.reserved.as_deref() == Some(state.turn.as_str())
+                {
+                    follow.blocked = None;
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+        rook.store
+            .kv_set(&format!("execution/{session:032x}"), &serde_json::to_vec(&state).unwrap())
+            .unwrap();
+        crate::execution::recover(&rook.store).unwrap();
+    }
+
+    #[test]
+    fn recovery_reuses_reserved_execution_and_admitted_prompt_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let rook = engine(dir.path());
+        let session = rook.start_session("recover same execution").unwrap();
+        let run = goal(&rook, session);
+        enqueue(&rook, session, "one");
+        status(&rook, &run, Status::Completed);
+        let (journal, _) = Journal::reserve_follow_up(&rook, session).unwrap().unwrap();
+        let turn = crate::execution::current(&rook, session).unwrap().unwrap().turn;
+        let (seq, _) = journal
+            .admit_prompt(&rook, "next task", "next task", "", Some("original hook context"), None)
+            .unwrap();
+        journal.finish("end_turn", None).unwrap();
+        drop(journal);
+        lost_owner(&rook, session);
+        assert!(ready(&rook, session).unwrap());
+        let (journal, message) = Journal::reserve_follow_up(&rook, session).unwrap().unwrap();
+        assert_eq!(crate::execution::current(&rook, session).unwrap().unwrap().turn, turn);
+        let admitted = journal.recovered_prompt(&message.text).unwrap().unwrap();
+        assert_eq!(admitted.seq, seq);
+        assert_eq!(admitted.context.as_deref(), Some("original hook context"));
+        assert!(journal.recovered_outcome().unwrap().is_none());
+        assert!(journal.recovered_prompt("different").is_err());
+        assert_eq!(
+            rook.store
+                .events(session, 0, 100)
+                .unwrap()
+                .iter()
+                .filter(|e| e.record.kind == rook_store::EventKind::UserMessage)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_saved_outcome_is_recovered_without_authorizing_another_execution() {
+        let dir = tempfile::tempdir().unwrap();
+        let rook = engine(dir.path());
+        let session = rook.start_session("saved ending").unwrap();
+        let run = goal(&rook, session);
+        enqueue(&rook, session, "one");
+        status(&rook, &run, Status::Completed);
+        let (journal, _) = Journal::reserve_follow_up(&rook, session).unwrap().unwrap();
+        journal.admit_prompt(&rook, "next task", "next task", "", Some(""), None).unwrap();
+        let outcome:crate::agent::TurnOutcome=serde_json::from_value(serde_json::json!({
+            "steps":2,"stopped":"end_turn","reply":"recorded final reply", "input_tokens":10,"output_tokens":20,"cached_tokens":0,
+            "tools_called":[],"skills_loaded":[],"skills_written":[],"facts_learned":[],"facts_forgotten":[],"delegated":[],"compactions":0
+        })).unwrap();
+        journal.record_outcome(&outcome).unwrap();
+        journal.finish("end_turn", None).unwrap();
+        drop(journal);
+        lost_owner(&rook, session);
+        let (journal, _) = Journal::reserve_follow_up(&rook, session).unwrap().unwrap();
+        assert_eq!(journal.recovered_outcome().unwrap().unwrap().reply, "recorded final reply");
+        journal.finish("end_turn", None).unwrap();
+        assert!(!ready(&rook, session).unwrap());
+    }
+
+    #[test]
+    fn oversized_recovery_context_is_refused_before_prompt_admission() {
+        let dir = tempfile::tempdir().unwrap();
+        let rook = engine(dir.path());
+        let session = rook.start_session("bounded hook context").unwrap();
+        let journal = Journal::start(&rook, session, None).unwrap();
+        let context = "x".repeat(1024 * 1024 + 1);
+        assert!(context.len() > 1024 * 1024);
+        assert!(journal.admit_prompt(&rook, "a", "a", "", Some(&context), None).is_err());
+        assert!(rook.store.events(session, 0, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn interrupted_side_effects_block_followup_recovery_until_explicit_inspection() {
+        let dir = tempfile::tempdir().unwrap();
+        let rook = engine(dir.path());
+        let session = rook.start_session("unknown operation").unwrap();
+        let run = goal(&rook, session);
+        enqueue(&rook, session, "one");
+        status(&rook, &run, Status::Completed);
+        let (journal, _) = Journal::reserve_follow_up(&rook, session).unwrap().unwrap();
+        journal.admit_prompt(&rook, "next task", "next task", "", Some(""), None).unwrap();
+        journal.begin("run_command", "write file", true, false, None).unwrap();
+        journal.finish("end_turn", None).unwrap();
+        drop(journal);
+        lost_owner(&rook, session);
+        let state = crate::execution::current(&rook, session).unwrap().unwrap();
+        assert_eq!(state.unknown.len(), 1);
+        assert!(!ready(&rook, session).unwrap());
+        assert!(Journal::reserve_follow_up(&rook, session).unwrap().is_none());
+        assert!(
+            view::page(&rook, session, &Default::default())
+                .unwrap()
+                .follow_up_status
+                .unwrap()
+                .contains("/recovery")
+        );
+        rook.acknowledge_operation(
+            session,
+            &state.unknown[0].id,
+            "Inspected the output and files; the operation had no effects",
+        )
+        .unwrap();
+        assert!(ready(&rook, session).unwrap());
     }
 }

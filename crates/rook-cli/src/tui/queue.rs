@@ -227,7 +227,14 @@ impl Queue {
                     self.page = Some(page);
                     self.entry = None;
                     self.at = 0;
-                    self.note = "e edits · d withdraws · q withdraws into draft · a toggles finished · r refreshes · n next · Esc closes".into();
+                    self.note = format!(
+                        "{}e edits · d withdraws · q withdraws into draft · a toggles finished · r refreshes · n next · Esc closes",
+                        self.page
+                            .as_ref()
+                            .and_then(|p| p.follow_up_status.as_ref())
+                            .map(|s| format!("{s}\n"))
+                            .unwrap_or_default()
+                    );
                 }
                 Ok(Update::Read(entry, edit)) => {
                     self.editing = edit

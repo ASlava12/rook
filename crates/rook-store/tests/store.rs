@@ -20,6 +20,21 @@ fn tmp_store() -> (tempfile::TempDir, Store) {
 }
 
 #[test]
+fn session_key_pages_are_bounded_exclusive_and_survive_deleted_cursors() {
+    let (_dir, store) = tmp_store();
+    for id in [0, 2, 4, 6, u128::MAX] {
+        store.create_session(&SessionMeta::new(id, "page", "/tmp", 0)).unwrap();
+    }
+    assert!(store.list_sessions().unwrap().len() > 2);
+    assert_eq!(store.session_ids_after(None, 2).unwrap(), [0, 2]);
+    store.delete_session(2).unwrap();
+    assert_eq!(store.session_ids_after(Some(2), 2).unwrap(), [4, 6]);
+    assert_eq!(store.session_ids_after(Some(6), 2).unwrap(), [u128::MAX]);
+    assert!(store.session_ids_after(Some(u128::MAX), 2).unwrap().is_empty());
+    assert!(store.session_ids_after(None, 0).unwrap().is_empty());
+}
+
+#[test]
 fn receipt_values_and_events_commit_together_and_failed_appends_publish_neither() {
     let (dir, store) = tmp_store();
     let session = rook_store::new_session_id();

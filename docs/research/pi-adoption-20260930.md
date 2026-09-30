@@ -435,6 +435,70 @@ sources were unchanged during that gate. `cargo xtask compaction` also exited 0:
 (`/tmp/rook-pi-followup-compaction.log`). The queue capability remains in progress
 until the recovery and continuation work listed above is verified.
 
+## Follow-up recovery (ninth block)
+
+The daemon now saves a bounded JSON driver snapshot for workspace, selected model,
+effort and stance. Idle supervision reuses the live-session registry and shares
+its admission lock with manual prompts, cancellation and goal workers. A bounded
+key-only store scan visits `work.followup_scan_sessions` IDs per tick (default 128,
+validated 1..4096), with an exclusive cursor that survives deletions and wraps at
+the end. Full session-family recovery checks run only for eligible queue entries.
+Concurrent starts respect `work.max_parallel_runs`. A frontend settings change is
+saved immediately and model/effort are resolved again at each follow-up boundary.
+Restart applies current configured rules; transient tool grants are not retained.
+Tool-initiated stance changes are persisted at boundaries, not atomically with the
+tool. A local-only session without a saved daemon profile is not auto-started.
+
+Lost-owner reservations can reattach to the same execution ID. Prompt admission
+also commits session and prompt hook context in its JSON companion, so recovery
+restores those inputs without rerunning hooks or appending another UserMessage.
+Setup operation completion follows prompt admission, closing the gap where hook
+effects could previously look safe to repeat. Recorded outcomes are reused. An
+unknown operation still blocks execution until explicit recovery acknowledgement;
+old admissions without context and pre-admission completed setup effects require
+inspection. Hook context is bounded to 1 MiB before copying it into the admission.
+The new JSON fields are optional; existing postcard records and format 4 remain
+unchanged. Prompt hook context is now included in the volatile model context,
+which the killed-daemon scenario found was previously only written as a Note.
+Recovery obtains a fresh turn allowance rather than retaining the lost deadline.
+
+Cancellation persists a paused driver before stopping its worker. An explicit
+prompt resumes it; a setting change does not. Recovery failures pause instead of
+retrying every tick. Queue pages expose paused/recovery status in CLI, TUI and
+browser within the page byte allowance. Error diagnostics and saved settings are
+bounded before encoding. A REPL follow-up now opens the explicitly selected
+workspace when it loads its queue.
+
+The actual daemon scenario kills a reserved follow-up during a model request,
+changes configuration defaults, and restarts it. It verifies the same execution,
+prompt and acceptance identity, restored readonly/model/effort settings, hook
+context in the next request, no repeated hook or prompt, ordered continuation,
+idle submission and cancellation surviving another restart. Its targeted pass is
+`/tmp/rook-pi-followup-kill-test4.log`. Focused checks also cover retained pause,
+escaped settings limits, exclusive bounded scanning after cursor deletion,
+oversized hook context, recorded outcomes and unknown-operation acknowledgement:
+`/tmp/rook-pi-followup-driver-tests.log`, `/tmp/rook-pi-followup-scan-tests.log` and
+`/tmp/rook-pi-followup-recovery-unit-final.log`.
+
+Chrome using the actual browser modules passed lost replies, reload/retry,
+retained submission identity and the visible paused recovery status
+(`/tmp/rook-pi-followup-recovery-browser.log`); JavaScript syntax also passed.
+The first full isolated gate exited 0 in 589.3 seconds. Final review then removed
+a session-hook context clone before size admission. The full gate was repeated
+on that final source and exited 0 in 560.2 seconds, including the daemon kill
+scenario, complete PTY suite and doctests
+(`/tmp/rook-pi-followup-recovery-final-ci.log`). Rust sources stayed unchanged
+during each gate. `cargo xtask compaction` exited 0: 4.02 MiB on disk, 37.1x
+dictionary compression and 5.8x end-to-end, unchanged
+(`/tmp/rook-pi-followup-recovery-compaction.log`).
+
+The queue capability remains in progress. Interrupted ordinary predecessors still
+need explicit continuation lineage; replacement goals must never inherit stale
+messages. Goal-ending follow-ups that promote to another goal still need worker
+handoff. Durable per-turn outcome history and aggregate reports, read-only TUI
+detail scrolling, legacy caller admission identity and old API mutation notices
+remain outstanding. The full Pi adoption scope remains the table above.
+
 ## Validation environment
 
 macOS showed long cold-start pauses before test code executed: a process sample

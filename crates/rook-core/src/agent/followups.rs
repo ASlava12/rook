@@ -16,6 +16,7 @@ impl<'a> AgentLoop<'a> {
         next.summariser = self.summariser.clone();
         next.interjections = self.interjections.clone();
         next.effort = self.effort;
+        next.followup_model = self.followup_model.clone();
         next.max_steps = self.max_steps;
         next.max_turn_tokens = self.max_turn_tokens;
         next.max_turn_secs = self.max_turn_secs;
@@ -34,10 +35,18 @@ impl<'a> AgentLoop<'a> {
             return Ok(None);
         }
         let mut last = None;
-        while let Some((journal, message)) =
-            crate::execution::Journal::reserve_follow_up(self.rook, self.session)?
-        {
-            let mut next = self.continuation(self.provider.clone());
+        while crate::message_queue::followups::ready(self.rook, self.session)? {
+            let (provider, effort) = match &self.followup_model {
+                Some(resolve) => resolve()?,
+                None => (self.provider.clone(), self.effort),
+            };
+            let Some((journal, message)) =
+                crate::execution::Journal::reserve_follow_up(self.rook, self.session)?
+            else {
+                break;
+            };
+            let mut next = self.continuation(provider);
+            next.effort = effort;
             next.reserved_execution = Some(journal);
             progress(Progress::FollowUp { id: &message.id });
             let outcome = next.run_once(&message.text, &mut progress).await?;

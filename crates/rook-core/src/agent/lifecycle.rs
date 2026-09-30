@@ -120,6 +120,21 @@ impl AgentLoop<'_> {
         prompt: &str,
         on_progress: &mut F,
     ) -> Result<Option<String>> {
+        let journal = self
+            .execution
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+            .ok_or_else(|| CoreError::Other("execution receipt is missing".into()))?;
+        if let Some(admitted) = journal.recovered_prompt(prompt)? {
+            self.began_at_seq = admitted.seq;
+            self.prompt_context = admitted.prompt_context;
+            *self.session_context.lock().unwrap_or_else(|e| e.into_inner()) = admitted.context;
+            if self.depth == 0 && self.max_turn_secs > 0 {
+                self.by =
+                    Some(std::time::Instant::now() + std::time::Duration::from_secs(self.max_turn_secs));
+            }
+            return Ok(None);
+        }
         self.rook.name_session_from(self.session, prompt).ok();
         let setup = if self.hooks.is_empty() {
             None
@@ -135,10 +150,10 @@ impl AgentLoop<'_> {
             .hooks
             .run(hooks::Event::Prompt, prompt, &self.payload(serde_json::json!({ "prompt": prompt })))
             .await;
-        if let Some(setup) = setup {
-            setup.finish("prompt hooks returned")?;
-        }
-        if let Some(rook_tools::policy::Decision::Deny(why)) = gate.decision {
+        if let Some(rook_tools::policy::Decision::Deny(ref why)) = gate.decision {
+            if let Some(setup) = setup {
+                setup.finish("prompt hooks refused admission")?;
+            }
             return Err(CoreError::Other(format!("the turn was refused before it began: {why}")));
         }
 
@@ -147,19 +162,41 @@ impl AgentLoop<'_> {
             .as_ref()
             .and_then(std::sync::Weak::upgrade)
             .ok_or_else(|| CoreError::Other("execution receipt is missing".into()))?;
-        // The actual prompt sequence and admission receipt commit together,
-        // even when another writer appends a note during the hooks.
-        let (sequence, receipt) = if self.turn_options().attachments.is_empty() {
-            journal.admit_prompt(self.rook, &self.vault.redact(prompt), prompt, "")?
-        } else {
-            let message = crate::attachments::prepare(prompt, &self.turn_options().attachments)?;
-            journal.admit_prompt(
-                self.rook,
-                &self.vault.redact(prompt),
-                &serde_json::to_string(&message)?,
-                crate::attachments::LABEL,
-            )?
+        self.prompt_context = gate.context();
+        if let Some(context) = &self.prompt_context {
+            self.rook.log(self.session, EventKind::Note, "hook", context)?;
+        }
+        // Borrow the hook context until admission checks its size; cloning here
+        // would spend the memory before the recovery limit can reject it.
+        let (sequence, receipt) = {
+            let context = self.session_context.lock().unwrap_or_else(|e| e.into_inner());
+            let context = context.as_deref().unwrap_or_default();
+            // The actual sequence commits with admission even when another
+            // writer appended a note while the hooks were running.
+            if self.turn_options().attachments.is_empty() {
+                journal.admit_prompt(
+                    self.rook,
+                    &self.vault.redact(prompt),
+                    prompt,
+                    "",
+                    Some(context),
+                    self.prompt_context.as_deref(),
+                )?
+            } else {
+                let message = crate::attachments::prepare(prompt, &self.turn_options().attachments)?;
+                journal.admit_prompt(
+                    self.rook,
+                    &self.vault.redact(prompt),
+                    &serde_json::to_string(&message)?,
+                    crate::attachments::LABEL,
+                    Some(context),
+                    self.prompt_context.as_deref(),
+                )?
+            }
         };
+        if let Some(setup) = setup {
+            setup.finish("prompt hooks returned and prompt admitted")?;
+        }
         self.began_at_seq = sequence;
         if let Some(receipt) = receipt {
             on_progress(Progress::Heard { text: prompt, receipt: Some(&receipt) });
@@ -170,9 +207,6 @@ impl AgentLoop<'_> {
         // fresh one each would be the multiplication this exists to stop.
         if self.depth == 0 && self.by.is_none() && self.max_turn_secs > 0 {
             self.by = Some(std::time::Instant::now() + std::time::Duration::from_secs(self.max_turn_secs));
-        }
-        if let Some(context) = gate.context() {
-            self.rook.log(self.session, EventKind::Note, "hook", &context)?;
         }
 
         if let Some(recipe) = &self.options.recipe {

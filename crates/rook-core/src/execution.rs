@@ -58,6 +58,11 @@ pub struct PromptAdmission {
     pub seq: u64,
     pub body: String,
     pub label: String,
+    /// Present for recoverable admission, including an empty hook context.
+    #[serde(default)]
+    pub context: Option<String>,
+    #[serde(default)]
+    pub prompt_context: Option<String>,
 }
 
 fn key(session: u128) -> String {
@@ -207,6 +212,7 @@ pub(crate) struct Journal {
     store: Arc<Store>,
     session: u128,
     turn: String,
+    resumed: bool,
 }
 
 impl Journal {
@@ -255,7 +261,13 @@ impl Journal {
         };
         save(&rook.store, session, &mut state)?;
         active.insert(identity, turn.clone());
-        Ok(Arc::new(Self { output_dir: rook.output_dir.clone(), store: rook.store.clone(), session, turn }))
+        Ok(Arc::new(Self {
+            output_dir: rook.output_dir.clone(),
+            store: rook.store.clone(),
+            session,
+            turn,
+            resumed: false,
+        }))
     }
 
     pub(crate) fn reserve_follow_up(
@@ -269,6 +281,25 @@ impl Journal {
             return Ok(None);
         }
         let mut messages = crate::message_queue::list(rook, session)?;
+        if let Some(at) = crate::message_queue::followups::resumable(rook, session, &messages)? {
+            let mut state = load(&rook.store, session)?
+                .ok_or_else(|| CoreError::Other("reserved execution disappeared".into()))?;
+            state.owner = OWNER.clone();
+            state.pid = std::process::id();
+            state.status = "running".into();
+            save(&rook.store, session, &mut state)?;
+            active.insert(identity, state.turn.clone());
+            return Ok(Some((
+                Arc::new(Self {
+                    output_dir: rook.output_dir.clone(),
+                    store: rook.store.clone(),
+                    session,
+                    turn: state.turn,
+                    resumed: true,
+                }),
+                messages[at].clone(),
+            )));
+        }
         let Some(at) = crate::message_queue::followups::next(rook, session, &messages)? else {
             return Ok(None);
         };
@@ -322,9 +353,42 @@ impl Journal {
         )?;
         active.insert(identity, turn.clone());
         Ok(Some((
-            Arc::new(Self { output_dir: rook.output_dir.clone(), store: rook.store.clone(), session, turn }),
+            Arc::new(Self {
+                output_dir: rook.output_dir.clone(),
+                store: rook.store.clone(),
+                session,
+                turn,
+                resumed: false,
+            }),
             message,
         )))
+    }
+
+    pub(crate) fn recovered_outcome(&self) -> Result<Option<crate::agent::TurnOutcome>> {
+        if !self.resumed {
+            return Ok(None);
+        }
+        let Some(bytes) = self.store.kv_get(&format!("execution-outcome/{:032x}", self.session))? else {
+            return Ok(None);
+        };
+        let (turn, outcome): (String, crate::agent::TurnOutcome) = serde_json::from_slice(&bytes)?;
+        Ok((turn == self.turn).then_some(outcome))
+    }
+
+    pub(crate) fn recovered_prompt(&self, body: &str) -> Result<Option<PromptAdmission>> {
+        if !self.resumed {
+            return Ok(None);
+        }
+        let state = load(&self.store, self.session)?
+            .ok_or_else(|| CoreError::Other("reserved execution disappeared".into()))?;
+        let Some(prompt) = state.prompt else { return Ok(None) };
+        if prompt.body != rook_store::ObjectId::of(body.as_bytes()).to_string()
+            || !prompt.label.is_empty()
+            || prompt.context.is_none()
+        {
+            return Err(CoreError::Other("saved follow-up admission is incompatible; inspect session recovery before continuing explicitly".into()));
+        }
+        Ok(Some(prompt))
     }
 
     fn update(&self, change: impl FnOnce(&mut Execution) -> Result<()>) -> Result<()> {
@@ -356,6 +420,8 @@ impl Journal {
         task: &str,
         body: &str,
         label: &str,
+        context: Option<&str>,
+        prompt_context: Option<&str>,
     ) -> Result<(u64, Option<rook_proto::queue::Notice>)> {
         let _queue = crate::work::receipts::WRITING.lock().unwrap_or_else(|e| e.into_inner());
         let _active = ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
@@ -363,6 +429,11 @@ impl Journal {
             .ok_or_else(|| CoreError::Other("execution receipt disappeared".into()))?;
         if state.turn != self.turn || state.status != "running" {
             return Err(CoreError::Other("execution ownership changed; the prompt was not admitted".into()));
+        }
+        if context.map_or(0, str::len).saturating_add(prompt_context.map_or(0, str::len)) > 1024 * 1024 {
+            return Err(CoreError::Other(
+                "session hook context exceeds the 1 MiB recovery limit; reduce hook output".into(),
+            ));
         }
         let identity = rook_store::ObjectId::of(body.as_bytes()).to_string();
         if let Some(prompt) = &state.prompt {
@@ -411,7 +482,13 @@ impl Journal {
         }
         let references: Vec<_> = values.iter().map(|(key, bytes)| (key.as_str(), bytes.as_slice())).collect();
         let encode = |seq| {
-            state.prompt = Some(PromptAdmission { seq, body: identity, label: label.into() });
+            state.prompt = Some(PromptAdmission {
+                seq,
+                body: identity,
+                label: label.into(),
+                context: context.map(str::to_owned),
+                prompt_context: prompt_context.map(str::to_owned),
+            });
             crate::persistence::encode(&state)
                 .map_err(|error| rook_store::StoreError::Encoding(error.to_string()))
         };
@@ -934,7 +1011,10 @@ mod tests {
         let (one, two) = std::thread::scope(|scope| {
             let admit = || {
                 barrier.wait();
-                journal.admit_prompt(&rook, "redacted preview", "original 🙂 prompt", "").unwrap().0
+                journal
+                    .admit_prompt(&rook, "redacted preview", "original 🙂 prompt", "", None, None)
+                    .unwrap()
+                    .0
             };
             let one = scope.spawn(admit);
             let two = scope.spawn(admit);
@@ -942,8 +1022,10 @@ mod tests {
         });
         assert_eq!(one, two);
         assert_eq!(one, 1, "a hook note occupies the reservation's original sequence");
-        assert!(journal.admit_prompt(&rook, "other", "different prompt", "").is_err());
-        assert!(journal.admit_prompt(&rook, "other", "original 🙂 prompt", "other label").is_err());
+        assert!(journal.admit_prompt(&rook, "other", "different prompt", "", None, None).is_err());
+        assert!(
+            journal.admit_prompt(&rook, "other", "original 🙂 prompt", "other label", None, None).is_err()
+        );
         let state = load(&rook.store, session).unwrap().unwrap();
         assert_eq!(state.task, "redacted preview");
         assert_eq!(state.prompt.unwrap().seq, one);
@@ -969,10 +1051,10 @@ mod tests {
         let old = Journal::start(&rook, session, None).unwrap();
         old.finish("failed", None).unwrap();
         let current = Journal::start(&rook, session, None).unwrap();
-        assert!(old.admit_prompt(&rook, "stale", "stale", "").is_err());
+        assert!(old.admit_prompt(&rook, "stale", "stale", "", None, None).is_err());
         assert!(load(&rook.store, session).unwrap().unwrap().prompt.is_none());
         assert!(rook.store.events(session, 0, 100).unwrap().is_empty());
-        current.admit_prompt(&rook, "current", "current", "").unwrap();
+        current.admit_prompt(&rook, "current", "current", "", None, None).unwrap();
         let state = load(&rook.store, session).unwrap().unwrap();
         assert_eq!(state.turn, current.turn);
         let mut legacy = serde_json::to_value(state).unwrap();

@@ -71,6 +71,10 @@ pub(crate) fn status(receipt: &rook_proto::work::Steering) -> &'static str {
 pub(crate) fn describe(value: &serde_json::Value) -> Result<String> {
     if let Ok(page) = serde_json::from_value::<Page>(value.clone()) {
         let mut text = format!("Submission target: {}\n", page.submission_target);
+        if let Some(status) = &page.follow_up_status {
+            text.push_str(status);
+            text.push('\n');
+        }
         text.push_str(&page.items.iter().map(describe_entry).collect::<Vec<_>>().join("\n\n"));
         if page.items.is_empty() {
             text.push_str("No queued messages.");

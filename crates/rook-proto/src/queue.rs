@@ -28,6 +28,8 @@ pub struct Page {
     pub submission_target: String,
     #[serde(default)]
     pub follow_up_target: Option<String>,
+    #[serde(default)]
+    pub follow_up_status: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

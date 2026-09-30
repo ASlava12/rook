@@ -144,6 +144,10 @@
       "1h"
     ]
   },
+  "work.followup_scan_sessions": {
+    "kind": "integer",
+    "help": "Maximum session IDs checked for idle follow-ups per supervisor tick (1..4096); scanning continues from the previous cursor."
+  },
   "work.max_parallel_runs": {
     "kind": "integer",
     "help": "Maximum durable runs executing concurrently in this daemon."

@@ -490,6 +490,9 @@ enum Reported {
     Open(String),
 }
 
+pub type FollowUpModel<'a> =
+    dyn Fn() -> Result<(std::sync::Arc<dyn Provider>, rook_llm::Effort)> + Send + Sync + 'a;
+
 pub struct AgentLoop<'a> {
     execution: Option<std::sync::Weak<crate::execution::Journal>>,
     reserved_execution: Option<std::sync::Arc<crate::execution::Journal>>,
@@ -502,6 +505,8 @@ pub struct AgentLoop<'a> {
     /// Shared rather than owned so a delegated child can reuse the connection
     /// instead of building a second HTTP client per sub-task.
     pub provider: std::sync::Arc<dyn Provider>,
+    /// Resolve frontend settings at the next turn, never during a model request.
+    pub followup_model: Option<std::sync::Arc<FollowUpModel<'a>>>,
     pub tools: ToolBox,
     pub tool_ctx: ToolContext,
     pub session: u128,
@@ -518,6 +523,7 @@ pub struct AgentLoop<'a> {
     pub summariser: Option<std::sync::Arc<dyn Provider>>,
     /// What the `session_start` hooks contributed, computed once.
     session_context: std::sync::Mutex<Option<String>>,
+    prompt_context: Option<String>,
     /// Where this turn's events begin, so what the goal check is shown is this
     /// turn and not the session. Set when the prompt is logged; zero until
     /// then, which is a whole session and is what a loop that has not run yet
@@ -652,6 +658,7 @@ impl<'a> AgentLoop<'a> {
             recipe_output: false,
             rook,
             provider,
+            followup_model: None,
             tools,
             tool_ctx,
             session,
@@ -661,6 +668,7 @@ impl<'a> AgentLoop<'a> {
             servers,
             summariser: None,
             session_context: std::sync::Mutex::new(None),
+            prompt_context: None,
             began_at_seq: 0,
             problems_before: Default::default(),
             installing: Default::default(),
@@ -796,6 +804,10 @@ impl<'a> AgentLoop<'a> {
             Some(journal) => journal,
             None => crate::execution::Journal::start(self.rook, self.session, self.tool_ctx.jobs.as_deref())?,
         };
+        if let Some(outcome) = journal.recovered_outcome()? {
+            journal.finish(&outcome.stopped, self.tool_ctx.jobs.as_deref())?;
+            return Ok(outcome);
+        }
         self.execution = Some(std::sync::Arc::downgrade(&journal));
         // From here until the turn ends, this session is marked as having one in
         // flight. Only the turn a person asked for: a sub-agent's session ends

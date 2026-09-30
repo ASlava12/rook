@@ -704,6 +704,7 @@ pub struct StorageConfig {
 #[serde(default)]
 pub struct WorkConfig {
     pub max_parallel_runs: usize,
+    pub followup_scan_sessions: usize,
     pub max_runs: usize,
     pub max_messages: usize,
     pub max_message_bytes: usize,
@@ -722,6 +723,7 @@ impl Default for WorkConfig {
     fn default() -> Self {
         Self {
             max_parallel_runs: 2,
+            followup_scan_sessions: 128,
             max_runs: 64,
             max_messages: 128,
             max_message_bytes: 8192,
