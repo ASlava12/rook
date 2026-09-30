@@ -9,7 +9,7 @@ public failure in another agent, and the ADRs cite them.
 ## Build and test
 
 ```sh
-cargo xtask ci             # fmt + clippy -D warnings + test — the CI gate
+cargo xtask ci             # fmt + clippy + frontend builds + test — the CI gate
 cargo test --workspace --no-fail-fast   # as the gate runs it: every failure, not the first
 cargo xtask compaction     # re-measure the storage claims in README/docs
 cargo xtask load           # time the per-turn work; --part one of them, --profile under samply
@@ -330,11 +330,12 @@ not see. Markdown from the model is rendered by building nodes, never by
 assigning HTML.
 
 **Verifying a change to `rookd`.** The daemon tests in
-`crates/rook-cli/tests/cli.rs` run the binary, and they build it themselves —
-so `cargo test -p rook-cli` after editing `rookd` can run against the previous
-one and pass. `cargo xtask ci` is fine, because `cargo test --workspace` builds
-every member first; a targeted run is not. Build `rookd` explicitly before
-trusting one, which is also how to tell whether such a test bites at all.
+`crates/rook-cli/tests/cli.rs` and `tui_pty.rs` run the binary. Their helpers may
+reuse one already present, so a targeted test after editing `rookd` can exercise
+an older daemon. Even `cargo test --workspace` can build the binary crate's test
+harness without replacing the executable those helpers launch. `cargo xtask ci`
+explicitly builds `rook-cli` and `rookd` before tests. For a targeted run, build
+`rookd` explicitly first.
 
 **Verifying the TUI.** `crates/rook-cli/tests/tui_pty.rs` does it; add to that
 rather than starting again. A pty capture is not readable as text: ratatui

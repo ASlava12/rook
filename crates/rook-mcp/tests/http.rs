@@ -17,6 +17,10 @@ async fn spawn(mode: &'static str) -> String {
 }
 
 async fn spawn_version(mode: &'static str, version: &'static str) -> String {
+    spawn_reply(mode, version, false).await
+}
+
+async fn spawn_reply(mode: &'static str, version: &'static str, echo: bool) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -66,6 +70,26 @@ async fn spawn_version(mode: &'static str, version: &'static str) -> String {
                             .await;
                         return;
                     }
+                    if id.is_null() && echo && mode.starts_with("notify-") {
+                        let authorization = text[..split]
+                            .lines()
+                            .find_map(|line| {
+                                let (key, value) = line.split_once(':')?;
+                                key.eq_ignore_ascii_case("authorization").then_some(value.trim())
+                            })
+                            .expect("notification must be authenticated");
+                        let (status, headers, body) = if mode == "notify-error" {
+                            (500, String::new(), format!("rejected {authorization}"))
+                        } else {
+                            (401, format!("WWW-Authenticate: {authorization}\r\n"), String::new())
+                        };
+                        let reply = format!(
+                            "HTTP/1.1 {status} Reply\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        socket.write_all(reply.as_bytes()).await.unwrap();
+                        return;
+                    }
                     if id.is_null() {
                         let _ = socket
                             .write_all(
@@ -76,6 +100,52 @@ async fn spawn_version(mode: &'static str, version: &'static str) -> String {
                     }
                     if method != "initialize" && !has_session {
                         let _ = socket.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 15\r\nConnection: close\r\n\r\nno session id\r\n").await;
+                        return;
+                    }
+
+                    if echo && method == "tools/call" {
+                        let token = text[..split]
+                            .lines()
+                            .find_map(|line| {
+                                let (key, value) = line.split_once(':')?;
+                                key.eq_ignore_ascii_case("authorization")
+                                    .then(|| value.trim().strip_prefix("Bearer ").unwrap().to_owned())
+                            })
+                            .expect("the fixture must receive the credential it reflects");
+                        let payload = match mode {
+                            "rpc" => {
+                                serde_json::json!({"id": id, "error":{"code": -32000, "message": format!("request rejected: {token}")}})
+                            }
+                            "rpc-data" => {
+                                serde_json::json!({"id":id,"error":{"code":-32000,"message":"refused","data":{"credential":token}}})
+                            }
+                            "resource" => {
+                                serde_json::json!({"id":id,"result":{"content":[{"type":"resource","resource":{token.clone(): "sensitive key"}}]}})
+                            }
+                            _ => {
+                                serde_json::json!({"id": id, "result":{"content":[{"type":"text","text":format!("authorization was {token}")}]}})
+                            }
+                        };
+                        let (status, extra, body) = match mode {
+                            "sse" => (
+                                200,
+                                "Content-Type: text/event-stream\r\n".to_owned(),
+                                format!("data: {payload}\n\n"),
+                            ),
+                            "http-error" => (500, String::new(), format!("request rejected: {token}")),
+                            "unauthorized" => (
+                                401,
+                                format!("WWW-Authenticate: Bearer error_description=\"{token}\"\r\n"),
+                                String::new(),
+                            ),
+                            "bad-json" => (200, String::new(), format!("invalid response: {token}")),
+                            _ => (200, "Content-Type: application/json\r\n".to_owned(), payload.to_string()),
+                        };
+                        let reply = format!(
+                            "HTTP/1.1 {status} Reply\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        socket.write_all(reply.as_bytes()).await.unwrap();
                         return;
                     }
 
@@ -296,5 +366,61 @@ async fn invalid_negotiated_versions_fail_before_initialized_notification() {
         let result =
             Server::connect(&config(spawn_version("json", version).await), &Default::default()).await;
         assert!(matches!(result, Err(McpError::Decode { .. })), "version {version:?} was accepted");
+    }
+}
+
+#[tokio::test]
+async fn an_oauth_credential_reflected_by_the_server_never_leaves_the_transport() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    struct Rotating(AtomicUsize);
+    #[async_trait::async_trait]
+    impl rook_mcp::oauth::TokenSource for Rotating {
+        async fn token(&self) -> Result<String, &'static str> {
+            Ok(format!("private-access-token-{}", self.0.fetch_add(1, Ordering::SeqCst)))
+        }
+    }
+    for mode in ["notify-error", "notify-unauthorized"] {
+        let outcome = Server::connect_with_token(
+            &config(spawn_reply(mode, "2025-06-18", true).await),
+            &Default::default(),
+            Some(Arc::new(Rotating(AtomicUsize::new(0)))),
+        )
+        .await;
+        let error = match outcome {
+            Err(error) => error,
+            Ok(_) => panic!("rejected initialization cannot connect"),
+        };
+        let output = format!("{error:?}: {error}");
+        assert!(
+            !output.contains("private-access-token"),
+            "{mode} exposed notification credentials: {output}"
+        );
+    }
+    for mode in ["json", "sse", "rpc", "rpc-data", "resource", "http-error", "unauthorized", "bad-json"] {
+        let tokens = Arc::new(Rotating(AtomicUsize::new(0)));
+        let server = Server::connect_with_token(
+            &config(spawn_reply(mode, "2025-06-18", true).await),
+            &Default::default(),
+            Some(tokens.clone()),
+        )
+        .await
+        .unwrap();
+        let args = serde_json::json!({});
+        let (first, second) = tokio::join!(server.call_tool("ping", &args), server.call_tool("ping", &args));
+        for outcome in [first, second] {
+            assert!(outcome.is_err(), "{mode}: a credential-bearing reply must be refused whole");
+            let output = match outcome {
+                Ok(reply) => reply.to_text(),
+                Err(error) => format!("{error:?}: {error}"),
+            };
+            assert!(
+                !output.contains("private-access-token"),
+                "{mode} leaked a reflected OAuth credential: {output}"
+            );
+        }
+        assert!(tokens.0.load(Ordering::SeqCst) >= 4, "credentials must be acquired per request");
     }
 }

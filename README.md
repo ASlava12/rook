@@ -1546,6 +1546,11 @@ requiring a client secret are not supported. Optional `issuer` selects an
 advertised authorization server; `scopes` is a fallback when the server's
 challenge supplies none.
 
+OAuth HTTP replies containing the access token sent on that request are refused
+before reaching tools or transcripts. Authenticated HTTP error bodies and
+challenge descriptions are withheld, since they can contain partial credentials.
+This check follows each request through token rotation and concurrent calls.
+
 Access and refresh tokens are saved separately from config and conversation
 history, in `~/.rook/mcp-auth/credentials.json` (or under `ROOK_HOME`). This is a
 private local file, not encrypted storage. The new grant must complete an MCP

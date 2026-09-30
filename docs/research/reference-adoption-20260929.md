@@ -8,6 +8,9 @@ second implementation.
 
 ## Work and evidence
 
+The table and final audit describe the current state. The sections between them
+record implementation history, including failures that subsequent gates resolved.
+
 | Item | Required behavior | State |
 |---|---|---|
 | Shared offline configuration validation | Form and runtime agree on model structure; compaction thresholds are not silently changed after save; offline check runs no credential helpers or network requests | Implemented; focused regressions and full cargo xtask ci passed |
@@ -16,7 +19,7 @@ second implementation.
 | Diagnostic export and timings | Local bounded, redacted support artifact with session state and actual measured request/tool durations; no automatic upload | Implemented; core privacy/limits/timing/cancellation, API, CLI and live TUI/browser export checks and full cargo xtask ci passed |
 | Model capabilities | Distinguish configured effort from supported/sent effort; discover endpoint capabilities with bounded caching and an offline fallback | Effort reporting, bounded metadata and cache/offline CLI passed full CI; pagination passed full CI; model-scoped context learning/reports passed full CI; native local metadata passed full CI; updated effort mappings passed full CI; runtime capability constraints passed full CI (1574.3s) |
 | Current provider request compatibility | Model-specific effort controls and request fields; Responses transport for reasoning with tools where Chat Completions cannot support it | Effort/request mappings and Responses transport foundation passed full CI; durable replay passed full CI (831.2s) |
-| MCP connection management | Status, reconnect and authenticated HTTP onboarding without losing pending work or leaking credentials | Managed status/reconnect and OAuth implemented in CLI/core/API/TUI/browser; native and web consent including HTTPS proxy verified; local/daemon terminal consent checks passed; combined full gate pending |
+| MCP connection management | Status, reconnect and authenticated HTTP onboarding without losing pending work or leaking credentials | Managed status/reconnect and OAuth implemented in CLI/core/API/TUI/browser; native and web consent including HTTPS proxy verified; local/daemon terminal consent checks and combined full gate passed (944.5s); final combined gate including reflected-credential protection passed (1012.5s, exit 0) |
 | Transcript navigation | Search, jump and quote within a session using paged history; retain bounded memory on long sessions | Implemented in core/CLI/API/TUI/browser; focused navigation, local/daemon CLI, HTTP and browser checks passed; live TUI quote checks and full CI passed (962.7s) |
 | MCP catalog budget | Bound per-server tool advertisement without corrupting schemas; keep deferred tools discoverable and ordering stable | Implemented; HTTP catalog/schema/budget and agent/config/API checks passed; full CI passed (872.7s) |
 
@@ -331,7 +334,10 @@ The next combined gate passed with exit status 0 (872.7s).
 - Diagnostics: Cline `104f3dc8a4461682a5a123ece3c6d45725914cbf`.
 - Model metadata and thinking: Goose `4dea9b483efbd2541d43500b8ed3c044c65e6d2f`
   and `07396897cda7ec916ce793b6f1c829750d363ab0`.
-- MCP login: Codex `4773a132c3512cc9dcfff1e03bcf57bbbd490cf8`.
+- MCP login: pinned Codex `c4017a87aacc7558002b7cb510025e967c1d765e`,
+  `codex-rs/rmcp-client/src/perform_oauth_login.rs`, `oauth.rs` and
+  `oauth/refresh_transaction.rs`. The initially listed review commit was not
+  available in the local reference; these checked sources anchor the attribution.
 - Transcript navigation: Codex `df7f717c856e0634b04a12f7d4fc9e8ecb3e65be`.
 - Catalog budgets: Codex `339e981ba71b131eae3e2086a22b143f455a8cb8`.
 
@@ -493,3 +499,48 @@ CLI/daemon executables. Formatting, Clippy, all functional tests and the panic
 audit passed. The only failure was the process-spawn portability guard: the TUI
 browser opener lacked Windows `NO_WINDOW`. The opener now sets this flag; the
 layering/portability target must pass before the next full gate.
+
+
+## Final requirement audit
+
+The review below follows the nine required behaviors through production callers
+and the regression assertions, not merely through exported function names.
+The final combined `cargo xtask ci` gate passed (1012.5s, exit 0).
+
+| Requirement | Production path | Evidence and boundary |
+|---|---|---|
+| Offline validation | `config/validate.rs`, `config/edit.rs`, CLI `config check` | `config_validation.rs` checks structural agreement and unchanged accepted thresholds; offline model-cache tests prove credential helpers are not executed. |
+| ACP context usage | `agent/budget.rs` → `Progress` → `rook-acp` `usage_update` | ACP wire fixture distinguishes live context/window from one-token billing; agent-loop compaction regression checks that context can decrease. |
+| MCP images | `rook-tools/mcp.rs` → `tool_images.rs` / history → provider image encoders | `tool_images.rs` traverses a real MCP batch, compaction, reopen, fork and explicit retrieval; provider tests check results precede images. Limits are reached in the fixtures. |
+| Diagnostics | shared `Rook::diagnostics` → CLI/API/TUI/browser | `diagnostics.rs` asserts measured elapsed durations, cancellation, bounded exports, no prompt/tool/credential-helper leakage, and refusal to overwrite. Live browser and terminal exports were checked earlier. |
+| Model capabilities | `model_catalog` cache → `models.rs` provider construction → runtime metadata/effort decorators | Cache/runtime HTTP tests check account and route identity, age, completeness, offline behavior, explicit limits, fallback reports and prompted tools. An absent fact remains unknown. |
+| Provider requests | `rook-llm/openai/responses.rs` and effort mappings → `provider_history.rs` | HTTP assertions cover request bodies, streaming terminal validation, ordered call IDs, reopen/fork/compaction and rejection before tool effects. Live commercial-provider acceptance has not been claimed. |
+| Managed MCP and OAuth | `mcp_connections.rs`, `mcp_auth`, daemon API, CLI, TUI and browser | Manager fixtures retain running calls on replacement; OAuth fixtures exercise PKCE, issuer/state binding, atomic storage and uncertain refresh. Browser/proxy and local/daemon PTY consent checks passed. The additional reflected-token regression below addresses an audit finding. |
+| Transcript navigation | `transcript.rs` and bounded store readers → CLI/API/TUI/browser | `transcript.rs` traverses beyond the old event cutoff, reaches byte limits, resumes Unicode search inside an event and preserves a fixed search snapshot. Quotes enter a draft with provenance. |
+| MCP catalog | bounded `rook-mcp/catalog.rs` → `rook-tools/mcp/catalog.rs` → shared equipment | MCP/tools fixtures reject incomplete catalogs, preserve nested schemas and deterministic order, page a schema beyond the budget, and call deferred tools through target approval/hooks. |
+
+The final audit reproduced an OAuth privacy defect with a local server echoing
+its Authorization header in a successful tool result. The HTTP transport now
+retains the credential only for the lifetime of its own request and refuses
+responses containing that credential before exposing decoded content. This also
+checks structured resource keys and RPC error data. Authenticated HTTP error
+bodies, malformed response excerpts and challenge descriptions are withheld,
+including cases where truncation could otherwise expose only part of a token.
+Concurrent requests retain their own credential after rotation; no history of
+retired tokens accumulates. This is protection against accidental reflection,
+not a claim that arbitrary allowed shell commands cannot read local credential
+files or that an intentionally encoded value can always be recognized.
+
+
+The portability correction and all accumulated frontend changes passed the full
+`cargo xtask ci` gate (944.5s, exit 0) and were committed as `038d3bd`. The
+reflection regression failed before the transport correction, then passed for
+JSON, SSE, RPC messages/data, structured resource keys, HTTP/decode errors and
+initialized notifications, with independently rotating concurrent credentials.
+The complete MCP suite, focused core OAuth suite and affected-crate Clippy
+passed in an isolated copy. The source files were transferred only after matching
+baseline and candidate hashes. The final combined gate passed (1012.5s, exit 0),
+including freshly built frontend executables. All nine requirements in the table
+above now have implementation and verification evidence. Validation is local; it
+does not claim a multi-day soak, live commercial-provider acceptance or a green
+remote platform matrix.

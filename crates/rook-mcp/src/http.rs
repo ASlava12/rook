@@ -112,7 +112,7 @@ impl Http {
         })
     }
 
-    async fn post(&self, body: &impl serde::Serialize) -> Result<reqwest::Response> {
+    async fn post(&self, body: &impl serde::Serialize) -> Result<(reqwest::Response, Option<String>)> {
         let mut request =
             self.client.post(&self.url).header("accept", "application/json, text/event-stream").json(body);
         for (name, value) in &self.headers {
@@ -123,13 +123,16 @@ impl Http {
         if let Some(version) = self.version.lock().ok().and_then(|v| v.clone()) {
             request = request.header("mcp-protocol-version", version);
         }
-        if let Some(source) = &self.token {
+        let token = if let Some(source) = &self.token {
             let token = source
                 .token()
                 .await
                 .map_err(|_| McpError::Unauthorized { server: self.name.clone(), offered: Vec::new() })?;
-            request = request.bearer_auth(token);
-        }
+            request = request.bearer_auth(&token);
+            Some(token)
+        } else {
+            None
+        };
         if let Ok(session) = self.session.lock()
             && let Some(id) = session.as_deref()
         {
@@ -146,7 +149,7 @@ impl Http {
         {
             *session = Some(id.to_string());
         }
-        Ok(response)
+        Ok((response, token))
     }
 }
 
@@ -178,7 +181,7 @@ impl Transport for Http {
         let body = Request { jsonrpc: "2.0", id, method, params };
 
         tokio::time::timeout(timeout, async {
-            let response = self.post(&body).await?;
+            let (response, token) = self.post(&body).await?;
             let status = response.status();
             let event_stream = response
                 .headers()
@@ -190,32 +193,37 @@ impl Transport for Http {
             // failure here a person can act on, and the header is where the
             // authorisation server is named.
             if status == reqwest::StatusCode::UNAUTHORIZED {
-                let offered = response
-                    .headers()
-                    .get_all(reqwest::header::WWW_AUTHENTICATE)
-                    .iter()
-                    .filter_map(|value| value.to_str().ok())
-                    .map(str::to_string)
-                    .collect();
+                let offered = challenges(&response, token.is_some());
                 return Err(McpError::Unauthorized { server: self.name.clone(), offered });
             }
             if !status.is_success() {
                 return Err(McpError::Transport {
                     server: self.name.clone(),
-                    message: format!("{status}: {}", quoted_text(response).await),
+                    message: format!("{status}: {}", failure_text(response, token.is_some()).await),
                 });
             }
 
-            if event_stream {
+            let message = if event_stream {
                 read_event_stream(&self.name, method, id, response, timeout).await
             } else {
                 let text = whole_text(response, &self.name).await?;
                 serde_json::from_str(&text).map_err(|e| McpError::Decode {
                     server: self.name.clone(),
                     method: method.into(),
-                    message: format!("{e}: {}", rook_llm::truncate(&text, 300)),
+                    message: if token.is_some() {
+                        "invalid authenticated response; body withheld to protect credentials".into()
+                    } else {
+                        format!("{e}: {}", rook_llm::truncate(&text, 300))
+                    },
                 })
+            }?;
+            if token.as_deref().is_some_and(|token| reflects(&message, token)) {
+                return Err(McpError::Transport {
+                    server: self.name.clone(),
+                    message: "response withheld because it contains the request credential".into(),
+                });
             }
+            Ok(message)
         })
         .await
         .map_err(|_| McpError::Timeout {
@@ -229,29 +237,72 @@ impl Transport for Http {
     async fn notify(&self, method: &str, params: Option<serde_json::Value>) -> Result<()> {
         let body = Notification { jsonrpc: "2.0", method, params };
         // A notification has no answer; 202 is the usual reply and any 2xx is fine.
-        let response = self.post(&body).await?;
+        let (response, token) = self.post(&body).await?;
         if response.status() == reqwest::StatusCode::UNAUTHORIZED {
             return Err(McpError::Unauthorized {
                 server: self.name.clone(),
-                offered: response
-                    .headers()
-                    .get_all(reqwest::header::WWW_AUTHENTICATE)
-                    .iter()
-                    .filter_map(|v| v.to_str().ok())
-                    .map(str::to_owned)
-                    .collect(),
+                offered: challenges(&response, token.is_some()),
             });
         }
         if !response.status().is_success() {
             return Err(McpError::Transport {
                 server: self.name.clone(),
-                message: format!("{}: {}", response.status(), quoted_text(response).await),
+                message: format!("{}: {}", response.status(), failure_text(response, token.is_some()).await),
             });
         }
         Ok(())
     }
 
     async fn shutdown(&self) {}
+}
+
+// Keep the actual credential with its response, not in a connection-wide
+// history: concurrent requests can use different rotations, and a long-lived
+// connection must not accumulate every access token it has ever sent.
+fn reflects(message: &Incoming, token: &str) -> bool {
+    if token.is_empty() {
+        return false;
+    }
+    fn value_contains(value: &serde_json::Value, token: &str) -> bool {
+        match value {
+            serde_json::Value::String(text) => text.contains(token),
+            serde_json::Value::Array(items) => items.iter().any(|v| value_contains(v, token)),
+            serde_json::Value::Object(fields) => {
+                fields.iter().any(|(key, v)| key.contains(token) || value_contains(v, token))
+            }
+            _ => false,
+        }
+    }
+    message.method.as_ref().is_some_and(|text| text.contains(token))
+        || message.params.as_ref().is_some_and(|v| value_contains(v, token))
+        || message.result.as_ref().is_some_and(|v| value_contains(v, token))
+        || message.error.as_ref().is_some_and(|error| {
+            error.message.contains(token) || error.data.as_ref().is_some_and(|v| value_contains(v, token))
+        })
+}
+
+fn challenges(response: &reqwest::Response, authenticated: bool) -> Vec<String> {
+    if authenticated {
+        // Error descriptions may quote even a prefix of the credential. Keep
+        // the actionable 401, not server-authored credential diagnostics.
+        Vec::new()
+    } else {
+        response
+            .headers()
+            .get_all(reqwest::header::WWW_AUTHENTICATE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .map(str::to_owned)
+            .collect()
+    }
+}
+
+async fn failure_text(response: reqwest::Response, authenticated: bool) -> String {
+    if authenticated {
+        "authenticated response body withheld to protect credentials".into()
+    } else {
+        quoted_text(response).await
+    }
 }
 
 /// Read frames until the answer to `id` arrives.
