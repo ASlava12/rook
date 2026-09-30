@@ -19,6 +19,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListSt
 use ratatui::{DefaultTerminal, Frame};
 
 use rook_core::agent::{AgentLoop, Progress};
+use rook_core::keybindings::{ACTIONS, Action, Bindings};
 use rook_core::{SessionSummary, TranscriptEntry};
 use rook_llm::Delta;
 use rook_proto::{ApprovalDecision, ChatEvent, ClientMessage};
@@ -30,8 +31,10 @@ use tokio::sync::mpsc;
 
 use crate::fmt;
 
+mod draft;
 mod editor;
 mod history;
+mod keys;
 mod mcp;
 mod mcp_auth;
 mod tasks;
@@ -395,6 +398,7 @@ struct Selected {
 #[derive(Default)]
 struct Typing {
     text: String,
+    edits: draft::History,
     /// A byte offset, always on a character boundary — the moves below are what
     /// keeps it there, and the text is whatever somebody typed, which includes
     /// their own language.
@@ -402,37 +406,56 @@ struct Typing {
 }
 
 impl Typing {
+    fn replace(&mut self, start: usize, end: usize, value: &str, typing: bool) {
+        if self.text[start..end] == *value {
+            self.edits.boundary();
+            self.at = start + value.len();
+            return;
+        }
+        self.edits.record(&self.text, start, end, value, self.at, typing);
+        self.text.replace_range(start..end, value);
+        self.at = start + value.len();
+    }
+
+    fn undo(&mut self) {
+        self.edits.undo(&mut self.text, &mut self.at);
+    }
+    fn redo(&mut self) {
+        self.edits.redo(&mut self.text, &mut self.at);
+    }
+
     fn insert(&mut self, c: char) {
-        self.text.insert(self.at, c);
-        self.at += c.len_utf8();
+        self.replace(self.at, self.at, c.encode_utf8(&mut [0; 4]), true);
     }
 
     fn backspace(&mut self) {
         if let Some(c) = self.text[..self.at].chars().next_back() {
-            self.at -= c.len_utf8();
-            self.text.remove(self.at);
+            self.replace(self.at - c.len_utf8(), self.at, "", false);
         }
     }
 
     fn delete(&mut self) {
-        if self.at < self.text.len() {
-            self.text.remove(self.at);
+        if let Some(c) = self.text[self.at..].chars().next() {
+            self.replace(self.at, self.at + c.len_utf8(), "", false);
         }
     }
 
     fn left(&mut self) {
+        self.edits.boundary();
         if let Some(c) = self.text[..self.at].chars().next_back() {
             self.at -= c.len_utf8();
         }
     }
 
     fn right(&mut self) {
+        self.edits.boundary();
         if let Some(c) = self.text[self.at..].chars().next() {
             self.at += c.len_utf8();
         }
     }
 
     fn home(&mut self) {
+        self.edits.boundary();
         self.at = 0;
     }
 
@@ -451,6 +474,7 @@ impl Typing {
     /// previous prompt instead — the box holds several rows now, and Up walking
     /// straight into the history took a half-written message with it.
     fn up(&mut self) -> bool {
+        self.edits.boundary();
         let start = self.row_start(self.at);
         if start == 0 {
             return false;
@@ -464,6 +488,7 @@ impl Typing {
     /// Down a row. False when there is none, where the key means the next
     /// prompt.
     fn down(&mut self) -> bool {
+        self.edits.boundary();
         let end = self.row_end(self.at);
         if end == self.text.len() {
             return false;
@@ -480,6 +505,7 @@ impl Typing {
     }
 
     fn end(&mut self) {
+        self.edits.boundary();
         self.at = self.text.len();
     }
 
@@ -489,23 +515,19 @@ impl Typing {
         let before = &self.text[..self.at];
         let trimmed = before.trim_end();
         let cut = trimmed.rfind(char::is_whitespace).map_or(0, |at| at + 1);
-        self.text.replace_range(cut..self.at, "");
-        self.at = cut;
+        self.replace(cut, self.at, "", false);
     }
 
     fn kill_to_start(&mut self) {
-        self.text.replace_range(..self.at, "");
-        self.at = 0;
+        self.replace(0, self.at, "", false);
     }
 
     fn kill_to_end(&mut self) {
-        self.text.truncate(self.at);
+        self.replace(self.at, self.text.len(), "", false);
     }
 
     fn set(&mut self, text: &str) {
-        self.text.clear();
-        self.text.push_str(text);
-        self.at = self.text.len();
+        self.replace(0, self.text.len(), text, false);
     }
 
     fn clear(&mut self) {
@@ -513,6 +535,7 @@ impl Typing {
     }
 
     fn take(&mut self) -> String {
+        self.edits.clear();
         let taken = std::mem::take(&mut self.text);
         self.at = 0;
         taken
@@ -592,8 +615,7 @@ impl Typing {
         // `\r\n` and a bare `\r` both mean a new line here. A `\r` left in
         // would move the cursor back over what was already drawn.
         let text = text.replace("\r\n", "\n").replace('\r', "\n");
-        self.text.insert_str(self.at, &text);
-        self.at += text.len();
+        self.replace(self.at, self.at, &text, false);
     }
 
     /// The file being named at the cursor: what follows the last `@` of the
@@ -622,8 +644,7 @@ impl Typing {
             return;
         }
         let start = self.at - fragment.len();
-        self.text.replace_range(start..self.at, common);
-        self.at = start + common.len();
+        self.replace(start, self.at, common, false);
     }
 
     /// Put `path` where the mention being typed is, and a space after it: the
@@ -637,8 +658,7 @@ impl Typing {
             true => "",
             false => " ",
         };
-        self.text.replace_range(start..self.at, &format!("@{path}{gap}"));
-        self.at = start + path.len() + '@'.len_utf8() + gap.len();
+        self.replace(start, self.at, &format!("@{path}{gap}"), false);
     }
 }
 
@@ -1185,6 +1205,7 @@ const QUIET: std::time::Duration = std::time::Duration::from_secs(30);
 const MAX_SCROLLBACK: usize = 1 << 20;
 
 struct App {
+    bindings: Bindings,
     /// Where the browsing tabs read from: this process's own store, or a
     /// running `rookd` holding it. A second window on a second project is the
     /// ordinary case, and it used to be an error message.
@@ -1349,13 +1370,27 @@ impl App {
         let tasks = tasks::Tasks::new(&source, &runtime, &config.work);
         let history = history::History::new(&source);
         let mcp_controls = mcp::Connections::new(&source, &runtime, mcp.clone());
+        let (bindings, binding_error) = match config.tui.bindings() {
+            Ok(bindings) => (bindings, None),
+            Err(errors) => (
+                rook_core::keybindings::Settings::default()
+                    .bindings()
+                    .expect("built-in keybindings have no conflicts"),
+                Some(errors.join("; ")),
+            ),
+        };
         let mut app = Self {
+            bindings,
             mcp: mcp_controls,
             tasks,
             history,
             editor: None,
             runtime,
-            chat: Chat { history: remembered_prompts(), ..Chat::default() },
+            chat: Chat {
+                input: Typing { edits: draft::History::new(&config.tui), ..Default::default() },
+                history: remembered_prompts(),
+                ..Chat::default()
+            },
             files_here: None,
             most_files: config.sandbox.max_files_searched,
             // Only when the window is configured. Otherwise it is the
@@ -1428,6 +1463,9 @@ impl App {
             quit: false,
         };
         app.reload();
+        if let Some(error) = binding_error {
+            app.chat.push("err", &format!("Invalid TUI settings; using default keys: {error}"));
+        }
         app
     }
 
@@ -1473,7 +1511,8 @@ impl App {
                 self.chat.push(
                     "stat",
                     &format!(
-                        "  no model is chosen — ^p models, or `/model {}`",
+                        "  no model is chosen — {} models, or `/model {}`",
+                        keys::hint(&self.bindings, Action::Palette),
                         named.first().map(String::as_str).unwrap_or("<name>")
                     ),
                 );
@@ -1724,8 +1763,11 @@ impl App {
         if remote.send(ClientMessage::Attach { session: rook_store::format_session_id(session) }).is_err() {
             self.chat.push(
                 "err",
-                "[lost the connection to the daemon — it may have been restarted, and this turn \
-                 may still be running there. `^p` → sessions → this one rejoins it]",
+                &format!(
+                    "[lost the connection to the daemon — it may have been restarted, and this turn \
+                 may still be running there. `{}` → sessions → this one rejoins it]",
+                    keys::hint(&self.bindings, Action::Palette)
+                ),
             );
             self.chat.ended();
         }
@@ -2000,55 +2042,9 @@ impl App {
             }
             return;
         }
-        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('c') {
-            // A running turn is what there is to stop, as in the chat REPL and
-            // the browser; quitting is what it means when there is nothing.
-            // A turn the daemon runs is stopped by asking it: dropping the
-            // socket here would leave the turn running with nobody reading it.
-            if let Some(say) = &self.chat.remote {
-                let _ = say.send(ClientMessage::Cancel);
-                self.chat.push("stat", "[stopping]");
-                return;
-            }
-            match self.turn.take_if(|turn| !turn.is_finished()) {
-                Some(turn) => self.stop(turn),
-                None => self.quit = true,
-            }
+        if let Some(action) = self.bindings.action(&keys::name(key), false) {
+            self.on_action(action);
             return;
-        }
-        // The two settings worth changing mid-turn, from wherever you are.
-        match key.code {
-            KeyCode::F(2) => return self.cycle_stance(),
-            KeyCode::F(3) => return self.cycle_effort(),
-            KeyCode::F(4) => {
-                self.overlay = Some(Overlay::Tasks);
-                return;
-            }
-            _ => {}
-        }
-        // `^p` from anywhere, including from inside another overlay: a palette
-        // you have to close something else to reach is a palette nobody uses.
-        // `^p` alone, and not `^k` beside it: `^k` kills to the end of the line
-        // and has done in every shell for fifty years — taking it for a palette
-        // broke the message box, which a test noticed and a person would have
-        // noticed sooner.
-        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('p') {
-            self.palette.clear();
-            self.palette_at = 0;
-            self.overlay = Some(Overlay::Palette);
-            return;
-        }
-        // `^s` hands the mouse back to the terminal so a line can be selected
-        // and copied, and takes it again for the wheel. Not a modifier held
-        // while dragging: every terminal has one and no two agree on which —
-        // Shift here, Option there, a setting somewhere else — so the answer
-        // to "I cannot copy what it said" was a different answer per terminal
-        // and none of them was in this window.
-        //
-        // `^s` is safe to take: raw mode clears `IXON`, so it arrives as a key
-        // rather than stopping the terminal's output as it would in a shell.
-        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('s') {
-            return self.take_or_yield_the_mouse();
         }
         match self.overlay {
             Some(overlay) => self.on_overlay_key(overlay, key),
@@ -2116,6 +2112,19 @@ impl App {
         }
         if key.code == KeyCode::Esc {
             self.overlay = None;
+            return;
+        }
+        if overlay == Overlay::Help {
+            match key.code {
+                KeyCode::PageDown | KeyCode::Down => {
+                    self.transcript_scroll = self.transcript_scroll.saturating_add(10)
+                }
+                KeyCode::PageUp | KeyCode::Up => {
+                    self.transcript_scroll = self.transcript_scroll.saturating_sub(10)
+                }
+                KeyCode::Home => self.transcript_scroll = 0,
+                _ => {}
+            }
             return;
         }
         if overlay == Overlay::Palette {
@@ -2224,8 +2233,17 @@ impl App {
         }
     }
 
-    fn newline_key(&self) -> &'static str {
-        Self::named_newline(self.shift_enter)
+    fn newline_key(&self) -> String {
+        let label = self.bindings.label(Action::Newline);
+        if label.split(" / ").count() == 3
+            && ["ctrl+j", "shift+enter", "alt+enter"]
+                .iter()
+                .all(|key| self.bindings.action(key, true) == Some(Action::Newline))
+        {
+            Self::named_newline(self.shift_enter).into()
+        } else {
+            label
+        }
     }
 
     /// Typing in the palette narrows the list; enter takes what is under the
@@ -2239,6 +2257,12 @@ impl App {
                 };
                 let name = name.clone();
                 self.overlay = None;
+                if let Some(id) = name.strip_prefix("action: ")
+                    && let Some(spec) = ACTIONS.iter().find(|spec| spec.id == id)
+                {
+                    self.on_action(spec.action);
+                    return;
+                }
                 match name.strip_prefix('/') {
                     // A command goes to the message box rather than running
                     // itself: several take an argument, and one that ran the
@@ -2254,6 +2278,8 @@ impl App {
                             self.history.open(self.chat.session);
                         } else if self.overlay == Some(Overlay::Mcp) {
                             self.mcp.request(None);
+                        } else if self.overlay == Some(Overlay::Help) {
+                            self.transcript_scroll = 0;
                         } else {
                             self.reload();
                         }
@@ -2275,39 +2301,6 @@ impl App {
     }
 
     fn on_chat_key(&mut self, key: crossterm::event::KeyEvent) {
-        // The line-editing keys every terminal has had for fifty years. Before
-        // the approval, because they are about the box being typed in and an
-        // approval is answered with a letter.
-        if key.modifiers == KeyModifiers::CONTROL && self.chat.pending.is_none() {
-            match key.code {
-                // Some terminals send BS for the backspace key, which arrives
-                // here as ctrl-h; unhandled it typed an `h` into the message.
-                KeyCode::Char('h') => return self.chat.input.backspace(),
-                KeyCode::Char('a') => return self.chat.input.home(),
-                KeyCode::Char('e') => {
-                    self.editor = Some(editor::Picker::discover());
-                    return;
-                }
-                KeyCode::Char('f') => {
-                    self.history.open(self.chat.session);
-                    self.overlay = Some(Overlay::History);
-                    return;
-                }
-                KeyCode::Char('w') => return self.chat.input.kill_word(),
-                KeyCode::Char('u') => return self.chat.input.kill_to_start(),
-                KeyCode::Char('k') => return self.chat.input.kill_to_end(),
-                // Not a line-editing key, but it belongs to this branch: the
-                // conversation says a call happened and this is the one gesture
-                // that says what it did. `o` for what came out of it.
-                KeyCode::Char('o') => {
-                    self.load_calls();
-                    self.transcript_scroll = 0;
-                    self.overlay = Some(Overlay::Calls);
-                    return;
-                }
-                _ => {}
-            }
-        }
         // An approval blocks the turn, so it takes the keyboard until answered.
         if let Some(request) = self.chat.pending.clone() {
             let approval = match key.code {
@@ -2336,69 +2329,82 @@ impl App {
             return;
         }
 
-        match key.code {
-            // Tab completes, and does nothing else. It used to leave the
-            // conversation for the next tab, which is not what Tab means in
-            // any other box somebody has ever typed into.
-            KeyCode::Tab => self.complete(),
-            KeyCode::Esc if self.chat.input.is_empty() => self.quit = true,
-            KeyCode::Esc => self.chat.input.clear(),
-            KeyCode::Left => self.chat.input.left(),
-            KeyCode::Right => self.chat.input.right(),
-            KeyCode::Home => self.chat.input.home(),
-            // With nothing typed there is no line to walk to the end of, and
-            // `End` is where a hand goes to get back to the newest message.
-            KeyCode::End if self.chat.input.is_empty() => self.chat.scroll = 0,
-            KeyCode::End => self.chat.input.end(),
-            KeyCode::Delete => self.chat.input.delete(),
-            // Within the message first: the box holds several rows, and a key
-            // that leaves it takes what is written with it.
-            KeyCode::Up => {
+        if let Some(action) = self.bindings.action(&keys::name(key), true) {
+            self.on_action(action);
+        } else if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+            && let KeyCode::Char(c) = key.code
+        {
+            self.chat.input.insert(c);
+        }
+    }
+
+    fn on_action(&mut self, action: Action) {
+        if self.chat.pending.is_some()
+            && ACTIONS.iter().any(|s| s.action == action && s.scope == rook_core::keybindings::Scope::Prompt)
+        {
+            return;
+        }
+        match action {
+            Action::Stop => {
+                if let Some(say) = &self.chat.remote {
+                    let _ = say.send(ClientMessage::Cancel);
+                    self.chat.push("stat", "[stopping]");
+                } else {
+                    match self.turn.take_if(|turn| !turn.is_finished()) {
+                        Some(turn) => self.stop(turn),
+                        None => self.quit = true,
+                    }
+                }
+            }
+            Action::Palette => {
+                self.palette.clear();
+                self.palette_at = 0;
+                self.overlay = Some(Overlay::Palette);
+            }
+            Action::Mouse => self.take_or_yield_the_mouse(),
+            Action::Stance => self.cycle_stance(),
+            Action::Effort => self.cycle_effort(),
+            Action::Tasks => self.overlay = Some(Overlay::Tasks),
+            Action::Home => self.chat.input.home(),
+            Action::End if self.chat.input.is_empty() => self.chat.scroll = 0,
+            Action::End => self.chat.input.end(),
+            Action::Editor => self.editor = Some(editor::Picker::discover()),
+            Action::History => {
+                self.history.open(self.chat.session);
+                self.overlay = Some(Overlay::History);
+            }
+            Action::KillWord => self.chat.input.kill_word(),
+            Action::KillStart => self.chat.input.kill_to_start(),
+            Action::KillEnd => self.chat.input.kill_to_end(),
+            Action::Calls => {
+                self.load_calls();
+                self.transcript_scroll = 0;
+                self.overlay = Some(Overlay::Calls);
+            }
+            Action::Complete => self.complete(),
+            Action::Escape if self.chat.input.is_empty() => self.quit = true,
+            Action::Escape => self.chat.input.clear(),
+            Action::Left => self.chat.input.left(),
+            Action::Right => self.chat.input.right(),
+            Action::Delete => self.chat.input.delete(),
+            Action::Up => {
                 if !self.chat.input.up() {
                     self.recall(-1);
                 }
             }
-            KeyCode::Down => {
+            Action::Down => {
                 if !self.chat.input.down() {
                     self.recall(1);
                 }
             }
-            // A newline by hand, since Enter sends. Both modifiers, because
-            // which one arrives is the terminal's business and they differ.
-            //
-            // Alt was the only one, on the reasoning that Shift+Enter is what a
-            // hand reaches for and almost no terminal tells it from Enter. True
-            // of a unix terminal, which reads escape sequences; not true here,
-            // where Windows reads console input records that carry the modifier
-            // outright. And on Windows Alt+Enter never arrives at all — the
-            // terminal keeps it, to go full screen — so the only key the help
-            // named was the one that could not work, and there was no way to
-            // write a second line at all.
-            KeyCode::Enter if key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) => {
-                self.chat.input.insert('\n')
-            }
-            // The one that needs nothing configured. A terminal sends Option
-            // as Meta only when it is told to, and iTerm2 ships with it off —
-            // so on macOS the key the help named arrived at no one who had not
-            // already changed a setting they had no reason to look for. That
-            // is the Windows fault again with a different key: the answer was
-            // on the screen and could not work.
-            //
-            // `^J` is the line feed itself. In raw mode a terminal stops
-            // turning `\r` into `\n`, so the two are distinct and crossterm
-            // reads 0x0A as Ctrl+J — its own comment on the byte says to use
-            // this rather than the newline. No terminal has to be configured
-            // for it, on any platform.
-            KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.chat.input.insert('\n')
-            }
-            KeyCode::Enter if self.chat.asking.is_some() => self.answer(),
-            KeyCode::Enter => self.send(),
-            KeyCode::Backspace => self.chat.input.backspace(),
-            KeyCode::PageUp => self.chat.scroll = self.chat.scroll.saturating_sub(10),
-            KeyCode::PageDown => self.chat.scroll = self.chat.scroll.saturating_add(10),
-            KeyCode::Char(c) => self.chat.input.insert(c),
-            _ => {}
+            Action::Newline => self.chat.input.insert('\n'),
+            Action::Submit if self.chat.asking.is_some() => self.answer(),
+            Action::Submit => self.send(),
+            Action::Backspace => self.chat.input.backspace(),
+            Action::PageUp => self.chat.scroll = self.chat.scroll.saturating_sub(10),
+            Action::PageDown => self.chat.scroll = self.chat.scroll.saturating_add(10),
+            Action::Undo => self.chat.input.undo(),
+            Action::Redo => self.chat.input.redo(),
         }
     }
 
@@ -3345,31 +3351,26 @@ impl App {
             }
         }
 
-        let keys: &[(&str, &str)] = match self.overlay {
-            Some(overlay) => overlay.keys(),
-            // The mouse hint says what pressing it gives you, which is also
-            // how this window says which of the two it is holding: a wheel
-            // that has stopped scrolling reads as an application that has
-            // stopped responding, and this is the line that explains it.
-            None if self.mouse => &[
-                ("^p ", "commands  "),
-                ("F4 ", "tasks  "),
-                ("^e ", "editor  "),
-                ("^s ", "select  "),
-                ("^c ", "stop  "),
-            ],
-            None => &[
-                ("^p ", "commands  "),
-                ("F4 ", "tasks  "),
-                ("^e ", "editor  "),
-                ("^s ", "wheel  "),
-                ("^c ", "stop  "),
-            ],
-        };
         let mut spans: Vec<Span> = vec![Span::raw(" ")];
-        for (key, what) in keys {
-            spans.push(Span::styled(*key, Style::default().fg(Color::Cyan)));
-            spans.push(Span::raw(*what));
+        if let Some(overlay) = self.overlay {
+            for (key, what) in overlay.keys() {
+                spans.push(Span::styled(*key, Style::default().fg(Color::Cyan)));
+                spans.push(Span::raw(*what));
+            }
+        } else {
+            for (action, what) in [
+                (Action::Palette, "commands"),
+                (Action::Tasks, "tasks"),
+                (Action::Editor, "editor"),
+                (Action::Mouse, if self.mouse { "select" } else { "wheel" }),
+                (Action::Stop, "stop"),
+            ] {
+                spans.push(Span::styled(
+                    format!("{} ", keys::hint(&self.bindings, action)),
+                    Style::default().fg(Color::Cyan),
+                ));
+                spans.push(Span::raw(format!("{what}  ")));
+            }
         }
         // What this window is talking to and under what rules — the two things
         // a person glances down to check, and neither was on the screen.
@@ -3491,6 +3492,9 @@ impl App {
                     (name, (*what).to_string())
                 }),
         );
+        out.extend(ACTIONS.iter().filter(|spec| matches(spec.id, spec.help)).map(|spec| {
+            (format!("action: {}", spec.id), format!("{} [{}]", spec.help, self.bindings.label(spec.action)))
+        }));
         out
     }
 
@@ -3569,7 +3573,10 @@ impl App {
         }
         if lines.is_empty() {
             lines.push(Line::from(Span::styled(
-                "Ask it something. ^p opens everything else.",
+                format!(
+                    "Ask it something. {} opens everything else.",
+                    keys::hint(&self.bindings, Action::Palette)
+                ),
                 Style::default().fg(Color::DarkGray),
             )));
         }
@@ -4511,11 +4518,14 @@ impl App {
         };
         let command = |line: &str| two(line, 33, Color::Cyan);
         let key = |line: &str| two(line, 14, Color::Cyan);
-        let text = vec![
+        let mut text = vec![
             Line::from(Span::styled("rook", Style::default().add_modifier(Modifier::BOLD))),
             Line::from(""),
             Line::from("The window is the conversation. Everything else — sessions, memory,"),
-            Line::from("skills, checkpoints, docs, the store — opens over it from ^p and closes"),
+            Line::from(format!(
+                "skills, checkpoints, docs, the store — opens from {} and closes",
+                keys::hint(&self.bindings, Action::Palette)
+            )),
             Line::from("with Esc. Everything here is also on the command line, as tables or --json:"),
             Line::from(""),
             command("  rook store stat                what memory costs, per kind"),
@@ -4530,18 +4540,26 @@ impl App {
             command("  rook doctor                    detected toolchains and platform"),
             Line::from(""),
             Line::from(Span::styled("keys", Style::default().add_modifier(Modifier::BOLD))),
-            key("  ^p          everything reachable, filtered as you type"),
-            key("  ^o          what each call was given and what came back"),
-            key("  ^e          edit the draft in a console editor; last used comes first"),
-            key("  F4          scheduled tasks: n creates, Enter opens a session, r runs now"),
-            key("  ^s          gives the mouse to the terminal, to select and copy what"),
-            key("              was said · press it again to get the wheel back"),
-            key("  @           names a file in the workspace · tab completes it"),
             key(&format!(
-                "  {:<12}a newline in the message · ⏎ sends · paste keeps its lines",
-                self.newline_key()
+                "  {} opens the action palette; search an action to see its keys",
+                keys::hint(&self.bindings, Action::Palette)
             )),
-            key("  Esc         closes what is open; in the chat, clears then quits"),
+            key(&format!(
+                "  {} undo draft · {} redo draft",
+                keys::hint(&self.bindings, Action::Undo),
+                keys::hint(&self.bindings, Action::Redo)
+            )),
+            key(&format!(
+                "  {} external editor · {} history",
+                keys::hint(&self.bindings, Action::Editor),
+                keys::hint(&self.bindings, Action::History)
+            )),
+            key(&format!(
+                "  {} newline · {} submit",
+                self.newline_key(),
+                keys::hint(&self.bindings, Action::Submit)
+            )),
+            key("  @ names a file in the workspace; prompt.complete completes it"),
             key("  j k ↑ ↓     move · Space/PgDn scroll · r reload · wheel scrolls"),
             Line::from(""),
             key("  In sessions: ⏎ continues the one under the cursor, in the chat"),
@@ -4555,7 +4573,11 @@ impl App {
             key("  In memory:  a adds a fact here · A adds it everywhere"),
             key("              d forgets the selected one · u puts it back"),
             Line::from(""),
-            key("  In the chat: Enter sends · Esc clears, then quits"),
+            key(&format!(
+                "  In the chat: {} sends · {} clears, then quits",
+                keys::hint(&self.bindings, Action::Submit),
+                keys::hint(&self.bindings, Action::Escape)
+            )),
             key("              /btw <question> asks without joining the conversation"),
             key("              /continue carries a turn stopped at a limit on from there"),
             key("              y / a / n answer an approval"),
@@ -4563,11 +4585,47 @@ impl App {
             key("              /…        tab completes; the list shows as you type"),
             key("              PgUp/PgDn scroll back through the conversation"),
             key("              ↑ / ↓     the prompts already sent, newest first"),
-            key("              ← → home end · ctrl-a/w/u/k edit the line being typed"),
-            key("              F2 / F3   cycle approvals / reasoning effort"),
-            key("              ctrl-c    stops a running turn, or quits when none is"),
+            key("              Named prompt actions below edit only the draft"),
+            key(&format!(
+                "              {} / {} cycle approvals / reasoning effort",
+                keys::hint(&self.bindings, Action::Stance),
+                keys::hint(&self.bindings, Action::Effort)
+            )),
+            key(&format!(
+                "              {} stops a running turn, or quits when idle",
+                keys::hint(&self.bindings, Action::Stop)
+            )),
         ];
-        f.render_widget(Paragraph::new(text).block(bordered(" help ")), area);
+        text.push(Line::from(""));
+        text.push(Line::from("Active bindings — configure with rook config edit; reopen TUI to apply"));
+        for spec in ACTIONS {
+            text.push(Line::from(format!(
+                "{}: {} — {}",
+                spec.id,
+                self.bindings.label(spec.action),
+                spec.help
+            )));
+        }
+        let width = area.width.saturating_sub(2).max(1) as usize;
+        let text: Vec<Line<'static>> = text
+            .into_iter()
+            .flat_map(|line| {
+                if line.width() <= width {
+                    return vec![line];
+                }
+                let plain: String = line.spans.iter().map(|span| span.content.as_ref()).collect();
+                wrapped(&plain, width).into_iter().map(Line::from).collect()
+            })
+            .collect();
+        self.transcript_scroll = self
+            .transcript_scroll
+            .min(text.len().saturating_sub(area.height.saturating_sub(2) as usize) as u16);
+        f.render_widget(
+            Paragraph::new(text)
+                .scroll((self.transcript_scroll, 0))
+                .block(bordered(" help · PgUp/PgDn scroll ")),
+            area,
+        );
     }
 }
 
@@ -5032,6 +5090,56 @@ and the next line"
 
         assert_eq!(chat.log.len(), 1, "a reply arrives in fragments and reads as one: {:?}", chat.log);
         assert_eq!(chat.log[0].1, "the sky is blue");
+    }
+
+    #[test]
+    fn draft_undo_restores_unicode_deletions_pastes_and_editor_replacements() {
+        let mut draft = Typing::default();
+        for c in "Привет".chars() {
+            draft.insert(c);
+        }
+        draft.undo();
+        assert_eq!(draft.as_str(), "", "continuous word input is one edit");
+        draft.redo();
+        assert_eq!(draft.as_str(), "Привет");
+        draft.left();
+        let cursor = draft.at;
+        draft.backspace();
+        assert_eq!(draft.as_str(), "Привт");
+        draft.undo();
+        assert_eq!((draft.as_str(), draft.at), ("Привет", cursor));
+        draft.end();
+        draft.paste("\r\nмир 🌍");
+        assert_eq!(draft.as_str(), "Привет\nмир 🌍");
+        draft.undo();
+        assert_eq!(draft.as_str(), "Привет", "the entire paste is one edit");
+        draft.redo();
+        draft.set("from external editor");
+        draft.undo();
+        assert_eq!(draft.as_str(), "Привет\nмир 🌍");
+        draft.clear();
+        draft.undo();
+        assert_eq!(draft.as_str(), "Привет\nмир 🌍", "clearing the draft is reversible");
+        let sent = draft.take();
+        draft.undo();
+        assert!(draft.is_empty(), "undo cannot resurrect a submitted prompt");
+        assert!(!sent.is_empty());
+    }
+
+    #[test]
+    fn draft_completion_is_atomic_and_new_input_discards_redo() {
+        let mut draft = Typing::default();
+        draft.paste("read @sr");
+        draft.mention("src/main.rs");
+        assert_eq!(draft.as_str(), "read @src/main.rs ");
+        draft.undo();
+        assert_eq!(draft.as_str(), "read @sr");
+        draft.insert('c');
+        draft.redo();
+        assert_eq!(draft.as_str(), "read @src");
+        draft.kill_word();
+        draft.undo();
+        assert_eq!(draft.as_str(), "read @src");
     }
 
     /// Reasoning streams the same way an answer does, and unmerged it rendered

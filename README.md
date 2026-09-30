@@ -236,6 +236,12 @@ End moves to the end of the input line. Draft files must be UTF-8 and at most
 1 MiB. On an editor/read error the original draft stays in the box and Rook
 shows the path of the retained file so edits can be recovered.
 
+**Ctrl+Z** undoes a draft edit and **Alt+Z** redoes it, including a whole paste or
+the text returned by the external editor. This does not rewind files. Configure
+named actions and the bounded undo history under `tui` in `rook config edit`;
+the palette and help show the active shortcuts. See
+[terminal keys and prompt undo](docs/tui-keybindings.md).
+
 Typing while a turn runs steers it rather than waiting for it: what you send
 reaches the model at its next step, so a turn heading the wrong way can be
 corrected without throwing away what it has already done — and if the turn has

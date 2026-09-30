@@ -30,6 +30,7 @@ pub mod fileset;
 pub mod hooks;
 pub mod install;
 pub mod instructions;
+pub mod keybindings;
 pub mod lsp;
 pub mod mcp_auth;
 pub mod mcp_connections;

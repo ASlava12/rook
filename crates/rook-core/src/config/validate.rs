@@ -7,6 +7,17 @@ impl Config {
     /// so a broken file can still be inspected and repaired.
     pub fn validation_errors(&self) -> Vec<String> {
         let mut errors = Vec::new();
+        if let Err(key_errors) = self.tui.bindings() {
+            errors.extend(key_errors);
+        }
+        for (name, value, low, high) in [
+            ("chat_queue_events", self.server.chat_queue_events, 1, 4096),
+            ("chat_queue_bytes", self.server.chat_queue_bytes, 4096, 32 * 1024 * 1024),
+        ] {
+            if !(low..=high).contains(&value) {
+                errors.push(format!("server.{name}: expected {low}..={high}"));
+            }
+        }
         if let Some(error) = self.mcp_connections.error() {
             errors.push(error.into());
         }

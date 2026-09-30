@@ -58,18 +58,17 @@ impl<Q, A> Pending<Q, A> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed).to_string();
         let (tx, rx) = oneshot::channel();
         self.hold().insert(id.clone(), tx);
+        // Cancellation drops the future at its await, bypassing all ordinary
+        // return paths. Keep removal tied to the future's lifetime instead.
+        let _waiting = Waiting { pending: self, id: &id };
 
         if self.requests.send(build(id.clone())).is_err() {
-            self.hold().remove(&id);
             return Err(Unanswered::NoListener);
         }
         match tokio::time::timeout(self.patience, rx).await {
             Ok(Ok(answer)) => Ok(answer),
             Ok(Err(_)) => Err(Unanswered::Dropped),
-            Err(_) => {
-                self.hold().remove(&id);
-                Err(Unanswered::Silence(self.patience))
-            }
+            Err(_) => Err(Unanswered::Silence(self.patience)),
         }
     }
 
@@ -85,5 +84,57 @@ impl<Q, A> Pending<Q, A> {
     /// still sound, and refusing to answer anything afterwards is worse.
     fn hold(&self) -> std::sync::MutexGuard<'_, HashMap<String, oneshot::Sender<A>>> {
         self.waiting.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+struct Waiting<'a, Q, A> {
+    pending: &'a Pending<Q, A>,
+    id: &'a str,
+}
+
+impl<Q, A> Drop for Waiting<'_, Q, A> {
+    fn drop(&mut self) {
+        self.pending.hold().remove(self.id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancelling_a_question_removes_its_pending_entry() {
+        let (send, mut requests) = tokio::sync::mpsc::unbounded_channel();
+        let pending = Pending::<String, bool>::new(send, Duration::from_secs(60));
+        for _ in 0..100 {
+            let mut asking = Box::pin(pending.ask(|id| id));
+            assert!(
+                std::future::poll_fn(|cx| { std::task::Poll::Ready(asking.as_mut().poll(cx).is_pending()) })
+                    .await
+            );
+            let id = requests.recv().await.unwrap();
+            assert_eq!(pending.hold().len(), 1);
+            assert!(pending.is_waiting());
+            drop(asking);
+            assert!(pending.hold().is_empty(), "cancelled request {id} left an entry");
+            assert!(!pending.is_waiting());
+            pending.answer(&id, true);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_answer_removes_the_entry_before_resuming_its_question() {
+        let (send, mut requests) = tokio::sync::mpsc::unbounded_channel();
+        let pending = Pending::<String, bool>::new(send, Duration::from_secs(60));
+        let mut asking = Box::pin(pending.ask(|id| id));
+        assert!(
+            std::future::poll_fn(|cx| { std::task::Poll::Ready(asking.as_mut().poll(cx).is_pending()) })
+                .await
+        );
+        let id = requests.recv().await.unwrap();
+        pending.answer(&id, true);
+        assert!(pending.hold().is_empty());
+        assert!(asking.await.unwrap());
+        assert!(pending.hold().is_empty());
     }
 }

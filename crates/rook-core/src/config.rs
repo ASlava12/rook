@@ -36,6 +36,7 @@ pub struct Config {
     pub mcp_catalog: rook_tools::mcp::CatalogLimits,
     pub mcp_connections: crate::mcp_connections::Settings,
     pub transcript: crate::transcript::Settings,
+    pub tui: crate::keybindings::Settings,
     /// Language servers, as `[[lsp]]` tables. When empty, known servers found
     /// on `PATH` are used.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -301,6 +302,7 @@ impl Default for Config {
             mcp_catalog: Default::default(),
             mcp_connections: Default::default(),
             transcript: Default::default(),
+            tui: Default::default(),
             server: Default::default(),
             lsp: Vec::new(),
             mcp: Vec::new(),
@@ -737,6 +739,10 @@ impl Default for WorkConfig {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ServerConfig {
+    /// Maximum queued and in-flight frames per chat connection.
+    pub chat_queue_events: usize,
+    /// Maximum encoded bytes queued or in flight per chat connection.
+    pub chat_queue_bytes: usize,
     /// Explicit reverse-proxy authorities (host:port); never inferred from request headers.
     pub allowed_hosts: Vec<String>,
     pub bind: String,
@@ -948,6 +954,8 @@ impl Default for StorageConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
+            chat_queue_events: 256,
+            chat_queue_bytes: 4 * 1024 * 1024,
             bind: "127.0.0.1".into(),
             port: 7717,
             max_projects: 16,

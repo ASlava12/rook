@@ -1799,6 +1799,8 @@ steering/follow-up queues, and configurable keyboard actions with prompt undo.
 Branch navigation, inline tool cards, context provenance and local HTML export
 follow. These are proposals, not implemented capabilities; the review includes
 existing equivalents, integration constraints and acceptance checks.
+Implementation and verification are tracked in the
+[Pi adoption log](research/pi-adoption-20260930.md).
 
 **Keep triaging the reference backlog.** `cargo xtask refs advance` moves a
 pointer and prints what landed; the log in

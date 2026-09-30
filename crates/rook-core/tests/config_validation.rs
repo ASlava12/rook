@@ -1,6 +1,25 @@
 use rook_core::{Config, Vault};
 
 #[test]
+fn prompt_key_overrides_validate_conflicts_and_history_limits_offline() {
+    for source in [
+        "[tui.keys]\n'prompt.undo'=['ctrl+p']",
+        "[tui.keys]\n'prompt.undoo'=['ctrl+z']",
+        "[tui]\nundo_bytes=0",
+        "[tui]\nundo_events=4097",
+    ] {
+        let config: Config = toml::from_str(source).unwrap();
+        assert!(config.validation_errors().iter().any(|error| error.contains("tui")), "{source}");
+    }
+    let config: Config = toml::from_str("[tui.keys]\n'prompt.undo'=['alt+u']\n'prompt.editor'=[]").unwrap();
+    assert!(config.validation_errors().is_empty());
+    let restored: Config = toml::from_str(&config.as_written().unwrap()).unwrap();
+    let keys = restored.tui.bindings().unwrap_or_else(|e| panic!("{e:?}"));
+    assert_eq!(keys.action("alt+u", true), Some(rook_core::keybindings::Action::Undo));
+    assert!(keys.action("ctrl+e", true).is_none());
+}
+
+#[test]
 fn mcp_catalog_download_limits_are_shared_with_connection_validation() {
     for (field, value) in [
         ("catalog_max_bytes", 1023),
@@ -271,4 +290,17 @@ fn oauth_limits_are_the_same_in_offline_config_and_protocol_setup() {
     assert_eq!(reread.mcp[0].oauth.client_id, "public-client");
     assert_eq!(reread.mcp[0].oauth.scopes, ["files:read"]);
     assert_eq!(reread.mcp[0].oauth.callback_port, 9321);
+}
+#[test]
+fn chat_delivery_limits_are_bounded_and_checked_offline() {
+    for (field, value) in [
+        ("chat_queue_events", 0),
+        ("chat_queue_events", 4097),
+        ("chat_queue_bytes", 4095),
+        ("chat_queue_bytes", 33_554_433),
+    ] {
+        let config: rook_core::Config = toml::from_str(&format!("[server]\n{field} = {value}\n")).unwrap();
+        assert!(config.validation_errors().iter().any(|error| error.contains(field)), "{field}={value}");
+    }
+    assert!(rook_core::Config::default().validation_errors().is_empty());
 }

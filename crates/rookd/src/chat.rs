@@ -23,6 +23,8 @@ use rook_tools::policy::{Approval, ChannelApprover};
 
 use crate::AppState;
 
+mod delivery;
+
 /// `?workspace=` names the project this conversation is in, defaulting to the
 /// daemon's own. A connection is bound to one for its life, because a project is
 /// what a conversation is about — not something a single prompt changes.
@@ -120,7 +122,8 @@ async fn serve(
     state: Arc<AppState>,
 ) {
     let (sink, mut stream) = socket.split();
-    let (outbound, queued) = mpsc::unbounded_channel::<ChatEvent>();
+    let limits = engine.read().await.config.server.clone();
+    let (outbound, queued) = delivery::channel(limits.chat_queue_events, limits.chat_queue_bytes);
 
     // One writer task: the turn, the approver and the error path all emit
     // concurrently, and a socket has a single writer.
@@ -129,7 +132,7 @@ async fn serve(
     // Settings are cheap and wanted before the first prompt, so they are not in
     // the cell with the expensive things.
     let settings = Arc::new(Settings::new(&*engine.read().await));
-    let _ = outbound.send(settings.describe());
+    let _ = outbound.send(settings.describe()).await;
 
     // Which turn this window is watching, and the task carrying it here. The
     // turn itself is the daemon's; this is only the view of it.
@@ -164,9 +167,10 @@ async fn serve(
                 let theirs = attached(&state, &watching).await.filter(|l| l.running());
                 let setting = theirs.as_ref().map(|l| l.settings.clone()).unwrap_or(settings.clone());
                 if let Err(message) = setting.set(&name, &value) {
-                    let _ = outbound.send(ChatEvent::Error { message });
+                    let _ = outbound.send(ChatEvent::Error { message }).await;
                     continue;
                 }
+                let mut persistence_error = None;
                 if let Some(session) = watching.as_ref().map(|w| w.session) {
                     let rook = engine.read().await;
                     if let Ok(Some(run)) = session_goal(&rook, session)
@@ -180,13 +184,14 @@ async fn serve(
                             Ok(())
                         })
                     {
-                        report(
-                            &outbound,
-                            format!("setting changed, but could not save it for restart: {error}"),
-                        );
+                        persistence_error =
+                            Some(format!("setting changed, but could not save it for restart: {error}"));
                     }
                 }
-                let _ = outbound.send(setting.describe());
+                if let Some(error) = persistence_error {
+                    report_window(&outbound, error).await;
+                }
+                let _ = outbound.send(setting.describe()).await;
             }
             ClientMessage::Cancel => {
                 let Some(session) = watching.as_ref().map(|w| w.session) else { continue };
@@ -194,33 +199,39 @@ async fn serve(
                 let goal = session_goal(&*engine.read().await, session);
                 match goal {
                     Ok(Some(run)) if !run.status.terminal() => {
-                        match managed::control(&*engine.read().await, &id, Action::Pause) {
+                        let paused = managed::control(&*engine.read().await, &id, Action::Pause);
+                        match paused {
                             Ok(_) => {
-                                let _ = outbound.send(ChatEvent::Agent {
-                                    text: "Pausing goal after the active operation; /continue resumes it."
-                                        .into(),
-                                });
+                                let _ = outbound
+                                    .send(ChatEvent::Agent {
+                                        text:
+                                            "Pausing goal after the active operation; /continue resumes it."
+                                                .into(),
+                                    })
+                                    .await;
                             }
-                            Err(error) => report(&outbound, error.to_string()),
+                            Err(error) => report_window(&outbound, error.to_string()).await,
                         }
                         continue;
                     }
                     Err(error) => {
-                        report(&outbound, error);
+                        report_window(&outbound, error).await;
                         continue;
                     }
                     _ => {}
                 }
-                if let Some(live) = state.live.write().await.remove(&session) {
+                let cancelled = state.live.write().await.remove(&session);
+                if let Some(live) = cancelled {
                     live.stop();
                     // The browser only leaves its working state on Done or
                     // Error; aborting silently leaves it stuck forever.
-                    let _ = outbound.send(ChatEvent::Cancelled);
+                    let _ = outbound.send(ChatEvent::Cancelled).await;
                 }
             }
             ClientMessage::Attach { session } => {
                 let Some(id) = rook_store::parse_session_id(&session) else {
-                    let _ = outbound.send(ChatEvent::Error { message: format!("no session {session:?}") });
+                    let _ =
+                        outbound.send(ChatEvent::Error { message: format!("no session {session:?}") }).await;
                     continue;
                 };
                 let live = state.live.read().await.get(&id).cloned();
@@ -228,13 +239,13 @@ async fn serve(
                     previous.carrying.abort();
                 }
                 let running = live.as_ref().is_some_and(|l| l.running());
-                let _ = outbound.send(ChatEvent::Attached { session, running });
+                let _ = outbound.send(ChatEvent::Attached { session, running }).await;
                 if let Some(live) = live {
                     // What it is running under, not what this window was
                     // showing: a footer reading `autonomous` over a turn in
                     // `assist` explains none of the approvals it asks for.
                     if running {
-                        let _ = outbound.send(live.settings.describe());
+                        let _ = outbound.send(live.settings.describe()).await;
                     }
                     watching = Some(watch(&live, id, outbound.clone(), watching));
                 }
@@ -248,36 +259,41 @@ async fn serve(
                 let id = match session.as_deref().and_then(rook_store::parse_session_id) {
                     Some(id) => Some(id),
                     None if session.is_some() => None,
-                    None => match engine.read().await.start_session("") {
-                        Ok(id) => Some(id),
-                        Err(e) => {
-                            report(&outbound, e.to_string());
-                            continue;
+                    None => {
+                        let started = engine.read().await.start_session("");
+                        match started {
+                            Ok(id) => Some(id),
+                            Err(e) => {
+                                report_window(&outbound, e.to_string()).await;
+                                continue;
+                            }
                         }
-                    },
+                    }
                 };
                 let Some(id) = id else {
-                    report(&outbound, format!("no session {:?}", session.unwrap_or_default()));
+                    report_window(&outbound, format!("no session {:?}", session.unwrap_or_default())).await;
                     continue;
                 };
                 let requested_goal = text.strip_prefix("/goal ").map(str::trim).filter(|s| !s.is_empty());
-                let existing = match session_goal(&*engine.read().await, id) {
+                let goal = session_goal(&*engine.read().await, id);
+                let existing = match goal {
                     Ok(run) => run.filter(|r| !r.status.terminal()),
                     Err(error) => {
-                        report(&outbound, error);
+                        report_window(&outbound, error).await;
                         continue;
                     }
                 };
                 if requested_goal.is_some() || existing.is_some() {
                     if !options.attachments.is_empty() && existing.is_some() {
-                        report(&outbound, "Attachments cannot be added to a running goal.".into());
+                        report_window(&outbound, "Attachments cannot be added to a running goal.".into())
+                            .await;
                         continue;
                     }
                     let (goal_engine, _) = match where_it_belongs(&state, id).await {
                         Ok(Some(theirs)) => theirs,
                         Ok(None) => (engine.clone(), shared.clone()),
                         Err(error) => {
-                            report(&outbound, error);
+                            report_window(&outbound, error).await;
                             continue;
                         }
                     };
@@ -295,6 +311,7 @@ async fn serve(
                     } else {
                         None
                     };
+                    let mut interjected = false;
                     let result = {
                         let rook = goal_engine.read().await;
                         if let Some(run) = existing {
@@ -309,7 +326,7 @@ async fn serve(
                                             text: text.clone(),
                                         },
                                     )?;
-                                    let _ = outbound.send(ChatEvent::Interjected { text: text.clone() });
+                                    interjected = true;
                                 }
                                 if !run.status.runnable() {
                                     managed::control(&rook, &run.id, Action::Resume)
@@ -338,14 +355,18 @@ async fn serve(
                             )
                         }
                     };
+                    if interjected {
+                        let _ = outbound.send(ChatEvent::Interjected { text: text.clone() }).await;
+                    }
                     match result {
                         Ok(run) => match crate::work::join_conversation(&state, &run).await {
                             Ok(live) => {
                                 if let Some(previous) = &promotion {
                                     previous.interjections.say(&text);
-                                    let _ = outbound.send(ChatEvent::Interjected { text: text.clone() });
+                                    let _ =
+                                        outbound.send(ChatEvent::Interjected { text: text.clone() }).await;
                                 }
-                                let _ = outbound.send(live.settings.describe());
+                                let _ = outbound.send(live.settings.describe()).await;
                                 if !previously_watched
                                     .as_ref()
                                     .is_some_and(|previous| Arc::ptr_eq(previous, &live))
@@ -353,22 +374,23 @@ async fn serve(
                                     watching = Some(watch(&live, id, outbound.clone(), watching));
                                 }
                             }
-                            Err(error) => report(&outbound, error),
+                            Err(error) => report_window(&outbound, error).await,
                         },
-                        Err(error) => report(&outbound, error.to_string()),
+                        Err(error) => report_window(&outbound, error.to_string()).await,
                     }
                     continue;
                 }
                 // Typed while that session's turn runs, it goes to the turn:
                 // the window had to wait or cancel, and cancelling loses
                 // everything the turn had done to say one sentence to it.
-                if let Some(live) = state.live.read().await.get(&id).filter(|l| l.running()).cloned() {
+                let current = state.live.read().await.get(&id).filter(|l| l.running()).cloned();
+                if let Some(live) = current {
                     if !options.attachments.is_empty() {
-                        report(&outbound, "Attachments cannot be added to a running turn; wait for it to finish or stop it first.".into());
+                        report_window(&outbound, "Attachments cannot be added to a running turn; wait for it to finish or stop it first.".into()).await;
                         continue;
                     }
                     live.interjections.say(&text);
-                    let _ = outbound.send(ChatEvent::Interjected { text });
+                    let _ = outbound.send(ChatEvent::Interjected { text }).await;
                     watching = Some(watch(&live, id, outbound.clone(), watching));
                     continue;
                 }
@@ -376,7 +398,7 @@ async fn serve(
                 // ran took a restart — and the restart was something a person
                 // had to be told to do.
                 if let Some(said) = state.config_if_changed().await {
-                    let _ = outbound.send(ChatEvent::Text { text: format!("({said})\n") });
+                    let _ = outbound.send(ChatEvent::Text { text: format!("({said})\n") }).await;
                 }
                 // A session is somewhere, and continuing one runs it there
                 // rather than wherever the window happens to be. A turn
@@ -388,7 +410,7 @@ async fn serve(
                     Ok(Some(theirs)) => theirs,
                     Ok(None) => (engine.clone(), shared.clone()),
                     Err(why) => {
-                        report(&outbound, why);
+                        report_window(&outbound, why).await;
                         continue;
                     }
                 };
@@ -456,7 +478,7 @@ async fn attached(state: &Arc<AppState>, watching: &Option<Watching>) -> Option<
 fn watch(
     live: &Arc<Live>,
     session: u128,
-    to_window: mpsc::UnboundedSender<ChatEvent>,
+    to_window: delivery::Sender,
     previous: Option<Watching>,
 ) -> Watching {
     if let Some(previous) = previous {
@@ -465,14 +487,14 @@ fn watch(
     let (mut coming, missed) = live.join();
     let carrying = tokio::spawn(async move {
         for event in missed {
-            if to_window.send(event).is_err() {
+            if to_window.send(event).await.is_err() {
                 return;
             }
         }
         loop {
             match coming.recv().await {
                 Ok(event) => {
-                    if to_window.send(event).is_err() {
+                    if to_window.send(event).await.is_err() {
                         return;
                     }
                 }
@@ -482,7 +504,7 @@ fn watch(
                 // happened.
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
                     let text = format!("\n[{missed} events not shown — this window fell behind]\n");
-                    if to_window.send(ChatEvent::Text { text }).is_err() {
+                    if to_window.send(ChatEvent::Text { text }).await.is_err() {
                         return;
                     }
                 }
@@ -586,32 +608,29 @@ pub(crate) async fn resume_goal(state: &Arc<AppState>, run: &Run) -> Result<Arc<
 /// gone rather than slow.
 ///
 /// A `send` on a socket nobody is reading blocks once the kernel's buffer
-/// fills, and there is no error to notice: the writer waits, the turn goes on
-/// producing deltas into the queue in front of it, and neither ever ends. A
-/// browser tab that has been throttled to a stop looks exactly like this. Half
-/// a minute for one frame is not slow, it is away — and the queue is what makes
-/// this a bound rather than a nicety, because it grows for as long as the writer
-/// is stuck.
+/// fills, and there is no error to notice. The queue is independently bounded
+/// by encoded bytes and frames; this deadline releases a connection whose
+/// reader has gone away without ending the daemon-owned turn.
 const SEND_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Every event, in order, until the socket stops taking them.
 ///
 /// Its own function so the deadline can be tested with a sink that never
 /// completes, rather than by holding a real socket unread for thirty seconds.
-async fn write_frames<S>(mut sink: S, mut queued: mpsc::UnboundedReceiver<ChatEvent>)
+async fn write_frames<S>(mut sink: S, mut queued: delivery::Receiver)
 where
     S: SinkExt<Message> + Unpin,
 {
-    while let Some(event) = queued.recv().await {
-        let Ok(text) = serde_json::to_string(&event) else { continue };
+    while let Some(mut frame) = queued.recv().await {
+        let text = std::mem::take(&mut frame.text);
         // Both endings are one ending: this socket is not taking frames.
-        // Dropping the sink closes the write half, which is what tells the
-        // client — and closes the read half's loop, which stops the turn.
+        // Closing the view leaves the daemon-owned turn running.
         match tokio::time::timeout(SEND_DEADLINE, sink.send(Message::Text(text.into()))).await {
             Ok(Ok(())) => {}
             Ok(Err(_)) | Err(_) => break,
         }
     }
+    let _ = tokio::time::timeout(SEND_DEADLINE, sink.close()).await;
 }
 
 /// What the connection gives a turn: who answers its questions, and what the
@@ -1072,6 +1091,10 @@ fn ended_badly(
     report(outbound, message);
 }
 
+async fn report_window(outbound: &delivery::Sender, message: String) {
+    let _ = outbound.send(ChatEvent::Failed { message }).await;
+}
+
 fn report(outbound: &mpsc::UnboundedSender<ChatEvent>, message: String) {
     let _ = outbound.send(ChatEvent::Failed { message });
 }
@@ -1387,9 +1410,9 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_socket_that_stops_taking_frames_is_let_go_of() {
         let took = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let (outbound, queued) = mpsc::unbounded_channel::<ChatEvent>();
+        let (outbound, queued) = delivery::channel(8, 4096);
         for text in ["one", "two", "three"] {
-            outbound.send(ChatEvent::Text { text: text.into() }).unwrap();
+            outbound.send(ChatEvent::Text { text: text.into() }).await.unwrap();
         }
 
         let writer = tokio::spawn(write_frames(Stalls { took: took.clone() }, queued));
@@ -1400,6 +1423,44 @@ mod tests {
         assert!(done.is_ok(), "the writer let go of the socket");
         assert_eq!(took.load(std::sync::atomic::Ordering::SeqCst), 1, "after the one frame it took");
         drop(outbound);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_but_live_socket_backpressures_its_relay_and_receives_the_ending() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let sent = Arc::new(AtomicUsize::new(0));
+        let received = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = futures_util::sink::unfold(received.clone(), |received, message| async move {
+            // Every send beats SEND_DEADLINE, so that timeout cannot bound
+            // the backlog of a producer that is faster than this consumer.
+            tokio::time::sleep(SEND_DEADLINE / 3).await;
+            received.lock().unwrap().push(message);
+            Ok::<_, std::convert::Infallible>(received)
+        });
+        let (outbound, queued) = delivery::channel(3, 4096);
+        let writer = tokio::spawn(write_frames(Box::pin(sink), queued));
+        let produced = sent.clone();
+        let producer = tokio::spawn(async move {
+            for _ in 0..100 {
+                outbound.send(text(&"x".repeat(1000))).await.unwrap();
+                produced.fetch_add(1, Ordering::SeqCst);
+            }
+            outbound.send(ChatEvent::Cancelled).await.unwrap();
+        });
+        // Yield without advancing paused time: the writer owns one frame,
+        // two can wait, and the relay cannot enqueue the other 97.
+        while sent.load(Ordering::SeqCst) < 3 {
+            tokio::task::yield_now().await;
+        }
+        tokio::task::yield_now().await;
+        assert_eq!(sent.load(Ordering::SeqCst), 3, "the queue limit was actually reached");
+        assert!(!producer.is_finished());
+        producer.await.unwrap();
+        writer.await.unwrap();
+        let received = received.lock().unwrap();
+        assert_eq!(received.len(), 101);
+        assert!(matches!(received.last(), Some(Message::Text(text)) if text.contains("cancelled")));
     }
 
     /// A turn's last word reaches the window that was watching it all along.

@@ -256,6 +256,20 @@ impl Editor {
     }
 
     fn field_help(&self, path: &[String], value: &Value) -> Help {
+        if path.len() >= 3
+            && path[0] == "tui"
+            && path[1] == "keys"
+            && let Some(spec) = crate::keybindings::ACTIONS.iter().find(|spec| spec.id == path[2])
+        {
+            return Help {
+                kind: kind(value).into(),
+                help: format!(
+                    "{}. Missing keeps defaults; an empty list disables. Keys: ctrl/alt/shift/super + key. Terminal support varies. Changes apply when reopening TUI.",
+                    spec.help
+                ),
+                choices: Vec::new(),
+            };
+        }
         let mut normalized = path.to_vec();
         if path == ["sandbox", "mode"] {
             normalized[1] = "stance".into();
@@ -731,6 +745,19 @@ mod tests {
             .unwrap();
         assert!(optional.default.is_null());
         assert_eq!(optional.help.kind, "integer");
+    }
+
+    #[test]
+    fn prompt_actions_have_live_help_and_conflicting_keys_cannot_be_saved() {
+        let (_dir, mut editor) = open("");
+        let actions = editor.entries(&path(&["tui", "keys"])).unwrap();
+        let undo = actions.iter().find(|entry| entry.path.last().unwrap() == "prompt.undo").unwrap();
+        assert!(undo.help.help.contains("does not rewind files"));
+        let key = path(&["tui", "keys", "prompt.undo", "0"]);
+        editor.set(&key, "ctrl+p").unwrap();
+        assert!(editor.save().is_err(), "the default palette binding participates in validation");
+        editor.set(&key, "alt+u").unwrap();
+        editor.save().unwrap();
     }
     #[test]
     fn legacy_approval_keys_keep_their_meaning_and_expose_every_supported_choice() {

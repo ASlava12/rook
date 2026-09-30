@@ -1,4 +1,8 @@
 {
+  "tui": {"kind":"table","help":"Local terminal keyboard actions and bounded prompt undo. Reopen the TUI after changing these settings."},
+  "tui.undo_events": {"kind":"integer","help":"Maximum retained undo and redo edits in the prompt (1..=4096; default 256)."},
+  "tui.undo_bytes": {"kind":"integer","help":"Maximum retained text bytes across prompt undo and redo (4096..=16777216; default 1048576)."},
+  "tui.keys": {"kind":"table","help":"Named global and prompt actions. Enter an action to edit its key list; empty disables, removing an override restores defaults. Reopen TUI to apply."},
   "agent.model": {
     "kind": "string",
     "help": "Default model: a name under models, or provider/model (for example ollama/qwen3:8b)."
@@ -211,6 +215,8 @@
     "kind": "integer",
     "help": "Run prune + gc on daemon start and then on this interval."
   },
+  "server.chat_queue_events": {"kind": "integer", "help": "Queued and in-flight frames per chat connection (1..=4096; default 256). A slow window backpressures its relay, not the running turn."},
+  "server.chat_queue_bytes": {"kind": "integer", "help": "Encoded JSON bytes queued or in flight per chat connection (4096..=33554432; default 4194304). An oversized event disconnects the view without cancelling work."},
   "server.allowed_hosts": {
     "kind": "array",
     "help": "Explicit reverse-proxy authorities (host:port); never inferred from request headers."

@@ -122,6 +122,15 @@ into it. Its `/api/chat` websocket runs a turn and streams it back, including th
 approval round-trip, so the browser is a way to use the agent and not only to
 read what it did.
 
+Each chat socket bounds queued and in-flight JSON by both frame count and encoded
+bytes (`server.chat_queue_events`, `server.chat_queue_bytes`). Byte admission
+counts JSON escaping before allocating the encoded frame. Permits remain held
+until socket delivery finishes; only that window's relay waits for capacity,
+without holding an engine or live-registry lock. An oversized event closes the
+view without truncating an approval or cancelling its daemon-owned turn. This
+queue bound is separate from the live broadcast/backlog and does not yet provide
+snapshot recovery after the relay falls behind.
+
 ## The agent loop
 
 [`AgentLoop::run`](../crates/rook-core/src/agent.rs) owns turn orchestration and

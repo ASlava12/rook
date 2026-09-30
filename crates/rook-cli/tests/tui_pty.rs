@@ -1736,6 +1736,10 @@ if [ -f "$ROOK_HOME/fail" ]; then exit 7; fi
     let screen = pty.screen_showing(100, 30, "updated draft").join("\n");
     assert!(screen.contains("Юникод"), "multiline Unicode must survive:\n{screen}");
     assert!(!screen.contains("▌ updated draft"), "the editor must not submit the draft:\n{screen}");
+    pty.send("\x1a");
+    pty.screen_showing(100, 30, "Привет");
+    pty.send("\x1bz");
+    pty.screen_showing(100, 30, "updated draft");
     let edited_path = std::fs::read_to_string(home.path().join("edited-path")).unwrap();
     assert!(!std::path::Path::new(&edited_path).exists(), "successful drafts are temporary");
     let saved: serde_json::Value =
@@ -1796,6 +1800,38 @@ fn external_editor_picker_without_editors_can_be_cancelled() {
     pty.screen(100, 30);
     pty.send(" here");
     pty.screen_showing(100, 30, "keep this draft here");
+}
+
+#[test]
+fn remapped_prompt_undo_and_palette_help_agree_without_submitting() {
+    let _one = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join("config.toml"), "[tui.keys]\n'prompt.undo'=['ctrl+x']\n").unwrap();
+    let mut pty = Pty::spawn(
+        std::path::Path::new(env!("CARGO_BIN_EXE_rook")),
+        &["--workspace", workspace.path().to_str().unwrap(), "tui", "--alone"],
+        &[("ROOK_HOME", home.path().to_str().unwrap()), ("ROOK_LOG", "error"), ("TERM", "xterm-256color")],
+        100,
+        30,
+    );
+    pty.screen(100, 30);
+    pty.send("\x1b[200~Привет\x1b[201~");
+    pty.screen_showing(100, 30, "Привет");
+    pty.send("\x15\x1asentinel");
+    let screen = pty.screen_showing(100, 30, "sentinel").join("\n");
+    assert!(!screen.contains("Привет"), "the former undo shortcut must be inactive: {screen}");
+    pty.send("\x18\x18");
+    pty.screen_showing(100, 30, "Привет");
+    pty.send("\x1b[200~\nВторая строка\x1b[201~");
+    pty.screen_showing(100, 30, "Вторая строка");
+    pty.send("\x18\x10prompt.undo");
+    let screen = pty.screen_showing(100, 30, "action: prompt.undo").join("\n");
+    assert!(screen.contains("ctrl+x"), "the palette shows the active binding: {screen}");
+    pty.send("\x1b");
+    let screen = pty.screen_showing(100, 30, "Привет").join("\n");
+    assert!(!screen.contains("Вторая строка"), "one undo removes the entire paste: {screen}");
+    assert!(!screen.contains("▌ Привет"), "the draft was never submitted: {screen}");
 }
 
 fn config_editor(home: &std::path::Path) -> Pty {
