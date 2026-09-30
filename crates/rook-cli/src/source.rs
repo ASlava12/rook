@@ -949,6 +949,30 @@ impl Source {
         })
     }
 
+    pub(crate) fn branch_page(
+        &self,
+        session: u128,
+        after: Option<&str>,
+    ) -> Result<rook_core::branches::Page> {
+        let after = after
+            .map(|id| {
+                rook_store::parse_session_id(id)
+                    .map(rook_store::format_session_id)
+                    .ok_or_else(|| anyhow::anyhow!("invalid branch scan cursor"))
+            })
+            .transpose()?;
+        match self {
+            Self::Local(rook) => {
+                Ok(rook_core::branches::page(rook, session, &rook_core::branches::Query { after })?)
+            }
+            Self::Daemon(d) => d.get_bounded(&format!(
+                "/api/sessions/{}/tree{}",
+                rook_store::format_session_id(session),
+                after.map(|after| format!("?after={after}")).unwrap_or_default()
+            )),
+        }
+    }
+
     pub(crate) fn turn_results(&self, session: u128, before: Option<u64>) -> Result<rook_core::turns::Page> {
         match self {
             Self::Local(rook) => {

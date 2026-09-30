@@ -15,6 +15,7 @@ pub const SHELL: &str = "/bin/sh";
 
 pub mod agent;
 pub mod attachments;
+pub mod branches;
 pub mod calls;
 pub mod catalog;
 pub mod changes;

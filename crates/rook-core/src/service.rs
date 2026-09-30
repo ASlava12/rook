@@ -1248,7 +1248,6 @@ impl Rook {
             self.store.get(id)?;
         }
         let forked = self.fork_session(session, to_seq)?;
-        self.set_mark(FORK_AT, forked.id, to_seq)?;
 
         // Before writing over them. The checkpoints hold what the agent found;
         // what is on disk now is whatever happened since, and an edit made by
@@ -1899,12 +1898,16 @@ impl Rook {
     pub fn fork_session(&self, session: u128, at: u64) -> Result<rook_store::SessionMeta> {
         let meta =
             self.store.get_session(session)?.ok_or_else(|| CoreError::Other("no such session".into()))?;
+        // Fix the boundary before copying: a live parent may append between
+        // this read and the store transaction, including beyond a future `at`.
+        let at = at.min(meta.next_seq);
         let mut forked = self.store.fork_session(
             session,
             rook_store::new_session_id(),
             at,
             &format!("{} @{at}", meta.title),
         )?;
+        self.set_mark(FORK_AT, forked.id, at)?;
         crate::results::inherit(self, session, forked.id)?;
         crate::execution::inherit(self, session, forked.id)?;
         // Forking a delegated conversation is a separate branch, not a new

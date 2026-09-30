@@ -710,6 +710,26 @@
     "kind": "integer",
     "help": "Maximum advertised MCP tools in total, including discovery and call helpers. Range 2–64; default 64. Keeps room for built-in tools in model request limits."
   },
+  "branches": {
+    "kind": "object",
+    "help": "Bounded conversation-tree navigation. Browsing or switching branches does not restore workspace files."
+  },
+  "branches.page_entries": {
+    "kind": "integer",
+    "help": "Maximum direct children returned on one tree page. Range 1–256; default 64."
+  },
+  "branches.page_bytes": {
+    "kind": "integer",
+    "help": "Maximum encoded tree page bytes, including ancestors. Range 16384–1048576; default 131072."
+  },
+  "branches.scan_sessions": {
+    "kind": "integer",
+    "help": "Maximum session records examined per child scan. Range 1–4096; default 256. Empty pages can still have a continuation cursor."
+  },
+  "branches.ancestors": {
+    "kind": "integer",
+    "help": "Maximum loaded ancestors in one view. Range 1–64; default 32. Earlier ancestry remains navigable separately."
+  },
   "transcript": {
     "kind": "object",
     "help": "Bounded pages, search scans and quotes from session history. Used by CLI, terminal and browser navigation."

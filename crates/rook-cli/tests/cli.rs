@@ -13,6 +13,62 @@ struct Rook {
 }
 
 #[test]
+fn branch_pages_match_with_and_without_the_daemon_and_fork_boundaries_are_retained() {
+    let rook = Rook::new();
+    rook.write_config("[branches]\npage_entries=1\nscan_sessions=2\n");
+    let id = rook_store::new_session_id();
+    let name = rook_store::format_session_id(id);
+    {
+        let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+        store
+            .create_session(&rook_store::SessionMeta::new(
+                id,
+                "root branch",
+                rook.workspace.path().display().to_string(),
+                1,
+            ))
+            .unwrap();
+        for text in ["first", "second"] {
+            store
+                .append_event(
+                    id,
+                    rook_store::NewEvent::new(
+                        rook_store::EventKind::UserMessage,
+                        rook_store::Kind::Message,
+                        text.as_bytes(),
+                    ),
+                )
+                .unwrap();
+        }
+    }
+    let first = rook.ok(&["session", "fork", &name, "--at", "1"]);
+    let second = rook.ok(&["session", "fork", &name, "--at", "2"]);
+    let first = first.split_whitespace().last().unwrap();
+    let second = second.split_whitespace().last().unwrap();
+    let check = || {
+        let page = rook.json(&["session", "tree", &name]);
+        assert_eq!(page["selected"]["id"], name);
+        assert_eq!(page["children"].as_array().unwrap().len(), 1);
+        assert_eq!(page["children"][0]["id"], first);
+        assert_eq!(page["children"][0]["forked_at"], 1);
+        let next = rook.json(&["session", "tree", &name, "--after", page["next"].as_str().unwrap()]);
+        assert_eq!(next["children"][0]["id"], second);
+        let child = rook.json(&["session", "tree", second]);
+        assert_eq!(child["ancestors"][0]["id"], name);
+        assert_eq!(child["selected"]["forked_at"], 2);
+        (page, next, child)
+    };
+    let local = check();
+    let daemon = Daemon::start(&rook);
+    assert_eq!(local, check());
+    assert!(rook.ok(&["session", "tree", &name]).contains("leave workspace files"));
+    drop(daemon);
+    let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+    assert_eq!(store.get_session(id).unwrap().unwrap().next_seq, 2);
+    assert_eq!(std::fs::read_to_string(rook.workspace.path().join("src/main.rs")).unwrap(), "fn main() {}\n");
+}
+
+#[test]
 fn history_navigation_and_quotes_match_locally_and_with_a_locked_daemon_store() {
     let rook = Rook::new();
     rook.write_config(

@@ -97,6 +97,7 @@ impl Config {
         if !(1..=4096).contains(&self.work.followup_scan_sessions) {
             errors.push("work.followup_scan_sessions: expected 1..=4096".into());
         }
+        errors.extend(self.branches.errors());
         errors.extend(crate::models::source_errors(self));
         let mut names = std::collections::BTreeSet::new();
         for (index, server) in self.mcp.iter().enumerate() {

@@ -9,7 +9,7 @@ Source: Pi `ee602414c703be8da722ec56de7f2399e62581ac`; starting Rook:
 | Bounded live delivery and snapshot recovery | Complete | Queue/replay/input limits, WebSocket backpressure, atomic recovery, current controls, PTY reconnect/goal checks, browser form preservation and full CI passed |
 | Editable steering and follow-up queue | In progress | Core/CLI/API/TUI/browser, durable IDs, goal vs ordinary-turn boundaries, revoke/accept races, restart |
 | Configurable keyboard actions and prompt undo | Complete | Shared registry/config/help, bounded Unicode edit tests, remapped-key and external-editor PTY checks, full CI passed |
-| Branch navigation and optional branch summary | Pending | Existing session/event IDs, bounded tree/history, explicit workspace semantics, attributable summary |
+| Branch navigation and optional branch summary | In progress | Existing session/event IDs, bounded tree/history, explicit workspace semantics, attributable summary |
 | Inline tool cards | Pending | Compact/expanded results, errors/duration/diffs, bounded loading, TUI/browser verification |
 | Context provenance inspector | Pending | Request-specific sources, discovered vs loaded skills, deferred tools, CLI/API/TUI/browser |
 | Local HTML export | Pending | Selected history scope, bounded streaming, escaped content, no publication, cross-frontend access |
@@ -612,3 +612,51 @@ stopped; only those diagnostic processes were stopped. No check was waived.
 Use isolated build targets for simultaneously active Rook worktrees to prevent
 artifact interference. The external shared target is also used by another project;
 do not clean it or stop that project's builds.
+
+## Conversation tree navigation
+
+The first branch block adds lazy navigation over existing session parent links.
+`rook session tree ID` and `GET /api/sessions/ID/tree` expose the same bounded
+ancestor/selected/direct-child page. The TUI has `/tree`, history `v` and
+sessions `b`; the browser has branch panels in Chat and Sessions. Explore, read
+history and continue are distinct actions. A plain REPL prints the tree page.
+See [conversation branches](../conversation-branches.md) for keys and limits.
+
+The tree preserves existing IDs and record formats. Count, encoded-byte, scan
+and ancestry limits apply to each page. Sparse child scans return a cursor even
+when no direct child is encountered; deleting the cursor session does not invalidate
+its position. Missing parents, truncated metadata and earlier ancestors are
+explicit. Cycles encountered in the loaded ancestry are rejected. Delegated tasks are labelled separately.
+Ordinary forks now record their exclusive boundary, fixed before copying so
+a concurrently growing parent cannot change the intended cutoff. Existing
+unmarked forks remain unknown rather than inferring a boundary from a child's
+current length. Browsing and switching do not restore workspace files.
+
+Continuing a TUI branch preserves the text draft and uses the selected node's
+ID directly. Browser switching detaches the old observer and attaches the new
+one, ignoring queued messages and close notifications from the old socket.
+A daemon-owned turn in the departed branch keeps running.
+
+Core checks cover count/byte/depth limits, escaped metadata, sparse scans,
+deleted cursors, absent/cyclic parents, fork boundaries and workspace retention.
+The real CLI produces matching local/daemon pages. A PTY scenario exercises
+paging, ancestors, sibling history and explicit continuation in both local and
+daemon modes, retaining the draft and leaving stored event counts/files intact.
+The Chrome scenario uses an actual scratch daemon and scripted provider; it
+checks Chat/Sessions panels, pagination, history, continuation, mobile wrapping
+and leaving a live turn without cancelling it or receiving its late response
+in the selected branch. A separate browser protocol scenario checks recovery
+forms and stale socket messages. Logs are `/tmp/rook-branches-core3.log`,
+`/tmp/rook-branches-cli.log`, `/tmp/rook-branches-pty.log`,
+`/tmp/rook-branches-browser3.log` and `/tmp/rook-branches-recovery2.log`.
+
+The branch capability remains **in progress**: optional attributable summaries,
+branching/editing from a selected historical message (including attachment
+semantics), session naming and event bookmarks still need implementation and
+verification. Other pending capabilities in the table remain in scope.
+
+The final `CARGO_TARGET_DIR=/tmp/rook-pi-ci-target cargo xtask ci` and
+`cargo xtask compaction` completed with exit status 0. CI reported 597.9 seconds;
+logs are `/tmp/rook-branches-final-ci2.log` and
+`/tmp/rook-branches-compaction.log`. The previous gate was deliberately stopped
+during review to fix the fork cutoff race, and is not counted as a pass.

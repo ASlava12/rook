@@ -6,6 +6,10 @@ full stored outcome, and `h` returns to history. Esc closes without changing the
 draft. See [recorded turn results](durable-work.md#recorded-turn-results) for
 accounting scope and pagination limits.
 
+`/tree [session-id]` opens [conversation branches](conversation-branches.md).
+The same view is `v` in history or `b` in the sessions pane. Enter explores a
+node, `h` reads its history, and `c` continues it while preserving the draft.
+
 Open `rook config edit`, enter `tui`, then `keys`. Each named action has its own
 description and list of shortcuts. Missing actions keep their defaults; an empty
 list disables a shortcut. Conflicting shortcuts, unknown action names and invalid

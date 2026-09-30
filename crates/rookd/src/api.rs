@@ -33,6 +33,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/sessions/{id}/diagnostics", get(diagnostics))
         .route("/api/sessions/{id}/transcript", get(transcript))
         .route("/api/sessions/{id}/turns", get(turns))
+        .route("/api/sessions/{id}/tree", get(branches))
         .route("/api/sessions/{id}/history", get(history_page))
         .route("/api/sessions/{id}/history/search", get(history_search))
         .route("/api/sessions/{id}/history/{seq}", get(history_entry))
@@ -357,6 +358,14 @@ async fn turns(
 ) -> ApiResult<rook_core::turns::Page> {
     let session = session_id(&id)?;
     history_read(s, move |r| rook_core::turns::page(r, session, &q)).await
+}
+async fn branches(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+    Query(q): Query<rook_core::branches::Query>,
+) -> ApiResult<rook_core::branches::Page> {
+    let session = session_id(&id)?;
+    history_read(s, move |r| rook_core::branches::page(r, session, &q)).await
 }
 #[derive(Deserialize)]
 struct HistorySearch {

@@ -143,9 +143,13 @@ impl Overlay {
                 ("d ", "forget  "),
                 ("Esc ", "back  "),
             ],
-            Overlay::Sessions => {
-                &[("j/k ", "move  "), ("⏎ ", "continue  "), ("f ", "history  "), ("r ", "reload  ")]
-            }
+            Overlay::Sessions => &[
+                ("j/k ", "move  "),
+                ("⏎ ", "continue  "),
+                ("f ", "history  "),
+                ("b ", "branches  "),
+                ("r ", "reload  "),
+            ],
             Overlay::Queue => &[
                 ("e ", "edit  "),
                 ("d ", "withdraw  "),
@@ -162,6 +166,7 @@ impl Overlay {
                 ("Esc ", "close"),
             ],
             Overlay::History => &[
+                ("v ", "branches  "),
                 ("t ", "turn results  "),
                 ("/ ", "find  "),
                 ("g ", "jump  "),
@@ -1639,6 +1644,12 @@ impl App {
                 self.status = "Quote inserted in draft; Enter sends".into();
                 self.chat.push("stat", "Quote inserted in draft; Enter sends");
             }
+            if let Some(branch) = self.history.take_session()
+                && self.overlay == Some(Overlay::History)
+                && let Some(id) = rook_store::parse_session_id(&branch.id)
+            {
+                self.continue_known(id, branch.title, branch.next_seq);
+            }
             self.still_running();
             // Poll rather than block: a streaming turn has to keep redrawing
             // even while nobody is typing.
@@ -2188,6 +2199,12 @@ impl App {
         if overlay == Overlay::Sessions && key.code == KeyCode::Char('f') {
             let session = self.session_state.selected().and_then(|i| self.sessions.get(i)).map(|s| s.meta.id);
             self.history.open(session);
+            self.overlay = Some(Overlay::History);
+            return;
+        }
+        if overlay == Overlay::Sessions && key.code == KeyCode::Char('b') {
+            let session = self.session_state.selected().and_then(|i| self.sessions.get(i)).map(|s| s.meta.id);
+            self.history.open_tree(session);
             self.overlay = Some(Overlay::History);
             return;
         }
@@ -2743,6 +2760,19 @@ impl App {
             self.chat.push("stat", &said);
             return;
         }
+        if name == "tree" {
+            let session = if rest.trim().is_empty() {
+                self.chat.session
+            } else {
+                match rook_store::parse_session_id(rest.trim()) {
+                    Some(id) => Some(id),
+                    None => return self.chat.push("err", "use /tree [session-id]"),
+                }
+            };
+            self.overlay = Some(Overlay::History);
+            self.history.open_tree(session);
+            return;
+        }
         if name == "turns" {
             let before = if rest.trim().is_empty() {
                 None
@@ -2830,7 +2860,7 @@ impl App {
         // <id>`, `/new` — takes the pane with it. Continuing a conversation in
         // a window showing somebody else's is continuing it blind.
         if was.is_some_and(|before| before != session) {
-            self.recall_conversation(session);
+            self.recall_conversation(session, None);
         }
         self.chat.session = Some(session);
         match said {
@@ -2851,15 +2881,18 @@ impl App {
     /// command cannot: switching is this window's own state and the transcript
     /// is a routed read, so neither needs the store to be here.
     fn continue_selected(&mut self) {
+        let Some(session) = self.session_state.selected().and_then(|at| self.sessions.get(at)) else {
+            return;
+        };
+        self.continue_known(session.meta.id, session.meta.title.clone(), session.meta.next_seq);
+    }
+
+    fn continue_known(&mut self, id: u128, title: String, next_seq: u64) {
         if self.chat.busy && self.source.here().is_some() {
             self.chat.push("stat", "  a turn is running here — stop it or let it finish first");
             self.overlay = None;
             return;
         }
-        let Some(session) = self.session_state.selected().and_then(|at| self.sessions.get(at)) else {
-            return;
-        };
-        let (id, title) = (session.meta.id, session.meta.title.clone());
         self.chat.busy = false;
         self.chat.pending = None;
         self.chat.asking = None;
@@ -2867,7 +2900,7 @@ impl App {
         self.chat.spent = None;
         self.chat.joining = self.source.daemon_base().map(|_| id);
         self.chat.session = Some(id);
-        self.recall_conversation(id);
+        self.recall_conversation(id, Some(next_seq));
         self.chat.push(
             "stat",
             &format!(
@@ -2902,16 +2935,13 @@ impl App {
     /// The tail because that is where a conversation is picked up, and bounded
     /// for the reason the scrollback is: the store holds all of it and the
     /// Sessions tab reads it back.
-    fn recall_conversation(&mut self, session: u128) {
+    fn recall_conversation(&mut self, session: u128, next_seq: Option<u64>) {
         const RECALLED: usize = 60;
         self.chat.log.clear();
         self.chat.receipt_lines.clear();
         self.chat.scroll = 0;
-        let events = self
-            .sessions
-            .iter()
-            .find(|s| s.meta.id == session)
-            .map(|s| s.meta.event_count)
+        let events = next_seq
+            .or_else(|| self.sessions.iter().find(|s| s.meta.id == session).map(|s| s.meta.next_seq))
             .unwrap_or_default();
         let from = events.saturating_sub(RECALLED as u64);
         for entry in self.source.transcript(session, from, RECALLED, 4_000).unwrap_or_default() {

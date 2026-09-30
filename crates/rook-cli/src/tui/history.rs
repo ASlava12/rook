@@ -9,6 +9,8 @@ pub(super) struct History {
     pending: bool,
     page: Option<Page>,
     turns: Option<rook_core::turns::Page>,
+    tree: Option<rook_core::branches::Page>,
+    switch: Option<rook_core::branches::Node>,
     hits: Option<Matches>,
     entry: Option<EntryPage>,
     at: usize,
@@ -22,6 +24,7 @@ pub(super) struct History {
     receive: Receiver<(u64, Result<Update>)>,
 }
 enum Command {
+    Tree(u128, Option<String>),
     Turns(u128, Option<u64>),
     Page(u128, PageRequest),
     Search(u128, String, Cursor),
@@ -29,8 +32,9 @@ enum Command {
     Quote(u128, u64, u64),
 }
 enum Update {
+    Tree(rook_core::branches::Page),
     Turns(rook_core::turns::Page),
-    Page(Page),
+    Page(u128, Page),
     Search(Matches),
     Entry(EntryPage),
     Quote(String),
@@ -38,8 +42,9 @@ enum Update {
 impl Command {
     fn read(self, source: &crate::source::Source) -> Result<Update> {
         Ok(match self {
+            Self::Tree(session, after) => Update::Tree(source.branch_page(session, after.as_deref())?),
             Self::Turns(session, before) => Update::Turns(source.turn_results(session, before)?),
-            Self::Page(session, q) => Update::Page(source.transcript_page(session, &q)?),
+            Self::Page(session, q) => Update::Page(session, source.transcript_page(session, &q)?),
             Self::Search(session, q, cursor) => {
                 Update::Search(source.transcript_search(session, &q, cursor)?)
             }
@@ -76,6 +81,8 @@ impl History {
             pending: false,
             page: None,
             turns: None,
+            tree: None,
+            switch: None,
             hits: None,
             entry: None,
             at: 0,
@@ -90,17 +97,22 @@ impl History {
         }
     }
     pub(super) fn open(&mut self, session: Option<u128>) {
-        self.open_mode(session, false, None);
+        self.open_mode(session, |id| Command::Page(id, PageRequest::default()));
     }
     pub(super) fn open_turns(&mut self, session: Option<u128>, before: Option<u64>) {
-        self.open_mode(session, true, before);
+        self.open_mode(session, |id| Command::Turns(id, before));
     }
-    fn open_mode(&mut self, session: Option<u128>, turns: bool, before: Option<u64>) {
+    pub(super) fn open_tree(&mut self, session: Option<u128>) {
+        self.open_mode(session, |id| Command::Tree(id, None));
+    }
+    fn open_mode(&mut self, session: Option<u128>, command: impl FnOnce(u128) -> Command) {
         self.epoch = self.epoch.wrapping_add(1);
         self.session = session;
         self.pending = false;
         self.page = None;
         self.turns = None;
+        self.tree = None;
+        self.switch = None;
         self.hits = None;
         self.entry = None;
         self.at = 0;
@@ -108,11 +120,7 @@ impl History {
         self.quote = None;
         self.editing = None;
         if let Some(session) = session {
-            self.ask(if turns {
-                Command::Turns(session, before)
-            } else {
-                Command::Page(session, PageRequest::default())
-            });
+            self.ask(command(session));
         } else {
             self.note = "This conversation has no saved session yet.".into();
         }
@@ -139,7 +147,19 @@ impl History {
             self.pending = false;
             self.note.clear();
             match update {
+                Ok(Update::Tree(page)) => {
+                    self.session = rook_store::parse_session_id(&page.selected.id);
+                    self.at = page.ancestors.len();
+                    self.tree = Some(page);
+                    self.turns = None;
+                    self.page = None;
+                    self.hits = None;
+                    self.entry = None;
+                    self.scroll = 0;
+                    self.note = "Enter explores · c continues selected · h reads history · n scans children · u earlier ancestors".into();
+                }
                 Ok(Update::Turns(page)) => {
+                    self.tree = None;
                     self.turns = Some(page);
                     self.page = None;
                     self.hits = None;
@@ -150,7 +170,9 @@ impl History {
                         "t refreshes results · n scans older · h opens history · Enter reads full result"
                             .into();
                 }
-                Ok(Update::Page(page)) => {
+                Ok(Update::Page(session, page)) => {
+                    self.session = Some(session);
+                    self.tree = None;
                     self.turns = None;
                     self.at = page.items.len().saturating_sub(1);
                     self.page = Some(page);
@@ -159,6 +181,7 @@ impl History {
                     self.scroll = 0;
                 }
                 Ok(Update::Search(hits)) => {
+                    self.tree = None;
                     self.turns = None;
                     self.note = if hits.next.is_some() {
                         "Search page complete; n continues the scan."
@@ -182,6 +205,13 @@ impl History {
     }
     pub(super) fn take_quote(&mut self) -> Option<String> {
         self.quote.take()
+    }
+    pub(super) fn take_session(&mut self) -> Option<rook_core::branches::Node> {
+        self.switch.take()
+    }
+    fn branch(&self) -> Option<&rook_core::branches::Node> {
+        let page = self.tree.as_ref()?;
+        page.ancestors.iter().chain(std::iter::once(&page.selected)).chain(page.children.iter()).nth(self.at)
     }
     fn target(&self) -> Option<(u64, u64)> {
         if let Some(entry) = &self.entry {
@@ -251,12 +281,61 @@ impl History {
             self.epoch = self.epoch.wrapping_add(1);
             self.pending = false;
             self.quote = None;
+            self.switch = None;
             return true;
         }
         let Some(session) = self.session else {
             return false;
         };
+        if self.tree.is_some() {
+            match key.code {
+                KeyCode::Enter => {
+                    if let Some(id) = self.branch().and_then(|n| rook_store::parse_session_id(&n.id)) {
+                        self.ask(Command::Tree(id, None));
+                    }
+                }
+                KeyCode::Char('c') if !self.pending => {
+                    self.switch = self.branch().cloned();
+                }
+                KeyCode::Char('h') => {
+                    if let Some(id) = self.branch().and_then(|n| rook_store::parse_session_id(&n.id)) {
+                        self.ask(Command::Page(id, PageRequest::default()));
+                    }
+                }
+                KeyCode::Char('n') => {
+                    if let Some(after) = self.tree.as_ref().and_then(|p| p.next.clone()) {
+                        self.ask(Command::Tree(session, Some(after)));
+                    }
+                }
+                KeyCode::Char('u') => {
+                    if let Some(id) = self
+                        .tree
+                        .as_ref()
+                        .and_then(|p| p.earlier_ancestor.as_deref())
+                        .and_then(rook_store::parse_session_id)
+                    {
+                        self.ask(Command::Tree(id, None));
+                    }
+                }
+                KeyCode::Char('r') => {
+                    self.ask(Command::Tree(session, None));
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if let Some(p) = &self.tree {
+                        self.at = self.at.saturating_add(1).min(p.ancestors.len() + p.children.len());
+                    }
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.at = self.at.saturating_sub(1);
+                }
+                _ => {}
+            }
+            return false;
+        }
         match key.code {
+            KeyCode::Char('v') => {
+                self.ask(Command::Tree(session, None));
+            }
             KeyCode::Char('/') => {
                 self.editing = Some(false);
                 self.input.set(&self.needle);
@@ -346,6 +425,71 @@ impl History {
         false
     }
     pub(super) fn draw(&self, f: &mut Frame, area: Rect) {
+        if let Some(page) = &self.tree {
+            let [heading, list, detail, help] = Layout::vertical([
+                Constraint::Length(3),
+                Constraint::Min(3),
+                Constraint::Length(6),
+                Constraint::Length(2),
+            ])
+            .areas(area);
+            f.render_widget(
+                Paragraph::new(
+                    "Explore a conversation branch. Switching leaves workspace files as they are.",
+                )
+                .wrap(Wrap { trim: false })
+                .block(bordered("conversation tree")),
+                heading,
+            );
+            let rows = page
+                .ancestors
+                .iter()
+                .enumerate()
+                .chain(std::iter::once((page.ancestors.len(), &page.selected)))
+                .chain(page.children.iter().map(|n| (page.ancestors.len() + 1, n)))
+                .map(|(depth, n)| {
+                    ListItem::new(format!(
+                        "{}{} {}",
+                        "  ".repeat(depth.min(8)),
+                        if n.id == page.selected.id { ">" } else { "└" },
+                        rook_core::branches::label(n)
+                    ))
+                })
+                .collect::<Vec<_>>();
+            let mut selected = ListState::default();
+            selected.select(Some(self.at));
+            f.render_stateful_widget(
+                List::new(rows)
+                    .block(bordered("ancestors → selected → children"))
+                    .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
+                list,
+                &mut selected,
+            );
+            let text = self
+                .branch()
+                .map(|n| {
+                    format!(
+                        "{}\n{}{}\nNext event #{}{}{}",
+                        n.id,
+                        n.workspace,
+                        if n.workspace_truncated { "…" } else { "" },
+                        n.next_seq,
+                        page.missing_parent
+                            .as_ref()
+                            .map(|id| format!("\nParent unavailable: {id}"))
+                            .unwrap_or_default(),
+                        if page.next.is_some() {
+                            "\nn scans more children; this is a bounded scan page."
+                        } else {
+                            ""
+                        }
+                    )
+                })
+                .unwrap_or_default();
+            f.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }), detail);
+            f.render_widget(Paragraph::new(self.note.as_str()).wrap(Wrap { trim: false }), help);
+            return;
+        }
         let [top, body, note] = Layout::vertical([
             Constraint::Length(if self.turns.is_some() { 5 } else { 3 }),
             Constraint::Min(3),

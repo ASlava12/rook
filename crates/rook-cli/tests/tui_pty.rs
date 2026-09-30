@@ -252,6 +252,100 @@ fn tui(home: &std::path::Path, workspace: &std::path::Path) -> Pty {
 }
 
 #[test]
+fn branch_navigation_pages_reads_and_continues_without_submitting_the_draft_or_restoring_files() {
+    let _one = one_at_a_time();
+    for remote in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("config.toml"), "[branches]\npage_entries=1\n").unwrap();
+        let file = workspace.path().join("untouched.txt");
+        std::fs::write(&file, "keep these workspace bytes").unwrap();
+        {
+            let store = rook_store::Store::open(home.path().join("store")).unwrap();
+            for (id, parent, title, text) in [
+                (1, None, "branch root", "ROOT_HISTORY"),
+                (2, Some(1), "first branch", "FIRST_HISTORY"),
+                (3, Some(1), "second branch", "SECOND_HISTORY"),
+            ] {
+                let mut meta =
+                    rook_store::SessionMeta::new(id, title, workspace.path().display().to_string(), 1);
+                meta.parent = parent;
+                store.create_session(&meta).unwrap();
+                store
+                    .append_event(
+                        id,
+                        rook_store::NewEvent::new(
+                            rook_store::EventKind::UserMessage,
+                            rook_store::Kind::Message,
+                            text.as_bytes(),
+                        ),
+                    )
+                    .unwrap();
+            }
+        }
+        let daemon = remote.then(|| Daemon::start(home.path(), workspace.path()));
+        let mut pty = if remote {
+            Pty::spawn(
+                std::path::Path::new(env!("CARGO_BIN_EXE_rook")),
+                &["--workspace", workspace.path().to_str().unwrap(), "tui"],
+                &[
+                    ("ROOK_HOME", home.path().to_str().unwrap()),
+                    ("ROOK_LOG", "error"),
+                    ("TERM", "xterm-256color"),
+                ],
+                100,
+                30,
+            )
+        } else {
+            tui(home.path(), workspace.path())
+        };
+        pty.screen(100, 30);
+        pty.send(&format!("/tree {}\r", rook_store::format_session_id(1)));
+        let first = pty.screen_showing(100, 30, "first branch").join("\n");
+        assert!(!first.contains("second branch"), "one child must fill the configured page: {first}");
+        assert!(first.contains("boundary unknown"), "legacy branches must not invent a boundary: {first}");
+        pty.send("n");
+        pty.screen_showing(100, 30, "second branch");
+        pty.send("jc");
+        pty.screen_showing(100, 30, "SECOND_HISTORY");
+        pty.send("DRAFT_BRANCH_SWITCH");
+        pty.screen_showing(100, 30, "› DRAFT_BRANCH_SWITCH");
+        pty.send("\u{6}"); // Ctrl-f opens history of the continued child.
+        pty.screen_showing(100, 30, "history ·");
+        pty.send("v");
+        pty.screen_showing(100, 30, "conversation tree");
+        pty.send("k\r"); // Explore the parent without continuing it.
+        pty.screen_showing(100, 30, "first branch");
+        pty.send("jh"); // Read the sibling without switching the conversation.
+        pty.screen_showing(100, 30, "FIRST_HISTORY");
+        pty.send("\u{1b}");
+        let unchanged = pty.screen_showing(100, 30, "› DRAFT_BRANCH_SWITCH").join("\n");
+        assert!(
+            unchanged.contains("SECOND_HISTORY"),
+            "reading history must leave the active conversation alone: {unchanged}"
+        );
+        pty.send("\u{6}");
+        pty.screen_showing(100, 30, "history ·");
+        pty.send("v");
+        pty.screen_showing(100, 30, "conversation tree");
+        pty.send("kc"); // Explicitly continue the parent, with the draft intact.
+        let continued = pty.screen_showing(100, 30, "ROOT_HISTORY").join("\n");
+        assert!(continued.contains("› DRAFT_BRANCH_SWITCH"), "switching keeps the draft: {continued}");
+        drop(pty);
+        drop(daemon);
+        let store = rook_store::Store::open(home.path().join("store")).unwrap();
+        for id in 1..=3 {
+            assert_eq!(
+                store.get_session(id).unwrap().unwrap().next_seq,
+                1,
+                "browsing and switching must not submit a turn"
+            );
+        }
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "keep these workspace bytes");
+    }
+}
+
+#[test]
 fn the_tui_starts_on_the_conversation() {
     let _one = one_at_a_time();
     let home = tempfile::tempdir().unwrap();

@@ -2,6 +2,7 @@
 // a turn that can be stopped, and the agent's questions answered in place.
 import { $, el, api, ago, md, state, nav, notify, askToNotify } from './lib.js';
 import { historyPanel } from './history.js';
+import { branchPanel } from './branches.js';
 import { mcpPanel } from './mcp.js';
 import { queuePanel, takeRestored } from './queue.js';
 import { pendingSubmission, submissionError, submitSteering } from './submission.js';
@@ -123,7 +124,9 @@ function done() {
 export function connect() {
   if (socket && socket.readyState <= 1) return socket;
   socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/chat?live_snapshots=true`);
+  const connection = socket;
   socket.onmessage = (event) => {
+    if (socket !== connection) return;
     const e = JSON.parse(event.data);
     switch (e.type) {
       case 'inputs': {
@@ -259,9 +262,9 @@ export function connect() {
   // opened again. Asking is how it finds out; before the turn outlived the
   // socket there was nothing to ask about.
   socket.addEventListener('open', () => {
-    if (state.chat.session) socket.send(JSON.stringify({ type: 'attach', session: state.chat.session }));
+    if (socket === connection && state.chat.session) connection.send(JSON.stringify({ type: 'attach', session: state.chat.session }));
   }, { once: true });
-  socket.onclose = () => { say('err', 'disconnected'); done(); };
+  socket.onclose = () => { if (socket === connection) { say('err', 'disconnected'); done(); } };
   return socket;
 }
 
@@ -414,6 +417,12 @@ function receiveQueueDraft() {
 
 function renderPicker() {
   receiveQueueDraft();
+  const branches = $('#branch-controls');
+  if (branches && branches.dataset.session !== (state.chat.session || '')) {
+    branches.dataset.session = state.chat.session || '';
+    branches.querySelector('section')?.remove();
+    if (branches.open) branches.append(branchPanel(state.chat.session, continueIn, quoteIntoDraft));
+  }
   const queue = $('#queue-controls');
   if (queue && queue.dataset.session !== (state.chat.session || '')) {
     queue.dataset.session = state.chat.session || '';
@@ -438,7 +447,7 @@ function renderPicker() {
     options.push(el('option', { value: current, selected: true }, `session ${current}`));
   }
   box.replaceChildren(el('label', {}, 'session ',
-    el('select', { onchange: (e) => resume(e.target.value || null) }, options)));
+    el('select', { onchange: (e) => continueIn(e.target.value || null) }, options)));
 }
 
 // Read back what the session already holds, so a resumed conversation is
@@ -668,6 +677,11 @@ export async function renderChat() {
     if (session && !history.querySelector('section')) history.append(historyPanel(session, text => quoteIntoDraft(session, text)));
   });
   const mcp = el('details', { id: 'mcp-controls' }, el('summary', {}, 'MCP connections'));
+  const branches = el('details', { id: 'branch-controls' }, el('summary', {}, 'Conversation branches'));
+  branches.addEventListener('toggle', () => {
+    branches.querySelector('section')?.remove();
+    if (branches.open) branches.append(branchPanel(state.chat.session, continueIn, quoteIntoDraft));
+  });
   mcp.addEventListener('toggle', () => {
     mcp.querySelector('section')?.remove();
     if (mcp.open) mcp.append(mcpPanel(state.chat.session));
@@ -680,7 +694,7 @@ export async function renderChat() {
   $('#view').replaceChildren(el('div', { class: 'card' },
     el('div', { class: 'row', id: 'picker' }),
     el('div', { class: 'row', id: 'settings' }),
-    stream, history, mcp, queue, outputSettings, form, naming));
+    stream, history, branches, mcp, queue, outputSettings, form, naming));
   renderPicker();
   renderSettings();
   connect();
@@ -691,6 +705,15 @@ export async function renderChat() {
 
 // From another tab: continue this session in the chat.
 export function continueIn(session) {
+  // Detach this observer before choosing another conversation. A queued frame
+  // from the old socket must not change the selected session or its controls.
+  const previous = socket;
+  socket = null;
+  previous?.close();
+  state.chat.draft = $('#chat-input')?.value ?? state.chat.draft ?? '';
+  done();
+  callStatus = null;
+  state.chat.spent = null; state.chat.context = null; state.chat.modelRequest = null;
   state.chat.session = session;
   nav.go('chat');
 }

@@ -77,6 +77,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("followup", "<text>", "queue a new turn after the current turn or goal finishes"),
     ("queue", "", "inspect pending messages; the TUI opens an editable queue"),
     ("turns", "[before]", "recorded turn results and cumulative token usage"),
+    ("tree", "[session-id]", "browse conversation branches; switching leaves files unchanged"),
     ("context", "[window]", "what this conversation costs, and of what"),
     ("skills", "[name]", "skills that apply here, or one skill's body"),
     ("session", "[id|last]", "this one's totals, or continue another"),
@@ -355,8 +356,19 @@ async fn through_the_daemon(
                         eprintln!("start or resume a session first");
                     }
                 }
-                "queue" | "turns" => {
-                    if let Some(session) = session.as_deref() {
+                "queue" | "turns" | "tree" => {
+                    let selected = if name == "tree" && !rest.trim().is_empty() {
+                        match rook_store::parse_session_id(rest.trim()) {
+                            Some(id) => Some(rook_store::format_session_id(id)),
+                            None => {
+                                eprintln!("use /tree [session-id]");
+                                continue;
+                            }
+                        }
+                    } else {
+                        session.clone()
+                    };
+                    if let Some(session) = selected.as_deref() {
                         let cursor = if name == "turns" && !rest.trim().is_empty() {
                             match rest.trim().parse::<u64>() {
                                 Ok(before) => format!("?before={before}"),
@@ -385,7 +397,9 @@ async fn through_the_daemon(
                             );
                             bytes.extend_from_slice(&chunk);
                         }
-                        if name == "turns" {
+                        if name == "tree" {
+                            println!("{}", rook_core::branches::describe(&serde_json::from_slice(&bytes)?));
+                        } else if name == "turns" {
                             println!(
                                 "{}",
                                 crate::commands::sessions::describe_turns(&serde_json::from_slice(&bytes)?)
@@ -731,6 +745,18 @@ pub async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command
                 },
             )?;
             say!("{}", crate::commands::queue::describe(&serde_json::to_value(entry)?)?);
+        }
+        "tree" => {
+            let id = if rest.trim().is_empty() {
+                *session
+            } else {
+                rook_store::parse_session_id(rest.trim())
+                    .ok_or_else(|| anyhow::anyhow!("use /tree [session-id]"))?
+            };
+            say!(
+                "{}",
+                rook_core::branches::describe(&rook_core::branches::page(rook, id, &Default::default())?)
+            );
         }
         "turns" => {
             let before = if rest.trim().is_empty() { None } else { Some(rest.trim().parse::<u64>()?) };

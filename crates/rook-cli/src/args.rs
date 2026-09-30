@@ -427,6 +427,12 @@ pub(crate) enum StoreCmd {
 
 #[derive(Subcommand)]
 pub(crate) enum SessionCmd {
+    /// Inspect ancestors and direct conversation branches without restoring files.
+    Tree {
+        id: String,
+        #[arg(long)]
+        after: Option<String>,
+    },
     /// Recorded turn results and cumulative token usage; newest page first.
     Turns {
         id: String,

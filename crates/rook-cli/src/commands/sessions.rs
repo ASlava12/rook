@@ -43,6 +43,14 @@ pub(crate) fn diagnostic_arguments(arguments: &str) -> Result<(bool, std::path::
 }
 
 pub(crate) fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, json: bool) -> Result<()> {
+    if let SessionCmd::Tree { id, after } = &cmd {
+        let page = source.branch_page(source.session_named(id, workspace)?, after.as_deref())?;
+        println!(
+            "{}",
+            if json { serde_json::to_string_pretty(&page)? } else { rook_core::branches::describe(&page) }
+        );
+        return Ok(());
+    }
     if let SessionCmd::Turns { id, before } = &cmd {
         let page = source.turn_results(source.session_named(id, workspace)?, *before)?;
         if json {
@@ -190,7 +198,8 @@ pub(crate) fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, js
         return show_rewind(&source.rewind(session, *to, !keep_files)?, *keep_files, json);
     }
     match cmd {
-        SessionCmd::Turns { .. }
+        SessionCmd::Tree { .. }
+        | SessionCmd::Turns { .. }
         | SessionCmd::Queue { .. }
         | SessionCmd::History { .. }
         | SessionCmd::Find { .. }

@@ -3,6 +3,7 @@
 import { $, el, api, ago, state } from './lib.js';
 import { continueIn, quoteIntoDraft } from './chat.js';
 import { historyPanel } from './history.js';
+import { branchPanel } from './branches.js';
 
 let follow = 0;
 
@@ -109,6 +110,12 @@ export async function renderSessions() {
       right.append(el('p', { class: 'warn' }, 'the workspace was too large to walk, so more may have been written'));
     }
     const session = state.session;
+    const branches = el('details', {}, el('summary', {}, 'Conversation branches'));
+    branches.addEventListener('toggle', () => {
+      branches.querySelector('section')?.remove();
+      if (branches.open) branches.append(branchPanel(session, continueIn, quoteIntoDraft));
+    });
+    right.append(branches);
     right.append(historyPanel(session, text => quoteIntoDraft(session, text), rewindTo));
   } else {
     right.append(el('p', { class: 'empty' }, 'no sessions yet — run `rook run "…"`'));
