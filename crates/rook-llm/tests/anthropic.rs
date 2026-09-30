@@ -70,6 +70,29 @@ fn provider(url: String) -> Anthropic {
 
 const DONE: &str = r#"{"id":"msg_1","model":"claude-opus-5","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":9,"output_tokens":2}}"#;
 
+#[tokio::test]
+async fn foreign_provider_state_is_omitted_while_native_signed_blocks_survive() {
+    let (url, seen) = serve("200 OK", "application/json", DONE).await;
+    let signed = serde_json::json!({"type":"thinking","thinking":"checked","signature":"native-signature"});
+    let redacted = serde_json::json!({"type":"redacted_thinking","data":"native-opaque"});
+    let mut assistant = Message::assistant("previous answer");
+    assistant.reasoning = vec![
+        serde_json::json!({"rook_responses_output":[{"type":"reasoning","encrypted_content":"foreign-opaque"}]}),
+        signed.clone(),
+        redacted.clone(),
+    ];
+    provider(url)
+        .complete(Request::new(vec![Message::user("hi"), assistant, Message::user("continue")]))
+        .await
+        .unwrap();
+    let body = seen.lock().unwrap().clone().unwrap();
+    assert_eq!(body["messages"][1]["content"][0], signed);
+    assert_eq!(body["messages"][1]["content"][1], redacted);
+    assert_eq!(body["messages"][1]["content"][2]["text"], "previous answer");
+    assert!(!body.to_string().contains("foreign-opaque"));
+    assert!(!body.to_string().contains("rook_responses_output"));
+}
+
 /// The hour is the better deal exactly when a conversation outlives five
 /// minutes, and it is not the default because a scripted single turn never
 /// reads the cache it wrote.
@@ -215,6 +238,7 @@ async fn a_stream_assembles_text_thinking_and_a_tool_call() {
     let mut done = None;
     while let Some(delta) = stream.next().await {
         match delta.unwrap() {
+            Delta::Effort(_) => panic!("no retry wrapper in this direct dialect test"),
             Delta::Text(t) => text.push_str(&t),
             Delta::Reasoning(t) => thinking.push_str(&t),
             Delta::ToolCall(c) => calls.push(c),
@@ -601,4 +625,32 @@ async fn inline_images_use_base64_sources_and_cache_follows_the_image() {
     );
     assert_eq!(blocks[1]["text"], "inspect");
     assert_eq!(blocks[1]["cache_control"]["type"], "ephemeral");
+}
+
+#[tokio::test]
+async fn tool_images_stay_inside_results_and_parallel_replies_stay_together() {
+    let (url, seen) = serve("200 OK", "application/json", DONE).await;
+    let mut calls = Message::assistant("");
+    calls.tool_calls = vec![
+        rook_llm::ToolCall { id: "one".into(), name: "screenshot".into(), arguments: serde_json::json!({}) },
+        rook_llm::ToolCall { id: "two".into(), name: "status".into(), arguments: serde_json::json!({}) },
+    ];
+    let mut image = Message::tool_result("one", "a screenshot");
+    image.images.push(rook_llm::Image {
+        mime_type: "image/png".into(),
+        data: "aW1hZ2U=".into(),
+        width: 1,
+        height: 1,
+    });
+    let request = Request::new(vec![calls, image, Message::tool_result("two", "ready")]);
+    provider(url).complete(request).await.unwrap();
+    let body = seen.lock().unwrap().clone().unwrap();
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 2, "{body}");
+    let results = messages[1]["content"].as_array().unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0]["tool_use_id"], "one");
+    assert_eq!(results[1]["tool_use_id"], "two");
+    assert_eq!(results[0]["content"][1]["source"]["data"], "aW1hZ2U=");
+    assert_eq!(results[1]["content"], "ready");
 }

@@ -346,3 +346,12 @@ pub fn config_options(mode: rook_tools::policy::Stance, effort: rook_llm::Effort
         },
     ])
 }
+
+/// ACP reports the current window, not all tokens billed across a turn. Cost
+/// is omitted because a token count alone cannot establish a monetary amount.
+pub fn usage_update(session: &str, used: usize, size: usize) -> serde_json::Value {
+    serde_json::json!({
+        "sessionId": session,
+        "update": { "sessionUpdate": "usage_update", "used": used, "size": size }
+    })
+}

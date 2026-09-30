@@ -281,6 +281,56 @@ async fn scripted_model(path: String) -> String {
     scripted_call("read_file", serde_json::json!({ "path": path })).await
 }
 
+#[tokio::test]
+async fn usage_updates_report_the_main_context_and_window_without_inventing_cost() {
+    let _turn = provider_lock().await;
+    let base = scripted_model("notes.txt".into()).await;
+    // This fixture shares the existing provider lock with the other ACP turns.
+    unsafe { std::env::set_var("OLLAMA_HOST", &base) };
+    let mut config = Config::default();
+    config.agent.model = "ollama/scripted".into();
+    config.agent.context_window = Some(8192);
+    let mut editor = Editor::start_with(config, |workspace| {
+        std::fs::write(workspace.join("notes.txt"), "a useful note\n").unwrap();
+    });
+    editor.call(1, "initialize", serde_json::json!({"protocolVersion": 1})).await;
+    let id = editor.call(2, "session/new", serde_json::json!({"cwd": "."})).await["result"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let prompt = serde_json::json!({
+        "jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+        "params": {"sessionId": id, "prompt": [{"type":"text", "text":"read the notes"}]}
+    });
+    editor.stdin.write_all(format!("{prompt}\n").as_bytes()).await.unwrap();
+    let mut updates = Vec::new();
+    loop {
+        let message = editor.next().await;
+        if message["id"] == 3 {
+            assert!(message.get("error").is_none(), "{message}");
+            break;
+        }
+        if message["params"]["update"]["sessionUpdate"] == "usage_update" {
+            assert_eq!(message["params"]["sessionId"], id);
+            updates.push(message["params"]["update"].clone());
+        }
+    }
+    assert_eq!(
+        updates.len(),
+        4,
+        "before/after each model call; the checker must not replace the main context: {updates:?}"
+    );
+    for update in &updates {
+        assert_eq!(update["size"], 8192);
+        assert!(
+            update["used"].as_u64().unwrap() > 3,
+            "fixture bills one input token per call; the context must not be that cumulative bill: {update}"
+        );
+        assert!(update.get("cost").is_none(), "no price information was available");
+    }
+    assert!(updates[3]["used"].as_u64() >= updates[0]["used"].as_u64());
+}
+
 /// A model that asks for one tool call and then answers.
 async fn scripted_call(tool: &str, arguments: serde_json::Value) -> String {
     use tokio::net::TcpListener;

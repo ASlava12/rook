@@ -116,6 +116,22 @@ pub struct Frames {
     partial: Vec<u8>,
     /// How far into `text` the search for a separator has already looked.
     scanned: usize,
+    /// CR terminates a line immediately; swallow a following LF even when it
+    /// arrives in the next transport chunk.
+    after_cr: bool,
+}
+
+fn append_sse_text(target: &mut String, after_cr: &mut bool, text: &str) {
+    for segment in text.split_inclusive('\r') {
+        let segment = if *after_cr { segment.strip_prefix('\n').unwrap_or(segment) } else { segment };
+        *after_cr = segment.ends_with('\r');
+        if let Some(line) = segment.strip_suffix('\r') {
+            target.push_str(line);
+            target.push('\n');
+        } else {
+            target.push_str(segment);
+        }
+    }
 }
 
 impl Frames {
@@ -140,14 +156,18 @@ impl Frames {
         loop {
             let e = match std::str::from_utf8(&self.partial) {
                 Ok(all) => {
-                    self.text.push_str(all);
+                    append_sse_text(&mut self.text, &mut self.after_cr, all);
                     self.partial.clear();
                     return;
                 }
                 Err(e) => e,
             };
             let whole = e.valid_up_to();
-            self.text.push_str(&String::from_utf8_lossy(&self.partial[..whole]));
+            append_sse_text(
+                &mut self.text,
+                &mut self.after_cr,
+                &String::from_utf8_lossy(&self.partial[..whole]),
+            );
             match e.error_len() {
                 // A truncated character: the next chunk finishes it.
                 None => {
@@ -157,6 +177,7 @@ impl Frames {
                 // Not UTF-8 at all. Held, it would stall the stream forever
                 // waiting for a byte that cannot make it valid.
                 Some(bad) => {
+                    self.after_cr = false;
                     self.text.push(char::REPLACEMENT_CHARACTER);
                     self.partial.drain(..whole + bad);
                 }
@@ -200,6 +221,13 @@ pub mod openai;
 pub mod prompted;
 pub mod proxy;
 pub use proxy::Proxy;
+pub mod catalog;
+pub use catalog::{CatalogLimits, MetadataApi, ModelCapabilities};
+
+pub mod effort;
+pub mod images;
+pub use effort::{EffortReport, EffortUse};
+
 pub mod retry;
 pub mod stream;
 pub mod types;
@@ -531,6 +559,25 @@ pub trait Provider: Send + Sync {
     /// sent, rather than discovering the limit by being rejected.
     fn context_window(&self) -> usize;
 
+    /// Opaque identity of the actual endpoint, credential, model and window
+    /// settings. None disables cross-turn learning for custom providers whose
+    /// identity is unknown; a display name alone cannot identify a connection.
+    fn context_key(&self) -> Option<[u8; 32]> {
+        None
+    }
+
+    /// Explicit limits are decisions, not assumptions to replace by discovery.
+    fn context_is_explicit(&self) -> bool {
+        false
+    }
+
+    /// Discover the window of the model this provider actually requests.
+    /// A routing provider must account for every candidate, not whichever
+    /// catalog happened to answer first.
+    async fn discover_context_window(&self, _limits: CatalogLimits) -> Result<Option<usize>> {
+        Ok(None)
+    }
+
     /// Whether the provider accepts tool definitions natively. When false the
     /// agent falls back to prompt-encoded tool calls.
     fn supports_tools(&self) -> bool {
@@ -550,6 +597,12 @@ pub trait Provider: Send + Sync {
         true
     }
 
+    /// The dialect's wire mapping. This describes an attempted parameter, not
+    /// a guarantee about how the model reasons or whether a gateway accepts it.
+    fn effort_use(&self, _effort: Effort) -> EffortUse {
+        EffortUse::Unknown
+    }
+
     async fn complete(&self, request: Request) -> Result<Response>;
 
     fn supports_streaming(&self) -> bool {
@@ -559,6 +612,12 @@ pub trait Provider: Send + Sync {
     /// What this endpoint says it can serve. Empty when it does not say.
     async fn models(&self) -> Result<Vec<ModelInfo>> {
         Ok(Vec::new())
+    }
+
+    /// Model listings with caller-controlled bounds. Custom providers that do
+    /// no HTTP retain their existing implementation.
+    async fn models_with(&self, _limits: CatalogLimits) -> Result<Vec<ModelInfo>> {
+        self.models().await
     }
 
     /// Cheapest possible proof that the endpoint is there and answering.
@@ -571,6 +630,8 @@ pub trait Provider: Send + Sync {
     async fn stream(&self, request: Request) -> Result<ResponseStream> {
         let response = self.complete(request).await?;
         let mut deltas = vec![Ok(Delta::Text(response.message.content.clone()))];
+        deltas
+            .extend(response.message.reasoning.iter().cloned().map(|block| Ok(Delta::ReasoningDone(block))));
         deltas.extend(response.message.tool_calls.iter().cloned().map(|c| Ok(Delta::ToolCall(c))));
         deltas.push(Ok(Delta::Done {
             stop_reason: response.stop_reason,
@@ -584,8 +645,18 @@ pub trait Provider: Send + Sync {
 /// Every dialect a spec can name, in the order they are tried. Beside the match
 /// that dispatches on them, and checked against it by a test: a list that has
 /// drifted from the code is worse than no list.
-pub const PROVIDERS: &[&str] =
-    &["anthropic", "claude", "google", "gemini", "openai", "openai-compatible", "ollama", "lmstudio"];
+pub const PROVIDERS: &[&str] = &[
+    "anthropic",
+    "claude",
+    "google",
+    "gemini",
+    "openai",
+    "responses",
+    "openai-responses",
+    "openai-compatible",
+    "ollama",
+    "lmstudio",
+];
 
 /// Split a `provider/model` spec, e.g. `ollama/qwen3-coder:30b`.
 pub fn split_spec(spec: &str) -> (&str, &str) {
@@ -603,17 +674,19 @@ pub fn split_spec(spec: &str) -> (&str, &str) {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Api {
     OpenAi,
+    Responses,
     Anthropic,
     Google,
 }
 
 impl Api {
     /// Every name a configuration may use, so an error can list them.
-    pub const ALL: [Api; 3] = [Api::OpenAi, Api::Anthropic, Api::Google];
+    pub const ALL: [Api; 4] = [Api::OpenAi, Api::Responses, Api::Anthropic, Api::Google];
 
     pub fn parse(name: &str) -> Option<Self> {
         match name.trim().to_ascii_lowercase().as_str() {
             "openai" | "openai-compatible" => Some(Api::OpenAi),
+            "responses" | "openai-responses" => Some(Api::Responses),
             "anthropic" | "claude" => Some(Api::Anthropic),
             "google" | "gemini" => Some(Api::Google),
             _ => None,
@@ -623,6 +696,7 @@ impl Api {
     pub fn as_str(self) -> &'static str {
         match self {
             Api::OpenAi => "openai",
+            Api::Responses => "responses",
             Api::Anthropic => "anthropic",
             Api::Google => "google",
         }
@@ -645,6 +719,9 @@ pub struct Endpoint {
     /// the `provider/model` spec it was built from.
     pub name: String,
     pub api: Api,
+    pub metadata_api: MetadataApi,
+    /// Built-in estimate, separate from an explicit user override.
+    pub assumed_context_window: Option<usize>,
     pub url: String,
     pub key: Option<String>,
     /// The model to ask for, as the endpoint spells it.
@@ -690,10 +767,21 @@ pub fn from_endpoints_with(
     stream_idle: std::time::Duration,
     prefer: Prefer,
 ) -> Result<Box<dyn Provider>> {
+    from_endpoints_configured(endpoints, stream_idle, prefer, |_, provider| provider)
+}
+
+/// Decorate each validated route before retries/failover, keeping route-local
+/// observations and accepted effort reports attached to the actual endpoint.
+pub fn from_endpoints_configured(
+    endpoints: Vec<Endpoint>,
+    stream_idle: std::time::Duration,
+    prefer: Prefer,
+    mut configure: impl FnMut(&Endpoint, Box<dyn Provider>) -> Box<dyn Provider>,
+) -> Result<Box<dyn Provider>> {
     let mut built: Vec<Box<dyn Provider>> = Vec::new();
     for (at, endpoint) in endpoints.into_iter().enumerate() {
         let name = endpoint.name.clone();
-        match endpoint_provider(endpoint, stream_idle) {
+        match endpoint_provider(endpoint.clone(), stream_idle) {
             // Each candidate carries its own retries, so "later" is answered
             // where it was said: a 429 from the preferred endpoint is waited
             // out there, rather than becoming a reason to use a worse model,
@@ -702,7 +790,7 @@ pub fn from_endpoints_with(
             // Outside the failover it did the opposite. It retried the whole
             // selection, so a 503 from the preferred endpoint was asked of the
             // preferred endpoint four more times and of the next one never.
-            Ok(provider) => built.push(Box::new(retry::Retrying::new(provider))),
+            Ok(provider) => built.push(Box::new(retry::Retrying::new(configure(&endpoint, provider)))),
             Err(why) if at == 0 => return Err(why),
             Err(why) => tracing::warn!("{name} cannot be built, so it is not a fallback: {why}"),
         }
@@ -728,8 +816,27 @@ pub fn endpoint_from_spec(spec: &str, context_window: Option<usize>) -> Result<E
 }
 
 fn endpoint_provider(endpoint: Endpoint, stream_idle: std::time::Duration) -> Result<Box<dyn Provider>> {
-    let Endpoint { name, api, url, key, model, context_window, parallel, key_in_the_clear, queue, proxy } =
-        endpoint;
+    let Endpoint {
+        name,
+        api,
+        metadata_api,
+        assumed_context_window,
+        url,
+        key,
+        model,
+        context_window,
+        parallel,
+        key_in_the_clear,
+        queue,
+        proxy,
+    } = endpoint;
+    if !matches!(api, Api::OpenAi | Api::Responses)
+        && !matches!(metadata_api, MetadataApi::Auto | MetadataApi::None)
+    {
+        return Err(LlmError::Other(
+            "native metadata_api requires the openai or responses generation dialect".into(),
+        ));
+    }
     let queue = queue.unwrap_or_else(|| name.clone());
     in_the_clear(&url, key.as_deref(), key_in_the_clear)?;
     let built: Box<dyn Provider> = match api {
@@ -737,6 +844,7 @@ fn endpoint_provider(endpoint: Endpoint, stream_idle: std::time::Duration) -> Re
             let mut config = anthropic::Config::new(url, key.unwrap_or_default(), &model);
             config.stream_idle_timeout = stream_idle;
             config.proxy = proxy;
+            config.context_window_explicit = context_window.is_some();
             if let Some(window) = context_window {
                 config.context_window = window;
             }
@@ -746,6 +854,7 @@ fn endpoint_provider(endpoint: Endpoint, stream_idle: std::time::Duration) -> Re
             let mut config = google::Config::new(url, key.unwrap_or_default(), &model);
             config.stream_idle_timeout = stream_idle;
             config.proxy = proxy;
+            config.context_window_explicit = context_window.is_some();
             if let Some(window) = context_window {
                 config.context_window = window;
             }
@@ -755,11 +864,18 @@ fn endpoint_provider(endpoint: Endpoint, stream_idle: std::time::Duration) -> Re
         // reason each api picks a small one: budgeting against a window the
         // model does not have fails the request, budgeting low wastes some of
         // it.
-        Api::OpenAi => {
-            let mut config = openai::Config::new(url, key, context_window.unwrap_or(32_768));
+        Api::OpenAi | Api::Responses => {
+            let mut config =
+                openai::Config::new(url, key, context_window.or(assumed_context_window).unwrap_or(32_768));
             config.stream_idle_timeout = stream_idle;
             config.proxy = proxy;
-            Box::new(openai::OpenAiCompatible::new(&name, &model, config)?)
+            config.context_window_explicit = context_window.is_some();
+            config.metadata_api = metadata_api;
+            if api == Api::Responses {
+                Box::new(openai::responses::Responses::new(&name, &model, config)?)
+            } else {
+                Box::new(openai::OpenAiCompatible::new(&name, &model, config)?)
+            }
         }
     };
     // Inside the retry wrapper rather than outside it: a request waiting out a
@@ -960,6 +1076,23 @@ fn build(
 /// look for the address and the key. A `[models]` table says those three things
 /// outright, which is why both end at the same builder.
 fn from_environment(spec: &str, context_window: Option<usize>) -> Result<Endpoint> {
+    environment_endpoint(spec, context_window, true)
+}
+
+/// Passive endpoint description for offline metadata lookup. Missing cloud
+/// keys are allowed; constructing a live provider still uses the strict path.
+pub fn catalog_endpoint_from_spec(spec: &str, context_window: Option<usize>) -> Result<Endpoint> {
+    environment_endpoint(spec, context_window, false)
+}
+
+fn environment_endpoint(spec: &str, context_window: Option<usize>, require_keys: bool) -> Result<Endpoint> {
+    let key = |names: &[&str]| -> Result<Option<String>> {
+        if require_keys {
+            required_key(names).map(Some)
+        } else {
+            Ok(names.iter().find_map(|name| std::env::var(name).ok().filter(|v| !v.trim().is_empty())))
+        }
+    };
     let (provider, model) = split_spec(spec);
     // The window each shorthand assumes when nothing overrides it. `None` where
     // the api reads it from the model's own name, which anthropic and google
@@ -970,17 +1103,17 @@ fn from_environment(spec: &str, context_window: Option<usize>) -> Result<Endpoin
         "anthropic" | "claude" => (
             Api::Anthropic,
             env_or("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
-            Some(required_key(&["ANTHROPIC_API_KEY"])?),
+            key(&["ANTHROPIC_API_KEY"])?,
             None,
         ),
         "google" | "gemini" => (
             Api::Google,
             env_or("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta"),
-            Some(required_key(&["GEMINI_API_KEY", "GOOGLE_API_KEY"])?),
+            key(&["GEMINI_API_KEY", "GOOGLE_API_KEY"])?,
             None,
         ),
-        "openai" => (
-            Api::OpenAi,
+        "openai" | "responses" | "openai-responses" => (
+            if provider == "openai" { Api::OpenAi } else { Api::Responses },
             env_or("OPENAI_BASE_URL", "https://api.openai.com/v1"),
             std::env::var("OPENAI_API_KEY").ok(),
             Some(128_000),
@@ -1007,7 +1140,9 @@ fn from_environment(spec: &str, context_window: Option<usize>) -> Result<Endpoin
         key,
         model: model.to_string(),
         // The override first, because it is the one somebody set on purpose.
-        context_window: context_window.or(assumed),
+        context_window,
+        assumed_context_window: assumed,
+        metadata_api: MetadataApi::Auto.resolved(spec),
         // No variable spells any of these, so there is nothing to read and
         // nothing to change: a configuration written before `[models]` behaves
         // exactly as it did.

@@ -70,8 +70,15 @@ fn main() -> Result<()> {
         Some(Command::Run { prompt, session, output }) => {
             commands::run::cmd_run(cli.workspace, prompt, session, cli.yes, cli.json, output.load()?)
         }
-        Some(Command::Models { recheck, source }) => {
-            commands::config::cmd_models(cli.workspace, cli.json, recheck, source)
+        Some(Command::Models { recheck, source, offline, refresh, metadata }) => {
+            let mode = if offline {
+                rook_core::model_catalog::Mode::Offline
+            } else if refresh {
+                rook_core::model_catalog::Mode::Refresh
+            } else {
+                rook_core::model_catalog::Mode::PreferCache
+            };
+            commands::config::cmd_models(cli.workspace, cli.json, recheck, source, mode, metadata)
         }
         Some(Command::Config(cmd)) => commands::config::cmd_config(cmd, cli.json),
         Some(Command::Eval { json }) => commands::work::cmd_eval(cli.workspace, json || cli.json),

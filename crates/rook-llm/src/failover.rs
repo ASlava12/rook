@@ -244,6 +244,44 @@ impl Provider for Failover {
         self.candidates.iter().map(|p| p.context_window()).min().unwrap_or(32_768)
     }
 
+    fn context_key(&self) -> Option<[u8; 32]> {
+        use sha2::{Digest, Sha256};
+        let mut hash = Sha256::new();
+        hash.update(b"rook-context-failover-v1");
+        for candidate in &self.candidates {
+            hash.update(candidate.context_key()?);
+        }
+        Some(hash.finalize().into())
+    }
+
+    fn context_is_explicit(&self) -> bool {
+        self.candidates.iter().all(|candidate| candidate.context_is_explicit())
+    }
+
+    async fn discover_context_window(&self, limits: crate::CatalogLimits) -> Result<Option<usize>> {
+        // All fallback routes must fit the same request. Missing metadata keeps
+        // that route's assumption in the minimum, never a larger route's fact.
+        // A group has one deadline, not one fresh timeout per candidate.
+        let discovery = async {
+            let mut minimum = usize::MAX;
+            let mut reported = false;
+            for candidate in &self.candidates {
+                let known = candidate
+                    .discover_context_window(limits)
+                    .await
+                    .ok()
+                    .flatten()
+                    .filter(|window| *window > 0);
+                reported |= known.is_some();
+                minimum = minimum.min(known.unwrap_or_else(|| candidate.context_window()));
+            }
+            reported.then_some(minimum)
+        };
+        Ok(tokio::time::timeout(std::time::Duration::from_secs(limits.bounded().timeout_secs), discovery)
+            .await
+            .unwrap_or(None))
+    }
+
     /// All of them, for the three below: the request is written once and may go
     /// to any of them, so a capability only some have is one that cannot be
     /// used. Sending tool definitions to an endpoint that refuses them fails
@@ -256,12 +294,22 @@ impl Provider for Failover {
         self.candidates.iter().all(|p| p.takes_effort())
     }
 
+    fn effort_use(&self, effort: crate::Effort) -> crate::EffortUse {
+        let mut settings = self.candidates.iter().map(|provider| provider.effort_use(effort));
+        let first = settings.next().unwrap_or(crate::EffortUse::Unknown);
+        if settings.all(|setting| setting == first) { first } else { crate::EffortUse::Unknown }
+    }
+
     fn supports_streaming(&self) -> bool {
         self.candidates.iter().all(|p| p.supports_streaming())
     }
 
     async fn models(&self) -> Result<Vec<ModelInfo>> {
         first_that_answers!(self, |provider| provider.models())
+    }
+
+    async fn models_with(&self, limits: crate::CatalogLimits) -> Result<Vec<ModelInfo>> {
+        first_that_answers!(self, |provider| provider.models_with(limits))
     }
 
     async fn reachable(&self) -> Result<()> {
@@ -365,6 +413,33 @@ mod tests {
         let asked = Arc::new(AtomicUsize::new(0));
         let id = format!("{id}-{}", NEXT.fetch_add(1, Ordering::Relaxed));
         (Box::new(Fake { id, says, asked: asked.clone() }), asked)
+    }
+
+    #[tokio::test]
+    async fn effort_reports_the_answering_candidate_instead_of_the_preferred_route() {
+        use futures_util::StreamExt;
+        let (first, first_count) = saying("effort-unreachable", Says::Unreachable);
+        let (second, second_count) = saying("effort-answer", Says::Answer);
+        let second_id = second.id().to_string();
+        let over = Failover::new(
+            vec![Box::new(crate::retry::Retrying::new(first)), Box::new(crate::retry::Retrying::new(second))],
+            Prefer::AsConfigured,
+        );
+        let mut request = Request::new(Vec::new());
+        request.effort = Some(crate::Effort::Max);
+        let mut stream = over.stream(request).await.unwrap();
+        let Some(Ok(crate::Delta::Effort(report))) = stream.next().await else {
+            panic!("missing effort report")
+        };
+        assert_eq!(first_count.load(Ordering::Relaxed), 1);
+        assert_eq!(second_count.load(Ordering::Relaxed), 1);
+        assert_ne!(over.id(), second_id);
+        assert_eq!(report.provider, second_id);
+        assert_eq!(
+            report.applied,
+            crate::EffortUse::Unknown,
+            "a mock without a wire mapping cannot claim one"
+        );
     }
 
     fn asking(over: &Failover) -> Result<Response> {

@@ -64,6 +64,20 @@ fn load(store: &Store, session: u128) -> Result<Option<Execution>> {
     Ok(Some(state))
 }
 
+pub(crate) fn diagnostic_state(store: &Store, session: u128) -> Result<serde_json::Value> {
+    let Some(state) = load(store, session)? else { return Ok(serde_json::Value::Null) };
+    let status = match state.status.as_str() {
+        "running" | "interrupted" | "needs_review" | "end_turn" | "failed" | "cancelled" | "complete"
+        | "stopped" | "max_tokens" | "blocked" | "incomplete" | "time" | "budget" | "steps" => {
+            state.status.as_str()
+        }
+        _ => "other",
+    };
+    Ok(serde_json::json!({"status":status,"pid":state.pid,"started_at":state.started_at,
+        "updated_at":state.updated_at,"completed_operations":state.completed_operations,
+        "pending":state.pending.is_some(),"background":state.background.len(),"unknown":state.unknown.len()}))
+}
+
 fn save(store: &Store, session: u128, state: &mut Execution) -> Result<()> {
     state.updated_at = rook_store::now_unix();
     store.kv_set(&key(session), &crate::persistence::encode(state)?)?;

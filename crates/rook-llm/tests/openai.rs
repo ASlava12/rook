@@ -160,3 +160,55 @@ async fn inline_images_are_sent_as_parts_and_plain_messages_stay_strings() {
     assert_eq!(body["messages"][1]["content"][0]["text"], "context\n\ninspect");
     assert_eq!(body["messages"][1]["content"][1]["image_url"]["url"], "data:image/png;base64,aW1hZ2U=");
 }
+
+#[tokio::test]
+async fn tool_images_follow_all_replies_in_a_parallel_batch() {
+    let (url, seen) = serve().await;
+    let mut calls = Message::assistant("");
+    calls.tool_calls = vec![
+        rook_llm::ToolCall { id: "one".into(), name: "screenshot".into(), arguments: serde_json::json!({}) },
+        rook_llm::ToolCall { id: "two".into(), name: "status".into(), arguments: serde_json::json!({}) },
+    ];
+    let mut image = Message::tool_result("one", "a screenshot");
+    image.images.push(rook_llm::Image {
+        mime_type: "image/png".into(),
+        data: "aW1hZ2U=".into(),
+        width: 1,
+        height: 1,
+    });
+    let request = Request::new(vec![calls, image, Message::tool_result("two", "ready")]);
+    OpenAiCompatible::new("test/model", "vision", Config::new(url, None, 8192))
+        .unwrap()
+        .complete(request)
+        .await
+        .unwrap();
+    let body = seen.lock().unwrap().clone().unwrap();
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 4, "{body}");
+    assert_eq!(messages[1]["role"], "tool");
+    assert_eq!(messages[1]["tool_call_id"], "one");
+    assert_eq!(messages[1]["content"], "a screenshot");
+    assert_eq!(messages[2]["tool_call_id"], "two");
+    assert_eq!(messages[3]["role"], "user");
+    assert!(messages[3]["content"][0]["text"].as_str().unwrap().contains("\"authority\":\"data\""));
+    assert_eq!(messages[3]["content"][1]["image_url"]["url"], "data:image/png;base64,aW1hZ2U=");
+}
+
+#[tokio::test]
+async fn reasoning_models_use_completion_limits_without_unsupported_sampling_fields() {
+    let defaults = Request::new(vec![Message::user("hi")]);
+    for model in ["o3-mini", "gpt-5", "gpt-5.2", "gpt-5.6-sol", "gpt-6-astra"] {
+        for effort in [None, Some(Effort::High)] {
+            let body = sent(model, effort).await;
+            assert_eq!(body["max_completion_tokens"], defaults.max_output_tokens, "{model}");
+            assert!(body.get("max_tokens").is_none(), "{model}");
+            assert!(body.get("temperature").is_none(), "{model}");
+        }
+    }
+    for model in ["gpt-4o", "qwen3-27b", "local-model"] {
+        let body = sent(model, Some(Effort::High)).await;
+        assert_eq!(body["max_tokens"], defaults.max_output_tokens, "{model}");
+        assert!(body.get("max_completion_tokens").is_none(), "{model}");
+        assert_eq!(body["temperature"], defaults.temperature, "{model}");
+    }
+}

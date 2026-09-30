@@ -207,12 +207,26 @@ impl<'a> AgentLoop<'a> {
         }
 
         if call.name == crate::results::READ_RESULT {
-            let (text, failed) = match crate::results::read(self.rook, self.session, &call.arguments) {
-                Ok(text) => (self.vault.redact(&text), false),
-                Err(why) => (why.to_string(), true),
-            };
-            self.rook.log(self.session, EventKind::ToolResult, &call.name, &text).ok();
-            return (text, failed);
+            match crate::results::read(self.rook, self.session, &call.arguments) {
+                Ok(result) => {
+                    let mut text = self.vault.redact(&result.content);
+                    return match crate::tool_images::record(
+                        self.rook,
+                        self.session,
+                        &call.name,
+                        &mut text,
+                        &result.images,
+                    ) {
+                        Ok(_) => (text, false),
+                        Err(why) => (format!("result could not be saved: {why}"), true),
+                    };
+                }
+                Err(why) => {
+                    let text = why.to_string();
+                    self.rook.log(self.session, EventKind::ToolResult, &call.name, &text).ok();
+                    return (text, true);
+                }
+            }
         }
 
         if call.name == VERIFY {
@@ -522,13 +536,16 @@ impl<'a> AgentLoop<'a> {
         // value has to be taken back out of it: before the model reads it and
         // before the store keeps it. A command's output, a page, a file and an
         // MCP server's answer are all the same question here.
-        let text = self.vault.redact(&text);
-        match self.rook.log(self.session, EventKind::ToolResult, &call.name, &text) {
+        let mut text = self.vault.redact(&text);
+        match crate::tool_images::record(self.rook, self.session, &call.name, &mut text, &outcome.images) {
             Ok(seq) if matches!(call.name.as_str(), "run_command" | "job") => {
                 if let Err(why) = crate::results::register_output(self.rook, self.session, seq, &outcome.meta)
                 {
                     tracing::warn!("full output could not be registered: {why}");
                 }
+            }
+            Err(why) if !outcome.images.is_empty() => {
+                return (format!("{text}\nTool images could not be saved or delivered: {why}"), true);
             }
             Err(why) => tracing::warn!("tool result could not be saved: {why}"),
             _ => {}
@@ -550,16 +567,21 @@ impl<'a> AgentLoop<'a> {
         if self.hooks.is_empty() {
             return None;
         }
+        let (name, arguments) = self
+            .tools
+            .get(&call.name)
+            .map(|tool| tool.invocation(&call.arguments))
+            .unwrap_or((&call.name, &call.arguments));
         let payload = self.payload(serde_json::json!({
-            "tool": call.name,
-            "input": call.arguments,
+            "tool": name,
+            "input": arguments,
             "result": outcome.content,
             "is_error": outcome.is_error,
             "truncated": outcome.truncated,
             "full_bytes": outcome.full_bytes,
             "meta": outcome.meta,
         }));
-        self.hooks.run(hooks::Event::PostTool, &call.name, &payload).await.context()
+        self.hooks.run(hooks::Event::PostTool, name, &payload).await.context()
     }
 
     /// The last `count` exchanges as plain text, for a child asked to inherit

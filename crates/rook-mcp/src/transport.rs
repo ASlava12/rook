@@ -26,6 +26,12 @@ pub(crate) trait Transport: Send + Sync {
 
     async fn shutdown(&self);
 
+    /// HTTP carries the negotiated version from initialized onward; stdio
+    /// already binds it to the process connection.
+    fn negotiated(&self, _version: &str) -> Result<()> {
+        Ok(())
+    }
+
     /// The subprocess this transport owns, if it owns one. Used to check that a
     /// server does not outlive the session it belongs to.
     fn child_pid(&self) -> Option<u32> {

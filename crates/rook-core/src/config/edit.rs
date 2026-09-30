@@ -137,8 +137,8 @@ impl Editor {
         if !help.choices.is_empty() && !help.choices.iter().any(|s| value.as_str() == Some(s)) {
             return Err(format!("choose one of: {}", help.choices.join(", ")));
         }
-        if path == ["agent", "compact_at"] && !value.as_f64().is_some_and(|v| v > 0.0 && v <= 1.0) {
-            return Err("compact_at must be greater than 0 and at most 1".into());
+        if path == ["agent", "compact_at"] {
+            crate::context::check_compact_at(value.as_f64().ok_or("enter a number")? as f32)?;
         }
         self.change(path, Some(item(&value)?))
     }
@@ -226,7 +226,10 @@ impl Editor {
     pub fn save(&mut self) -> Result<(), String> {
         let text = self.doc.to_string();
         let config: Config = toml::from_str(&text).map_err(|e| format!("not saved: {}", e.message()))?;
-        validate(&config)?;
+        let errors = config.validation_errors();
+        if !errors.is_empty() {
+            return Err(errors.join("\n"));
+        }
         if !self.dirty() {
             return Ok(());
         }
@@ -586,31 +589,6 @@ fn append(node: &mut Item, path: &[String], value: Item) -> Result<(), String> {
     }
     Ok(())
 }
-fn validate(config: &Config) -> Result<(), String> {
-    if !(config.agent.compact_at > 0.0 && config.agent.compact_at <= 1.0) {
-        return Err("agent.compact_at must be greater than 0 and at most 1".into());
-    }
-    let mut names = std::collections::BTreeSet::new();
-    for server in &config.mcp {
-        valid_name(&server.name)?;
-        if !names.insert(&server.name) {
-            return Err(format!("duplicate MCP server name: {}", server.name));
-        }
-        if server.enabled
-            && server.command.trim().is_empty()
-            && server.url.as_deref().unwrap_or_default().trim().is_empty()
-        {
-            return Err(format!("MCP {}: set command or url, or disable this server", server.name));
-        }
-    }
-    for (name, model) in &config.models {
-        if !model.endpoint.is_empty() && !config.endpoints.contains_key(&model.endpoint) {
-            return Err(format!("model {name}: endpoint {} does not exist", model.endpoint));
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -644,6 +622,29 @@ mod tests {
         assert_eq!(std::fs::read_to_string(editor.file_path()).unwrap(), "# changed elsewhere\n");
     }
     #[test]
+    fn invalid_model_drafts_are_repairable_and_never_replace_the_saved_file() {
+        let original = "# keep this file until the whole draft is valid\n";
+        let (_dir, mut editor) = open(original);
+        editor.add(&path(&["models"]), "local").unwrap();
+        for (field, value, missing) in
+            [("model", "example", "api` is not set"), ("api", "openai", "url` is not set")]
+        {
+            editor.set(&path(&["models", "local", field]), value).unwrap();
+            let why = editor.save().unwrap_err();
+            assert!(why.contains(missing), "{why}");
+            assert_eq!(std::fs::read_to_string(editor.file_path()).unwrap(), original);
+        }
+        editor.set(&path(&["models", "local", "url"]), "http://localhost:8080/v1").unwrap();
+        editor.set(&path(&["models", "local", "key"]), "secret:not-resolved-here").unwrap();
+        editor.save().unwrap();
+        let saved = std::fs::read_to_string(editor.file_path()).unwrap();
+        assert!(saved.contains("# keep this file"));
+        for value in ["0.09", "0.91", "1"] {
+            assert!(editor.set(&path(&["agent", "compact_at"]), value).is_err());
+        }
+        assert_eq!(std::fs::read_to_string(editor.file_path()).unwrap(), saved);
+    }
+    #[test]
     fn named_models_mcp_headers_and_arrays_can_be_added_edited_and_removed() {
         let (_dir, mut editor) = open("# original\n");
         let mcp = editor.add(&path(&["mcp"]), "docs").unwrap();
@@ -660,6 +661,8 @@ mod tests {
         let mut name = model.clone();
         name.push("model".into());
         editor.set(&name, "llama").unwrap();
+        editor.set(&path(&["models", "local.v1", "api"]), "openai").unwrap();
+        editor.set(&path(&["models", "local.v1", "url"]), "http://localhost:8080/v1").unwrap();
         let mut window = model.clone();
         window.push("context_window".into());
         editor.set(&window, "8192").unwrap();

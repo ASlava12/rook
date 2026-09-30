@@ -200,8 +200,15 @@ impl Tool for Search {
                 "\n[stopped after {most_files} files; narrow `path` or `glob` to search the rest]"
             ));
         }
-        Ok(ToolOutcome { content: body, is_error: false, truncated, full_bytes: 0, meta: Default::default() }
-            .with("matches", total as u64)
-            .with("files_scanned", files_scanned as u64))
+        Ok(ToolOutcome {
+            images: Vec::new(),
+            content: body,
+            is_error: false,
+            truncated,
+            full_bytes: 0,
+            meta: Default::default(),
+        }
+        .with("matches", total as u64)
+        .with("files_scanned", files_scanned as u64))
     }
 }

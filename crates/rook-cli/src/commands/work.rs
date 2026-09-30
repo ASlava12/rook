@@ -103,7 +103,7 @@ pub(crate) fn cmd_work(
         // respawned seventy times is seventy handshakes, and the rule about
         // expensive things belonging to the front end is exactly this.
         let mcp = rook.connect_mcp().await;
-        for (name, error) in &mcp.failures {
+        for (name, error) in &mcp.failures() {
             eprintln!("mcp {name}: {error}");
         }
         let servers = rook_core::agent::servers_for(&rook.config, &rook.workspace);

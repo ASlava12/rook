@@ -44,7 +44,13 @@ fn built(
     prefer: rook_llm::Prefer,
 ) -> Result<Box<dyn Provider>, LlmError> {
     let endpoints = endpoints_for(config, vault, name)?;
-    rook_llm::from_endpoints_with(endpoints, config.agent.stream_idle(), prefer)
+    let observations = crate::model_catalog::Snapshot::new(config);
+    rook_llm::from_endpoints_configured(
+        endpoints,
+        config.agent.stream_idle(),
+        prefer,
+        |endpoint, provider| observations.decorate(config, vault, endpoint, provider),
+    )
 }
 
 /// Every endpoint worth trying for this setting, the one asked for first.
@@ -176,37 +182,14 @@ pub fn model_named(config: &Config, name: &str) -> String {
 pub fn endpoint_for(config: &Config, vault: &Vault, name: &str) -> Result<Option<Endpoint>, LlmError> {
     let name = name.trim();
     let Some(source) = config.models.get(name) else { return Ok(None) };
-    let address = address_of(config, name, source)?;
+    let (address, api) = checked_address(config, name, source)?;
     let at = &address.at;
-
-    let api = Api::parse(address.api).ok_or_else(|| {
-        let known = Api::ALL.map(Api::as_str).join(", ");
-        LlmError::Other(match address.api.trim().is_empty() {
-            true => format!("`[{at}] api` is not set. It has to be one of: {known}."),
-            false => format!(
-                "`[{at}] api` is {:?}, which is not an api this speaks. It has to be one of: \
-                 {known}.",
-                address.api
-            ),
-        })
-    })?;
-    if address.url.trim().is_empty() {
-        return Err(LlmError::Other(format!(
-            "`[{at}] url` is not set, so there is nowhere to send the request. Most \
-             openai-compatible servers want `/v1` on the end of it."
-        )));
-    }
-    if source.model.trim().is_empty() {
-        return Err(LlmError::Other(format!(
-            "`[models.{name}] model` is not set, so there is nothing to ask {} for. \
-             `rook models --source {name}` lists what it serves.",
-            address.url.trim()
-        )));
-    }
 
     Ok(Some(Endpoint {
         name: name.to_string(),
         api,
+        metadata_api: address.metadata_api,
+        assumed_context_window: None,
         url: address.url.trim().to_string(),
         key: key_for(at, address.key, vault)?,
         model: source.model.trim().to_string(),
@@ -231,6 +214,56 @@ pub fn endpoint_for(config: &Config, vault: &Vault, name: &str) -> Result<Option
     }))
 }
 
+/// The structural half of resolution must also be safe inside a config form:
+/// no vault reads, environment lookups, secret commands or network requests.
+pub(crate) fn source_errors(config: &Config) -> Vec<String> {
+    config
+        .models
+        .iter()
+        .filter_map(|(name, source)| checked_address(config, name, source).err().map(|why| why.to_string()))
+        .collect()
+}
+
+fn checked_address<'a>(
+    config: &'a Config,
+    name: &str,
+    source: &'a ModelSource,
+) -> Result<(Address<'a>, Api), LlmError> {
+    let address = address_of(config, name, source)?;
+    let at = &address.at;
+
+    let api = Api::parse(address.api).ok_or_else(|| {
+        let known = Api::ALL.map(Api::as_str).join(", ");
+        LlmError::Other(match address.api.trim().is_empty() {
+            true => format!("`[{at}] api` is not set. It has to be one of: {known}."),
+            false => format!(
+                "`[{at}] api` is {:?}, which is not an api this speaks. It has to be one of: \
+                 {known}.",
+                address.api
+            ),
+        })
+    })?;
+    if address.url.trim().is_empty() {
+        return Err(LlmError::Other(format!(
+            "`[{at}] url` is not set, so there is nowhere to send the request. Most \
+             openai-compatible servers want `/v1` on the end of it."
+        )));
+    }
+    if source.model.trim().is_empty() {
+        return Err(LlmError::Other(format!(
+            "`[models.{name}] model` is not set, so there is nothing to ask for. \
+             `rook models --source {name}` lists what it serves."
+        )));
+    }
+
+    if !matches!(api, Api::OpenAi | Api::Responses)
+        && !matches!(address.metadata_api, rook_llm::MetadataApi::Auto | rook_llm::MetadataApi::None)
+    {
+        return Err(LlmError::Other(format!("`[{at}] metadata_api` requires api = openai or responses")));
+    }
+    Ok((address, api))
+}
+
 /// Where a source's requests go, from wherever the file wrote it down.
 struct Address<'a> {
     /// `models.home-llama` or `endpoints.desk`, whichever table the address is
@@ -238,6 +271,7 @@ struct Address<'a> {
     /// open — and so does the secret it looks for.
     at: String,
     api: &'a str,
+    metadata_api: rook_llm::MetadataApi,
     url: &'a str,
     key: &'a str,
     parallel: Option<usize>,
@@ -258,6 +292,7 @@ fn address_of<'a>(config: &'a Config, name: &str, source: &'a ModelSource) -> Re
         return Ok(Address {
             at: format!("models.{name}"),
             api: &source.api,
+            metadata_api: source.metadata_api,
             url: &source.url,
             key: &source.key,
             parallel: source.parallel,
@@ -283,6 +318,7 @@ fn address_of<'a>(config: &'a Config, name: &str, source: &'a ModelSource) -> Re
     // when the request goes to the wrong machine.
     let also: Vec<&str> = [
         (!source.api.trim().is_empty()).then_some("api"),
+        (source.metadata_api != rook_llm::MetadataApi::Auto).then_some("metadata_api"),
         (!source.url.trim().is_empty()).then_some("url"),
         (!source.key.trim().is_empty()).then_some("key"),
         source.parallel.is_some().then_some("parallel"),
@@ -305,6 +341,7 @@ fn address_of<'a>(config: &'a Config, name: &str, source: &'a ModelSource) -> Re
     Ok(Address {
         at: format!("endpoints.{named}"),
         api: &endpoint.api,
+        metadata_api: endpoint.metadata_api,
         url: &endpoint.url,
         key: &endpoint.key,
         parallel: endpoint.parallel,
@@ -361,6 +398,60 @@ fn key_for(at: &str, written: &str, vault: &Vault) -> Result<Option<String>, Llm
     Ok(Some(written.to_string()))
 }
 
+/// Cache namespaces describe configuration without executing credential helpers.
+pub(crate) fn catalog_scope(config: &Config, vault: &Vault, name: &str) -> Result<String, LlmError> {
+    use sha2::{Digest, Sha256};
+    let mut parts = if let Some(source) = config.models.get(name.trim()) {
+        let (address, api) = checked_address(config, name, source)?;
+        let secret =
+            address.key.trim().strip_prefix("secret:").map(|key| vault.cache_scope(key)).unwrap_or_default();
+        vec![
+            name.to_string(),
+            api.as_str().to_string(),
+            address.metadata_api.as_str().to_string(),
+            source.model.trim().to_string(),
+            address.url.trim().to_string(),
+            address.key.to_string(),
+            secret,
+            format!("{:?}", rook_llm::Proxy::parse(address.proxy).or(config.proxy.for_models())),
+        ]
+    } else {
+        if !name.contains('/') && !config.models.is_empty() {
+            return Err(LlmError::Other(format!("{name:?} is not a configured model source")));
+        }
+        let endpoint = rook_llm::catalog_endpoint_from_spec(name, config.agent.context_window)?;
+        vec![
+            name.to_string(),
+            endpoint.api.as_str().to_string(),
+            endpoint.metadata_api.as_str().to_string(),
+            endpoint.url,
+            format!("{:?}", endpoint.proxy),
+        ]
+    };
+    // A proxy can route the same hostname to another server/account. Runtime
+    // capability decisions must not cross that boundary either.
+    parts.push("catalog-scope-v2".into());
+    for variable in [
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "NO_PROXY",
+        "no_proxy",
+    ] {
+        parts.push(variable.into());
+        parts.push(std::env::var(variable).unwrap_or_default());
+    }
+    let mut digest = Sha256::new();
+    for part in parts {
+        digest.update((part.len() as u64).to_le_bytes());
+        digest.update(part.as_bytes());
+    }
+    Ok(hex::encode(digest.finalize()))
+}
+
 /// What one endpoint said when it was asked just now.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Answered {
@@ -413,7 +504,7 @@ pub async fn recheck(config: &Config, vault: &Vault) -> Vec<Answered> {
             // useful half of the answer: an endpoint that is up and serving
             // something other than what the file names is a different problem
             // from one that is down, and they look the same otherwise.
-            Ok(provider) => match provider.models().await {
+            Ok(provider) => match provider.models_with(config.model_catalog.limits).await {
                 Ok(models) => (models.into_iter().map(|m| m.id).collect(), None),
                 Err(why) => (Vec::new(), Some(why.to_string())),
             },

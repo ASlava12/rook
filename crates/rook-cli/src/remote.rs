@@ -86,6 +86,7 @@ pub(crate) fn escaped(value: &str) -> String {
 /// only how the command got here — one line and out, or a prompt that comes
 /// back.
 pub struct Watching {
+    last_effort: Option<String>,
     /// What `--yes` decided. The daemon asks the socket rather than the
     /// terminal asking a person, and the rule is the local path's: a command
     /// is scripted more often than watched, so it refuses what it cannot get
@@ -113,6 +114,7 @@ impl Watching {
         Self {
             yes,
             json,
+            last_effort: None,
             calls: crate::fmt::Calls::default(),
             said: String::new(),
             tools: 0,
@@ -133,6 +135,14 @@ impl Watching {
         match event {
             ChatEvent::Started { session } | ChatEvent::Attached { session, .. } => {
                 self.session = session;
+            }
+            ChatEvent::ModelRequest { model, requested_effort, effort } => {
+                let report = format!("{model}: effort requested {requested_effort}; {effort}");
+                if !self.json && self.last_effort.as_ref() != Some(&report) {
+                    let _ = writeln!(out, "\n  {report}");
+                    let _ = out.flush();
+                }
+                self.last_effort = Some(report);
             }
             ChatEvent::Text { text } => {
                 self.said.push_str(&text);

@@ -93,6 +93,10 @@ pub type Result<T> = std::result::Result<T, ToolError>;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolOutcome {
     pub content: String,
+    /// Validated inline tool data, kept separate from text and metadata so
+    /// hooks and transcript rendering cannot accidentally print base64.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<rook_llm::Image>,
     pub is_error: bool,
     #[serde(default)]
     pub truncated: bool,
@@ -107,13 +111,27 @@ impl ToolOutcome {
     pub fn ok(content: impl Into<String>) -> Self {
         let content = content.into();
         let full_bytes = content.len();
-        Self { content, is_error: false, truncated: false, full_bytes, meta: BTreeMap::new() }
+        Self {
+            content,
+            images: Vec::new(),
+            is_error: false,
+            truncated: false,
+            full_bytes,
+            meta: BTreeMap::new(),
+        }
     }
 
     pub fn error(content: impl Into<String>) -> Self {
         let content = content.into();
         let full_bytes = content.len();
-        Self { content, is_error: true, truncated: false, full_bytes, meta: BTreeMap::new() }
+        Self {
+            content,
+            images: Vec::new(),
+            is_error: true,
+            truncated: false,
+            full_bytes,
+            meta: BTreeMap::new(),
+        }
     }
 
     pub fn with(mut self, key: &str, value: impl Into<serde_json::Value>) -> Self {
@@ -494,7 +512,18 @@ pub fn normalize(path: &std::path::Path) -> PathBuf {
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn spec(&self) -> ToolSpec;
+
+    /// The model-facing form; external schemas must retain their constraints.
+    fn advertisement(&self, lazy: bool) -> ToolSpec {
+        let spec = self.spec();
+        if lazy { spec.stub() } else { spec }
+    }
     async fn call(&self, ctx: &ToolContext, args: &serde_json::Value) -> Result<ToolOutcome>;
+
+    /// Concrete operation for approvals and hooks when a tool forwards a call.
+    fn invocation<'a>(&'a self, args: &'a serde_json::Value) -> (&'a str, &'a serde_json::Value) {
+        (self.name(), args)
+    }
 
     /// Paths this call is about to modify, so the caller can checkpoint them
     /// first. Empty for read-only tools.
@@ -584,7 +613,7 @@ impl ToolBox {
     /// between ~400 and ~4,000 tokens on every single request, and on local
     /// models a tool-heavy prompt is far slower to process than a plain one.
     pub fn stubs(&self) -> Vec<ToolSpec> {
-        self.tools.iter().map(|t| t.spec().stub()).collect()
+        self.tools.iter().map(|t| t.advertisement(true)).collect()
     }
 
     pub async fn call(&self, ctx: &ToolContext, name: &str, args: &serde_json::Value) -> Result<ToolOutcome> {

@@ -225,6 +225,17 @@ impl Vault {
         raw.map(|value| cleaned(&value)).filter(|value| !value.is_empty())
     }
 
+    /// Passive identity of a credential definition. External helpers are never
+    /// run for an offline cache lookup; the live credential is checked separately.
+    pub(crate) fn cache_scope(&self, name: &str) -> String {
+        use sha2::{Digest, Sha256};
+        self.entries
+            .get(name.trim())
+            .and_then(|entry| serde_json::to_vec(entry).ok())
+            .map(|bytes| hex::encode(Sha256::digest(bytes)))
+            .unwrap_or_default()
+    }
+
     /// The value, and remembered as handed out so it can be taken back out of
     /// what comes back.
     pub fn value(&self, name: &str) -> Option<String> {

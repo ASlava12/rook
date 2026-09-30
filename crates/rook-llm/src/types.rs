@@ -9,7 +9,7 @@ pub enum Role {
     Tool,
 }
 
-/// Inline image supplied by the user; never a URL for a provider to fetch.
+/// Validated inline image from a user or tool; never a URL for a provider to fetch.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Image {
     pub mime_type: String,
@@ -273,6 +273,10 @@ pub struct Request {
     /// choice. Ignored by the ones that do not.
     #[serde(default)]
     pub cache_ttl: CacheTtl,
+    /// Route-local observations supplied by the host, never model output or a
+    /// serialized request. Wire adapters use only facts for their dialect.
+    #[serde(skip)]
+    pub model_capabilities: crate::ModelCapabilities,
 }
 
 /// How long a cached prompt prefix is kept.
@@ -329,6 +333,7 @@ impl Request {
             temperature: 0.0,
             effort: None,
             cache_ttl: CacheTtl::default(),
+            model_capabilities: Default::default(),
         }
     }
 }
@@ -378,12 +383,17 @@ pub struct Response {
 /// A model the provider says it can serve.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelInfo {
+    #[serde(default)]
+    pub capabilities: crate::ModelCapabilities,
     pub id: String,
     #[serde(default)]
     pub owned_by: Option<String>,
     /// Reported context length, where the endpoint gives one. Most do not.
     #[serde(default)]
     pub context_window: Option<usize>,
+    /// Architectural maximum, distinct from a local instance's active window.
+    #[serde(default)]
+    pub max_context_window: Option<usize>,
     /// Whether the endpoint has it in memory, where it says.
     ///
     /// The difference between a model that answers in a second and one that

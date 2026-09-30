@@ -12,9 +12,9 @@
 //!   `rook-skills`, which reads skills written for any conforming agent.
 //! * **ACP** (Agent Client Protocol) — JSON-RPC 2.0 over stdio, how editors talk
 //!   to agents. Implemented by `rook acp`; see `rook-acp`.
-//! * **MCP** (Model Context Protocol) — for consuming third-party tools. Planned.
+//! * **MCP** (Model Context Protocol) — third-party tools over stdio and HTTP.
 //! * **Agent Plugins** — `plugin.json` packaging around skills and MCP servers.
-//!   Planned; it defers to Agent Skills for the skill format itself.
+//!   Implemented; it defers to Agent Skills for the skill format itself.
 //!
 //! The HTTP API below is Rook's own, for its CLI and web UI only.
 
@@ -210,6 +210,13 @@ pub enum ChatEvent {
     Reasoning {
         text: String,
     },
+    /// The effort parameter of the accepted request on the answering route.
+    /// Separate from Settings.effort, which remains the user's preference.
+    ModelRequest {
+        model: String,
+        requested_effort: String,
+        effort: String,
+    },
     /// A sub-agent's progress: which of them is working, and on what.
     ///
     /// Its own event because it is its own thing. A turn run here sent it as
@@ -255,6 +262,12 @@ pub enum ChatEvent {
     },
     Forgot {
         text: String,
+    },
+    /// Current main conversation, including estimated new messages. This may
+    /// decrease after compaction; `Spent` remains cumulative billing usage.
+    Context {
+        used: usize,
+        size: usize,
     },
     /// What the turn has spent so far, sent after each reply from the model so
     /// a long turn shows its cost while it can still change a decision.

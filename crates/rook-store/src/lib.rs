@@ -421,10 +421,23 @@ impl Store {
     /// size and hash. Compressed results need a sequential decode; long command
     /// spills use seekable files in the core instead.
     pub fn get_range(&self, id: &ObjectId, offset: u64, limit: usize) -> Result<Vec<u8>> {
+        Ok(self.get_ranges(id, &[(offset, limit)])?.pop().unwrap_or_default())
+    }
+
+    /// A bounded head and tail, with one verified decode even for large objects.
+    pub fn get_ends(&self, id: &ObjectId, head: usize, tail: usize) -> Result<(Vec<u8>, Vec<u8>)> {
+        let meta = self.stat_object(id)?.ok_or_else(|| StoreError::MissingObject(id.short()))?;
+        let mut ends =
+            self.get_ranges(id, &[(0, head), (meta.size_raw.saturating_sub(tail as u64), tail)])?;
+        let tail = ends.pop().unwrap_or_default();
+        Ok((ends.pop().unwrap_or_default(), tail))
+    }
+
+    fn get_ranges(&self, id: &ObjectId, ranges: &[(u64, usize)]) -> Result<Vec<Vec<u8>>> {
         use std::io::{BufReader, Read};
         let meta = self.stat_object(id)?.ok_or_else(|| StoreError::MissingObject(id.short()))?;
         let corrupt = |reason: &str| StoreError::Corrupt { id: id.short(), reason: reason.into() };
-        if offset > meta.size_raw {
+        if ranges.iter().any(|(offset, _)| *offset > meta.size_raw) {
             return Err(corrupt("range starts past the object's end"));
         }
         let source = || -> Result<Box<dyn Read>> {
@@ -451,7 +464,7 @@ impl Store {
         };
         let mut last = "required dictionary is missing".to_string();
         for dict in dictionaries {
-            let attempt = (|| -> Result<Vec<u8>> {
+            let attempt = (|| -> Result<Vec<Vec<u8>>> {
                 let mut reader: Box<dyn Read> = match meta.codec {
                     codec::CODEC_RAW => source()?,
                     _ => Box::new(
@@ -465,7 +478,7 @@ impl Store {
                 let mut hash = blake3::Hasher::new();
                 let mut chunk = [0u8; 64 * 1024];
                 let mut seen = 0u64;
-                let mut kept = Vec::new();
+                let mut kept = vec![Vec::new(); ranges.len()];
                 loop {
                     let n = reader.read(&mut chunk).map_err(|e| StoreError::Encoding(e.to_string()))?;
                     if n == 0 {
@@ -476,10 +489,12 @@ impl Store {
                         return Err(corrupt("decoded bytes exceed recorded size"));
                     }
                     hash.update(&chunk[..n]);
-                    let start = offset.max(seen);
-                    let stop = offset.saturating_add(limit as u64).min(end);
-                    if start < stop {
-                        kept.extend_from_slice(&chunk[(start - seen) as usize..(stop - seen) as usize]);
+                    for ((offset, limit), output) in ranges.iter().zip(&mut kept) {
+                        let start = (*offset).max(seen);
+                        let stop = offset.saturating_add(*limit as u64).min(end);
+                        if start < stop {
+                            output.extend_from_slice(&chunk[(start - seen) as usize..(stop - seen) as usize]);
+                        }
                     }
                     seen = end;
                 }
@@ -721,13 +736,30 @@ impl Store {
     /// Append one event. The body is stored as an object, so a repeated payload
     /// costs only the ~50-byte log record.
     pub fn append_event(&self, session: u128, event: NewEvent<'_>) -> Result<u64> {
+        self.append_events(session, [event]).map(|[seq]| seq)
+    }
+
+    /// Keep a companion payload and its event adjacent even while another
+    /// thread appends to the session. Both records commit together and survive
+    /// ordinary event-based forks and retention, without session KV sidecars.
+    pub fn append_event_pair(
+        &self,
+        session: u128,
+        before: NewEvent<'_>,
+        event: NewEvent<'_>,
+    ) -> Result<[u64; 2]> {
+        self.append_events(session, [before, event])
+    }
+
+    fn append_events<const N: usize>(&self, session: u128, batch: [NewEvent<'_>; N]) -> Result<[u64; N]> {
         // A checkpoint and a compaction are the two events a session can be
         // returned to, so they are the two that have to be on the disk rather
         // than in the page cache — and because an `Immediate` commit carries
         // everything before it, making these durable makes the turn that led up
         // to them durable too. Everything else rides along.
-        let ordinary = !matches!(event.kind, EventKind::Checkpoint | EventKind::Compaction)
-            && self.unflushed.load(Ordering::Relaxed) < EVENTS_PER_FLUSH;
+        let ordinary =
+            batch.iter().all(|event| !matches!(event.kind, EventKind::Checkpoint | EventKind::Compaction))
+                && self.unflushed.load(Ordering::Relaxed).saturating_add(N as u64) <= EVENTS_PER_FLUSH;
 
         let mut txn = self.db.begin_write()?;
         if ordinary {
@@ -736,59 +768,66 @@ impl Store {
             // handle, and the cost of being wrong is a flush we did not need.
             let _ = txn.set_durability(redb::Durability::None);
         }
-        let body_id = self.put_tx(&txn, event.body_kind, event.body)?;
+        let mut sequences = [0; N];
+        for (index, event) in batch.into_iter().enumerate() {
+            let body_id = self.put_tx(&txn, event.body_kind, event.body)?;
 
-        let seq;
-        {
-            let mut sessions = txn.open_table(schema::SESSIONS)?;
-            let key = schema::session_key(session);
-            let mut meta: SessionMeta = match sessions.get(key.as_slice())? {
-                Some(v) => postcard::from_bytes(v.value())?,
-                None => return Err(StoreError::MissingSession(format_session_id(session))),
-            };
-            seq = meta.next_seq;
-            meta.next_seq += 1;
-            meta.event_count += 1;
-            meta.tokens_in += event.tokens_in as u64;
-            meta.tokens_out += event.tokens_out as u64;
-            meta.updated_at = now_unix();
-            let encoded = postcard::to_stdvec(&meta)?;
-            sessions.insert(key.as_slice(), encoded.as_slice())?;
-        }
+            let seq;
+            {
+                let mut sessions = txn.open_table(schema::SESSIONS)?;
+                let key = schema::session_key(session);
+                let mut meta: SessionMeta = match sessions.get(key.as_slice())? {
+                    Some(v) => postcard::from_bytes(v.value())?,
+                    None => return Err(StoreError::MissingSession(format_session_id(session))),
+                };
+                seq = meta.next_seq;
+                meta.next_seq += 1;
+                meta.event_count += 1;
+                meta.tokens_in += event.tokens_in as u64;
+                meta.tokens_out += event.tokens_out as u64;
+                meta.updated_at = now_unix();
+                let encoded = postcard::to_stdvec(&meta)?;
+                sessions.insert(key.as_slice(), encoded.as_slice())?;
+            }
 
-        {
-            let record = EventRecord {
-                ts: event.ts.unwrap_or_else(now_unix),
-                kind: event.kind,
-                body: body_id,
-                label: event.label.to_string(),
-                tokens_in: event.tokens_in,
-                tokens_out: event.tokens_out,
-            };
-            let encoded = postcard::to_stdvec(&record)?;
-            let mut events = txn.open_table(schema::EVENTS)?;
-            events.insert(schema::event_key(session, seq).as_slice(), encoded.as_slice())?;
-        }
+            {
+                let record = EventRecord {
+                    ts: event.ts.unwrap_or_else(now_unix),
+                    kind: event.kind,
+                    body: body_id,
+                    label: event.label.to_string(),
+                    tokens_in: event.tokens_in,
+                    tokens_out: event.tokens_out,
+                };
+                let encoded = postcard::to_stdvec(&record)?;
+                let mut events = txn.open_table(schema::EVENTS)?;
+                events.insert(schema::event_key(session, seq).as_slice(), encoded.as_slice())?;
+            }
 
-        if event.kind == EventKind::Checkpoint {
-            let mut kv = txn.open_table(schema::KV)?;
-            let previous = kv.get("checkpoint-clock")?.map(|v| v.value().to_vec());
-            let order = previous
-                .as_deref()
-                .and_then(|b| b.try_into().ok())
-                .map(u64::from_le_bytes)
-                .unwrap_or(0)
-                .checked_add(1)
-                .ok_or_else(|| StoreError::Encoding("checkpoint order exhausted".into()))?;
-            kv.insert("checkpoint-clock", order.to_le_bytes().as_slice())?;
-            kv.insert(format!("checkpoint-order/{session}/{seq}").as_str(), order.to_le_bytes().as_slice())?;
+            if event.kind == EventKind::Checkpoint {
+                let mut kv = txn.open_table(schema::KV)?;
+                let previous = kv.get("checkpoint-clock")?.map(|v| v.value().to_vec());
+                let order = previous
+                    .as_deref()
+                    .and_then(|b| b.try_into().ok())
+                    .map(u64::from_le_bytes)
+                    .unwrap_or(0)
+                    .checked_add(1)
+                    .ok_or_else(|| StoreError::Encoding("checkpoint order exhausted".into()))?;
+                kv.insert("checkpoint-clock", order.to_le_bytes().as_slice())?;
+                kv.insert(
+                    format!("checkpoint-order/{session}/{seq}").as_str(),
+                    order.to_le_bytes().as_slice(),
+                )?;
+            }
+            sequences[index] = seq;
         }
         txn.commit()?;
         match ordinary {
-            true => self.unflushed.fetch_add(1, Ordering::Relaxed),
+            true => self.unflushed.fetch_add(N as u64, Ordering::Relaxed),
             false => self.unflushed.swap(0, Ordering::Relaxed),
         };
-        Ok(seq)
+        Ok(sequences)
     }
 
     /// How many events are not on the disk yet.
@@ -822,6 +861,9 @@ impl Store {
     }
 
     pub fn events(&self, session: u128, from_seq: u64, limit: usize) -> Result<Vec<Event>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         let txn = self.db.begin_read()?;
         let events = txn.open_table(schema::EVENTS)?;
         let start = schema::event_key(session, from_seq);
@@ -838,6 +880,28 @@ impl Store {
                 break;
             }
         }
+        Ok(out)
+    }
+
+    /// Read the nearest earlier events without collecting an entire session.
+    /// `before` is exclusive; returned events remain in chronological order.
+    pub fn events_before(&self, session: u128, before: u64, limit: usize) -> Result<Vec<Event>> {
+        if before == 0 || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let txn = self.db.begin_read()?;
+        let events = txn.open_table(schema::EVENTS)?;
+        let start = schema::event_key(session, 0);
+        let end = schema::event_key(session, before - 1);
+        let mut out = Vec::new();
+        for entry in events.range(start.as_slice()..=end.as_slice())?.rev().take(limit) {
+            let (k, v) = entry?;
+            let Some((sid, seq)) = schema::parse_event_key(k.value()) else { continue };
+            if sid == session {
+                out.push(Event { session: sid, seq, record: postcard::from_bytes(v.value())? });
+            }
+        }
+        out.reverse();
         Ok(out)
     }
 

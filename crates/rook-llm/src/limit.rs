@@ -116,12 +116,28 @@ impl Provider for Limited {
         self.inner.context_window()
     }
 
+    fn context_key(&self) -> Option<[u8; 32]> {
+        self.inner.context_key()
+    }
+
+    fn context_is_explicit(&self) -> bool {
+        self.inner.context_is_explicit()
+    }
+
+    async fn discover_context_window(&self, limits: crate::CatalogLimits) -> Result<Option<usize>> {
+        self.inner.discover_context_window(limits).await
+    }
+
     fn supports_tools(&self) -> bool {
         self.inner.supports_tools()
     }
 
     fn takes_effort(&self) -> bool {
         self.inner.takes_effort()
+    }
+
+    fn effort_use(&self, effort: crate::Effort) -> crate::EffortUse {
+        self.inner.effort_use(effort)
     }
 
     fn supports_streaming(&self) -> bool {
@@ -132,6 +148,10 @@ impl Provider for Limited {
     /// work for it, and `doctor` asking it must not queue behind a turn.
     async fn models(&self) -> Result<Vec<ModelInfo>> {
         self.inner.models().await
+    }
+
+    async fn models_with(&self, limits: crate::CatalogLimits) -> Result<Vec<ModelInfo>> {
+        self.inner.models_with(limits).await
     }
 
     /// The same, and more so: this is the question "is anything there", and an

@@ -260,7 +260,39 @@ rook session ls
 rook session show 01JQ… --from 0 --limit 50
 rook session show 01JQ… --json | jq '.[] | select(.kind=="tool-call")'
 rook session context 01JQ…            # what the conversation costs, and of what
+rook session history last            # most recent page, oldest to newest
+rook session history last --before 1200
+rook session find last "connection refused" --json
+rook session entry last 1190 --offset 4096
+rook session quote last 1190          # attributed source text; never sends it
 ```
+
+History pages have `previous` (exclusive `--before`) and `next` (inclusive
+`--from`) cursors. Search matches literal text case-insensitively, one hit per
+matching event. Its JSON `next` cursor contains `seq`, `offset` and `through`:
+pass them as `--from`, `--offset`, `--through` to continue the same scan. An empty
+hit page with a cursor means more history remains to scan. The first request
+fixes the search's upper event boundary so a running session cannot prolong it
+indefinitely. Entry and quote results expose `next_offset` for long bodies.
+
+In the TUI, **Ctrl+F** opens this session's history, or **f** opens the selected
+session from the Sessions pane. **/** searches, **g** jumps to an event number,
+**Enter** opens its body, **n/p** read the next/previous page or body part,
+**b** returns to the event list, **r** refreshes the tail, and **q** inserts an
+attributed quote into the existing draft. **Esc** returns without sending.
+History reads run on a separate worker so a running turn stays responsive.
+The browser's Sessions view and the chat history panel expose the same pages,
+search, jump and quote operations; each retains one page, and Refresh latest
+loads the current tail. Quotes carry session/event provenance as source data,
+preserve draft text and require an explicit Send/Enter. Encoded images and signed
+provider state are never exposed as raw search results or quoted payloads.
+
+`[transcript]` configures `page_entries` (64), `page_bytes` (262144 serialized
+bytes), `body_bytes` (4096), `search_bytes` (4194304 per scan), `search_events`
+(256 per scan) and `quote_bytes` (16384 source bytes). Small UTF-8 lookahead and
+formatting envelopes have separate bounded overhead. Large objects are decoded
+with bounded memory and their full hash is verified; compressed range reads
+still require a sequential decode. `rook config edit` explains the ranges.
 
 ### Seeing what changed
 
@@ -699,6 +731,43 @@ route answers 400, and rather than ending the turn on a field you never set, the
 effort is dropped and the request made once more — and not sent again for the
 rest of the run.
 
+The effort control is a **requested** level. After a streaming request is accepted,
+Rook also reports what was sent on the answering route: for example, requested
+`max` can become `reasoning_effort=high`, or the parameter can be omitted after a
+refusal. The CLI and TUI show changes to this status; the browser keeps the last
+request beside the controls. This reports request parameters, not a measurement
+of how much the model actually thought. `/effort` describes the expected mapping
+for the model selected in that session, while live request status includes retries
+and fallback routes.
+
+Mappings depend on the model: older OpenAI reasoning models cap at `high`,
+GPT-5.2–5.5 at `xhigh`, and GPT-5.6/6 at `max`. These families use
+`max_completion_tokens` and omit unsupported sampling temperature.
+Claude Opus/Sonnet 4.6 map requested `xhigh` to `high`, retaining `max`;
+Opus 4.5 accepts effort without enabling adaptive thinking.
+Gemini 3 uses `thinkingLevel`, with model-specific supported levels. Gemini 2.5
+uses numeric budgets; upper levels use its documented maximum rather than
+switching back to dynamic thinking. Unmapped Google models omit the control.
+The Responses transport is selected explicitly with `api = "responses"` (alias
+`"openai-responses"`) on a named model/endpoint, or `responses/gpt-6-astra`
+shorthand. The shorthand uses `OPENAI_API_KEY` and `OPENAI_BASE_URL`, like
+`openai/model`. Existing `api = "openai"` and `openai/model` continue to use
+Chat Completions. Responses sends `max_output_tokens`, preserves optional tool
+arguments, and replays ordered output and encrypted reasoning within a live
+turn and across session reopen/forks. Original tool IDs and whole batches survive;
+interrupted calls get an explicit missing-result response. Opaque state is sent
+only with matching connection/model settings and is omitted from transcript
+views. Compaction and context reports count it even though its preview is short.
+
+`agent.max_provider_state_bytes` caps stored assistant state per response
+(default 4 MiB, range 1 KiB–32 MiB). Oversized state stops before tools execute;
+its reported token usage is still recorded. Signed state cannot be truncated by
+`max_reasoning_tokens`, which applies to text-only reasoning. If known-secret
+redaction would alter a signed block or its visible content, the block is
+withheld with a transcript note; resumed reasoning may need to restart.
+Verification uses local HTTP fixtures, not live cloud-model acceptance. See the
+[provider compatibility work](docs/research/reference-adoption-20260929.md).
+
 `prompt_cache_ttl` is which side of a pause you pay on. A cache write costs more
 for the hour and a hit costs a tenth either way, so `1h` pays off exactly when a
 conversation outlives five minutes — a person thinking between turns. It is not
@@ -812,7 +881,12 @@ cannot route to. An MCP server this machine starts and talks to over pipes has
 no network between the two and never sees a proxy at all.
 
 `rook config check` reads the file, names anything in it that is not a setting,
-and asks every endpoint whether it is there. `rook config set agent.model
+and asks every endpoint whether it is there. `rook config check --offline` checks
+compaction thresholds, model/endpoint structure and MCP declarations without
+network requests, credential resolution or the store lock. Invalid settings and
+unknown keys produce a nonzero exit status; `--json` includes `errors`, `valid`
+and `connections_checked`. Offline success does not prove connectivity.
+`rook config set agent.model
 desk-small` changes one line and leaves the comments around it alone.
 
 `rook config edit` opens an interactive editor for the user config without
@@ -831,17 +905,113 @@ variables/headers are hidden, including while typing.
 
 Changes stay in a draft until saved. Existing comments and unrelated values are
 preserved, writes are atomic, and a file changed by another editor is not
-overwritten. The form does not execute configured commands or test connections;
+overwritten. Before saving, the form uses the same offline structural checks as `config check`
+(including conflicting model/endpoint fields and required API, URL and model
+settings). The accepted `agent.compact_at` range is 0.1–0.9, matching runtime.
+The form does not execute configured commands or test connections;
 use `rook config check` / `rook mcp ls` afterwards for connection checks. The
-daemon reads updated settings between turns; restart `rookd` for listener, MCP
-or LSP connection changes. Reopen a standalone TUI to reload its settings.
+daemon reads updated settings between turns. Use `/mcp reconnect <name>` or
+`rook mcp reconnect <name>` to apply an MCP connection change; restart `rookd`
+for listener or LSP changes and for MCP connection limits. Reopen a standalone TUI to reload its settings.
 Workspace overrides can still take precedence
 over the user configuration. Files are limited to 1 MiB, collections to 256
 entries, and input fields to 16 KiB.
 
-`rook models` asks the endpoint what it serves. Effort applies where the provider
-has the notion; sub-agents and `/btw` run at `low` regardless, since a bounded
-errand does not need the depth the main turn does.
+`rook models` uses a recent local observation or asks the selected endpoint what
+it serves. `--refresh` always contacts it and reports failures; `--offline` reads
+only the cache, or shows the configured model with unknown capabilities when no
+usable observation exists. Offline mode never starts credential helpers. Use
+`--json --metadata` for an object containing the models, origin, observation time,
+age, credential-resolution status and notices; ordinary `--json` keeps the model
+array, with provenance on stderr. Offline observations do not verify the current
+account, and cached catalogs do not prove that an endpoint is reachable. With
+`--json`, each model also
+carries `capabilities`: tool use, image input, reasoning, adaptive thinking and
+advertised effort levels where the API reports them. `null` means unknown;
+missing metadata is not a claim that a model lacks a capability.
+
+Generation uses a fresh, complete, credential-matched catalog snapshot when a
+provider is built. An explicit lack of native tools selects prompt-encoded calls
+and history; tool results remain marked as untrusted observations. An explicit
+lack of image input rejects image requests before sending, without removing
+images. Advertised effort levels constrain the dialect's known mappings,
+including the minimum supported level. Unknown wire mappings stay unknown;
+metadata does not invent request fields. Anthropic's reported adaptive-thinking
+support also controls that request field. Accepted effort reports describe the
+actual answering route, including fallback and retry behavior.
+
+Snapshots stay fixed for that provider's lifetime, so a mid-turn catalog update
+does not rewrite the prompt/tool prefix. `rook models --refresh` affects the next
+provider construction. Expired, future-dated, incomplete or mismatched entries
+are not used for generation, even when `--offline` can display an old observation.
+Normal provider construction performs no metadata network request. Runtime
+context discovery can populate the same cache for subsequent turns.
+
+Model metadata requests have a total deadline, a byte cap while reading, and a
+model-count cap while parsing. These apply to `models`, `doctor`, endpoint
+rechecks and automatic context-window discovery. The limits are editable with
+`rook config edit`:
+
+```toml
+[model_catalog]
+max_bytes = 1048576    # 1 KiB–4 MiB across all responses, including error bodies
+max_models = 1024     # 1–4096 received entries across pages, including duplicates
+max_pages = 16       # 1–64 requests, including optional metadata enrichment
+timeout_secs = 5     # 1–60 seconds for the entire catalog operation
+cache_enabled = true
+cache_ttl_secs = 300       # 0–86400; zero refreshes each online listing
+cache_max_entries = 16     # 1–128 endpoint/configuration observations
+learned_window_entries = 16 # 1–128 in-memory context observations
+cache_max_bytes = 4194304  # 4 KiB–16 MiB for the complete cache
+```
+
+Local model metadata can use the server's native API beside its compatible
+chat API. For a named connection, set `metadata_api = "ollama"` or
+`metadata_api = "lmstudio"` under its `[endpoints.<name>]` table, or directly
+under `[models.<name>]` when it carries its own address. Use `api = "openai"`,
+or `api = "responses"` if the server supports that transport.
+`auto` (the default) recognizes `ollama/model` and `lmstudio/model` shorthand;
+`none` disables native requests. The interactive config editor lists these
+choices. Native requests use the same address prefix, authorization and shared
+metadata budgets. LM Studio tries `/api/v1/models`, then v0 only for 404/405.
+Ollama asks `/api/show` for the selected model first, reads `/api/ps`, and enriches
+other listed models while the remaining budget allows. It never loads models.
+Missing or unavailable native facts remain unknown; they do not invalidate a
+successful compatible model listing.
+
+JSON `context_window` is the active or configured context, while
+`max_context_window` is the separately reported architectural maximum. An
+unloaded model's maximum does not become the agent's operating budget. For an
+LM Studio model key with several loaded instances, all must report a context
+before their minimum is used; an instance alias uses its own context.
+[LM Studio metadata](https://lmstudio.ai/docs/developer/rest/list) and
+[Ollama model details](https://docs.ollama.com/api-reference/show-model-details)
+describe the native fields; [running Ollama models](https://docs.ollama.com/api/ps)
+report their allocated context.
+
+Context discovery and session context reports use the model actually selected
+for the turn, including named sources and recipe overrides. Learned windows are scoped to the endpoint, model,
+credential and complete fallback group, retained in a bounded in-memory LRU.
+Fallback groups use the smallest reported or assumed window of their candidates;
+a large primary cannot enlarge an unknown fallback. Explicit context limits are
+not replaced by discovery. A refusal takes precedence over a later catalog
+observation of the same connection.
+
+Anthropic and Google listings follow their pagination cursors. Limits apply to
+the whole operation; a later-page failure never stores a partial catalog.
+Overlapping IDs keep their first observation. Older cache entries without a
+completeness marker are ignored and refreshed by the next online lookup.
+
+The cache lives under the Rook home in `cache/models-v1.json`. It is bounded,
+written atomically with private permissions, and keyed by opaque endpoint and
+credential and proxy-routing identities. Old observations are evicted first; an oversized snapshot
+or a busy cache writer does not fail a successful listing. A changed live
+credential invalidates reuse. After a connection failure, an existing observation
+is explicitly marked stale; authentication errors are still errors. `models
+--recheck` and `doctor` continue to probe live endpoints.
+
+Effort applies where the provider has the notion; sub-agents and `/btw` run at
+`low` regardless, since a bounded errand does not need the depth the main turn does.
 
 ### Working at one goal for longer than a turn
 
@@ -1017,6 +1187,39 @@ This is a recovery journal, not a transaction with the outside world: a crash
 between an effect and its durable receipt cannot prove whether the effect happened.
 Existing sessions created before this feature have only their older logs.
 
+### Local diagnostic reports
+
+```sh
+rook session diagnostics last                       # bounded JSON on stdout
+rook session diagnostics last --output support.json # create a new local file
+rook session diagnostics last --logs                # also include redacted log tails
+```
+
+In the TUI or chat REPL, `/diagnostics [--logs] [new-file-path]` saves a report;
+without a path it creates a unique file under `$ROOK_HOME/diagnostics/`. The
+browser's session view has a **Download diagnostics** button. Export also works
+through a running daemon, including while the session is executing a tool.
+Existing destination files are never overwritten and nothing is uploaded.
+
+The default report contains selected state and counters, recent event metadata,
+and measured request/tool durations. It excludes conversation bodies, session
+titles, tool arguments, model URLs and credentials. Logs are opt-in: credential
+patterns, URLs and local home/workspace paths are redacted, but arbitrary private
+application text can remain, so inspect a log-inclusive report before sharing it.
+
+`telemetry.diagnostic_events` defaults to 256 and is clamped to 1–2048 events.
+`telemetry.diagnostic_log_bytes` defaults to 65536 and caps each of the two log
+tails at 64 KiB; zero omits log content. The serialized report is capped at 1 MiB.
+Large log tails discard an incomplete first line, and oversized timing payloads
+are reported without being decoded. Missing timings are stated explicitly.
+
+Timings cover main agent requests, checking-agent requests, compaction requests
+and tool dispatch. Request durations include queue/retry waits; dispatch durations
+include approval, hooks and receipt bookkeeping. They are elapsed durations,
+not pure network or command CPU time. Failure and future cancellation are recorded
+separately from completion. A process killed before recording its measurement
+leaves no invented duration; execution recovery still reports unfinished work.
+
 ### From an editor
 
 `rook acp` speaks the [Agent Client Protocol](https://agentclientprotocol.com) on
@@ -1074,6 +1277,14 @@ would make, built by applying the very edits the call would apply to a copy
 nothing writes. Indented under the terminal prompt, coloured in the TUI panel, in
 the browser's dialog, and as content on the ACP permission request — an approval
 that names only a path is one given blind.
+
+Context usage is reported separately from cumulative token spend. The TUI and
+browser show the current main conversation against the effective model window;
+ACP clients receive standard `usage_update` notifications before and after model
+requests. Counts use the engine's estimate, anchored to provider usage when that
+count is credible. Compaction can lower them; delegated work and completion
+checks do not replace the main conversation's count. Monetary cost is omitted
+when no pricing information is available.
 
 A question put to a person is bounded by `[agent] answer_timeout_secs` (ten
 minutes). A closed tab or an abandoned terminal would otherwise hold the turn —
@@ -1283,9 +1494,143 @@ rook mcp tools filesystem                # its tools and their arguments
 rook mcp call filesystem read_file '{"path":"a.txt"}'   # no model in the loop
 ```
 
+These commands open their own MCP connections using configuration and trusted
+plugin declarations. They do not take the conversation store lock, so they work
+while `rookd` or another local session is running. `rook mcp ls --json` returns
+empty arrays when no servers are enabled.
+
+Managed connections belong to the frontend running the turns:
+
+```sh
+rook mcp status --json              # installed connections in the running daemon
+rook mcp reconnect filesystem       # reload this server's config and replace it
+```
+
+In a chat, `/mcp` shows status; `/mcp reconnect <name>` reloads one declaration.
+The TUI opens a panel with `r` to reconnect, `u` to refresh and Esc to return to
+chat. It keeps accepting input and displaying turn progress while discovery runs.
+The browser's **MCP connections** panel controls the workspace of its selected
+session. These operations reuse the equipment used by agent turns; `ls`, `tools`
+and `call` remain independent probes.
+
+A replacement completes its handshake and full catalog before it is installed.
+Failure keeps the previous connection/catalog, and active turns retain the
+connection they started with. Set `enabled = false` and reconnect to stop offering
+that server to future turns. New declarations can be connected by name. Status
+shows installed state, generation, tool count, current-connection active requests,
+last completed request failure and last reconnect failure. An idle `connected`
+status is not a live health probe. Credentials and server-authored error bodies
+are excluded from managed reports; a lost tool response is never automatically
+replayed by reconnect.
+
+`[mcp_connections]` bounds retained declarations (`max_servers`, default 32,
+range 1..=256, including disabled servers) and initial concurrent discovery
+(`parallel_connects`, default 4, range 1..=32). Too many declarations or duplicate
+names fail admission before starting servers. Restart to apply these limits.
+HTTP credential headers are supported. For a server using OAuth, omit the
+Authorization header and sign in from the CLI:
+
+```sh
+rook mcp login hosted              # prints a URL; open it on this computer
+rook mcp reconnect hosted          # install the new credentials in the daemon
+rook mcp logout hosted             # remove saved credentials for this name
+```
+
+The native login uses a temporary `127.0.0.1` callback listener, discovery and
+PKCE. A pre-registered **public** client can be configured in the server's
+`[mcp.oauth]` table with `client_id`; `callback_port` selects a fixed port if its
+registration requires one (zero asks the OS). A real HTTPS client metadata URL
+can also be used as the client ID when the issuer supports it. With no client ID,
+Rook tries dynamic registration; the server must support it. Confidential clients
+requiring a client secret are not supported. Optional `issuer` selects an
+advertised authorization server; `scopes` is a fallback when the server's
+challenge supplies none.
+
+Access and refresh tokens are saved separately from config and conversation
+history, in `~/.rook/mcp-auth/credentials.json` (or under `ROOK_HOME`). This is a
+private local file, not encrypted storage. The new grant must complete an MCP
+handshake and full tool catalog before replacing saved credentials. Expiring
+tokens refresh across active HTTP connections, with a cross-process lock to
+prevent duplicate rotation. An interrupted refresh requires sign-in again; it
+is not replayed with a potentially spent token. Switching accounts takes effect
+on a new connection; an existing turn never adopts another identity. Logout
+removes saved credentials, but already dispatched requests may finish; it does
+not revoke the grant at the authorization server.
+
+`[mcp_connections]` also bounds the credential store: `oauth_max_entries`
+(default 64, range 1..=256) and `oauth_max_bytes` (default 1 MiB, range
+64 KiB..=4 MiB). Each server's `[mcp.oauth]` bounds response bytes
+(`max_response_bytes`, default 256 KiB), network operations (`timeout_secs`,
+default 30) and waiting for browser consent (`login_timeout_secs`, default 600).
+The config editor explains the accepted ranges. A full store refuses a new
+entry without evicting an existing login.
+
+In the TUI, `/mcp login <name>` starts sign-in and `/mcp logout <name>` removes
+credentials. The `/mcp` panel also has **l** to sign in, **x** to sign out,
+**o** to open the authorization URL in the system browser and **c** to cancel.
+Esc returns to chat while consent is pending; the draft and running turn remain
+available. Successful sign-in reconnects the server for future turns.
+
+The browser's **MCP connections** panel offers Sign in, an explicit authorization
+link, Cancel and Sign out. Reopening the panel recovers pending daemon attempts.
+Its callback is `<Rook origin>/mcp-oauth-callback.html`, so an HTTPS reverse proxy
+can serve a remote browser too. Configure the proxy authority in
+`server.allowed_hosts`, and register this exact callback if the OAuth client
+requires pre-registration. Callback codes are cleared from browser history and
+exchanged in the daemon; tokens never enter page state. The browser reports the
+result after credential verification and reconnection.
+
+`mcp_connections.oauth_max_pending` bounds daemon attempts (default 16, range
+1..=64), including discovery and code exchange. Consent expires according to
+`oauth.login_timeout_secs`; completed results are retained for 60 seconds.
+Cancellation after code exchange starts is refused until its result is known.
+A daemon restart forgets unfinished attempts, which must be started again.
+
+The standalone TUI and native CLI callback require a browser on the same
+computer as Rook. The daemon-backed TUI uses the daemon callback, which must be
+reachable from its browser. After native CLI login, `/mcp reconnect <name>` can
+install the credentials in an existing chat.
+
 Servers connect concurrently and a failure is reported without stopping the turn —
 one misconfigured server must not cost you the working ones. Tools are namespaced
 `server__tool`.
+
+Tool discovery follows every `tools/list` continuation before exposing a catalog.
+Per-server `[[mcp]]` settings bound the complete download: `catalog_max_bytes`
+(default 8388608 serialized result bytes), `catalog_max_tools` (4096),
+`catalog_max_pages` (64), and `catalog_timeout_secs` (30). Empty intermediate
+pages are allowed. Cyclic cursors, duplicate names, malformed pages and exceeded
+limits fail the connection's discovery instead of silently exposing a prefix.
+The startup deadline includes `notifications/initialized`; a refused or hung
+notification is a failed connection. These bounds are independent of the model
+advertisement budget below.
+
+MCP advertisements preserve complete input schemas, including under `lazy_tools`.
+A large server cannot fill the prompt with all of its schemas: `[mcp_catalog]`
+limits their total count (`max_tools`, default 64), combined JSON size
+(`max_bytes`, default 65536), each server's
+share (`max_server_bytes`, default 16384), and directly advertised tools per
+server (`max_server_tools`, default 16). The aggregate includes discovery/call
+helpers; built-in tools are separate. Setting either per-server limit to zero
+keeps that server's tools available through discovery only.
+
+The agent uses `mcp_tools` to search the full connected catalog and read a chosen
+schema in byte pages, then `mcp_call` to invoke a tool that was not advertised
+directly. Follow `next_offset` until null to read the complete schema. Schemas
+are never truncated into a different contract. The selected tool's approval
+rules and pre/post hooks still apply, and results keep images and provenance.
+The advertised prefix stays stable while searching. Ordinary names remain
+`server__tool`; oversized or ambiguous names receive bounded distinct aliases.
+
+
+Inline MCP image results reach image-capable models and survive session reopen
+and forks. PNG, JPEG, WebP and GIF are accepted, up to four images per result,
+2 MiB each and 4096 pixels per side; MIME types are checked against the data.
+As tool results arrive, the request keeps at most four recent images. Omitted
+images leave a notice, and originals remain available to the agent through
+`read_result` with `include_images=true`, including after history compaction.
+Transcript views show image descriptions rather than base64. Image URLs are
+not fetched automatically.
 
 ### Skills
 

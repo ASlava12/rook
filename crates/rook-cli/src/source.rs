@@ -330,6 +330,22 @@ impl Source {
         }
     }
 
+    pub fn diagnostics(&self, session: u128, logs: bool) -> Result<rook_core::diagnostics::Report> {
+        match self {
+            Self::Local(rook) => Ok(rook.diagnostics(session, logs)?),
+            Self::Daemon(daemon) => daemon.get(&format!(
+                "/api/sessions/{}/diagnostics?logs={logs}",
+                rook_store::format_session_id(session)
+            )),
+        }
+    }
+
+    pub fn diagnostics_command(&self, session: u128, arguments: &str) -> Result<String> {
+        let (logs, path) = crate::commands::sessions::diagnostic_arguments(arguments)?;
+        let report = self.diagnostics(session, logs)?;
+        Ok(format!("Diagnostics saved to {}", report.save(&path)?.display()))
+    }
+
     pub fn acknowledge_operation(&self, session: u128, operation: &str, note: &str) -> Result<()> {
         match self {
             Self::Local(rook) => Ok(rook.acknowledge_operation(session, operation, note)?),
@@ -874,6 +890,95 @@ impl Source {
         }
     }
 
+    /// A private reader for a UI worker. It shares a local engine but gives a
+    /// routed reader its own runtime/client so pooled sockets stay on that runtime.
+    pub(crate) fn reader(&self) -> Result<Self> {
+        Ok(match self {
+            Self::Local(rook) => Self::Local(rook.clone()),
+            Self::Daemon(d) => Self::Daemon(Daemon {
+                base: d.base.clone(),
+                replaced: d.replaced,
+                workspace: d.workspace.clone(),
+                runtime: tokio::runtime::Builder::new_current_thread().enable_all().build()?,
+                http: reqwest::Client::builder().timeout(ROUTED).build()?,
+            }),
+        })
+    }
+
+    pub fn transcript_page(
+        &self,
+        session: u128,
+        q: &rook_core::transcript::PageRequest,
+    ) -> Result<rook_core::transcript::Page> {
+        match self {
+            Self::Local(rook) => Ok(rook.transcript_page(session, q)?),
+            Self::Daemon(d) => {
+                let mut path = format!("/api/sessions/{}/history?", rook_store::format_session_id(session));
+                if let Some(from) = q.from {
+                    path.push_str(&format!("&from={from}"));
+                }
+                if let Some(before) = q.before {
+                    path.push_str(&format!("&before={before}"));
+                }
+                if let Some(limit) = q.limit {
+                    path.push_str(&format!("&limit={limit}"));
+                }
+                d.get_bounded(&path)
+            }
+        }
+    }
+    pub fn transcript_search(
+        &self,
+        session: u128,
+        query: &str,
+        cursor: rook_core::transcript::Cursor,
+    ) -> Result<rook_core::transcript::Matches> {
+        match self {
+            Self::Local(rook) => Ok(rook.transcript_search(session, query, cursor)?),
+            Self::Daemon(d) => {
+                let mut path = format!(
+                    "/api/sessions/{}/history/search?q={}&seq={}&offset={}",
+                    rook_store::format_session_id(session),
+                    escaped(query),
+                    cursor.seq,
+                    cursor.offset
+                );
+                if let Some(through) = cursor.through {
+                    path.push_str(&format!("&through={through}"));
+                }
+                d.get_bounded(&path)
+            }
+        }
+    }
+    pub fn transcript_entry(
+        &self,
+        session: u128,
+        seq: u64,
+        offset: u64,
+    ) -> Result<rook_core::transcript::EntryPage> {
+        match self {
+            Self::Local(rook) => Ok(rook.transcript_entry(session, seq, offset)?),
+            Self::Daemon(d) => d.get_bounded(&format!(
+                "/api/sessions/{}/history/{seq}?offset={offset}",
+                rook_store::format_session_id(session)
+            )),
+        }
+    }
+    pub fn transcript_quote(
+        &self,
+        session: u128,
+        seq: u64,
+        offset: u64,
+    ) -> Result<rook_core::transcript::Quote> {
+        match self {
+            Self::Local(rook) => Ok(rook.transcript_quote(session, seq, offset)?),
+            Self::Daemon(d) => d.get_bounded(&format!(
+                "/api/sessions/{}/history/{seq}/quote?offset={offset}",
+                rook_store::format_session_id(session)
+            )),
+        }
+    }
+
     pub fn transcript(
         &self,
         session: u128,
@@ -1191,6 +1296,26 @@ impl Daemon {
                 bail!("{}", refused(&url, status, &said));
             }
             serde_json::from_str(&said).with_context(|| format!("decoding {url}"))
+        })
+    }
+
+    fn get_bounded<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        let url = format!("{}{path}", self.base);
+        self.runtime.block_on(async {
+            let mut response = self.http.get(&url).send().await?;
+            let status = response.status();
+            let mut bytes = Vec::new();
+            while let Some(chunk) = response.chunk().await? {
+                anyhow::ensure!(
+                    chunk.len() <= (2 * 1024 * 1024usize).saturating_sub(bytes.len()),
+                    "history response exceeds 2 MiB"
+                );
+                bytes.extend_from_slice(&chunk);
+            }
+            if !status.is_success() {
+                bail!("{}", refused(&url, status, &String::from_utf8_lossy(&bytes)));
+            }
+            Ok(serde_json::from_slice(&bytes)?)
         })
     }
 

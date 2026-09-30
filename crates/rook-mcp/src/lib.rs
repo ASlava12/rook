@@ -21,7 +21,9 @@
 // so where the characters wider than a byte actually arrive. A slice here
 // either uses an index the code just found, and says so, or it is a crash
 // waiting for somebody who does not write in English.
+mod catalog;
 pub mod http;
+pub mod oauth;
 pub mod protocol;
 pub mod stdio;
 pub mod transport;
@@ -33,7 +35,7 @@ use serde::{Deserialize, Serialize};
 
 use transport::Transport;
 
-pub use protocol::{RpcError, ServerInfo, ToolDescriptor, ToolResult};
+pub use protocol::{PROTOCOL_VERSION, RpcError, ServerInfo, ToolDescriptor, ToolResult};
 
 #[derive(Debug, thiserror::Error)]
 pub enum McpError {
@@ -99,7 +101,7 @@ impl McpError {
 
 pub type Result<T> = std::result::Result<T, McpError>;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ServerConfig {
     pub name: String,
@@ -112,10 +114,16 @@ pub struct ServerConfig {
     pub url: Option<String>,
     /// Extra headers for the HTTP transport, which is where an API key goes.
     pub headers: HashMap<String, String>,
+    pub oauth: oauth::OAuthConfig,
     /// A server that never completes the handshake must fail fast rather than
     /// stalling the agent's startup.
     pub startup_timeout_secs: u64,
     pub call_timeout_secs: u64,
+    /// Whole-catalog limits apply across tools/list pages, before retaining descriptors.
+    pub catalog_max_bytes: usize,
+    pub catalog_max_tools: usize,
+    pub catalog_max_pages: usize,
+    pub catalog_timeout_secs: u64,
     pub enabled: bool,
 }
 
@@ -129,8 +137,13 @@ impl Default for ServerConfig {
             cwd: None,
             url: None,
             headers: HashMap::new(),
+            oauth: Default::default(),
             startup_timeout_secs: 20,
             call_timeout_secs: 120,
+            catalog_max_bytes: 8 * 1024 * 1024,
+            catalog_max_tools: 4096,
+            catalog_max_pages: 64,
+            catalog_timeout_secs: 30,
             enabled: true,
         }
     }
@@ -149,6 +162,9 @@ pub struct Server {
     /// transport again.
     proxy: rook_llm::Proxy,
     restarts: std::sync::atomic::AtomicU32,
+    active: std::sync::atomic::AtomicUsize,
+    last_error: std::sync::atomic::AtomicU8,
+    token: Option<std::sync::Arc<dyn oauth::TokenSource>>,
 }
 
 /// Enough to survive a crash and a restart loop's first turns, and few enough
@@ -159,7 +175,22 @@ impl Server {
     /// Connect and complete the MCP handshake, over whichever transport the
     /// configuration describes.
     pub async fn connect(config: &ServerConfig, proxy: &rook_llm::Proxy) -> Result<Self> {
-        let transport = Self::transport_for(config, proxy)?;
+        Self::connect_with_token(config, proxy, None).await
+    }
+
+    pub async fn connect_with_token(
+        config: &ServerConfig,
+        proxy: &rook_llm::Proxy,
+        token: Option<std::sync::Arc<dyn oauth::TokenSource>>,
+    ) -> Result<Self> {
+        if let Some(message) = config.catalog_error().or_else(|| config.oauth.error()) {
+            return Err(McpError::Decode {
+                server: config.name.clone(),
+                method: "configuration".into(),
+                message: message.into(),
+            });
+        }
+        let transport = Self::transport_for(config, proxy, token.clone())?;
         let info = Self::handshake(transport.as_ref(), config).await?;
         Ok(Self {
             name: config.name.clone(),
@@ -172,13 +203,20 @@ impl Server {
             // after the first crash.
             proxy: proxy.clone(),
             restarts: std::sync::atomic::AtomicU32::new(0),
+            active: std::sync::atomic::AtomicUsize::new(0),
+            last_error: std::sync::atomic::AtomicU8::new(0),
+            token,
         })
     }
 
-    fn transport_for(config: &ServerConfig, proxy: &rook_llm::Proxy) -> Result<Box<dyn Transport>> {
+    fn transport_for(
+        config: &ServerConfig,
+        proxy: &rook_llm::Proxy,
+        token: Option<std::sync::Arc<dyn oauth::TokenSource>>,
+    ) -> Result<Box<dyn Transport>> {
         match config.url.as_deref() {
             Some(url) if !url.is_empty() => {
-                Ok(Box::new(http::Http::new(&config.name, url, &config.headers, proxy)?))
+                Ok(Box::new(http::Http::new(&config.name, url, &config.headers, proxy, token)?))
             }
             // A server this machine starts and talks to over its own pipes has
             // no network between the two, so there is nothing for a proxy to
@@ -193,34 +231,66 @@ impl Server {
     /// routing this through `request_with` would have restart call connect call
     /// restart.
     async fn handshake(transport: &dyn Transport, config: &ServerConfig) -> Result<ServerInfo> {
-        let message = transport
-            .request(
-                "initialize",
-                Some(serde_json::json!({
-                    "protocolVersion": protocol::PROTOCOL_VERSION,
-                    "capabilities": { "tools": {} },
-                    "clientInfo": { "name": "rook", "version": env!("CARGO_PKG_VERSION") },
-                })),
-                Duration::from_secs(config.startup_timeout_secs),
-            )
-            .await?;
-        if let Some(error) = message.error {
-            return Err(McpError::Rpc { server: config.name.clone(), method: "initialize".into(), error });
-        }
-        let info =
-            serde_json::from_value(message.result.unwrap_or(serde_json::Value::Null)).map_err(|e| {
-                McpError::Decode {
+        let timeout = Duration::from_secs(config.startup_timeout_secs);
+        tokio::time::timeout(timeout, async {
+            let message = transport
+                .request(
+                    "initialize",
+                    Some(serde_json::json!({
+                        "protocolVersion": protocol::PROTOCOL_VERSION,
+                        "capabilities": { "tools": {} },
+                        "clientInfo": { "name": "rook", "version": env!("CARGO_PKG_VERSION") },
+                    })),
+                    Duration::from_secs(config.startup_timeout_secs),
+                )
+                .await?;
+            if let Some(error) = message.error {
+                return Err(McpError::Rpc {
+                    server: config.name.clone(),
+                    method: "initialize".into(),
+                    error,
+                });
+            }
+            let info: ServerInfo = serde_json::from_value(message.result.unwrap_or(serde_json::Value::Null))
+                .map_err(|e| McpError::Decode {
                     server: config.name.clone(),
                     method: "initialize".into(),
                     message: e.to_string(),
-                }
-            })?;
-        transport.notify("notifications/initialized", None).await?;
-        Ok(info)
+                })?;
+            transport.negotiated(&info.protocol_version)?;
+            transport.notify("notifications/initialized", None).await?;
+            Ok(info)
+        })
+        .await
+        .map_err(|_| McpError::Timeout {
+            server: config.name.clone(),
+            method: "initialize".into(),
+            timeout,
+            said: String::new(),
+        })?
     }
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Requests currently using this connection, including catalog discovery.
+    pub fn active_requests(&self) -> usize {
+        self.active.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Last completed request only; status reads do not probe an idle server.
+    /// Server-authored text is excluded because it may echo secrets.
+    pub fn last_request_error(&self) -> Option<&'static str> {
+        match self.last_error.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => None,
+            1 => Some("authentication required"),
+            2 => Some("tool outcome unknown; inspect its effects before calling again"),
+            3 => Some("connection failed; check server availability or reconnect"),
+            4 => Some("request timed out"),
+            5 => Some("server refused the request"),
+            _ => Some("invalid protocol response or configuration"),
+        }
     }
 
     pub fn info(&self) -> &ServerInfo {
@@ -229,16 +299,6 @@ impl Server {
 
     pub async fn child_pid(&self) -> Option<u32> {
         self.transport.read().await.child_pid()
-    }
-
-    pub async fn list_tools(&self) -> Result<Vec<ToolDescriptor>> {
-        #[derive(Deserialize)]
-        struct Listing {
-            #[serde(default)]
-            tools: Vec<ToolDescriptor>,
-        }
-        let listing: Listing = self.request("tools/list", Some(serde_json::json!({}))).await?;
-        Ok(listing.tools)
     }
 
     pub async fn call_tool(&self, tool: &str, arguments: &serde_json::Value) -> Result<ToolResult> {
@@ -265,7 +325,9 @@ impl Server {
         if self.restarts.fetch_add(1, Ordering::Relaxed) >= MOST_RESTARTS {
             return false;
         }
-        let Ok(fresh) = Self::transport_for(&self.config, &self.proxy) else { return false };
+        let Ok(fresh) = Self::transport_for(&self.config, &self.proxy, self.token.clone()) else {
+            return false;
+        };
         if Self::handshake(fresh.as_ref(), &self.config).await.is_err() {
             return false;
         }
@@ -275,6 +337,33 @@ impl Server {
     }
 
     async fn request_with<T: for<'de> Deserialize<'de>>(
+        &self,
+        method: &str,
+        params: Option<serde_json::Value>,
+        timeout: Duration,
+    ) -> Result<T> {
+        self.active.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let _active = ActiveRequest(&self.active);
+        let result = self.request_inner(method, params, timeout).await;
+        let code = match &result {
+            Ok(_) => 0,
+            Err(McpError::Unauthorized { .. }) => 1,
+            Err(error)
+                if method == "tools/call"
+                    && (error.is_transport() || matches!(error, McpError::Timeout { .. })) =>
+            {
+                2
+            }
+            Err(error) if error.is_transport() => 3,
+            Err(McpError::Timeout { .. }) => 4,
+            Err(McpError::Rpc { .. }) => 5,
+            Err(_) => 6,
+        };
+        self.last_error.store(code, std::sync::atomic::Ordering::Relaxed);
+        result
+    }
+
+    async fn request_inner<T: for<'de> Deserialize<'de>>(
         &self,
         method: &str,
         params: Option<serde_json::Value>,
@@ -311,5 +400,12 @@ impl Server {
         serde_json::from_value(message.result.unwrap_or(serde_json::Value::Null)).map_err(|e| {
             McpError::Decode { server: self.name.clone(), method: method.into(), message: e.to_string() }
         })
+    }
+}
+
+struct ActiveRequest<'a>(&'a std::sync::atomic::AtomicUsize);
+impl Drop for ActiveRequest<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     }
 }

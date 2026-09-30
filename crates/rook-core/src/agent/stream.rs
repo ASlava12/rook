@@ -49,10 +49,12 @@ impl AgentLoop<'_> {
                 _ = carrying.tick() => nursery.relay(&self.interjections, &mut carried),
                 Some(()) = nursery.collect_next(), if nursery.busy() => {}
                 delta = stream.next() => {
-                    nothing_yet = false;
                     let Some(delta) = delta else { break };
                     match delta {
                         Ok(delta) => {
+                            if !matches!(delta, rook_llm::Delta::Effort(_)) {
+                                nothing_yet = false;
+                            }
                             on_progress(Progress::Delta(&delta));
                             if let Err(e) = assembler.push(delta) {
                                 broke = Some(CoreError::Other(e.to_string()));

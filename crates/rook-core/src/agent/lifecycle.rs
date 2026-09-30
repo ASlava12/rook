@@ -43,7 +43,7 @@ impl AgentLoop<'_> {
             if let Some(model) = recipe.model {
                 self.provider = crate::models::provider_for(&self.rook.config, &self.vault, &model)?.into();
                 self.budget = ContextBudget::new(
-                    self.rook.window_to_budget(self.provider.context_window()),
+                    self.rook.window_to_budget(self.provider.as_ref()),
                     self.rook.config.agent.compact_at,
                 );
                 self.rook.store.update_session(self.session, |meta| meta.model = model.clone())?;

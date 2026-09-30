@@ -51,8 +51,51 @@ only work against one storage backend would be much harder to reuse.
 **`rook-llm` has no branch on vendor.** One trait, one HTTP implementation of the
 chat-completions dialect that Ollama, LM Studio, llama.cpp, vLLM and OpenAI all
 accept. Providers with their own wire format — Anthropic's Messages API, Google's
-`generateContent` — get their own implementation of the same trait, and the agent
-loop never learns which is answering.
+`generateContent`, and OpenAI Responses — get their own implementation of the
+same trait, and the agent loop never learns which is answering. Responses is
+selected explicitly; it shares endpoint/authentication/catalog handling with
+the compatible adapter while encoding typed input/output items separately.
+
+Provider-owned assistant state is stored as a bounded companion note paired
+atomically with the visible reply or usage record. Tool bindings preserve original
+call IDs through interrupted turns and forks. Transcript views omit opaque
+payloads; request replay and context reporting share the same reconstruction.
+Compaction retains or summarizes a complete batch, accounting for its hidden
+state size. No postcard field is added for provider-specific data.
+
+Durable transcript navigation lives in `rook-core::transcript`: bounded event
+pages, snapshot search cursors, body parts and attributed source-data quotes.
+CLI, TUI and browser use the same operations. The TUI owns one bounded reader
+worker; HTTP routes move decompression off the asynchronous socket executor.
+The store verifies complete hashes while retaining only requested byte ranges;
+a head/tail preview uses one decode. Navigation decodes attachment envelopes
+under their format limits and shows only visible text, never base64 images or
+opaque provider state. Quoting reads history and edits the frontend draft; it
+neither appends an event nor starts or interrupts a turn.
+
+Managed MCP equipment lives in `rook-core::mcp_connections`. Initial admission
+bounds declarations and concurrent handshakes; reports contain no endpoint,
+command, headers, environment or server-authored error text. A reconnect reloads
+trusted config and installs a candidate only after complete discovery. Agent
+turns keep fixed connection/catalog snapshots, so replacement cannot interrupt or
+replay their calls. CLI, TUI and browser reuse the daemon's per-workspace equipment;
+standalone frontends own their manager. TUI requests use one bounded worker queue.
+
+MCP authorization lives in `rook-core::mcp_auth`. A shared `Login` owns PKCE,
+issuer/resource binding, consent expiry, grant verification and private storage.
+Native frontends attach a loopback listener; the daemon keeps a bounded set of
+attempts and consumes browser callbacks from its trusted origin. Frontends see
+only authorization URLs and sanitized outcomes. The TUI uses a separate bounded
+consent worker so catalog status and ordinary input remain responsive. Account
+replacement affects new MCP connections; token refresh retains the identity of
+an existing connection and serializes refresh-token rotation across processes.
+
+Core decorates validated generation routes with a bounded, fresh snapshot of
+cached model capabilities before adding retries and failover. The snapshot is
+fixed for the provider lifetime; an ordinary request does not probe metadata.
+It constrains known effort mappings, selects prompt-encoded tools where native
+tools are unavailable, and rejects unsupported image inputs without stripping
+them. Catalog reads for context discovery can seed later instances.
 
 The wrappers around that trait are the same trait again, which is what keeps the
 loop from having to know about any of them: `Retrying` waits out what means

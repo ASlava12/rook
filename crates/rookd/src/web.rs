@@ -43,7 +43,16 @@ fn serve(path: &str) -> Response {
     match Assets::get(path) {
         Some(file) => {
             let mime = mime_guess::from_path(path).first_or_octet_stream();
-            ([(header::CONTENT_TYPE, mime.as_ref())], file.data).into_response()
+            let mut response = ([(header::CONTENT_TYPE, mime.as_ref())], file.data).into_response();
+            if path == "mcp-oauth-callback.html" {
+                response
+                    .headers_mut()
+                    .insert(header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
+                response
+                    .headers_mut()
+                    .insert("referrer-policy", axum::http::HeaderValue::from_static("no-referrer"));
+            }
+            response
         }
         None => (StatusCode::NOT_FOUND, "not found").into_response(),
     }
@@ -67,6 +76,26 @@ mod tests {
             .unwrap_or_default();
         let bytes = axum::body::to_bytes(response.into_body(), 8 << 20).await.unwrap();
         (status, content_type, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    #[tokio::test]
+    async fn oauth_callback_page_is_not_cached_and_never_echoes_codes() {
+        let response = router()
+            .oneshot(
+                Request::builder()
+                    .uri("/mcp-oauth-callback.html?code=DO_NOT_ECHO&state=opaque")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers().get("cache-control").unwrap(), "no-store");
+        assert_eq!(response.headers().get("referrer-policy").unwrap(), "no-referrer");
+        let bytes = axum::body::to_bytes(response.into_body(), 65536).await.unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(body.contains("mcp-oauth-callback.js"));
+        assert!(!body.contains("DO_NOT_ECHO"));
     }
 
     /// The page is embedded at build time, so a missing or renamed file is a

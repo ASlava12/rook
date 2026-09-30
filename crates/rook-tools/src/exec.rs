@@ -349,6 +349,7 @@ impl Tool for RunCommand {
             false => "",
         };
         let outcome = ToolOutcome {
+            images: Vec::new(),
             content: format!(
                 "exit {code}\n{combined}{}{held}{left_running}",
                 kept.as_ref().map(|(n, _, _)| n.as_str()).unwrap_or("")
@@ -516,6 +517,7 @@ async fn elsewhere(
             .with("timed_out", true));
     }
     Ok(ToolOutcome {
+        images: Vec::new(),
         content: format!("exit {}\n{}", ran.exit_code, ran.output),
         is_error: ran.exit_code != 0,
         truncated: ran.truncated,

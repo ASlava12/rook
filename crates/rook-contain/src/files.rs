@@ -39,6 +39,29 @@ pub fn read_text(root: &Path, path: &Path, limit: usize) -> io::Result<String> {
 
 /// Replace a file atomically without following its final symlink or hard link.
 pub fn write(root: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_with(root, path, bytes, false)
+}
+
+/// Atomic replacement with owner-only permissions, including temporary bytes.
+pub fn write_private(root: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_with(root, path, bytes, true)
+}
+
+/// A stable, directory-relative inode for nonblocking cross-process locking.
+/// Opening does not truncate existing data or follow links outside the root.
+pub fn lock_file(root: &Path, path: &Path) -> io::Result<std::fs::File> {
+    relative(path)?;
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    Ok(directory(root)?.open_with(path, &options)?.into_std())
+}
+
+fn write_with(root: &Path, path: &Path, bytes: &[u8], private: bool) -> io::Result<()> {
     relative(path)?;
     let dir = directory(root)?;
     let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
@@ -48,11 +71,17 @@ pub fn write(root: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
         Ok(meta) if meta.file_type().is_symlink() => {
             return Err(io::Error::new(io::ErrorKind::PermissionDenied, "refusing to replace a symlink"));
         }
-        Ok(meta) => Some(meta.permissions()),
+        Ok(meta) => {
+            if private {
+                None
+            } else {
+                Some(meta.permissions())
+            }
+        }
         Err(e) if e.kind() == io::ErrorKind::NotFound => None,
         Err(e) => return Err(e),
     };
-    let (temp, mut file) = temporary(&parent)?;
+    let (temp, mut file) = temporary(&parent, private)?;
     let result = (|| {
         file.write_all(bytes)?;
         if let Some(permissions) = permissions {
@@ -72,7 +101,7 @@ pub fn write(root: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
 
 // Keep the temporary file on the destination filesystem for atomic rename.
 // A name left by a killed process is occupied, not ours to truncate or unlink.
-fn temporary(parent: &Dir) -> io::Result<(String, cap_std::fs::File)> {
+fn temporary(parent: &Dir, private: bool) -> io::Result<(String, cap_std::fs::File)> {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     for _ in 0..128 {
         let temp = format!(
@@ -80,7 +109,18 @@ fn temporary(parent: &Dir) -> io::Result<(String, cap_std::fs::File)> {
             std::process::id(),
             NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         );
-        match parent.open_with(&temp, OpenOptions::new().write(true).create_new(true)) {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use cap_std::fs::OpenOptionsExt;
+            if private {
+                options.mode(0o600);
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = private;
+        match parent.open_with(&temp, &options) {
             Ok(file) => return Ok((temp, file)),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(e),

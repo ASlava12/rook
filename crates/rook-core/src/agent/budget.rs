@@ -117,9 +117,9 @@ impl<'a> AgentLoop<'a> {
         }
     }
 
-    /// What the endpoint says it will hold, asked once for the life of the
-    /// process, only when nobody has set a number, and only when a turn is
-    /// about to summarise itself to fit the guess.
+    /// What this provider says it will hold, asked before a turn summarises
+    /// itself to fit an assumption. Successful observations are retained by
+    /// connection/model identity until evicted from the bounded cache.
     ///
     /// The assumption for anything self-hosted is 32768, and the machine this
     /// was written for serves 262144 — so a turn compacted five times to fit a
@@ -128,21 +128,25 @@ impl<'a> AgentLoop<'a> {
     /// an assumption that turns out too large is answered by the refusal.
     pub(super) async fn ask_the_window(&mut self) {
         if self.rook.config.agent.context_window.is_some()
-            || self.rook.window_to_budget(0) > 0
+            || self.provider.context_is_explicit()
             || self.depth > 0
         {
             return;
         }
-        let (_, wanted) = rook_llm::split_spec(&self.rook.config.agent.model);
-        let Ok(models) = self.provider.models().await else { return };
-        let Some(window) = models.iter().find(|m| m.id == wanted).and_then(|m| m.context_window) else {
-            return;
-        };
-        if window <= self.budget.window {
+        if let Some(window) = self.rook.learned_window(self.provider.as_ref()) {
+            self.budget = ContextBudget::new(window, self.rook.config.agent.compact_at);
             return;
         }
+        let Ok(Some(window)) =
+            self.provider.discover_context_window(self.rook.config.model_catalog.limits).await
+        else {
+            return;
+        };
+        if window == 0 {
+            return;
+        }
+        let window = self.rook.learn_window(self.provider.as_ref(), window);
         tracing::info!("the endpoint holds {window} tokens, not the {} assumed", self.budget.window);
-        self.rook.learn_window(window);
         self.budget = ContextBudget::new(window, self.rook.config.agent.compact_at);
     }
 

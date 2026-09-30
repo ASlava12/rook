@@ -11,6 +11,8 @@ use crate::{Message, Response, Result, StopReason, ToolCall, Usage};
 /// only once its arguments are complete.
 #[derive(Clone, Debug)]
 pub enum Delta {
+    /// Request metadata, never a model token or part of conversation history.
+    Effort(crate::EffortReport),
     Text(String),
     Reasoning(String),
     /// A whole block of reasoning, as the provider will want it back. Text for
@@ -42,6 +44,7 @@ pub struct Assembler {
 impl Assembler {
     pub fn push(&mut self, delta: Delta) -> Result<()> {
         let bytes = match &delta {
+            Delta::Effort(report) => report.describe().len(),
             Delta::Text(t) | Delta::Reasoning(t) => t.len(),
             Delta::ReasoningDone(block) => json_bytes(block)?,
             Delta::ToolCall(call) => {
@@ -59,6 +62,7 @@ impl Assembler {
             ));
         }
         match delta {
+            Delta::Effort(_) => {}
             Delta::Text(t) => self.text.push_str(&t),
             Delta::Reasoning(t) => self.reasoning.push_str(&t),
             Delta::ReasoningDone(block) => self.reasoning_blocks.push(block),

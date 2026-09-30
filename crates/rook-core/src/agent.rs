@@ -28,7 +28,7 @@ mod checks;
 mod compaction;
 mod delegation;
 mod effects;
-mod history;
+pub(crate) mod history;
 mod lifecycle;
 mod output;
 mod prompt;
@@ -73,9 +73,7 @@ pub fn equip(
 ) {
     agent.servers = servers.clone();
     crate::lsp::register(&mut agent.tools, servers);
-    for (server, tools) in &mcp.servers {
-        agent.tools.register_server(server.clone(), tools.clone());
-    }
+    agent.tools.register_mcp_catalog(mcp.servers(), agent.rook.config.mcp_catalog);
     // Registered only where there is a registry behind it, the way `ask` is
     // registered only where somebody can answer.
     agent.tools.register(std::sync::Arc::new(rook_tools::jobs::JobTool));
@@ -331,6 +329,13 @@ pub enum Progress<'a> {
     Step {
         at: u32,
         of: u32,
+    },
+    /// Current main conversation, independently of cumulative spend on this
+    /// turn, delegates and completion checks. Uses the compaction estimator,
+    /// anchored to trustworthy provider counts when available.
+    Context {
+        used: usize,
+        size: usize,
     },
     /// What the turn has spent, after each reply from the model. A turn that
     /// runs for minutes across a dozen steps otherwise shows no cost at all
@@ -628,7 +633,7 @@ impl<'a> AgentLoop<'a> {
             tracing::warn!("ignoring unusable hook matcher: {error}");
         }
 
-        let window = rook.window_to_budget(provider.context_window());
+        let window = rook.window_to_budget(provider.as_ref());
         let budget = ContextBudget::new(window, rook.config.agent.compact_at);
         Self {
             execution: None,
@@ -944,7 +949,14 @@ impl<'a> AgentLoop<'a> {
             // A pasted build log larger than the window would otherwise be sent
             // whole and come back as a provider error about a limit the user
             // never saw.
+            if images_in(&messages) > crate::attachments::MAX_ATTACHMENTS
+                && messages.iter().any(|message| message.role == Role::Tool && !message.images.is_empty())
+                && crate::tool_images::bound(&mut messages) > 0
+            {
+                anchor = None;
+            }
             let used = measured(&messages, anchor);
+            on_progress(Progress::Context { used, size: self.budget.window });
             if used > self.budget.usable() {
                 return Err(CoreError::Llm(rook_llm::LlmError::ContextOverflow {
                     used,
@@ -956,8 +968,13 @@ impl<'a> AgentLoop<'a> {
                 return Err(CoreError::Other("too many images remain in context after compaction; start a new session or compact older turns".into()));
             }
             let sent = messages.len();
-            let mut request = Request::new(messages.clone());
-            if self.native_tools() {
+            let native_tools = self.native_tools();
+            let mut request = Request::new(if native_tools {
+                messages.clone()
+            } else {
+                rook_llm::prompted::history(&messages)
+            });
+            if native_tools {
                 request.tools = self.tool_specs();
             }
             request.effort = Some(self.effort);
@@ -969,6 +986,15 @@ impl<'a> AgentLoop<'a> {
             // question it raises: whether to keep waiting or go and look.
             let patience =
                 rook_llm::first_token_patience(self.rook.config.agent.stream_idle(), request.prompt_bytes());
+            let mut timing = crate::diagnostics::Timer::start(
+                self.rook,
+                self.session,
+                if self.checking {
+                    crate::diagnostics::Phase::CheckRequest
+                } else {
+                    crate::diagnostics::Phase::ModelRequest
+                },
+            );
             let answering =
                 saying_it_waits(self.provider.stream(request.clone()), patience, &mut on_progress);
             let asked = match answering.await {
@@ -978,10 +1004,11 @@ impl<'a> AgentLoop<'a> {
                 // summarisation; not believing it ends the turn on a number
                 // nobody chose, which is what a wrong guess used to do.
                 Err(e) if rook_llm::retry::names_the_context(&e) && !shrunk => {
+                    timing.finish(crate::diagnostics::Status::Failed, None);
                     shrunk = true;
                     let assumed = self.budget.window;
                     let smaller = (used * 3 / 4).max(4096);
-                    self.rook.learn_window(smaller);
+                    let smaller = self.rook.learn_window(self.provider.as_ref(), smaller);
                     self.budget = ContextBudget::new(smaller, self.rook.config.agent.compact_at);
                     let said = format!(
                         "the endpoint refused {used} tokens as too long, so its window is smaller \
@@ -1003,12 +1030,28 @@ impl<'a> AgentLoop<'a> {
                 }
                 Err(e) => Err(CoreError::Other(e.to_string())),
             };
+            let stream = match asked {
+                Ok(stream) => stream,
+                Err(error) => {
+                    timing.finish(crate::diagnostics::Status::Failed, None);
+                    return Err(error);
+                }
+            };
             let assembler = self
-                .receive(asked?, &mut nursery, &mut nursery_steps, &mut carrying, patience, &mut on_progress)
-                .await?;
+                .receive(stream, &mut nursery, &mut nursery_steps, &mut carrying, patience, &mut on_progress)
+                .await;
+            timing.finish(
+                if assembler.is_ok() {
+                    crate::diagnostics::Status::Completed
+                } else {
+                    crate::diagnostics::Status::Failed
+                },
+                None,
+            );
+            let assembler = assembler?;
             let thinking = assembler.reasoning().to_string();
             if !thinking.is_empty() {
-                self.rook.log(self.session, EventKind::Reasoning, "", &thinking).ok();
+                self.rook.log(self.session, EventKind::Reasoning, "", &self.vault.redact(&thinking)).ok();
             }
             let mut response = assembler.finish();
             // Read back either way. Without native tools the object is the
@@ -1031,6 +1074,12 @@ impl<'a> AgentLoop<'a> {
                 anchor = Some((sent, reported));
             }
 
+            on_progress(Progress::Context {
+                used: measured(&messages, anchor)
+                    .saturating_add(measure(std::slice::from_ref(&response.message))),
+                size: self.budget.window,
+            });
+
             outcome.input_tokens += response.usage.input_tokens;
             outcome.output_tokens += response.usage.output_tokens;
             outcome.cached_tokens += response.usage.cache_read_tokens;
@@ -1040,31 +1089,29 @@ impl<'a> AgentLoop<'a> {
                 cached: outcome.cached_tokens,
             });
 
-            // Tool-only responses still cost tokens. Persist their usage before
-            // effects, so a retry/restart cannot reset a durable task's budget.
-            if response.message.content.is_empty() {
-                self.rook.store.append_event(
-                    self.session,
-                    rook_store::NewEvent::new(
-                        EventKind::Note,
-                        rook_store::Kind::Message,
-                        b"tool-only response",
-                    )
-                    .label("usage")
-                    .usage(response.usage.input_tokens, response.usage.output_tokens),
-                )?;
-            }
+            let assistant_state =
+                match crate::provider_history::record(self.rook, self.session, &response, &self.vault) {
+                    Ok(seq) => seq,
+                    Err(error) => {
+                        // A response too large to retain was still billed. Stopping
+                        // before effects must not erase that cost on goal resume.
+                        self.rook
+                            .store
+                            .append_event(
+                                self.session,
+                                rook_store::NewEvent::new(
+                                    EventKind::Note,
+                                    rook_store::Kind::Message,
+                                    b"response could not be retained",
+                                )
+                                .label("usage")
+                                .usage(response.usage.input_tokens, response.usage.output_tokens),
+                            )
+                            .ok();
+                        return Err(error);
+                    }
+                };
             if !response.message.content.is_empty() {
-                self.rook.store.append_event(
-                    self.session,
-                    rook_store::NewEvent::new(
-                        EventKind::AssistantMessage,
-                        rook_store::Kind::Message,
-                        response.message.content.as_bytes(),
-                    )
-                    .label(&response.model)
-                    .usage(response.usage.input_tokens, response.usage.output_tokens),
-                )?;
                 outcome.reply = response.message.content.clone();
             }
 
@@ -1374,7 +1421,13 @@ impl<'a> AgentLoop<'a> {
                 // third is refused and pointed at the answer it has. Same
                 // result is the test, so a command run again after an edit is
                 // not caught by it.
+                crate::provider_history::begin(self.rook, self.session, assistant_state, &call.id)?;
                 let key = (call.name.clone(), call.arguments.to_string());
+                let mut timing = crate::diagnostics::Timer::start(
+                    self.rook,
+                    self.session,
+                    crate::diagnostics::Phase::ToolDispatch,
+                );
                 let (mut result, failed) = match repeated.get(&key) {
                     Some((_, times)) if *times >= 2 => {
                         let said = format!(
@@ -1396,7 +1449,14 @@ impl<'a> AgentLoop<'a> {
                     _ => {
                         let done = self
                             .dispatch_recorded(call, &mut outcome, &mut on_progress, &crew, &mut nursery)
-                            .await?;
+                            .await;
+                        let done = match done {
+                            Ok(done) => done,
+                            Err(error) => {
+                                timing.finish(crate::diagnostics::Status::Failed, None);
+                                return Err(error);
+                            }
+                        };
                         // A call that changed the workspace makes every earlier
                         // answer stale: the file read twice reads differently
                         // after the edit, and the count starts over. Not the
@@ -1423,6 +1483,8 @@ impl<'a> AgentLoop<'a> {
                          call, and it can be asked for again]"
                     ));
                 }
+                let mut images = Vec::new();
+                let mut result_seq = None;
                 let shown = if call.name == LOAD_SKILL && !failed {
                     result
                 } else {
@@ -1441,11 +1503,32 @@ impl<'a> AgentLoop<'a> {
                                 && e.record.body == recorded_body
                         });
                     match recorded {
-                        Some(event) => crate::results::fresh(&event, &result),
+                        Some(event) => {
+                            result_seq = Some(event.seq);
+                            images = crate::tool_images::load(self.rook, &event)?;
+                            crate::results::fresh(&event, &result)
+                        }
                         None => crate::sources::tool_result(&call.name, &result),
                     }
                 };
-                messages.push(Message::tool_result(&call.id, shown));
+                let mut message = Message::tool_result(&call.id, shown);
+                let has_images = !images.is_empty();
+                message.images = images;
+                messages.push(message);
+                if has_images && crate::tool_images::bound(&mut messages) > 0 {
+                    anchor = None;
+                    worth_compacting = true;
+                }
+                // The receipt and image binding both inspect the latest result.
+                // Only now can a diagnostic note be appended without hiding it.
+                timing.finish(
+                    if failed {
+                        crate::diagnostics::Status::Failed
+                    } else {
+                        crate::diagnostics::Status::Completed
+                    },
+                    result_seq,
+                );
             }
 
             // Told three times that it is asking the same thing again, and

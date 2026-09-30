@@ -82,6 +82,7 @@ impl Tool for CrateApi {
             body.push_str(&format!("\n\n[{} more; narrow it with `entity`]", full - MOST_ITEMS));
         }
         Ok(ToolOutcome {
+            images: Vec::new(),
             content: body,
             is_error: false,
             truncated: full > MOST_ITEMS,

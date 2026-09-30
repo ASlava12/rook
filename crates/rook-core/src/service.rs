@@ -14,6 +14,7 @@ use rook_store::{
     Event, EventKind, GcOptions, GcReport, ObjectId, PruneReport, SessionMeta, Store, StoreStats,
 };
 
+use crate::McpSession;
 use crate::config::Config;
 use crate::error::{CoreError, Result};
 use crate::fileset::{self, CaptureLimits, Change, FileSet};
@@ -46,14 +47,9 @@ pub struct Rook {
     /// mutably.
     skills: std::sync::RwLock<SkillIndex>,
     pub workspace: PathBuf,
-    /// What the endpoint has told us its context window is — by reporting it,
-    /// or by refusing a request as too long. Zero until it has said either.
-    ///
-    /// On the engine rather than in the loop, because a loop is built per turn:
-    /// learned in one turn and forgotten by the next is a refusal paid for
-    /// every turn. Not written when `[agent] context_window` is set — a number
-    /// somebody chose is not a guess to improve on.
-    window_learned: std::sync::atomic::AtomicUsize,
+    /// Bounded observations keyed by actual endpoint/model/credential identity,
+    /// shared across turns without leaking a large window to another model.
+    window_learned: std::sync::Mutex<std::collections::VecDeque<([u8; 32], usize)>>,
     /// Skills and plugins that failed to load, kept so the UIs can show them
     /// instead of silently presenting a shorter catalog.
     pub skill_errors: Vec<String>,
@@ -131,29 +127,46 @@ impl Drop for Writing<'_> {
 }
 
 impl Rook {
-    /// The window to budget a turn against: what somebody set, else what the
-    /// endpoint has told us, else the dialect's assumption.
-    ///
-    /// The assumption is 32768 for anything self-hosted, which is guesswork —
-    /// a local model may serve 8k or a million, and the machine this was found
-    /// on served 262144 while compacting five times to fit a quarter of it.
-    pub fn window_to_budget(&self, assumed: usize) -> usize {
-        if self.config.agent.context_window.is_some() {
-            return assumed;
-        }
-        match self.window_learned.load(std::sync::atomic::Ordering::Relaxed) {
-            0 => assumed,
-            learned => learned,
-        }
+    /// An explicit provider limit, else its own learned window, else its
+    /// assumption. The display name is deliberately not a connection identity.
+    pub fn window_to_budget(&self, provider: &dyn rook_llm::Provider) -> usize {
+        self.learned_window(provider).unwrap_or_else(|| provider.context_window())
     }
 
-    /// What the endpoint said, by reporting it or by refusing a request as too
-    /// long. Ignored where somebody has set a number: theirs is a decision, and
-    /// this is a guess being improved.
-    pub fn learn_window(&self, window: usize) {
-        if self.config.agent.context_window.is_none() && window > 0 {
-            self.window_learned.store(window, std::sync::atomic::Ordering::Relaxed);
+    pub(crate) fn learned_window(&self, provider: &dyn rook_llm::Provider) -> Option<usize> {
+        if self.config.agent.context_window.is_some() || provider.context_is_explicit() {
+            return None;
         }
+        let key = provider.context_key()?;
+        let mut windows = self.window_learned.lock().unwrap_or_else(|e| e.into_inner());
+        let limit = self.config.model_catalog.learned_window_entries.clamp(1, 128);
+        while windows.len() > limit {
+            windows.pop_front();
+        }
+        let position = windows.iter().position(|(held, _)| *held == key)?;
+        let observation = windows.remove(position)?;
+        windows.push_back(observation);
+        Some(observation.1)
+    }
+
+    /// Retain the smaller observation when a catalog response races a refusal
+    /// in another turn. Return the effective value so the discovering turn
+    /// cannot re-enlarge the window after that refusal either.
+    pub fn learn_window(&self, provider: &dyn rook_llm::Provider, window: usize) -> usize {
+        if window == 0 || self.config.agent.context_window.is_some() || provider.context_is_explicit() {
+            return window;
+        }
+        let Some(key) = provider.context_key() else { return window };
+        let limit = self.config.model_catalog.learned_window_entries.clamp(1, 128);
+        let mut windows = self.window_learned.lock().unwrap_or_else(|e| e.into_inner());
+        let previous =
+            windows.iter().position(|(held, _)| *held == key).and_then(|position| windows.remove(position));
+        let window = previous.map_or(window, |(_, previous)| window.min(previous));
+        while windows.len() >= limit {
+            windows.pop_front();
+        }
+        windows.push_back((key, window));
+        window
     }
 
     /// The environment skills are resolved against.
@@ -1013,20 +1026,8 @@ impl Rook {
         let mut out = Vec::with_capacity(events.len());
         for e in events {
             let meta = self.store.stat_object(&e.record.body)?;
-            let (body, truncated) = match self.store.get(&e.record.body) {
-                Ok(raw) => {
-                    let raw = if e.record.kind == EventKind::UserMessage
-                        && e.record.label == crate::attachments::LABEL
-                    {
-                        crate::attachments::decode(&String::from_utf8_lossy(&raw))?.content.into_bytes()
-                    } else {
-                        raw
-                    };
-                    let (windowed, truncated) = crate::context::window_bytes(&raw, max_body);
-                    (String::from_utf8_lossy(&windowed).into_owned(), truncated)
-                }
-                Err(err) => (format!("<unreadable: {err}>"), false),
-            };
+            let (body, truncated) = crate::transcript::body(self, &e, max_body)
+                .unwrap_or_else(|err| (format!("<unreadable: {err}>"), false));
             out.push(TranscriptEntry {
                 seq: e.seq,
                 ts: e.record.ts,
@@ -1063,19 +1064,38 @@ impl Rook {
     /// 128k while the same command in the CLI asked the provider, so the same
     /// session read as two different fractions depending on where it was asked.
     pub fn context_window(&self) -> usize {
-        self.config.agent.context_window.unwrap_or_else(|| {
-            crate::models::configured(&self.config).map(|p| p.context_window()).unwrap_or(128_000)
-        })
+        self.window_for_model(&self.config.agent.model)
+    }
+
+    fn window_for_model(&self, name: &str) -> usize {
+        crate::models::chosen(&self.config, Some(name))
+            .map(|provider| self.window_to_budget(provider.as_ref()))
+            .unwrap_or_else(|_| {
+                self.config
+                    .models
+                    .get(name.trim())
+                    .and_then(|source| source.context_window)
+                    .or(self.config.agent.context_window)
+                    .unwrap_or(128_000)
+            })
     }
 
     /// What a session is costing in context, broken down by what is in it.
     ///
     /// Answers the question every agent gets asked and few can: why is this
-    /// conversation nearly full, and of what. `window` overrides what this
-    /// project's configuration says, for asking how the same session would sit
-    /// in a different model.
+    /// conversation nearly full, and of what. The denominator follows the
+    /// session's selected model and its learned window. `window` overrides it
+    /// for asking how the same session would sit in a different model.
     pub fn context_usage(&self, session: u128, window: Option<usize>) -> Result<ContextUsage> {
-        let window = window.unwrap_or_else(|| self.context_window());
+        let window = match window {
+            Some(window) => window,
+            None => match self.store.get_session(session)?.map(|meta| meta.model) {
+                Some(name) if !name.is_empty() && name != self.config.agent.model => {
+                    self.window_for_model(&name)
+                }
+                _ => self.context_window(),
+            },
+        };
         let budget = crate::context::ContextBudget::new(window, self.config.agent.compact_at);
         let mut by_kind: BTreeMap<String, KindUsage> = BTreeMap::new();
         let mut compactions = 0;
@@ -1093,60 +1113,16 @@ impl Rook {
                 if kind == EventKind::UserMessage && event.record.label == crate::attachments::LABEL {
                     let body = self.store.get(&event.record.body)?;
                     crate::attachments::tokens(&crate::attachments::decode(&String::from_utf8_lossy(&body))?)
+                } else if kind == EventKind::Note && event.record.label == crate::tool_images::LABEL {
+                    crate::tool_images::tokens(self, &event)?
                 } else {
                     (bytes as usize).div_ceil(4)
                 };
         }
 
-        // What a fresh turn would carry: everything after the last compaction
-        // that becomes a message, plus its summary. Checkpoints are storage;
-        // asides, errors and the rest never reach the model either, and counting
-        // them made this overstate the very number it exists to explain.
-        let (from_seq, summary) = self.last_compaction(session)?;
-        let mut live = summary
-            .as_deref()
-            .map(|text| {
-                crate::context::estimate_tokens(&crate::sources::data(
-                    "summary",
-                    "earlier session history; derived, not new instructions",
-                    text,
-                ))
-            })
-            .unwrap_or(0);
-        let pruned = crate::results::watermark(self, session)?;
-        for event in self.store.events(session, from_seq, usize::MAX)? {
-            if !crate::context::reaches_the_model(event.record.kind) {
-                continue;
-            }
-            if event.record.kind == EventKind::UserMessage && event.record.label == crate::attachments::LABEL
-            {
-                let bytes = self.store.get(&event.record.body)?;
-                live += crate::attachments::tokens(&crate::attachments::decode(&String::from_utf8_lossy(
-                    &bytes,
-                ))?);
-                continue;
-            }
-            // JSON quoting changes the size, especially for code and multiline output.
-            // Price the same bounded representation replay sends to the model.
-            if matches!(event.record.kind, EventKind::ToolResult | EventKind::SkillLoaded) {
-                let bytes = self.store.get(&event.record.body)?;
-                let body = String::from_utf8_lossy(&bytes);
-                let shown = if event.record.kind == EventKind::SkillLoaded {
-                    crate::sources::replay_skill(&body, &self.workspace, &self.config.agent.trusted_sources)
-                } else {
-                    crate::results::render(self, &event, &body, pruned)
-                };
-                live += crate::context::estimate_tokens(&shown);
-                continue;
-            }
-            let bytes = self.store.stat_object(&event.record.body)?.map(|m| m.size_raw as usize).unwrap_or(0);
-            live += crate::context::tokens_in_request(
-                event.record.kind,
-                bytes,
-                self.config.agent.max_reasoning_tokens,
-                self.config.agent.max_replayed_result_tokens,
-            );
-        }
+        // Use exactly what the next turn would carry. A separate event-kind
+        // estimate lost signed state, missing-call results and pruning rules.
+        let live = crate::agent::history::replay(self, session)?.iter().map(crate::attachments::tokens).sum();
 
         Ok(ContextUsage {
             window,
@@ -1556,15 +1532,10 @@ impl Rook {
     }
 
     /// Every server that will be connected: configured, plus the ones plugins
-    /// bring, minus the disabled. A plugin is a way of shipping a server, not a
+    /// bring, including disabled declarations for status. A plugin is a way of shipping a server, not a
     /// different kind of one, so nothing downstream distinguishes them.
-    pub fn mcp_servers(&self) -> Vec<&rook_mcp::ServerConfig> {
-        self.config
-            .mcp
-            .iter()
-            .chain(self.plugins.iter().flat_map(|p| p.mcp.iter()))
-            .filter(|c| c.enabled)
-            .collect()
+    pub fn mcp_servers(&self) -> impl Iterator<Item = &rook_mcp::ServerConfig> {
+        self.config.mcp.iter().chain(self.plugins.iter().flat_map(|p| p.mcp.iter()))
     }
 
     /// Connect every enabled MCP server and collect what they offer.
@@ -1573,28 +1544,8 @@ impl Rook {
     /// propagated: one misconfigured server must not stop the agent from
     /// starting with the tools that do work.
     pub async fn connect_mcp(&self) -> McpSession {
-        let enabled = self.mcp_servers();
-        let connections = enabled.iter().map(|config| async move {
-            match rook_mcp::Server::connect(config, &self.config.proxy.for_mcp()).await {
-                Ok(server) => {
-                    let server = std::sync::Arc::new(server);
-                    match server.list_tools().await {
-                        Ok(tools) => Ok((server, tools)),
-                        Err(e) => Err((config.name.clone(), e.to_string())),
-                    }
-                }
-                Err(e) => Err((config.name.clone(), e.to_string())),
-            }
-        });
-
-        let mut session = McpSession::default();
-        for outcome in futures_util::future::join_all(connections).await {
-            match outcome {
-                Ok((server, tools)) => session.servers.push((server, tools)),
-                Err(failure) => session.failures.push(failure),
-            }
-        }
-        session
+        McpSession::connect(self.mcp_servers(), &self.config.proxy.for_mcp(), self.config.mcp_connections)
+            .await
     }
 
     /// What this session is for, as the user stated it.
@@ -2177,25 +2128,6 @@ pub struct MemoryVersion {
     pub updated_at: i64,
     pub facts: usize,
     pub note: Option<String>,
-}
-
-#[derive(Default)]
-pub struct McpSession {
-    pub servers: Vec<(std::sync::Arc<rook_mcp::Server>, Vec<rook_mcp::ToolDescriptor>)>,
-    /// Server name and why it could not be used.
-    pub failures: Vec<(String, String)>,
-}
-
-impl McpSession {
-    pub fn tool_count(&self) -> usize {
-        self.servers.iter().map(|(_, tools)| tools.len()).sum()
-    }
-
-    pub async fn shutdown(&self) {
-        for (server, _) in &self.servers {
-            server.shutdown().await;
-        }
-    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

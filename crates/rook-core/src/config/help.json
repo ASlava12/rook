@@ -5,7 +5,7 @@
   },
   "agent.compact_at": {
     "kind": "number",
-    "help": "Fraction of the context window used before compacting the conversation. Greater than 0 and at most 1."
+    "help": "Fraction of the context window used before compacting the conversation. Between 0.1 and 0.9 inclusive; a margin is kept for replies and tool results."
   },
   "agent.max_steps": {
     "kind": "integer",
@@ -87,9 +87,13 @@
     "kind": "string",
     "help": "What a delegated errand runs on, when the call does not ask for better. Empty is the turn's own model."
   },
+  "agent.max_provider_state_bytes": {
+    "kind": "integer",
+    "help": "Maximum serialized assistant state per response (1024–33554432 bytes; default 4 MiB). Signed reasoning and original tool IDs are retained for session replay. Oversized state stops before tool execution instead of truncating signatures."
+  },
   "agent.max_reasoning_tokens": {
     "kind": "integer",
-    "help": "Maximum reasoning tokens carried into the next request per thought. Longer thoughts keep their ends; the middle is elided. 0 omits reasoning from subsequent requests."
+    "help": "Maximum text-only reasoning tokens carried into the next request per thought. Longer thoughts keep their ends; the middle is elided. 0 omits text-only reasoning. Signed/encrypted provider state is retained whole under max_provider_state_bytes."
   },
   "agent.max_replayed_result_tokens": {
     "kind": "integer",
@@ -304,6 +308,14 @@
       "trace"
     ]
   },
+  "telemetry.diagnostic_events": {
+    "kind": "integer",
+    "help": "Recent event metadata included in a diagnostic report, clamped to 1..2048. Default 256."
+  },
+  "telemetry.diagnostic_log_bytes": {
+    "kind": "integer",
+    "help": "Bytes per log tail when export explicitly includes logs. Capped at 65536; zero omits content."
+  },
   "telemetry.max_log_bytes": {
     "kind": "integer",
     "help": "Hard cap on the local log directory."
@@ -360,9 +372,10 @@
     "kind": "string",
     "help": "Downloading a language server."
   },
+  "endpoints.*.metadata_api": {"kind":"string", "choices":["auto","none","ollama","lmstudio"], "help":"Native model metadata beside api=openai or api=responses. Set ollama or lmstudio for a named connection. auto recognizes provider/model shorthand; none disables native requests. Uses the same address and authorization, under model_catalog limits."},
   "endpoints.*.api": {
     "kind": "string",
-    "help": "Which api it speaks: openai, anthropic or google. Not the vendor — see [ModelSource::api], which means the same thing."
+    "help": "Which api it speaks: openai (Chat Completions), responses, anthropic or google. Not the vendor — see [ModelSource::api], which means the same thing."
   },
   "endpoints.*.url": {
     "kind": "string",
@@ -392,9 +405,10 @@
     "kind": "string",
     "help": "A name from [endpoints] to ask, where the address is written down once and several models share it."
   },
+  "models.*.metadata_api": {"kind":"string", "choices":["auto","none","ollama","lmstudio"], "help":"Native model metadata beside api=openai or api=responses. Set ollama or lmstudio for a named connection. auto recognizes provider/model shorthand; none disables native requests. Uses the same address and authorization, under model_catalog limits."},
   "models.*.api": {
     "kind": "string",
-    "help": "Which api it speaks: openai, anthropic or google."
+    "help": "Which api it speaks: openai (Chat Completions), responses, anthropic or google."
   },
   "models.*.url": {
     "kind": "string",
@@ -424,6 +438,26 @@
     "kind": "string",
     "help": "How a request to this source leaves the machine, where it differs from [proxy] models — see [ApiEndpoint::proxy], which means the same thing for a source that names an endpoint instead of carrying one."
   },
+  "mcp_connections": {"kind":"table", "help":"Session-owned MCP connections: startup concurrency, retained declarations and private OAuth credential storage limits."},
+  "mcp.*.oauth": {"kind":"table", "help":"OAuth public-client sign-in, issuer selection, native callback and network limits."},
+  "mcp_connections.max_servers": {
+    "kind": "integer",
+    "help": "Maximum configured and plugin MCP servers per session (1..=256; default 32), including disabled entries. Too many declarations fail before any server starts. Restart to apply a changed limit."
+  },
+  "mcp_connections.parallel_connects": {
+    "kind": "integer",
+    "help": "Maximum concurrent MCP startup/catalog downloads (1..=32; default 4). Bounds startup work while keeping configured server order. Restart to apply."
+  },
+  "mcp_connections.oauth_max_pending": {"kind": "integer", "help": "Maximum retained daemon OAuth attempts, including discovery and completion (1..=64; default 16). Expired attempts are discarded; a full set refuses new logins."},
+  "mcp_connections.oauth_max_entries": {"kind": "integer", "help": "Maximum persisted MCP OAuth grants (1..=256; default 64). Full storage refuses new sign-ins; existing grants are preserved."},
+  "mcp_connections.oauth_max_bytes": {"kind": "integer", "help": "Maximum bytes read/written for private MCP OAuth credentials (65536..=4194304; default 1048576). Tokens are stored separately from config."},
+  "mcp.*.oauth.client_id": {"kind": "string", "help": "Public OAuth client ID, optionally an actual HTTPS client metadata document URL. Empty uses dynamic registration if supported. Confidential client secrets are not supported."},
+  "mcp.*.oauth.issuer": {"kind": "string", "help": "Select an authorization server advertised by this MCP resource. Empty selects the first. A changed issuer requires a new login."},
+  "mcp.*.oauth.scopes": {"kind": "array", "help": "Scopes requested when the server challenge supplies none; otherwise its required scope set takes precedence. At most 64 scopes of 256 bytes."},
+  "mcp.*.oauth.callback_port": {"kind": "integer", "help": "Native browser callback port on 127.0.0.1. Zero chooses an available port. Set a fixed port if a pre-registered client requires it."},
+  "mcp.*.oauth.max_response_bytes": {"kind": "integer", "help": "Maximum OAuth metadata, registration or token response bytes (4096..=1048576; default 262144). Enforced while receiving."},
+  "mcp.*.oauth.timeout_secs": {"kind": "integer", "help": "OAuth discovery/exchange time budget in seconds (1..=120; default 30). Browser interaction has a separate deadline."},
+  "mcp.*.oauth.login_timeout_secs": {"kind": "integer", "help": "Browser sign-in lifetime in seconds (30..=1800; default 600). An expired callback cannot grant access."},
   "mcp.*.name": {
     "kind": "string",
     "help": "Unique server name. Tools appear as name__tool in the agent."
@@ -459,6 +493,22 @@
   "mcp.*.call_timeout_secs": {
     "kind": "integer",
     "help": "Maximum duration of one MCP tool call, in seconds."
+  },
+  "mcp.*.catalog_max_bytes": {
+    "kind": "integer",
+    "help": "Maximum serialized tools/list result bytes retained across all pages, 1024–33554432; default 8388608. Oversized catalogs fail instead of hiding tools."
+  },
+  "mcp.*.catalog_max_tools": {
+    "kind": "integer",
+    "help": "Maximum tools across all listing pages, 1–16384; default 4096. Duplicate names are rejected."
+  },
+  "mcp.*.catalog_max_pages": {
+    "kind": "integer",
+    "help": "Maximum tools/list pages per catalog, 1–256; default 64. Transport recovery may retry a page. Cursor cycles and incomplete catalogs are errors."
+  },
+  "mcp.*.catalog_timeout_secs": {
+    "kind": "integer",
+    "help": "Total time for the complete tools/list catalog including retries and all pages, 1–300 seconds; default 30."
   },
   "mcp.*.enabled": {
     "kind": "boolean",
@@ -602,5 +652,75 @@
   "skill_sources": {
     "kind": "array",
     "help": "Repositories or directories used by skills search and install. One source per entry."
+  },
+  "model_catalog": {
+    "kind": "object",
+    "help": "Limits for reading model lists and capabilities from endpoints."
+  },
+  "model_catalog.max_bytes": {
+    "kind": "integer",
+    "help": "Maximum decoded response bytes across every page and enrichment request in one model listing. Range: 1024–4194304; default: 1048576. Applied while downloading, including HTTP error bodies."
+  },
+  "model_catalog.max_models": {
+    "kind": "integer",
+    "help": "Maximum received entries across model-list pages, counting duplicates. Range: 1–4096; default: 1024. Oversized lists fail instead of silently dropping models."
+  },
+  "model_catalog.timeout_secs": {
+    "kind": "integer",
+    "help": "Total deadline for headers, all pages and enrichment, in seconds. Range: 1–60; default: 5. A trickling response cannot extend it."
+  },
+  "model_catalog.cache_enabled": {"kind":"boolean", "help":"Keep bounded endpoint model metadata on this machine. Disable to skip cache reads and writes; offline mode then shows configuration only."},
+  "model_catalog.cache_ttl_secs": {"kind":"integer", "help":"Seconds before a cached catalog needs refreshing (0–86400; default 300). Zero always checks online, while keeping an explicit offline copy."},
+  "model_catalog.learned_window_entries": {"kind":"integer", "help":"Maximum in-memory learned context windows (1–128; default 16). Keyed by endpoint, model, credential and fallback group; least recently used observations are evicted. Explicit context limits are preserved."},
+  "model_catalog.cache_max_entries": {"kind":"integer", "help":"Maximum endpoint/configuration snapshots retained (1–128; default 16). The oldest observations are evicted first."},
+  "model_catalog.cache_max_bytes": {"kind":"integer", "help":"Maximum bytes read or written for the entire model cache (4096–16777216; default 4194304). Oversized entries are not cached."},
+  "model_catalog.max_pages": {"kind":"integer", "help":"Maximum HTTP metadata requests per listing, including native enrichment. Range 1–64; default 16. Cycles or incomplete lists are errors, never silently cached as complete."},
+  "mcp_catalog": {
+    "kind": "object",
+    "help": "Bound MCP advertisements while retaining tools through mcp_tools discovery and mcp_call. Full external schemas are preserved, including under lazy_tools."
+  },
+  "mcp_catalog.max_bytes": {
+    "kind": "integer",
+    "help": "Total serialized JSON advertisement budget for MCP tools and discovery/call helpers, 4096–1048576 bytes. Built-in tools have their own catalog."
+  },
+  "mcp_catalog.max_server_bytes": {
+    "kind": "integer",
+    "help": "Maximum serialized JSON advertisement bytes from one MCP server, 0–262144. Overflow tools remain searchable and callable."
+  },
+  "mcp_catalog.max_server_tools": {
+    "kind": "integer",
+    "help": "Maximum directly advertised tools from each MCP server, 0–128. Zero exposes its tools only through discovery and mcp_call."
+  },
+  "mcp_catalog.max_tools": {
+    "kind": "integer",
+    "help": "Maximum advertised MCP tools in total, including discovery and call helpers. Range 2–64; default 64. Keeps room for built-in tools in model request limits."
+  },
+  "transcript": {
+    "kind": "object",
+    "help": "Bounded pages, search scans and quotes from session history. Used by CLI, terminal and browser navigation."
+  },
+  "transcript.page_entries": {
+    "kind": "integer",
+    "help": "Maximum events or search hits per page, 1–256; default 64."
+  },
+  "transcript.page_bytes": {
+    "kind": "integer",
+    "help": "Maximum serialized history page bytes, 4096–1048576; default 262144. Escaped JSON counts toward the bound."
+  },
+  "transcript.body_bytes": {
+    "kind": "integer",
+    "help": "Maximum text bytes per event preview or body part, 128–65536; default 4096. Large bodies remain readable in parts."
+  },
+  "transcript.search_bytes": {
+    "kind": "integer",
+    "help": "Maximum text bytes scanned per search request, 4096–16777216; default 4194304. A cursor resumes unfinished scans; a small bounded lookahead finds matches across chunks."
+  },
+  "transcript.search_events": {
+    "kind": "integer",
+    "help": "Maximum events visited per search request, 1–4096; default 256."
+  },
+  "transcript.quote_bytes": {
+    "kind": "integer",
+    "help": "Maximum source text bytes in one attributed quote, 128–65536; default 16384. Quotes are inserted into drafts and never sent automatically."
   }
 }

@@ -414,7 +414,7 @@ fn probe_provider(config: &rook_core::Config) -> Result<String> {
     let configured = rook_core::models::model_named(config, &config.agent.model);
     let configured = configured.as_str();
     let provider = provider(config)?;
-    let models = runtime.block_on(provider.models())?;
+    let models = runtime.block_on(provider.models_with(config.model_catalog.limits))?;
 
     let spec = &config.agent.model;
     let window = provider.context_window();
@@ -442,15 +442,11 @@ fn probe_provider(config: &rook_core::Config) -> Result<String> {
             "\n  the endpoint reports {reported}; set `context_window = {reported}` under [agent] to use it"
         ));
     }
-    // A knob connected to nothing is worse than no knob: every front end shows
-    // the effort beside the stance, and on a model with no reasoning to spend
-    // it was being shown a setting that reached no request.
-    if !provider.takes_effort() {
-        note.push_str(
-            "\n  `effort` is not sent to this model — it is not one of the families that reason, \
-             and an unknown field is refused by a strict endpoint rather than ignored",
-        );
-    }
+    note.push_str(&format!(
+        "\n  effort requested {}; mapping: {}",
+        config.agent.effort().as_str(),
+        provider.effort_use(config.agent.effort()).describe()
+    ));
     Ok(note)
 }
 
@@ -474,8 +470,10 @@ mod tests {
             id: id.into(),
             owned_by: None,
             context_window: Some(262_144),
+            max_context_window: None,
             loaded: None,
             quantization: None,
+            capabilities: Default::default(),
         }
     }
 

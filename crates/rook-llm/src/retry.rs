@@ -142,7 +142,16 @@ fn names_the_output(error: &LlmError) -> bool {
     let LlmError::Status { status, body, .. } = error else { return false };
     let said = body.to_ascii_lowercase();
     *status == 400
-        && ["max_tokens", "max_output_tokens", "maxtokens", "max output"].iter().any(|w| said.contains(w))
+        && [
+            "max_tokens",
+            "max_completion_tokens",
+            "max_output_tokens",
+            "maxtokens",
+            "maxoutputtokens",
+            "max output",
+        ]
+        .iter()
+        .any(|w| said.contains(w))
 }
 
 pub struct Retrying {
@@ -245,12 +254,32 @@ impl Provider for Retrying {
         self.inner.context_window()
     }
 
+    fn context_key(&self) -> Option<[u8; 32]> {
+        self.inner.context_key()
+    }
+
+    fn context_is_explicit(&self) -> bool {
+        self.inner.context_is_explicit()
+    }
+
+    async fn discover_context_window(&self, limits: crate::CatalogLimits) -> Result<Option<usize>> {
+        self.inner.discover_context_window(limits).await
+    }
+
     fn supports_tools(&self) -> bool {
         self.inner.supports_tools()
     }
 
     fn takes_effort(&self) -> bool {
-        self.inner.takes_effort()
+        !self.effort_refused.load(std::sync::atomic::Ordering::Relaxed) && self.inner.takes_effort()
+    }
+
+    fn effort_use(&self, effort: crate::Effort) -> crate::EffortUse {
+        if self.effort_refused.load(std::sync::atomic::Ordering::Relaxed) {
+            crate::EffortUse::Omitted { reason: "endpoint refused the effort parameter" }
+        } else {
+            self.inner.effort_use(effort)
+        }
     }
 
     fn supports_streaming(&self) -> bool {
@@ -259,6 +288,10 @@ impl Provider for Retrying {
 
     async fn models(&self) -> Result<Vec<ModelInfo>> {
         self.inner.models().await
+    }
+
+    async fn models_with(&self, limits: crate::CatalogLimits) -> Result<Vec<ModelInfo>> {
+        self.inner.models_with(limits).await
     }
 
     async fn reachable(&self) -> Result<()> {
@@ -279,10 +312,25 @@ impl Provider for Retrying {
     }
 
     async fn stream(&self, request: Request) -> Result<ResponseStream> {
+        use futures_util::StreamExt;
+        let requested = request.effort;
         let mut request = self.as_accepted(request);
         let mut attempt = 1;
         loop {
             match self.inner.stream(request.clone()).await {
+                Ok(stream) => {
+                    let Some(requested) = requested else { return Ok(stream) };
+                    // Use this attempt's request, not shared refusal state: a
+                    // concurrent call could have learned a different answer.
+                    let applied = match request.effort {
+                        Some(effort) => self.inner.effort_use(effort),
+                        None => crate::EffortUse::Omitted { reason: "endpoint refused the effort parameter" },
+                    };
+                    let report = crate::EffortReport { provider: self.inner.id().into(), requested, applied };
+                    return Ok(Box::pin(
+                        futures_util::stream::once(async { Ok(crate::Delta::Effort(report)) }).chain(stream),
+                    ));
+                }
                 Err(e) if worth_asking_again(&e) && self.wait_before(attempt, &e).await => attempt += 1,
                 Err(e) if self.drop_the_effort(&e, &mut request) => continue,
                 Err(e) if self.ask_for_less_output(&e, &mut request) => continue,

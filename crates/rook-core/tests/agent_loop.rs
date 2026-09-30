@@ -495,6 +495,9 @@ async fn a_plain_turn_is_logged_end_to_end() {
     assert_eq!(outcome.input_tokens, 100);
 
     let entries = f.rook.transcript(session, 0, 100, 4096).unwrap();
+    assert_eq!(entries.iter().filter(|e| e.label == "rook:timing:v1").count(), 1);
+    // Timing receipts supplement the conversation; keep its original ordering assertions.
+    let entries: Vec<_> = entries.into_iter().filter(|e| e.label != "rook:timing:v1").collect();
     let kinds: Vec<&str> = entries.iter().map(|e| e.kind.as_str()).collect();
     assert_eq!(
         kinds,
@@ -547,6 +550,9 @@ async fn a_tool_call_runs_and_both_halves_reach_the_log() {
     assert_eq!(outcome.reply, "the file has two lines");
 
     let entries = f.rook.transcript(session, 0, 100, 8192).unwrap();
+    assert_eq!(entries.iter().filter(|e| e.label == "rook:timing:v1").count(), 3);
+    // Timing receipts supplement the conversation; keep its original ordering assertions.
+    let entries: Vec<_> = entries.into_iter().filter(|e| e.label != "rook:timing:v1").collect();
     let kinds: Vec<&str> = entries.iter().map(|e| e.kind.as_str()).collect();
     assert_eq!(kinds, vec!["user", "note", "tool-call", "tool-result", "assistant", "note"]);
     assert!(entries[3].body.contains("line two"), "{}", entries[3].body);
@@ -1306,6 +1312,9 @@ async fn a_turn_that_broke_keeps_what_it_had_already_said() {
     assert!(e.to_string().contains("connection reset"), "and it says which: {e}");
 
     let entries = f.rook.transcript(session, 0, usize::MAX, 4096).unwrap();
+    assert_eq!(entries.iter().filter(|e| e.label == "rook:timing:v1").count(), 1);
+    // Timing receipts supplement the conversation; keep its original ordering assertions.
+    let entries: Vec<_> = entries.into_iter().filter(|e| e.label != "rook:timing:v1").collect();
     let kinds: Vec<&str> = entries.iter().map(|e| e.kind.as_str()).collect();
     assert_eq!(
         kinds,
@@ -1815,6 +1824,39 @@ async fn compaction_summarises_and_later_turns_start_from_the_summary() {
         !carried.contains("question 0"),
         "the compacted span must not be carried; only the recent tail should remain"
     );
+}
+
+#[tokio::test]
+async fn context_progress_falls_after_compaction_while_spend_keeps_growing() {
+    use rook_core::agent::Progress;
+    let f = fixture();
+    let session = f.rook.start_session("context progress").unwrap();
+    let mut first = call("list_dir", serde_json::json!({"path":"."}));
+    first.usage.input_tokens = 3500;
+    let provider = ScriptedProvider::new(vec![
+        first,
+        reply("## Goal\nlist the workspace\n## Done\nlisted the files"),
+        reply("The workspace is listed."),
+    ]);
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), session);
+    agent.set_window_for_test(4000);
+    let mut contexts = Vec::new();
+    let mut spend = Vec::new();
+    let outcome = agent
+        .run_with("list the workspace", |progress| match progress {
+            Progress::Context { used, size } => contexts.push((used, size)),
+            Progress::Spent { input, .. } => spend.push(input),
+            _ => {}
+        })
+        .await
+        .unwrap();
+    assert_eq!(outcome.compactions, 1, "the fixture must actually reach compaction");
+    assert_eq!(contexts.len(), 4, "before/after each main request: {contexts:?}");
+    assert!(contexts.iter().all(|(_, size)| *size == 4000));
+    assert!(contexts[1].0 >= 3500, "trust the provider when it reports a larger context");
+    assert!(contexts[2].0 < contexts[1].0, "compaction must lower usage: {contexts:?}");
+    assert!(spend.windows(2).all(|pair| pair[1] >= pair[0]), "{spend:?}");
+    assert!(spend.last().copied().unwrap() as usize > contexts.last().unwrap().0);
 }
 
 #[tokio::test]
@@ -2912,6 +2954,9 @@ async fn a_file_too_large_to_diff_still_says_whether_it_changed() {
     ]));
     let mut agent = AgentLoop::new(&f.rook, provider, session);
     agent.allow_everything_not_denied();
+    // The scripted write carries 300 KB of arguments. Give it a window that
+    // can actually hold them; this test measures diff bounds, not overflow.
+    agent.set_window_for_test(200_000);
     agent.run("rewrite it with what it already says").await.unwrap();
 
     // Written with the same content: hashing says so, and nothing else could
@@ -3236,6 +3281,13 @@ async fn tools_an_endpoint_cannot_be_sent_are_put_in_the_prompt_and_read_back() 
         turns[1].messages.iter().any(|m| m.content.contains("forty-two")),
         "and the result came back as a tool result"
     );
+    assert!(
+        turns[1].messages.iter().all(|message| message.role != Role::Tool
+            && message.tool_calls.is_empty()
+            && message.tool_call_id.is_none()),
+        "the history must not reintroduce native function messages"
+    );
+    assert!(turns[1].messages.iter().any(|message| message.content.contains("untrusted tool observation")));
 }
 
 /// Small and quantised models sometimes finish a sentence in a script nobody
@@ -5389,6 +5441,9 @@ impl Provider for RefusesOnce {
     fn id(&self) -> &str {
         "refuses/test"
     }
+    fn context_key(&self) -> Option<[u8; 32]> {
+        Some([42; 32])
+    }
     fn context_window(&self) -> usize {
         200_000
     }
@@ -5437,12 +5492,12 @@ async fn what_the_endpoint_refused_is_remembered_for_the_next_turn() {
     let f = fixture();
     let session = f.rook.start_session("window").unwrap();
     let provider = Arc::new(RefusesOnce { refused: Mutex::new(false), seen: Default::default() });
-    AgentLoop::new(&f.rook, provider, session).run("first").await.unwrap();
+    AgentLoop::new(&f.rook, provider.clone(), session).run("first").await.unwrap();
 
-    let next = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(vec![reply("ok")])), session);
+    let next = AgentLoop::new(&f.rook, provider.clone(), session);
 
     assert!(
-        f.rook.window_to_budget(200_000) < 200_000,
+        f.rook.window_to_budget(provider.as_ref()) < 200_000,
         "the next turn budgets against what was learned, not the assumption"
     );
     drop(next);
@@ -7056,6 +7111,15 @@ async fn cancelling_an_operation_retains_uncertainty_and_blocks_even_an_autonomo
     }
     // The AgentLoop is deliberately still alive: cancelling its future must
     // release the execution owner and persist interruption immediately.
+    assert!(
+        f.rook
+            .diagnostics(session, false)
+            .unwrap()
+            .timings
+            .iter()
+            .any(|sample| sample["measurement"]["phase"] == "tool_dispatch"
+                && sample["measurement"]["status"] == "cancelled")
+    );
     let receipts = f.rook.execution(session).unwrap();
     assert_eq!(receipts[0].status, "interrupted");
     assert_eq!(receipts[0].unknown.len(), 1);
@@ -7324,4 +7388,218 @@ async fn an_observed_image_does_not_prevent_compacting_a_long_turn() {
     let (from, summary) = f.rook.last_compaction(session).unwrap();
     assert!(from > 0, "an image already observed by the model does not pin all later work");
     assert!(summary.unwrap().contains("pixels are no longer in context"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn effort_metadata_does_not_end_the_wait_for_the_models_first_token() {
+    struct MetadataThenSilence;
+    #[async_trait]
+    impl Provider for MetadataThenSilence {
+        fn id(&self) -> &str {
+            "effort-metadata"
+        }
+        fn context_window(&self) -> usize {
+            16_000
+        }
+        async fn complete(&self, request: Request) -> rook_llm::Result<Response> {
+            Ok(completion_answer(&request).unwrap_or_else(|| reply("answered")))
+        }
+        async fn stream(&self, request: Request) -> rook_llm::Result<rook_llm::ResponseStream> {
+            if completion_answer(&request).is_some() {
+                return Ok(Box::pin(futures_util::stream::iter(vec![Ok(rook_llm::Delta::Text(
+                    completion_answer(&request).unwrap().message.content,
+                ))])));
+            }
+            use futures_util::StreamExt;
+            let metadata =
+                futures_util::stream::iter(vec![Ok(rook_llm::Delta::Effort(rook_llm::EffortReport {
+                    provider: "metadata-route".into(),
+                    requested: rook_llm::Effort::Max,
+                    applied: rook_llm::EffortUse::Unknown,
+                }))]);
+            let answer = futures_util::stream::once(async {
+                tokio::time::sleep(std::time::Duration::from_secs(70)).await;
+                Ok(rook_llm::Delta::Text("answered".into()))
+            });
+            Ok(Box::pin(metadata.chain(answer)))
+        }
+    }
+    let f = fixture();
+    let session = f.rook.start_session("metadata silence").unwrap();
+    let mut waits = Vec::new();
+    let mut metadata = 0;
+    let outcome = AgentLoop::new(&f.rook, Arc::new(MetadataThenSilence), session)
+        .run_with("say something", |progress| match progress {
+            rook_core::agent::Progress::Waiting { secs, .. } => waits.push(secs),
+            rook_core::agent::Progress::Delta(rook_llm::Delta::Effort(_)) => metadata += 1,
+            _ => {}
+        })
+        .await
+        .unwrap();
+    assert_eq!(metadata, 1, "the request metadata arrived before the silence");
+    assert_eq!(waits, [20, 50]);
+    assert_eq!(outcome.reply, "answered");
+    assert!(
+        !f.rook
+            .transcript(session, 0, 100, 4096)
+            .unwrap()
+            .iter()
+            .any(|event| event.body.contains("metadata-route")),
+        "request observations are not conversation content"
+    );
+}
+
+/// Stream replies are scripted, but metadata goes through the production
+/// endpoint and its wrappers: a configured alias is not the model's wire ID.
+struct CatalogScript {
+    endpoint: Box<dyn Provider>,
+    replies: ScriptedProvider,
+}
+#[async_trait]
+impl Provider for CatalogScript {
+    fn id(&self) -> &str {
+        self.endpoint.id()
+    }
+    fn context_window(&self) -> usize {
+        self.endpoint.context_window()
+    }
+    fn context_key(&self) -> Option<[u8; 32]> {
+        self.endpoint.context_key()
+    }
+    fn context_is_explicit(&self) -> bool {
+        self.endpoint.context_is_explicit()
+    }
+    async fn discover_context_window(
+        &self,
+        limits: rook_llm::CatalogLimits,
+    ) -> rook_llm::Result<Option<usize>> {
+        self.endpoint.discover_context_window(limits).await
+    }
+    async fn complete(&self, request: Request) -> rook_llm::Result<Response> {
+        self.replies.complete(request).await
+    }
+}
+
+#[tokio::test]
+async fn context_discovery_uses_the_sessions_named_model_and_does_not_enlarge_another_session() {
+    use rook_core::agent::Progress;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut bytes = Vec::new();
+        let mut buffer = [0; 4096];
+        while bytes.len() < 16384 && !bytes.windows(4).any(|w| w == b"\r\n\r\n") {
+            let n = socket.read(&mut buffer).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buffer[..n]);
+        }
+        let body = r#"{"data":[{"id":"global-default","context_length":8192},{"id":"actual-selected","context_length":131072}]}"#;
+        socket
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        String::from_utf8(bytes).unwrap()
+    });
+    let config:Config=toml::from_str(&format!("[agent]\nmodel='openai/global-default'\n[models.selected]\napi='openai'\nmodel='actual-selected'\nurl='{url}'\n[models.other]\napi='openai'\nmodel='other'\nurl='{url}'\n")).unwrap();
+    let f = fixture_with(config);
+    let session = f.rook.start_session("selected").unwrap();
+    f.rook.store.update_session(session, |meta| meta.model = "selected".into()).unwrap();
+    let history = "A".repeat(100_000);
+    assert!(
+        rook_core::context::ContextBudget::new(32768, f.rook.config.agent.compact_at)
+            .needs_compaction(rook_core::context::estimate_tokens(&history)),
+        "history must force discovery under the assumed window"
+    );
+    f.rook.log(session, rook_store::EventKind::UserMessage, "history", &history).unwrap();
+    let provider = Arc::new(CatalogScript {
+        endpoint: rook_core::models::provider_for(&f.rook.config, &rook_core::Vault::empty(), "selected")
+            .unwrap(),
+        replies: ScriptedProvider::new(vec![reply("done")]),
+    });
+    let mut observed = Vec::new();
+    let outcome = AgentLoop::new(&f.rook, provider.clone(), session)
+        .run_with("continue", |event| {
+            if let Progress::Context { size, .. } = event {
+                observed.push(size);
+            }
+        })
+        .await
+        .unwrap();
+    assert_eq!(outcome.compactions, 0, "the selected model's larger window avoids unnecessary summarisation");
+    assert!(!observed.is_empty());
+    assert!(observed.iter().all(|size| *size == 131072), "{observed:?}");
+    assert_eq!(f.rook.window_to_budget(provider.as_ref()), 131072);
+    assert_eq!(
+        f.rook.context_usage(session, None).unwrap().window,
+        131072,
+        "inspection must report the same learned window as the running session"
+    );
+    assert_eq!(f.rook.context_usage(session, Some(9000)).unwrap().window, 9000);
+    assert!(server.await.unwrap().starts_with("GET /v1/models "));
+
+    let other_session = f.rook.start_session("other").unwrap();
+    f.rook.store.update_session(other_session, |meta| meta.model = "other".into()).unwrap();
+    let other = Arc::new(CatalogScript {
+        endpoint: rook_core::models::provider_for(&f.rook.config, &rook_core::Vault::empty(), "other")
+            .unwrap(),
+        replies: ScriptedProvider::new(vec![reply("done")]),
+    });
+    let mut observed = Vec::new();
+    AgentLoop::new(&f.rook, other.clone(), other_session)
+        .run_with("short request", |event| {
+            if let Progress::Context { size, .. } = event {
+                observed.push(size);
+            }
+        })
+        .await
+        .unwrap();
+    assert!(!observed.is_empty());
+    assert_eq!(f.rook.context_usage(other_session, None).unwrap().window, 32768);
+    assert!(
+        observed.iter().all(|size| *size == 32768),
+        "another model must not inherit 131072: {observed:?}"
+    );
+}
+
+#[test]
+fn learned_windows_are_bounded_isolated_and_a_refusal_wins_over_a_later_catalog() {
+    let mut config = Config::default();
+    config.model_catalog.learned_window_entries = 2;
+    let f = fixture_with(config);
+    let provider = |model: &str| {
+        rook_llm::openai::OpenAiCompatible::new(
+            "same-display-name",
+            model,
+            rook_llm::openai::Config::new("http://127.0.0.1:1/v1".into(), None, 32768),
+        )
+        .unwrap()
+    };
+    let first = provider("first");
+    let second = provider("second");
+    let third = provider("third");
+    f.rook.learn_window(&first, 131072);
+    f.rook.learn_window(&second, 8192);
+    assert_eq!(f.rook.window_to_budget(&first), 131072); // first is most recently used
+    f.rook.learn_window(&third, 65536); // third distinct entry exceeds capacity two
+    assert_eq!(f.rook.window_to_budget(&second), 32768, "least recently used observation is evicted");
+    assert_eq!(f.rook.window_to_budget(&first), 131072);
+    assert_eq!(f.rook.window_to_budget(&third), 65536);
+    assert_eq!(f.rook.learn_window(&first, 8192), 8192);
+    assert_eq!(f.rook.learn_window(&first, 262144), 8192, "a late discovery must not undo a refusal");
+    assert_eq!(f.rook.window_to_budget(&first), 8192);
+    let mut explicit = rook_llm::openai::Config::new("http://127.0.0.1:1/v1".into(), None, 16384);
+    explicit.context_window_explicit = true;
+    let explicit = rook_llm::openai::OpenAiCompatible::new("same-display-name", "first", explicit).unwrap();
+    f.rook.learn_window(&explicit, 4096);
+    assert_eq!(f.rook.window_to_budget(&explicit), 16384, "configured limit is not replaced by learning");
 }

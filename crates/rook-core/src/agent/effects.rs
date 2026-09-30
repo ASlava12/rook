@@ -75,7 +75,8 @@ impl<'a> AgentLoop<'a> {
     pub(super) async fn gate(&self, call: &rook_llm::ToolCall) -> Option<String> {
         let tool = self.tools.get(&call.name)?;
         let risk = tool.risk(&call.arguments);
-        self.gate_risk(&call.name, &call.arguments, risk, Shown::Tool(tool)).await
+        let (name, arguments) = tool.invocation(&call.arguments);
+        self.gate_risk(name, arguments, risk, Shown::Tool(tool)).await
     }
 
     pub(super) async fn gate_risk(

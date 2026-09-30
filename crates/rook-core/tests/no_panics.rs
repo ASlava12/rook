@@ -34,7 +34,10 @@ fn production(text: &str) -> &str {
     let mut upto = 0usize;
     for line in text.split_inclusive('\n') {
         let t = line.trim();
-        if t.starts_with("#[cfg(") && t.contains("test") && !t.contains("not(test)") {
+        if (t.starts_with("#[cfg(") || t.starts_with("#![cfg("))
+            && t.contains("test")
+            && !t.contains("not(test)")
+        {
             return &text[..upto];
         }
         upto += line.len();
@@ -120,4 +123,16 @@ fn where_the_production_part_ends_does_not_depend_on_the_line_endings() {
         kept,
         "and a checkout with two-byte line endings cuts in the same place"
     );
+}
+
+#[test]
+fn a_file_explicitly_excluded_from_production_is_not_scanned_as_shipping_code() {
+    for ending in ["\n", "\r\n"] {
+        let tests =
+            ["//! Dedicated test module", "#![cfg(test)]", "fn fixture() { panic!(\"fixture\"); }", ""]
+                .join(ending);
+        assert_eq!(production(&tests), format!("//! Dedicated test module{ending}"));
+        let shipped = ["#![cfg(not(test))]", "fn fixture() { panic!(\"shipping\"); }", ""].join(ending);
+        assert_eq!(production(&shipped), shipped);
+    }
 }

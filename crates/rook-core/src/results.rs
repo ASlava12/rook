@@ -78,7 +78,7 @@ pub(crate) fn prune(rook: &Rook, session: u128, messages: &mut [Message]) -> Res
         let Ok(value) = serde_json::from_str::<Value>(&message.content) else { continue };
         let Some(seq) = value["result_id"].as_u64() else { continue };
         let Some(name) = value["rook_source"]["origin"].as_str() else { continue };
-        let cost = estimate_tokens(&message.content);
+        let cost = crate::attachments::tokens(message);
         count += 1;
         let keep = recent < rook.config.agent.prune_tool_results_keep_tokens;
         recent += cost;
@@ -108,6 +108,7 @@ pub(crate) fn prune(rook: &Rook, session: u128, messages: &mut [Message]) -> Res
                 && !protected(name)
             {
                 message.content = stub(name, seq);
+                message.images.clear();
             }
         }
     }
@@ -177,7 +178,7 @@ pub(crate) fn inherit(rook: &Rook, parent: u128, child: u128) -> Result<()> {
 
 /// Byte offsets, bounded pages, and an explicit next offset make even a long
 /// single-line result readable without asking the provider to hold it all.
-pub(crate) fn read(rook: &Rook, session: u128, args: &Value) -> Result<String> {
+pub(crate) fn read(rook: &Rook, session: u128, args: &Value) -> Result<rook_tools::ToolOutcome> {
     let session = match args.get("session") {
         None => session,
         Some(value) => {
@@ -206,7 +207,9 @@ pub(crate) fn read(rook: &Rook, session: u128, args: &Value) -> Result<String> {
             .filter(|e| e.record.kind == EventKind::ToolResult)
             .map(|e| json!({"result_id":e.seq,"tool":e.record.label,"at":e.record.ts}))
             .collect();
-        return Ok(json!({"results":rows,"next_offset":next.filter(|n| *n < end)}).to_string());
+        return Ok(rook_tools::ToolOutcome::ok(
+            json!({"results":rows,"next_offset":next.filter(|n| *n < end)}).to_string(),
+        ));
     }
     let seq = args
         .get("result_id")
@@ -266,14 +269,21 @@ pub(crate) fn read(rook: &Rook, session: u128, args: &Value) -> Result<String> {
         _ => bytes.len(),
     };
     let next = offset + end as u64;
-    Ok(json!({"result_id": seq, "source": source, "offset": offset, "next_offset": (next < total).then_some(next),
+    let mut result = rook_tools::ToolOutcome::ok(json!({"result_id": seq, "source": source, "offset": offset, "next_offset": (next < total).then_some(next),
         "total_bytes": total, "capture_complete": complete, "output_available": output.is_some(),
-        "content": String::from_utf8_lossy(&bytes[..end])}).to_string())
+        "content": String::from_utf8_lossy(&bytes[..end])}).to_string());
+    if args.get("include_images").and_then(Value::as_bool) == Some(true) {
+        result.images = crate::tool_images::load(rook, &event)?;
+    }
+    Ok(result)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn read_text(rook: &Rook, session: u128, args: &Value) -> Result<String> {
+        read(rook, session, args).map(|result| result.content)
+    }
     fn fixture() -> (tempfile::TempDir, Rook, u128) {
         let dir = tempfile::tempdir().unwrap();
         let mut config = crate::Config::default();
@@ -289,6 +299,40 @@ mod tests {
         );
         let session = rook.start_session("results").unwrap();
         (dir, rook, session)
+    }
+
+    #[test]
+    fn pruning_counts_image_tokens_and_original_pixels_remain_explicitly_retrievable() {
+        let (_dir, rook, session) = fixture();
+        let data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+        let image = rook_llm::Image::from_base64("image/png", data).unwrap();
+        let mut messages = Vec::new();
+        let mut first = 0;
+        for i in 0..12 {
+            rook.log(session, EventKind::ToolCall, "camera", "{}").unwrap();
+            let mut text = "screenshot".to_string();
+            let seq =
+                crate::tool_images::record(&rook, session, "camera", &mut text, std::slice::from_ref(&image))
+                    .unwrap();
+            if i == 0 {
+                first = seq;
+            }
+            let event = rook.store.events(session, seq, 1).unwrap().remove(0);
+            let mut message = Message::tool_result(format!("call-{i}"), fresh(&event, &text));
+            message.images.push(image.clone());
+            messages.push(message);
+        }
+        let text_only: usize = messages.iter().map(|m| estimate_tokens(&m.content)).sum();
+        assert!(
+            text_only < rook.config.agent.prune_tool_results_min_tokens,
+            "the images, not just the captions, must be what reaches the threshold"
+        );
+        assert!(prune(&rook, session, &mut messages).unwrap() >= 4 * 1536);
+        assert!(messages[..4].iter().all(|message| message.images.is_empty()));
+        assert!(read(&rook, session, &json!({"result_id":first})).unwrap().images.is_empty());
+        let restored = read(&rook, session, &json!({"result_id":first,"include_images":true})).unwrap();
+        assert_eq!(restored.images[0].data, data);
+        assert!(!restored.content.contains(data));
     }
 
     #[test]
@@ -331,7 +375,7 @@ mod tests {
         let mut offset = 0;
         loop {
             let page: Value = serde_json::from_str(
-                &read(&rook, session, &json!({"result_id":events[0].seq,"offset":offset,"limit":97}))
+                &read_text(&rook, session, &json!({"result_id":events[0].seq,"offset":offset,"limit":97}))
                     .unwrap(),
             )
             .unwrap();
@@ -343,7 +387,7 @@ mod tests {
         }
         assert_eq!(whole, format!("0\n{body}"));
         let other = rook.start_session("other").unwrap();
-        assert!(read(&rook, other, &json!({"result_id":events[0].seq})).is_err());
+        assert!(read_text(&rook, other, &json!({"result_id":events[0].seq})).is_err());
         assert!(
             read(
                 &rook,
@@ -361,12 +405,13 @@ mod tests {
                 &json!({"result_id":child_result,"session":rook_store::format_session_id(child)})
             )
             .unwrap()
+            .content
             .contains("child answer")
         );
-        let listed: Value = serde_json::from_str(&read(&rook, session, &json!({})).unwrap()).unwrap();
+        let listed: Value = serde_json::from_str(&read_text(&rook, session, &json!({})).unwrap()).unwrap();
         assert_eq!(listed["results"][0]["result_id"], events[0].seq);
         assert!(
-            read(&rook, session, &json!({"result_id":0})).is_err(),
+            read_text(&rook, session, &json!({"result_id":0})).is_err(),
             "tool calls cannot be read as results"
         );
     }
@@ -382,17 +427,17 @@ mod tests {
         let meta = [("output_file".into(), json!(path)), ("output_complete".into(), json!(true))].into();
         register_output(&rook, session, seq, &meta).unwrap();
         let page: Value = serde_json::from_str(
-            &read(&rook, session, &json!({"result_id":seq,"source":"output","limit":u64::MAX})).unwrap(),
+            &read_text(&rook, session, &json!({"result_id":seq,"source":"output","limit":u64::MAX})).unwrap(),
         )
         .unwrap();
         assert_eq!(page["content"].as_str().unwrap().len(), PAGE);
         assert_eq!(page["next_offset"], PAGE);
         assert_eq!(page["capture_complete"], true);
         let fork = rook.fork_session(session, seq + 1).unwrap();
-        let copied = read(&rook, fork.id, &json!({"result_id":seq,"source":"output"})).unwrap();
+        let copied = read_text(&rook, fork.id, &json!({"result_id":seq,"source":"output"})).unwrap();
         assert!(copied.contains(&"a".repeat(PAGE)));
         rook.delete_session(session).unwrap();
-        assert!(read(&rook, fork.id, &json!({"result_id":seq,"source":"output"})).is_ok());
+        assert!(read_text(&rook, fork.id, &json!({"result_id":seq,"source":"output"})).is_ok());
         let bad = [("output_file".into(), json!(rook.workspace.join("secret.txt")))].into();
         assert!(register_output(&rook, session, seq, &bad).is_err());
         #[cfg(unix)]
@@ -400,7 +445,7 @@ mod tests {
             std::fs::write(rook.workspace.join("secret.txt"), "outside").unwrap();
             std::fs::remove_file(&path).unwrap();
             std::os::unix::fs::symlink(rook.workspace.join("secret.txt"), &path).unwrap();
-            assert!(read(&rook, fork.id, &json!({"result_id":seq,"source":"output"})).is_err());
+            assert!(read_text(&rook, fork.id, &json!({"result_id":seq,"source":"output"})).is_err());
         }
     }
 }

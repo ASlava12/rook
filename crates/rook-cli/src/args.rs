@@ -138,6 +138,15 @@ pub(crate) enum Command {
         /// seeing what a machine serves before pointing anything at it.
         #[arg(long)]
         source: Option<String>,
+        /// Read cached observations, or the configured model if none exist. No network or credential helpers.
+        #[arg(long, conflicts_with_all = ["refresh", "recheck"])]
+        offline: bool,
+        /// Contact the endpoint now; do not fall back to cached observations.
+        #[arg(long, conflicts_with = "recheck")]
+        refresh: bool,
+        /// Include cache origin, age and notices in the JSON object.
+        #[arg(long, requires = "json", conflicts_with = "recheck")]
+        metadata: bool,
     },
     /// Speak the Agent Client Protocol on stdio, for editors.
     Acp,
@@ -315,7 +324,11 @@ pub(crate) enum ConfigCmd {
     Show,
     /// Read the file, name what is wrong in it, and ask every endpoint whether
     /// it is there.
-    Check,
+    Check {
+        /// Validate the file without contacting endpoints or resolving secrets.
+        #[arg(long)]
+        offline: bool,
+    },
     /// Change one setting, leaving the rest of the file — comments included —
     /// exactly as it was.
     Set {
@@ -346,6 +359,14 @@ pub(crate) enum SecretsCmd {
 
 #[derive(Subcommand)]
 pub(crate) enum McpCmd {
+    /// Sign in to an HTTP server using OAuth and a native browser callback.
+    Login { server: String },
+    /// Forget stored OAuth access/refresh tokens for this server.
+    Logout { server: String },
+    /// Show the running daemon's installed MCP connections for this workspace.
+    Status,
+    /// Replace one daemon connection using current config, preserving active turns.
+    Reconnect { server: String },
     /// Offer Rook's own tools over stdio, so any MCP client can use them.
     Serve {
         /// Allow anything the deny list does not forbid. Without it a client
@@ -406,6 +427,16 @@ pub(crate) enum StoreCmd {
 
 #[derive(Subcommand)]
 pub(crate) enum SessionCmd {
+    /// Export bounded diagnostics; conversation content is excluded by default.
+    Diagnostics {
+        id: String,
+        /// Save a new file instead of printing JSON. Existing files are preserved.
+        #[arg(long)]
+        output: Option<std::path::PathBuf>,
+        /// Include redacted log tails, which may still contain private application text.
+        #[arg(long)]
+        logs: bool,
+    },
     /// Inspect interrupted execution, or acknowledge one reviewed operation.
     Recovery {
         id: String,
@@ -419,6 +450,41 @@ pub(crate) enum SessionCmd {
         /// Every workspace, not just this one.
         #[arg(long)]
         all: bool,
+    },
+    /// Browse a bounded page (newest by default), or jump to one event.
+    History {
+        id: String,
+        #[arg(long, conflicts_with = "before")]
+        from: Option<u64>,
+        #[arg(long)]
+        before: Option<u64>,
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Search literal text within one transcript; follow the returned cursor.
+    Find {
+        id: String,
+        query: String,
+        #[arg(long, default_value_t = 0)]
+        from: u64,
+        #[arg(long, default_value_t = 0)]
+        offset: u64,
+        #[arg(long)]
+        through: Option<u64>,
+    },
+    /// Read an event body in byte pages without loading its whole payload.
+    Entry {
+        id: String,
+        seq: u64,
+        #[arg(long, default_value_t = 0)]
+        offset: u64,
+    },
+    /// Produce a bounded, attributed data quote for a new prompt.
+    Quote {
+        id: String,
+        seq: u64,
+        #[arg(long, default_value_t = 0)]
+        offset: u64,
     },
     /// Print a session transcript.
     Show {

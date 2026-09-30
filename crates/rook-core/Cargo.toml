@@ -9,7 +9,9 @@ authors.workspace = true
 
 [dependencies]
 base64 = "0.22.1"
+getrandom = "0.4.3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+regex = "1.13.1"
 jsonschema = { version = "0.56.0", default-features = false }
 rook-contain = { path = "../rook-contain" }
 async-trait = "0.1.92"

@@ -222,6 +222,7 @@ async fn a_stream_yields_text_as_it_arrives_and_calls_whole() {
     let (mut text, mut reasoning, mut calls, mut done) = (String::new(), String::new(), 0, None);
     while let Some(delta) = stream.next().await {
         match delta.unwrap() {
+            Delta::Effort(_) => panic!("no retry wrapper in this direct dialect test"),
             Delta::Text(t) => text.push_str(&t),
             Delta::Reasoning(t) => reasoning.push_str(&t),
             // Google signs nothing and asks for nothing back.
@@ -260,4 +261,31 @@ async fn inline_images_use_gemini_inline_data_beside_text() {
         serde_json::json!({"mimeType":"image/png","data":"aW1hZ2U="})
     );
     assert_eq!(body["contents"][0]["parts"][0]["text"], "inspect");
+}
+
+#[tokio::test]
+async fn tool_images_follow_every_function_response_in_one_user_turn() {
+    let (url, seen) = serve(ANSWERED).await;
+    let mut calls = Message::assistant("");
+    calls.tool_calls = vec![
+        rook_llm::ToolCall { id: "one".into(), name: "screenshot".into(), arguments: serde_json::json!({}) },
+        rook_llm::ToolCall { id: "two".into(), name: "status".into(), arguments: serde_json::json!({}) },
+    ];
+    let mut image = Message::tool_result("one", "a screenshot");
+    image.images.push(rook_llm::Image {
+        mime_type: "image/png".into(),
+        data: "aW1hZ2U=".into(),
+        width: 1,
+        height: 1,
+    });
+    let request = Request::new(vec![calls, image, Message::tool_result("two", "ready")]);
+    provider(url).complete(request).await.unwrap();
+    let body = sent(&seen.await.unwrap());
+    let contents = body["contents"].as_array().unwrap();
+    assert_eq!(contents.len(), 2, "{body}");
+    let parts = contents[1]["parts"].as_array().unwrap();
+    assert_eq!(parts[0]["functionResponse"]["name"], "screenshot");
+    assert_eq!(parts[1]["functionResponse"]["name"], "status");
+    assert_eq!(parts[1]["functionResponse"]["response"]["result"], "ready");
+    assert_eq!(parts[3]["inlineData"]["data"], "aW1hZ2U=");
 }

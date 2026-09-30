@@ -28,6 +28,7 @@ pub struct Config {
     pub base_url: String,
     pub api_key: String,
     pub context_window: usize,
+    pub context_window_explicit: bool,
     pub stream_idle_timeout: Duration,
     /// How a request to this base leaves the machine — see [`crate::Proxy`].
     /// The default is whatever the environment says, which is what every
@@ -41,6 +42,7 @@ impl Config {
             base_url,
             api_key,
             context_window: context_window_for(model),
+            context_window_explicit: false,
             stream_idle_timeout: Duration::from_secs(90),
             proxy: Default::default(),
         }
@@ -63,12 +65,24 @@ pub struct Google {
     model: String,
     config: Config,
     http: reqwest::Client,
+    context_key: [u8; 32],
 }
 
 impl Google {
     pub fn new(id: &str, model: &str, config: Config) -> Result<Self> {
+        let context_key = crate::catalog::context_key(
+            &[
+                "google",
+                &config.base_url,
+                &config.api_key,
+                model,
+                &config.context_window.to_string(),
+                if config.context_window_explicit { "explicit" } else { "assumed" },
+            ],
+            &config.proxy,
+        );
         let http = crate::client_for(&config.base_url, &config.proxy)?;
-        Ok(Self { id: id.to_string(), model: model.to_string(), config, http })
+        Ok(Self { id: id.to_string(), model: model.to_string(), config, http, context_key })
     }
 
     fn endpoint(&self, path: &str) -> String {
@@ -86,7 +100,8 @@ impl Google {
             true => format!("models/{}:streamGenerateContent?alt=sse", self.model),
             false => format!("models/{}:generateContent", self.model),
         };
-        let req = self.authorized(self.http.post(self.endpoint(&path)).json(&wire_request(request)));
+        let req =
+            self.authorized(self.http.post(self.endpoint(&path)).json(&wire_request(&self.model, request)));
         let bytes = request.prompt_bytes();
         let patience = crate::first_token_patience(self.config.stream_idle_timeout, bytes);
         let base = self.config.base_url.clone();
@@ -107,16 +122,53 @@ impl Provider for Google {
         self.config.context_window
     }
 
+    fn context_key(&self) -> Option<[u8; 32]> {
+        Some(self.context_key)
+    }
+
+    fn context_is_explicit(&self) -> bool {
+        self.config.context_window_explicit
+    }
+
+    async fn discover_context_window(&self, limits: crate::CatalogLimits) -> Result<Option<usize>> {
+        if self.context_is_explicit() {
+            return Ok(Some(self.context_window()));
+        }
+        Ok(self
+            .models_with(limits)
+            .await?
+            .into_iter()
+            .find(|entry| entry.id == self.model)
+            .and_then(|entry| entry.context_window)
+            .filter(|window| *window > 0))
+    }
+
     fn supports_streaming(&self) -> bool {
         true
     }
 
-    async fn models(&self) -> Result<Vec<ModelInfo>> {
-        #[derive(Deserialize)]
-        struct Listing {
-            #[serde(default)]
-            models: Vec<Entry>,
+    fn takes_effort(&self) -> bool {
+        thinking_parameter(&self.model, crate::Effort::High).is_some()
+    }
+
+    fn effort_use(&self, effort: crate::Effort) -> crate::EffortUse {
+        match thinking_parameter(&self.model, effort) {
+            Some(("thinkingLevel", value)) => crate::EffortUse::parameter(
+                "generationConfig.thinkingConfig.thinkingLevel",
+                value.as_str().unwrap_or_default(),
+            ),
+            Some((_, value)) => {
+                crate::EffortUse::parameter("generationConfig.thinkingConfig.thinkingBudget", value)
+            }
+            None => crate::EffortUse::Omitted { reason: "no effort mapping for this model" },
         }
+    }
+
+    async fn models(&self) -> Result<Vec<ModelInfo>> {
+        self.models_with(crate::CatalogLimits::default()).await
+    }
+
+    async fn models_with(&self, limits: crate::CatalogLimits) -> Result<Vec<ModelInfo>> {
         #[derive(Deserialize)]
         struct Entry {
             /// Fully qualified, as `models/gemini-2.5-pro`.
@@ -125,35 +177,39 @@ impl Provider for Google {
             display_name: Option<String>,
             #[serde(default, rename = "inputTokenLimit")]
             input_token_limit: Option<usize>,
+            #[serde(default)]
+            thinking: Option<bool>,
         }
 
-        let response = self
-            .authorized(self.http.get(self.endpoint("models")))
-            .timeout(Duration::from_secs(20))
-            .send()
-            .await
-            .map_err(|e| LlmError::unreachable(&self.config.base_url, e))?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(LlmError::Status {
-                status: status.as_u16(),
-                retry_after: crate::retry_after(response.headers()),
-                body: crate::quoted_text(response, self.config.stream_idle_timeout).await,
-            });
-        }
-        let text =
-            crate::whole_text(response, &self.config.base_url, self.config.stream_idle_timeout).await?;
-        let listing: Listing = serde_json::from_str(&text)
-            .map_err(|e| LlmError::Decode(format!("{e}: {}", truncate(&text, 300))))?;
-        Ok(listing
-            .models
+        let page_size = limits.bounded().max_models.min(1000);
+        let endpoint = reqwest::Url::parse(&self.endpoint("models"))
+            .map_err(|e| LlmError::Other(format!("invalid model catalog endpoint: {e}")))?;
+        let mut budget = crate::catalog::Budget::new(limits);
+        let entries: Vec<Entry> = budget
+            .list(
+                |cursor| {
+                    let mut url = endpoint.clone();
+                    url.query_pairs_mut().append_pair("pageSize", &page_size.to_string());
+                    if let Some(cursor) = cursor {
+                        url.query_pairs_mut().append_pair("pageToken", cursor);
+                    }
+                    self.authorized(self.http.get(url))
+                },
+                &self.config.base_url,
+                crate::catalog::Paging::Google,
+                |entry: &Entry| &entry.name,
+            )
+            .await?;
+        Ok(entries
             .into_iter()
             .map(|e| ModelInfo {
                 id: e.name.trim_start_matches("models/").to_string(),
                 owned_by: e.display_name,
                 context_window: e.input_token_limit,
+                max_context_window: None,
                 loaded: None,
                 quantization: None,
+                capabilities: crate::ModelCapabilities { reasoning: e.thinking, ..Default::default() },
             })
             .collect())
     }
@@ -314,14 +370,15 @@ fn stop_reason(raw: Option<&str>, called_tools: bool) -> StopReason {
     }
 }
 
-fn wire_request(request: &Request) -> Value {
+fn wire_request(model: &str, request: &Request) -> Value {
     let mut system = String::new();
     let mut contents: Vec<Value> = Vec::new();
     // A result carries only the function's name, so the call it answers has to
     // be remembered from the assistant message that asked for it.
     let mut called: HashMap<&str, &str> = HashMap::new();
 
-    for message in &request.messages {
+    let messages = crate::images::for_wire(&request.messages);
+    for message in &messages {
         match message.role {
             Role::System => {
                 if !system.is_empty() {
@@ -336,7 +393,7 @@ fn wire_request(request: &Request) -> Value {
                         "inlineData":{"mimeType":image.mime_type,"data":image.data}
                     })
                 }));
-                contents.push(json!({"role":"user","parts":parts}));
+                append_user_parts(&mut contents, parts);
             }
             Role::Assistant => {
                 let mut parts: Vec<Value> = Vec::new();
@@ -359,15 +416,15 @@ fn wire_request(request: &Request) -> Value {
                     .as_deref()
                     .and_then(|id| called.get(id).copied())
                     .unwrap_or_default();
-                contents.push(json!({
-                    "role": "user",
-                    "parts": [{
+                append_user_parts(
+                    &mut contents,
+                    vec![json!({
                         "functionResponse": {
                             "name": name,
                             "response": { "result": message.content },
                         }
-                    }],
-                }));
+                    })],
+                );
             }
         }
     }
@@ -392,20 +449,62 @@ fn wire_request(request: &Request) -> Value {
     }
     // Only when the caller asked: a model without a thinking budget rejects the
     // field outright, and most requests do not set an effort.
-    if let Some(effort) = request.effort {
-        body["generationConfig"]["thinkingConfig"] = json!({ "thinkingBudget": thinking_budget(effort) });
+    if let Some((name, value)) = request.effort.and_then(|effort| thinking_parameter(model, effort)) {
+        body["generationConfig"]["thinkingConfig"] = json!({ name: value });
     }
     body
 }
 
-/// `-1` asks the model to decide, which is what "as much as it takes" means here.
-fn thinking_budget(effort: crate::Effort) -> i32 {
+/// GenerateContent uses budgets for 2.5 and levels for 3.x. This is not
+/// the Interactions API, whose 2.5 examples also use levels.
+fn thinking_parameter(model: &str, effort: crate::Effort) -> Option<(&'static str, Value)> {
+    use crate::Effort::*;
+    use crate::effort::model_family;
+    let model = model.strip_prefix("models/").unwrap_or(model);
+    if model_family(model, "gemini-3.1-flash-lite-image") {
+        return Some(("thinkingLevel", json!(if effort == Low { "minimal" } else { "high" })));
+    }
+    if [
+        "gemini-3",
+        "gemini-3.1",
+        "gemini-3.5",
+        "gemini-3.6",
+        "gemini-3.7",
+        "gemini-3.8",
+        "gemini-robotics-er-2",
+    ]
+    .iter()
+    .any(|family| model_family(model, family))
+    {
+        let value = match effort {
+            Low => "low",
+            Medium if !model_family(model, "gemini-3-pro") => "medium",
+            _ => "high",
+        };
+        return Some(("thinkingLevel", json!(value)));
+    }
+    // Image-only and TTS variants do not inherit the text model's controls.
+    if (model_family(model, "gemini-2.5-pro")
+        || model_family(model, "gemini-2.5-flash")
+        || model_family(model, "gemini-robotics-er-1.6"))
+        && !model.contains("image")
+        && !model.contains("tts")
+    {
+        return Some(("thinkingBudget", json!(thinking_budget(model, effort))));
+    }
+    None
+}
+
+/// Explicit upper levels use the model limit rather than switching back to
+/// dynamic thinking (`-1`), which could spend less than the selected high level.
+fn thinking_budget(model: &str, effort: crate::Effort) -> i32 {
     use crate::Effort::*;
     match effort {
         Low => 1_024,
         Medium => 8_192,
         High => 24_576,
-        XHigh | Max => -1,
+        XHigh | Max if crate::effort::model_family(model, "gemini-2.5-pro") => 32_768,
+        XHigh | Max => 24_576,
     }
 }
 
@@ -491,5 +590,18 @@ impl From<UsageMetadata> for Usage {
             cache_read_tokens: m.cached_content_token_count,
             cache_write_tokens: 0,
         }
+    }
+}
+
+// All results of a parallel function call belong to the same user turn. The
+// following image parts must come after those results, not between them.
+fn append_user_parts(contents: &mut Vec<Value>, parts: Vec<Value>) {
+    if let Some(last) = contents.last_mut()
+        && last["role"] == "user"
+        && let Some(existing) = last["parts"].as_array_mut()
+    {
+        existing.extend(parts);
+    } else {
+        contents.push(json!({"role":"user", "parts":parts}));
     }
 }

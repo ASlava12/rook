@@ -63,6 +63,7 @@ async fn serving(answers: Vec<(&'static str, &'static str)>) -> String {
 async fn a_window_the_compatible_listing_omits_is_asked_for_where_it_is_kept() {
     let url = serving(vec![
         ("200 OK", r#"{"object":"list","data":[{"id":"qwen/qwen3.8-27b"}]}"#),
+        ("404 Not Found", "{}"),
         (
             "200 OK",
             r#"{"data":[{"id":"qwen/qwen3.8-27b","max_context_length":262144,"loaded_context_length":32768}]}"#,
@@ -89,6 +90,7 @@ async fn a_window_the_compatible_listing_omits_is_asked_for_where_it_is_kept() {
 async fn a_local_listing_says_what_is_resident_and_how_it_is_quantised() {
     let url = serving(vec![
         ("200 OK", r#"{"object":"list","data":[{"id":"big"},{"id":"small"}]}"#),
+        ("404 Not Found", "{}"),
         (
             "200 OK",
             r#"{"data":[
@@ -211,5 +213,7 @@ async fn the_configured_context_window_overrides_the_provider_default() {
     let default = rook_llm::from_spec_with("ollama/x", Duration::from_secs(1), None).unwrap();
     let overridden = rook_llm::from_spec_with("ollama/x", Duration::from_secs(1), Some(262_144)).unwrap();
     assert_ne!(default.context_window(), 262_144);
+    assert!(!default.context_is_explicit(), "the built-in estimate must not disable discovery");
+    assert!(overridden.context_is_explicit());
     assert_eq!(overridden.context_window(), 262_144);
 }

@@ -19,6 +19,43 @@ fn tmp_store() -> (tempfile::TempDir, Store) {
     (dir, store)
 }
 
+#[test]
+fn companion_events_stay_adjacent_under_concurrent_appends_and_fork_together() {
+    let (_dir, store) = tmp_store();
+    let session = rook_store::new_session_id();
+    store.create_session(&SessionMeta::new(session, "pairs", "/tmp", rook_store::now_unix())).unwrap();
+    std::thread::scope(|scope| {
+        for writer in 0..4 {
+            let store = &store;
+            scope.spawn(move || {
+                for n in 0..20 {
+                    let body = format!("{writer}/{n}");
+                    let [before, after] = store
+                        .append_event_pair(
+                            session,
+                            NewEvent::new(EventKind::Note, Kind::Message, body.as_bytes()).label("companion"),
+                            NewEvent::new(EventKind::ToolResult, Kind::ToolResult, body.as_bytes())
+                                .label("tool"),
+                        )
+                        .unwrap();
+                    assert_eq!(after, before + 1);
+                }
+            });
+        }
+    });
+    let events = store.events(session, 0, 1000).unwrap();
+    assert_eq!(events.len(), 160);
+    for pair in events.chunks_exact(2) {
+        assert_eq!(pair[0].record.kind, EventKind::Note);
+        assert_eq!(pair[1].record.kind, EventKind::ToolResult);
+        assert_eq!(pair[0].record.body, pair[1].record.body);
+    }
+    let fork = rook_store::new_session_id();
+    store.fork_session(session, fork, 160, "copy").unwrap();
+    assert_eq!(store.events(fork, 0, 1000).unwrap().len(), 160);
+    assert_eq!(store.get_session(fork).unwrap().unwrap().next_seq, 160);
+}
+
 /// A payload that looks like what an agent actually writes: small, structured,
 /// and nearly identical to its neighbours.
 fn message(i: usize) -> Vec<u8> {
@@ -766,6 +803,10 @@ fn paged_reads_verify_whole_objects_across_codecs_and_dictionary_generations() {
             );
         }
         assert!(store.get_range(&id, body.len() as u64 + 1, 1).is_err());
+        let (head, tail) = store.get_ends(&id, 71, 93).unwrap();
+        assert_eq!(head, body[..body.len().min(71)]);
+        assert_eq!(tail, body[body.len().saturating_sub(93)..]);
+        assert_eq!(store.get_ends(&id, 0, 0).unwrap(), (vec![], vec![]));
     }
     let first: Vec<_> = (0..100).map(message).collect();
     store.dicts().train(Kind::Message, &first, 4096).unwrap();
@@ -775,10 +816,15 @@ fn paged_reads_verify_whole_objects_across_codecs_and_dictionary_generations() {
     let next: Vec<_> = (1000..1100).map(message).collect();
     store.dicts().train(Kind::Message, &next, 4096).unwrap();
     assert_eq!(store.get_range(&id, 5, 91).unwrap(), body[5..96]);
+    assert_eq!(store.get_ends(&id, 5, 7).unwrap(), (body[..5].to_vec(), body[body.len() - 7..].to_vec()));
     let external = noise(2 * 1024 * 1024, 99);
     let id = store.put(Kind::Other, &external).unwrap();
     assert!(store.stat_object(&id).unwrap().unwrap().external);
     assert_eq!(store.get_range(&id, 75_000, 500).unwrap(), external[75_000..75_500]);
+    assert_eq!(
+        store.get_ends(&id, 5, 7).unwrap(),
+        (external[..5].to_vec(), external[external.len() - 7..].to_vec())
+    );
     let hex = id.to_hex();
     let path = store.root().join("objects").join(&hex[..2]).join(&hex[2..4]).join(&hex);
     let mut broken = std::fs::read(&path).unwrap();
@@ -789,6 +835,7 @@ fn paged_reads_verify_whole_objects_across_codecs_and_dictionary_generations() {
         store.get_range(&id, 0, 10).is_err(),
         "corruption outside the requested page must also be detected"
     );
+    assert!(store.get_ends(&id, 5, 7).is_err());
 }
 
 /// Retraining must not make what is already written unreadable.

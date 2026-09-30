@@ -1,6 +1,8 @@
 //! The HTTP surface. Every handler is a thin projection of `rook-core`, so the
 //! web UI cannot learn anything the CLI does not also expose.
 
+pub(crate) mod mcp_oauth;
+
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
@@ -28,7 +30,12 @@ pub fn router(state: Shared) -> Router {
         .route("/api/store/refs", get(refs))
         .route("/api/sessions", get(sessions))
         .route("/api/sessions/{id}/recovery", get(execution).post(acknowledge_operation))
+        .route("/api/sessions/{id}/diagnostics", get(diagnostics))
         .route("/api/sessions/{id}/transcript", get(transcript))
+        .route("/api/sessions/{id}/history", get(history_page))
+        .route("/api/sessions/{id}/history/search", get(history_search))
+        .route("/api/sessions/{id}/history/{seq}", get(history_entry))
+        .route("/api/sessions/{id}/history/{seq}/quote", get(history_quote))
         .route("/api/sessions/{id}/changes", get(changes))
         .route("/api/sessions/{id}/context", get(context))
         .route("/api/sessions/{id}/goal", post(set_goal))
@@ -46,6 +53,9 @@ pub fn router(state: Shared) -> Router {
         .route("/api/docs", get(docs_kept).post(gather_docs))
         .route("/api/docs/forget", post(forget_docs))
         .route("/api/docs/{topic}", get(docs))
+        .merge(mcp_oauth::routes())
+        .route("/api/mcp", get(mcp_status))
+        .route("/api/mcp/{name}/reconnect", post(mcp_reconnect))
         .route("/api/skills", get(skills))
         .route("/api/skills/{name}", get(skill))
         .route("/api/skills/{name}/history", get(skill_history))
@@ -110,7 +120,7 @@ impl From<CoreError> for Fail {
                 "capture_too_big",
                 Some("narrow the paths, or raise the limits under [storage] in config.toml"),
             ),
-            CoreError::Store(rook_store::StoreError::MissingObject(_)) => {
+            CoreError::NoTranscriptEvent(_) | CoreError::Store(rook_store::StoreError::MissingObject(_)) => {
                 (StatusCode::NOT_FOUND, "not_found", None)
             }
             _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal", None),
@@ -230,6 +240,43 @@ async fn execution(
 }
 
 #[derive(Deserialize)]
+struct DiagnosticQuery {
+    #[serde(default)]
+    logs: bool,
+}
+
+async fn diagnostics(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+    Query(query): Query<DiagnosticQuery>,
+) -> ApiResult<rook_core::diagnostics::Report> {
+    let sid = session_id(&id)?;
+    let workspace = s
+        .rook
+        .read()
+        .await
+        .store
+        .get_session(sid)
+        .map_err(CoreError::from)?
+        .ok_or(CoreError::NoSession(id))?
+        .workspace;
+    let engine = s.engine_for(Some(std::path::Path::new(&workspace))).await;
+    let (report, fallback) = match engine {
+        Ok(engine) => (engine.read().await.diagnostics(sid, query.logs)?, false),
+        Err(_) => (s.rook.read().await.diagnostics(sid, query.logs)?, true),
+    };
+    let mut report = report;
+    if fallback {
+        report.notices.push(
+            "workspace configuration unavailable; current settings come from the daemon's main workspace"
+                .into(),
+        );
+    }
+    report.json()?;
+    Ok(Json(report))
+}
+
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Acknowledgement {
     operation: String,
@@ -275,6 +322,83 @@ async fn transcript(
     let entries = rook.transcript(sid, q.from, q.limit.min(2000), q.max_body.min(1 << 20))?;
     let next = entries.last().map(|e| (e.seq + 1).to_string());
     Ok(Json(Page::new(entries).with_cursor(next)))
+}
+
+// Large compressed events are read on a blocking worker, never on the socket
+// executor that also carries running turns and cancellation messages.
+async fn history_read<T: Send + 'static>(
+    s: Shared,
+    read: impl FnOnce(&rook_core::Rook) -> rook_core::Result<T> + Send + 'static,
+) -> ApiResult<T> {
+    let result = tokio::task::spawn_blocking(move || read(&s.rook.blocking_read()))
+        .await
+        .map_err(|e| Fail(StatusCode::INTERNAL_SERVER_ERROR, ApiError::new("internal", e.to_string())))??;
+    Ok(Json(result))
+}
+async fn history_page(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+    Query(q): Query<rook_core::transcript::PageRequest>,
+) -> ApiResult<rook_core::transcript::Page> {
+    let session = session_id(&id)?;
+    if q.from.is_some() && q.before.is_some() {
+        return Err(Fail(
+            StatusCode::BAD_REQUEST,
+            ApiError::new("bad_request", "choose from or before, not both"),
+        ));
+    }
+    history_read(s, move |r| r.transcript_page(session, &q)).await
+}
+#[derive(Deserialize)]
+struct HistorySearch {
+    q: String,
+    #[serde(default)]
+    seq: u64,
+    #[serde(default)]
+    offset: u64,
+    through: Option<u64>,
+}
+async fn history_search(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+    Query(q): Query<HistorySearch>,
+) -> ApiResult<rook_core::transcript::Matches> {
+    let session = session_id(&id)?;
+    if q.q.trim().is_empty() || q.q.len() > 256 {
+        return Err(Fail(
+            StatusCode::BAD_REQUEST,
+            ApiError::new("bad_request", "history search needs 1–256 bytes of literal text"),
+        ));
+    }
+    history_read(s, move |r| {
+        r.transcript_search(
+            session,
+            &q.q,
+            rook_core::transcript::Cursor { seq: q.seq, offset: q.offset, through: q.through },
+        )
+    })
+    .await
+}
+#[derive(Deserialize, Default)]
+struct HistoryOffset {
+    #[serde(default)]
+    offset: u64,
+}
+async fn history_entry(
+    State(s): State<Shared>,
+    Path((id, seq)): Path<(String, u64)>,
+    Query(q): Query<HistoryOffset>,
+) -> ApiResult<rook_core::transcript::EntryPage> {
+    let session = session_id(&id)?;
+    history_read(s, move |r| r.transcript_entry(session, seq, q.offset)).await
+}
+async fn history_quote(
+    State(s): State<Shared>,
+    Path((id, seq)): Path<(String, u64)>,
+    Query(q): Query<HistoryOffset>,
+) -> ApiResult<rook_core::transcript::Quote> {
+    let session = session_id(&id)?;
+    history_read(s, move |r| r.transcript_quote(session, seq, q.offset)).await
 }
 
 #[derive(Deserialize)]
@@ -659,6 +783,69 @@ async fn rewind(
 ) -> ApiResult<rook_core::Rewind> {
     let rook = s.rook.read().await;
     Ok(Json(rook.rewind(session_id(&id)?, body.to_seq, body.restore_files)?))
+}
+
+#[derive(Deserialize)]
+struct McpQuery {
+    workspace: Option<std::path::PathBuf>,
+    session: Option<String>,
+}
+
+async fn mcp_session(
+    s: &Shared,
+    q: &McpQuery,
+) -> Result<(Arc<rook_core::McpSession>, std::path::PathBuf), Fail> {
+    if q.workspace.is_some() && q.session.is_some() {
+        return Err(Fail(
+            StatusCode::BAD_REQUEST,
+            ApiError::new("invalid_scope", "choose workspace or session, not both"),
+        ));
+    }
+    let workspace = match &q.session {
+        Some(id) => {
+            let id = session_id(id)?;
+            let rook = s.rook.read().await;
+            Some(
+                rook.store
+                    .get_session(id)
+                    .map_err(CoreError::from)?
+                    .ok_or_else(|| CoreError::NoSession(rook_store::format_session_id(id)))?
+                    .workspace
+                    .into(),
+            )
+        }
+        None => q.workspace.clone(),
+    };
+    let engine = s.engine_for(workspace.as_deref()).await.map_err(CoreError::Other)?;
+    let equipment = s.equipment_for(&engine).await;
+    let shared = equipment
+        .get_or_init(|| async {
+            let rook = engine.read().await;
+            crate::chat::Shared::for_project(&rook).await
+        })
+        .await;
+    let workspace = engine.read().await.workspace.clone();
+    Ok((shared.mcp.clone(), workspace))
+}
+
+async fn mcp_status(
+    State(s): State<Shared>,
+    Query(q): Query<McpQuery>,
+) -> ApiResult<rook_core::mcp_connections::Report> {
+    Ok(Json(mcp_session(&s, &q).await?.0.report()))
+}
+
+async fn mcp_reconnect(
+    State(s): State<Shared>,
+    Path(name): Path<String>,
+    Query(q): Query<McpQuery>,
+) -> ApiResult<rook_core::mcp_connections::Report> {
+    let (session, workspace) = mcp_session(&s, &q).await?;
+    session
+        .reconnect_in(&workspace, &name)
+        .await
+        .map(Json)
+        .map_err(|message| Fail(StatusCode::CONFLICT, ApiError::new("mcp_reconnect_failed", message)))
 }
 
 async fn skills(
@@ -1222,6 +1409,7 @@ mod tests {
         };
         let state = Arc::new(AppState {
             work: Default::default(),
+            oauth: Default::default(),
             rook: Arc::new(tokio::sync::RwLock::new(rook)),
             elsewhere: tokio::sync::RwLock::new(std::collections::HashMap::new()),
             equipment: tokio::sync::RwLock::new(std::collections::HashMap::new()),
@@ -1482,6 +1670,94 @@ mod tests {
         assert!(body["store_root"].is_string(), "a client needs to know which store it reached");
     }
 
+    #[tokio::test]
+    async fn mcp_status_reuses_turn_equipment_and_does_not_expose_connection_secrets() {
+        let f = fixture();
+        {
+            let mut rook = f.state.rook.write().await;
+            rook.config.mcp = serde_json::from_value::<rook_core::Config>(serde_json::json!({"mcp":[{
+                "name":"private", "enabled":false, "command":"SECRET_COMMAND",
+                "env":{"TOKEN":"SECRET_ENV"}, "headers":{"Authorization":"SECRET_HEADER"}
+            }]}))
+            .unwrap()
+            .mcp;
+        }
+        let (status, report) = get(&f, "/api/mcp").await;
+        assert_eq!(status, StatusCode::OK, "{report}");
+        assert_eq!(report["servers"][0]["state"], "disabled");
+        assert!(!report.to_string().contains("SECRET"));
+        let first = f.state.equipment_for(&f.state.rook).await;
+        let manager = first.get().unwrap().mcp.clone();
+        let id = rook_store::format_session_id(f.session);
+        let held = f.state.rook.read().await;
+        let (status, _) = get(&f, &format!("/api/mcp?session={id}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(Arc::ptr_eq(&manager, &first.get().unwrap().mcp));
+        let (status, error) =
+            post(&f, &format!("/api/mcp/not-configured/reconnect?session={id}"), serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{error}");
+        assert_eq!(manager.report().servers[0].state, "disabled");
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn mcp_session_scope_selects_its_workspace_and_never_falls_back_for_missing_sessions() {
+        let f = fixture();
+        let another = tempfile::tempdir().unwrap();
+        let engine = f.state.engine_for(Some(another.path())).await.unwrap();
+        let id = engine.read().await.start_session("other workspace").unwrap();
+        let id = rook_store::format_session_id(id);
+        let q = McpQuery { session: Some(id.clone()), workspace: None };
+        let (manager, workspace) = mcp_session(&f.state, &q).await.unwrap_or_else(|_| panic!("scope failed"));
+        assert_eq!(workspace.canonicalize().unwrap(), another.path().canonicalize().unwrap());
+        let disabled = serde_json::from_value::<rook_core::Config>(
+            serde_json::json!({"mcp":[{"name":"only-in-other","enabled":false}]}),
+        )
+        .unwrap()
+        .mcp
+        .remove(0);
+        manager.reconnect(&disabled.name, [&disabled], &rook_llm::Proxy::default()).await.unwrap();
+        let (status, body) = get(&f, &format!("/api/mcp?session={id}")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["servers"][0]["name"], "only-in-other");
+        let (_, own) = get(&f, "/api/mcp").await;
+        assert_eq!(own["servers"], serde_json::json!([]));
+        let missing = rook_store::format_session_id(rook_store::new_session_id());
+        let (status, _) = get(&f, &format!("/api/mcp?session={missing}")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = get(&f, &format!("/api/mcp?session={id}&workspace=.")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn diagnostics_are_available_during_a_turn_and_do_not_export_the_conversation() {
+        let f = fixture();
+        let turn = f.state.turn_started();
+        let guard = f.state.rook.read().await;
+        let id = rook_store::format_session_id(f.session);
+        let (status, body) = get(&f, &format!("/api/sessions/{id}/diagnostics")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["version"], 1);
+        assert_eq!(body["session"]["id"], id);
+        assert_eq!(body["logs"], serde_json::json!([]));
+        assert!(!body.to_string().contains("find the leak"));
+        assert!(!body.to_string().contains("api test"));
+        assert!(!body.to_string().contains(f._workspace.path().to_str().unwrap()));
+        drop(guard);
+        drop(turn);
+        // Support data should still be obtainable after the project directory moved.
+        std::fs::remove_dir_all(f._workspace.path()).unwrap();
+        let (status, body) = get(&f, &format!("/api/sessions/{id}/diagnostics")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            body["notices"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v.as_str().unwrap().contains("workspace configuration unavailable"))
+        );
+    }
+
     /// A turn holds its read guard for as long as it runs and maintenance wants
     /// the write lock, so if liveness went through either one it would report a
     /// working daemon as a dead one for minutes at a time.
@@ -1524,6 +1800,48 @@ mod tests {
         let items = body["items"].as_array().unwrap();
         assert_eq!(items.len(), 1, "{body}");
         assert!(items[0]["body"].as_str().unwrap().contains("find the leak"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn history_routes_share_navigation_errors_and_read_only_quotes() {
+        let f = fixture();
+        let id = rook_store::format_session_id(f.session);
+        {
+            let rook = f.state.rook.read().await;
+            for n in 1..70 {
+                rook.log(f.session, rook_store::EventKind::AssistantMessage, "", &format!("answer {n}"))
+                    .unwrap();
+            }
+        }
+        let base = format!("/api/sessions/{id}/history");
+        let (status, page) = get(&f, &base).await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        assert_eq!(page["items"].as_array().unwrap().len(), 64);
+        assert_eq!(page["items"][0]["seq"], 6);
+        assert_eq!(page["next"], serde_json::Value::Null);
+        let (status, older) = get(&f, &format!("{base}?before=6")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(older["items"].as_array().unwrap().len(), 6);
+        let (status, found) = get(&f, &format!("{base}/search?q=find%20the%20leak")).await;
+        assert_eq!(status, StatusCode::OK, "{found}");
+        assert_eq!(found["hits"][0]["seq"], 0);
+        let (status, entry) = get(&f, &format!("{base}/69?offset=0")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(entry["entry"]["body"], "answer 69");
+        let (status, quoted) = get(&f, &format!("{base}/0/quote")).await;
+        assert_eq!(status, StatusCode::OK);
+        let quote: serde_json::Value = serde_json::from_str(quoted["text"].as_str().unwrap()).unwrap();
+        assert_eq!(quote["rook_source"]["authority"], "data");
+        for (suffix, expected) in [
+            ("?from=0&before=5", StatusCode::BAD_REQUEST),
+            ("/search?q=", StatusCode::BAD_REQUEST),
+            ("/999", StatusCode::NOT_FOUND),
+            ("/999/quote", StatusCode::NOT_FOUND),
+        ] {
+            let (status, body) = get(&f, &format!("{base}{suffix}")).await;
+            assert_eq!(status, expected, "{suffix}: {body}");
+        }
+        assert_eq!(f.state.rook.read().await.store.get_session(f.session).unwrap().unwrap().next_seq, 70);
     }
 
     /// A browser cannot walk a filesystem, so naming a file there meant knowing

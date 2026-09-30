@@ -24,6 +24,8 @@ pub(crate) fn cmd_models(
     json: bool,
     recheck: bool,
     source: Option<String>,
+    mode: rook_core::model_catalog::Mode,
+    metadata: bool,
 ) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     if recheck {
@@ -32,41 +34,33 @@ pub(crate) fn cmd_models(
     runtime.block_on(async move {
         let _ = workspace;
         let config = rook_core::Config::load()?;
-        // Named, so the question is about that machine rather than about
-        // whatever the agent happens to be pointed at. The list it comes back
-        // with is what `[models.<name>] model` has to be one of, which is the
-        // thing nobody can know before asking.
-        if let Some(named) = source {
-            let vault = rook_core::Vault::load().unwrap_or_else(|_| rook_core::Vault::empty());
-            let provider = rook_core::models::provider_for(&config, &vault, &named)
-                .with_context(|| format!("asking {named:?}"))?;
-            let models = provider.models().await?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&models)?);
-                return anyhow::Ok(());
-            }
-            let wanted = rook_core::models::model_named(&config, &named);
-            let rows: Vec<Vec<String>> = models
-                .iter()
-                .map(|m| {
-                    vec![
-                        if m.id == wanted { "▸".into() } else { " ".into() },
-                        m.id.clone(),
-                        m.context_window.map(|w| format!("{w}")).unwrap_or_default(),
-                        m.quantization.clone().unwrap_or_default(),
-                    ]
-                })
-                .collect();
-            print!("{}", fmt::table(&["", "model", "context", "quant"], &rows));
-            return anyhow::Ok(());
+        let named = source.as_deref().unwrap_or(&config.agent.model);
+        let vault = rook_core::Vault::load().unwrap_or_else(|_| rook_core::Vault::empty());
+        let listing = rook_core::model_catalog::discover(
+            &config,
+            &vault,
+            named,
+            mode,
+            &rook_core::paths::home().join("cache"),
+        )
+        .await?;
+        eprintln!("{}", listing.description());
+        for notice in &listing.notices {
+            eprintln!("{notice}");
         }
-        let configured = rook_core::models::model_named(&config, &config.agent.model);
-        let configured = configured.as_str();
-        let models = provider(&config)?.models().await?;
         if json {
-            println!("{}", serde_json::to_string_pretty(&models)?);
+            let body = if metadata {
+                serde_json::to_string_pretty(&listing)?
+            } else {
+                serde_json::to_string_pretty(&listing.models)?
+            };
+            println!("{body}");
             return anyhow::Ok(());
         }
+        let configured = rook_core::models::model_named(&config, named);
+        let configured = configured.as_str();
+        let is_observed = !matches!(listing.origin, rook_core::model_catalog::Origin::Configuration);
+        let models = listing.models;
         if models.is_empty() {
             println!("the endpoint does not list its models");
             return anyhow::Ok(());
@@ -94,7 +88,7 @@ pub(crate) fn cmd_models(
             })
             .collect();
         print!("{}", fmt::table(&["", "model", "context", "quant", "", "owner"], &rows));
-        if offered(&models, configured).is_none() {
+        if is_observed && offered(&models, configured).is_none() {
             println!("\n{configured:?} is configured but not offered here");
         }
         anyhow::Ok(())
@@ -140,9 +134,9 @@ pub(crate) fn cmd_config(cmd: ConfigCmd, json: bool) -> Result<()> {
                 Err(why) => anyhow::bail!("{why}"),
             }
         }
-        ConfigCmd::Check => {
+        ConfigCmd::Check { offline } => {
             let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-            checked(&runtime, json)
+            checked(&runtime, json, offline)
         }
     }
 }
@@ -153,15 +147,22 @@ pub(crate) fn cmd_config(cmd: ConfigCmd, json: bool) -> Result<()> {
 /// reads is a typo that changes nothing, and an endpoint that will not answer
 /// is a machine that is off. Reporting them together is what makes the answer
 /// worth reading — the file is the only place both are decided.
-fn checked(runtime: &tokio::runtime::Runtime, json: bool) -> Result<()> {
+fn checked(runtime: &tokio::runtime::Runtime, json: bool, offline: bool) -> Result<()> {
     let path = rook_core::paths::config_file();
     let config = rook_core::Config::load()?;
     let ignored = rook_core::Config::ignored_in(&path);
     let unpointed = rook_core::models::unpointed(&config);
-    let answers = {
+    let errors = config.validation_errors();
+    // A structural failure is actionable without executing any credential
+    // helpers. Check the file first, even in the ordinary online mode.
+    let probe = !offline && errors.is_empty() && ignored.is_empty();
+    let answers = if probe {
         let vault = rook_core::Vault::load().unwrap_or_else(|_| rook_core::Vault::empty());
         runtime.block_on(rook_core::models::recheck(&config, &vault))
+    } else {
+        Vec::new()
     };
+    let valid = errors.is_empty() && ignored.is_empty();
 
     if json {
         println!(
@@ -171,8 +172,12 @@ fn checked(runtime: &tokio::runtime::Runtime, json: bool) -> Result<()> {
                 "ignored": ignored,
                 "unpointed": unpointed,
                 "models": answers,
+                "errors": errors,
+                "valid": valid,
+                "connections_checked": probe,
             }))?
         );
+        anyhow::ensure!(valid, "configuration is invalid; see the reported errors");
         return Ok(());
     }
 
@@ -198,6 +203,14 @@ fn checked(runtime: &tokio::runtime::Runtime, json: bool) -> Result<()> {
         println!("  · [endpoints.{name}] is described and no `[models]` source asks for it");
     }
 
+    for error in &errors {
+        println!("  ✗ {error}");
+    }
+    anyhow::ensure!(valid, "configuration is invalid; fix the errors above");
+    if offline {
+        println!("  ✓ offline validation passed; connections and credentials were not checked");
+        return Ok(());
+    }
     println!();
     if answers.is_empty() {
         println!("no models are named under `[models]`");

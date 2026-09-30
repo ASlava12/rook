@@ -718,3 +718,69 @@ async fn a_body_that_stops_halfway_is_given_up_on_rather_than_waited_out() {
         started.elapsed()
     );
 }
+
+#[test]
+fn sse_line_endings_and_utf8_can_split_at_every_byte_boundary() {
+    for separator in ["\n", "\r\n", "\r"] {
+        let text = format!("data: привет{separator}{separator}data: next{separator}{separator}");
+        for split in 0..=text.len() {
+            let mut frames = rook_llm::Frames::new();
+            frames.feed(&text.as_bytes()[..split]);
+            let mut ready = frames.ready();
+            frames.feed(&text.as_bytes()[split..]);
+            ready.extend(frames.ready());
+            assert_eq!(
+                ready,
+                ["data: привет\n\n", "data: next\n\n"],
+                "separator {separator:?}, split {split}"
+            );
+            assert_eq!(frames.held(), 0);
+        }
+    }
+    let mut frames = rook_llm::Frames::new();
+    let mut ready = Vec::new();
+    for byte in "data: я\r\n\r\ndata: ю\r\rdata: z\n\n".bytes() {
+        frames.feed(&[byte]);
+        ready.extend(frames.ready());
+    }
+    assert_eq!(ready, ["data: я\n\n", "data: ю\n\n", "data: z\n\n"]);
+}
+
+#[tokio::test]
+async fn a_provider_using_the_default_stream_keeps_its_signed_reasoning() {
+    struct CompletionOnly;
+    #[async_trait::async_trait]
+    impl Provider for CompletionOnly {
+        fn id(&self) -> &str {
+            "completion-only"
+        }
+        fn context_window(&self) -> usize {
+            32000
+        }
+        async fn complete(&self, _: Request) -> rook_llm::Result<rook_llm::Response> {
+            let mut message = Message::assistant("checked");
+            message
+                .reasoning
+                .push(serde_json::json!({"type":"thinking","thinking":"working","signature":"opaque"}));
+            message.tool_calls.push(rook_llm::ToolCall {
+                id: "original".into(),
+                name: "inspect".into(),
+                arguments: serde_json::json!({}),
+            });
+            Ok(rook_llm::Response {
+                message,
+                model: self.id().into(),
+                stop_reason: StopReason::ToolUse,
+                usage: Default::default(),
+            })
+        }
+    }
+    let mut stream = CompletionOnly.stream(Request::new(vec![])).await.unwrap();
+    let mut assembler = rook_llm::Assembler::default();
+    while let Some(delta) = stream.next().await {
+        assembler.push(delta.unwrap()).unwrap();
+    }
+    let response = assembler.finish();
+    assert_eq!(response.message.reasoning[0]["signature"], "opaque");
+    assert_eq!(response.message.tool_calls[0].id, "original");
+}

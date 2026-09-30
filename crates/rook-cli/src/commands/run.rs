@@ -141,7 +141,7 @@ pub(crate) fn cmd_run(
             &mcp,
             rook_core::agent::jobs_for(&rook.config),
         );
-        for (name, error) in &mcp.failures {
+        for (name, error) in &mcp.failures() {
             eprintln!("mcp {name}: {error}");
         }
         // Before the loop borrows the agent, for the phrase a call is named by.

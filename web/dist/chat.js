@@ -1,6 +1,8 @@
 // The chat: one socket for the tab's lifetime, a session that can be resumed,
 // a turn that can be stopped, and the agent's questions answered in place.
 import { $, el, api, ago, md, state, nav, notify, askToNotify } from './lib.js';
+import { historyPanel } from './history.js';
+import { mcpPanel } from './mcp.js';
 
 // Scrollback, not the record: the session holds every word of this and the
 // sessions tab reads it back, so a tab left open for a day need not keep an
@@ -32,6 +34,9 @@ function say(kind, text) {
 function saidByModel(text) {
   if (!current || !current.isConnected) {
     current = block('md', '');
+    // A running turn keeps streaming while history is open on another tab.
+    // Its durable events remain readable even when there is no chat viewport.
+    if (!current) return;
     current.dataset.text = '';
   }
   current.dataset.text += text;
@@ -87,12 +92,17 @@ export function connect() {
   socket.onmessage = (event) => {
     const e = JSON.parse(event.data);
     switch (e.type) {
-      case 'started': state.chat.session = e.session; state.chat.spent = null; renderPicker(); break;
+      case 'started': state.chat.session = e.session; state.chat.spent = null; state.chat.context = null; state.chat.modelRequest = null; renderSettings(); renderPicker(); break;
       // Joined a turn this page did not start. Said out loud either way: a
       // page that quietly starts streaming looks like it is answering
       // something you did not ask, and one that says nothing after asking
       // cannot be told from a daemon that did not hear.
       case 'attached':
+        if (state.chat.session !== e.session) {
+          state.chat.context = null; state.chat.modelRequest = null;
+          state.chat.spent = null;
+          renderSettings();
+        }
         state.chat.session = e.session;
         renderPicker();
         if (e.running) { say('stat', '[joined a turn already running here]'); working(); }
@@ -116,8 +126,10 @@ export function connect() {
         current = null;
         break;
       }
+      case 'model_request': state.chat.modelRequest = e; renderSettings(); break;
       case 'settings': state.chat.settings = e; renderSettings(); break;
       case 'spent': state.chat.spent = e; renderSettings(); break;
+      case 'context': state.chat.context = e; renderSettings(); break;
       case 'remembered': say('stat', `remembered: ${e.text}`); break;
       case 'forgot': say('stat', `forgot: ${e.text}`); break;
       case 'failed': say('err', e.message); done(); break;
@@ -263,11 +275,11 @@ function renderSettings() {
   const s = state.chat.settings;
   if (!bar || !s) return;
   const pick = (name, values, selected) => el('label', {},
-    `${name} `,
+    `${name === 'effort' ? 'requested effort' : name} `,
     el('select', { onchange: (e) => send({ type: 'setting', name, value: e.target.value }) },
       values.map(v => el('option', { value: v, selected: v === selected }, v))));
   const spent = state.chat.spent;
-  bar.replaceChildren(
+  const controls = [
     pick('stance', s.stances && s.stances.length ? s.stances : [s.mode], s.mode),
     pick('effort', s.efforts && s.efforts.length ? s.efforts : [s.effort], s.effort),
     // Only where there is a choice. A daemon with nothing under `[models]`
@@ -285,14 +297,25 @@ function renderSettings() {
     })(),
     // Beside the settings rather than in the transcript: it changes on every
     // step, and a running total that scrolled away would be no use.
+    state.chat.modelRequest ? el('span', { class: 'sub', 'data-testid': 'model-request' },
+      `last request (${state.chat.modelRequest.model}): requested ${state.chat.modelRequest.requested_effort}; ${state.chat.modelRequest.effort}`) : null,
+    state.chat.context ? el('span', { class: 'sub' },
+      `context ${state.chat.context.used} / ${state.chat.context.size} tokens`) : null,
     spent ? el('span', { class: 'sub' },
       `${spent.input_tokens} in / ${spent.output_tokens} out` +
-      (spent.cached_tokens ? ` (${spent.cached_tokens} cached)` : '')) : null);
+      (spent.cached_tokens ? ` (${spent.cached_tokens} cached)` : '')) : null];
+  bar.replaceChildren(...controls.filter(node => node !== null));
 }
 
 // Which session the next prompt goes to: a new one, or any of the recent
 // ones, whose transcript is read back into the stream when chosen.
 function renderPicker() {
+  const mcp = $('#mcp-controls');
+  if (mcp && mcp.dataset.session !== (state.chat.session || '')) {
+    mcp.dataset.session = state.chat.session || '';
+    mcp.querySelector('section')?.remove();
+    if (mcp.open) mcp.append(mcpPanel(state.chat.session));
+  }
   const box = $('#picker');
   if (!box) return;
   const current = state.chat.session;
@@ -319,7 +342,8 @@ export async function resume(session) {
   renderPicker();
   if (!session) return;
   try {
-    const { items } = await api(`/api/sessions/${session}/transcript?limit=80&max_body=4000`);
+    const { items } = await api(`/api/sessions/${session}/history`);
+    if (state.chat.session !== session || state.chat.busy) return;
     for (const e of items) {
       if (e.kind === 'user') say('you', `› ${e.body}`);
       else if (e.kind === 'assistant') { current = null; saidByModel(e.body); current = null; }
@@ -363,6 +387,7 @@ function name(input, path) {
   const gap = rest.startsWith(' ') ? '' : ' ';
   input.value = `${input.value.slice(0, start)}@${path}${gap}${rest}`;
   const caret = start + path.length + 1 + gap.length;
+  state.chat.draft = input.value;
   input.setSelectionRange(caret, caret);
   input.focus();
 }
@@ -395,7 +420,7 @@ async function offer(input, row) {
 export async function renderChat() {
   try { state.chat.sessions = (await api('/api/sessions')).items.slice(0, 30); } catch { state.chat.sessions = []; }
   const stream = el('div', { class: 'stream', id: 'stream' });
-  const input = el('input', { placeholder: 'Ask the agent… (Esc stops a running turn)', autofocus: true });
+  const input = el('input', { id: 'chat-input', value: state.chat.draft || '', placeholder: 'Ask the agent… (Esc stops a running turn)', autofocus: true });
   const sendButton = el('button', { id: 'send', type: 'submit' }, 'Send');
   const stopButton = el('button', { id: 'stop', type: 'button', hidden: true, onclick: stop }, 'Stop');
 
@@ -466,6 +491,7 @@ export async function renderChat() {
     finally { loadingAttachments = false; }
     send({ type: 'prompt', session: state.chat.session, text, options });
     input.value = '';
+    state.chat.draft = '';
     attachmentsInput.value = '';
     // While a turn runs this is something to say to it, and the server echoes
     // it back as `interjected` — so the transcript is written there, once, and
@@ -478,7 +504,7 @@ export async function renderChat() {
   // means leaving the page to go and look. The ranking is the daemon's, so the
   // page offers the same list the terminal does.
   const naming = el('div', { class: 'row', id: 'naming' });
-  input.addEventListener('input', () => offer(input, naming));
+  input.addEventListener('input', () => { state.chat.draft = input.value; offer(input, naming); });
   input.addEventListener('keydown', (e) => {
     const offered = naming.firstElementChild;
     if (e.key === 'Tab' && offered) {
@@ -486,6 +512,7 @@ export async function renderChat() {
       // still typing in.
       e.preventDefault();
       name(input, offered.textContent);
+      state.chat.draft = input.value;
       naming.replaceChildren();
       return;
     }
@@ -497,13 +524,25 @@ export async function renderChat() {
     }
   });
 
+  const history = el('details', {}, el('summary', {}, 'Search, jump and quote history'));
+  history.addEventListener('toggle', () => {
+    if (!history.open) { history.querySelector('section')?.remove(); return; }
+    const session = state.chat.session;
+    if (session && !history.querySelector('section')) history.append(historyPanel(session, text => quoteIntoDraft(session, text)));
+  });
+  const mcp = el('details', { id: 'mcp-controls' }, el('summary', {}, 'MCP connections'));
+  mcp.addEventListener('toggle', () => {
+    mcp.querySelector('section')?.remove();
+    if (mcp.open) mcp.append(mcpPanel(state.chat.session));
+  });
   $('#view').replaceChildren(el('div', { class: 'card' },
     el('div', { class: 'row', id: 'picker' }),
     el('div', { class: 'row', id: 'settings' }),
-    stream, outputSettings, form, naming));
+    stream, history, mcp, outputSettings, form, naming));
   renderPicker();
   renderSettings();
   connect();
+  if (state.chat.busy) working();
   if (state.chat.session && !state.chat.busy) await resume(state.chat.session);
   input.focus();
 }
@@ -512,4 +551,18 @@ export async function renderChat() {
 export function continueIn(session) {
   state.chat.session = session;
   nav.go('chat');
+}
+
+// A quote is just draft text. It cannot send a prompt or switch a running turn.
+export function quoteIntoDraft(session, text) {
+  const input = $('#chat-input');
+  const draft = input?.value ?? state.chat.draft ?? '';
+  state.chat.draft = draft + (draft ? '  ' : '') + text;
+  if (state.tab === 'chat' && input) {
+    input.value = state.chat.draft;
+    input.focus();
+  } else {
+    if (!state.chat.busy) state.chat.session = session;
+    nav.go('chat');
+  }
 }

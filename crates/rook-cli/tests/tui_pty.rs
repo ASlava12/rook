@@ -547,6 +547,28 @@ fn steering_during_a_tool_reaches_the_next_request(through_daemon: bool) {
         pty.screen(100, 30);
         assert!(std::time::Instant::now() < deadline, "the tool never started: {}", pty.diagnosis());
     }
+    pty.send("/mcp\r");
+    pty.screen_showing(100, 30, "MCP connections");
+    assert!(requests.try_recv().is_err(), "MCP inspection must not start another model request");
+    pty.send("\u{1b}");
+    pty.screen_showing(100, 30, "^p commands");
+    let diagnostic = home.path().join("during-turn.json");
+    pty.send(&format!("/diagnostics {}\r", diagnostic.display()));
+    pty.screen_showing(100, 30, "Diagnostics saved to");
+    let exported = std::fs::read_to_string(&diagnostic).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&exported).unwrap();
+    assert_eq!(report["execution"]["status"], "running");
+    assert_eq!(report["execution"]["pending"], true);
+    assert!(!exported.contains("start the waiting command"));
+    pty.send("QUOTE_DRAFT\u{6}");
+    pty.screen_showing(100, 30, "history ·");
+    pty.send("g0\r");
+    pty.screen_showing(100, 30, "#0 · byte 0");
+    pty.send("q");
+    pty.screen_showing(100, 30, "Quote inserted in draft");
+    assert!(requests.try_recv().is_err(), "quoting must not start another model request");
+    pty.send("\r");
+    pty.screen_showing(100, 30, "the turn will see this");
     pty.send("PREFER_BLUE\r");
     pty.screen_showing(100, 30, "the turn will see this");
     pty.send("/schema-retries 1\r");
@@ -559,13 +581,28 @@ fn steering_during_a_tool_reaches_the_next_request(through_daemon: bool) {
 
     let next = requests.recv_timeout(PATIENCE).unwrap();
     let messages = next["messages"].as_array().unwrap();
-    for text in ["EARLY_NOTE", "PREFER_BLUE", "/schema-retries 1"] {
+    assert!(
+        !next["messages"].to_string().contains("/diagnostics"),
+        "local export is not a model instruction"
+    );
+    for text in ["EARLY_NOTE", "PREFER_BLUE", "/schema-retries 1", "QUOTE_DRAFT"] {
         assert!(
             messages.iter().any(|m| m["role"] == "user"
                 && m["content"].as_str().is_some_and(|body| body.lines().any(|line| line == text))),
             "the next model request must contain the steering message {text:?}: {messages:?}"
         );
     }
+    let quoted = messages
+        .iter()
+        .filter(|m| m["role"] == "user")
+        .filter_map(|m| m["content"].as_str())
+        .flat_map(str::lines)
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|value| value["rook_source"]["kind"] == "transcript_quote")
+        .expect("the quote must remain a structured source record inside the steering message");
+    assert_eq!(quoted["rook_source"]["authority"], "data");
+    assert_eq!(quoted["rook_source"]["content"], "start the waiting command");
+    assert_eq!(quoted["rook_source"]["seq"], 0);
     pty.send("\u{3}");
 }
 
@@ -1877,4 +1914,278 @@ fn config_editor_keeps_credentials_out_of_the_screen_including_the_edit_field() 
     pty.send("\r");
     pty.screen_showing(100, 30, "Edit value");
     assert!(!pty.seen.contains("DO_NOT_SHOW_THIS_KEY"), "secrets must not appear in terminal output");
+}
+
+fn history_browsing_preserves_the_session(through_daemon: bool) {
+    let _one = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join("config.toml"), "[transcript]\npage_entries=3\nsearch_events=256\n")
+        .unwrap();
+    let session = rook_store::new_session_id();
+    {
+        let store = rook_store::Store::open(home.path().join("store")).unwrap();
+        store
+            .create_session(&rook_store::SessionMeta::new(
+                session,
+                "history fixture",
+                workspace.path().display().to_string(),
+                rook_store::now_unix(),
+            ))
+            .unwrap();
+        for n in 0..80 {
+            store
+                .append_event(
+                    session,
+                    rook_store::NewEvent::new(
+                        rook_store::EventKind::UserMessage,
+                        rook_store::Kind::Message,
+                        format!("HISTORY_EVENT_{n}").as_bytes(),
+                    ),
+                )
+                .unwrap();
+        }
+    }
+    let daemon = through_daemon.then(|| Daemon::start(home.path(), workspace.path()));
+    let mut pty = tui(home.path(), workspace.path());
+    pty.screen(100, 30);
+    pty.send(&format!("/session {}\r", rook_store::format_session_id(session)));
+    pty.screen_showing(100, 30, "continuing");
+    pty.send("PRESERVED_DRAFT\u{6}");
+    pty.screen_showing(100, 30, "HISTORY_EVENT_79");
+    pty.send("p");
+    pty.screen_showing(100, 30, "HISTORY_EVENT_76");
+    pty.send("/HISTORY_EVENT_12\r");
+    pty.screen_showing(100, 30, "Search complete.");
+    pty.screen_showing(100, 30, "HISTORY_EVENT_12");
+    pty.send("g0\r");
+    pty.screen_showing(100, 30, "#0 · byte 0");
+    pty.screen_showing(100, 30, "HISTORY_EVENT_0");
+    pty.send("\u{1b}");
+    pty.screen_showing(100, 30, "PRESERVED_DRAFT");
+    drop(pty);
+    drop(daemon);
+    let store = rook_store::Store::open(home.path().join("store")).unwrap();
+    assert_eq!(store.get_session(session).unwrap().unwrap().next_seq, 80);
+}
+
+#[test]
+fn local_history_search_jump_and_pages_preserve_the_draft() {
+    history_browsing_preserves_the_session(false);
+}
+#[test]
+fn daemon_history_search_jump_and_pages_preserve_the_draft() {
+    history_browsing_preserves_the_session(true);
+}
+
+fn mcp_panel_reconnects_from_current_config(through_daemon: bool) {
+    let _one = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let file = home.path().join("config.toml");
+    std::fs::write(&file, "[[mcp]]\nname='docs'\nenabled=false\n").unwrap();
+    let daemon = through_daemon.then(|| Daemon::start(home.path(), workspace.path()));
+    let mut pty = tui(home.path(), workspace.path());
+    pty.screen(100, 30);
+    pty.send("/mcp\r");
+    pty.screen_showing(100, 30, "docs — disabled");
+    let binary = serde_json::to_string(env!("CARGO_BIN_EXE_rook")).unwrap();
+    let args = serde_json::json!(["--workspace", workspace.path(), "mcp", "serve", "--yes"]);
+    std::fs::write(&file, format!("[[mcp]]\nname='docs'\ncommand={binary}\nargs={args}\n")).unwrap();
+    pty.send("r");
+    pty.screen_showing(100, 30, "docs — connected");
+    std::fs::write(&file, "[[mcp]]\nname='docs'\ncommand='/missing/mcp-command'\n").unwrap();
+    pty.send("r");
+    pty.screen_showing(100, 30, "could not start server");
+    // Leaving the pane still works after a failed reconnect.
+    pty.send("\u{1b}");
+    pty.screen_showing(100, 30, "^p commands");
+    pty.send("PRESERVED_MCP_DRAFT");
+    pty.screen_showing(100, 30, "PRESERVED_MCP_DRAFT");
+    drop(pty);
+    drop(daemon);
+}
+
+#[test]
+fn local_mcp_panel_reconnects_from_current_config() {
+    mcp_panel_reconnects_from_current_config(false);
+}
+#[test]
+fn daemon_mcp_panel_reconnects_from_current_config() {
+    mcp_panel_reconnects_from_current_config(true);
+}
+
+struct OAuthFixture {
+    runtime: tokio::runtime::Runtime,
+    task: tokio::task::JoinHandle<()>,
+    base: String,
+    grants: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+impl Drop for OAuthFixture {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+impl OAuthFixture {
+    fn new() -> Self {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        rook_llm::init_tls();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let listener = runtime.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let grants = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (address, count) = (base.clone(), grants.clone());
+        let task = runtime.spawn(async move {
+            let mut clients = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    accepted = listener.accept() => {
+                        let (mut socket, _) = accepted.unwrap();
+                        let base = address.clone(); let grants = count.clone();
+                        clients.spawn(async move {
+                            let mut bytes = Vec::new(); let mut chunk = [0u8;4096];
+                            let (end,length) = loop {
+                                let n = socket.read(&mut chunk).await.unwrap(); if n == 0 { return; }
+                                assert!(bytes.len()+n <= 65536); bytes.extend_from_slice(&chunk[..n]);
+                                if let Some(end) = bytes.windows(4).position(|b| b == b"\r\n\r\n") {
+                                    let headers = String::from_utf8_lossy(&bytes[..end]);
+                                    let length = headers.lines().find_map(|line| line.to_lowercase().strip_prefix("content-length:").map(|s|s.trim().parse::<usize>().unwrap())).unwrap_or(0);
+                                    assert!(end+4+length <= 65536); break (end+4,length);
+                                }
+                            };
+                            while bytes.len() < end+length {
+                                let n = socket.read(&mut chunk).await.unwrap(); if n == 0 { return; }
+                                assert!(bytes.len()+n <= 65536); bytes.extend_from_slice(&chunk[..n]);
+                            }
+                            let headers = String::from_utf8_lossy(&bytes[..end]);
+                            let path = headers.lines().next().unwrap().split(' ').nth(1).unwrap();
+                            let (status, extra, body) = match path {
+                                "/resource" => (200,String::new(),serde_json::json!({"resource":format!("{base}/mcp"),"authorization_servers":[format!("{base}/issuer")]})),
+                                "/.well-known/oauth-authorization-server/issuer" => (200,String::new(),serde_json::json!({"issuer":format!("{base}/issuer"),"authorization_endpoint":format!("{base}/authorize"),"token_endpoint":format!("{base}/token"),"code_challenge_methods_supported":["S256"],"token_endpoint_auth_methods_supported":["none"]})),
+                                "/token" => {
+                                    grants.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
+                                    (200,String::new(),serde_json::json!({"access_token":"PRIVATE_PTY_ACCESS","token_type":"Bearer","expires_in":3600}))
+                                }
+                                "/mcp" if !headers.contains("Bearer PRIVATE_PTY_ACCESS") => (401,format!("WWW-Authenticate: Bearer resource_metadata=\"{base}/resource\"\r\n"),serde_json::json!({})),
+                                "/mcp" => {
+                                    let request: serde_json::Value = serde_json::from_slice(&bytes[end..end+length]).unwrap();
+                                    let result = match request["method"].as_str().unwrap() {
+                                        "initialize" => serde_json::json!({"protocolVersion":"2025-06-18","serverInfo":{"name":"pty","version":"1"},"capabilities":{"tools":{}}}),
+                                        "tools/list" => serde_json::json!({"tools":[{"name":"echo","inputSchema":{"type":"object"}}]}),
+                                        "notifications/initialized" => serde_json::Value::Null,
+                                        other => panic!("unexpected method {other}"),
+                                    };
+                                    (if request.get("id").is_some() {200} else {202},String::new(),serde_json::json!({"jsonrpc":"2.0","id":request["id"],"result":result}))
+                                }
+                                _ => (404,String::new(),serde_json::json!({})),
+                            };
+                            let body = body.to_string();
+                            let response = format!("HTTP/1.1 {status} Reply\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{extra}\r\n{body}",body.len());
+                            let _ = socket.write_all(response.as_bytes()).await;
+                        });
+                    }
+                    Some(result) = clients.join_next() => { result.unwrap(); }
+                }
+            }
+        });
+        Self { runtime, task, base, grants }
+    }
+}
+
+fn mcp_sign_in_keeps_input_live_and_can_cancel_before_completing(through_daemon: bool) {
+    let _one = one_at_a_time();
+    let fixture = OAuthFixture::new();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join("config.toml"),format!("[agent]\ninstall_servers=false\n[mcp_connections]\noauth_max_pending=1\n[[mcp]]\nname='private'\nurl='{}/mcp'\n[mcp.oauth]\nclient_id='pty-client'\n",fixture.base)).unwrap();
+    let daemon = through_daemon.then(|| Daemon::start(home.path(), workspace.path()));
+    let mut pty = tui(home.path(), workspace.path());
+    pty.screen(100, 30);
+    pty.send("/mcp login private\r");
+    pty.screen_showing(100, 30, "o opens the sign-in URL");
+    if through_daemon {
+        fixture.runtime.block_on(async {
+            let base = std::fs::read_to_string(home.path().join("rookd.addr")).unwrap();
+            let base = base.trim();
+            let client = reqwest::Client::builder().timeout(PATIENCE).build().unwrap();
+            let response = client.get(format!("{base}/api/mcp/oauth")).send().await.unwrap();
+            assert_eq!(response.headers().get("cache-control").unwrap(), "no-store");
+            let attempts: serde_json::Value = response.json().await.unwrap();
+            assert_eq!(attempts.as_array().unwrap().len(), 1, "configured pending limit is reached");
+            let response = client
+                .post(format!("{base}/api/mcp/private/login"))
+                .json(&serde_json::json!({"redirect_uri":format!("{base}/mcp-oauth-callback.html")}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+            let error: serde_json::Value = response.json().await.unwrap();
+            assert!(error["error"].as_str().unwrap().contains("too many"), "{error}");
+        });
+    }
+    pty.send("\u{1b}");
+    pty.screen_showing(100, 30, "^p commands");
+    pty.send("PRESERVED_AUTH_DRAFT");
+    pty.screen_showing(100, 30, "PRESERVED_AUTH_DRAFT");
+    pty.send("\u{10}mcp\r");
+    pty.screen_showing(100, 30, "o opens the sign-in URL");
+    pty.send("c");
+    pty.screen_showing(100, 30, "Sign-in cancelled.");
+    assert!(!home.path().join("mcp-auth/credentials.json").exists());
+    assert_eq!(fixture.grants.load(std::sync::atomic::Ordering::SeqCst), 0);
+    // Returning through the palette populated status and selected the server.
+    pty.send("l");
+    let screen = pty.screen_showing(100, 30, "o opens the sign-in URL");
+    let text = screen.iter().filter_map(|line| line.split('│').nth(2)).map(str::trim).collect::<String>();
+    let at = text.find(&format!("{}/authorize?", fixture.base)).unwrap();
+    let url = text[at..].split(|c: char| !c.is_ascii() || c.is_whitespace()).next().unwrap();
+    let url = reqwest::Url::parse(url).unwrap();
+    let fields: std::collections::BTreeMap<_, _> =
+        url.query_pairs().map(|(k, v)| (k.into_owned(), v.into_owned())).collect();
+    let redirect =
+        fields.get("redirect_uri").unwrap_or_else(|| panic!("missing callback in {url}; screen {screen:?}"));
+    let mut callback = reqwest::Url::parse(redirect)
+        .unwrap_or_else(|e| panic!("bad callback {e}: {url}; screen {screen:?}"));
+    callback
+        .query_pairs_mut()
+        .append_pair("state", &fields["state"])
+        .append_pair("code", "test-code")
+        .append_pair("iss", &format!("{}/issuer", fixture.base));
+    fixture.runtime.block_on(async {
+        let client = reqwest::Client::builder().timeout(PATIENCE).build().unwrap();
+        let response = if through_daemon {
+            let base = std::fs::read_to_string(home.path().join("rookd.addr")).unwrap();
+            client
+                .post(format!("{}/api/mcp/oauth/complete", base.trim()))
+                .json(&serde_json::json!({"callback":callback.as_str()}))
+                .send()
+                .await
+                .unwrap()
+        } else {
+            client.get(callback).send().await.unwrap()
+        };
+        assert!(response.status().is_success(), "{}", response.text().await.unwrap());
+    });
+    pty.screen_showing(100, 30, "Signed in and reconnected.");
+    pty.screen_showing(100, 30, "private — connected");
+    assert_eq!(fixture.grants.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(!pty.seen.contains("PRIVATE_PTY_ACCESS"));
+    pty.send("x");
+    pty.screen_showing(100, 30, "Saved credentials removed.");
+    pty.send("\u{1b}");
+    pty.screen_showing(100, 30, "PRESERVED_AUTH_DRAFT");
+    let stored: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(home.path().join("mcp-auth/credentials.json")).unwrap())
+            .unwrap();
+    assert_eq!(stored["entries"], serde_json::json!([]));
+    drop(pty);
+    drop(daemon);
+}
+#[test]
+fn local_mcp_sign_in_keeps_input_live_and_can_cancel_before_completing() {
+    mcp_sign_in_keeps_input_live_and_can_cancel_before_completing(false);
+}
+#[test]
+fn daemon_mcp_sign_in_keeps_input_live_and_can_cancel_before_completing() {
+    mcp_sign_in_keeps_input_live_and_can_cancel_before_completing(true);
 }

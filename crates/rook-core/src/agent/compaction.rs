@@ -107,16 +107,49 @@ impl<'a> AgentLoop<'a> {
             .rook
             .transcript(self.session, from_seq, usize::MAX, 8_000)?
             .into_iter()
-            .filter(|e| crate::context::kind_reaches_the_model(&e.kind))
+            .filter(|e| {
+                crate::context::kind_reaches_the_model(&e.kind)
+                    || (e.kind == "note" && e.label == crate::provider_history::LABEL)
+            })
             .collect();
 
+        let text_costs: std::collections::BTreeMap<_, _> =
+            entries.iter().map(|entry| (entry.seq, estimate_tokens(&entry.body))).collect();
         let mut attachment_costs = std::collections::BTreeMap::new();
-        for event in self.rook.store.events(self.session, from_seq, usize::MAX)? {
-            if event.record.kind == EventKind::UserMessage && event.record.label == crate::attachments::LABEL
+        let mut tool_images = std::collections::BTreeSet::new();
+        let events = self.rook.store.events(self.session, from_seq, usize::MAX)?;
+        // Usage is logged for a tool-only model reply; otherwise the assistant
+        // message is the witness that preceding images reached the model.
+        let seen_through = events
+            .iter()
+            .rev()
+            .find(|event| {
+                event.record.kind == EventKind::AssistantMessage
+                    || (event.record.kind == EventKind::Note && event.record.label == "usage")
+            })
+            .map(|event| event.seq);
+        for event in &events {
+            if event.record.kind == EventKind::Note && event.record.label == crate::provider_history::LABEL {
+                // The transcript deliberately hides opaque data; its small
+                // preview must not make a large signed response free to retain.
+                let message = crate::provider_history::load(self.rook, event)?;
+                attachment_costs.insert(event.seq, crate::attachments::tokens(&message));
+            } else if event.record.kind == EventKind::UserMessage
+                && event.record.label == crate::attachments::LABEL
             {
                 let bytes = self.rook.store.get(&event.record.body)?;
                 let message = crate::attachments::decode(&String::from_utf8_lossy(&bytes))?;
                 attachment_costs.insert(event.seq, crate::attachments::tokens(&message));
+            } else if event.record.kind == EventKind::ToolResult {
+                let images = crate::tool_images::load(self.rook, event)?;
+                if !images.is_empty() {
+                    tool_images.insert(event.seq);
+                    let text = text_costs.get(&event.seq).copied().unwrap_or(0);
+                    attachment_costs.insert(
+                        event.seq,
+                        text + images.iter().map(rook_llm::Image::estimated_tokens).sum::<usize>(),
+                    );
+                }
             }
         }
 
@@ -149,6 +182,49 @@ impl<'a> AgentLoop<'a> {
             {
                 split = split.min(latest);
             }
+        }
+        if images_in(&self.history()?) > crate::attachments::MAX_ATTACHMENTS
+            && let Some(old) = entries.iter().rposition(|entry| {
+                tool_images.contains(&entry.seq) && seen_through.is_some_and(|seen| entry.seq < seen)
+            })
+        {
+            split = split.max(old + 1);
+        }
+        if let Some(unseen) = entries.iter().position(|entry| {
+            tool_images.contains(&entry.seq) && !seen_through.is_some_and(|seen| entry.seq < seen)
+        }) {
+            split = split.min(unseen);
+        }
+        // A retained result must keep its call and the companion image event
+        // between them. Replay cannot attach either to an orphaned result.
+        if split < entries.len()
+            && entries[split].kind == "tool-result"
+            && split > 0
+            && entries[split - 1].kind == "tool-call"
+        {
+            split -= 1;
+        }
+        if let Some(retained) = entries.get(split)
+            && let Some(start) = crate::provider_history::batch_start(&events, retained.seq)
+        {
+            let before = entries.partition_point(|entry| entry.seq < start);
+            let end = crate::provider_history::batch_end(&events, start);
+            let after = end.map(|seq| entries.partition_point(|entry| entry.seq < seq));
+            let cost: usize = entries[before..after.unwrap_or(entries.len())]
+                .iter()
+                .map(|entry| {
+                    attachment_costs.get(&entry.seq).copied().unwrap_or_else(|| estimate_tokens(&entry.body))
+                })
+                .sum();
+            // A batch larger than the retained tail must eventually leave as
+            // a whole. Keep unseen results; once a later response consumed
+            // them, retaining the huge state forever would prevent compaction.
+            split = match (end, after) {
+                (Some(end), Some(after)) if cost > keep && seen_through.is_some_and(|seq| seq >= end) => {
+                    after
+                }
+                _ => before,
+            };
         }
         if split < 2
             && previous.is_none()
@@ -186,7 +262,9 @@ impl<'a> AgentLoop<'a> {
         Ok(serde_json::to_string(&serde_json::json!({
             "through_seq": through_seq,
             "dropped_events": span.len(),
-            "summary": if span.iter().any(|entry| entry.label == crate::attachments::LABEL) {
+            "summary": if span.iter().any(|entry| tool_images.contains(&entry.seq)) {
+                format!("{summary}\nEarlier tool images are no longer in context. Their original pixels remain available through read_result with include_images=true.")
+            } else if span.iter().any(|entry| entry.label == crate::attachments::LABEL) {
                 format!("{summary}\nEarlier attachments are now represented by a summary; any image pixels are no longer in context. Ask the user to reattach an image if its visual details matter.")
             } else { summary },
         }))?)
@@ -232,13 +310,31 @@ impl<'a> AgentLoop<'a> {
         // that thinking on writing its own summary.
         request.effort = Some(rook_llm::Effort::Low);
         let asked = self.summariser();
-        let mut stream = asked.stream(request).await.map_err(|e| CoreError::Other(e.to_string()))?;
-        let mut assembler = Assembler::default();
-        while let Some(delta) = stream.next().await {
-            assembler
-                .push(delta.map_err(|e| CoreError::Other(e.to_string()))?)
-                .map_err(|e| CoreError::Other(e.to_string()))?;
+        let mut timing = crate::diagnostics::Timer::start(
+            self.rook,
+            self.session,
+            crate::diagnostics::Phase::CompactionRequest,
+        );
+        let assembled: Result<Assembler> = async {
+            let mut stream = asked.stream(request).await.map_err(|e| CoreError::Other(e.to_string()))?;
+            let mut assembler = Assembler::default();
+            while let Some(delta) = stream.next().await {
+                assembler
+                    .push(delta.map_err(|e| CoreError::Other(e.to_string()))?)
+                    .map_err(|e| CoreError::Other(e.to_string()))?;
+            }
+            Ok(assembler)
         }
+        .await;
+        timing.finish(
+            if assembled.is_ok() {
+                crate::diagnostics::Status::Completed
+            } else {
+                crate::diagnostics::Status::Failed
+            },
+            None,
+        );
+        let assembler = assembled?;
         // A model that wrote the summary into its reasoning channel and left
         // `content` empty has still written one, and discarding it for the note
         // that says the span could not be summarised throws away a transcript

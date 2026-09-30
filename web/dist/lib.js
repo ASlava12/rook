@@ -45,7 +45,7 @@ export const api = async (path, body) => {
 // others left, which is how "continue in chat" from the sessions tab works.
 export const state = {
   tab: 'chat', session: null, skill: null, job: null, query: '', memoryAll: false, docsTopic: null,
-  chat: { session: null, busy: false, waiting: false, settings: null, spent: null, sessions: [] },
+  chat: { draft: '', session: null, busy: false, waiting: false, settings: null, spent: null, context: null, modelRequest: null, sessions: [] },
 };
 
 // Set by the app so views can switch tabs without importing the router.

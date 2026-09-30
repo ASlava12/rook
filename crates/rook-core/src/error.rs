@@ -22,6 +22,8 @@ pub enum CoreError {
     Json(#[from] serde_json::Error),
     #[error("no session {0}")]
     NoSession(String),
+    #[error("no transcript event #{0}")]
+    NoTranscriptEvent(u64),
     #[error(transparent)]
     Llm(#[from] rook_llm::LlmError),
     #[error("{0}")]

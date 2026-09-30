@@ -399,3 +399,26 @@ async fn the_other_spelling_of_an_empty_wallet_is_not_waited_out_either() {
     assert_eq!(seen.load(Ordering::SeqCst), 1);
     assert!(refused.to_string().contains("credit balance"), "{refused}");
 }
+
+#[tokio::test]
+async fn reasoning_completion_limits_are_reduced_and_remembered_after_a_refusal() {
+    let (url, sent) = recording(vec![(
+        "400 Bad Request",
+        r#"{"error":{"message":"max_completion_tokens exceeds the model output limit"}}"#,
+    )])
+    .await;
+    let provider = reasoning_provider(url);
+    let mut request = thinking_hard();
+    request.max_output_tokens = 20_000;
+    provider.complete(request.clone()).await.unwrap();
+    provider.complete(request).await.unwrap();
+    let sent = sent.lock().unwrap();
+    assert_eq!(sent.len(), 3);
+    for (raw, expected) in sent.iter().zip([20_000, 10_000, 10_000]) {
+        let body: serde_json::Value = serde_json::from_str(raw).unwrap();
+        assert_eq!(body["max_completion_tokens"], expected);
+        assert!(body.get("max_tokens").is_none());
+        assert!(body.get("temperature").is_none());
+        assert_eq!(body["reasoning_effort"], "high", "only the output limit was refused");
+    }
+}

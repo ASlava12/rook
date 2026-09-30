@@ -25,7 +25,7 @@ impl<'a> AgentLoop<'a> {
                 "Read saved results or command output in byte pages; omit result_id to list result IDs."
                     .into(),
             parameters: json!({"type":"object", "properties":{
-                "result_id":{"type":"integer"}, "session":{"type":"string", "description":"Optional direct child session."}, "offset":{"type":"integer"},
+                "include_images":{"type":"boolean", "description":"Restore this result’s images."}, "result_id":{"type":"integer"}, "session":{"type":"string", "description":"Optional direct child session."}, "offset":{"type":"integer"},
                 "limit":{"type":"integer"}, "source":{"type":"string","enum":["result","output"]}
             }}),
         });

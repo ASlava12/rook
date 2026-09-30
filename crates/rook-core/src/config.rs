@@ -1,6 +1,7 @@
 //! Configuration, with defaults chosen so an unconfigured install is still safe.
 
 pub mod edit;
+mod validate;
 
 use serde::{Deserialize, Serialize};
 
@@ -29,6 +30,12 @@ pub struct Config {
     pub telemetry: TelemetryConfig,
     pub memory: MemoryConfig,
     pub web: WebConfig,
+    /// Bounds for endpoint model and capability discovery.
+    pub model_catalog: crate::model_catalog::Settings,
+    /// Bounds for model-visible external tools; overflow stays discoverable.
+    pub mcp_catalog: rook_tools::mcp::CatalogLimits,
+    pub mcp_connections: crate::mcp_connections::Settings,
+    pub transcript: crate::transcript::Settings,
     /// Language servers, as `[[lsp]]` tables. When empty, known servers found
     /// on `PATH` are used.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -149,9 +156,11 @@ impl ProxyConfig {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ApiEndpoint {
-    /// Which api it speaks: `openai`, `anthropic` or `google`. Not the vendor —
+    /// Which api it speaks: `openai`, `responses`, `anthropic` or `google`. Not the vendor —
     /// see [`ModelSource::api`], which means the same thing.
     pub api: String,
+    /// Native metadata beside an OpenAI-compatible generation API.
+    pub metadata_api: rook_llm::MetadataApi,
     /// Where it is, path included. Most openai-compatible servers want `/v1` on
     /// the end and this is not the place to guess which do.
     pub url: String,
@@ -197,12 +206,14 @@ pub struct ModelSource {
     /// resolved. Either the line above or the line below is being ignored, and
     /// which one is not something to leave to a rule nobody would remember.
     pub endpoint: String,
-    /// Which api it speaks: `openai`, `anthropic` or `google`.
+    /// Which api it speaks: `openai`, `responses`, `anthropic` or `google`.
     ///
     /// Not the vendor. An Anthropic-shaped gateway in front of something else
     /// is `anthropic`, because what this decides is how a request is written
     /// and how a reply is read.
     pub api: String,
+    /// Native metadata beside an OpenAI-compatible generation API.
+    pub metadata_api: rook_llm::MetadataApi,
     /// Where it is, path included. Most openai-compatible servers want `/v1` on
     /// the end and this is not the place to guess which do: a URL that is wrong
     /// by a path segment answers with a 404 that names it, and one this code
@@ -286,6 +297,10 @@ impl Default for Config {
             telemetry: TelemetryConfig::default(),
             memory: MemoryConfig::default(),
             web: WebConfig::default(),
+            model_catalog: Default::default(),
+            mcp_catalog: Default::default(),
+            mcp_connections: Default::default(),
+            transcript: Default::default(),
             server: Default::default(),
             lsp: Vec::new(),
             mcp: Vec::new(),
@@ -570,6 +585,9 @@ pub struct AgentConfig {
     /// work does. Past this the middle is elided and the marker says how much
     /// went. 0 carries none, which is what it did before.
     pub max_reasoning_tokens: usize,
+    /// Maximum encoded assistant state retained for provider replay, per reply.
+    /// Signed/encrypted state cannot be truncated; an oversized reply fails before tools run.
+    pub max_provider_state_bytes: usize,
     /// How much of a tool's answer is carried back into each later request.
     ///
     /// A result is stored whole — `session show` and the calls pane read it —
@@ -860,6 +878,10 @@ pub struct TelemetryConfig {
     pub log_level: String,
     /// Hard cap on the local log directory.
     pub max_log_bytes: u64,
+    /// Recent event metadata to include in support reports (1..2048).
+    pub diagnostic_events: usize,
+    /// Bytes per optional log tail, capped at 64 KiB. Zero omits log content.
+    pub diagnostic_log_bytes: usize,
 }
 
 impl Default for AgentConfig {
@@ -888,6 +910,7 @@ impl Default for AgentConfig {
             compaction_model: String::new(),
             errand_model: String::new(),
             max_reasoning_tokens: 800,
+            max_provider_state_bytes: 4 * 1024 * 1024,
             // Four kilobytes or so: above the median result by a factor of
             // five, so the ordinary ones are untouched, and well under the
             // three that made up more than half of one turn's context.
@@ -1105,7 +1128,13 @@ fn append_lists(merged: &mut toml::Table, project: &toml::Table) {
 
 impl Default for TelemetryConfig {
     fn default() -> Self {
-        Self { upload: false, log_level: "warn".into(), max_log_bytes: 64 << 20 }
+        Self {
+            upload: false,
+            log_level: "warn".into(),
+            max_log_bytes: 64 << 20,
+            diagnostic_events: 256,
+            diagnostic_log_bytes: 64 * 1024,
+        }
     }
 }
 

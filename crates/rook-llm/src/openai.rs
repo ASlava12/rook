@@ -4,6 +4,9 @@
 //! is what makes "works with local models" true rather than aspirational: Ollama,
 //! LM Studio, llama.cpp and vLLM all serve this shape.
 
+mod native;
+pub mod responses;
+
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -23,6 +26,8 @@ pub struct Config {
     pub base_url: String,
     pub api_key: Option<String>,
     pub context_window: usize,
+    pub context_window_explicit: bool,
+    pub metadata_api: crate::MetadataApi,
     /// How long the model may go silent mid-stream before the stream is
     /// abandoned. Without this a dropped connection looks like a model that is
     /// merely thinking, and the turn hangs until the overall timeout.
@@ -39,6 +44,8 @@ impl Config {
             base_url,
             api_key,
             context_window,
+            context_window_explicit: false,
+            metadata_api: crate::MetadataApi::Auto,
             stream_idle_timeout: Duration::from_secs(90),
             proxy: Default::default(),
         }
@@ -50,12 +57,27 @@ pub struct OpenAiCompatible {
     model: String,
     config: Config,
     http: reqwest::Client,
+    context_key: [u8; 32],
 }
 
 impl OpenAiCompatible {
-    pub fn new(id: &str, model: &str, config: Config) -> Result<Self> {
+    pub fn new(id: &str, model: &str, mut config: Config) -> Result<Self> {
+        config.metadata_api = config.metadata_api.resolved(id);
+        let context_key = crate::catalog::context_key(
+            &[
+                "openai",
+                config.metadata_api.as_str(),
+                &config.base_url,
+                config.api_key.as_deref().unwrap_or_default(),
+                if config.api_key.is_some() { "credential" } else { "anonymous" },
+                model,
+                &config.context_window.to_string(),
+                if config.context_window_explicit { "explicit" } else { "assumed" },
+            ],
+            &config.proxy,
+        );
         let http = crate::client_for(&config.base_url, &config.proxy)?;
-        Ok(Self { id: id.to_string(), model: model.to_string(), config, http })
+        Ok(Self { id: id.to_string(), model: model.to_string(), config, http, context_key })
     }
 }
 
@@ -69,12 +91,40 @@ impl Provider for OpenAiCompatible {
         self.config.context_window
     }
 
+    fn context_key(&self) -> Option<[u8; 32]> {
+        Some(self.context_key)
+    }
+
+    fn context_is_explicit(&self) -> bool {
+        self.config.context_window_explicit
+    }
+
+    async fn discover_context_window(&self, limits: crate::CatalogLimits) -> Result<Option<usize>> {
+        if self.context_is_explicit() {
+            return Ok(Some(self.context_window()));
+        }
+        Ok(self
+            .models_with(limits)
+            .await?
+            .into_iter()
+            .find(|entry| native::matches(self.config.metadata_api, &entry.id, &self.model))
+            .and_then(|entry| entry.context_window)
+            .filter(|window| *window > 0))
+    }
+
     fn supports_streaming(&self) -> bool {
         true
     }
 
     fn takes_effort(&self) -> bool {
         reasons(&self.model)
+    }
+
+    fn effort_use(&self, effort: crate::Effort) -> crate::EffortUse {
+        match reasoning_effort(&self.model, effort) {
+            Some(value) => crate::EffortUse::parameter("reasoning_effort", value),
+            None => crate::EffortUse::Omitted { reason: "no effort mapping for this model" },
+        }
     }
 
     async fn complete(&self, request: Request) -> Result<Response> {
@@ -139,11 +189,10 @@ impl Provider for OpenAiCompatible {
     }
 
     async fn models(&self) -> Result<Vec<crate::ModelInfo>> {
-        #[derive(Deserialize)]
-        struct Listing {
-            #[serde(default)]
-            data: Vec<Entry>,
-        }
+        self.models_with(crate::CatalogLimits::default()).await
+    }
+
+    async fn models_with(&self, limits: crate::CatalogLimits) -> Result<Vec<crate::ModelInfo>> {
         #[derive(Deserialize)]
         struct Entry {
             id: String,
@@ -152,32 +201,29 @@ impl Provider for OpenAiCompatible {
             /// Not in the OpenAI shape, but several compatible servers add it.
             #[serde(default, alias = "max_model_len", alias = "context_length")]
             context_window: Option<usize>,
+            #[serde(default)]
+            supported_parameters: Option<Vec<String>>,
+            #[serde(default)]
+            architecture: serde_json::Value,
         }
 
-        let mut request = self.http.get(format!("{}/models", self.config.base_url.trim_end_matches('/')));
-        if let Some(key) = &self.config.api_key {
-            request = request.bearer_auth(key);
-        }
-        let response = request
-            .timeout(std::time::Duration::from_secs(20))
-            .send()
-            .await
-            .map_err(|e| LlmError::unreachable(&self.config.base_url, e))?;
-
-        let status = response.status();
-        if !status.is_success() {
-            return Err(LlmError::Status {
-                status: status.as_u16(),
-                retry_after: crate::retry_after(response.headers()),
-                body: crate::quoted_text(response, self.config.stream_idle_timeout).await,
-            });
-        }
-        let text =
-            crate::whole_text(response, &self.config.base_url, self.config.stream_idle_timeout).await?;
-        let listing: Listing = serde_json::from_str(&text)
-            .map_err(|e| LlmError::Decode(format!("{e}: {}", truncate(&text, 300))))?;
-        let mut models: Vec<crate::ModelInfo> = listing
-            .data
+        let mut budget = crate::catalog::Budget::new(limits);
+        let entries: Vec<Entry> = budget
+            .list(
+                |_| {
+                    let mut request =
+                        self.http.get(format!("{}/models", self.config.base_url.trim_end_matches('/')));
+                    if let Some(key) = &self.config.api_key {
+                        request = request.bearer_auth(key);
+                    }
+                    request
+                },
+                &self.config.base_url,
+                crate::catalog::Paging::Single,
+                |entry: &Entry| &entry.id,
+            )
+            .await?;
+        let mut models: Vec<crate::ModelInfo> = entries
             .into_iter()
             .map(|e| crate::ModelInfo {
                 id: e.id,
@@ -185,34 +231,24 @@ impl Provider for OpenAiCompatible {
                 context_window: e.context_window,
                 // The compatible listing says neither; LM Studio's own does,
                 // and is asked below.
+                max_context_window: None,
                 loaded: None,
                 quantization: None,
+                capabilities: crate::ModelCapabilities {
+                    tools: e.supported_parameters.as_ref().map(|p| p.iter().any(|v| v == "tools")),
+                    image_input: e
+                        .architecture
+                        .get("input_modalities")
+                        .and_then(|m| m.as_array())
+                        .map(|modalities| modalities.iter().any(|m| m.as_str() == Some("image"))),
+                    reasoning: e.supported_parameters.as_ref().and_then(|p| {
+                        p.iter().any(|v| v == "reasoning" || v == "reasoning_effort").then_some(true)
+                    }),
+                    ..Default::default()
+                },
             })
             .collect();
-        // The OpenAI shape has no context length, and only some servers add
-        // one. LM Studio is not among them — it answers that on an endpoint of
-        // its own, and the number matters: a model that serves 262144 was being
-        // budgeted at the 32768 this crate assumes for anything self-hosted,
-        // which is a quarter of the reading it could have held. Asked only when
-        // the compatible listing said nothing, so a server that does answer
-        // properly pays no second round trip.
-        // Only where that endpoint exists. Everywhere else it is a 404 paid
-        // for on every process, and a fixture that answers `/models` twice is
-        // a server nothing resembles — which is how this was found.
-        //
-        // The same answer carries two more things the compatible listing has
-        // no room for and a person choosing a local model needs: whether it is
-        // resident, and how it is quantised. A model that fits on the card and
-        // one that runs from system memory at a tenth of the speed differ in
-        // neither their name nor their window.
-        if self.id.starts_with("lmstudio") && models.iter().all(|m| m.context_window.is_none()) {
-            for said in self.what_lm_studio_reports().await {
-                let Some(model) = models.iter_mut().find(|m| m.id == said.id) else { continue };
-                model.context_window = said.context_window;
-                model.loaded = said.loaded;
-                model.quantization = said.quantization;
-            }
-        }
+        native::enrich(self, &mut models, limits, &mut budget).await;
         Ok(models)
     }
 
@@ -333,61 +369,6 @@ impl Provider for OpenAiCompatible {
 }
 
 impl OpenAiCompatible {
-    /// What LM Studio says about each model, by its own API rather than the
-    /// compatible one: how much it will hold, whether it is resident, and how
-    /// it is quantised.
-    ///
-    /// `loaded_context_length` first: a model that supports 262144 may have
-    /// been loaded with 8192, and the number worth budgeting against is the one
-    /// it will actually serve. Failures are silence — this is a guess being
-    /// improved, and a server that is not LM Studio simply answers 404.
-    async fn what_lm_studio_reports(&self) -> Vec<crate::ModelInfo> {
-        #[derive(serde::Deserialize)]
-        struct Listing {
-            #[serde(default)]
-            data: Vec<Entry>,
-        }
-        #[derive(serde::Deserialize)]
-        struct Entry {
-            id: String,
-            #[serde(default)]
-            loaded_context_length: Option<usize>,
-            #[serde(default)]
-            max_context_length: Option<usize>,
-            /// `loaded` or `not-loaded`.
-            #[serde(default)]
-            state: Option<String>,
-            #[serde(default)]
-            quantization: Option<String>,
-        }
-
-        let root = self.config.base_url.trim_end_matches('/').trim_end_matches("/v1");
-        let Ok(response) = self
-            .http
-            .get(format!("{root}/api/v0/models"))
-            .timeout(std::time::Duration::from_secs(5))
-            .send()
-            .await
-        else {
-            return Vec::new();
-        };
-        if !response.status().is_success() {
-            return Vec::new();
-        }
-        let Ok(listing) = response.json::<Listing>().await else { return Vec::new() };
-        listing
-            .data
-            .into_iter()
-            .map(|e| crate::ModelInfo {
-                id: e.id,
-                owned_by: None,
-                context_window: e.loaded_context_length.or(e.max_context_length),
-                loaded: e.state.map(|state| state == "loaded"),
-                quantization: e.quantization,
-            })
-            .collect()
-    }
-
     /// A 404 from a server that is otherwise answering means the model is not
     /// there — the common first-run failure, because the default spec names a
     /// model nobody has pulled yet. The server knows which it does have.
@@ -413,9 +394,10 @@ impl OpenAiCompatible {
     }
 
     async fn send(&self, request: &Request, stream: bool) -> Result<reqwest::Response> {
+        let messages = crate::images::for_wire(&request.messages);
         let body = WireRequest {
             model: &self.model,
-            messages: request.messages.iter().map(WireMessage::from).collect(),
+            messages: messages.iter().map(|message| WireMessage::from(message.as_ref())).collect(),
             tools: request
                 .tools
                 .iter()
@@ -428,8 +410,11 @@ impl OpenAiCompatible {
                     },
                 })
                 .collect(),
-            max_tokens: request.max_output_tokens,
-            temperature: request.temperature,
+            // Reasoning families reject the legacy token field and sampling
+            // temperature. Omitting effort after a refusal does not change that.
+            max_tokens: (!reasons(&self.model)).then_some(request.max_output_tokens),
+            max_completion_tokens: reasons(&self.model).then_some(request.max_output_tokens),
+            temperature: (!reasons(&self.model)).then_some(request.temperature),
             stream,
             stream_options: stream.then_some(StreamOptions { include_usage: true }),
             reasoning_effort: request.effort.and_then(|e| reasoning_effort(&self.model, e)),
@@ -468,8 +453,12 @@ struct WireRequest<'a> {
     messages: Vec<WireMessage<'a>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<WireTool<'a>>,
-    max_tokens: u32,
-    temperature: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_completion_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream_options: Option<StreamOptions>,
@@ -488,12 +477,28 @@ fn reasoning_effort(model: &str, effort: crate::Effort) -> Option<&'static str> 
     if !reasons(model) {
         return None;
     }
+    use crate::Effort::*;
+    use crate::effort::model_family;
+    // Pro variants have a higher floor than the general-purpose model.
+    if model_family(model, "gpt-5-pro") {
+        return Some("high");
+    }
+    if effort == Low
+        && ["gpt-5.2-pro", "gpt-5.4-pro", "gpt-5.5-pro"].iter().any(|family| model_family(model, family))
+    {
+        return Some("medium");
+    }
+    let max = ["gpt-5.6", "gpt-6", "gpt-6.1"].iter().any(|family| model_family(model, family));
+    let xhigh = max
+        || ["gpt-5.1-codex-max", "gpt-5.2", "gpt-5.3", "gpt-5.4", "gpt-5.5"]
+            .iter()
+            .any(|family| model_family(model, family));
     Some(match effort {
-        // Four rungs against five: the two above `high` are the same request
-        // here, and pretending otherwise would be a value the API rejects.
-        crate::Effort::Low => "low",
-        crate::Effort::Medium => "medium",
-        crate::Effort::High | crate::Effort::XHigh | crate::Effort::Max => "high",
+        Low => "low",
+        Medium => "medium",
+        Max if max => "max",
+        XHigh | Max if xhigh => "xhigh",
+        High | XHigh | Max => "high",
     })
 }
 

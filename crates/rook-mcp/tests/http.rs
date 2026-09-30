@@ -13,6 +13,10 @@ use tokio::net::TcpListener;
 /// `mode` is "json" or "sse"; the server answers initialize, tools/list and
 /// tools/call, and requires the session id it hands out on initialize.
 async fn spawn(mode: &'static str) -> String {
+    spawn_version(mode, "2025-06-18").await
+}
+
+async fn spawn_version(mode: &'static str, version: &'static str) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -47,6 +51,21 @@ async fn spawn(mode: &'static str) -> String {
                     let id = request["id"].clone();
                     let has_session = text.to_lowercase().contains("mcp-session-id: s-1");
 
+                    let versions: Vec<_> = text[..split]
+                        .lines()
+                        .filter_map(|line| {
+                            let (key, value) = line.split_once(':')?;
+                            key.eq_ignore_ascii_case("mcp-protocol-version").then(|| value.trim())
+                        })
+                        .collect();
+                    if method != "initialize" && versions != [version] {
+                        let _ = socket
+                            .write_all(
+                                b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
+                            .await;
+                        return;
+                    }
                     if id.is_null() {
                         let _ = socket
                             .write_all(
@@ -62,7 +81,7 @@ async fn spawn(mode: &'static str) -> String {
 
                     let result = match method {
                         "initialize" => serde_json::json!({
-                            "protocolVersion": "2025-06-18",
+                            "protocolVersion": version,
                             "serverInfo": { "name": "over-http", "version": "2.0.0" },
                             "capabilities": { "tools": {} }
                         }),
@@ -255,4 +274,27 @@ async fn a_server_that_wants_authentication_says_so_and_keeps_every_challenge() 
     assert!(said.contains("https://auth.example/.well-known"), "the challenge is the way out: {said}");
     assert!(said.contains("Basic realm=\"mcp\""), "and every challenge is kept: {said}");
     assert!(said.contains("[[mcp]]"), "and it says where credentials go: {said}");
+}
+
+#[tokio::test]
+async fn every_post_after_initialize_uses_the_negotiated_version_once() {
+    let mut config = config(spawn_version("json", "2025-03-26").await);
+    assert_ne!(rook_mcp::PROTOCOL_VERSION, "2025-03-26");
+    config.headers.insert("MCP-Protocol-Version".into(), "incorrect-override".into());
+    // The fixture rejects initialized notifications, tools/list and tools/call
+    // unless each has exactly the server's version, including on a downgrade.
+    let server = Server::connect(&config, &Default::default()).await.unwrap();
+    assert_eq!(server.info().protocol_version, "2025-03-26");
+    assert_eq!(server.list_tools().await.unwrap().len(), 1);
+    assert_eq!(server.call_tool("ping", &serde_json::json!({})).await.unwrap().to_text(), "pong");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn invalid_negotiated_versions_fail_before_initialized_notification() {
+    for version in ["", "2025-06-18\r\nx-injected: bad", "not a version"] {
+        let result =
+            Server::connect(&config(spawn_version("json", version).await), &Default::default()).await;
+        assert!(matches!(result, Err(McpError::Decode { .. })), "version {version:?} was accepted");
+    }
 }

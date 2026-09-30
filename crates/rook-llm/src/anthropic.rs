@@ -28,6 +28,7 @@ pub struct Config {
     pub base_url: String,
     pub api_key: String,
     pub context_window: usize,
+    pub context_window_explicit: bool,
     pub stream_idle_timeout: Duration,
     /// How a request to this base leaves the machine — see [`crate::Proxy`].
     /// The default is whatever the environment says, which is what every
@@ -41,6 +42,7 @@ impl Config {
             base_url,
             api_key,
             context_window: context_window_for(model),
+            context_window_explicit: false,
             stream_idle_timeout: Duration::from_secs(90),
             proxy: Default::default(),
         }
@@ -64,12 +66,24 @@ pub struct Anthropic {
     model: String,
     config: Config,
     http: reqwest::Client,
+    context_key: [u8; 32],
 }
 
 impl Anthropic {
     pub fn new(id: &str, model: &str, config: Config) -> Result<Self> {
+        let context_key = crate::catalog::context_key(
+            &[
+                "anthropic",
+                &config.base_url,
+                &config.api_key,
+                model,
+                &config.context_window.to_string(),
+                if config.context_window_explicit { "explicit" } else { "assumed" },
+            ],
+            &config.proxy,
+        );
         let http = crate::client_for(&config.base_url, &config.proxy)?;
-        Ok(Self { id: id.to_string(), model: model.to_string(), config, http })
+        Ok(Self { id: id.to_string(), model: model.to_string(), config, http, context_key })
     }
 
     fn endpoint(&self, path: &str) -> String {
@@ -103,20 +117,47 @@ impl Provider for Anthropic {
         self.config.context_window
     }
 
+    fn context_key(&self) -> Option<[u8; 32]> {
+        Some(self.context_key)
+    }
+
+    fn context_is_explicit(&self) -> bool {
+        self.config.context_window_explicit
+    }
+
+    async fn discover_context_window(&self, limits: crate::CatalogLimits) -> Result<Option<usize>> {
+        if self.context_is_explicit() {
+            return Ok(Some(self.context_window()));
+        }
+        Ok(self
+            .models_with(limits)
+            .await?
+            .into_iter()
+            .find(|entry| entry.id == self.model)
+            .and_then(|entry| entry.context_window)
+            .filter(|window| *window > 0))
+    }
+
     fn supports_streaming(&self) -> bool {
         true
     }
 
     fn takes_effort(&self) -> bool {
-        takes_adaptive_thinking(&self.model)
+        effort_value(&self.model, crate::Effort::High).is_some()
+    }
+
+    fn effort_use(&self, effort: crate::Effort) -> crate::EffortUse {
+        match effort_value(&self.model, effort) {
+            Some(value) => crate::EffortUse::parameter("output_config.effort", value),
+            None => crate::EffortUse::Omitted { reason: "no effort mapping for this model" },
+        }
     }
 
     async fn models(&self) -> Result<Vec<ModelInfo>> {
-        #[derive(Deserialize)]
-        struct Listing {
-            #[serde(default)]
-            data: Vec<Entry>,
-        }
+        self.models_with(crate::CatalogLimits::default()).await
+    }
+
+    async fn models_with(&self, limits: crate::CatalogLimits) -> Result<Vec<ModelInfo>> {
         #[derive(Deserialize)]
         struct Entry {
             id: String,
@@ -125,36 +166,40 @@ impl Provider for Anthropic {
             /// The context window; there is no `context_window` field.
             #[serde(default)]
             max_input_tokens: Option<usize>,
+            #[serde(default)]
+            capabilities: serde_json::Value,
         }
 
-        let response = self
-            .authorized(self.http.get(self.endpoint("v1/models")))
-            .timeout(Duration::from_secs(20))
-            .send()
-            .await
-            .map_err(|e| LlmError::unreachable(&self.config.base_url, e))?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(LlmError::Status {
-                status: status.as_u16(),
-                retry_after: crate::retry_after(response.headers()),
-                body: crate::quoted_text(response, self.config.stream_idle_timeout).await,
-            });
-        }
-        let text =
-            crate::whole_text(response, &self.config.base_url, self.config.stream_idle_timeout).await?;
-        let listing: Listing = serde_json::from_str(&text)
-            .map_err(|e| LlmError::Decode(format!("{e}: {}", truncate(&text, 300))))?;
-        Ok(listing
-            .data
+        let page_size = limits.bounded().max_models.min(1000);
+        let endpoint = reqwest::Url::parse(&self.endpoint("v1/models"))
+            .map_err(|e| LlmError::Other(format!("invalid model catalog endpoint: {e}")))?;
+        let mut budget = crate::catalog::Budget::new(limits);
+        let entries: Vec<Entry> = budget
+            .list(
+                |cursor| {
+                    let mut url = endpoint.clone();
+                    url.query_pairs_mut().append_pair("limit", &page_size.to_string());
+                    if let Some(cursor) = cursor {
+                        url.query_pairs_mut().append_pair("after_id", cursor);
+                    }
+                    self.authorized(self.http.get(url))
+                },
+                &self.config.base_url,
+                crate::catalog::Paging::Anthropic,
+                |entry: &Entry| &entry.id,
+            )
+            .await?;
+        Ok(entries
             .into_iter()
             .map(|e| ModelInfo {
                 id: e.id,
                 owned_by: e.display_name,
                 context_window: e.max_input_tokens,
                 // A hosted model is neither loaded nor quantised from here.
+                max_context_window: None,
                 loaded: None,
                 quantization: None,
+                capabilities: crate::ModelCapabilities::anthropic(&e.capabilities),
             })
             .collect())
     }
@@ -393,13 +438,6 @@ fn stop_reason(raw: Option<&str>) -> StopReason {
     }
 }
 
-/// Build the request body.
-///
-/// Three shape differences from the OpenAI dialect are handled here: the system
-/// prompt is lifted out of the message list, an assistant turn's tool calls
-/// become content blocks, and *consecutive* tool results are merged into one
-/// user message — splitting them across several teaches the model to stop
-/// making parallel calls.
 /// Whether the model takes adaptive thinking and `output_config.effort`.
 ///
 /// Sent only to families documented to accept them: on an older model
@@ -414,11 +452,40 @@ fn takes_adaptive_thinking(model: &str) -> bool {
         "claude-sonnet-5",
         "claude-sonnet-4-6",
     ];
-    FAMILIES.iter().any(|f| model.starts_with(f))
-        || model.starts_with("claude-fable")
-        || model.starts_with("claude-mythos")
+    FAMILIES.iter().any(|f| crate::effort::model_family(model, f))
+        || crate::effort::model_family(model, "claude-fable-5")
+        || crate::effort::model_family(model, "claude-mythos-5")
+        || crate::effort::model_family(model, "claude-mythos-preview")
 }
 
+/// Effort and adaptive thinking are separate capabilities: Opus 4.5 accepts
+/// effort without adaptive thinking; 4.6 accepts max but not xhigh.
+fn effort_value(model: &str, effort: crate::Effort) -> Option<&'static str> {
+    use crate::Effort::*;
+    use crate::effort::model_family;
+    if model_family(model, "claude-opus-4-5") {
+        return Some(match effort {
+            Low => "low",
+            Medium => "medium",
+            _ => "high",
+        });
+    }
+    if !takes_adaptive_thinking(model) {
+        return None;
+    }
+    let without_xhigh = ["claude-opus-4-6", "claude-sonnet-4-6", "claude-mythos-preview"]
+        .iter()
+        .any(|family| model_family(model, family));
+    Some(if effort == XHigh && without_xhigh { "high" } else { effort.as_str() })
+}
+
+/// Build the request body.
+///
+/// Three shape differences from the OpenAI dialect are handled here: the system
+/// prompt is lifted out of the message list, an assistant turn's tool calls
+/// become content blocks, and *consecutive* tool results are merged into one
+/// user message — splitting them across several teaches the model to stop
+/// making parallel calls.
 fn wire_request(model: &str, request: &Request, stream: bool) -> serde_json::Value {
     let mut system = String::new();
     let mut cache_system = false;
@@ -434,10 +501,19 @@ fn wire_request(model: &str, request: &Request, stream: bool) -> serde_json::Val
                 cache_system |= message.cache;
             }
             Role::Tool => {
+                let content = if message.images.is_empty() {
+                    serde_json::json!(message.content)
+                } else {
+                    let mut parts = vec![serde_json::json!({"type":"text", "text":message.content})];
+                    parts.extend(message.images.iter().map(|image| serde_json::json!({
+                        "type":"image", "source":{"type":"base64", "media_type":image.mime_type,"data":image.data}
+                    })));
+                    serde_json::json!(parts)
+                };
                 let block = serde_json::json!({
                     "type": "tool_result",
                     "tool_use_id": message.tool_call_id.clone().unwrap_or_default(),
-                    "content": message.content,
+                    "content": content,
                 });
                 match messages.last_mut() {
                     Some(last) if last["role"] == "user" && last["content"].is_array() => {
@@ -463,7 +539,17 @@ fn wire_request(model: &str, request: &Request, stream: bool) -> serde_json::Val
                 // still going: thinking is required back beside the tool call
                 // it led to, and is neither wanted nor kept for a turn that
                 // ended — a replayed conversation carries none.
-                let mut blocks: Vec<serde_json::Value> = message.reasoning.clone();
+                let mut blocks: Vec<serde_json::Value> = message
+                    .reasoning
+                    .iter()
+                    .filter(|block| {
+                        matches!(
+                            block.get("type").and_then(serde_json::Value::as_str),
+                            Some("thinking" | "redacted_thinking")
+                        )
+                    })
+                    .cloned()
+                    .collect();
                 if !message.content.trim().is_empty() {
                     blocks.push(text_block(&message.content, false, request.cache_ttl));
                 }
@@ -500,13 +586,15 @@ fn wire_request(model: &str, request: &Request, stream: bool) -> serde_json::Val
         // system, so one marker here caches both.
         body["system"] = serde_json::json!([text_block(&system, cache_system, request.cache_ttl)]);
     }
-    if takes_adaptive_thinking(model) {
+    if request.model_capabilities.reasoning != Some(false)
+        && request.model_capabilities.adaptive_thinking.unwrap_or_else(|| takes_adaptive_thinking(model))
+    {
         // `display` defaults to omitted on these models, which streams empty
         // thinking blocks — a long pause with nothing to show for it.
         body["thinking"] = serde_json::json!({ "type": "adaptive", "display": "summarized" });
-        if let Some(effort) = request.effort {
-            body["output_config"] = serde_json::json!({ "effort": effort.as_str() });
-        }
+    }
+    if let Some(effort) = request.effort.and_then(|effort| effort_value(model, effort)) {
+        body["output_config"] = serde_json::json!({ "effort": effort });
     }
     if !request.tools.is_empty() {
         body["tools"] = request

@@ -17,6 +17,19 @@ pub struct ContextBudget {
     pub reserve_output: usize,
 }
 
+// Shared with offline configuration checks; hand-written legacy configs still
+// receive the runtime guard when they bypass those checks.
+const MIN_COMPACT_AT: f32 = 0.1;
+const MAX_COMPACT_AT: f32 = 0.9;
+
+pub(crate) fn check_compact_at(value: f32) -> Result<(), String> {
+    if (MIN_COMPACT_AT..=MAX_COMPACT_AT).contains(&value) {
+        Ok(())
+    } else {
+        Err(format!("agent.compact_at must be between {MIN_COMPACT_AT} and {MAX_COMPACT_AT} inclusive"))
+    }
+}
+
 impl ContextBudget {
     /// `compact_at` comes from config, so it is clamped here rather than
     /// trusted: the check runs before a request is built, and a threshold near
@@ -24,7 +37,8 @@ impl ContextBudget {
     /// tool results it is about to receive. Near the bottom it summarises a
     /// transcript that has barely started, every turn.
     pub fn new(window: usize, compact_at: f32) -> Self {
-        let compact_at = if compact_at.is_finite() { compact_at.clamp(0.1, 0.9) } else { 0.75 };
+        let compact_at =
+            if compact_at.is_finite() { compact_at.clamp(MIN_COMPACT_AT, MAX_COMPACT_AT) } else { 0.75 };
         Self { window, compact_at, reserve_output: (window / 8).clamp(1024, 32_768) }
     }
 
@@ -188,23 +202,6 @@ pub fn shorten_result(text: &str, budget_tokens: usize) -> String {
     format!("{}{marker}{}", &text[..head], &text[tail..])
 }
 
-/// What an event costs the next request, from its stored size — which is all
-/// `session context` has, and all it needs: a thought and a tool's answer are
-/// each carried whole or shortened to their budget, so the cost is the smaller
-/// of the two.
-pub fn tokens_in_request(
-    kind: rook_store::EventKind,
-    bytes: usize,
-    reasoning_budget: usize,
-    result_budget: usize,
-) -> usize {
-    match kind {
-        rook_store::EventKind::Reasoning => bytes.div_ceil(4).min(reasoning_budget),
-        rook_store::EventKind::ToolResult if result_budget > 0 => bytes.div_ceil(4).min(result_budget),
-        _ => bytes.div_ceil(4),
-    }
-}
-
 /// The same question asked of a kind's printed name, which is what a transcript
 /// entry carries.
 ///
@@ -234,15 +231,9 @@ mod tests {
         assert!(kept.contains("elided"), "and it says the middle went: {kept}");
         assert!(kept.contains("read_result"), "and where the whole of it still is");
 
-        assert_eq!(
-            super::tokens_in_request(rook_store::EventKind::ToolResult, long.len(), 800, 200),
-            200,
-            "priced as it is carried, not as it is stored"
-        );
         // A result that fits is untouched, which is most of them.
         let short = "port = 8080\n";
         assert_eq!(super::shorten_result(short, 200), short);
-        assert_eq!(super::tokens_in_request(rook_store::EventKind::ToolResult, short.len(), 800, 200), 3);
         // And 0 is the budget that carries everything, as it did before.
         assert_eq!(super::shorten_result(&long, 0), long);
     }
@@ -259,9 +250,8 @@ mod tests {
         assert_eq!(once, again, "nothing about the step it is sent on changes it");
     }
 
-    /// The bound is what lets `session context` price a thought from its
-    /// stored size without reading it back, so it has to hold for every
-    /// budget — including one too small to say anything in.
+    /// The bound holds even when there is too little room for the omission
+    /// marker itself. Context reporting prices the actual replayed text.
     #[test]
     fn a_thought_carried_into_the_next_request_never_exceeds_its_budget() {
         // In a language whose characters are not bytes, which is what a model
@@ -273,11 +263,6 @@ mod tests {
                 super::estimate_tokens(&kept) <= budget,
                 "budget {budget} carried {} tokens",
                 super::estimate_tokens(&kept)
-            );
-            assert!(
-                super::tokens_in_request(rook_store::EventKind::Reasoning, long.len(), budget, 0)
-                    >= super::estimate_tokens(&kept),
-                "and what the report prices it at is never less than what is carried"
             );
         }
 

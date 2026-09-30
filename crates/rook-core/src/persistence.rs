@@ -11,11 +11,15 @@ pub(crate) fn save_json(
 }
 
 pub(crate) fn encode(value: &impl serde::Serialize) -> crate::Result<Vec<u8>> {
-    struct Bounded(Vec<u8>);
+    encode_with_limit(value, 8 * 1024 * 1024)
+}
+
+pub(crate) fn encode_with_limit(value: &impl serde::Serialize, limit: usize) -> crate::Result<Vec<u8>> {
+    struct Bounded(Vec<u8>, usize);
     impl std::io::Write for Bounded {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            if bytes.len() > (8 * 1024 * 1024usize).saturating_sub(self.0.len()) {
-                return Err(std::io::Error::other("recovery state exceeds 8 MiB"));
+            if bytes.len() > self.1.saturating_sub(self.0.len()) {
+                return Err(std::io::Error::other(format!("serialized state exceeds {} bytes", self.1)));
             }
             self.0.extend_from_slice(bytes);
             Ok(bytes.len())
@@ -24,7 +28,7 @@ pub(crate) fn encode(value: &impl serde::Serialize) -> crate::Result<Vec<u8>> {
             Ok(())
         }
     }
-    let mut encoded = Bounded(Vec::new());
+    let mut encoded = Bounded(Vec::new(), limit);
     serde_json::to_writer(&mut encoded, value)?;
     Ok(encoded.0)
 }

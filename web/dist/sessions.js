@@ -1,11 +1,9 @@
 // Sessions: what each one changed on disk, its transcript as it grows, and
 // the two things a person does with one — continue it, or rewind it.
-import { $, el, api, ago, bytes, state } from './lib.js';
-import { continueIn } from './chat.js';
+import { $, el, api, ago, state } from './lib.js';
+import { continueIn, quoteIntoDraft } from './chat.js';
+import { historyPanel } from './history.js';
 
-// A transcript being written elsewhere — a `rook run` in a terminal, a TUI —
-// grows under the reader. Polled while this tab is showing and the page is
-// visible, from the last entry seen; stopped by the next render.
 let follow = 0;
 
 async function rewindTo(seq) {
@@ -18,20 +16,6 @@ async function rewindTo(seq) {
   } catch (e) {
     alert(e.error || e);
   }
-}
-
-function entry(e) {
-  return el('div', { class: 'entry' },
-    el('div', { class: 'hd' },
-      el('span', {}, `#${e.seq}`),
-      el('span', { class: 'tag' }, e.kind),
-      e.label ? el('span', {}, e.label) : null,
-      el('span', {}, `${bytes(e.bytes)} → ${bytes(e.stored_bytes)}`),
-      e.truncated ? el('span', { class: 'warn' }, 'elided') : null),
-    el('pre', {}, e.body),
-    // Rewinding forks rather than truncating, so nothing is lost — but it
-    // does put files back, which is why it asks first.
-    el('button', { class: 'quiet', onclick: () => rewindTo(e.seq) }, `rewind to #${e.seq}`));
 }
 
 export async function renderSessions() {
@@ -58,6 +42,22 @@ export async function renderSessions() {
         await api(`/api/sessions/${state.session}/goal`, { goal: $('#goal').value });
         renderSessions();
       } }, 'Set')));
+
+    const includeLogs = el('input', { type: 'checkbox', 'aria-label': 'Include redacted log tails' });
+    right.append(el('div', { class: 'row' },
+      el('label', {}, includeLogs, ' Include redacted logs (may contain private text)'),
+      el('button', { onclick: async () => {
+        const session = state.session;
+        try {
+          const report = await api(`/api/sessions/${session}/diagnostics?logs=${includeLogs.checked}`);
+          const url = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' }));
+          const link = el('a', { href: url, download: `rook-diagnostics-${session}.json` });
+          document.body.append(link);
+          link.click();
+          link.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 1000);
+        } catch (error) { alert(error.error || error); }
+      } }, 'Download diagnostics')));
 
     const receipts = await api(`/api/sessions/${state.session}/recovery`);
     if (receipts.length) {
@@ -108,29 +108,12 @@ export async function renderSessions() {
     if (changed.watched === false) {
       right.append(el('p', { class: 'warn' }, 'the workspace was too large to walk, so more may have been written'));
     }
-    const { items: entries } = await api(`/api/sessions/${state.session}/transcript?limit=200`);
-    const box = el('div', { class: 'scroll' });
-    if (!entries.length) box.append(el('p', { class: 'empty' }, 'no events yet'));
-    for (const e of entries) box.append(entry(e));
-    right.append(box);
-
-    let last = entries.length ? entries[entries.length - 1].seq : 0;
     const session = state.session;
-    const tick = async () => {
-      if (token !== follow || state.tab !== 'sessions' || String(state.session) !== String(session)) return;
-      if (!document.hidden) {
-        try {
-          const more = await api(`/api/sessions/${session}/transcript?from=${last + 1}&limit=200`);
-          for (const e of more.items) { box.append(entry(e)); last = Math.max(last, e.seq); }
-          if (more.items.length) box.scrollTop = box.scrollHeight;
-        } catch { /* the next tick tries again */ }
-      }
-      if (token === follow) setTimeout(tick, 3000);
-    };
-    setTimeout(tick, 3000);
+    right.append(historyPanel(session, text => quoteIntoDraft(session, text), rewindTo));
   } else {
     right.append(el('p', { class: 'empty' }, 'no sessions yet — run `rook run "…"`'));
   }
+  if (token !== follow || state.tab !== 'sessions') return;
   $('#view').replaceChildren(el('div', { class: 'grid' },
     el('div', { class: 'card' }, el('h2', {}, `sessions (${items.length})`), list), right));
 }

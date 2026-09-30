@@ -61,6 +61,7 @@ fn editor() -> Result<rustyline::Editor<Pasting, rustyline::history::DefaultHist
 /// help text and the TUI's completion both answer "what can I type here" and a
 /// second hand-written copy of the answer is one that drifts.
 pub const COMMANDS: &[(&str, &str, &str)] = &[
+    ("diagnostics", "[--logs] [new-file-path]", "export local diagnostics; logs are opt-in"),
     (
         "recovery",
         "[operation-id inspection note]",
@@ -92,7 +93,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("diff", "", "what this session has changed on disk"),
     ("btw", "<question>", "ask about this conversation without joining it"),
     ("continue", "", "carry on a turn that stopped at a limit, with a fresh one"),
-    ("mcp", "", "connected tool servers"),
+    ("mcp", "[reconnect <name>]", "tool server status or reconnect using current config"),
     ("jobs", "[id]", "commands left running, or what one has printed"),
     ("undo", "", "rewind past the last exchange, files included"),
     ("rewind", "<seq>", "rewind to a specific point in the transcript"),
@@ -157,7 +158,7 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
     };
 
     let mcp = runtime.block_on(rook.connect_mcp());
-    for (name, error) in &mcp.failures {
+    for (name, error) in &mcp.failures() {
         eprintln!("mcp {name}: {error}");
     }
 
@@ -170,7 +171,7 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
     let skills = rook.catalog().iter().filter(|c| c.applicable).count();
     println!(
         "{skills} skill(s), {} tool server(s) offering {} tool(s), session {}",
-        mcp.servers.len(),
+        mcp.servers().len(),
         mcp.tool_count(),
         rook_store::format_session_id(session)
     );
@@ -323,6 +324,36 @@ async fn through_the_daemon(
             let (name, rest) = command.split_once(' ').unwrap_or((command, ""));
             match name {
                 "quit" | "exit" => break,
+                "diagnostics" => {
+                    if let Some(session) = session.as_deref().and_then(rook_store::parse_session_id) {
+                        let result: Result<String> = async {
+                            let (logs, path) = crate::commands::sessions::diagnostic_arguments(rest)?;
+                            let client = reqwest::Client::builder()
+                                .no_proxy()
+                                .timeout(std::time::Duration::from_secs(30))
+                                .build()?;
+                            let report: rook_core::diagnostics::Report = client
+                                .get(format!(
+                                    "{}/api/sessions/{}/diagnostics?logs={logs}",
+                                    daemon.base,
+                                    rook_store::format_session_id(session)
+                                ))
+                                .send()
+                                .await?
+                                .error_for_status()?
+                                .json()
+                                .await?;
+                            Ok(format!("Diagnostics saved to {}", report.save(&path)?.display()))
+                        }
+                        .await;
+                        match result {
+                            Ok(said) => println!("{said}"),
+                            Err(error) => eprintln!("{error}"),
+                        }
+                    } else {
+                        eprintln!("start or resume a session first");
+                    }
+                }
                 "recovery" => {
                     if let Some(session) = session.as_deref().and_then(rook_store::parse_session_id) {
                         let client = reqwest::Client::builder()
@@ -486,7 +517,16 @@ async fn turn(
     let mut calls = crate::fmt::Calls::default();
     // Before the loop borrows the agent, for the phrase a call is named by.
     let here = rook.workspace.clone();
+    let mut last_effort = None;
     let running = agent.run_with(prompt, |progress| match progress {
+        Progress::Delta(Delta::Effort(report)) => {
+            let report = report.describe();
+            if last_effort.as_ref() != Some(&report) {
+                let _ = writeln!(out, "\n  {report}");
+                let _ = out.flush();
+                last_effort = Some(report);
+            }
+        }
         Progress::Delta(Delta::Text(text)) => {
             print!("{text}");
             calls.said(text);
@@ -561,18 +601,16 @@ pub struct Said {
     pub quit: bool,
 }
 
-/// What `effort` costs on a model that has none to spend, said where it is set.
-const EFFORT_UNSPENT: &str = "  this model is not one of the families that reason, so the effort \
-                              is not sent with a request — `rook doctor` says the same beside the \
-                              model";
-
-/// Whether the configured model takes an effort at all.
-///
-/// Asked of the provider rather than decided again here: each dialect knows
-/// which of its families take the field, and a second table in a front end is
-/// the one that goes stale.
-fn reaches_nothing(rook: &Rook) -> bool {
-    crate::commands::config::provider(&rook.config).is_ok_and(|provider| !provider.takes_effort())
+/// Expected mapping for this session; the accepted request reports its own result.
+fn effort_mapping(rook: &Rook, shared: &Session) -> String {
+    match rook_core::models::chosen(&rook.config, shared.model.borrow().as_deref()) {
+        Ok(provider) => format!(
+            "requested {}; mapping: {}",
+            shared.effort.get().as_str(),
+            provider.effort_use(shared.effort.get()).describe()
+        ),
+        Err(_) => format!("requested {}; mapping unavailable", shared.effort.get().as_str()),
+    }
 }
 
 /// Whether a word at the end of `/docs …` names a version rather than more of
@@ -604,6 +642,11 @@ pub async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command
         "task" => {
             say!("Use F4 in `rook tui` to manage scheduled tasks. /goal starts work in the current session.")
         }
+        "diagnostics" => {
+            let (logs, path) = crate::commands::sessions::diagnostic_arguments(rest)?;
+            let report = rook.diagnostics(*session, logs)?;
+            say!("Diagnostics saved to {}", report.save(&path)?.display());
+        }
         "recovery" => {
             if !rest.is_empty() {
                 let (operation, note) = rest
@@ -626,10 +669,7 @@ pub async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command
         // footer shows it beside the stance, and on a model with no reasoning
         // to spend it was being shown a knob connected to nothing.
         "effort" if rest.is_empty() => {
-            say!("{}", shared.effort.get().as_str());
-            if reaches_nothing(rook) {
-                say!("{EFFORT_UNSPENT}");
-            }
+            say!("{}", effort_mapping(rook, shared));
         }
         // Says what it is running on and what else there is, because the
         // names are in a file and nobody keeps a file in their head.
@@ -654,9 +694,7 @@ pub async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command
         "effort" => match rook_llm::Effort::parse(rest) {
             Some(effort) => {
                 shared.effort.set(effort);
-                if reaches_nothing(rook) {
-                    say!("{EFFORT_UNSPENT}");
-                }
+                say!("{}", effort_mapping(rook, shared));
             }
             None => say!("no effort {rest:?} — low, medium, high, xhigh or max"),
         },
@@ -876,12 +914,16 @@ pub async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command
         }
 
         "mcp" => {
-            if mcp.servers.is_empty() {
-                say!("no tool servers connected");
-            }
-            for (server, tools) in &mcp.servers {
-                say!("{} — {} tool(s)", server.name(), tools.len());
-            }
+            let report = if rest.is_empty() {
+                mcp.report()
+            } else if let Some(name) =
+                rest.strip_prefix("reconnect ").map(str::trim).filter(|s| !s.is_empty())
+            {
+                mcp.reconnect_in(&rook.workspace, name).await.map_err(anyhow::Error::msg)?
+            } else {
+                anyhow::bail!("usage: /mcp [reconnect <name>]");
+            };
+            say!("{}", crate::commands::mcp::describe(&report));
         }
 
         "undo" => {

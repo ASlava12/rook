@@ -35,8 +35,7 @@ async fn whole_text(mut response: reqwest::Response, server: &str) -> Result<Str
         match response.chunk().await {
             Ok(None) => return Ok(String::from_utf8_lossy(&body).into_owned()),
             Ok(Some(chunk)) => {
-                body.extend_from_slice(&chunk);
-                if body.len() > MAX_FRAME_BYTES {
+                if chunk.len() > MAX_FRAME_BYTES.saturating_sub(body.len()) {
                     return Err(McpError::Transport {
                         server: server.into(),
                         message: format!(
@@ -45,6 +44,7 @@ async fn whole_text(mut response: reqwest::Response, server: &str) -> Result<Str
                         ),
                     });
                 }
+                body.extend_from_slice(&chunk);
             }
             Err(e) => {
                 return Err(McpError::Transport { server: server.into(), message: e.to_string() });
@@ -56,9 +56,11 @@ async fn whole_text(mut response: reqwest::Response, server: &str) -> Result<Str
 /// As much of a failure's body as the message will carry, and no more.
 async fn quoted_text(mut response: reqwest::Response) -> String {
     let mut body = Vec::new();
-    while body.len() <= MOST_QUOTED_BYTES {
+    while body.len() < MOST_QUOTED_BYTES {
         match response.chunk().await {
-            Ok(Some(chunk)) => body.extend_from_slice(&chunk),
+            Ok(Some(chunk)) => {
+                body.extend_from_slice(&chunk[..chunk.len().min(MOST_QUOTED_BYTES - body.len())])
+            }
             _ => break,
         }
     }
@@ -71,7 +73,9 @@ pub(crate) struct Http {
     client: reqwest::Client,
     headers: Vec<(String, String)>,
     session: Mutex<Option<String>>,
+    version: Mutex<Option<reqwest::header::HeaderValue>>,
     next_id: AtomicU64,
+    token: Option<std::sync::Arc<dyn crate::oauth::TokenSource>>,
 }
 
 impl Http {
@@ -80,11 +84,14 @@ impl Http {
         url: &str,
         headers: &std::collections::HashMap<String, String>,
         proxy: &rook_llm::Proxy,
+        token: Option<std::sync::Arc<dyn crate::oauth::TokenSource>>,
     ) -> Result<Self> {
         rook_llm::init_tls();
         let client = reqwest::Client::builder()
             .user_agent(concat!("rook/", env!("CARGO_PKG_VERSION")))
-            .connect_timeout(Duration::from_secs(15));
+            .connect_timeout(Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never());
         // One server, one address: a server inside the building takes no proxy
         // whatever is configured, the same as a model endpoint on this network.
         let client = proxy
@@ -95,11 +102,13 @@ impl Http {
             .map_err(|e| McpError::Transport { server: name.into(), message: e.to_string() })?;
         Ok(Self {
             name: name.to_string(),
-            url: url.trim_end_matches('/').to_string(),
+            url: url.to_string(),
             client,
             headers: headers.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
             session: Mutex::new(None),
+            version: Mutex::new(None),
             next_id: AtomicU64::new(1),
+            token,
         })
     }
 
@@ -107,7 +116,19 @@ impl Http {
         let mut request =
             self.client.post(&self.url).header("accept", "application/json, text/event-stream").json(body);
         for (name, value) in &self.headers {
-            request = request.header(name, value);
+            if !name.eq_ignore_ascii_case("mcp-protocol-version") {
+                request = request.header(name, value);
+            }
+        }
+        if let Some(version) = self.version.lock().ok().and_then(|v| v.clone()) {
+            request = request.header("mcp-protocol-version", version);
+        }
+        if let Some(source) = &self.token {
+            let token = source
+                .token()
+                .await
+                .map_err(|_| McpError::Unauthorized { server: self.name.clone(), offered: Vec::new() })?;
+            request = request.bearer_auth(token);
         }
         if let Ok(session) = self.session.lock()
             && let Some(id) = session.as_deref()
@@ -131,6 +152,22 @@ impl Http {
 
 #[async_trait]
 impl Transport for Http {
+    fn negotiated(&self, version: &str) -> Result<()> {
+        let invalid = || McpError::Decode {
+            server: self.name.clone(),
+            method: "initialize".into(),
+            message: "invalid negotiated protocol version".into(),
+        };
+        // The protocol's versions are dates; bound the header before retaining
+        // a server-authored value and reject whitespace/control characters.
+        if version.is_empty() || version.len() > 64 || !version.bytes().all(|b| b.is_ascii_graphic()) {
+            return Err(invalid());
+        }
+        let value = reqwest::header::HeaderValue::from_str(version).map_err(|_| invalid())?;
+        *self.version.lock().map_err(|_| invalid())? = Some(value);
+        Ok(())
+    }
+
     async fn request(
         &self,
         method: &str,
@@ -192,7 +229,26 @@ impl Transport for Http {
     async fn notify(&self, method: &str, params: Option<serde_json::Value>) -> Result<()> {
         let body = Notification { jsonrpc: "2.0", method, params };
         // A notification has no answer; 202 is the usual reply and any 2xx is fine.
-        self.post(&body).await.map(|_| ())
+        let response = self.post(&body).await?;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(McpError::Unauthorized {
+                server: self.name.clone(),
+                offered: response
+                    .headers()
+                    .get_all(reqwest::header::WWW_AUTHENTICATE)
+                    .iter()
+                    .filter_map(|v| v.to_str().ok())
+                    .map(str::to_owned)
+                    .collect(),
+            });
+        }
+        if !response.status().is_success() {
+            return Err(McpError::Transport {
+                server: self.name.clone(),
+                message: format!("{}: {}", response.status(), quoted_text(response).await),
+            });
+        }
+        Ok(())
     }
 
     async fn shutdown(&self) {}
@@ -211,7 +267,7 @@ async fn read_event_stream(
     timeout: Duration,
 ) -> Result<Incoming> {
     let mut bytes = response.bytes_stream();
-    let mut frames = rook_llm::Frames::new();
+    let mut frames = EventReader::new(MAX_FRAME_BYTES);
 
     loop {
         let chunk = match tokio::time::timeout(timeout, bytes.next()).await {
@@ -228,22 +284,87 @@ async fn read_event_stream(
                 chunk.map_err(|e| McpError::Transport { server: server.into(), message: e.to_string() })?
             }
         };
-        frames.feed(&chunk);
-        if frames.held() > MAX_FRAME_BYTES {
-            return Err(McpError::Transport {
-                server: server.into(),
-                message: format!("an event passed {MAX_FRAME_BYTES} bytes with no separator"),
-            });
+        if let Some(message) = frames.feed(&chunk, id).map_err(|()| McpError::Transport {
+            server: server.into(),
+            message: format!("an event exceeded {MAX_FRAME_BYTES} bytes"),
+        })? {
+            return Ok(message);
         }
+    }
+}
 
-        for frame in frames.ready() {
-            for line in frame.lines() {
-                let Some(data) = line.strip_prefix("data:") else { continue };
-                let Ok(message) = serde_json::from_str::<Incoming>(data.trim()) else { continue };
-                if message.id == Some(id) {
-                    return Ok(message);
+/// Incremental SSE framing caps bytes before appending. Parsing a transport
+/// chunk as one allocation would let either one huge event or many small ones
+/// bypass the per-event memory bound. UTF-8 stays in bytes until JSON parsing.
+struct EventReader {
+    bytes: Vec<u8>,
+    after_cr: bool,
+    limit: usize,
+}
+impl EventReader {
+    fn new(limit: usize) -> Self {
+        Self { bytes: Vec::new(), after_cr: false, limit }
+    }
+    fn feed(&mut self, chunk: &[u8], id: u64) -> std::result::Result<Option<Incoming>, ()> {
+        for &byte in chunk {
+            if self.after_cr && byte == b'\n' {
+                self.after_cr = false;
+                continue;
+            }
+            self.after_cr = byte == b'\r';
+            let byte = if self.after_cr { b'\n' } else { byte };
+            let complete = byte == b'\n' && self.bytes.last() == Some(&b'\n');
+            if self.bytes.len() == self.limit {
+                return Err(());
+            }
+            self.bytes.push(byte);
+            if complete {
+                let mut data = Vec::new();
+                for line in self.bytes.split(|&b| b == b'\n') {
+                    if let Some(value) = line.strip_prefix(b"data:") {
+                        if !data.is_empty() {
+                            data.push(b'\n');
+                        }
+                        data.extend_from_slice(value.strip_prefix(b" ").unwrap_or(value));
+                    }
+                }
+                self.bytes.clear();
+                if let Ok(message) = serde_json::from_slice::<Incoming>(&data)
+                    && message.id == Some(id)
+                {
+                    return Ok(Some(message));
                 }
             }
         }
+        Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod frame_tests {
+    use super::*;
+    #[test]
+    fn sse_limits_each_event_before_retaining_it_even_in_one_large_chunk() {
+        let mut reader = EventReader::new(128);
+        let many = b": ignored\r\n\r\n".repeat(1000);
+        assert!(many.len() > 128);
+        assert!(reader.feed(&many, 1).unwrap().is_none());
+        assert!(reader.bytes.is_empty());
+        let oversized = vec![b'x'; 1024];
+        assert!(reader.feed(&oversized, 1).is_err());
+        assert_eq!(reader.bytes.len(), 128, "the cap is applied before the offending byte is copied");
+    }
+    #[test]
+    fn multiline_sse_and_split_utf8_and_crlf_deliver_one_json_response() {
+        let wire = "data: {\r\ndata: \"id\":7,\r\ndata: \"result\":{\"text\":\"Привет 🙂\"}}\r\n\r\n";
+        let mut reader = EventReader::new(1024);
+        let mut found = None;
+        for byte in wire.as_bytes() {
+            if let Some(message) = reader.feed(&[*byte], 7).unwrap() {
+                assert!(found.is_none());
+                found = Some(message);
+            }
+        }
+        assert_eq!(found.unwrap().result.unwrap()["text"], "Привет 🙂");
     }
 }

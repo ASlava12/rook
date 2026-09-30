@@ -214,6 +214,7 @@ impl Calls {
 /// The command built for runs measured in days was the one with no way to see
 /// that anything was happening.
 pub struct Watching {
+    last_effort: Option<String>,
     out: std::io::Stdout,
     calls: Calls,
     /// For naming a call by what it is doing here rather than by its arguments.
@@ -225,7 +226,7 @@ pub struct Watching {
 
 impl Watching {
     pub fn new(here: std::path::PathBuf, quiet: bool) -> Self {
-        Self { out: std::io::stdout(), calls: Calls::default(), here, quiet }
+        Self { out: std::io::stdout(), calls: Calls::default(), here, quiet, last_effort: None }
     }
 
     pub fn see(&mut self, progress: rook_core::agent::Progress<'_>) {
@@ -236,6 +237,14 @@ impl Watching {
             return;
         }
         let written = match progress {
+            Progress::Delta(rook_llm::Delta::Effort(report)) => {
+                let report = report.describe();
+                if self.last_effort.as_ref() == Some(&report) {
+                    return;
+                }
+                self.last_effort = Some(report.clone());
+                format!("\n  {report}\n")
+            }
             Progress::Delta(rook_llm::Delta::Text(text)) => {
                 self.calls.said(text);
                 text.to_string()

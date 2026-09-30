@@ -12,6 +12,158 @@ struct Rook {
     workspace: tempfile::TempDir,
 }
 
+#[test]
+fn history_navigation_and_quotes_match_locally_and_with_a_locked_daemon_store() {
+    let rook = Rook::new();
+    rook.write_config(
+        "[transcript]\npage_entries=3\nbody_bytes=128\nquote_bytes=128\nsearch_bytes=4096\nsearch_events=2\n",
+    );
+    let id = rook_store::new_session_id();
+    let name = rook_store::format_session_id(id);
+    {
+        let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+        store
+            .create_session(&rook_store::SessionMeta::new(
+                id,
+                "history",
+                rook.workspace.path().display().to_string(),
+                rook_store::now_unix(),
+            ))
+            .unwrap();
+        for n in 0..9 {
+            store
+                .append_event(
+                    id,
+                    rook_store::NewEvent::new(
+                        rook_store::EventKind::UserMessage,
+                        rook_store::Kind::Message,
+                        format!("event {n}: {}END", "🙂".repeat(100)).as_bytes(),
+                    ),
+                )
+                .unwrap();
+        }
+    }
+    let check = || {
+        let tail = rook.json(&["session", "history", &name]);
+        assert_eq!(tail["items"][0]["seq"], 6);
+        assert_eq!(tail["items"].as_array().unwrap().len(), 3);
+        let older = rook.json(&["session", "history", &name, "--before", "6"]);
+        assert_eq!(older["items"][0]["seq"], 3);
+        let next = rook.json(&["session", "history", &name, "--from", "6"]);
+        assert_eq!(tail, next);
+        let found = rook.json(&["session", "find", &name, "event 0"]);
+        assert_eq!(found["hits"][0]["seq"], 0);
+        assert_eq!(found["next"]["seq"], 2);
+        let more = rook.json(&["session", "find", &name, "event 0", "--from", "2", "--through", "9"]);
+        assert!(more["hits"].as_array().unwrap().is_empty());
+        let entry = rook.json(&["session", "entry", &name, "8", "--offset", "128"]);
+        assert_eq!(entry["entry"]["seq"], 8);
+        assert!(entry["next_offset"].as_u64().unwrap() > 128);
+        let quote = rook.json(&["session", "quote", &name, "0"]);
+        let source: serde_json::Value = serde_json::from_str(quote["text"].as_str().unwrap()).unwrap();
+        assert_eq!(source["rook_source"]["authority"], "data");
+        assert_eq!(source["rook_source"]["session"], name);
+        assert_eq!(source["rook_source"]["complete"], false);
+        assert!(!rook.run(&["session", "entry", &name, "999"]).status.success());
+        (tail, quote)
+    };
+    let local = check();
+    let _daemon = Daemon::start(&rook);
+    let remote = check();
+    assert_eq!(local, remote);
+}
+
+#[test]
+fn mcp_probes_and_explicit_calls_work_while_the_conversation_store_is_locked() {
+    let rook = Rook::new();
+    let _locked = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+    let empty = rook.run(&["mcp", "ls", "--json"]);
+    assert!(empty.status.success(), "{}", String::from_utf8_lossy(&empty.stderr));
+    let body: serde_json::Value = serde_json::from_slice(&empty.stdout).unwrap();
+    assert_eq!(body, serde_json::json!({"connected":[], "failed":[]}));
+    assert!(!rook.run(&["mcp", "tools", "missing"]).status.success());
+    let binary = serde_json::to_string(env!("CARGO_BIN_EXE_rook")).unwrap();
+    let args = serde_json::json!(["--workspace", rook.workspace.path(), "mcp", "serve", "--yes"]);
+    rook.write_config(&format!(
+        "[[mcp]]\nname='local'\ncommand={binary}\nargs={args}\n\n[[mcp]]\nname='disabled'\ncommand='must-not-be-started'\nenabled=false\n"
+    ));
+    let listed = rook.run(&["mcp", "ls", "--json"]);
+    assert!(listed.status.success(), "{}", String::from_utf8_lossy(&listed.stderr));
+    let body: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(body["connected"].as_array().unwrap().len(), 1);
+    assert_eq!(body["connected"][0]["name"], "local");
+    assert_eq!(body["failed"], serde_json::json!([]));
+    let tools = rook.run(&["mcp", "tools", "local", "--json"]);
+    assert!(tools.status.success(), "{}", String::from_utf8_lossy(&tools.stderr));
+    let body: serde_json::Value = serde_json::from_slice(&tools.stdout).unwrap();
+    assert!(body.as_array().unwrap().iter().any(|tool| tool["name"] == "read_file"));
+    let read = rook.run(&["mcp", "call", "local", "read_file", r#"{"path":"src/main.rs"}"#]);
+    assert!(read.status.success(), "{}", String::from_utf8_lossy(&read.stderr));
+    assert!(String::from_utf8_lossy(&read.stdout).contains("fn main() {}"));
+
+    // Removing the store dependency must preserve plugin discovery and its
+    // trust boundary: user-installed servers count, repository declarations do not.
+    for (directory, name) in [
+        (rook.home.path().join("plugins/trusted"), "trusted"),
+        (rook.workspace.path().join(".rook/plugins/repository"), "repository"),
+    ] {
+        std::fs::create_dir_all(&directory).unwrap();
+        let manifest = serde_json::json!({
+            "name":name,
+            "mcpServers":{"probe":{"command":env!("CARGO_BIN_EXE_rook"),"args":args}}
+        });
+        std::fs::write(directory.join("plugin.json"), manifest.to_string()).unwrap();
+    }
+    let listed = rook.run(&["mcp", "ls", "--json"]);
+    assert!(listed.status.success(), "{}", String::from_utf8_lossy(&listed.stderr));
+    let body: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let connected = body["connected"].as_array().unwrap();
+    assert_eq!(connected.len(), 2, "{body}");
+    assert!(connected.iter().any(|server| server["name"] == "trusted__probe"));
+    assert_eq!(body["failed"], serde_json::json!([]));
+    assert!(String::from_utf8_lossy(&listed.stderr).contains("not started"));
+}
+
+#[test]
+fn offline_config_check_never_contacts_endpoints_or_requires_secrets_or_the_store() {
+    let rook = Rook::new();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    rook.write_config(&format!(
+        "[models.local]\napi='openai'\nurl='http://{}/v1'\nmodel='example'\nkey='secret:missing'\n",
+        listener.local_addr().unwrap()
+    ));
+    let _locked = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+    let out = rook.run(&["config", "check", "--offline", "--json"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let body: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(body["valid"], true);
+    assert_eq!(body["connections_checked"], false);
+    assert_eq!(body["models"], serde_json::json!([]));
+    assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+}
+
+#[test]
+fn config_check_reports_structural_errors_and_typos_with_a_failing_exit_status() {
+    let rook = Rook::new();
+    rook.write_config("[agent]\ncompact_at=1.0\nmax_step=4\n[models.local]\nmodel='example'\n");
+    // Even the online command must diagnose a broken file before asking a
+    // provider. JSON remains machine-readable on failure.
+    let out = rook.run(&["config", "check", "--json"]);
+    assert!(!out.status.success());
+    let body: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(body["valid"], false);
+    assert_eq!(body["connections_checked"], false);
+    assert_eq!(body["ignored"], serde_json::json!(["agent.max_step"]));
+    assert_eq!(body["errors"].as_array().unwrap().len(), 2);
+    let out = rook.run(&["config", "check", "--offline"]);
+    assert!(!out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("compact_at") && text.contains("api` is not set"), "{text}");
+    rook.write_config("[agent]\nmax_step=4\n");
+    assert!(!rook.run(&["config", "check", "--offline"]).status.success());
+}
+
 impl Rook {
     fn new() -> Self {
         let rook = Self { home: tempfile::tempdir().unwrap(), workspace: tempfile::tempdir().unwrap() };
@@ -819,7 +971,7 @@ fn every_slash_command_answers_on_an_empty_session() {
         "nothing remembered yet",
         "nothing matched",
         "nothing changed on disk yet",
-        "no tool servers connected",
+        "no MCP servers installed",
         "no goal set",
         "nothing running in the background",
     ] {
@@ -859,9 +1011,19 @@ fn the_repl_can_change_the_approvals_and_the_effort() {
     let lines: Vec<&str> = out
         .lines()
         .map(|l| l.trim_start_matches(['›', ' ']))
-        .filter(|l| ["assist", "readonly", "high", "low"].contains(l))
+        .filter(|l| ["assist", "readonly"].contains(l) || l.starts_with("requested "))
         .collect();
-    assert_eq!(lines, ["assist", "readonly", "high", "low"], "each reads back what was set:\n{out}");
+    assert_eq!(
+        lines,
+        [
+            "assist",
+            "readonly",
+            "requested high; mapping: not sent: no effort mapping for this model",
+            "requested low; mapping: not sent: no effort mapping for this model",
+            "requested low; mapping: not sent: no effort mapping for this model",
+        ],
+        "each reads back the preference and its actual mapping:\n{out}"
+    );
 }
 
 #[test]
@@ -1227,6 +1389,50 @@ fn a_two_word_topic_is_not_read_as_a_topic_and_a_version() {
 }
 
 #[test]
+fn diagnostics_export_works_locally_and_through_the_daemon_without_overwriting_files() {
+    let rook = Rook::new();
+    let id = rook_store::new_session_id();
+    let name = rook_store::format_session_id(id);
+    {
+        let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+        store
+            .create_session(&rook_store::SessionMeta::new(
+                id,
+                "private-title",
+                rook.workspace.path().display().to_string(),
+                rook_store::now_unix(),
+            ))
+            .unwrap();
+        store
+            .append_event(
+                id,
+                rook_store::NewEvent::new(
+                    rook_store::EventKind::UserMessage,
+                    rook_store::Kind::Message,
+                    b"private-prompt",
+                ),
+            )
+            .unwrap();
+    }
+    let local = rook.json(&["session", "diagnostics", &name]);
+    assert_eq!(local["session"]["id"], name);
+    assert!(!local.to_string().contains("private-prompt"));
+    assert!(!local.to_string().contains("private-title"));
+    let _daemon = Daemon::start(&rook);
+    let out = rook.run(&["session", "diagnostics", &name]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("using the running rookd"));
+    let remote: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(remote["session"], local["session"]);
+    let destination = rook.home.path().join("support.json");
+    let args = ["session", "diagnostics", &name, "--output", destination.to_str().unwrap()];
+    assert!(rook.run(&args).status.success());
+    let original = std::fs::read(&destination).unwrap();
+    assert!(!rook.run(&args).status.success());
+    assert_eq!(std::fs::read(&destination).unwrap(), original);
+}
+
+#[test]
 fn recovery_inspection_and_acknowledgement_reach_the_daemon_and_reject_stale_ids() {
     let rook = Rook::new();
     let id = rook_store::new_session_id();
@@ -1559,4 +1765,165 @@ fn config_edit_requires_a_terminal_and_never_creates_a_file_from_a_pipe() {
     let out = rook.run(&["config", "edit", "--json"]);
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("omit --json"));
+}
+
+#[test]
+fn effort_mapping_follows_the_model_selected_in_this_session() {
+    let rook = Rook::new();
+    rook.write_config(
+        r#"
+[agent]
+model = "plain"
+install_servers = false
+[models.plain]
+api = "openai"
+url = "http://127.0.0.1:1/v1"
+model = "local-model"
+[models.reasoner]
+api = "openai"
+url = "http://127.0.0.1:1/v1"
+model = "gpt-5"
+"#,
+    );
+    let out = rook.chat("/effort max\n/model reasoner\n/effort\n/quit\n");
+    let before = out.find("not sent: no effort mapping for this model").unwrap_or_else(|| panic!("{out}"));
+    let after = out.find("sent reasoning_effort=high").unwrap_or_else(|| panic!("{out}"));
+    assert!(before < after, "the session's choice changes the mapping: {out}");
+    assert!(out.contains("requested max"), "the preference is preserved: {out}");
+}
+
+#[test]
+fn models_enforces_configured_catalog_limits_and_exposes_capabilities_without_the_store() {
+    use std::io::{Read, Write};
+    use std::time::{Duration, Instant};
+    let _one = one_at_a_time();
+    let rook = Rook::new();
+    let _store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut seen = 0;
+        while seen < 2 && Instant::now() < deadline {
+            let Ok((mut socket, _)) = listener.accept() else {
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            };
+            socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            socket.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut bytes = [0; 4096];
+            let n = socket.read(&mut bytes).unwrap();
+            assert!(String::from_utf8_lossy(&bytes[..n]).starts_with("GET /v1/models "));
+            let body =
+                r#"{"data":[{"id":"one","supported_parameters":["tools","reasoning_effort"]},{"id":"two"}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).unwrap();
+            seen += 1;
+        }
+        seen
+    });
+    for limit in [1, 2] {
+        rook.write_config(&format!("[agent]\nmodel='local'\n[models.local]\napi='openai'\nurl='http://{address}/v1'\nmodel='one'\n[model_catalog]\nmax_models={limit}\nmax_bytes=2048\ntimeout_secs=2\n"));
+        let out = rook.run(&["models", "--source", "local", "--json"]);
+        if limit == 1 {
+            assert!(!out.status.success());
+            assert!(String::from_utf8_lossy(&out.stderr).contains("exceeds 1 models"));
+        } else {
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            let models: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+            assert_eq!(models.as_array().unwrap().len(), 2);
+            assert_eq!(models[0]["capabilities"]["tools"], true);
+            assert_eq!(models[0]["capabilities"]["reasoning"], true);
+            assert!(models[1]["capabilities"]["tools"].is_null());
+        }
+    }
+    assert_eq!(server.join().unwrap(), 2);
+}
+
+#[test]
+fn models_offline_reports_configuration_without_running_credential_helpers() {
+    let _one = one_at_a_time();
+    let rook = Rook::new();
+    rook.write_config("[agent]\nmodel='local'\n[models.local]\napi='openai'\nurl='http://127.0.0.1:1/v1'\nmodel='private-model'\nkey='secret:missing'\ncontext_window=8192\n");
+    let _store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+    let value = rook.json(&["models", "--offline", "--metadata"]);
+    assert_eq!(value["origin"], "configuration");
+    assert_eq!(value["credentials_resolved"], false);
+    assert_eq!(value["models"][0]["id"], "private-model");
+    assert_eq!(value["models"][0]["context_window"], 8192);
+    assert!(value["models"][0]["capabilities"]["tools"].is_null());
+    assert!(value["observed_at"].is_null());
+    let legacy_shape = rook.json(&["models", "--offline"]);
+    assert!(legacy_shape.is_array());
+    for flags in [
+        vec!["models", "--offline", "--refresh"],
+        vec!["models", "--offline", "--recheck"],
+        vec!["models", "--metadata"],
+    ] {
+        assert!(!rook.run(&flags).status.success(), "invalid flags: {flags:?}");
+    }
+    assert!(!rook.home.path().join("cache/models-v1.json").exists());
+}
+
+#[test]
+fn models_offline_allows_a_cloud_spec_without_a_key_but_online_still_requires_one() {
+    let _one = one_at_a_time();
+    let rook = Rook::new();
+    rook.write_config("[agent]\nmodel='anthropic/claude-catalog-test'\n");
+    for offline in [true, false] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_rook"));
+        command
+            .env("ROOK_HOME", rook.home.path())
+            .env("ROOK_LOG", "error")
+            .env_remove("ANTHROPIC_API_KEY")
+            .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:1")
+            .arg("--workspace")
+            .arg(rook.workspace.path())
+            .args(["models", "--json", "--metadata"]);
+        if offline {
+            command.arg("--offline");
+        }
+        let out = command.output().unwrap();
+        if offline {
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            let result: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+            assert_eq!(result["origin"], "configuration");
+            assert_eq!(result["models"][0]["id"], "claude-catalog-test");
+            assert_eq!(result["credentials_resolved"], false);
+        } else {
+            assert!(!out.status.success());
+            assert!(String::from_utf8_lossy(&out.stderr).contains("ANTHROPIC_API_KEY is not set"));
+        }
+    }
+}
+
+#[test]
+fn managed_mcp_commands_reload_one_connection_in_the_running_daemon() {
+    let rook = Rook::new();
+    rook.write_config("[[mcp]]\nname='local'\nenabled=false\n");
+    let _daemon = Daemon::start(&rook);
+    let initial = rook.json(&["mcp", "status"]);
+    assert_eq!(initial["servers"][0]["state"], "disabled");
+    let binary = serde_json::to_string(env!("CARGO_BIN_EXE_rook")).unwrap();
+    let args = serde_json::json!(["--workspace", rook.workspace.path(), "mcp", "serve", "--yes"]);
+    rook.write_config(&format!("[[mcp]]\nname='local'\ncommand={binary}\nargs={args}\n"));
+    let connected = rook.json(&["mcp", "reconnect", "local"]);
+    assert_eq!(connected["servers"][0]["state"], "connected");
+    assert!(connected["servers"][0]["tools"].as_u64().unwrap() > 0);
+    let generation = connected["servers"][0]["generation"].clone();
+    rook.write_config("[[mcp]]\nname='local'\ncommand='/missing/mcp-command'\n");
+    let failed = rook.run(&["mcp", "reconnect", "local"]);
+    assert!(!failed.status.success());
+    let kept = rook.json(&["mcp", "status"]);
+    assert_eq!(kept["servers"][0]["state"], "connected");
+    assert_eq!(kept["servers"][0]["generation"], generation);
+    assert!(kept["servers"][0]["error"].is_string());
+    rook.write_config("[[mcp]]\nname='local'\nenabled=false\n");
+    let disabled = rook.json(&["mcp", "reconnect", "local"]);
+    assert_eq!(disabled["servers"][0]["state"], "disabled");
+    assert_eq!(disabled["servers"][0]["tools"], 0);
 }

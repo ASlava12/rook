@@ -37,6 +37,7 @@ struct Args {
 
 pub struct AppState {
     pub work: work::Tasks,
+    oauth: api::mcp_oauth::Logins,
     /// An `Arc` so a websocket turn can take an owned read guard and outlive the
     /// request that spawned it.
     pub rook: Arc<RwLock<Rook>>,
@@ -343,6 +344,7 @@ async fn serve() -> Result<()> {
     let about = about(&rook);
     let state = Arc::new(AppState {
         work: Default::default(),
+        oauth: Default::default(),
         rook: Arc::new(RwLock::new(rook)),
         elsewhere: RwLock::new(std::collections::HashMap::new()),
         equipment: RwLock::new(std::collections::HashMap::new()),

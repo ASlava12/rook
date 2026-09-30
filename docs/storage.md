@@ -122,6 +122,24 @@ preserves dictionary generations; opening format 1 upgrades its marker under the
 store lock. Older binaries then refuse the store instead of overwriting a dictionary
 or failing to load retired generations. This upgrade does not recover lost data.
 
+Tool images use existing event types and leave the postcard format unchanged.
+A `Note` labelled `rook:tool-images:v1` holds bounded image JSON immediately before
+its `ToolResult`; both events are appended in one transaction, so concurrent
+writers cannot separate them. Replay attaches pixels to that result, and older
+readers retain its text fallback. Ordinary session forks and retention preserve
+or collect these objects along with their events, without a separate KV index.
+Transcript views replace the companion payload with MIME and dimension notes.
+Compaction and result pruning remove pixels from model context, while explicit
+`read_result` retrieval can recover the original images from retained events.
+
+Measured request and dispatch durations are small `Note` events labelled
+`rook:timing:v1`. These numeric records contain no prompts or tool arguments and
+do not enter model history. They follow normal event retention and forks; no
+postcard migration or separate KV index is required. Tool timing notes are appended
+after execution receipts and image/result binding, preserving their adjacency
+assumptions. Diagnostic export reads a bounded event tail and never infers a zero
+duration from a missing measurement.
+
 ## Bounded growth
 
 Retention is on by default, with real limits, because a default of "unbounded" is

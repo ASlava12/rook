@@ -90,7 +90,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Task {
-    /// fmt + clippy + test, the same gate CI runs.
+    /// fmt + clippy + frontend builds + test, the same gate CI runs.
     Ci,
     /// Print the supported target matrix.
     Targets,
@@ -576,7 +576,7 @@ fn short(sha: &str) -> String {
     sha.chars().take(9).collect()
 }
 
-/// fmt, then clippy, then the tests — and how long each took.
+/// fmt, then clippy, current frontend binaries and tests — timed separately.
 ///
 /// The timing is the point of it being here rather than three commands in a
 /// shell. "The gate got slower" was a feeling for a week, and the answer turned
@@ -601,6 +601,11 @@ fn ci() -> Result<()> {
         .and_then(|()| {
             timed("clippy", &["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"], &mut timings)
         })
+        // Integration/PTY helpers launch the sibling rookd executable. Cargo
+        // builds a test harness for this binary-only crate, not necessarily
+        // target/debug/rookd; existence alone could silently reuse an older
+        // daemon. Build the actual frontends before any helper can launch them.
+        .and_then(|()| timed("build", &["build", "-p", "rook-cli", "-p", "rookd"], &mut timings))
         // `--no-fail-fast`, because cargo otherwise stops at the first test
         // binary that fails and says nothing about the rest. On the platforms
         // this machine cannot run, that turns one red run into one round trip

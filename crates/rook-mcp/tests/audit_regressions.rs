@@ -48,6 +48,44 @@ fn config(url: String) -> ServerConfig {
         ..Default::default()
     }
 }
+
+#[tokio::test]
+async fn initialized_notification_is_inside_the_startup_deadline_and_must_be_accepted() {
+    for status in [0, 401, 503] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        let reached = Arc::new(AtomicUsize::new(0));
+        let count = reached.clone();
+        let task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let req = request(&mut socket).await;
+            json(&mut socket, serde_json::json!({"jsonrpc":"2.0","id":req["id"],"result":{"protocolVersion":"2025-06-18","serverInfo":{"name":"slow","version":"1"}}})).await;
+            drop(socket);
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let req = request(&mut socket).await;
+            assert_eq!(req["method"], "notifications/initialized");
+            count.fetch_add(1, Ordering::SeqCst);
+            if status == 0 {
+                std::future::pending::<()>().await;
+            }
+            let _ = socket.write_all(format!("HTTP/1.1 {status} Refused\r\nContent-Length: 0\r\nWWW-Authenticate: Bearer realm=\"fixture\"\r\nConnection: close\r\n\r\n").as_bytes()).await;
+        });
+        let outcome =
+            tokio::time::timeout(Duration::from_secs(15), Server::connect(&config(url), &Default::default()))
+                .await;
+        task.abort();
+        let error = outcome
+            .expect("the startup timeout covers notifications/initialized")
+            .err()
+            .expect("refused or hung notification cannot be a successful connection");
+        assert_eq!(reached.load(Ordering::SeqCst), 1);
+        match status {
+            0 => assert!(matches!(error, rook_mcp::McpError::Timeout { .. })),
+            401 => assert!(matches!(error, rook_mcp::McpError::Unauthorized { .. })),
+            _ => assert!(error.to_string().contains("503")),
+        }
+    }
+}
 #[tokio::test]
 async fn json_body_is_covered_by_the_request_deadline() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

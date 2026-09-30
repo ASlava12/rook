@@ -31,6 +31,9 @@ use tokio::sync::mpsc;
 use crate::fmt;
 
 mod editor;
+mod history;
+mod mcp;
+mod mcp_auth;
 mod tasks;
 
 /// What is over the conversation, when anything is.
@@ -51,6 +54,8 @@ enum Overlay {
     Calls,
     Tasks,
     Sessions,
+    History,
+    Mcp,
     Memory,
     Skills,
     Store,
@@ -62,10 +67,12 @@ enum Overlay {
 
 impl Overlay {
     /// The panes the palette offers, in the order somebody reaches for them.
-    const PANES: [Overlay; 10] = [
+    const PANES: [Overlay; 12] = [
         Overlay::Calls,
         Overlay::Tasks,
         Overlay::Sessions,
+        Overlay::History,
+        Overlay::Mcp,
         Overlay::Models,
         Overlay::Docs,
         Overlay::Memory,
@@ -81,6 +88,8 @@ impl Overlay {
             Overlay::Calls => "calls",
             Overlay::Tasks => "tasks",
             Overlay::Sessions => "sessions",
+            Overlay::History => "history",
+            Overlay::Mcp => "mcp connections",
             Overlay::Memory => "memory",
             Overlay::Skills => "skills",
             Overlay::Store => "store",
@@ -98,6 +107,8 @@ impl Overlay {
             Overlay::Calls => "what each call was given and what came back",
             Overlay::Tasks => "scheduled tasks and their session history",
             Overlay::Sessions => "past conversations — enter continues one here",
+            Overlay::History => "find, jump and quote messages in this conversation",
+            Overlay::Mcp => "tool server status and reconnect",
             Overlay::Memory => "what the agent believes, and how to correct it",
             Overlay::Skills => "what applies in this workspace, and why",
             Overlay::Store => "what memory costs, per kind of object",
@@ -123,7 +134,24 @@ impl Overlay {
                 ("d ", "forget  "),
                 ("Esc ", "back  "),
             ],
-            Overlay::Sessions => &[("j/k ", "move  "), ("⏎ ", "continue  "), ("r ", "reload  ")],
+            Overlay::Sessions => {
+                &[("j/k ", "move  "), ("⏎ ", "continue  "), ("f ", "history  "), ("r ", "reload  ")]
+            }
+            Overlay::Mcp => &[
+                ("↑↓ ", "choose  "),
+                ("r ", "reconnect  "),
+                ("l/x ", "login/logout  "),
+                ("o ", "browser  "),
+                ("c ", "cancel  "),
+                ("Esc ", "close"),
+            ],
+            Overlay::History => &[
+                ("/ ", "find  "),
+                ("g ", "jump  "),
+                ("n/p ", "page  "),
+                ("q ", "quote  "),
+                ("Esc ", "close"),
+            ],
             Overlay::Memory => &[
                 ("j/k ", "move  "),
                 ("a ", "add  "),
@@ -305,6 +333,7 @@ fn this_window_decides(opening: &ClientMessage) -> bool {
 /// What a running turn reports back to the drawing loop.
 enum TurnEvent {
     Started(u128),
+    Effort(String),
     Text(String),
     Reasoning(String),
     /// A call the model has just made: the tool's own name, which is what
@@ -333,6 +362,10 @@ enum TurnEvent {
     /// Said by the turn, because the size of the prompt it is waiting on is not
     /// something a window can see.
     Waiting(u64),
+    Context {
+        used: usize,
+        size: usize,
+    },
     Spent {
         input: u32,
         output: u32,
@@ -501,15 +534,50 @@ impl Typing {
 
     /// Where the cursor is drawn in the message box, which holds newlines: the
     /// row it is on and how far along that row.
-    fn caret(&self) -> (u16, u16) {
+    fn caret(&self) -> (usize, usize) {
         let before = &self.text[..self.at];
-        let row = before.matches('\n').count() as u16;
-        let column = before.rsplit('\n').next().unwrap_or_default().chars().count() as u16;
+        let row = before.matches('\n').count();
+        let column = Line::from(before.rsplit('\n').next().unwrap_or_default()).width();
         (row, column)
     }
 
     fn rows(&self) -> u16 {
-        (self.text.matches('\n').count() + 1) as u16
+        (self.text.matches('\n').count() + 1).min(u16::MAX as usize) as u16
+    }
+
+    /// Only the visible cells are retained. Long JSON quotes can exceed u16
+    /// columns, and terminal cursor coordinates must never inherit that offset.
+    fn view(&self, prompt: &str, width: u16, height: u16) -> (Vec<Line<'static>>, (u16, u16)) {
+        let (row, column) = self.caret();
+        let gutter = Line::from(prompt).width();
+        let scroll = row.saturating_sub(height.saturating_sub(1) as usize);
+        let horizontal = (gutter + column).saturating_sub(width.saturating_sub(1) as usize);
+        let mut lines = Vec::new();
+        for (at, text) in self.text.split('\n').enumerate().skip(scroll).take(height as usize) {
+            let mark = if at == 0 { prompt.to_owned() } else { " ".repeat(gutter) };
+            let line =
+                Line::from(vec![Span::styled(mark, Style::default().fg(Color::DarkGray)), Span::raw(text)]);
+            let start = if at == row { horizontal } else { 0 };
+            let mut cells = 0;
+            let mut spans = Vec::new();
+            for part in line.styled_graphemes(Style::default()) {
+                let size = Span::raw(part.symbol).width();
+                let end = cells + size;
+                if cells >= start + width as usize {
+                    break;
+                }
+                if cells >= start && end <= start + width as usize {
+                    spans.push(Span::styled(part.symbol.to_owned(), part.style));
+                } else if cells < start && end > start {
+                    // Preserve a wide grapheme's remaining cells at the edge,
+                    // without rendering half of it or shifting the caret.
+                    spans.push(Span::raw(" ".repeat((end - start).min(width as usize))));
+                }
+                cells = end;
+            }
+            lines.push(Line::from(spans));
+        }
+        (lines, ((row - scroll) as u16, (gutter + column - horizontal) as u16))
     }
 
     /// Text arriving from the terminal in one piece, newlines and all.
@@ -586,6 +654,7 @@ struct Adding {
 
 #[derive(Default)]
 struct Chat {
+    last_effort: Option<String>,
     input: Typing,
     /// Prompts already sent, oldest first, and where in them the up-arrow has
     /// walked. Kept here rather than in the store: it is what this window has
@@ -618,10 +687,9 @@ struct Chat {
     drawn: u16,
     /// Input, output and cached tokens so far in this turn.
     spent: Option<(u32, u32, u32)>,
-    /// What the newest request carried, which is the context as the provider
-    /// counted it: the cumulative figure above less what it was before this
-    /// reply. A running total was being read as the size of the context, and it
-    /// is thirty-nine steps' worth of them.
+    /// Current main conversation, from the engine's context estimator. The
+    /// cumulative spend also includes delegates and completion checks and
+    /// therefore cannot be used to reconstruct this number.
     carried: u32,
     /// Which step of its budget the turn in flight is on. A window showing
     /// only that something is happening cannot say how much room is left, and
@@ -795,26 +863,22 @@ fn waiting_on(
 /// have spent between them. Somebody asked whether their context had passed a
 /// million; it was at 29%.
 ///
-/// The share is the newest request's own input, which the provider counted,
-/// rather than an estimate of what the next one will carry — measured beats
-/// guessed, and it is already here.
-fn spent(totals: Option<(u32, u32, u32)>, carried: u32, usable: usize) -> String {
-    let Some((input, output, cached)) = totals else { return String::new() };
-    // A percentage rather than a second large number: what is worth knowing
-    // about the cache is how much of the bill it took, not its size.
-    let cached = match (cached, input) {
+/// The engine reports the main context independently of accounting for
+/// sub-agents and checkers. Show it even while awaiting the first reply.
+fn spent(totals: Option<(u32, u32, u32)>, carried: u32, size: usize) -> String {
+    let window = match (carried, size) {
         (0, _) | (_, 0) => String::new(),
-        // Rounded, not truncated: 86.998% shown as 86 is a percentage point
-        // given away for nothing.
-        (n, all) => format!(" ({}% cached)", (n as u64 * 100 + all as u64 / 2) / all as u64),
-    };
-    let window = match (carried, usable) {
-        (0, _) | (_, 0) => String::new(),
-        (carried, usable) => {
-            format!("ctx {}/{} · ", thousands(carried), thousands(usable.min(u32::MAX as usize) as u32))
+        (carried, size) => {
+            format!("ctx {}/{}", thousands(carried), thousands(size.min(u32::MAX as usize) as u32))
         }
     };
-    format!("{window}{} in / {} out{cached}", thousands(input), thousands(output))
+    let Some((input, output, cached)) = totals else { return window };
+    let cached = match (cached, input) {
+        (0, _) | (_, 0) => String::new(),
+        (n, all) => format!(" ({}% cached)", (n as u64 * 100 + all as u64 / 2) / all as u64),
+    };
+    let separator = if window.is_empty() { "" } else { " · " };
+    format!("{window}{separator}{} in / {} out{cached}", thousands(input), thousands(output))
 }
 
 /// The tail of a path, which is what tells two projects apart in a narrow list.
@@ -882,6 +946,12 @@ impl Asking {
 }
 
 impl Chat {
+    fn effort_report(&mut self, report: String) {
+        if self.last_effort.as_ref() != Some(&report) {
+            self.push("stat", &format!("  {report}"));
+            self.last_effort = Some(report);
+        }
+    }
     /// Append, merging consecutive pieces of a stream so a streamed reply is
     /// one paragraph rather than one line per token.
     ///
@@ -1122,6 +1192,7 @@ struct App {
     runtime: tokio::runtime::Runtime,
     chat: Chat,
     tasks: tasks::Tasks,
+    mcp: mcp::Connections,
     editor: Option<editor::Picker>,
     /// Whether this window is taking the mouse, and so whether the terminal's
     /// own selection works.
@@ -1150,6 +1221,7 @@ struct App {
     /// The same state the chat REPL keeps, so the slash commands are one
     /// implementation rather than two that drift.
     shared: crate::chat::Session,
+    history: history::History,
     turn: Option<tokio::task::JoinHandle<()>>,
     /// `None` is the ordinary state: the conversation, whole.
     overlay: Option<Overlay>,
@@ -1163,9 +1235,8 @@ struct App {
     /// setting that caps the search tool's looking. Read once, for the reason
     /// above.
     most_files: usize,
-    /// What a request may carry, so the footer can say how much of it the
-    /// newest one used. Read once with the model, for the same reason.
-    usable: usize,
+    /// Effective model window, refreshed by the engine after discovery.
+    context_window: usize,
     /// How long a stream may say nothing before the turn gives up on it.
     ///
     /// Shown beside the silence, because a wait with no end named reads as no
@@ -1276,8 +1347,12 @@ impl App {
         let patience = config.agent.answer_timeout();
 
         let tasks = tasks::Tasks::new(&source, &runtime, &config.work);
+        let history = history::History::new(&source);
+        let mcp_controls = mcp::Connections::new(&source, &runtime, mcp.clone());
         let mut app = Self {
+            mcp: mcp_controls,
             tasks,
+            history,
             editor: None,
             runtime,
             chat: Chat { history: remembered_prompts(), ..Chat::default() },
@@ -1286,13 +1361,7 @@ impl App {
             // Only when the window is configured. Otherwise it is the
             // provider's to report, and a share of a guess is worse than no
             // share at all.
-            usable: config
-                .agent
-                .context_window
-                .map(|window| {
-                    rook_core::context::ContextBudget::new(window, config.agent.compact_at).usable()
-                })
-                .unwrap_or(0),
+            context_window: config.agent.context_window.unwrap_or(0),
             patience: config.agent.stream_idle(),
             events,
             to_loop,
@@ -1498,6 +1567,16 @@ impl App {
             terminal.draw(|f| self.draw(f))?;
             self.drain_turn_events();
             self.tasks.poll();
+            self.history.poll();
+            self.mcp.poll();
+            if let Some(quote) = self.history.take_quote()
+                && self.overlay == Some(Overlay::History)
+            {
+                self.chat.input.paste(&format!("\n\n{quote}"));
+                self.overlay = None;
+                self.status = "Quote inserted in draft; Enter sends".into();
+                self.chat.push("stat", "Quote inserted in draft; Enter sends");
+            }
             self.still_running();
             // Poll rather than block: a streaming turn has to keep redrawing
             // even while nobody is typing.
@@ -1657,6 +1736,7 @@ impl App {
             self.chat.heard = Some(std::time::Instant::now());
             match event {
                 TurnEvent::Started(id) => self.chat.session = Some(id),
+                TurnEvent::Effort(report) => self.chat.effort_report(report),
                 TurnEvent::Text(text) => self.chat.push("text", &text),
                 TurnEvent::Reasoning(text) => self.chat.push("think", &text),
                 TurnEvent::Tool { name, said } => self.chat.tool_started(&name, &said),
@@ -1668,8 +1748,11 @@ impl App {
                 TurnEvent::Heard(text) => self.chat.taken_up(&text),
                 TurnEvent::Step(at, of) => self.chat.step = Some((at, of)),
                 TurnEvent::ToolDone(name, failed) => self.chat.tool_done(&name, failed),
+                TurnEvent::Context { used, size } => {
+                    self.chat.carried = used.min(u32::MAX as usize) as u32;
+                    self.context_window = size;
+                }
                 TurnEvent::Spent { input, output, cached } => {
-                    self.chat.carried = input.saturating_sub(self.chat.spent.map_or(0, |(was, ..)| was));
                     self.chat.spent = Some((input, output, cached));
                 }
                 TurnEvent::Approval(request) => {
@@ -1774,6 +1857,13 @@ impl App {
             ChatEvent::Step { at, of } => self.chat.step = Some((at, of)),
             ChatEvent::Remembered { text } => self.chat.push("stat", &format!("  remembered: {text}")),
             ChatEvent::Forgot { text } => self.chat.push("stat", &format!("  forgot: {text}")),
+            ChatEvent::ModelRequest { model, requested_effort, effort } => {
+                self.chat.effort_report(format!("{model}: effort requested {requested_effort}; {effort}"));
+            }
+            ChatEvent::Context { used, size } => {
+                self.chat.carried = used.min(u32::MAX as usize) as u32;
+                self.context_window = size;
+            }
             ChatEvent::Spent { input_tokens, output_tokens, cached_tokens } => {
                 self.chat.spent = Some((input_tokens, output_tokens, cached_tokens))
             }
@@ -1822,7 +1912,7 @@ impl App {
                 }
                 let ours = (self.shared.policy.stance().as_str(), self.shared.effort.get().as_str());
                 if (mode.as_str(), effort.as_str()) != ours {
-                    self.chat.push("stat", &format!("  running at {mode} · {effort}"));
+                    self.chat.push("stat", &format!("  settings: {mode} · effort requested {effort}"));
                 }
                 if let Some(stance) = rook_tools::policy::Stance::parse(&mode) {
                     self.shared.policy.set_stance(stance);
@@ -1982,6 +2072,7 @@ impl App {
         match self.overlay {
             Some(Overlay::Palette) => self.palette.paste(text),
             Some(Overlay::Tasks) => self.tasks.paste(text),
+            Some(Overlay::History) => self.history.paste(text),
             // The one-line boxes take a paste as one line: a fact or a topic
             // with a newline in it is not two of them.
             Some(Overlay::Memory) => {
@@ -1996,6 +2087,24 @@ impl App {
     }
 
     fn on_overlay_key(&mut self, overlay: Overlay, key: crossterm::event::KeyEvent) {
+        if overlay == Overlay::Mcp {
+            if self.mcp.key(key) {
+                self.overlay = None;
+            }
+            return;
+        }
+        if overlay == Overlay::History {
+            if self.history.key(key) {
+                self.overlay = None;
+            }
+            return;
+        }
+        if overlay == Overlay::Sessions && key.code == KeyCode::Char('f') {
+            let session = self.session_state.selected().and_then(|i| self.sessions.get(i)).map(|s| s.meta.id);
+            self.history.open(session);
+            self.overlay = Some(Overlay::History);
+            return;
+        }
         if overlay == Overlay::Tasks {
             if self.tasks.key(key) {
                 self.overlay = None;
@@ -2141,7 +2250,13 @@ impl App {
                     }
                     None => {
                         self.overlay = Overlay::PANES.iter().copied().find(|pane| pane.name() == name);
-                        self.reload();
+                        if self.overlay == Some(Overlay::History) {
+                            self.history.open(self.chat.session);
+                        } else if self.overlay == Some(Overlay::Mcp) {
+                            self.mcp.request(None);
+                        } else {
+                            self.reload();
+                        }
                     }
                 }
             }
@@ -2171,6 +2286,11 @@ impl App {
                 KeyCode::Char('a') => return self.chat.input.home(),
                 KeyCode::Char('e') => {
                     self.editor = Some(editor::Picker::discover());
+                    return;
+                }
+                KeyCode::Char('f') => {
+                    self.history.open(self.chat.session);
+                    self.overlay = Some(Overlay::History);
                     return;
                 }
                 KeyCode::Char('w') => return self.chat.input.kill_word(),
@@ -2521,11 +2641,44 @@ impl App {
             self.chat.push("stat", &said);
             return;
         }
+        if name == "mcp" {
+            for (prefix, logout) in [("login ", false), ("logout ", true)] {
+                if let Some(server) =
+                    rest.trim().strip_prefix(prefix).map(str::trim).filter(|s| !s.is_empty())
+                {
+                    self.overlay = Some(Overlay::Mcp);
+                    self.mcp.authenticate(server.to_owned(), logout);
+                    return;
+                }
+            }
+            let name = if rest.trim().is_empty() {
+                None
+            } else if let Some(name) =
+                rest.trim().strip_prefix("reconnect ").map(str::trim).filter(|s| !s.is_empty())
+            {
+                Some(name.to_owned())
+            } else {
+                return self.chat.push("err", "usage: /mcp [reconnect|login|logout <name>]");
+            };
+            self.overlay = Some(Overlay::Mcp);
+            self.mcp.request(name);
+            return;
+        }
         if name == "task" {
             let said = if self.source.here().is_some() {
                 "Durable tasks require the shared daemon: reopen with `rook tui` (without --alone).".into()
             } else {
                 crate::commands::tasks::slash(rest, self.source.workspace()).unwrap_or_else(|e| e.to_string())
+            };
+            self.chat.push("stat", &said);
+            return;
+        }
+        if name == "diagnostics" {
+            let said = match self.chat.session {
+                Some(session) => {
+                    self.source.diagnostics_command(session, rest).unwrap_or_else(|e| e.to_string())
+                }
+                None => "start or resume a session first".into(),
             };
             self.chat.push("stat", &said);
             return;
@@ -2718,7 +2871,7 @@ impl App {
         };
         self.shared.effort.set(next);
         self.tell_the_daemon("effort", next.as_str());
-        self.chat.push("stat", &format!("  effort: {}", next.as_str()));
+        self.chat.push("stat", &format!("  effort requested: {}", next.as_str()));
     }
 
     fn answer(&mut self) {
@@ -2778,7 +2931,12 @@ impl App {
         // where it was taken, so watching one go the wrong way left nothing to
         // do but stop it and start again.
         if let Some(command) = slash(&prompt)
-            && (command == "task" || command.starts_with("task "))
+            && (command == "mcp"
+                || command.starts_with("mcp ")
+                || command == "task"
+                || command.starts_with("task ")
+                || command == "diagnostics"
+                || command.starts_with("diagnostics "))
         {
             self.command(command);
             return;
@@ -2939,6 +3097,8 @@ impl App {
                         Progress::Heard { text } => TurnEvent::Heard(text.to_string()),
                         Progress::Step { at, of } => TurnEvent::Step(at, of),
                         Progress::ToolDone { name, failed } => TurnEvent::ToolDone(name.to_string(), failed),
+                        Progress::Delta(Delta::Effort(report)) => TurnEvent::Effort(report.describe()),
+                        Progress::Context { used, size } => TurnEvent::Context { used, size },
                         Progress::Spent { input, output, cached } => {
                             TurnEvent::Spent { input, output, cached }
                         }
@@ -3172,6 +3332,8 @@ impl App {
                 Overlay::Palette => self.draw_palette(f, area),
                 Overlay::Calls => self.draw_calls(f, area),
                 Overlay::Tasks => self.tasks.draw(f, area),
+                Overlay::History => self.history.draw(f, area),
+                Overlay::Mcp => self.mcp.draw(f, area),
                 Overlay::Sessions => self.draw_sessions(f, area),
                 Overlay::Memory => self.draw_memory(f, area),
                 Overlay::Skills => self.draw_skills(f, area),
@@ -3214,10 +3376,15 @@ impl App {
         spans.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
         spans.push(Span::styled(short_model(&self.model), Style::default().fg(Color::LightBlue)));
         spans.push(Span::styled(
-            format!("  {}/{}", self.shared.policy.stance().as_str(), self.shared.effort.get().as_str()),
+            format!(
+                "  {}/{} (requested)",
+                self.shared.policy.stance().as_str(),
+                self.shared.effort.get().as_str()
+            ),
             Style::default().fg(Color::DarkGray),
         ));
-        let tail = format!("  {}  {}", spent(self.chat.spent, self.chat.carried, self.usable), self.status);
+        let tail =
+            format!("  {}  {}", spent(self.chat.spent, self.chat.carried, self.context_window), self.status);
         spans.push(Span::styled(tail, Style::default().fg(Color::DarkGray)));
 
         f.render_widget(
@@ -3543,42 +3710,15 @@ impl App {
             (true, None) => "  working… ".to_string(),
             _ => "› ".to_string(),
         };
-        // The prompt marks the first row only; the rest are indented to line up
-        // under it, so a pasted block reads as one message rather than as a
-        // column of fragments.
-        let gutter = prompt.chars().count();
-        let typing: Vec<Line> = self
-            .chat
-            .input
-            .as_str()
-            .split('\n')
-            .enumerate()
-            .map(|(row, line)| {
-                let mark = match row {
-                    0 => prompt.clone(),
-                    _ => " ".repeat(gutter),
-                };
-                Line::from(vec![
-                    Span::styled(mark, Style::default().fg(Color::DarkGray)),
-                    Span::raw(line.to_string()),
-                ])
-            })
-            .collect();
-        // Held to the cursor's row: typing at the bottom of a block longer than
-        // the box would otherwise write where nothing is shown.
-        let (row, column) = self.chat.input.caret();
-        let visible = input.height.saturating_sub(2);
-        let scroll = row.saturating_sub(visible.saturating_sub(1));
-        f.render_widget(Paragraph::new(typing).block(bordered("")).scroll((scroll, 0)), input);
+        let inner = input.inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 });
+        let (typing, (row, column)) = self.chat.input.view(&prompt, inner.width, inner.height);
+        f.render_widget(Paragraph::new(typing).block(bordered("")), input);
         // Wherever the box takes typing, which is everywhere but an approval:
         // a running turn takes what is typed as an interjection, and hiding the
         // caret there left somebody typing into a box with no sign of it. An
         // approval is answered with a letter and has the keyboard.
-        if self.chat.pending.is_none() {
-            f.set_cursor_position((
-                input.x + 1 + gutter as u16 + column,
-                input.y + 1 + row.saturating_sub(scroll),
-            ));
+        if self.chat.pending.is_none() && inner.width > 0 && inner.height > 0 {
+            f.set_cursor_position((inner.x + column, inner.y + row));
         }
     }
 
@@ -4627,6 +4767,21 @@ fn kind_style(kind: &str) -> Style {
 mod tests {
 
     #[test]
+    fn request_effort_status_changes_are_visible_without_repeating_every_step() {
+        let mut chat = Chat::default();
+        let first = "route: effort requested max; sent reasoning_effort=high".to_string();
+        chat.effort_report(first.clone());
+        chat.effort_report(first.clone());
+        assert_eq!(chat.log.len(), 1);
+        assert!(chat.log[0].1.contains(&first));
+        let omitted =
+            "route: effort requested max; not sent: endpoint refused the effort parameter".to_string();
+        chat.effort_report(omitted.clone());
+        assert_eq!(chat.log.len(), 2);
+        assert!(chat.log[1].1.contains(&omitted));
+    }
+
+    #[test]
     fn daemon_steering_waits_for_a_session_id_and_never_uses_the_local_runner_queue_afterwards() {
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         let mut chat = super::Chat { remote: Some(sender), busy: true, ..Default::default() };
@@ -5051,6 +5206,7 @@ and the next line"
 
         // Before the first reply there is nothing to report at all.
         assert_eq!(spent(None, 0, 175_000), "");
+        assert_eq!(spent(None, 41_000, 175_000), "ctx 41.0k/175.0k");
     }
 
     /// Up walked straight into the history and set the box to the last prompt,
@@ -5124,6 +5280,28 @@ and the next line"
         assert_eq!(typing.caret(), (1, 7), "seven characters, not thirteen bytes");
         typing.home();
         assert_eq!(typing.caret(), (0, 0));
+    }
+
+    #[test]
+    fn long_quoted_drafts_keep_the_tail_and_unicode_caret_inside_the_viewport() {
+        let mut typing = Typing::default();
+        typing.paste(&format!("draft\n{}界🙂END", "x".repeat(70000)));
+        assert!(typing.caret().1 > u16::MAX as usize);
+        let (lines, cursor) = typing.view("› ", 20, 2);
+        assert_eq!(cursor, (1, 19));
+        assert_eq!(lines.len(), 2);
+        assert!(lines.iter().all(|line| line.width() <= 20));
+        assert!(lines[1].to_string().ends_with("界🙂END"));
+        typing.home();
+        let (lines, cursor) = typing.view("› ", 20, 2);
+        assert_eq!(cursor, (0, 2));
+        assert!(lines[0].to_string().contains("draft"));
+        typing.set("界🙂e\u{301}");
+        assert_eq!(typing.caret(), (0, 5), "display columns, not bytes or code points");
+        let (lines, cursor) = typing.view("› ", 4, 1);
+        assert_eq!(cursor, (0, 3));
+        assert_eq!(lines[0].width(), 3);
+        assert!(lines[0].to_string().ends_with("e\u{301}"));
     }
 
     /// Naming a file meant knowing its path and typing it, so the short way to

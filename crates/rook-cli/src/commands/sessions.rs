@@ -7,7 +7,40 @@ use anyhow::Result;
 use rook_core::SessionSummary;
 use std::path::Path;
 
+pub(crate) fn diagnostic_arguments(arguments: &str) -> Result<(bool, std::path::PathBuf)> {
+    let arguments = arguments.trim();
+    let (logs, rest) = if arguments == "--logs" {
+        (true, "")
+    } else if let Some(rest) = arguments.strip_prefix("--logs ") {
+        (true, rest.trim())
+    } else {
+        (false, arguments)
+    };
+    anyhow::ensure!(!rest.starts_with("--"), "use /diagnostics [--logs] [new-file-path]");
+    let path = if rest.is_empty() {
+        let directory = rook_core::paths::home().join("diagnostics");
+        std::fs::create_dir_all(&directory)?;
+        directory.join(format!(
+            "rook-diagnostics-{}.json",
+            rook_store::format_session_id(rook_store::new_session_id())
+        ))
+    } else {
+        rest.into()
+    };
+    Ok((logs, path))
+}
+
 pub(crate) fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, json: bool) -> Result<()> {
+    if let SessionCmd::Diagnostics { id, output, logs } = &cmd {
+        let report = source.diagnostics(source.session_named(id, workspace)?, *logs)?;
+        match output {
+            Some(path) => {
+                println!("{}", report.save(path)?.display());
+            }
+            None => println!("{}", report.json()?),
+        }
+        return Ok(());
+    }
     // Both read, and both are what somebody wants while the daemon is up.
     if let SessionCmd::Recovery { id, acknowledge, note } = &cmd {
         let session = source.session_named(id, workspace)?;
@@ -19,6 +52,79 @@ pub(crate) fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, js
     }
     if let SessionCmd::Ls { all } = cmd {
         return show_sessions(&source.sessions()?, workspace, all, json);
+    }
+    match &cmd {
+        SessionCmd::History { id, from, before, limit } => {
+            let page = source.transcript_page(
+                source.session_named(id, workspace)?,
+                &rook_core::transcript::PageRequest { from: *from, before: *before, limit: *limit },
+            )?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&page)?);
+            } else {
+                show_transcript(&page.items, false)?;
+                if let Some(before) = page.previous {
+                    println!("earlier: --before {before}");
+                }
+                if let Some(from) = page.next {
+                    println!("later: --from {from}");
+                }
+            }
+            return Ok(());
+        }
+        SessionCmd::Find { id, query, from, offset, through } => {
+            let result = source.transcript_search(
+                source.session_named(id, workspace)?,
+                query,
+                rook_core::transcript::Cursor { seq: *from, offset: *offset, through: *through },
+            )?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                for hit in &result.hits {
+                    println!(
+                        "#{} {} {} (byte {})\n{}",
+                        hit.seq, hit.kind, hit.label, hit.offset, hit.snippet
+                    );
+                }
+                if let Some(next) = result.next {
+                    println!(
+                        "continue search: --from {} --offset {} --through {}",
+                        next.seq,
+                        next.offset,
+                        next.through.unwrap_or(0)
+                    );
+                } else if result.hits.is_empty() {
+                    println!("no matches in the remaining history");
+                }
+            }
+            return Ok(());
+        }
+        SessionCmd::Entry { id, seq, offset } => {
+            let page = source.transcript_entry(source.session_named(id, workspace)?, *seq, *offset)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&page)?);
+            } else {
+                println!(
+                    "#{} {} byte {} / {}\n{}",
+                    page.entry.seq, page.entry.kind, page.offset, page.total_bytes, page.entry.body
+                );
+                if let Some(offset) = page.next_offset {
+                    println!("next: --offset {offset}");
+                }
+            }
+            return Ok(());
+        }
+        SessionCmd::Quote { id, seq, offset } => {
+            let quote = source.transcript_quote(source.session_named(id, workspace)?, *seq, *offset)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&quote)?);
+            } else {
+                println!("{}", quote.text);
+            }
+            return Ok(());
+        }
+        _ => {}
     }
     if let SessionCmd::Show { id, from, limit, max_body } = &cmd {
         let session = source.session_named(id, workspace)?;
@@ -54,7 +160,12 @@ pub(crate) fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, js
         return show_rewind(&source.rewind(session, *to, !keep_files)?, *keep_files, json);
     }
     match cmd {
-        SessionCmd::Recovery { .. }
+        SessionCmd::History { .. }
+        | SessionCmd::Find { .. }
+        | SessionCmd::Entry { .. }
+        | SessionCmd::Quote { .. }
+        | SessionCmd::Diagnostics { .. }
+        | SessionCmd::Recovery { .. }
         | SessionCmd::Ls { .. }
         | SessionCmd::Show { .. }
         | SessionCmd::Diff { .. }

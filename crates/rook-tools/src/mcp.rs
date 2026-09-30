@@ -9,46 +9,39 @@ use async_trait::async_trait;
 use rook_llm::ToolSpec;
 use rook_mcp::{Server, ToolDescriptor};
 
-use crate::{Result, Tool, ToolBox, ToolContext, ToolOutcome};
+use crate::{Result, Tool, ToolContext, ToolOutcome};
 
-/// Models constrain tool names to `[a-zA-Z0-9_-]` and to 64 characters, so
-/// servers are namespaced with a double underscore rather than a dot.
-///
-/// A package-style server name — `npm:@modelcontextprotocol/server-everything`
-/// — sanitises to something long enough that the pair does not fit, and a name
-/// that does not fit is not one tool refused: the provider rejects the whole
-/// request, so every turn fails while the tool list contains it. The server half
-/// gives way, since the tool half is what tells two of them apart, and what is
-/// cut is replaced by a digest of the whole name so two long servers do not
-/// become one.
+mod catalog;
+pub use catalog::CatalogLimits;
+
+/// Preserve ordinary names; encode ambiguous or oversized pairs with a digest
+/// of the original strings, before sanitization can make two tools identical.
 pub fn namespaced(server: &str, tool: &str) -> String {
-    const MOST: usize = 64;
-    let (server, tool) = (sanitize(server), sanitize(tool));
-    let room = MOST.saturating_sub(tool.len() + 2);
-    if server.len() <= room {
-        return format!("{server}__{tool}");
+    use sha2::{Digest, Sha256};
+    let clean = |s: &str| -> String {
+        s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect()
+    };
+    let (left, right) = (clean(server), clean(tool));
+    if left == server
+        && right == tool
+        && !left.contains("__")
+        && !right.contains("__")
+        && !left.is_empty()
+        && !right.is_empty()
+        && left.len() + right.len() + 2 <= 64
+    {
+        return format!("{left}__{right}");
     }
-    // Enough of the name to stay recognisable, and enough digest to stay
-    // distinct. A tool name so long that neither fits is the server's own
-    // problem, and truncating the tool would make two of them the same.
-    let digest = format!("{:04x}", crc16(&server));
-    let keep = room.saturating_sub(digest.len());
-    format!("{}{digest}__{tool}", &server[..keep.min(server.len())])
-}
-
-fn sanitize(s: &str) -> String {
-    s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect()
-}
-
-/// Four hex characters of difference, which is all this needs: it separates the
-/// handful of servers one agent talks to, not the world's.
-fn crc16(text: &str) -> u16 {
-    text.bytes().fold(0xffffu16, |crc, byte| {
-        (0..8).fold(crc ^ u16::from(byte), |crc, _| match crc & 1 {
-            1 => (crc >> 1) ^ 0xa001,
-            _ => crc >> 1,
-        })
-    })
+    let mut hash = Sha256::new();
+    hash.update((server.len() as u64).to_le_bytes());
+    hash.update(server.as_bytes());
+    hash.update(tool.as_bytes());
+    let digest = format!("{:x}", hash.finalize());
+    // All three strings are ASCII; the digest separates pairs even when both
+    // human-readable halves are shortened or empty.
+    let right = &right[..right.len().min(40)];
+    let room = 64 - right.len() - 18;
+    format!("{}{}__{right}", &left[..left.len().min(room)], &digest[..16])
 }
 
 pub struct McpTool {
@@ -83,12 +76,12 @@ impl Tool for McpTool {
         ToolSpec {
             name: self.name.clone(),
             description: self.description.clone(),
-            parameters: if self.schema.is_object() {
-                self.schema.clone()
-            } else {
-                serde_json::json!({ "type": "object", "properties": {} })
-            },
+            parameters: self.schema.clone(),
         }
+    }
+
+    fn advertisement(&self, _lazy: bool) -> ToolSpec {
+        self.spec()
     }
 
     /// Never read-only: what a server's tool does is not visible from here, so
@@ -106,9 +99,17 @@ impl Tool for McpTool {
         };
 
         let text = result.to_text();
+        let images = match images(&result) {
+            Ok(images) => images,
+            Err(why) => {
+                return Ok(ToolOutcome::error(format!("MCP image result refused: {why}"))
+                    .with("server", self.server.name()));
+            }
+        };
         let full = text.len();
         let (windowed, truncated) = window(&text, ctx.max_output_bytes);
         Ok(ToolOutcome {
+            images,
             content: windowed,
             is_error: result.is_error,
             truncated,
@@ -122,15 +123,6 @@ impl Tool for McpTool {
 /// The same rule commands get: a long result loses its middle, not its end.
 fn window(text: &str, max: usize) -> (String, bool) {
     (crate::elide_middle(text, max), text.len() > max)
-}
-
-impl ToolBox {
-    /// Register every tool a connected server advertises.
-    pub fn register_server(&mut self, server: Arc<Server>, tools: Vec<ToolDescriptor>) {
-        for descriptor in tools {
-            self.register(Arc::new(McpTool::new(server.clone(), descriptor)));
-        }
-    }
 }
 
 #[cfg(test)]
@@ -164,5 +156,47 @@ mod tests {
     #[test]
     fn a_short_name_is_left_alone() {
         assert_eq!(namespaced("docs", "search"), "docs__search");
+    }
+}
+
+fn images(result: &rook_mcp::protocol::ToolResult) -> std::result::Result<Vec<rook_llm::Image>, String> {
+    let mut images = Vec::new();
+    for block in &result.content {
+        if let rook_mcp::protocol::Content::Image { data, mime_type } = block {
+            if images.len() >= rook_llm::images::MAX_IMAGES_PER_MESSAGE {
+                return Err("at most 4 images per tool result; request fewer images".into());
+            }
+            images.push(rook_llm::Image::from_base64(mime_type, data)?);
+        }
+    }
+    Ok(images)
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::images;
+    use rook_mcp::protocol::{Content, ToolResult};
+
+    #[test]
+    fn mcp_image_limits_apply_before_pixels_reach_the_agent() {
+        let data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+        let block = Content::Image { mime_type: "image/png".into(), data: data.into() };
+        let mixed = ToolResult {
+            content: vec![Content::Text { text: "caption".into() }, block.clone()],
+            is_error: false,
+        };
+        assert_eq!(images(&mixed).unwrap()[0].width, 1);
+        assert!(mixed.to_text().contains("caption"));
+        assert!(!mixed.to_text().contains(data));
+        let over = ToolResult { content: vec![block; 5], is_error: false };
+        assert_eq!(over.content.len(), rook_llm::images::MAX_IMAGES_PER_MESSAGE + 1);
+        assert!(images(&over).unwrap_err().contains("at most 4"));
+        for data in ["not base64".into(), "A".repeat(rook_llm::images::MAX_IMAGE_BYTES.div_ceil(3) * 4 + 1)] {
+            let bad = ToolResult {
+                content: vec![Content::Image { mime_type: "image/png".into(), data }],
+                is_error: false,
+            };
+            assert!(images(&bad).is_err());
+        }
     }
 }

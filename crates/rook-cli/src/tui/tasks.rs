@@ -348,14 +348,12 @@ impl Tasks {
                 LABELS[field],
                 field + 1
             );
-            let (row, col) = self.draft.caret();
-            let top = row.saturating_sub(editor.height.saturating_sub(3));
-            let left = col.saturating_sub(editor.width.saturating_sub(4));
-            f.render_widget(
-                Paragraph::new(self.draft.as_str()).scroll((top, left)).block(bordered(&title)),
-                editor,
-            );
-            f.set_cursor_position((editor.x + 1 + col - left, editor.y + 1 + row - top));
+            let inner = editor.inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 });
+            let (lines, (row, col)) = self.draft.view("", inner.width, inner.height);
+            f.render_widget(Paragraph::new(lines).block(bordered(&title)), editor);
+            if inner.width > 0 && inner.height > 0 {
+                f.set_cursor_position((inner.x + col, inner.y + row));
+            }
         }
         let hint = match self.editing {
             Some(1) => "once 2026-12-01 03:00 | every 30m | daily 09:00 | weekdays 09:00 | weekly fri 09:00",

@@ -119,6 +119,7 @@ impl Tool for ReadFile {
         }
 
         Ok(ToolOutcome {
+            images: Vec::new(),
             content: page.body,
             is_error: false,
             truncated: page.cut || stopped_at < total_lines || offset > 0,
@@ -971,8 +972,15 @@ impl Tool for ListDir {
         if truncated {
             body.push_str(&format!("\n[{} more entries not shown]", total - entries.len()));
         }
-        Ok(ToolOutcome { content: body, is_error: false, truncated, full_bytes: 0, meta: Default::default() }
-            .with("entries", total as u64))
+        Ok(ToolOutcome {
+            images: Vec::new(),
+            content: body,
+            is_error: false,
+            truncated,
+            full_bytes: 0,
+            meta: Default::default(),
+        }
+        .with("entries", total as u64))
     }
 }
 

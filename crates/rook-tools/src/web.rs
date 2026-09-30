@@ -128,6 +128,7 @@ impl Tool for Fetch {
             false => (page.text, false),
         };
         Ok(ToolOutcome {
+            images: Vec::new(),
             content: format!("{} {}\n\n{text}", page.status, page.url),
             is_error: !(200..300).contains(&page.status),
             truncated,
@@ -484,6 +485,7 @@ impl Tool for Search {
             false => (listed, false),
         };
         Ok(ToolOutcome {
+            images: Vec::new(),
             content: listed,
             is_error: false,
             truncated,

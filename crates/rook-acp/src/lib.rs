@@ -421,6 +421,11 @@ async fn prompt(
     let result = agent
         .run_with(&text, |progress| {
             let update = match progress {
+                Progress::Delta(Delta::Effort(report)) => protocol::agent_thought_chunk(
+                    &session_id,
+                    &format!("[request: {}]\n", report.describe()),
+                    &part(1),
+                ),
                 Progress::Delta(Delta::Text(text)) => {
                     protocol::agent_message_chunk(&session_id, text, &part(2))
                 }
@@ -481,8 +486,9 @@ async fn prompt(
                     &format!("call_{}", finished.fetch_add(1, Ordering::Relaxed)),
                     failed,
                 ),
-                // The protocol has no slot for a running total, and inventing
-                // one as a thought would put accounting in the transcript.
+                Progress::Context { used, size } => protocol::usage_update(&session_id, used, size),
+                // Cumulative token spend is not context usage or a monetary
+                // cost. Only the dedicated context event maps to ACP usage.
                 // Nothing to show: the block is the wire's copy of what
                 // `Reasoning` already streamed to the person.
                 // A step counter has no slot either: the editor draws its
@@ -497,8 +503,7 @@ async fn prompt(
         })
         .await;
 
-    // The protocol has no slot for these either, and unlike a running total
-    // they are for the person, so they go out as the last thing said.
+    // Decisions and change summaries go out as the last thing said.
     if let Ok(outcome) = &result {
         let mut said = String::new();
         if let Some(note) = outcome.changed_note() {

@@ -1006,6 +1006,11 @@ fn ended_goal(rook: &rook_core::Rook, outbound: &mpsc::UnboundedSender<ChatEvent
 /// already been given.
 fn as_event(progress: Progress<'_>, workspace: &std::path::Path) -> Option<ChatEvent> {
     Some(match progress {
+        Progress::Delta(Delta::Effort(report)) => ChatEvent::ModelRequest {
+            model: report.provider.clone(),
+            requested_effort: report.requested.as_str().into(),
+            effort: report.applied.describe(),
+        },
         Progress::Delta(Delta::Text(text)) => ChatEvent::Text { text: text.clone() },
         Progress::Delta(Delta::Reasoning(text)) => ChatEvent::Reasoning { text: text.clone() },
         Progress::Delta(Delta::ToolCall(call)) => ChatEvent::Tool {
@@ -1038,6 +1043,7 @@ fn as_event(progress: Progress<'_>, workspace: &std::path::Path) -> Option<ChatE
             name: "model".to_string(),
             said: rook_core::calls::waiting(secs, patience),
         },
+        Progress::Context { used, size } => ChatEvent::Context { used, size },
         Progress::Spent { input, output, cached } => {
             ChatEvent::Spent { input_tokens: input, output_tokens: output, cached_tokens: cached }
         }
@@ -1496,6 +1502,23 @@ mod tests {
             told.as_bytes(),
             "what the window was told and what the session records are the same reason"
         );
+    }
+
+    #[test]
+    fn accepted_request_effort_is_separate_from_the_configured_setting() {
+        let report = rook_llm::EffortReport {
+            provider: "fallback-model".into(),
+            requested: rook_llm::Effort::Max,
+            applied: rook_llm::EffortUse::Parameter { name: "reasoning_effort", value: "high".into() },
+        };
+        let delta = rook_llm::Delta::Effort(report);
+        let event = as_event(Progress::Delta(&delta), std::path::Path::new("."));
+        let value = serde_json::to_value(event.unwrap()).unwrap();
+        assert_eq!(value["type"], "model_request");
+        assert_eq!(value["model"], "fallback-model");
+        assert_eq!(value["requested_effort"], "max");
+        assert_eq!(value["effort"], "sent reasoning_effort=high");
+        assert!(serde_json::from_value::<ChatEvent>(value).is_ok());
     }
 
     /// A sub-agent working is told apart from the model thinking.
