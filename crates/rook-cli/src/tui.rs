@@ -2776,6 +2776,9 @@ impl App {
             (Some(Overlay::Sessions), MouseEventKind::ScrollDown) => {
                 self.transcript_scroll = self.transcript_scroll.saturating_add(BY)
             }
+            (Some(Overlay::Queue), MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) => {
+                self.queue.scroll(wheel)
+            }
             _ => {}
         }
     }

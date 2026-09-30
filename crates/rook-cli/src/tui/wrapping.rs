@@ -26,7 +26,7 @@ impl Geometry {
         Self { width, gutter: Line::from(prompt).width().min(width.saturating_sub(3)) }
     }
 
-    fn walk(&self, text: &str, mut visit: impl FnMut(usize, usize, usize, &str, usize) -> bool) {
+    pub(super) fn walk(&self, text: &str, mut visit: impl FnMut(usize, usize, usize, &str, usize) -> bool) {
         let capacity = self.width.saturating_sub(self.gutter + 1).max(1);
         let (mut row, mut column) = (0, 0);
         for (byte, symbol) in text.grapheme_indices(true) {
@@ -52,6 +52,38 @@ impl Geometry {
             }
         }
         visit(text.len(), row, column, "", 0);
+    }
+
+    /// Render a bounded row window from a known row boundary. The caller may
+    /// index a much larger text without retaining every rendered row.
+    pub(super) fn window(&self, text: &str, first: usize, height: u16) -> Vec<Line<'static>> {
+        let mut lines = Vec::with_capacity(usize::from(height));
+        if self.width == 0 || height == 0 {
+            return lines;
+        }
+        self.walk(text, |_, row, _, symbol, cells| {
+            if row < first {
+                return true;
+            }
+            if row >= first.saturating_add(usize::from(height)) {
+                return false;
+            }
+            while lines.len() <= row - first {
+                lines.push(Line::default());
+            }
+            if cells > 0 {
+                let visible = if symbol == "\t" {
+                    " ".repeat(cells)
+                } else if Span::raw(symbol).width() > cells {
+                    "�".into()
+                } else {
+                    symbol.to_owned()
+                };
+                lines.last_mut().expect("visible row").spans.push(Span::raw(visible));
+            }
+            true
+        });
+        lines
     }
 
     pub(super) fn measure(&self, text: &str, at: usize) -> (usize, (usize, usize)) {

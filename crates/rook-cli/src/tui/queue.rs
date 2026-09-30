@@ -1,6 +1,7 @@
 //! One worker and one pending operation keep queue I/O off the terminal thread.
 use super::*;
 use rook_proto::queue::{Change, Entry, Page, Query};
+use std::cell::{Cell, RefCell};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 
 enum Command {
@@ -16,6 +17,13 @@ enum Update {
     Page(Page),
     Read(Entry, bool),
     Changed(Entry, bool),
+}
+#[derive(Default)]
+struct DetailIndex {
+    width: u16,
+    rows: usize,
+    /// One byte offset every 256 rendered rows, bounded by message bytes.
+    checkpoints: Vec<(usize, usize)>,
 }
 impl Command {
     fn run(self, source: &crate::source::Source, session: u128) -> Result<Update> {
@@ -50,6 +58,9 @@ pub(super) struct Queue {
     page: Option<Page>,
     entry: Option<Entry>,
     at: usize,
+    detail_scroll: Cell<usize>,
+    detail_max: Cell<usize>,
+    detail_index: RefCell<DetailIndex>,
     all: bool,
     editing: bool,
     input: Typing,
@@ -86,6 +97,9 @@ impl Queue {
             page: None,
             entry: None,
             at: 0,
+            detail_scroll: Cell::new(0),
+            detail_max: Cell::new(0),
+            detail_index: RefCell::new(DetailIndex::default()),
             all: false,
             editing: false,
             input: Typing::default(),
@@ -113,6 +127,8 @@ impl Queue {
         self.editing = false;
         self.page = None;
         self.at = 0;
+        self.detail_scroll.set(0);
+        self.detail_index.get_mut().width = 0;
         if session.is_some() {
             self.refresh(None);
         } else {
@@ -227,6 +243,8 @@ impl Queue {
                     self.page = Some(page);
                     self.entry = None;
                     self.at = 0;
+                    self.detail_scroll.set(0);
+                    self.detail_index.get_mut().width = 0;
                     self.note = format!(
                         "{}e edits · d withdraws · q withdraws into draft · a toggles finished · r refreshes · n next · Esc closes",
                         self.page
@@ -237,6 +255,8 @@ impl Queue {
                     );
                 }
                 Ok(Update::Read(entry, edit)) => {
+                    self.detail_scroll.set(0);
+                    self.detail_index.get_mut().width = 0;
                     self.editing = edit
                         && entry.receipt.queued()
                         && entry.receipt.follow_up.as_ref().is_none_or(|f| f.reserved.is_none());
@@ -302,6 +322,18 @@ impl Queue {
             }
         }
     }
+    pub(super) fn scroll(&mut self, wheel: MouseEventKind) {
+        if self.editing {
+            return;
+        }
+        match wheel {
+            MouseEventKind::ScrollUp => self.detail_scroll.set(self.detail_scroll.get().saturating_sub(3)),
+            MouseEventKind::ScrollDown => {
+                self.detail_scroll.set(self.detail_scroll.get().saturating_add(3).min(self.detail_max.get()))
+            }
+            _ => {}
+        }
+    }
     pub(super) fn key(&mut self, key: crossterm::event::KeyEvent) -> bool {
         if self.pending {
             return key.code == KeyCode::Esc;
@@ -365,6 +397,10 @@ impl Queue {
         }
         match key.code {
             KeyCode::Esc => return true,
+            KeyCode::PageUp => self.detail_scroll.set(self.detail_scroll.get().saturating_sub(8)),
+            KeyCode::PageDown => {
+                self.detail_scroll.set(self.detail_scroll.get().saturating_add(8).min(self.detail_max.get()))
+            }
             KeyCode::Char('r') => self.refresh(None),
             KeyCode::Char('a') => {
                 self.all = !self.all;
@@ -377,11 +413,15 @@ impl Queue {
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 self.entry = None;
+                self.detail_scroll.set(0);
+                self.detail_index.get_mut().width = 0;
                 self.at =
                     (self.at + 1).min(self.page.as_ref().map_or(0, |p| p.items.len().saturating_sub(1)));
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 self.entry = None;
+                self.detail_scroll.set(0);
+                self.detail_index.get_mut().width = 0;
                 self.at = self.at.saturating_sub(1);
             }
             KeyCode::Enter | KeyCode::Char('e') => {
@@ -459,36 +499,66 @@ impl Queue {
                 f.set_cursor_position((inside.x + column, inside.y + row));
             }
         } else {
-            let text = self
-                .selected()
-                .map(|entry| {
-                    format!(
-                        "{} · revision {}{}{}\n\n{}",
-                        entry.reference,
-                        entry.receipt.revision,
-                        entry
-                            .receipt
-                            .follow_up
-                            .as_ref()
-                            .map(|f| format!(
-                                "\nFollow-up after {}{}{}",
-                                f.after,
-                                if f.reserved.is_some() { " · reserved" } else { "" },
-                                f.blocked.as_ref().map(|r| format!(" · stopped: {r}")).unwrap_or_default()
-                            ))
-                            .unwrap_or_default(),
-                        if entry.truncated { " · shortened; Enter reads full text" } else { "" },
-                        entry.receipt.text
-                    )
-                })
-                .unwrap_or_else(|| "No messages on this page. r refreshes.".into());
-            f.render_widget(
-                Paragraph::new(text).wrap(Wrap { trim: false }).block(Block::bordered().title(format!(
-                    " Message · {} ",
-                    self.session.map(rook_store::format_session_id).unwrap_or_default()
-                ))),
-                body,
-            );
+            let block = Block::bordered().title(format!(
+                " Message · {} · PgUp/PgDn scroll ",
+                self.session.map(rook_store::format_session_id).unwrap_or_default()
+            ));
+            let inside = block.inner(body);
+            f.render_widget(block, body);
+            if let Some(entry) = self.selected() {
+                let header = format!(
+                    "{} · revision {}{}{}",
+                    entry.reference,
+                    entry.receipt.revision,
+                    entry
+                        .receipt
+                        .follow_up
+                        .as_ref()
+                        .map(|follow_up| format!(
+                            " · follow-up after {}{}{}",
+                            follow_up.after,
+                            if follow_up.reserved.is_some() { " · reserved" } else { "" },
+                            follow_up
+                                .blocked
+                                .as_ref()
+                                .map(|reason| format!(" · stopped: {reason}"))
+                                .unwrap_or_default()
+                        ))
+                        .unwrap_or_default(),
+                    if entry.truncated { " · shortened; Enter reads full text" } else { "" },
+                );
+                let header_height = inside.height.min(2);
+                let header_area = Rect { height: header_height, ..inside };
+                f.render_widget(Paragraph::new(header).wrap(Wrap { trim: false }), header_area);
+                let text_area =
+                    Rect { y: inside.y + header_height, height: inside.height - header_height, ..inside };
+                let geometry = wrapping::Geometry::new("", text_area.width);
+                let mut index = self.detail_index.borrow_mut();
+                if index.width != text_area.width || index.rows == 0 {
+                    let mut rows = 0;
+                    let mut checkpoints = Vec::new();
+                    let mut next = 0;
+                    geometry.walk(&entry.receipt.text, |byte, row, column, _, _| {
+                        rows = row + 1;
+                        if column == 0 && row >= next {
+                            checkpoints.push((row, byte));
+                            next = row.saturating_add(256);
+                        }
+                        true
+                    });
+                    *index = DetailIndex { width: text_area.width, rows, checkpoints };
+                }
+                let maximum = index.rows.saturating_sub(usize::from(text_area.height));
+                self.detail_max.set(maximum);
+                let offset = self.detail_scroll.get().min(maximum);
+                self.detail_scroll.set(offset);
+                let &(row, byte) =
+                    index.checkpoints.iter().rev().find(|(row, _)| *row <= offset).unwrap_or(&(0, 0));
+                let lines = geometry.window(&entry.receipt.text[byte..], offset - row, text_area.height);
+                f.render_widget(Paragraph::new(lines), text_area);
+            } else {
+                f.render_widget(Paragraph::new("No messages on this page. r refreshes."), inside);
+            }
         }
         f.render_widget(Paragraph::new(self.note.as_str()).wrap(Wrap { trim: false }), note);
     }
@@ -510,6 +580,9 @@ mod tests {
                 page: None,
                 entry: None,
                 at: 0,
+                detail_scroll: Cell::new(0),
+                detail_max: Cell::new(0),
+                detail_index: RefCell::new(DetailIndex::default()),
                 all: false,
                 editing: false,
                 input: Typing::default(),
@@ -525,6 +598,67 @@ mod tests {
             commands,
             updates,
         )
+    }
+
+    fn screen(queue: &Queue) -> String {
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(52, 20)).unwrap();
+        terminal.draw(|frame| queue.draw(frame, frame.area())).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..20)
+            .map(|y| (0..52).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn read_only_queue_detail_scrolls_to_the_last_line_and_back_without_changing_the_receipt() {
+        let (mut queue, _, _) = window(4096);
+        queue.session = Some(42);
+        let text = (0..30).map(|n| format!("line-{n:02}")).collect::<Vec<_>>().join("\n");
+        queue.entry = Some(
+            serde_json::from_value(serde_json::json!({
+                "reference": "session.long", "truncated": false,
+                "receipt": { "id": "long", "text": text, "submitted_at": 1,
+                             "applied_at": null, "session": null }
+            }))
+            .unwrap(),
+        );
+        let initial = screen(&queue);
+        assert!(initial.contains("line-00"), "{initial}");
+        queue.key(crossterm::event::KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        let scrolled = screen(&queue);
+        assert!(!scrolled.contains("line-00") && scrolled.contains("line-08"), "{scrolled}");
+        for _ in 0..30 {
+            queue.key(crossterm::event::KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        }
+        let end = screen(&queue);
+        assert!(end.contains("line-29"), "{end}");
+        assert_eq!(queue.detail_scroll.get(), queue.detail_max.get());
+        queue.scroll(MouseEventKind::ScrollUp);
+        assert!(queue.detail_scroll.get() < queue.detail_max.get());
+        assert_eq!(queue.entry.as_ref().unwrap().receipt.text, text);
+    }
+
+    #[test]
+    fn queue_detail_can_reach_past_the_terminal_widget_scroll_limit() {
+        let (mut queue, _, _) = window(8 * 1024 * 1024);
+        queue.session = Some(42);
+        let text = format!("{}TAIL_MARK", "x\n".repeat(66_000));
+        queue.entry = Some(
+            serde_json::from_value(serde_json::json!({
+                "reference": "session.long", "truncated": false,
+                "receipt": { "id": "long", "text": text, "submitted_at": 1,
+                             "applied_at": null, "session": null }
+            }))
+            .unwrap(),
+        );
+        screen(&queue);
+        assert!(queue.detail_index.borrow().rows > u16::MAX as usize);
+        for _ in 0..9_000 {
+            queue.key(crossterm::event::KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        }
+        let end = screen(&queue);
+        assert!(end.contains("TAIL_MARK"), "last line remained unreachable: {end}");
     }
 
     #[test]

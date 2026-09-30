@@ -115,6 +115,8 @@ usable while a turn runs; one background worker performs queue requests.
   be withdrawn or restored through this action.
 - **r** refreshes, **a** includes accepted/withdrawn receipts, **n** reads the next
   page, and Enter reads a selected message. Arrow keys select a receipt.
+- PageUp/PageDown or the mouse wheel scroll the read-only message detail. The
+  position resets when another receipt is selected; editing has its own cursor.
 
 In the browser, expand **Message queue** under the conversation. Use **Edit
 message**, **Withdraw message**, or **Withdraw to draft**. The prompt supports

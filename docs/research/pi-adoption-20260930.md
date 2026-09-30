@@ -775,3 +775,26 @@ the context refactor and a Unix-only command in an existing agent-loop test;
 both failed checks were fixed and passed individually. The final `cargo xtask ci`
 exited 0 (`ci: ok`, 335.5 seconds). `cargo xtask compaction` exited 0 and kept
 the published 4.02 MiB, 37.1x dictionary and 5.8x end-to-end measurements.
+
+## Read-only queue detail scrolling
+
+The TUI queue panel now scrolls the full read-only message with PageUp/PageDown
+or the mouse wheel. The offset resets when a different receipt or page is
+selected; the edit field keeps its own cursor and scroll behavior. The rendered
+row count and a sparse byte index are cached by viewport width, so a long
+message is not measured anew or copied into a display string on every frame.
+The same panel works with local and daemon queue reads; no
+queue protocol or stored record changed. A TestBackend check reached the last
+line, scrolled back with the wheel, reached a row beyond the widget's 65,535-row
+scroll limit, and verified that the receipt text stayed unchanged. The Windows
+PTY target is disabled, so live TUI key delivery in both
+modes remains to be checked on a Unix runner.
+
+Queue admission identity for legacy callers, live notices from old mutation
+routes and remaining lifecycle/frontend parity cases are still open. The
+broader Pi adoption scope remains the table above.
+
+Both focused queue-render tests exited 0. The final `cargo xtask ci` exited 0
+(`ci: ok`, 388.0 seconds), including the queue unit tests. No store format or
+retention code changed, so the preceding block's compaction measurement remains
+the latest storage check.
