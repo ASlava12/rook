@@ -180,6 +180,7 @@ pub fn start(rook: &Rook, request: Start) -> Result<Run> {
     }
     let at = now();
     let run = Run {
+        generation: rook_store::format_session_id(rook_store::new_session_id()),
         id: conversation.unwrap_or_else(|| rook_store::format_session_id(rook_store::new_session_id())),
         conversation: request.conversation,
         workspace,

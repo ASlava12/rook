@@ -70,7 +70,7 @@ td.t{font-family:inherit}
 .stream .decided,.stream .open{border-left:3px solid var(--line);padding:.3rem .7rem;margin:.2rem 0}
 .stream .open{border-left-color:var(--warn)}
 form.ask{display:flex;gap:.5rem;margin-top:.8rem}
-form.ask input{flex:1;padding:.55rem .7rem;border:1px solid var(--line);border-radius:6px;
+form.ask textarea{flex:1;min-width:0;resize:vertical;max-height:18rem;padding:.55rem .7rem;border:1px solid var(--line);border-radius:6px;
   background:var(--bg);color:var(--fg);font:inherit}
 .row{display:flex;gap:.5rem;margin:.5rem 0;align-items:center;flex-wrap:wrap}
 .row label{color:var(--dim);font-size:.82rem}
@@ -78,12 +78,13 @@ form.ask input{flex:1;padding:.55rem .7rem;border:1px solid var(--line);border-r
   border-radius:4px;padding:.2rem .3rem;font:inherit}
 .row input{flex:1}
 .row textarea{flex:1;min-width:12rem;min-height:3rem;max-width:100%;resize:vertical}
+.queue-controls textarea{width:100%;min-height:8rem;resize:vertical;background:var(--panel);color:var(--fg);border:1px solid var(--line);font:inherit}
 button.quiet{background:none;border:0;color:var(--dim);cursor:pointer;font:inherit;
   font-size:.75rem;padding:.1rem 0}
 button.quiet:hover{color:var(--fg)}
 .muted{color:var(--dim);font-size:.82rem}
 #maintenance-report{white-space:pre-wrap;font-family:var(--mono);margin:0}
-form.ask button,.row button,.approve button,.ask-form button{padding:.5rem .9rem;border:1px solid var(--line);
+form.ask button,.queue-controls button,.row button,.approve button,.ask-form button{padding:.5rem .9rem;border:1px solid var(--line);
   border-radius:6px;background:var(--panel);color:var(--fg);cursor:pointer;font:inherit}
 form.ask button[disabled]{opacity:.5;cursor:default}
 /* Files a mention names. The first is what Tab takes, and says so by looking

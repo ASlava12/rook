@@ -3,6 +3,7 @@
 import { $, el, api, ago, md, state, nav, notify, askToNotify } from './lib.js';
 import { historyPanel } from './history.js';
 import { mcpPanel } from './mcp.js';
+import { queuePanel, takeRestored } from './queue.js';
 
 // Scrollback, not the record: the session holds every word of this and the
 // sessions tab reads it back, so a tab left open for a day need not keep an
@@ -364,7 +365,23 @@ function renderSettings() {
 
 // Which session the next prompt goes to: a new one, or any of the recent
 // ones, whose transcript is read back into the stream when chosen.
+function receiveQueueDraft() {
+  const text = takeRestored(state.chat.session);
+  if (text === null) return;
+  const input = $('#chat-input');
+  const draft = input?.value ?? state.chat.draft ?? '';
+  state.chat.draft = draft + (draft ? '\n\n' : '') + text;
+  if (input) { input.value = state.chat.draft; input.focus(); }
+}
+
 function renderPicker() {
+  receiveQueueDraft();
+  const queue = $('#queue-controls');
+  if (queue && queue.dataset.session !== (state.chat.session || '')) {
+    queue.dataset.session = state.chat.session || '';
+    queue.querySelector('section')?.remove();
+    if (queue.open) queue.append(queuePanel(state.chat.session, receiveQueueDraft));
+  }
   const mcp = $('#mcp-controls');
   if (mcp && mcp.dataset.session !== (state.chat.session || '')) {
     mcp.dataset.session = state.chat.session || '';
@@ -475,7 +492,7 @@ async function offer(input, row) {
 export async function renderChat() {
   try { state.chat.sessions = (await api('/api/sessions')).items.slice(0, 30); } catch { state.chat.sessions = []; }
   const stream = el('div', { class: 'stream', id: 'stream' });
-  const input = el('input', { id: 'chat-input', value: state.chat.draft || '', placeholder: 'Ask the agent… (Esc stops a running turn)', autofocus: true });
+  const input = el('textarea', { id: 'chat-input', rows: 3, 'aria-label': 'Prompt', placeholder: 'Ask the agent… (Enter sends, Shift+Enter adds a line, Esc stops)', autofocus: true }, state.chat.draft || '');
   const sendButton = el('button', { id: 'send', type: 'submit' }, 'Send');
   const stopButton = el('button', { id: 'stop', type: 'button', hidden: true, onclick: stop }, 'Stop');
 
@@ -562,6 +579,11 @@ export async function renderChat() {
   input.addEventListener('input', () => { state.chat.draft = input.value; offer(input, naming); });
   input.addEventListener('keydown', (e) => {
     const offered = naming.firstElementChild;
+    if (e.key === 'Enter' && !e.shiftKey && !e.altKey && !e.isComposing) {
+      e.preventDefault();
+      form.requestSubmit();
+      return;
+    }
     if (e.key === 'Tab' && offered) {
       // Tab moves focus by default, which here means leaving the box you are
       // still typing in.
@@ -590,10 +612,15 @@ export async function renderChat() {
     mcp.querySelector('section')?.remove();
     if (mcp.open) mcp.append(mcpPanel(state.chat.session));
   });
+  const queue = el('details', { id: 'queue-controls' }, el('summary', {}, 'Message queue'));
+  queue.addEventListener('toggle', () => {
+    queue.querySelector('section')?.remove();
+    if (queue.open) queue.append(queuePanel(state.chat.session, receiveQueueDraft));
+  });
   $('#view').replaceChildren(el('div', { class: 'card' },
     el('div', { class: 'row', id: 'picker' }),
     el('div', { class: 'row', id: 'settings' }),
-    stream, history, mcp, outputSettings, form, naming));
+    stream, history, mcp, queue, outputSettings, form, naming));
   renderPicker();
   renderSettings();
   connect();

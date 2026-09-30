@@ -101,6 +101,59 @@ Creation supports `--stance`, `--seconds`, `--tokens`, `--max-iterations` and
 steering/control commands remain for compatibility with existing runs; they
 are not the Tasks panel. Use `/goal` for immediate conversational work.
 
+## Edit or withdraw queued messages
+
+Open **message queue** from Ctrl-P, or type `/queue`, in the TUI. The panel shows
+pending messages from both the ordinary session and its current goal. It remains
+usable while a turn runs; one background worker performs queue requests.
+
+- **e** loads the selected message for editing. Ctrl-S saves, Enter adds a line,
+  and Escape cancels the edit. A conflict retains the unsaved text.
+- **d** withdraws the selected pending message.
+- **q** withdraws it and appends its complete text to the prompt draft. Existing
+  draft text is retained; this does not send a prompt. An accepted message cannot
+  be withdrawn or restored through this action.
+- **r** refreshes, **a** includes accepted/withdrawn receipts, **n** reads the next
+  page, and Enter reads a selected message. Arrow keys select a receipt.
+
+In the browser, expand **Message queue** under the conversation. Use **Edit
+message**, **Withdraw message**, or **Withdraw to draft**. The prompt supports
+multiple lines: Enter sends, Shift+Enter or Alt+Enter adds a line. A withdrawal
+that finishes after switching sessions keeps its draft handoff for the original
+session; it never appends to the other session while that session is selected.
+
+The CLI exposes the same operations locally and through the daemon:
+
+```sh
+rook session queue SESSION_ID
+rook session queue SESSION_ID list --all
+rook session queue SESSION_ID show REFERENCE
+rook session queue SESSION_ID edit REFERENCE --revision 2 "revised guidance"
+rook session queue SESSION_ID withdraw REFERENCE --revision 2
+```
+
+Use the opaque reference and revision printed by the queue; do not construct a
+reference from a visible row number. Goal references identify the particular goal
+run, so an editor left open across a new `/goal` cannot change that new goal's
+messages. Refresh after a conflict. Read-only views do not start or resume work.
+
+`GET /api/sessions/{id}/queue` returns the combined pending view. Query parameters
+are `include_finished=true` and `after=<next reference>`. Page size, byte budget
+and preview size use `transcript.page_entries`, `page_bytes` and `body_bytes`.
+Full text is available at `GET /api/sessions/{id}/queue/{reference}`. To edit or
+withdraw, POST to the combined queue with JSON matching one of these forms:
+
+```json
+{"action":"edit","reference":"REFERENCE","revision":2,"text":"revised guidance"}
+{"action":"withdraw","reference":"REFERENCE","revision":2}
+```
+
+The reference and revision are rechecked while holding the mutation lock. The
+older scope-specific routes below remain available for compatibility; new clients
+should use the combined view and mutation routes for generation protection.
+Follow-up execution after a complete ordinary turn or whole goal is still being
+implemented; this panel currently manages steering messages.
+
 ## Steering receipts
 
 Messages sent while an ordinary daemon-owned turn is running are saved in its
@@ -137,8 +190,6 @@ New submissions during a goal use the work queue.
 withdrawn ones needed to recognize retries. At the limit, use a new session or
 raise the setting. `work.max_message_bytes` limits each message before copying it
 into a receipt. Deleting or pruning an ordinary session removes its queue too.
-The HTTP controls are available now; an interactive queue editor and follow-up
-execution after a complete turn or goal are still being implemented.
 
 ## Keep the daemon available
 

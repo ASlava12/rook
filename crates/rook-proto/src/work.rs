@@ -115,6 +115,9 @@ pub struct Iteration {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Run {
     pub id: String,
+    /// Distinguishes successive goals in the same conversation.
+    #[serde(default)]
+    pub generation: String,
     #[serde(default)]
     pub conversation: Option<Conversation>,
     pub workspace: String,

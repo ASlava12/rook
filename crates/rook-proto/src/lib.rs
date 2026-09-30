@@ -20,6 +20,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod queue;
 pub mod schedule;
 pub mod work;
 

@@ -427,6 +427,12 @@ pub(crate) enum StoreCmd {
 
 #[derive(Subcommand)]
 pub(crate) enum SessionCmd {
+    /// Inspect, edit or withdraw queued messages without starting a turn.
+    Queue {
+        id: String,
+        #[command(subcommand)]
+        action: Option<QueueCmd>,
+    },
     /// Export bounded diagnostics; conversation content is excluded by default.
     Diagnostics {
         id: String,
@@ -546,6 +552,33 @@ pub(crate) enum SessionCmd {
         /// Rewind the conversation only, leaving files as they are.
         #[arg(long)]
         keep_files: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum QueueCmd {
+    /// Read a bounded page. Pending messages are shown by default.
+    List {
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        after: Option<String>,
+    },
+    /// Read the complete text of one receipt.
+    Show { reference: String },
+    /// Replace pending text using the revision shown in the queue.
+    Edit {
+        reference: String,
+        #[arg(long)]
+        revision: u64,
+        #[arg(required = true, trailing_var_arg = true)]
+        text: Vec<String>,
+    },
+    /// Withdraw pending text; accepted messages cannot be recalled.
+    Withdraw {
+        reference: String,
+        #[arg(long)]
+        revision: u64,
     },
 }
 

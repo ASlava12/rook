@@ -74,6 +74,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("output", "[path|off]", "save the final answer inside the workspace"),
     ("schema", "[file|off]", "validate the final answer against JSON Schema"),
     ("schema-retries", "[0..3]", "format-only correction attempts"),
+    ("queue", "", "inspect pending messages; the TUI opens an editable queue"),
     ("context", "[window]", "what this conversation costs, and of what"),
     ("skills", "[name]", "skills that apply here, or one skill's body"),
     ("session", "[id|last]", "this one's totals, or continue another"),
@@ -325,6 +326,30 @@ async fn through_the_daemon(
             let (name, rest) = command.split_once(' ').unwrap_or((command, ""));
             match name {
                 "quit" | "exit" => break,
+                "queue" => {
+                    if let Some(session) = session.as_deref() {
+                        let client = reqwest::Client::builder()
+                            .no_proxy()
+                            .timeout(std::time::Duration::from_secs(30))
+                            .build()?;
+                        let mut response = client
+                            .get(format!("{}/api/sessions/{session}/queue", daemon.base))
+                            .send()
+                            .await?
+                            .error_for_status()?;
+                        let mut bytes = Vec::new();
+                        while let Some(chunk) = response.chunk().await? {
+                            anyhow::ensure!(
+                                chunk.len() <= (2 * 1024 * 1024usize).saturating_sub(bytes.len()),
+                                "queue response exceeds 2 MiB"
+                            );
+                            bytes.extend_from_slice(&chunk);
+                        }
+                        println!("{}", crate::commands::queue::describe(&serde_json::from_slice(&bytes)?)?);
+                    } else {
+                        eprintln!("start or resume a session first");
+                    }
+                }
                 "diagnostics" => {
                     if let Some(session) = session.as_deref().and_then(rook_store::parse_session_id) {
                         let result: Result<String> = async {
@@ -641,6 +666,10 @@ pub async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command
     match name {
         "quit" | "exit" | "q" => return Ok(Said { text: String::new(), quit: true }),
         "help" | "?" => say!("{}", help_text()),
+        "queue" => {
+            let page = rook_core::message_queue::view::page(rook, *session, &Default::default())?;
+            say!("{}", crate::commands::queue::describe(&serde_json::to_value(page)?)?);
+        }
         "task" => {
             say!("Use F4 in `rook tui` to manage scheduled tasks. /goal starts work in the current session.")
         }

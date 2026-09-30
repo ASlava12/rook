@@ -153,7 +153,7 @@ pub fn shorten_thinking(text: &str, budget_tokens: usize) -> String {
 
 /// The largest offset no further than `bytes` into `text` that is a character
 /// boundary — thinking is prose in whatever language the model thinks in.
-fn at_boundary(text: &str, bytes: usize) -> usize {
+pub(crate) fn at_boundary(text: &str, bytes: usize) -> usize {
     let bytes = bytes.min(text.len());
     (0..=bytes).rev().find(|at| text.is_char_boundary(*at)).unwrap_or(0)
 }

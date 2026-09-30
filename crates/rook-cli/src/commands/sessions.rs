@@ -31,6 +31,15 @@ pub(crate) fn diagnostic_arguments(arguments: &str) -> Result<(bool, std::path::
 }
 
 pub(crate) fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, json: bool) -> Result<()> {
+    if let SessionCmd::Queue { id, action } = &cmd {
+        let session = source.session_named(id, workspace)?;
+        let value = super::queue::execute(source, session, action.as_ref())?;
+        println!(
+            "{}",
+            if json { serde_json::to_string_pretty(&value)? } else { super::queue::describe(&value)? }
+        );
+        return Ok(());
+    }
     if let SessionCmd::Diagnostics { id, output, logs } = &cmd {
         let report = source.diagnostics(source.session_named(id, workspace)?, *logs)?;
         match output {
@@ -160,7 +169,8 @@ pub(crate) fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, js
         return show_rewind(&source.rewind(session, *to, !keep_files)?, *keep_files, json);
     }
     match cmd {
-        SessionCmd::History { .. }
+        SessionCmd::Queue { .. }
+        | SessionCmd::History { .. }
         | SessionCmd::Find { .. }
         | SessionCmd::Entry { .. }
         | SessionCmd::Quote { .. }

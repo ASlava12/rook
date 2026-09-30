@@ -37,6 +37,7 @@ mod history;
 mod keys;
 mod mcp;
 mod mcp_auth;
+mod queue;
 mod tasks;
 
 /// What is over the conversation, when anything is.
@@ -59,6 +60,7 @@ enum Overlay {
     Sessions,
     History,
     Mcp,
+    Queue,
     Memory,
     Skills,
     Store,
@@ -70,12 +72,13 @@ enum Overlay {
 
 impl Overlay {
     /// The panes the palette offers, in the order somebody reaches for them.
-    const PANES: [Overlay; 12] = [
+    const PANES: [Overlay; 13] = [
         Overlay::Calls,
         Overlay::Tasks,
         Overlay::Sessions,
         Overlay::History,
         Overlay::Mcp,
+        Overlay::Queue,
         Overlay::Models,
         Overlay::Docs,
         Overlay::Memory,
@@ -93,6 +96,7 @@ impl Overlay {
             Overlay::Sessions => "sessions",
             Overlay::History => "history",
             Overlay::Mcp => "mcp connections",
+            Overlay::Queue => "message queue",
             Overlay::Memory => "memory",
             Overlay::Skills => "skills",
             Overlay::Store => "store",
@@ -112,6 +116,7 @@ impl Overlay {
             Overlay::Sessions => "past conversations — enter continues one here",
             Overlay::History => "find, jump and quote messages in this conversation",
             Overlay::Mcp => "tool server status and reconnect",
+            Overlay::Queue => "edit or withdraw pending messages, or return one to the draft",
             Overlay::Memory => "what the agent believes, and how to correct it",
             Overlay::Skills => "what applies in this workspace, and why",
             Overlay::Store => "what memory costs, per kind of object",
@@ -140,6 +145,13 @@ impl Overlay {
             Overlay::Sessions => {
                 &[("j/k ", "move  "), ("⏎ ", "continue  "), ("f ", "history  "), ("r ", "reload  ")]
             }
+            Overlay::Queue => &[
+                ("e ", "edit  "),
+                ("d ", "withdraw  "),
+                ("q ", "to draft  "),
+                ("r ", "refresh  "),
+                ("Esc ", "close"),
+            ],
             Overlay::Mcp => &[
                 ("↑↓ ", "choose  "),
                 ("r ", "reconnect  "),
@@ -1215,6 +1227,7 @@ struct App {
     chat: Chat,
     tasks: tasks::Tasks,
     mcp: mcp::Connections,
+    queue: queue::Queue,
     editor: Option<editor::Picker>,
     /// Whether this window is taking the mouse, and so whether the terminal's
     /// own selection works.
@@ -1370,6 +1383,7 @@ impl App {
 
         let tasks = tasks::Tasks::new(&source, &runtime, &config.work);
         let history = history::History::new(&source);
+        let queue = queue::Queue::new(&source);
         let mcp_controls = mcp::Connections::new(&source, &runtime, mcp.clone());
         let (bindings, binding_error) = match config.tui.bindings() {
             Ok(bindings) => (bindings, None),
@@ -1383,6 +1397,7 @@ impl App {
         let mut app = Self {
             bindings,
             mcp: mcp_controls,
+            queue,
             tasks,
             history,
             editor: None,
@@ -1613,6 +1628,16 @@ impl App {
             self.tasks.poll();
             self.history.poll();
             self.mcp.poll();
+            if let Some(text) = self.queue.poll(self.chat.session) {
+                if !self.chat.input.text.is_empty() {
+                    self.chat.input.paste("\n\n");
+                }
+                self.chat.input.paste(&text);
+                if self.overlay == Some(Overlay::Queue) {
+                    self.overlay = None;
+                }
+                self.chat.push("stat", "Message withdrawn and appended to draft; it has not been sent.");
+            }
             if let Some(quote) = self.history.take_quote()
                 && self.overlay == Some(Overlay::History)
             {
@@ -2085,6 +2110,13 @@ impl App {
             }
             return;
         }
+        if self.overlay == Some(Overlay::Queue)
+            && key.code == KeyCode::Char('s')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            self.on_overlay_key(Overlay::Queue, key);
+            return;
+        }
         if let Some(action) = self.bindings.action(&keys::name(key), false) {
             self.on_action(action);
             return;
@@ -2112,6 +2144,7 @@ impl App {
             Some(Overlay::Palette) => self.palette.paste(text),
             Some(Overlay::Tasks) => self.tasks.paste(text),
             Some(Overlay::History) => self.history.paste(text),
+            Some(Overlay::Queue) => self.queue.paste(text),
             // The one-line boxes take a paste as one line: a fact or a topic
             // with a newline in it is not two of them.
             Some(Overlay::Memory) => {
@@ -2126,6 +2159,12 @@ impl App {
     }
 
     fn on_overlay_key(&mut self, overlay: Overlay, key: crossterm::event::KeyEvent) {
+        if overlay == Overlay::Queue {
+            if self.queue.key(key) {
+                self.overlay = None;
+            }
+            return;
+        }
         if overlay == Overlay::Mcp {
             if self.mcp.key(key) {
                 self.overlay = None;
@@ -2319,6 +2358,8 @@ impl App {
                         self.overlay = Overlay::PANES.iter().copied().find(|pane| pane.name() == name);
                         if self.overlay == Some(Overlay::History) {
                             self.history.open(self.chat.session);
+                        } else if self.overlay == Some(Overlay::Queue) {
+                            self.queue.open(self.chat.session);
                         } else if self.overlay == Some(Overlay::Mcp) {
                             self.mcp.request(None);
                         } else if self.overlay == Some(Overlay::Help) {
@@ -2693,6 +2734,11 @@ impl App {
             self.chat.push("stat", &said);
             return;
         }
+        if name == "queue" {
+            self.overlay = Some(Overlay::Queue);
+            self.queue.open(self.chat.session);
+            return;
+        }
         if name == "mcp" {
             for (prefix, logout) in [("login ", false), ("logout ", true)] {
                 if let Some(server) =
@@ -2983,7 +3029,8 @@ impl App {
         // where it was taken, so watching one go the wrong way left nothing to
         // do but stop it and start again.
         if let Some(command) = slash(&prompt)
-            && (command == "mcp"
+            && (command == "queue"
+                || command == "mcp"
                 || command.starts_with("mcp ")
                 || command == "task"
                 || command.starts_with("task ")
@@ -3386,6 +3433,7 @@ impl App {
                 Overlay::Tasks => self.tasks.draw(f, area),
                 Overlay::History => self.history.draw(f, area),
                 Overlay::Mcp => self.mcp.draw(f, area),
+                Overlay::Queue => self.queue.draw(f, area),
                 Overlay::Sessions => self.draw_sessions(f, area),
                 Overlay::Memory => self.draw_memory(f, area),
                 Overlay::Skills => self.draw_skills(f, area),

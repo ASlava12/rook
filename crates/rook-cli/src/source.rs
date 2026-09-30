@@ -828,6 +828,50 @@ impl Source {
         }
     }
 
+    pub(crate) fn queue_page(
+        &self,
+        session: u128,
+        query: &rook_proto::queue::Query,
+    ) -> Result<rook_proto::queue::Page> {
+        match self {
+            Self::Local(rook) => Ok(rook_core::message_queue::view::page(rook, session, query)?),
+            Self::Daemon(daemon) => daemon.get_bounded(&format!(
+                "/api/sessions/{}/queue?include_finished={}{}",
+                rook_store::format_session_id(session),
+                query.include_finished,
+                query.after.as_ref().map(|after| format!("&after={}", escaped(after))).unwrap_or_default()
+            )),
+        }
+    }
+    pub(crate) fn queue_read(&self, session: u128, reference: &str) -> Result<rook_proto::queue::Entry> {
+        match self {
+            Self::Local(rook) => Ok(rook_core::message_queue::view::read(rook, session, reference)?),
+            Self::Daemon(daemon) => daemon.request_bounded(
+                &format!(
+                    "/api/sessions/{}/queue/{}",
+                    rook_store::format_session_id(session),
+                    escaped(reference)
+                ),
+                None,
+                16 * 1024 * 1024,
+            ),
+        }
+    }
+    pub(crate) fn queue_change(
+        &self,
+        session: u128,
+        change: rook_proto::queue::Change,
+    ) -> Result<rook_proto::queue::Entry> {
+        match self {
+            Self::Local(rook) => Ok(rook_core::message_queue::view::change(rook, session, change)?),
+            Self::Daemon(daemon) => daemon.request_bounded(
+                &format!("/api/sessions/{}/queue", rook_store::format_session_id(session)),
+                Some(&serde_json::to_value(change)?),
+                16 * 1024 * 1024,
+            ),
+        }
+    }
+
     pub fn delete_session(&self, session: u128) -> Result<u64> {
         match self {
             Self::Local(rook) => Ok(rook.delete_session(session)?),
@@ -1300,15 +1344,28 @@ impl Daemon {
     }
 
     fn get_bounded<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        self.request_bounded(path, None, 2 * 1024 * 1024)
+    }
+
+    fn request_bounded<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: Option<&serde_json::Value>,
+        limit: usize,
+    ) -> Result<T> {
         let url = format!("{}{path}", self.base);
         self.runtime.block_on(async {
-            let mut response = self.http.get(&url).send().await?;
+            let request = match body {
+                Some(body) => self.http.post(&url).json(body),
+                None => self.http.get(&url),
+            };
+            let mut response = request.timeout(ROUTED).send().await?;
             let status = response.status();
             let mut bytes = Vec::new();
             while let Some(chunk) = response.chunk().await? {
                 anyhow::ensure!(
-                    chunk.len() <= (2 * 1024 * 1024usize).saturating_sub(bytes.len()),
-                    "history response exceeds 2 MiB"
+                    chunk.len() <= limit.saturating_sub(bytes.len()),
+                    "API response exceeds {limit} bytes"
                 );
                 bytes.extend_from_slice(&chunk);
             }

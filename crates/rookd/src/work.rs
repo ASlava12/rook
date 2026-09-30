@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     routing::{get, post},
 };
@@ -41,6 +41,8 @@ fn failure(error: impl std::fmt::Display) -> Failure {
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
+        .route("/api/sessions/{id}/queue", get(queue_page).post(queue_change))
+        .route("/api/sessions/{id}/queue/{reference}", get(queue_read))
         .route("/api/sessions/{id}/instructions", get(session_instructions).post(session_submit))
         .route(
             "/api/sessions/{id}/instructions/{message}",
@@ -61,6 +63,36 @@ pub fn routes() -> Router<Arc<AppState>> {
 
 fn session_id(id: &str) -> Result<u128, Failure> {
     rook_store::parse_session_id(id).ok_or_else(|| failure("invalid session id"))
+}
+
+async fn queue_page(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<rook_proto::queue::Query>,
+) -> Result<Json<rook_proto::queue::Page>, Failure> {
+    Ok(Json(
+        rook_core::message_queue::view::page(&*state.rook.read().await, session_id(&id)?, &query)
+            .map_err(failure)?,
+    ))
+}
+async fn queue_read(
+    State(state): State<Arc<AppState>>,
+    Path((id, reference)): Path<(String, String)>,
+) -> Result<Json<rook_proto::queue::Entry>, Failure> {
+    Ok(Json(
+        rook_core::message_queue::view::read(&*state.rook.read().await, session_id(&id)?, &reference)
+            .map_err(failure)?,
+    ))
+}
+async fn queue_change(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(change): Json<rook_proto::queue::Change>,
+) -> Result<Json<rook_proto::queue::Entry>, Failure> {
+    Ok(Json(
+        rook_core::message_queue::view::change(&*state.rook.read().await, session_id(&id)?, change)
+            .map_err(failure)?,
+    ))
 }
 
 async fn session_instructions(

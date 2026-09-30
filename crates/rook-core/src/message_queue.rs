@@ -1,6 +1,8 @@
 //! Durable steering for ordinary sessions. These receipts do not create a work
 //! run or authorize another turn. Pending messages survive until the session is
 //! explicitly continued, including when the daemon restarts.
+pub mod view;
+
 use rook_proto::work::{EditInstruction, Steer, Steering, WithdrawInstruction};
 use rook_store::{EventKind, Kind, NewEvent};
 

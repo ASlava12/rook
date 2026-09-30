@@ -7,6 +7,7 @@ pub(crate) mod doctor;
 pub(crate) mod knowledge;
 pub(crate) mod lsp;
 pub(crate) mod mcp;
+pub(crate) mod queue;
 pub(crate) mod run;
 pub(crate) mod secrets;
 pub(crate) mod sessions;

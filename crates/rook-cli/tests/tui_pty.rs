@@ -2263,3 +2263,118 @@ fn local_mcp_sign_in_keeps_input_live_and_can_cancel_before_completing() {
 fn daemon_mcp_sign_in_keeps_input_live_and_can_cancel_before_completing() {
     mcp_sign_in_keeps_input_live_and_can_cancel_before_completing(true);
 }
+
+fn queue_controls_preserve_drafts_and_use_the_saved_revision(through_daemon: bool) {
+    let _one = one_at_a_time();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let session = {
+        let rook = rook_core::Rook::from_parts(
+            rook_store::Store::open(home.path().join("store")).unwrap(),
+            rook_core::Config::default(),
+            rook_skills::Environment::bare("linux", "x86_64", "0.1.0"),
+            rook_skills::SkillIndex::discover(&[]).0,
+            workspace.path().into(),
+        );
+        let session = rook.start_session("queue controls").unwrap();
+        rook_core::message_queue::submit(
+            &rook,
+            session,
+            rook_proto::work::Steer { id: "ordinary".into(), text: "ORIGINAL_QUEUE_TEXT".into() },
+        )
+        .unwrap();
+        let run = rook_core::work::managed::start(
+            &rook,
+            rook_proto::work::Start {
+                goal: "paused queue fixture".into(),
+                workspace: None,
+                conversation: Some(rook_proto::work::Conversation {
+                    session: rook_store::format_session_id(session),
+                    model: None,
+                    effort: "high".into(),
+                    stance: "assist".into(),
+                    options: Default::default(),
+                }),
+                autonomous: false,
+                max_iterations: None,
+                max_tokens: None,
+                max_seconds: None,
+            },
+        )
+        .unwrap();
+        rook_core::work::managed::steer(
+            &rook,
+            &run.id,
+            rook_proto::work::Steer { id: "goal".into(), text: "GOAL_QUEUE_TEXT".into() },
+        )
+        .unwrap();
+        rook_core::work::managed::control(&rook, &run.id, rook_proto::work::Action::Pause).unwrap();
+        session
+    };
+    let daemon = through_daemon.then(|| Daemon::start(home.path(), workspace.path()));
+    let named = rook_store::format_session_id(session);
+    let cli = |arguments: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_rook"))
+            .env("ROOK_HOME", home.path())
+            .env("ROOK_LOG", "error")
+            .args(["--workspace", workspace.path().to_str().unwrap(), "--json", "session", "queue", &named])
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    let page = cli(&[]);
+    assert_eq!(page["items"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        cli(&["edit", "session.ordinary", "--revision", "0", "CLI_QUEUE_TEXT"])["receipt"]["revision"],
+        1
+    );
+    assert_eq!(cli(&["show", "session.ordinary"])["receipt"]["text"], "CLI_QUEUE_TEXT");
+    let mut pty = tui(home.path(), workspace.path());
+    pty.screen(100, 30);
+    pty.send(&format!("/session {named}\r"));
+    pty.screen_showing(100, 30, "continuing");
+    pty.send("PRESERVED_QUEUE_DRAFT\u{10}");
+    pty.screen_showing(100, 30, "what would you like to do");
+    pty.send("message queue\r");
+    pty.screen_showing(100, 30, "CLI_QUEUE_TEXT");
+    pty.send("e");
+    pty.screen_showing(100, 30, "Ctrl-S saves");
+    pty.send("\u{15}GUI_QUEUE_TEXT\u{13}");
+    pty.screen_showing(100, 30, "queued · r2");
+    pty.send("q");
+    pty.screen_showing(100, 30, "Message withdrawn and appended to draft");
+    let screen = pty.screen_showing(100, 30, "GUI_QUEUE_TEXT").join("\n");
+    assert!(screen.contains("PRESERVED_QUEUE_DRAFT"), "existing draft survived: {screen}");
+    pty.send("\u{10}");
+    pty.screen_showing(100, 30, "what would you like to do");
+    pty.send("message queue\r");
+    pty.screen_showing(100, 30, "GOAL_QUEUE_TEXT");
+    pty.send("d");
+    pty.screen_showing(100, 30, "No messages on this page");
+    pty.send("a");
+    pty.screen_showing(100, 30, "withdrawn · r3");
+    drop(pty);
+    let page = cli(&["list", "--all"]);
+    assert!(page["items"].as_array().unwrap().iter().all(|e| e["receipt"]["withdrawn_at"].is_number()));
+    drop(daemon);
+    let store = rook_store::Store::open(home.path().join("store")).unwrap();
+    assert!(
+        store
+            .events(session, 0, 100)
+            .unwrap()
+            .iter()
+            .all(|event| event.record.kind != rook_store::EventKind::UserMessage),
+        "queue controls never start a turn or inject the restored draft"
+    );
+}
+
+#[test]
+fn local_queue_controls_edit_withdraw_and_restore_without_sending() {
+    queue_controls_preserve_drafts_and_use_the_saved_revision(false);
+}
+#[test]
+fn daemon_queue_controls_edit_withdraw_and_restore_without_sending() {
+    queue_controls_preserve_drafts_and_use_the_saved_revision(true);
+}

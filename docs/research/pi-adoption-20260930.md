@@ -149,11 +149,51 @@ goal lifecycle checks. The combined CI/compaction process exited 0. Compaction
 4.02 MiB on disk, 37.1x dictionary compression, and 5.8x end-to-end. No check was
 waived. The failed first gate is `/tmp/rook-pi-session-queue-ci.log`.
 
-The queue capability remains in progress. Still required: interactive queue
-controls across CLI/TUI/browser, bounded views and draft restoration, explicit
-follow-up boundaries after a complete ordinary turn or whole goal, stable scope
-identity across successive goals, client-generated submission IDs on the live
-protocol, and their restart/compaction/delegation/acceptance tests.
+The third queue block adds combined, bounded session/goal views and interactive
+controls across CLI, TUI and browser. Opaque receipt references distinguish the
+two queues and include a goal generation, preventing stale edits from affecting
+a replacement goal. The generation is an additive JSON field with a legacy
+default; postcard records are unchanged. Pagination keeps working when its
+cursor message is accepted. Tests explicitly fill the byte limit, including
+escaped Unicode text, before checking that the page stays within it.
+
+`rook session queue`, TUI `/queue` and the browser's Message queue panel expose
+full-message reads, revision-checked editing and withdrawal. Both interactive
+frontends can withdraw into the existing draft without sending it. A single
+reserved handoff retains a restoration across session switches, and conflicting
+edits preserve the user's text. The browser prompt now accepts multiple lines:
+Enter sends and Shift+Enter inserts a newline. Queue refresh is explicit.
+
+Local and daemon PTY scenarios passed for editing, withdrawal and restoration
+without starting a turn. A Chrome harness using the actual frontend modules and
+controlled HTTP/protocol events passed for conflicts, accepted-message rejection,
+session switches during withdrawal, snapshot recovery during editing, Unicode
+limits, text-only rendering and multiline submission. Its harness is
+`/tmp/rook-pi-browser-check/queue.cjs`; the final log is
+`/tmp/rook-pi-queue-controls-browser-snapshot.log`. A separate check against an
+actual scratch daemon passed for full multiline editing, draft preservation,
+withdrawal receipts and unchanged ordinary form layout; it confirmed that no
+turn started. Its harness and log are
+`/tmp/rook-pi-browser-check/queue-live.cjs` and
+`/tmp/rook-pi-queue-controls-browser-live.log`. These are UI checks, not live-model
+benchmarks. The rendered page was also inspected.
+
+The full isolated `cargo xtask ci` passed with exit status 0 in 535.1 seconds
+(`/tmp/rook-pi-queue-controls-ci.log`). The combined CI/compaction process exited
+0; compaction retained 4.02 MiB on disk, 37.1x dictionary compression and 5.8x
+end-to-end (`/tmp/rook-pi-queue-controls-compaction.log`). A CSS selector correction
+during the test phase was additionally exercised by the real-daemon browser
+check; Rust sources were unchanged during the gate.
+
+The queue capability remains in progress. Still required: explicit follow-up
+boundaries after a complete ordinary turn or whole goal, client-generated live
+submission IDs, identity-based acceptance/withdrawal notifications, local embedded
+input parity, and restart/compaction/delegation/acceptance tests for those paths.
+The TUI's read-only message detail still needs scrolling; its editor already has
+a cursor viewport. Existing provisional chat markers still acknowledge the oldest
+local message without receipt identity, which must be corrected before calling
+the live queue complete. Generation-qualified view references solve stale queue
+edits but do not yet establish the live submission lifecycle across goals.
 
 `/tmp/rook-pi-message-queue` retains its older staged baseline and preparation
 patch. Main is now authoritative; do not reapply that worktree or merge its diff
