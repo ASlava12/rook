@@ -193,6 +193,7 @@ fn socket_corrections_reuse_caller_receipts_and_old_frames_still_work() {
             let mut prompt = json!({"type":"prompt","session":session,"text":text});
             if let Some(id) = id {
                 prompt["id"] = id.into();
+                prompt["target"] = "session".into();
             }
             socket
                 .send(tokio_tungstenite::tungstenite::Message::Text(prompt.to_string().into()))
@@ -252,16 +253,22 @@ fn socket_corrections_reuse_caller_receipts_and_old_frames_still_work() {
             assert!(tokio::time::Instant::now() < deadline, "goal was not created");
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        let correction =
-            json!({"type":"prompt","session":goal_session,"text":"goal correction","id":"goal-caller"});
+        let page = get(&client, &format!("{}/api/sessions/{goal_session}/queue", daemon.address)).await;
+        let target = page["submission_target"].as_str().unwrap();
+        assert!(target.starts_with("goal."));
+        let correction = json!({"type":"prompt","session":goal_session,"text":"goal correction","id":"goal-caller","target":target});
         for _ in 0..2 {
             goal_socket
                 .send(tokio_tungstenite::tungstenite::Message::Text(correction.to_string().into()))
                 .await
                 .unwrap();
         }
+        goal_socket.send(tokio_tungstenite::tungstenite::Message::Text(json!({
+            "type":"prompt","session":goal_session,"text":"wrong goal","id":"wrong-goal","target":"goal.stale"
+        }).to_string().into())).await.unwrap();
         let mut references = Vec::new();
-        while references.len() < 2 {
+        let mut rejected = false;
+        while references.len() < 2 || !rejected {
             let frame = tokio::time::timeout(std::time::Duration::from_secs(30), goal_socket.next())
                 .await
                 .unwrap()
@@ -270,6 +277,8 @@ fn socket_corrections_reuse_caller_receipts_and_old_frames_still_work() {
             let event: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
             if event["type"] == "interjected" {
                 references.push(event["receipt"]["reference"].as_str().unwrap().to_string());
+            } else if event["type"] == "failed" && event["message"].as_str().unwrap_or("").contains("no longer current") {
+                rejected = true;
             }
         }
         assert_eq!(references[0], references[1]);

@@ -16,6 +16,7 @@ use rook_core::agent::{AgentLoop, Progress};
 use rook_core::work::managed;
 use rook_llm::Delta;
 use rook_proto::AskQuestion;
+use rook_proto::queue::Change;
 use rook_proto::work::{Action, Conversation, Run, Start, Status, Steer};
 use rook_proto::{ApprovalDecision, ChatEvent, ClientMessage};
 use rook_tools::ask::{AskRequest, ChannelAsker};
@@ -264,7 +265,13 @@ async fn serve(
                     watching = Some(watch(&live, id, outbound.clone(), watching, live_snapshots));
                 }
             }
-            ClientMessage::Prompt { session, text, id: submission_id, options } => {
+            ClientMessage::Prompt {
+                session,
+                text,
+                id: submission_id,
+                target: submission_target,
+                options,
+            } => {
                 if submission_id.as_ref().is_some_and(|id| {
                     id.is_empty()
                         || id.len() > 64
@@ -275,6 +282,20 @@ async fn serve(
                     report_window(
                         &outbound,
                         "instruction id must be 1–64 letters, digits, hyphens or underscores".into(),
+                    )
+                    .await;
+                    continue;
+                }
+                if submission_target.as_ref().is_some_and(|target| {
+                    submission_id.is_none()
+                        || target.len() > 128
+                        || !target.bytes().all(|byte| {
+                            byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'-' || byte == b'_'
+                        })
+                }) {
+                    report_window(
+                        &outbound,
+                        "submission target requires an ID and must fit in 128 ASCII bytes".into(),
                     )
                     .await;
                     continue;
@@ -343,11 +364,22 @@ async fn serve(
                             (|| {
                                 if !rook_core::agent::carrying_on(&text) && text != rook_core::agent::CARRY_ON
                                 {
-                                    let (_, notice) = managed::steer_noticed(
-                                        &rook,
-                                        &run.id,
-                                        Steer { id: correction_id(&submission_id), text: text.clone() },
-                                    )?;
+                                    let notice = if let Some(target) = submission_target.as_deref() {
+                                        scoped_correction(
+                                            &rook,
+                                            id,
+                                            target,
+                                            correction_id(&submission_id),
+                                            text.clone(),
+                                        )?
+                                    } else {
+                                        managed::steer_noticed(
+                                            &rook,
+                                            &run.id,
+                                            Steer { id: correction_id(&submission_id), text: text.clone() },
+                                        )?
+                                        .1
+                                    };
                                     interjected = Some(notice);
                                 }
                                 if !run.status.runnable() {
@@ -386,13 +418,24 @@ async fn serve(
                         Ok(run) => match crate::work::join_conversation(&state, &run).await {
                             Ok(live) => {
                                 if promotion.is_some() {
-                                    let receipt = managed::steer_noticed(
-                                        &*goal_engine.read().await,
-                                        &run.id,
-                                        Steer { id: correction_id(&submission_id), text: text.clone() },
-                                    );
+                                    let receipt = if let Some(target) = submission_target.as_deref() {
+                                        scoped_correction(
+                                            &*goal_engine.read().await,
+                                            id,
+                                            target,
+                                            correction_id(&submission_id),
+                                            text.clone(),
+                                        )
+                                    } else {
+                                        managed::steer_noticed(
+                                            &*goal_engine.read().await,
+                                            &run.id,
+                                            Steer { id: correction_id(&submission_id), text: text.clone() },
+                                        )
+                                        .map(|(_, notice)| notice)
+                                    };
                                     match receipt {
-                                        Ok((_, receipt)) => {
+                                        Ok(receipt) => {
                                             let _ = outbound
                                                 .send(ChatEvent::Interjected {
                                                     receipt: Some(receipt),
@@ -434,12 +477,23 @@ async fn serve(
                         report_window(&outbound, "Attachments cannot be added to a running turn; wait for it to finish or stop it first.".into()).await;
                         continue;
                     }
-                    let receipt = rook_core::message_queue::submit_noticed(
-                        &*engine.read().await,
-                        id,
-                        Steer { id: correction_id(&submission_id), text: text.clone() },
-                    );
-                    let (_, receipt) = match receipt {
+                    let receipt = if let Some(target) = submission_target.as_deref() {
+                        scoped_correction(
+                            &*engine.read().await,
+                            id,
+                            target,
+                            correction_id(&submission_id),
+                            text.clone(),
+                        )
+                    } else {
+                        rook_core::message_queue::submit_noticed(
+                            &*engine.read().await,
+                            id,
+                            Steer { id: correction_id(&submission_id), text: text.clone() },
+                        )
+                        .map(|(_, notice)| notice)
+                    };
+                    let receipt = match receipt {
                         Ok(value) => value,
                         Err(error) => {
                             report_window(&outbound, error.to_string()).await;
@@ -493,6 +547,25 @@ async fn serve(
 
 fn correction_id(supplied: &Option<String>) -> String {
     supplied.clone().unwrap_or_else(|| rook_store::format_session_id(rook_store::new_session_id()))
+}
+
+fn scoped_correction(
+    rook: &rook_core::Rook,
+    session: u128,
+    target: &str,
+    id: String,
+    text: String,
+) -> rook_core::Result<rook_proto::queue::Notice> {
+    let entry = rook_core::message_queue::view::change(
+        rook,
+        session,
+        Change::Submit { target: target.into(), id, text },
+    )?;
+    Ok(rook_proto::queue::Notice::new(
+        rook_store::format_session_id(session),
+        entry.reference,
+        &entry.receipt,
+    ))
 }
 
 /// Where a session's turns run: the workspace it was started in, always.

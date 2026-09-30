@@ -541,6 +541,7 @@ async fn through_the_daemon(
             session: session.clone(),
             text: line,
             id: Some(rook_store::format_session_id(rook_store::new_session_id())),
+            target: None,
             options: crate::turn_options::for_turn(&mut output),
         })?;
         while let Some(frame) = events.recv().await {

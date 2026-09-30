@@ -865,3 +865,28 @@ progress. Queue first-prompt admission and all Pending rows also remain open.
 The full `cargo xtask ci` exited 0 (`ci: ok`, 438.7 seconds). The required
 `cargo xtask compaction` exited 0 with 4.02 MiB on disk, 37.1x dictionary
 compression and 5.8x end-to-end. No postcard field or store format changed.
+
+## Scoped socket correction retries
+
+The socket `prompt` frame now also accepts optional `target` alongside its
+caller ID. When present, the daemon submits through the same combined queue
+admission as HTTP, using the saved `submission_target`; a stale goal generation
+or ordinary-session target is rejected before creating a receipt. Old frames
+without either field retain their behavior. The target is length/alphabet
+checked before copying. CLI/TUI senders keep using the compatible unscoped
+path, since they do not persist a target across reconnect; browser corrections
+already use scoped HTTP. A real-daemon socket test now covers scoped ordinary
+and goal duplicate requests, a rejected stale goal target and a legacy frame.
+
+Initial prompt and goal-control admission identities, CLI/TUI retry retention,
+and remaining queue lifecycle/frontend parity remain open. The queue row stays
+In progress; branch semantic synthesis and all Pending rows remain open.
+The focused real-daemon socket test exited 0. The first full CI exited 1:
+one existing model-catalog fixture failed under the parallel CLI suite, while
+the other 69 CLI scenarios passed. Its test server previously assumed a whole
+HTTP request line arrived in one read and allowed only short timeouts. The
+fixture now reads the bounded line and gives the unrelated catalog operation
+more time under load; the isolated test exited 0. The second full
+`cargo xtask ci` exited 0 (`ci: ok`, 389.3 seconds). `cargo xtask compaction`
+exited 0 with 4.02 MiB on disk, 37.1x dictionary compression and 5.8x
+end-to-end. Stored receipt and session formats remain unchanged.

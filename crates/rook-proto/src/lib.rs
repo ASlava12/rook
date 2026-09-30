@@ -146,6 +146,10 @@ pub enum ClientMessage {
         /// Older clients omit it; a retry must reuse the same ID and text.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
+        /// Opaque `submission_target` from the queue page. Send with `id` to
+        /// keep a retry scoped to the same ordinary session or goal generation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
         #[serde(default)]
         options: TurnOptions,
     },

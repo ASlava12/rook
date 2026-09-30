@@ -1993,18 +1993,23 @@ fn models_enforces_configured_catalog_limits_and_exposes_capabilities_without_th
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap();
     let server = std::thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let deadline = Instant::now() + Duration::from_secs(60);
         let mut seen = 0;
         while seen < 2 && Instant::now() < deadline {
             let Ok((mut socket, _)) = listener.accept() else {
                 std::thread::sleep(Duration::from_millis(10));
                 continue;
             };
-            socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-            socket.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
-            let mut bytes = [0; 4096];
-            let n = socket.read(&mut bytes).unwrap();
-            assert!(String::from_utf8_lossy(&bytes[..n]).starts_with("GET /v1/models "));
+            socket.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            socket.set_write_timeout(Some(Duration::from_secs(10))).unwrap();
+            let mut bytes = Vec::new();
+            while !bytes.contains(&b'\n') {
+                let mut chunk = [0; 4096];
+                let n = socket.read(&mut chunk).unwrap();
+                assert!(n > 0 && bytes.len() + n <= 8192, "bounded mock request line");
+                bytes.extend_from_slice(&chunk[..n]);
+            }
+            assert!(String::from_utf8_lossy(&bytes).starts_with("GET /v1/models "));
             let body =
                 r#"{"data":[{"id":"one","supported_parameters":["tools","reasoning_effort"]},{"id":"two"}]}"#;
             let response = format!(
@@ -2017,7 +2022,7 @@ fn models_enforces_configured_catalog_limits_and_exposes_capabilities_without_th
         seen
     });
     for limit in [1, 2] {
-        rook.write_config(&format!("[agent]\nmodel='local'\n[models.local]\napi='openai'\nurl='http://{address}/v1'\nmodel='one'\n[model_catalog]\nmax_models={limit}\nmax_bytes=2048\ntimeout_secs=2\n"));
+        rook.write_config(&format!("[agent]\nmodel='local'\n[models.local]\napi='openai'\nurl='http://{address}/v1'\nmodel='one'\n[model_catalog]\nmax_models={limit}\nmax_bytes=2048\ntimeout_secs=10\n"));
         let out = rook.run(&["models", "--source", "local", "--json"]);
         if limit == 1 {
             assert!(!out.status.success());

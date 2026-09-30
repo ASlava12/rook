@@ -246,6 +246,7 @@ async fn through_the_daemon(
         session,
         text: asked.to_string(),
         id: Some(rook_store::format_session_id(rook_store::new_session_id())),
+        target: None,
         options,
     })?;
 
