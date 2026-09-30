@@ -1011,6 +1011,21 @@ impl Source {
         }
     }
 
+    pub(crate) fn branch_summary_draft(
+        &self,
+        source: u128,
+        target: u128,
+    ) -> Result<rook_core::branches::SummaryDraft> {
+        match self {
+            Self::Local(rook) => Ok(rook_core::branches::draft_summary(rook, source, target)?),
+            Self::Daemon(d) => d.get_bounded(&format!(
+                "/api/sessions/{}/summary-draft?source={}",
+                rook_store::format_session_id(target),
+                rook_store::format_session_id(source)
+            )),
+        }
+    }
+
     pub(crate) fn bookmarks(&self, session: u128) -> Result<rook_core::branches::Bookmarks> {
         match self {
             Self::Local(rook) => Ok(rook_core::branches::bookmarks(rook, session)?),

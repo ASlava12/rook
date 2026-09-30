@@ -842,3 +842,26 @@ In progress; branch draft generation and all Pending rows remain open.
 The focused daemon test exited 0. The full `cargo xtask ci` exited 0
 (`ci: ok`, 412.1 seconds). No storage code or format changed, so the previous
 block's compaction check remains the latest one.
+
+## Reviewable branch-summary evidence draft
+
+The summary editor can now load bounded recorded excerpts from the departing
+branch. Core scans at most 128 recent event records, selects at most 12 text
+messages, and reads at most 768 body bytes per excerpt; attachment envelopes
+and tool payloads are excluded. The response identifies source session, last
+event and truncation/coverage, and its text remains within the existing 16 KiB
+summary limit. This is an evidence draft for a person to rewrite, not a model
+conclusion. CLI `session summary-draft SOURCE TARGET`, REPL/TUI
+`/summary-draft TARGET`, HTTP `GET .../summary-draft?source=SOURCE`, and the
+browser's summary editor expose the same core result. The browser sends the
+loaded source boundary when saving; the daemon rejects a stale draft if new
+source events arrived. Existing manual summary calls and stored format remain
+compatible.
+
+The focused core boundary/size test and local plus real-daemon CLI test passed;
+`node --check web/dist/branches.js` exited 0. Model-generated synthesis and
+live browser/TUI interaction checks remain open, so the branch row stays In
+progress. Queue first-prompt admission and all Pending rows also remain open.
+The full `cargo xtask ci` exited 0 (`ci: ok`, 438.7 seconds). The required
+`cargo xtask compaction` exited 0 with 4.02 MiB on disk, 37.1x dictionary
+compression and 5.8x end-to-end. No postcard field or store format changed.

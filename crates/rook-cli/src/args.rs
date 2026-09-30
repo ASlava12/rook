@@ -427,6 +427,11 @@ pub(crate) enum StoreCmd {
 
 #[derive(Subcommand)]
 pub(crate) enum SessionCmd {
+    /// Show bounded source excerpts to review before carrying a branch summary.
+    SummaryDraft {
+        source: String,
+        target: String,
+    },
     /// Carry a reviewed summary from one branch into another as attributed history.
     Summary {
         source: String,

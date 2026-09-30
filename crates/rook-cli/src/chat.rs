@@ -329,6 +329,21 @@ async fn through_the_daemon(
             let (name, rest) = command.split_once(' ').unwrap_or((command, ""));
             match name {
                 "quit" | "exit" => break,
+                "summary-draft" => {
+                    let Some(from) = session.as_deref().and_then(rook_store::parse_session_id) else {
+                        eprintln!("open a source conversation first");
+                        continue;
+                    };
+                    let Some(target) = rook_store::parse_session_id(rest.trim()) else {
+                        eprintln!("use /summary-draft TARGET_SESSION");
+                        continue;
+                    };
+                    let source = crate::source::Source::open(Some(workspace.to_path_buf()))?;
+                    match source.branch_summary_draft(from, target) {
+                        Ok(draft) => print!("{}", draft.text),
+                        Err(error) => eprintln!("{error}"),
+                    }
+                }
                 "summary" => {
                     let Some(from) = session.as_deref().and_then(rook_store::parse_session_id) else {
                         eprintln!("open a source conversation first");

@@ -42,9 +42,15 @@ fn branch_summaries_keep_source_attribution_locally_and_through_daemon() {
             )
             .unwrap();
     }
+    let draft = rook.json(&["session", "summary-draft", &source_name, &target_name]);
+    assert_eq!(draft["source_session"], source_name);
+    assert_eq!(draft["source_through"], 0);
+    assert!(draft["text"].as_str().unwrap().contains("event #0 (user): old branch"));
     let first = rook.json(&["session", "summary", &source_name, &target_name, "Earlier tests passed there"]);
     assert_eq!(first["event"], 0);
     let daemon = Daemon::start(&rook);
+    let remote_draft = rook.json(&["session", "summary-draft", &source_name, &target_name]);
+    assert_eq!(remote_draft, draft);
     let second = rook.json(&["session", "summary", &source_name, &target_name, "A second finding"]);
     assert_eq!(second["event"], 1);
     let history = rook.json(&["session", "history", &target_name]);

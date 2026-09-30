@@ -19,6 +19,8 @@ and `l` opens bookmarks; Enter jumps to one, `m` edits it, `x` removes it, and
 `/summary TARGET_SESSION reviewed text` copies an explicitly sourced historical
 summary from the open conversation into another branch; it does not switch or
 restore files. See [conversation branches](conversation-branches.md).
+`/summary-draft TARGET_SESSION` displays bounded source excerpts to review
+before writing that summary.
 
 Open `rook config edit`, enter `tui`, then `keys`. Each named action has its own
 description and list of shortcuts. Missing actions keep their defaults; an empty

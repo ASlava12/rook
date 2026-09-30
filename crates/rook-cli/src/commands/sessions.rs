@@ -43,6 +43,20 @@ pub(crate) fn diagnostic_arguments(arguments: &str) -> Result<(bool, std::path::
 }
 
 pub(crate) fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, json: bool) -> Result<()> {
+    if let SessionCmd::SummaryDraft { source: from, target } = &cmd {
+        let from = source.session_named(from, workspace)?;
+        let to = source.session_named(target, workspace)?;
+        let draft = source.branch_summary_draft(from, to)?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&draft)?);
+        } else {
+            print!("{}", draft.text);
+            if draft.omitted_earlier {
+                println!("Earlier events were omitted from this bounded excerpt.");
+            }
+        }
+        return Ok(());
+    }
     if let SessionCmd::Summary { source: from, target, text } = &cmd {
         let from = source.session_named(from, workspace)?;
         let to = source.session_named(target, workspace)?;
@@ -267,7 +281,8 @@ pub(crate) fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, js
         return show_rewind(&source.rewind(session, *to, !keep_files)?, *keep_files, json);
     }
     match cmd {
-        SessionCmd::Summary { .. }
+        SessionCmd::SummaryDraft { .. }
+        | SessionCmd::Summary { .. }
         | SessionCmd::Rename { .. }
         | SessionCmd::Bookmarks { .. }
         | SessionCmd::Bookmark { .. }

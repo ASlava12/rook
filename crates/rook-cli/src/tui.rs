@@ -2843,6 +2843,19 @@ impl App {
             self.history.open_tree(session);
             return;
         }
+        if name == "summary-draft" {
+            let Some(from) = self.chat.session else {
+                return self.chat.push("err", "open a source conversation first");
+            };
+            let Some(target) = rook_store::parse_session_id(rest.trim()) else {
+                return self.chat.push("err", "use /summary-draft TARGET_SESSION");
+            };
+            match self.source.branch_summary_draft(from, target) {
+                Ok(draft) => self.chat.push("stat", &draft.text),
+                Err(error) => self.chat.push("err", &error.to_string()),
+            }
+            return;
+        }
         if name == "summary" {
             let Some(from) = self.chat.session else {
                 return self.chat.push("err", "open a source conversation first");
@@ -3192,6 +3205,8 @@ impl App {
             && (command == "queue"
                 || command == "summary"
                 || command.starts_with("summary ")
+                || command == "summary-draft"
+                || command.starts_with("summary-draft ")
                 || command == "mcp"
                 || command.starts_with("mcp ")
                 || command == "task"

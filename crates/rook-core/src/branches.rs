@@ -121,13 +121,72 @@ pub struct Summary {
     pub text: String,
 }
 
-/// Add an explicitly attributed, user-approved summary to another conversation.
-/// It describes old conversation evidence, never the current workspace state.
-pub fn transfer_summary(rook: &Rook, source: u128, target: u128, text: &str) -> Result<u64> {
-    let text = text.trim();
-    if text.is_empty() || text.len() > SUMMARY_BYTES {
-        return Err(CoreError::Other(format!("branch summary must be 1..={SUMMARY_BYTES} UTF-8 bytes")));
+/// Bounded excerpts to review and rewrite before carrying them to another branch.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SummaryDraft {
+    pub source_session: String,
+    pub source_through: u64,
+    pub text: String,
+    pub scanned_events: usize,
+    pub omitted_earlier: bool,
+}
+
+pub fn draft_summary(rook: &Rook, source: u128, target: u128) -> Result<SummaryDraft> {
+    let (source_meta, _) = summary_pair(rook, source, target)?;
+    let source_through = source_meta
+        .next_seq
+        .checked_sub(1)
+        .ok_or_else(|| CoreError::Other("source branch has no saved events to summarize".into()))?;
+    const SCAN: usize = 128;
+    const EXCERPTS: usize = 12;
+    const EXCERPT_BYTES: usize = 768;
+    let events = rook.store.events_before(source, source_meta.next_seq, SCAN)?;
+    let mut excerpts = Vec::new();
+    for event in events.iter().rev() {
+        let role = match event.record.kind {
+            rook_store::EventKind::UserMessage if event.record.label != crate::attachments::LABEL => "user",
+            rook_store::EventKind::AssistantMessage => "assistant",
+            _ => continue,
+        };
+        let (body, truncated) = crate::transcript::body(rook, event, EXCERPT_BYTES)?;
+        let suffix = if truncated { " [excerpt shortened]" } else { "" };
+        excerpts.push(format!("- event #{} ({role}): {body}{suffix}", event.seq));
+        if excerpts.len() == EXCERPTS {
+            break;
+        }
     }
+    if excerpts.is_empty() {
+        return Err(CoreError::Other(
+            "no recent text messages to draft from; write a summary manually".into(),
+        ));
+    }
+    excerpts.reverse();
+    let mut text = format!(
+        "Recorded excerpts from session {} through event #{}; review and rewrite before carrying. File and test observations are historical and must be verified in the current workspace.\n\n",
+        rook_store::format_session_id(source),
+        source_through
+    );
+    for excerpt in excerpts {
+        if text.len() + excerpt.len() + 1 > SUMMARY_BYTES {
+            break;
+        }
+        text.push_str(&excerpt);
+        text.push('\n');
+    }
+    Ok(SummaryDraft {
+        source_session: rook_store::format_session_id(source),
+        source_through,
+        text,
+        scanned_events: events.len(),
+        omitted_earlier: source_meta.next_seq > events.len() as u64,
+    })
+}
+
+fn summary_pair(
+    rook: &Rook,
+    source: u128,
+    target: u128,
+) -> Result<(rook_store::SessionMeta, rook_store::SessionMeta)> {
     if source == target {
         return Err(CoreError::Other("choose a different target branch".into()));
     }
@@ -142,9 +201,34 @@ pub fn transfer_summary(rook: &Rook, source: u128, target: u128, text: &str) -> 
     if source_meta.workspace != target_meta.workspace {
         return Err(CoreError::Other("branches belong to different workspaces".into()));
     }
+    Ok((source_meta, target_meta))
+}
+
+/// Add an explicitly attributed, user-approved summary to another conversation.
+/// It describes old conversation evidence, never the current workspace state.
+pub fn transfer_summary(rook: &Rook, source: u128, target: u128, text: &str) -> Result<u64> {
+    transfer_summary_at(rook, source, target, None, text)
+}
+
+/// A reviewed draft can pin the source boundary it actually showed.
+pub fn transfer_summary_at(
+    rook: &Rook,
+    source: u128,
+    target: u128,
+    expected_through: Option<u64>,
+    text: &str,
+) -> Result<u64> {
+    let text = text.trim();
+    if text.is_empty() || text.len() > SUMMARY_BYTES {
+        return Err(CoreError::Other(format!("branch summary must be 1..={SUMMARY_BYTES} UTF-8 bytes")));
+    }
+    let (source_meta, _) = summary_pair(rook, source, target)?;
     let Some(source_through) = source_meta.next_seq.checked_sub(1) else {
         return Err(CoreError::Other("source branch has no saved events to summarize".into()));
     };
+    if expected_through.is_some_and(|through| through != source_through) {
+        return Err(CoreError::Other("source branch changed since the draft; review a fresh draft".into()));
+    }
     let summary =
         Summary { source_session: rook_store::format_session_id(source), source_through, text: text.into() };
     let bytes = crate::persistence::encode_with_limit(&summary, SUMMARY_BYTES + 1024)?;
@@ -545,6 +629,28 @@ mod tests {
         assert!(last.contains(&format!("session {} through event #0", rook_store::format_session_id(1))));
         assert!(last.contains("not current file state or test results"));
         assert!(!last.contains("later claim"));
+    }
+
+    #[test]
+    fn draft_reads_bounded_source_excerpts_and_pins_the_reviewed_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let rook = engine(dir.path());
+        session(&rook, 1, None, "departed");
+        session(&rook, 2, Some(1), "target");
+        rook.log(1, rook_store::EventKind::UserMessage, "", &"old branch ".repeat(10_000)).unwrap();
+        rook.log(1, rook_store::EventKind::AssistantMessage, "", "Tests passed in that branch").unwrap();
+        let draft = draft_summary(&rook, 1, 2).unwrap();
+        assert_eq!(draft.source_session, rook_store::format_session_id(1));
+        assert_eq!(draft.source_through, 1);
+        assert!(draft.text.len() <= SUMMARY_BYTES);
+        assert!(draft.text.contains("[excerpt shortened]"));
+        assert!(draft.text.contains("event #1 (assistant): Tests passed in that branch"));
+        assert!(draft.text.contains("historical and must be verified"));
+        let stored = transfer_summary_at(&rook, 1, 2, Some(draft.source_through), &draft.text).unwrap();
+        assert_eq!(stored, 0);
+        rook.log(1, rook_store::EventKind::UserMessage, "", "new evidence").unwrap();
+        assert!(transfer_summary_at(&rook, 1, 2, Some(draft.source_through), &draft.text).is_err());
+        assert_eq!(rook.store.get_session(2).unwrap().unwrap().next_seq, 1);
     }
 
     #[test]

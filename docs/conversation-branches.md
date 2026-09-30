@@ -66,6 +66,22 @@ keeps running. In the browser, **Conversation branches** is available in both
 Chat and Sessions, with separate Explore, Read history and Continue buttons.
 The REPL `/tree [session-id]` prints a page; `/session ID` continues a session.
 
+To prepare a transfer, run `rook session summary-draft SOURCE TARGET` or
+`/summary-draft TARGET` in the REPL or TUI with the source conversation open.
+The browser's **Carry reviewed summary** editor has **Load recorded excerpts**.
+This reads at most 128 recent source events and includes at most 12 bounded
+user/assistant excerpts with event numbers. It is a starting point for editing,
+not a model-generated conclusion. Earlier events and attachments can be absent.
+Review and rewrite it, then use `rook session summary SOURCE TARGET TEXT`,
+`/summary TARGET TEXT`, or **Save summary and continue**. The saved history
+identifies the source session and event boundary and tells the next turn to
+verify historical file and test observations in the current workspace. A
+browser draft is rejected if the source branch changed after it was loaded.
+The HTTP draft route is `GET /api/sessions/TARGET/summary-draft?source=SOURCE`;
+`POST /api/sessions/TARGET/summary` accepts optional `source_through` with the
+existing `source` and `text` fields. Both source and target must belong to the
+same workspace. The summary body is limited to 16 KiB UTF-8 bytes.
+
 These actions do not restore files, change worktrees or transfer goals and
 queued messages. Workspace recovery remains an explicit rewind/undo operation.
 All sessions in a workspace see its current files, including changes made since
