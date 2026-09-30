@@ -4,11 +4,15 @@ use rook_proto::queue::{Change, Entry, Page, Query};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 
 enum Command {
+    Prepare,
+    Submit(Change),
     Page(Query),
     Read(String, bool),
     Change(Change, bool),
 }
 enum Update {
+    Prepared(String, usize),
+    Submitted(Entry),
     Page(Page),
     Read(Entry, bool),
     Changed(Entry, bool),
@@ -16,6 +20,11 @@ enum Update {
 impl Command {
     fn run(self, source: &crate::source::Source, session: u128) -> Result<Update> {
         Ok(match self {
+            Self::Prepare => {
+                let page = source.queue_page(session, &Query::default())?;
+                Update::Prepared(page.submission_target, page.max_message_bytes)
+            }
+            Self::Submit(change) => Update::Submitted(source.queue_change(session, change)?),
             Self::Page(query) => Update::Page(source.queue_page(session, &query)?),
             Self::Read(reference, edit) => Update::Read(source.queue_read(session, &reference)?, edit),
             Self::Change(change, restore) => Update::Changed(source.queue_change(session, change)?, restore),
@@ -24,6 +33,9 @@ impl Command {
 }
 
 pub(super) struct Queue {
+    attempt: Option<(u128, Change)>,
+    status: Option<String>,
+    max_text: usize,
     session: Option<u128>,
     pending: bool,
     page: Option<Page>,
@@ -40,7 +52,7 @@ pub(super) struct Queue {
 }
 
 impl Queue {
-    pub(super) fn new(source: &crate::source::Source) -> Self {
+    pub(super) fn new(source: &crate::source::Source, max_text: usize) -> Self {
         let (send, commands) = sync_channel::<(u128, Command)>(1);
         let (updates, receive) = sync_channel(1);
         let result = source.reader().and_then(|reader| {
@@ -57,6 +69,9 @@ impl Queue {
             Err(error) => (None, error.to_string()),
         };
         Self {
+            attempt: None,
+            status: None,
+            max_text: max_text.min(8 * 1024 * 1024),
             session: None,
             pending: false,
             page: None,
@@ -80,6 +95,10 @@ impl Queue {
             self.note = "Finishing the current queue operation…".into();
             return;
         }
+        if let Some((session, _)) = &self.attempt {
+            self.session = Some(*session);
+            return;
+        }
         self.session = session;
         self.entry = None;
         self.editing = false;
@@ -90,6 +109,49 @@ impl Queue {
         } else {
             self.note = "Start or open a session first.".into();
         }
+    }
+
+    /// Reserve the only in-flight submission before copying its bounded text.
+    /// Preparing only reads the target; the first write happens after it is
+    /// retained here, so retries can never resolve a different goal generation.
+    pub(super) fn submit(&mut self, session: u128, text: &str) -> Result<()> {
+        anyhow::ensure!(
+            !self.pending && self.attempt.is_none() && !self.editing,
+            "queue request pending; /queue opens it (u retries a failed send); your new draft is retained"
+        );
+        anyhow::ensure!(
+            !text.trim().is_empty() && text.len() <= self.max_text,
+            "message must fit work.max_message_bytes ({})",
+            self.max_text
+        );
+        self.attempt = Some((
+            session,
+            Change::Submit {
+                target: String::new(),
+                id: rook_store::format_session_id(rook_store::new_session_id()),
+                text: text.into(),
+            },
+        ));
+        self.retry();
+        Ok(())
+    }
+
+    fn retry(&mut self) {
+        if self.pending {
+            return;
+        }
+        let Some((session, change)) = &self.attempt else { return };
+        self.session = Some(*session);
+        let prepare = matches!(change, Change::Submit { target, .. } if target.is_empty());
+        let command = if prepare { Command::Prepare } else { Command::Submit(change.clone()) };
+        self.ask(command);
+        if !self.pending {
+            self.status = Some(format!("{} · /queue retains this send for retry", self.note));
+        }
+    }
+
+    pub(super) fn take_status(&mut self) -> Option<String> {
+        self.status.take()
     }
 
     fn ask(&mut self, command: Command) {
@@ -119,6 +181,29 @@ impl Queue {
         while let Ok((session, result)) = self.receive.try_recv() {
             self.pending = false;
             match result {
+                Ok(Update::Prepared(target, limit)) => {
+                    if let Some((_, Change::Submit { target: saved, text, .. })) = &mut self.attempt {
+                        if target.is_empty() || text.len() > limit {
+                            self.note = "Cannot send: daemon needs an update or message exceeds its byte limit. c discards this local attempt.".into();
+                            self.status = Some(self.note.clone());
+                            continue;
+                        }
+                        *saved = target;
+                        self.retry();
+                    }
+                }
+                Ok(Update::Submitted(entry)) => {
+                    self.attempt = None;
+                    self.notice = Some((
+                        rook_proto::queue::Notice::new(
+                            rook_store::format_session_id(session),
+                            entry.reference.clone(),
+                            &entry.receipt,
+                        ),
+                        format!("↩ {}", entry.receipt.text),
+                    ));
+                    self.note = "Submission confirmed. r refreshes the queue.".into();
+                }
                 Ok(Update::Page(page)) => {
                     self.page = Some(page);
                     self.entry = None;
@@ -156,8 +241,15 @@ impl Queue {
                     self.refresh(None);
                 }
                 Err(error) => {
-                    self.note =
-                        format!("{error} · draft retained; Esc cancels editing, r refreshes the queue")
+                    if self.attempt.is_some() {
+                        self.note = format!(
+                            "{error} · /queue: u retries the same ID and target; c forgets the local attempt (it may already be queued)."
+                        );
+                        self.status = Some(self.note.clone());
+                    } else {
+                        self.note =
+                            format!("{error} · draft retained; Esc cancels editing, r refreshes the queue");
+                    }
                 }
             }
         }
@@ -185,6 +277,20 @@ impl Queue {
     pub(super) fn key(&mut self, key: crossterm::event::KeyEvent) -> bool {
         if self.pending {
             return key.code == KeyCode::Esc;
+        }
+        if self.attempt.is_some() {
+            match key.code {
+                KeyCode::Esc => return true,
+                KeyCode::Char('u') => self.retry(),
+                KeyCode::Char('c') => {
+                    self.attempt = None;
+                    self.note =
+                        "Local retry forgotten; the message may already be in the saved queue. r refreshes."
+                            .into();
+                }
+                _ => {}
+            }
+            return false;
         }
         if self.editing {
             match key.code {
@@ -309,7 +415,10 @@ impl Queue {
             rows,
             &mut selected,
         );
-        if self.editing {
+        if let Some((session, Change::Submit { target, id, text })) = &self.attempt {
+            f.render_widget(Paragraph::new(format!("Session {}\nTarget {target} · ID {id}\n{text}\n\nu retries the same send · c forgets the local retry (may already be queued)", rook_store::format_session_id(*session)))
+                .wrap(Wrap { trim: false }).block(Block::bordered().title(" Unconfirmed submission ")), body);
+        } else if self.editing {
             let block = Block::bordered().title(" Edit pending message · Ctrl-S saves ");
             let inside = block.inner(body);
             let (lines, (x, y)) = self.input.view("", inside.width, inside.height);
@@ -340,5 +449,73 @@ impl Queue {
             );
         }
         f.render_widget(Paragraph::new(self.note.as_str()).wrap(Wrap { trim: false }), note);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    type TestWindow = (Queue, Receiver<(u128, Command)>, SyncSender<(u128, Result<Update>)>);
+
+    fn window(limit: usize) -> TestWindow {
+        let (send, commands) = sync_channel(1);
+        let (updates, receive) = sync_channel(1);
+        (
+            Queue {
+                session: None,
+                pending: false,
+                page: None,
+                entry: None,
+                at: 0,
+                all: false,
+                editing: false,
+                input: Typing::default(),
+                note: String::new(),
+                restored: None,
+                notice: None,
+                send: Some(send),
+                receive,
+                attempt: None,
+                status: None,
+                max_text: limit,
+            },
+            commands,
+            updates,
+        )
+    }
+
+    #[test]
+    fn an_uncertain_send_retries_the_same_target_id_and_text_even_after_switching_sessions() {
+        let (mut queue, commands, updates) = window(16);
+        queue.submit(42, "correct this").unwrap();
+        assert!(matches!(commands.try_recv().unwrap(), (42, Command::Prepare)));
+        updates.send((42, Ok(Update::Prepared("goal.original".into(), 16)))).unwrap();
+        queue.poll(Some(42));
+        let (session, Command::Submit(first)) = commands.try_recv().unwrap() else { panic!("not submitted") };
+        assert_eq!(session, 42);
+        updates.send((42, Err(anyhow::anyhow!("response lost after commit")))).unwrap();
+        queue.poll(Some(42));
+        assert!(queue.take_status().unwrap().contains("same ID and target"));
+        queue.open(Some(43));
+        queue.retry();
+        let (session, Command::Submit(retry)) = commands.try_recv().unwrap() else {
+            panic!("retry must not prepare a new target")
+        };
+        assert_eq!(session, 42);
+        assert_eq!(serde_json::to_value(first).unwrap(), serde_json::to_value(retry).unwrap());
+    }
+
+    #[test]
+    fn one_bounded_pending_send_refuses_another_before_copying_it() {
+        let (mut queue, commands, _) = window(4);
+        assert!(queue.submit(42, "🙂a").is_err());
+        assert!(queue.attempt.is_none());
+        assert!(commands.try_recv().is_err());
+        queue.submit(42, "🙂").unwrap();
+        assert!(queue.pending);
+        assert!(queue.submit(42, "next").is_err());
+        let Some((42, Change::Submit { text, .. })) = queue.attempt else { panic!("lost first message") };
+        assert_eq!(text, "🙂");
     }
 }

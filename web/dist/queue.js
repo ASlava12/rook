@@ -1,5 +1,6 @@
 // Opaque references and revisions keep a stale view from changing newer work.
 import { el, api } from './lib.js';
+import { pendingSubmission, submissionError, retrySubmission, forgetSubmission } from './submission.js';
 
 // One reserved handoff, including an in-flight withdrawal. Changing tabs or
 // sessions cannot append this message to an unrelated conversation's draft.
@@ -117,6 +118,36 @@ export function queuePanel(session, receiveDraft, receiveReceipt) {
     if (root.isConnected) load();
   }
   all.addEventListener('change', () => load());
+  const sending = el('div', { class: 'submission-controls' });
+  root.append(sending);
+  // Refresh only the send controls; rebuilding the queue would erase an edit.
+  root.refreshSubmission = () => {
+    sending.replaceChildren();
+    const attempted = pendingSubmission();
+    if (attempted || submissionError()) {
+      const sendState = el('p', { role: 'status' }, attempted
+        ? `Unconfirmed send to session ${attempted.session}: ${attempted.id}. Retry uses the saved target and text.`
+        : submissionError());
+      const retry = el('button', { type: 'button', onclick: async () => {
+        retry.disabled = forget.disabled = true;
+        try {
+          const result = await retrySubmission();
+          receiveReceipt?.(result.session, result.entry, result.text);
+          sendState.textContent = 'Submission confirmed.';
+          retry.remove(); forget.remove(); load();
+        } catch (error) { sendState.textContent = error.error || String(error); }
+        finally { retry.disabled = forget.disabled = false; }
+      } }, 'Retry submission');
+      const forget = el('button', { type: 'button', onclick: () => {
+        try {
+          forgetSubmission(); retry.remove(); forget.remove();
+          sendState.textContent = 'Local retry forgotten. The message may already be queued; refresh before sending it again.';
+        } catch (error) { sendState.textContent = String(error); }
+      } }, 'Forget pending send');
+      sending.append(sendState, retry, forget);
+    }
+  };
+  root.refreshSubmission();
   root.append(el('p', {}, 'Pending messages can be changed until the agent accepts them. Editing does not start a turn.'),
     el('div', { class: 'row' }, refresh, more, el('label', {}, all, ' Include accepted and withdrawn')), notice, rows, detail);
   setTimeout(() => { if (root.isConnected) load(); }, 0);

@@ -845,11 +845,12 @@ impl Live {
                 rook_proto::queue::Status::Accepted => "accepted",
                 rook_proto::queue::Status::Withdrawn => "withdrawn",
             };
-            fan_out(
-                &self.backlog,
-                &self.said,
-                ChatEvent::Agent { text: format!("Message {status}: {text}"), receipt: Some(receipt) },
-            );
+            let text = if receipt.status == rook_proto::queue::Status::Queued {
+                format!("↩ {text}")
+            } else {
+                format!("Message {status}: {text}")
+            };
+            fan_out(&self.backlog, &self.said, ChatEvent::Agent { text, receipt: Some(receipt) });
         }
     }
     pub(crate) fn needs_input(&self) -> bool {

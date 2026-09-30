@@ -569,15 +569,11 @@ fn steering_during_a_tool_reaches_the_next_request(through_daemon: bool) {
     pty.screen_showing(100, 30, "Quote inserted in draft");
     assert!(requests.try_recv().is_err(), "quoting must not start another model request");
     pty.send("\r");
-    pty.screen_showing(100, 30, if through_daemon { "· queued]" } else { "the turn will see this" });
+    pty.screen_showing(100, 30, "↩ QUOTE_DRAFT");
     pty.send("PREFER_BLUE\r");
-    pty.screen_showing(100, 30, if through_daemon { "· queued]" } else { "the turn will see this" });
+    pty.screen_showing(100, 30, "↩ PREFER_BLUE");
     pty.send("/schema-retries 1\r");
-    pty.screen_showing(
-        100,
-        30,
-        if through_daemon { "↩ /schema-retries 1" } else { "done · the turn hears it" },
-    );
+    pty.screen_showing(100, 30, "↩ /schema-retries 1");
     if through_daemon {
         // Receipt by rookd, rather than only the TUI's optimistic local echo.
         pty.screen_showing(100, 30, "↩ /schema-retries 1");
@@ -2387,6 +2383,15 @@ fn queue_controls_preserve_drafts_and_use_the_saved_revision(through_daemon: boo
     };
     let page = cli(&[]);
     assert_eq!(page["items"].as_array().unwrap().len(), 2);
+    let target = page["submission_target"].as_str().unwrap();
+    let submitted = cli(&["submit", "--id", "cli-stable", "--target", target, "CLI_NEW_MESSAGE"]);
+    let retried = cli(&["submit", "--id", "cli-stable", "--target", target, "CLI_NEW_MESSAGE"]);
+    assert_eq!(submitted, retried);
+    let reference = submitted["reference"].as_str().unwrap();
+    cli(&["withdraw", reference, "--revision", "0"]);
+    let retried = cli(&["submit", "--id", "cli-stable", "--target", target, "CLI_NEW_MESSAGE"]);
+    assert!(retried["receipt"]["withdrawn_at"].is_number());
+    assert_eq!(cli(&[])["items"].as_array().unwrap().len(), 2, "retry must not resurrect a withdrawal");
     assert_eq!(
         cli(&["edit", "session.ordinary", "--revision", "0", "CLI_QUEUE_TEXT"])["receipt"]["revision"],
         1

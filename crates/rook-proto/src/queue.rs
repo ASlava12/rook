@@ -22,11 +22,16 @@ pub struct Page {
     pub next: Option<String>,
     pub total: usize,
     pub max_message_bytes: usize,
+    /// Opaque admission target. Save together with the caller-generated ID;
+    /// resolving it again on retry could steer a replacement goal.
+    #[serde(default)]
+    pub submission_target: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Change {
+    Submit { target: String, id: String, text: String },
     Edit { reference: String, revision: u64, text: String },
     Withdraw { reference: String, revision: u64 },
 }

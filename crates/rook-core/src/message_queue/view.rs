@@ -52,8 +52,13 @@ pub fn page(rook: &Rook, session: u128, query: &Query) -> Result<Page> {
     let ordinary = super::list(rook, session)?;
     let work = managed::for_session(rook, session)?;
     let settings = rook.config.transcript.bounded();
+    let submission_target = work
+        .as_ref()
+        .filter(|run| !run.status.terminal())
+        .map_or_else(|| "session".into(), |run| format!("goal.{}", generation(run)));
     let mut page = Page {
         items: Vec::new(),
+        submission_target,
         next: None,
         total: 0,
         max_message_bytes: rook.config.work.max_message_bytes.min(8 * 1024 * 1024),
@@ -109,10 +114,18 @@ pub fn read(rook: &Rook, session: u128, address: &str) -> Result<Entry> {
 }
 
 pub fn change(rook: &Rook, session: u128, change: Change) -> Result<Entry> {
+    let change = match change {
+        Change::Submit { target, id, text } => {
+            return submit(rook, session, &target, rook_proto::work::Steer { id, text });
+        }
+        change => change,
+    };
     let address = match &change {
         Change::Edit { reference, .. } | Change::Withdraw { reference, .. } => reference.clone(),
+        Change::Submit { .. } => return Err(stale()),
     };
     let apply = |messages: &mut [Steering], id: &str, open: bool| match change {
+        Change::Submit { .. } => Err(stale()),
         Change::Edit { revision, text, .. } => {
             receipts::edit(rook, messages, id, EditInstruction { revision, text }, open)
         }
@@ -134,6 +147,23 @@ pub fn change(rook: &Rook, session: u128, change: Change) -> Result<Entry> {
         })?
     };
     Ok(Entry { reference: address, receipt: message, truncated: false })
+}
+
+fn submit(rook: &Rook, session: u128, target: &str, request: rook_proto::work::Steer) -> Result<Entry> {
+    if target == "session" {
+        let (receipt, notice) = super::submit_noticed(rook, session, request)?;
+        return Ok(Entry { reference: notice.reference, receipt, truncated: false });
+    }
+    let named = rook_store::format_session_id(session);
+    managed::update(rook, &named, |saved| {
+        if target != format!("goal.{}", generation(&saved.run)) || saved.run.conversation.is_none() {
+            return Err(stale());
+        }
+        let receipt =
+            receipts::submit(rook, &mut saved.run.instructions, request, !saved.run.status.terminal())?;
+        saved.idle = 0;
+        Ok(Entry { reference: reference(Some(&saved.run), &receipt), receipt, truncated: false })
+    })
 }
 
 #[cfg(test)]
@@ -173,6 +203,112 @@ mod tests {
     }
     fn steer(id: &str, text: &str) -> Steer {
         Steer { id: id.into(), text: text.into() }
+    }
+
+    #[test]
+    fn scoped_submissions_survive_lost_replies_restart_and_goal_replacement_without_retargeting() {
+        let dir = tempfile::tempdir().unwrap();
+        let rook = engine(dir.path());
+        let session = rook.start_session("stable submission").unwrap();
+        let ordinary_target = page(&rook, session, &Query::default()).unwrap().submission_target;
+        let ordinary = Change::Submit {
+            target: ordinary_target.clone(),
+            id: "ordinary".into(),
+            text: "original".into(),
+        };
+        let saved = change(&rook, session, ordinary.clone()).unwrap();
+        change(
+            &rook,
+            session,
+            Change::Edit { reference: saved.reference, revision: 0, text: "edited".into() },
+        )
+        .unwrap();
+        super::super::accept(&rook, session, "ordinary").unwrap();
+        let run = goal(&rook, session);
+        let target = page(&rook, session, &Query::default()).unwrap().submission_target;
+        let goal_request = Change::Submit {
+            target: target.clone(),
+            id: "goal-message".into(),
+            text: "goal correction".into(),
+        };
+        let goal_receipt = change(&rook, session, goal_request.clone()).unwrap();
+        change(&rook, session, Change::Withdraw { reference: goal_receipt.reference, revision: 0 }).unwrap();
+        assert!(
+            change(
+                &rook,
+                session,
+                Change::Submit { target: ordinary_target, id: "late".into(), text: "do not retarget".into() }
+            )
+            .is_err()
+        );
+        drop(rook);
+        let rook = engine(dir.path());
+        let retried = change(&rook, session, ordinary).unwrap();
+        assert_eq!(retried.receipt.text, "edited");
+        assert!(retried.receipt.applied_at.is_some());
+        let retried = change(&rook, session, goal_request.clone()).unwrap();
+        assert!(retried.receipt.withdrawn_at.is_some());
+        managed::control(&rook, &run.id, Action::Cancel).unwrap();
+        assert!(change(&rook, session, goal_request.clone()).unwrap().receipt.withdrawn_at.is_some());
+        let replacement = goal(&rook, session);
+        assert_ne!(replacement.generation, run.generation);
+        assert!(
+            change(&rook, session, goal_request).is_err(),
+            "an old target cannot resolve a new generation"
+        );
+        assert!(replacement.instructions.is_empty());
+        assert_eq!(super::super::list(&rook, session).unwrap().len(), 1);
+        assert_eq!(
+            rook.store
+                .events(session, 0, 100)
+                .unwrap()
+                .iter()
+                .filter(|e| e.record.kind == rook_store::EventKind::UserMessage)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn concurrent_retries_have_one_receipt_and_still_work_at_the_receipt_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rook = engine(dir.path());
+        rook.config.work.max_messages = 1;
+        let session = rook.start_session("concurrent submission").unwrap();
+        let request = Change::Submit { target: "session".into(), id: "same".into(), text: "🙂".into() };
+        let barrier = std::sync::Barrier::new(2);
+        let (left, right) = std::thread::scope(|scope| {
+            let send = || {
+                barrier.wait();
+                change(&rook, session, request.clone()).unwrap()
+            };
+            let one = scope.spawn(send);
+            let two = scope.spawn(send);
+            (one.join().unwrap(), two.join().unwrap())
+        });
+        assert_eq!(left.reference, right.reference);
+        assert_eq!(super::super::list(&rook, session).unwrap().len(), rook.config.work.max_messages);
+        assert!(change(&rook, session, request.clone()).is_ok());
+        assert!(
+            change(
+                &rook,
+                session,
+                Change::Submit { target: "session".into(), id: "other".into(), text: "new".into() }
+            )
+            .is_err()
+        );
+        assert!(
+            change(
+                &rook,
+                session,
+                Change::Submit { target: "session".into(), id: "same".into(), text: "different".into() }
+            )
+            .is_err()
+        );
+        assert!(
+            rook.store.events(session, 0, 100).unwrap().is_empty(),
+            "submitting alone never starts or logs a turn"
+        );
     }
 
     #[test]

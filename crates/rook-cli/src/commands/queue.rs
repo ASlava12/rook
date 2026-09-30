@@ -9,6 +9,26 @@ pub(crate) fn execute(
     command: Option<&QueueCmd>,
 ) -> Result<serde_json::Value> {
     Ok(match command {
+        Some(QueueCmd::Submit { id, target, text }) => {
+            let target = match target {
+                Some(target) => target.clone(),
+                None => source.queue_page(session, &Query::default())?.submission_target,
+            };
+            anyhow::ensure!(
+                !target.is_empty(),
+                "daemon does not advertise scoped queue submission; restart it with the current build"
+            );
+            let id =
+                id.clone().unwrap_or_else(|| rook_store::format_session_id(rook_store::new_session_id()));
+            // Keep the retry identity visible even if this process is stopped
+            // after the server commits but before its response arrives.
+            eprintln!("Submission ID {id}; target {target}");
+            let change = Change::Submit { target: target.clone(), id: id.clone(), text: text.join(" ") };
+            let entry = source.queue_change(session, change).map_err(|error| anyhow::anyhow!(
+                "{error}; repeat the identical text with --id {id} --target {target} to resolve this submission without duplicating it"
+            ))?;
+            serde_json::to_value(entry)?
+        }
         None => serde_json::to_value(source.queue_page(session, &Query::default())?)?,
         Some(QueueCmd::List { all, after }) => serde_json::to_value(
             source.queue_page(session, &Query { include_finished: *all, after: after.clone() })?,
@@ -37,7 +57,8 @@ pub(crate) fn status(receipt: &rook_proto::work::Steering) -> &'static str {
 
 pub(crate) fn describe(value: &serde_json::Value) -> Result<String> {
     if let Ok(page) = serde_json::from_value::<Page>(value.clone()) {
-        let mut text = page.items.iter().map(describe_entry).collect::<Vec<_>>().join("\n\n");
+        let mut text = format!("Submission target: {}\n", page.submission_target);
+        text.push_str(&page.items.iter().map(describe_entry).collect::<Vec<_>>().join("\n\n"));
         if page.items.is_empty() {
             text.push_str("No queued messages.");
         }

@@ -4,6 +4,7 @@ import { $, el, api, ago, md, state, nav, notify, askToNotify } from './lib.js';
 import { historyPanel } from './history.js';
 import { mcpPanel } from './mcp.js';
 import { queuePanel, takeRestored } from './queue.js';
+import { pendingSubmission, submissionError, submitSteering } from './submission.js';
 
 // Scrollback, not the record: the session holds every word of this and the
 // sessions tab reads it back, so a tab left open for a day need not keep an
@@ -51,7 +52,13 @@ function receiptNotice(receipt, text) {
   current = null;
 }
 
-function receiveQueueReceipt(session, entry) {
+function receiveQueueReceipt(session, entry, submittedText) {
+  const input = $('#chat-input');
+  if (submittedText !== undefined && session === state.chat.session &&
+      (input?.value ?? state.chat.draft ?? '').trim() === submittedText) {
+    if (input) input.value = '';
+    state.chat.draft = '';
+  }
   const r = entry.receipt;
   receiptNotice({ session, reference: entry.reference, revision: r.revision,
     status: r.applied_at !== null ? 'accepted' : r.withdrawn_at !== null ? 'withdrawn' : 'queued' }, r.text);
@@ -542,6 +549,8 @@ export async function renderChat() {
     const text = input.value.trim() || (recipePath.value.trim() ? `Run recipe ${recipePath.value.trim()}` : files.length ? 'Analyse the attachments' : '');
     if (!text) return;
     askToNotify();
+    const submittingSession = state.chat.session;
+    const wasBusy = state.chat.busy;
     let options;
     try {
       const schema = outputSchema.value.trim();
@@ -588,6 +597,23 @@ export async function renderChat() {
         output_schema: schema ? JSON.parse(schema) : null, schema_retries: retries };
     } catch (error) { say('err', String(error)); return; }
     finally { loadingAttachments = false; }
+    if (pendingSubmission() || submissionError() || (wasBusy && !text.startsWith('/goal '))) {
+      try {
+        if (options.attachments.length) throw new Error('Queued corrections cannot include attachments');
+        const submission = submitSteering(submittingSession, text);
+        $('#queue-controls section')?.refreshSubmission?.();
+        const result = await submission;
+        receiveQueueReceipt(result.session, result.entry);
+        if (state.chat.session === submittingSession && input.isConnected && input.value.trim() === text) {
+          input.value = ''; state.chat.draft = '';
+        }
+      } catch (error) {
+        say('err', `${error.error || String(error)} Open Message queue to retry the saved submission.`);
+      } finally {
+        $('#queue-controls section')?.refreshSubmission?.();
+      }
+      return;
+    }
     send({ type: 'prompt', session: state.chat.session, text, options });
     input.value = '';
     state.chat.draft = '';

@@ -557,6 +557,15 @@ pub(crate) enum SessionCmd {
 
 #[derive(Subcommand)]
 pub(crate) enum QueueCmd {
+    /// Queue steering without starting a turn. Keep both ID and target for retry.
+    Submit {
+        #[arg(long, requires = "target")]
+        id: Option<String>,
+        #[arg(long, requires = "id")]
+        target: Option<String>,
+        #[arg(required = true, trailing_var_arg = true)]
+        text: Vec<String>,
+    },
     /// Read a bounded page. Pending messages are shown by default.
     List {
         #[arg(long)]

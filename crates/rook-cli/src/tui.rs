@@ -1427,7 +1427,7 @@ impl App {
 
         let tasks = tasks::Tasks::new(&source, &runtime, &config.work);
         let history = history::History::new(&source);
-        let queue = queue::Queue::new(&source);
+        let queue = queue::Queue::new(&source, config.work.max_message_bytes);
         let mcp_controls = mcp::Connections::new(&source, &runtime, mcp.clone());
         let (bindings, binding_error) = match config.tui.bindings() {
             Ok(bindings) => (bindings, None),
@@ -1681,6 +1681,9 @@ impl App {
                     self.overlay = None;
                 }
                 self.chat.push("stat", "Message withdrawn and appended to draft; it has not been sent.");
+            }
+            if let Some(status) = self.queue.take_status() {
+                self.chat.push("err", &status);
             }
             if let Some((receipt, text)) = self.queue.take_notice() {
                 self.chat.receipt_notice(receipt, &text);
@@ -3122,13 +3125,19 @@ impl App {
                 },
                 None => Chat::QUEUED,
             };
-            match self.chat.interject(&prompt, self.source.here().is_some(), &self.shared.interjections) {
+            let result = match self.chat.session {
+                Some(session) => self.queue.submit(session, &prompt),
+                None => {
+                    self.chat.interject(&prompt, self.source.here().is_some(), &self.shared.interjections)
+                }
+            };
+            match result {
                 Ok(()) => self.chat.push(
                     "stat",
-                    if self.source.here().is_some() {
-                        queued
+                    if self.chat.session.is_some() {
+                        "  submitting · /queue retains the ID until confirmation"
                     } else {
-                        "  sent to daemon · /queue shows its current receipt"
+                        queued
                     },
                 ),
                 Err(error) => {

@@ -227,13 +227,57 @@ CI/compaction process exited 0. Compaction retained the published measurements:
 CPU-active without returning a slice for over seven minutes; that diagnostic
 process was stopped, and directed source reads supplied the call-path evidence.
 
+The fifth block adds scoped, retryable correction submission. The combined page
+advertises an admission target; CLI, TUI and browser save that target with a
+caller-generated ID and the original text before their first write. Core checks
+the goal generation under the mutation lock. An identical retry returns the
+existing receipt after editing, withdrawal or acceptance; replacing the goal
+rejects its old target. Submission alone neither starts a turn nor resumes a
+paused goal. Concurrent retries and retries at a full receipt cap use one
+receipt. Ordinary receipts remain retryable after promotion to a goal.
+
+The CLI adds `session queue ... submit` and prints its ID and target before the
+write. Both explicit retry flags are required together. TUI corrections use the
+same durable path for local and daemon turns once the session ID is known. One
+pending send is retained in that TUI process; `/queue` offers retry and forgetting.
+The browser retains one bounded pending send in `sessionStorage`, including
+across tab reloads. Finite queue requests have a 30-second deadline. A malformed
+acknowledgement retains the request; storage failure before saving its target
+prevents the first write. Neither client silently falls back to a fresh prompt.
+Forgetting only discards the local retry and does not withdraw a server receipt.
+Refreshing pending-send controls preserves a separate unsaved queue edit.
+
+Focused core and TUI checks passed for restart, replacement, concurrent retries,
+receipt caps, retained identity and UTF-8 byte limits. Local and daemon PTY checks
+passed for live acceptance and explicit CLI retry after withdrawal. Logs:
+`/tmp/rook-pi-scoped-core.log`, `/tmp/rook-pi-scoped-tui.log`,
+`/tmp/rook-pi-scoped-pty.log` and `/tmp/rook-pi-scoped-controls-pty.log`.
+Chrome checks using actual frontend modules passed for lost replies, reloads,
+edited accepted receipts, stale targets, invalid acknowledgements, storage
+failure, timeout/retry, and pending controls preserving an unsaved edit. Logs:
+`/tmp/rook-pi-scoped-browser-deadline.log` and
+`/tmp/rook-pi-scoped-browser-preserve-edit.log`. An actual scratch daemon plus
+Chrome and a scripted provider confirmed one correction in the next model
+request and the matching accepted receipt
+(`/tmp/rook-pi-scoped-browser-live-final.log`). This checks queue delivery, not model
+quality or completion checking; the scripted provider does not implement the
+completion-check protocol.
+
+The fifth block's full isolated `cargo xtask ci` passed with exit status 0 in
+531.9 seconds (`/tmp/rook-pi-scoped-ci.log`). The combined CI/compaction process
+also exited 0; storage stayed at 4.02 MiB, 37.1x dictionary compression and 5.8x
+end-to-end (`/tmp/rook-pi-scoped-compaction.log`). Rust sources were unchanged
+during the gate. The browser-only pending-controls correction during its test
+phase passed the final Chrome regressions and a repeated real-daemon check;
+JavaScript syntax and the rendered page were checked too.
+
 The queue capability remains in progress. Still required: explicit follow-up
-boundaries after a complete ordinary turn or whole goal, client-generated live
-submission IDs with goal-generation-aware admission/retry, local embedded input
-parity, and restart/compaction/delegation/acceptance tests for those paths. The
-TUI's read-only message detail still needs scrolling; its editor already has a
-cursor viewport. Generation-qualified references and notifications do not yet
-establish the live submission lifecycle across goals.
+boundaries after a complete ordinary turn or whole goal, idempotent admission
+for initial prompts, `/goal` controls, plain REPL and early TUI input before a
+session ID, local embedded input parity, and restart/compaction/delegation/
+acceptance tests for the full lifecycle. The TUI's read-only message detail
+still needs scrolling; its editor already has a cursor viewport. These scoped
+correction retries do not establish every execution lifecycle boundary.
 
 ### Next queue admission boundary
 

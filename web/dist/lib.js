@@ -30,8 +30,9 @@ export const ago = ts => {
   return `${Math.floor(d / 86400)}d ago`;
 };
 
-export const api = async (path, body) => {
-  const r = await fetch(path, body === undefined ? undefined : {
+export const api = async (path, body, signal) => {
+  const r = await fetch(path, body === undefined ? { signal } : {
+    signal,
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
