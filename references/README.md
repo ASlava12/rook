@@ -7,7 +7,7 @@ inventing a worse one.
 They are **not** fetched by a normal `git clone`. Get them when you want them:
 
 ```sh
-cargo xtask refs init          # clone all, shallow (~870 MB)
+cargo xtask refs init          # clone all, shallow
 cargo xtask refs init codex    # or just one
 ```
 
@@ -15,6 +15,7 @@ cargo xtask refs init codex    # or just one
 |---|---|---|---|
 | `acp/` | [agentclientprotocol/agent-client-protocol](https://github.com/agentclientprotocol/agent-client-protocol) | Apache-2.0 | The ACP spec and its Rust SDK. The reference for `rookd acp`. |
 | `codex/` | [openai/codex](https://github.com/openai/codex) | Apache-2.0 | Closest architectural relative: a Rust agent with a TUI and an app-server. |
+| `pi/` | [earendil-works/pi](https://github.com/earendil-works/pi) | MIT | Extensible coding-agent CLI, a reusable agent loop and unified provider API, durable conversations/tasks, and a TUI with differential rendering. |
 | `goose/` | [aaif-goose/goose](https://github.com/aaif-goose/goose) | Apache-2.0 | Rust agent with extensions, recipes and MCP. |
 | `opencode/` | [anomalyco/opencode](https://github.com/anomalyco/opencode) | MIT | The best-regarded TUI, plus its skills and session model. |
 | `cline/` | [cline/cline](https://github.com/cline/cline) | Apache-2.0 | Context-window management and diff-editing reliability. |

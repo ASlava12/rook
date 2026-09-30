@@ -52,3 +52,9 @@
 	branch = main
 	shallow = true
 	update = none
+[submodule "references/pi"]
+	path = references/pi
+	url = https://github.com/earendil-works/pi.git
+	branch = main
+	shallow = true
+	update = none
