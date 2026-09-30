@@ -9,6 +9,10 @@ accounting scope and pagination limits.
 `/tree [session-id]` opens [conversation branches](conversation-branches.md).
 The same view is `v` in history or `b` in the sessions pane. Enter explores a
 node, `h` reads its history, and `c` continues it while preserving the draft.
+In history, `Shift+B` branches from the selected event. A user message becomes an
+editable draft with its attachments; other events continue after that point.
+An existing draft must be saved or cleared first. Creating a branch does not
+submit a prompt or restore files; lowercase `b` still navigates back in history.
 
 Open `rook config edit`, enter `tui`, then `keys`. Each named action has its own
 description and list of shortcuts. Missing actions keep their defaults; an empty

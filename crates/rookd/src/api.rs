@@ -34,6 +34,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/sessions/{id}/transcript", get(transcript))
         .route("/api/sessions/{id}/turns", get(turns))
         .route("/api/sessions/{id}/tree", get(branches))
+        .route("/api/sessions/{id}/branch", post(branch_from_event))
         .route("/api/sessions/{id}/history", get(history_page))
         .route("/api/sessions/{id}/history/search", get(history_search))
         .route("/api/sessions/{id}/history/{seq}", get(history_entry))
@@ -366,6 +367,18 @@ async fn branches(
 ) -> ApiResult<rook_core::branches::Page> {
     let session = session_id(&id)?;
     history_read(s, move |r| rook_core::branches::page(r, session, &q)).await
+}
+#[derive(Deserialize)]
+struct BranchEvent {
+    event: u64,
+}
+async fn branch_from_event(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+    Json(q): Json<BranchEvent>,
+) -> ApiResult<rook_core::branches::Forked> {
+    let session = session_id(&id)?;
+    history_read(s, move |r| rook_core::branches::from_event(r, session, q.event)).await
 }
 #[derive(Deserialize)]
 struct HistorySearch {

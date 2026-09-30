@@ -137,6 +137,14 @@ unchanged. Reserving an execution updates the queue and execution together.
 Admission commits the goal note, user message, queue acceptance, goal value and
 actual prompt sequence in the execution receipt in one transaction.
 
+Attachment-bearing user events keep the `rook:attachments:v1` JSON message.
+An optional `rook_draft` field records the admitted prompt before attachment
+framing and the original attachment names/text; image parts reference indexes
+in the message rather than duplicating base64 payloads. This lets historical
+message editing restore an exact draft. Older readers ignore the field, and
+older messages without it remain editable as prepared text plus retained images.
+The encoded record is capped at 16 MiB. No postcard layout changes are required.
+
 Tool images use existing event types and leave the postcard format unchanged.
 A `Note` labelled `rook:tool-images:v1` holds bounded image JSON immediately before
 its `ToolResult`; both events are appended in one transaction, so concurrent

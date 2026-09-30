@@ -730,6 +730,10 @@
     "kind": "integer",
     "help": "Maximum loaded ancestors in one view. Range 1–64; default 32. Earlier ancestry remains navigable separately."
   },
+  "branches.edit_bytes": {
+    "kind": "integer",
+    "help": "Maximum complete UTF-8 text returned to the editor when branching from a user message. Range 1024–8388608; default 1048576. Oversized drafts are rejected before a branch is created, never shortened. Attachment records and replies also have a 16 MiB frame limit."
+  },
   "transcript": {
     "kind": "object",
     "help": "Bounded pages, search scans and quotes from session history. Used by CLI, terminal and browser navigation."

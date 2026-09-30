@@ -4,6 +4,7 @@ use std::{io::Read, path::Path};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use rook_llm::Message;
 use rook_proto::Attachment;
+use serde::{Deserialize, Serialize};
 
 use crate::{CoreError, Result};
 
@@ -12,6 +13,109 @@ pub const MAX_IMAGE_BYTES: usize = rook_llm::images::MAX_IMAGE_BYTES;
 pub const MAX_TEXT_BYTES: usize = 256 * 1024;
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const LABEL: &str = "rook:attachments:v1";
+
+/// Material returned to an editor; it is never an automatic submission.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EditDraft {
+    pub text: String,
+    pub attachments: Vec<Attachment>,
+    pub notice: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct DraftMetadata {
+    prompt: String,
+    parts: Vec<DraftPart>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum DraftPart {
+    Image { name: String, index: usize },
+    Text { name: String, text: String },
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredMessage {
+    #[serde(flatten)]
+    message: Message,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rook_draft: Option<DraftMetadata>,
+}
+
+/// Optional JSON metadata preserves the prompt before attachment framing. Older readers
+/// still decode the flattened Message; image bytes occur only once.
+pub(crate) fn encode(prompt: &str, attachments: &[Attachment]) -> Result<String> {
+    if prompt.len() > MAX_FRAME_BYTES {
+        return Err(bad("attachment prompt exceeds the stored message limit"));
+    }
+    let message = prepare(prompt, attachments)?;
+    let mut index = 0;
+    let parts = attachments
+        .iter()
+        .map(|part| match part {
+            Attachment::Image { name, .. } => {
+                let part = DraftPart::Image { name: name.clone(), index };
+                index += 1;
+                part
+            }
+            Attachment::Text { name, text } => DraftPart::Text { name: name.clone(), text: text.clone() },
+        })
+        .collect();
+    let stored = StoredMessage { message, rook_draft: Some(DraftMetadata { prompt: prompt.into(), parts }) };
+    let bytes = crate::persistence::encode_with_limit(&stored, MAX_FRAME_BYTES)?;
+    String::from_utf8(bytes).map_err(|error| bad(error.to_string()))
+}
+
+pub(crate) fn edit(body: &[u8], limit: usize) -> Result<EditDraft> {
+    let StoredMessage { message, rook_draft } = serde_json::from_slice(body)?;
+    if message.role != rook_llm::Role::User || message.images.len() > MAX_ATTACHMENTS {
+        return Err(bad("invalid stored attachment message"));
+    }
+    let image = |name: String, index: usize| -> Result<Attachment> {
+        let found = message.images.get(index).ok_or_else(|| bad("stored draft names a missing image"))?;
+        rook_llm::Image::from_base64(&found.mime_type, &found.data).map_err(bad)?;
+        Ok(Attachment::Image { name, mime_type: found.mime_type.clone(), data: found.data.clone() })
+    };
+    if let Some(metadata) = rook_draft {
+        if metadata.prompt.len() > limit {
+            return Err(bad(format!(
+                "draft exceeds branches.edit_bytes ({limit}); read or export the complete event instead"
+            )));
+        }
+        if metadata.parts.len() > MAX_ATTACHMENTS {
+            return Err(bad("stored draft exceeds the attachment count limit"));
+        }
+        let attachments = metadata
+            .parts
+            .into_iter()
+            .map(|part| match part {
+                DraftPart::Image { name, index } => image(name, index),
+                DraftPart::Text { name, text } => Ok(Attachment::Text { name, text }),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let restored = prepare(&metadata.prompt, &attachments)?;
+        if restored.content != message.content
+            || serde_json::to_vec(&restored.images)? != serde_json::to_vec(&message.images)?
+        {
+            return Err(bad("stored draft metadata does not match the original message"));
+        }
+        return Ok(EditDraft { text: metadata.prompt, attachments, notice: None });
+    }
+    if message.content.len() > limit {
+        return Err(bad(format!(
+            "draft exceeds branches.edit_bytes ({limit}); read or export the complete event instead"
+        )));
+    }
+    let attachments = (0..message.images.len())
+        .map(|index| image(format!("historical-image-{}", index + 1), index))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(EditDraft {
+        text: message.content,
+        attachments,
+        notice: Some("Legacy message: the draft includes prepared text and embedded file context; original images are retained.".into()),
+    })
+}
 
 fn bad(why: impl Into<String>) -> CoreError {
     CoreError::Other(why.into())
@@ -117,6 +221,50 @@ mod tests {
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
     fn png() -> Attachment {
         Attachment::Image { name: "shot.png".into(), mime_type: "image/png".into(), data: PNG.into() }
+    }
+
+    #[test]
+    fn stored_draft_metadata_round_trips_editor_input_and_remains_readable_as_a_message() {
+        let prompt = "  Привет 👩‍💻\nlook at these files\n";
+        let attachments =
+            vec![Attachment::Text { name: "context.txt".into(), text: "untrusted context\n".into() }, png()];
+        let stored = encode(prompt, &attachments).unwrap();
+        let message = decode(&stored).unwrap();
+        assert_eq!(message.content, prepare(prompt, &attachments).unwrap().content);
+        assert_eq!(message.images.len(), 1);
+        assert_eq!(stored.matches(PNG).count(), 1, "metadata must reference image bytes, not duplicate them");
+        let draft = edit(stored.as_bytes(), 1024).unwrap();
+        assert_eq!(draft.text, prompt);
+        assert_eq!(
+            serde_json::to_value(draft.attachments).unwrap(),
+            serde_json::to_value(attachments).unwrap()
+        );
+        assert!(draft.notice.is_none());
+        assert!(edit(stored.as_bytes(), 4).unwrap_err().to_string().contains("branches.edit_bytes"));
+        let mut changed: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        changed["rook_draft"]["prompt"] = "different prompt".into();
+        assert!(
+            edit(&serde_json::to_vec(&changed).unwrap(), 1024)
+                .unwrap_err()
+                .to_string()
+                .contains("does not match")
+        );
+    }
+
+    #[test]
+    fn legacy_attachment_edits_keep_all_prepared_text_and_pixels_and_explain_the_difference() {
+        let message = prepare(
+            "original request",
+            &[png(), Attachment::Text { name: "file.txt".into(), text: "embedded bytes".into() }],
+        )
+        .unwrap();
+        let bytes = serde_json::to_vec(&message).unwrap();
+        let draft = edit(&bytes, 4096).unwrap();
+        assert_eq!(draft.text, message.content);
+        assert!(draft.text.contains("embedded bytes"));
+        assert!(draft.notice.unwrap().contains("Legacy message"));
+        let restored = prepare(&draft.text, &draft.attachments).unwrap();
+        assert_eq!(restored.images[0].data, message.images[0].data);
     }
 
     #[test]

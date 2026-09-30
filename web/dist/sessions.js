@@ -1,7 +1,7 @@
 // Sessions: what each one changed on disk, its transcript as it grows, and
 // the two things a person does with one — continue it, or rewind it.
 import { $, el, api, ago, state } from './lib.js';
-import { continueIn, quoteIntoDraft } from './chat.js';
+import { continueIn, quoteIntoDraft, branchFromEvent } from './chat.js';
 import { historyPanel } from './history.js';
 import { branchPanel } from './branches.js';
 
@@ -113,10 +113,10 @@ export async function renderSessions() {
     const branches = el('details', {}, el('summary', {}, 'Conversation branches'));
     branches.addEventListener('toggle', () => {
       branches.querySelector('section')?.remove();
-      if (branches.open) branches.append(branchPanel(session, continueIn, quoteIntoDraft));
+      if (branches.open) branches.append(branchPanel(session, continueIn, quoteIntoDraft, branchFromEvent));
     });
     right.append(branches);
-    right.append(historyPanel(session, text => quoteIntoDraft(session, text), rewindTo));
+    right.append(historyPanel(session, text => quoteIntoDraft(session, text), rewindTo, seq => branchFromEvent(session, seq)));
   } else {
     right.append(el('p', { class: 'empty' }, 'no sessions yet — run `rook run "…"`'));
   }

@@ -11,6 +11,7 @@ pub(super) struct History {
     turns: Option<rook_core::turns::Page>,
     tree: Option<rook_core::branches::Page>,
     switch: Option<rook_core::branches::Node>,
+    forked: Option<rook_core::branches::Forked>,
     hits: Option<Matches>,
     entry: Option<EntryPage>,
     at: usize,
@@ -24,6 +25,7 @@ pub(super) struct History {
     receive: Receiver<(u64, Result<Update>)>,
 }
 enum Command {
+    Fork(u128, u64),
     Tree(u128, Option<String>),
     Turns(u128, Option<u64>),
     Page(u128, PageRequest),
@@ -32,6 +34,7 @@ enum Command {
     Quote(u128, u64, u64),
 }
 enum Update {
+    Fork(rook_core::branches::Forked),
     Tree(rook_core::branches::Page),
     Turns(rook_core::turns::Page),
     Page(u128, Page),
@@ -42,6 +45,7 @@ enum Update {
 impl Command {
     fn read(self, source: &crate::source::Source) -> Result<Update> {
         Ok(match self {
+            Self::Fork(session, seq) => Update::Fork(source.branch_from_event(session, seq)?),
             Self::Tree(session, after) => Update::Tree(source.branch_page(session, after.as_deref())?),
             Self::Turns(session, before) => Update::Turns(source.turn_results(session, before)?),
             Self::Page(session, q) => Update::Page(session, source.transcript_page(session, &q)?),
@@ -83,6 +87,7 @@ impl History {
             turns: None,
             tree: None,
             switch: None,
+            forked: None,
             hits: None,
             entry: None,
             at: 0,
@@ -141,12 +146,22 @@ impl History {
     }
     pub(super) fn poll(&mut self) {
         while let Ok((epoch, update)) = self.receive.try_recv() {
+            // A committed fork survives closing the viewer while it was being
+            // created. The app decides whether it can still replace the draft.
+            if let Ok(Update::Fork(forked)) = update {
+                self.forked = Some(forked);
+                if epoch == self.epoch {
+                    self.pending = false;
+                }
+                continue;
+            }
             if epoch != self.epoch {
                 continue;
             }
             self.pending = false;
             self.note.clear();
             match update {
+                Ok(Update::Fork(_)) => unreachable!("fork completion handled before stale read filtering"),
                 Ok(Update::Tree(page)) => {
                     self.session = rook_store::parse_session_id(&page.selected.id);
                     self.at = page.ancestors.len();
@@ -208,6 +223,12 @@ impl History {
     }
     pub(super) fn take_session(&mut self) -> Option<rook_core::branches::Node> {
         self.switch.take()
+    }
+    pub(super) fn take_forked(&mut self) -> Option<rook_core::branches::Forked> {
+        self.forked.take()
+    }
+    pub(super) fn wants_branch(&self, key: crossterm::event::KeyEvent) -> bool {
+        self.editing.is_none() && self.tree.is_none() && key.code == KeyCode::Char('B')
     }
     fn branch(&self) -> Option<&rook_core::branches::Node> {
         let page = self.tree.as_ref()?;
@@ -333,6 +354,11 @@ impl History {
             return false;
         }
         match key.code {
+            KeyCode::Char('B') => {
+                if let Some((seq, _)) = self.target() {
+                    self.ask(Command::Fork(session, seq));
+                }
+            }
             KeyCode::Char('v') => {
                 self.ask(Command::Tree(session, None));
             }
@@ -500,7 +526,7 @@ impl History {
             Some(true) => "jump to event #",
             Some(false) => "find literal text",
             None if self.turns.is_some() => "turn results · t refresh · n older · h history",
-            None => "history · / find · g jump · q quote · t turn results",
+            None => "history · / find · g jump · q quote · B branch · t turn results",
         };
         let text = if self.editing.is_some() {
             self.input.text.clone()

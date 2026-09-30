@@ -660,3 +660,63 @@ The final `CARGO_TARGET_DIR=/tmp/rook-pi-ci-target cargo xtask ci` and
 logs are `/tmp/rook-branches-final-ci2.log` and
 `/tmp/rook-branches-compaction.log`. The previous gate was deliberately stopped
 during review to fix the fork cutoff race, and is not counted as a pass.
+
+## Editing historical messages into branches
+
+The next branch block exposes `rook session branch ID EVENT`, the matching HTTP
+POST, TUI history **Shift+B**, and browser history actions in Chat and Sessions.
+A user event is excluded from the copied prefix and returned as a complete
+editable draft; other events are included and start with an empty editor.
+Selection creates the branch without calling the model. Existing drafts and
+attachments are protected, and neither the source conversation nor workspace
+files are changed. The operation is not idempotent; uncertain responses require
+inspecting the tree before retrying.
+
+Attachment records retain optional JSON metadata for the admitted prompt and
+original attachment names/text. Image payloads occur once and are referenced by
+index. Replay still reads the original Message shape, including in older readers;
+postcard records are unchanged. Legacy records return complete prepared text
+with an explicit notice and retained images. Recipe-expanded text is preserved,
+not the recipe invocation or output settings. Oversized/invalid drafts fail
+before creating a branch: `branches.edit_bytes` bounds text, and encoded records
+and responses have an additional 16 MiB ceiling.
+
+The browser displays historical attachment names and keeps them across tab
+changes. Sending consumes them once. JSON frame admission counts UTF-8 and
+escaping before serialization; refusal keeps both text and attachments.
+`node --test web/tests/json-size.mjs` checks exact encoded boundaries, Unicode,
+escaped oversized input and deep nesting. It passed; log:
+`/tmp/rook-event-branch-json-size.log`.
+
+Core checks cover exact event boundaries, complete Unicode drafts, legacy/new
+attachment records, rejected oversized and inconsistent metadata, and actual
+edited model requests. CLI checks exercise local and daemon paths. PTY checks
+exercise draft refusal, editor loading, Enter submission and image retention in
+both modes. Chrome with an actual scratch daemon and scripted provider checks
+both history panels, tab changes, duplicate context prevention, assistant-event
+boundaries and oversized submission refusal without losing attachments.
+The rendered draft was inspected. The harness and final browser log are
+`/tmp/rook-pi-browser-check/event-branch-live.cjs` and
+`/tmp/rook-event-branch-browser3.log`.
+
+The first gate was deliberately stopped to remove serialization before the
+browser's size check. The next full gate exited 1: the existing follow-up-to-goal
+scenario did not observe a tool-role message in its second checker request.
+Its original assertion did not print that request. The assertion now prints it
+without weakening the condition. The complete CLI suite and ten subsequent
+isolated executions passed; independent API probes with and without hooks also
+passed. The cause of the original failure remains unresolved and belongs in the
+remaining queue lifecycle investigation. Evidence: `/tmp/rook-event-branch-ci2.log`,
+`/tmp/rook-event-branch-cli-diagnostic.log`, `/tmp/rook-promotion-repeat-*.log`,
+`/tmp/rook-promotion-probe.log` and `/tmp/rook-promotion-probe-hooks.log`.
+
+The final isolated `cargo xtask ci` and `cargo xtask compaction` process exited 0.
+CI reported 621.3 seconds (`/tmp/rook-event-branch-ci3.log`). Sources stayed fixed
+during that gate. Compaction retained 4.02 MiB on disk, 37.1x dictionary
+compression and 5.8x end-to-end (`/tmp/rook-event-branch-compaction.log`).
+
+The branch capability remains in progress: names, bookmarks and optional
+attributable summaries are still required. The existing store fork path also
+collects the copied event records in memory; bounded tree/draft reads do not
+establish a bounded-memory fork of a long history. Address this when completing
+branch handling. Other pending capabilities retain their full scope.

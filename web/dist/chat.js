@@ -1,6 +1,6 @@
 // The chat: one socket for the tab's lifetime, a session that can be resumed,
 // a turn that can be stopped, and the agent's questions answered in place.
-import { $, el, api, ago, md, state, nav, notify, askToNotify } from './lib.js';
+import { $, el, api, ago, md, state, nav, notify, askToNotify, jsonWithin } from './lib.js';
 import { historyPanel } from './history.js';
 import { branchPanel } from './branches.js';
 import { mcpPanel } from './mcp.js';
@@ -421,7 +421,7 @@ function renderPicker() {
   if (branches && branches.dataset.session !== (state.chat.session || '')) {
     branches.dataset.session = state.chat.session || '';
     branches.querySelector('section')?.remove();
-    if (branches.open) branches.append(branchPanel(state.chat.session, continueIn, quoteIntoDraft));
+    if (branches.open) branches.append(branchPanel(state.chat.session, continueIn, quoteIntoDraft, branchFromEvent));
   }
   const queue = $('#queue-controls');
   if (queue && queue.dataset.session !== (state.chat.session || '')) {
@@ -546,6 +546,15 @@ export async function renderChat() {
 
   let loadingAttachments = false;
   const attachmentsInput = el('input', { id: 'attachments', type: 'file', multiple: true, 'aria-label': 'Images or UTF-8 context files' });
+  const historicalAttachments = el('div', { class: 'row', 'aria-label': 'Historical attachments' });
+  const showHistoricalAttachments = () => {
+    const kept = state.chat.historicalAttachments || [];
+    historicalAttachments.replaceChildren(...(kept.length ? [
+      el('span', {}, `Historical attachments: ${kept.length} (${kept.map(a => a.name.slice(0, 120)).join(', ')})`),
+      el('button', { type: 'button', onclick: () => { state.chat.historicalAttachments = []; showHistoricalAttachments(); } }, 'Clear historical attachments'),
+    ] : []));
+  };
+  showHistoricalAttachments();
   const recipePath = el('input', { id: 'recipe-name', 'aria-label': 'Run recipe', placeholder: 'Recipe name or workspace-relative .toml file (optional)' });
   const recipeParameters = el('textarea', { id: 'recipe-parameters', 'aria-label': 'Recipe parameters', placeholder: 'Parameters as JSON, for example {"scope":"src"}', rows: 2 });
   const outputPath = el('input', { id: 'output-file', 'aria-label': 'Final answer file', placeholder: 'Save final answer: workspace-relative path (optional)' });
@@ -580,9 +589,10 @@ export async function renderChat() {
             Object.values(parameters).some(value => typeof value !== 'string')) throw new Error('Recipe parameters must be a JSON object of strings');
         recipe = { path: recipePath.value.trim(), parameters };
       }
-      if (files.length > 4) throw new Error('At most 4 attachments per turn');
-      if (state.chat.busy && files.length) throw new Error('Wait for the running turn to finish before attaching files');
-      let textBytes = 0;
+      const kept = state.chat.historicalAttachments || [];
+      if (files.length + kept.length > 4) throw new Error('At most 4 attachments per turn');
+      if (state.chat.busy && (files.length || kept.length)) throw new Error('Wait for the running turn to finish before attaching files');
+      let textBytes = kept.filter(a => a.type === 'text').reduce((n, a) => n + new TextEncoder().encode(a.text).length, 0);
       for (const file of files) {
         const isImage = /^image\//.test(file.type) || /\.(png|jpe?g|webp|gif)$/i.test(file.name);
         if (isImage && file.size > 2 * 1024 * 1024) throw new Error('An image exceeds 2 MiB; resize it first');
@@ -590,7 +600,7 @@ export async function renderChat() {
       }
       if (textBytes > 256 * 1024) throw new Error('Embedded text exceeds 256 KiB');
       loadingAttachments = true;
-      const attachments = [];
+      const attachments = [...kept];
       for (const file of files) {
         const isImage = /^image\//.test(file.type) || /\.(png|jpe?g|webp|gif)$/i.test(file.name);
         const bytes = await file.arrayBuffer();
@@ -630,10 +640,18 @@ export async function renderChat() {
       }
       return;
     }
-    send({ type: 'prompt', session: state.chat.session, text, options });
+    const message = { type: 'prompt', session: state.chat.session, text, options };
+    if (!jsonWithin(message, 16 * 1024 * 1024)) {
+      say('err', 'The prompt and attachments exceed the 16 MiB message limit; the draft was retained.'); return;
+    }
+    send(message);
     input.value = '';
     state.chat.draft = '';
     attachmentsInput.value = '';
+    state.chat.historicalAttachments = [];
+    showHistoricalAttachments();
+    state.chat.branchNotice = '';
+    $('#branch-draft-note')?.replaceChildren();
     // While a turn runs this is something to say to it, and the server echoes
     // it back as `interjected` — so the transcript is written there, once, and
     // the working state is left alone.
@@ -674,13 +692,13 @@ export async function renderChat() {
   history.addEventListener('toggle', () => {
     if (!history.open) { history.querySelector('section')?.remove(); return; }
     const session = state.chat.session;
-    if (session && !history.querySelector('section')) history.append(historyPanel(session, text => quoteIntoDraft(session, text)));
+    if (session && !history.querySelector('section')) history.append(historyPanel(session, text => quoteIntoDraft(session, text), undefined, seq => branchFromEvent(session, seq)));
   });
   const mcp = el('details', { id: 'mcp-controls' }, el('summary', {}, 'MCP connections'));
   const branches = el('details', { id: 'branch-controls' }, el('summary', {}, 'Conversation branches'));
   branches.addEventListener('toggle', () => {
     branches.querySelector('section')?.remove();
-    if (branches.open) branches.append(branchPanel(state.chat.session, continueIn, quoteIntoDraft));
+    if (branches.open) branches.append(branchPanel(state.chat.session, continueIn, quoteIntoDraft, branchFromEvent));
   });
   mcp.addEventListener('toggle', () => {
     mcp.querySelector('section')?.remove();
@@ -694,7 +712,8 @@ export async function renderChat() {
   $('#view').replaceChildren(el('div', { class: 'card' },
     el('div', { class: 'row', id: 'picker' }),
     el('div', { class: 'row', id: 'settings' }),
-    stream, history, branches, mcp, queue, outputSettings, form, naming));
+    stream, history, branches, mcp, queue, outputSettings, historicalAttachments,
+    el('p', { id: 'branch-draft-note', class: 'sub', role: 'status' }, state.chat.branchNotice || ''), form, naming));
   renderPicker();
   renderSettings();
   connect();
@@ -704,18 +723,29 @@ export async function renderChat() {
 }
 
 // From another tab: continue this session in the chat.
-export function continueIn(session) {
+export function continueIn(session, prepared = null) {
   // Detach this observer before choosing another conversation. A queued frame
   // from the old socket must not change the selected session or its controls.
   const previous = socket;
   socket = null;
   previous?.close();
-  state.chat.draft = $('#chat-input')?.value ?? state.chat.draft ?? '';
+  state.chat.draft = prepared ? prepared.text : ($('#chat-input')?.value ?? state.chat.draft ?? '');
+  if (prepared) state.chat.historicalAttachments = prepared.attachments;
   done();
   callStatus = null;
   state.chat.spent = null; state.chat.context = null; state.chat.modelRequest = null;
   state.chat.session = session;
   nav.go('chat');
+}
+
+export async function branchFromEvent(session, event) {
+  const canLoad = () => !($('#chat-input')?.value ?? state.chat.draft ?? '') &&
+    !($('#attachments')?.files.length) && !(state.chat.historicalAttachments?.length);
+  if (!canLoad()) throw new Error('Save or clear the current draft and attachments before branching.');
+  const forked = await api(`/api/sessions/${encodeURIComponent(session)}/branch`, { event });
+  if (!canLoad()) throw new Error(`Created branch ${forked.node.id}; current draft retained because it changed while the branch was being created.`);
+  state.chat.branchNotice = forked.draft?.notice || 'New branch created. Edit the draft and send when ready; workspace files are unchanged.';
+  continueIn(forked.node.id, forked.draft || { text: '', attachments: [] });
 }
 
 // A quote is just draft text. It cannot send a prompt or switch a running turn.

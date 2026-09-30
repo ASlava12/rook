@@ -166,6 +166,7 @@ impl Overlay {
                 ("Esc ", "close"),
             ],
             Overlay::History => &[
+                ("B ", "branch at event  "),
                 ("v ", "branches  "),
                 ("t ", "turn results  "),
                 ("/ ", "find  "),
@@ -1650,6 +1651,28 @@ impl App {
             {
                 self.continue_known(id, branch.title, branch.next_seq);
             }
+            if let Some(forked) = self.history.take_forked() {
+                if self.overlay != Some(Overlay::History) || !self.can_load_branch() {
+                    self.chat.push(
+                        "stat",
+                        &format!(
+                            "Created branch {}; open it from /tree. Current draft retained.",
+                            forked.node.id
+                        ),
+                    );
+                } else if let Some(id) = rook_store::parse_session_id(&forked.node.id) {
+                    self.continue_known(id, forked.node.title, forked.node.next_seq);
+                    if let Some(draft) = forked.draft {
+                        self.chat.input.set(&draft.text);
+                        let count = draft.attachments.len();
+                        self.shared.output.borrow_mut().attachments = draft.attachments;
+                        self.chat.push("stat", &format!("Historical message loaded with {count} attachments; Enter submits in the new branch. Workspace files unchanged."));
+                        if let Some(notice) = draft.notice {
+                            self.chat.push("stat", &notice);
+                        }
+                    }
+                }
+            }
             self.still_running();
             // Poll rather than block: a streaming turn has to keep redrawing
             // even while nobody is typing.
@@ -2191,6 +2214,11 @@ impl App {
             return;
         }
         if overlay == Overlay::History {
+            if self.history.wants_branch(key) && !self.can_load_branch() {
+                self.overlay = None;
+                self.chat.push("stat", "Before branching, save or clear the draft and attachments. In --alone mode, finish or stop the running turn first.");
+                return;
+            }
             if self.history.key(key) {
                 self.overlay = None;
             }
@@ -2927,6 +2955,12 @@ impl App {
             None => {}
         }
         self.overlay = None;
+    }
+
+    fn can_load_branch(&self) -> bool {
+        self.chat.input.as_str().is_empty()
+            && self.shared.output.borrow().attachments.is_empty()
+            && !(self.chat.busy && self.source.here().is_some())
     }
 
     /// The tail of a session's transcript, in the chat pane, as the window

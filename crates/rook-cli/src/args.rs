@@ -427,6 +427,11 @@ pub(crate) enum StoreCmd {
 
 #[derive(Subcommand)]
 pub(crate) enum SessionCmd {
+    /// Fork from an event; user messages are returned as an editable draft.
+    Branch {
+        id: String,
+        event: u64,
+    },
     /// Inspect ancestors and direct conversation branches without restoring files.
     Tree {
         id: String,

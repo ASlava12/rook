@@ -13,6 +13,49 @@ struct Rook {
 }
 
 #[test]
+fn event_branches_return_complete_drafts_locally_and_through_the_daemon() {
+    let rook = Rook::new();
+    let id = rook_store::new_session_id();
+    let name = rook_store::format_session_id(id);
+    let text = format!("  Привет\n{}\n", "editable ".repeat(800));
+    {
+        let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+        store
+            .create_session(&rook_store::SessionMeta::new(
+                id,
+                "root",
+                rook.workspace.path().display().to_string(),
+                1,
+            ))
+            .unwrap();
+        for (kind, text) in [
+            (rook_store::EventKind::UserMessage, text.as_str()),
+            (rook_store::EventKind::AssistantMessage, "answer"),
+        ] {
+            store
+                .append_event(id, rook_store::NewEvent::new(kind, rook_store::Kind::Message, text.as_bytes()))
+                .unwrap();
+        }
+    }
+    let check = || {
+        let branch = rook.json(&["session", "branch", &name, "0"]);
+        assert_eq!(branch["node"]["parent"], name);
+        assert_eq!(branch["node"]["forked_at"], 0);
+        assert_eq!(branch["node"]["next_seq"], 0);
+        assert_eq!(branch["draft"]["text"], text);
+        let after = rook.json(&["session", "branch", &name, "1"]);
+        assert_eq!(after["node"]["forked_at"], 2);
+        assert!(after["draft"].is_null());
+    };
+    check();
+    let daemon = Daemon::start(&rook);
+    check();
+    drop(daemon);
+    let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+    assert_eq!(store.get_session(id).unwrap().unwrap().next_seq, 2);
+}
+
+#[test]
 fn branch_pages_match_with_and_without_the_daemon_and_fork_boundaries_are_retained() {
     let rook = Rook::new();
     rook.write_config("[branches]\npage_entries=1\nscan_sessions=2\n");

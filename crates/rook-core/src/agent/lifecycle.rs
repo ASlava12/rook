@@ -183,11 +183,11 @@ impl AgentLoop<'_> {
                     self.prompt_context.as_deref(),
                 )?
             } else {
-                let message = crate::attachments::prepare(prompt, &self.turn_options().attachments)?;
+                let message = crate::attachments::encode(prompt, &self.turn_options().attachments)?;
                 journal.admit_prompt(
                     self.rook,
                     &self.vault.redact(prompt),
-                    &serde_json::to_string(&message)?,
+                    &message,
                     crate::attachments::LABEL,
                     Some(context),
                     self.prompt_context.as_deref(),

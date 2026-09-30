@@ -2,7 +2,7 @@
 import { el, api } from './lib.js';
 import { historyPanel } from './history.js';
 
-export function branchPanel(session, continueBranch, quote) {
+export function branchPanel(session, continueBranch, quote, forkEvent) {
   const root = el('section', { 'aria-label': 'Conversation branches', style: 'overflow-wrap:anywhere' });
   const notice = el('p', { role: 'status', 'aria-live': 'polite', class: 'sub' });
   const rows = el('div', { class: 'scroll', 'aria-label': 'Branch nodes' });
@@ -18,7 +18,8 @@ export function branchPanel(session, continueBranch, quote) {
       el('p', { class: 'sub' }, `${node.id} · ${node.workspace}${node.workspace_truncated ? '…' : ''}`),
       el('div', { class: 'row' }, button('Explore branch', () => load(node.id)),
       button('Read history', () => {
-        if (!pending) history.replaceChildren(historyPanel(node.id, text => quote(node.id, text)));
+        if (!pending) history.replaceChildren(historyPanel(node.id, text => quote(node.id, text), undefined,
+          forkEvent ? seq => forkEvent(node.id, seq) : undefined));
       }),
       button('Continue in chat', () => { if (!pending) continueBranch(node.id); })));
   }

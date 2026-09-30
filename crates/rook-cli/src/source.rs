@@ -973,6 +973,17 @@ impl Source {
         }
     }
 
+    pub(crate) fn branch_from_event(&self, session: u128, event: u64) -> Result<rook_core::branches::Forked> {
+        match self {
+            Self::Local(rook) => Ok(rook_core::branches::from_event(rook, session, event)?),
+            Self::Daemon(d) => d.request_bounded(
+                &format!("/api/sessions/{}/branch", rook_store::format_session_id(session)),
+                Some(&serde_json::json!({ "event": event })),
+                rook_core::attachments::MAX_FRAME_BYTES,
+            ),
+        }
+    }
+
     pub(crate) fn turn_results(&self, session: u128, before: Option<u64>) -> Result<rook_core::turns::Page> {
         match self {
             Self::Local(rook) => {

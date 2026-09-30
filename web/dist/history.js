@@ -2,7 +2,7 @@
 // durable cursor belongs to the server; DOM positions never address history.
 import { el, api } from './lib.js';
 
-export function historyPanel(session, quote, rewind) {
+export function historyPanel(session, quote, rewind, branch) {
   const base = `/api/sessions/${encodeURIComponent(session)}/history`;
   const notice = el('p', { class: 'sub', role: 'status', 'aria-live': 'polite' });
   const totals = el('p', { class: 'sub', 'aria-label': 'Recorded turn totals' });
@@ -31,6 +31,14 @@ export function historyPanel(session, quote, rewind) {
       notice.textContent = result.next_offset == null ? 'Quote added to draft.' : 'This part was added to the draft; more text remains in the event.';
     });
   }
+  async function branchAt(seq) {
+    if (pending) return;
+    pending = true;
+    notice.textContent = 'Creating a branch; workspace files stay unchanged…';
+    try { await branch(seq); }
+    catch (error) { if (root.isConnected) notice.textContent = error.error || String(error); }
+    finally { pending = false; }
+  }
   function open(seq, offset = 0) {
     read(`${base}/${seq}?offset=${offset}`, result => {
       const e = result.entry;
@@ -42,6 +50,7 @@ export function historyPanel(session, quote, rewind) {
           button('Previous part', () => open(seq, result.previous_offset), result.previous_offset == null),
           button('Next part', () => open(seq, result.next_offset), result.next_offset == null),
           button('Quote into draft', () => insert(seq, result.offset)),
+          branch ? button(e.kind === 'user' ? 'Edit in new branch' : 'Continue after event in new branch', () => branchAt(seq)) : null,
           rewind ? button(`Rewind to #${seq}`, () => rewind(seq)) : null));
     });
   }
@@ -49,7 +58,8 @@ export function historyPanel(session, quote, rewind) {
     return el('article', { class: 'entry' },
       el('div', { class: 'hd' }, button(`#${e.seq} · ${e.kind} ${e.label}`, () => open(e.seq, offset))),
       el('pre', {}, snippet),
-      button('Quote into draft', () => insert(e.seq, offset)));
+      button('Quote into draft', () => insert(e.seq, offset)),
+      branch ? button(e.kind === 'user' ? 'Edit in new branch' : 'Continue after event in new branch', () => branchAt(e.seq)) : null);
   }
   function load(params = '') {
     read(base + params, result => {

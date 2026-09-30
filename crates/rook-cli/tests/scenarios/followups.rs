@@ -574,7 +574,11 @@ fn a_followup_promoted_to_a_goal_keeps_its_observer_and_uses_the_new_goals_optio
     model.release.store(6, Ordering::SeqCst);
     assert!(model.next()["messages"].to_string().contains("The claim:"));
     model.release.store(7, Ordering::SeqCst);
-    assert!(model.next()["messages"].as_array().unwrap().iter().any(|m| m["role"] == "tool"));
+    let checked = model.next();
+    assert!(
+        checked["messages"].as_array().unwrap().iter().any(|m| m["role"] == "tool"),
+        "the new goal's checker must receive its tool result: {checked}"
+    );
     model.release.store(8, Ordering::SeqCst);
     runtime.block_on(async {
         loop {

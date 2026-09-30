@@ -9,10 +9,17 @@ pub struct Settings {
     pub page_bytes: usize,
     pub scan_sessions: usize,
     pub ancestors: usize,
+    pub edit_bytes: usize,
 }
 impl Default for Settings {
     fn default() -> Self {
-        Self { page_entries: 64, page_bytes: 131072, scan_sessions: 256, ancestors: 32 }
+        Self {
+            page_entries: 64,
+            page_bytes: 131072,
+            scan_sessions: 256,
+            ancestors: 32,
+            edit_bytes: 1024 * 1024,
+        }
     }
 }
 impl Settings {
@@ -22,6 +29,7 @@ impl Settings {
             ("page_bytes", self.page_bytes, 16384, 1048576),
             ("scan_sessions", self.scan_sessions, 1, 4096),
             ("ancestors", self.ancestors, 1, 64),
+            ("edit_bytes", self.edit_bytes, 1024, 8 * 1024 * 1024),
         ]
         .into_iter()
         .filter(|(_, value, low, high)| !(low..=high).contains(&value))
@@ -34,6 +42,7 @@ impl Settings {
             page_bytes: self.page_bytes.clamp(16384, 1048576),
             scan_sessions: self.scan_sessions.clamp(1, 4096),
             ancestors: self.ancestors.clamp(1, 64),
+            edit_bytes: self.edit_bytes.clamp(1024, 8 * 1024 * 1024),
         }
     }
 }
@@ -68,6 +77,63 @@ pub struct Page {
     pub earlier_ancestor: Option<String>,
     pub missing_parent: Option<String>,
     pub scanned_sessions: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Forked {
+    pub node: Node,
+    pub source_event: u64,
+    pub draft: Option<crate::attachments::EditDraft>,
+}
+
+/// A user event is excluded and returned for editing; other selected events
+/// are included. Validate the complete draft before creating a child session.
+pub fn from_event(rook: &Rook, session: u128, seq: u64) -> Result<Forked> {
+    let event = rook
+        .store
+        .events(session, seq, 1)?
+        .into_iter()
+        .find(|e| e.seq == seq)
+        .ok_or(CoreError::NoTranscriptEvent(seq))?;
+    let user = event.record.kind == rook_store::EventKind::UserMessage;
+    let draft = if user {
+        let limit = rook.config.branches.bounded().edit_bytes;
+        let framed = event.record.label == crate::attachments::LABEL;
+        let maximum = if framed { crate::attachments::MAX_FRAME_BYTES } else { limit };
+        let size = rook
+            .store
+            .stat_object(&event.record.body)?
+            .ok_or_else(|| CoreError::Other("event body is missing".into()))?
+            .size_raw;
+        if size > maximum as u64 {
+            return Err(CoreError::Other(format!(
+                "selected message exceeds its {maximum}-byte edit limit; read the complete event instead (branches.edit_bytes controls text drafts)"
+            )));
+        }
+        let bytes = rook.store.get_range(&event.record.body, 0, maximum)?;
+        Some(if framed {
+            crate::attachments::edit(&bytes, limit)?
+        } else {
+            crate::attachments::EditDraft {
+                text: String::from_utf8(bytes)
+                    .map_err(|_| CoreError::Other("selected message is not UTF-8".into()))?,
+                attachments: Vec::new(),
+                notice: None,
+            }
+        })
+    } else {
+        None
+    };
+    // Reserve a full node and envelope before the mutation. Escaped text may
+    // need more wire bytes than the editable UTF-8 budget.
+    crate::persistence::encode_with_limit(&draft, crate::attachments::MAX_FRAME_BYTES - 8192)?;
+    let at = if user {
+        seq
+    } else {
+        seq.checked_add(1).ok_or_else(|| CoreError::Other("event boundary overflow".into()))?
+    };
+    let child = rook.fork_session(session, at)?;
+    Ok(Forked { node: node(rook, &child)?, source_event: seq, draft })
 }
 
 fn preview(text: &str, limit: usize) -> String {
@@ -241,6 +307,64 @@ mod tests {
     }
 
     #[test]
+    fn branching_from_user_and_assistant_events_keeps_exact_boundaries_and_complete_drafts() {
+        let dir = tempfile::tempdir().unwrap();
+        let rook = engine(dir.path());
+        session(&rook, 1, None, "original");
+        rook.log(1, rook_store::EventKind::UserMessage, "", "first").unwrap();
+        rook.log(1, rook_store::EventKind::AssistantMessage, "", "answer").unwrap();
+        let text = format!("  Привет 👩‍💻\n{}\n", "long draft ".repeat(900));
+        assert!(text.len() > rook.config.transcript.body_bytes);
+        rook.log(1, rook_store::EventKind::UserMessage, "", &text).unwrap();
+        std::fs::write(dir.path().join("keep.txt"), "current workspace").unwrap();
+        let fork = from_event(&rook, 1, 2).unwrap();
+        assert_eq!(fork.node.forked_at, Some(2));
+        assert_eq!(fork.node.next_seq, 2);
+        assert_eq!(fork.draft.unwrap().text, text);
+        let after = from_event(&rook, 1, 1).unwrap();
+        assert_eq!(after.node.forked_at, Some(2));
+        assert_eq!(after.node.next_seq, 2);
+        assert!(after.draft.is_none());
+        assert_eq!(rook.store.get_session(1).unwrap().unwrap().next_seq, 3);
+        assert_eq!(std::fs::read_to_string(dir.path().join("keep.txt")).unwrap(), "current workspace");
+        let attachments =
+            vec![rook_proto::Attachment::Text { name: "file".into(), text: "stored context".into() }];
+        let body = crate::attachments::encode("edit only this request", &attachments).unwrap();
+        rook.log(1, rook_store::EventKind::UserMessage, crate::attachments::LABEL, &body).unwrap();
+        let draft = from_event(&rook, 1, 3).unwrap().draft.unwrap();
+        assert_eq!(draft.text, "edit only this request");
+        assert_eq!(
+            serde_json::to_value(draft.attachments).unwrap(),
+            serde_json::to_value(attachments).unwrap()
+        );
+    }
+
+    #[test]
+    fn oversized_missing_or_invalid_drafts_are_rejected_before_creating_any_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rook = engine(dir.path());
+        session(&rook, 1, None, "original");
+        rook.config.branches.edit_bytes = 1024;
+        let text = "x".repeat(1025);
+        assert!(text.len() > rook.config.branches.edit_bytes);
+        rook.log(1, rook_store::EventKind::UserMessage, "", &text).unwrap();
+        let before = rook.store.session_ids_after(None, 10).unwrap();
+        assert!(from_event(&rook, 1, 0).unwrap_err().to_string().contains("edit limit"));
+        assert!(from_event(&rook, 1, 123).is_err());
+        rook.log(1, rook_store::EventKind::UserMessage, crate::attachments::LABEL, "invalid JSON").unwrap();
+        assert!(from_event(&rook, 1, 1).is_err());
+        // UTF-8 fits the editable budget, but JSON escaping exceeds the wire
+        // limit. This must fail before a new session has been written.
+        rook.config.branches.edit_bytes = 8 * 1024 * 1024;
+        let escaped = "\u{1}".repeat(3 * 1024 * 1024);
+        assert!(escaped.len() <= rook.config.branches.edit_bytes);
+        assert!(escaped.len() * 6 > crate::attachments::MAX_FRAME_BYTES);
+        rook.log(1, rook_store::EventKind::UserMessage, "", &escaped).unwrap();
+        assert!(from_event(&rook, 1, 2).unwrap_err().to_string().contains("serialized state exceeds"));
+        assert_eq!(rook.store.session_ids_after(None, 10).unwrap(), before);
+    }
+
+    #[test]
     fn sparse_child_scans_advance_under_bounds_even_when_the_cursor_session_is_deleted() {
         let dir = tempfile::tempdir().unwrap();
         let mut rook = engine(dir.path());
@@ -334,8 +458,14 @@ mod tests {
 
     #[test]
     fn branch_configuration_rejects_unbounded_scans_and_undersized_pages() {
-        let limits = Settings { page_entries: 0, page_bytes: 100, scan_sessions: usize::MAX, ancestors: 0 };
+        let limits = Settings {
+            page_entries: 0,
+            page_bytes: 100,
+            scan_sessions: usize::MAX,
+            ancestors: 0,
+            edit_bytes: 0,
+        };
         let errors = limits.errors();
-        assert_eq!(errors.len(), 4);
+        assert_eq!(errors.len(), 5);
     }
 }

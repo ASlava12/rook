@@ -43,6 +43,13 @@ pub(crate) fn diagnostic_arguments(arguments: &str) -> Result<(bool, std::path::
 }
 
 pub(crate) fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, json: bool) -> Result<()> {
+    if let SessionCmd::Branch { id, event } = &cmd {
+        let forked = source.branch_from_event(source.session_named(id, workspace)?, *event)?;
+        // Always structured: the complete draft and attachments must survive
+        // when this command is piped into another editor or client.
+        println!("{}", serde_json::to_string_pretty(&forked)?);
+        return Ok(());
+    }
     if let SessionCmd::Tree { id, after } = &cmd {
         let page = source.branch_page(source.session_named(id, workspace)?, after.as_deref())?;
         println!(
@@ -198,7 +205,8 @@ pub(crate) fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, js
         return show_rewind(&source.rewind(session, *to, !keep_files)?, *keep_files, json);
     }
     match cmd {
-        SessionCmd::Tree { .. }
+        SessionCmd::Branch { .. }
+        | SessionCmd::Tree { .. }
         | SessionCmd::Turns { .. }
         | SessionCmd::Queue { .. }
         | SessionCmd::History { .. }

@@ -252,6 +252,114 @@ fn tui(home: &std::path::Path, workspace: &std::path::Path) -> Pty {
 }
 
 #[test]
+fn event_branching_protects_the_draft_then_edits_and_sends_with_its_historical_image() {
+    let _one = one_at_a_time();
+    for remote in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let requests = a_model_that_asks_to_run(home.path(), "echo never-executed");
+        std::fs::write(workspace.path().join("keep.txt"), "current files").unwrap();
+        {
+            let store = rook_store::Store::open(home.path().join("store")).unwrap();
+            store
+                .create_session(&rook_store::SessionMeta::new(
+                    1,
+                    "source",
+                    workspace.path().display().to_string(),
+                    1,
+                ))
+                .unwrap();
+            store
+                .append_event(
+                    1,
+                    rook_store::NewEvent::new(
+                        rook_store::EventKind::UserMessage,
+                        rook_store::Kind::Message,
+                        b"EARLIER_CONTEXT",
+                    ),
+                )
+                .unwrap();
+            let mut message = rook_llm::Message::user("HISTORICAL_PROMPT");
+            message.images.push(rook_llm::Image::from_base64("image/png", "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==").unwrap());
+            store
+                .append_event(
+                    1,
+                    rook_store::NewEvent::new(
+                        rook_store::EventKind::UserMessage,
+                        rook_store::Kind::Message,
+                        &serde_json::to_vec(&message).unwrap(),
+                    )
+                    .label("rook:attachments:v1"),
+                )
+                .unwrap();
+            store
+                .append_event(
+                    1,
+                    rook_store::NewEvent::new(
+                        rook_store::EventKind::AssistantMessage,
+                        rook_store::Kind::Message,
+                        b"FUTURE_RESPONSE",
+                    ),
+                )
+                .unwrap();
+        }
+        let daemon = remote.then(|| Daemon::start(home.path(), workspace.path()));
+        let mut pty = if remote {
+            Pty::spawn(
+                std::path::Path::new(env!("CARGO_BIN_EXE_rook")),
+                &["--workspace", workspace.path().to_str().unwrap(), "tui"],
+                &[
+                    ("ROOK_HOME", home.path().to_str().unwrap()),
+                    ("ROOK_LOG", "error"),
+                    ("TERM", "xterm-256color"),
+                ],
+                100,
+                30,
+            )
+        } else {
+            tui(home.path(), workspace.path())
+        };
+        pty.screen(100, 30);
+        pty.send(&format!("/tree {}\r", rook_store::format_session_id(1)));
+        pty.screen_showing(100, 30, "conversation tree");
+        pty.send("c");
+        pty.screen_showing(100, 30, "FUTURE_RESPONSE");
+        pty.send("KEEP_DRAFT\u{6}");
+        pty.screen_showing(100, 30, "history ·");
+        pty.send("g1\r");
+        pty.screen_showing(100, 30, "#1 · byte");
+        pty.send("B");
+        let refused = pty.screen_showing(100, 30, "save or clear").join("\n");
+        assert!(refused.contains("› KEEP_DRAFT"));
+        pty.send("\u{1}\u{b}\u{6}");
+        pty.screen_showing(100, 30, "history ·");
+        pty.send("g1\r");
+        pty.screen_showing(100, 30, "#1 · byte");
+        pty.send("B");
+        pty.screen_showing(100, 30, "› HISTORICAL_PROMPT");
+        assert!(requests.try_recv().is_err(), "creating the branch must not call the model");
+        pty.send("_EDITED\r");
+        let request = requests.recv_timeout(PATIENCE).unwrap();
+        let messages = request["messages"].to_string();
+        assert!(messages.contains("HISTORICAL_PROMPT_EDITED"), "{messages}");
+        assert!(messages.contains("EARLIER_CONTEXT"));
+        assert!(messages.contains("data:image/png;base64,"));
+        assert!(!messages.contains("FUTURE_RESPONSE"));
+        pty.screen_showing(100, 30, "approval");
+        drop(pty);
+        drop(daemon);
+        let store = rook_store::Store::open(home.path().join("store")).unwrap();
+        assert_eq!(store.get_session(1).unwrap().unwrap().next_seq, 3);
+        assert_eq!(
+            store.session_ids_after(None, 10).unwrap().len(),
+            2,
+            "the rejected attempt must not create a branch"
+        );
+        assert_eq!(std::fs::read_to_string(workspace.path().join("keep.txt")).unwrap(), "current files");
+    }
+}
+
+#[test]
 fn branch_navigation_pages_reads_and_continues_without_submitting_the_draft_or_restoring_files() {
     let _one = one_at_a_time();
     for remote in [false, true] {

@@ -42,6 +42,52 @@ export const api = async (path, body, signal) => {
   return parsed;
 };
 
+// Admission for JSON values assembled by the composer. Count escaping and
+// UTF-8 before stringify allocates the frame. Iterators keep nesting on the
+// stack without copying a wide array of attachment/schema values.
+export function jsonWithin(value, maximum) {
+  let remaining = maximum;
+  const spend = n => (remaining -= n) >= 0;
+  const string = text => {
+    if (!spend(2)) return false;
+    for (const char of text) {
+      const point = char.codePointAt(0);
+      const size = point === 34 || point === 92 ? 2 :
+        point < 32 ? (point === 8 || point === 9 || point === 10 || point === 12 || point === 13 ? 2 : 6) :
+        point >= 0xd800 && point <= 0xdfff ? 6 :
+        point < 0x80 ? 1 : point < 0x800 ? 2 : point < 0x10000 ? 3 : 4;
+      if (!spend(size)) return false;
+    }
+    return true;
+  };
+  function* objectEntries(object) {
+    for (const key in object) {
+      if (Object.hasOwn(object, key) && object[key] !== undefined) yield [key, object[key]];
+    }
+  }
+  const pending = [{ iterator: [value].values(), object: false }];
+  while (pending.length) {
+    const frame = pending.at(-1), next = frame.iterator.next();
+    if (next.done) { pending.pop(); continue; }
+    if (frame.seen && !spend(1)) return false;
+    frame.seen = true;
+    let item = next.value;
+    if (frame.object) {
+      if (!string(item[0]) || !spend(1)) return false;
+      item = item[1];
+    }
+    if (item == null) { if (!spend(4)) return false; }
+    else if (typeof item === 'string') { if (!string(item)) return false; }
+    else if (typeof item === 'number') { if (!spend(Number.isFinite(item) ? String(item).length : 4)) return false; }
+    else if (typeof item === 'boolean') { if (!spend(item ? 4 : 5)) return false; }
+    else if (typeof item === 'object') {
+      if (!spend(2)) return false;
+      pending.push({ iterator: Array.isArray(item) ? item.values() : objectEntries(item), object: !Array.isArray(item) });
+    } else return false;
+  }
+  return true;
+}
+
 // One object, shared by every view: a tab that re-renders reads what the
 // others left, which is how "continue in chat" from the sessions tab works.
 export const state = {
