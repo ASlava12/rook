@@ -41,6 +41,71 @@ fn receipt_values_and_events_commit_together_and_failed_appends_publish_neither(
 }
 
 #[test]
+fn a_receipt_encoding_failure_rolls_back_its_event_and_sequence() {
+    let (dir, store) = tmp_store();
+    let session = rook_store::new_session_id();
+    store.create_session(&SessionMeta::new(session, "admission", "/tmp", rook_store::now_unix())).unwrap();
+    store.kv_set("admission", b"reserved").unwrap();
+    let event = || NewEvent::new(EventKind::UserMessage, Kind::Message, b"first prompt").usage(11, 0);
+    let result = store.append_event_with_receipt(session, event(), "admission", |seq| {
+        assert_eq!(seq, 0);
+        Err(rook_store::StoreError::Encoding("injected receipt failure".into()))
+    });
+    assert!(result.unwrap_err().to_string().contains("injected receipt failure"));
+    assert!(store.events(session, 0, 10).unwrap().is_empty());
+    let meta = store.get_session(session).unwrap().unwrap();
+    assert_eq!((meta.next_seq, meta.event_count, meta.tokens_in), (0, 0, 0));
+    assert_eq!(store.kv_get("admission").unwrap().unwrap(), b"reserved");
+    let seq = store
+        .append_event_with_receipt(session, event(), "admission", |seq| Ok(seq.to_le_bytes().to_vec()))
+        .unwrap();
+    assert_eq!(seq, 0);
+    assert_eq!(store.not_on_disk_yet(), 0);
+    drop(store);
+    let store = Store::open(dir.path()).unwrap();
+    assert_eq!(store.kv_get("admission").unwrap().unwrap(), 0_u64.to_le_bytes());
+    assert_eq!(store.events(session, 0, 10).unwrap().len(), 1);
+    assert_eq!(store.get_session(session).unwrap().unwrap().tokens_in, 11);
+}
+
+#[test]
+fn generated_receipts_name_their_actual_event_under_concurrent_appends() {
+    let (_dir, store) = tmp_store();
+    let session = rook_store::new_session_id();
+    store
+        .create_session(&SessionMeta::new(session, "concurrent admission", "/tmp", rook_store::now_unix()))
+        .unwrap();
+    std::thread::scope(|scope| {
+        for writer in 0..4 {
+            let store = &store;
+            scope.spawn(move || {
+                for index in 0..16 {
+                    let body = format!("prompt-{writer}-{index}");
+                    store
+                        .append_event(session, NewEvent::new(EventKind::Note, Kind::Message, b"intervening"))
+                        .unwrap();
+                    store
+                        .append_event_with_receipt(
+                            session,
+                            NewEvent::new(EventKind::UserMessage, Kind::Message, body.as_bytes()),
+                            &body,
+                            |seq| Ok(seq.to_le_bytes().to_vec()),
+                        )
+                        .unwrap();
+                }
+            });
+        }
+    });
+    let events = store.events(session, 0, 256).unwrap();
+    assert_eq!(events.len(), 128);
+    for event in events.iter().filter(|event| event.record.kind == EventKind::UserMessage) {
+        let body = String::from_utf8(store.get(&event.record.body).unwrap()).unwrap();
+        let bytes: [u8; 8] = store.kv_get(&body).unwrap().unwrap().try_into().unwrap();
+        assert_eq!(u64::from_le_bytes(bytes), event.seq);
+    }
+}
+
+#[test]
 fn companion_events_stay_adjacent_under_concurrent_appends_and_fork_together() {
     let (_dir, store) = tmp_store();
     let session = rook_store::new_session_id();

@@ -41,11 +41,21 @@ pub struct Execution {
     pub status: String,
     pub task: String,
     pub start_seq: u64,
+    /// Missing on older receipts and until the prompt hooks have admitted it.
+    #[serde(default)]
+    pub prompt: Option<PromptAdmission>,
     pub completed_operations: u64,
     pub last_result_seq: Option<u64>,
     pub pending: Option<Operation>,
     pub background: Vec<Operation>,
     pub unknown: Vec<Operation>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PromptAdmission {
+    pub seq: u64,
+    pub body: String,
+    pub label: String,
 }
 
 fn key(session: u128) -> String {
@@ -170,6 +180,7 @@ pub(crate) fn inherit(rook: &Rook, parent: u128, child: u128) -> Result<()> {
         status: "interrupted".into(),
         task: "fork inherits unknown side effects from the source execution".into(),
         start_seq: 0,
+        prompt: None,
         completed_operations: 0,
         last_result_seq: None,
         pending: None,
@@ -222,6 +233,7 @@ impl Journal {
             status: "running".into(),
             task: "prompt awaiting admission by configured hooks".into(),
             start_seq: meta.next_seq,
+            prompt: None,
             completed_operations: 0,
             last_result_seq: None,
             pending: None,
@@ -251,6 +263,37 @@ impl Journal {
             state.task = rook_tools::elide_middle(task, PREVIEW);
             Ok(())
         })
+    }
+
+    /// Hooks run before admission. Recording the prompt and its identity must
+    /// commit together: recovery cannot infer admission from a task preview or
+    /// mistake a hook's intervening event for the prompt's sequence.
+    pub(crate) fn admit_prompt(&self, task: &str, body: &str, label: &str) -> Result<u64> {
+        let _active = ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = load(&self.store, self.session)?
+            .ok_or_else(|| CoreError::Other("execution receipt disappeared".into()))?;
+        if state.turn != self.turn || state.status != "running" {
+            return Err(CoreError::Other("execution ownership changed; the prompt was not admitted".into()));
+        }
+        let identity = rook_store::ObjectId::of(body.as_bytes()).to_string();
+        if let Some(prompt) = &state.prompt {
+            if prompt.body == identity && prompt.label == label {
+                return Ok(prompt.seq);
+            }
+            return Err(CoreError::Other("this execution already admitted a different prompt".into()));
+        }
+        state.task = rook_tools::elide_middle(task, PREVIEW);
+        state.updated_at = rook_store::now_unix();
+        Ok(self.store.append_event_with_receipt(
+            self.session,
+            NewEvent::new(EventKind::UserMessage, Kind::Message, body.as_bytes()).label(label),
+            &key(self.session),
+            |seq| {
+                state.prompt = Some(PromptAdmission { seq, body: identity, label: label.into() });
+                crate::persistence::encode(&state)
+                    .map_err(|error| rook_store::StoreError::Encoding(error.to_string()))
+            },
+        )?)
     }
 
     pub(crate) fn begin(
@@ -693,5 +736,78 @@ impl Rook {
             .map(|s| format!("{}: {} unknown operation(s)", s.session, s.unknown.len()))
             .collect();
         Ok((!unknown.is_empty()).then(|| format!("Changes are paused because an interrupted execution has unknown results ({}). Read the files and recorded output to inspect what happened. A user must inspect `rook session recovery <session>` and acknowledge each operation with an inspection note before changes resume. Do not retry commands or delegate around this restriction.", unknown.join("; "))))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn engine(dir: &std::path::Path) -> Rook {
+        Rook::from_parts(
+            Store::open(dir.join("store")).unwrap(),
+            crate::Config::default(),
+            rook_skills::Environment::bare("linux", "x86_64", "0.10.0"),
+            rook_skills::SkillIndex::default(),
+            dir.into(),
+        )
+    }
+
+    #[test]
+    fn concurrent_prompt_admission_has_one_event_and_a_durable_matching_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let rook = engine(dir.path());
+        let session = rook.start_session("prompt reservation").unwrap();
+        let journal = Journal::start(&rook, session, None).unwrap();
+        assert!(load(&rook.store, session).unwrap().unwrap().prompt.is_none());
+        rook.log(session, EventKind::Note, "hook", "setup before admission").unwrap();
+        let barrier = std::sync::Barrier::new(2);
+        let (one, two) = std::thread::scope(|scope| {
+            let admit = || {
+                barrier.wait();
+                journal.admit_prompt("redacted preview", "original 🙂 prompt", "").unwrap()
+            };
+            let one = scope.spawn(admit);
+            let two = scope.spawn(admit);
+            (one.join().unwrap(), two.join().unwrap())
+        });
+        assert_eq!(one, two);
+        assert_eq!(one, 1, "a hook note occupies the reservation's original sequence");
+        assert!(journal.admit_prompt("other", "different prompt", "").is_err());
+        assert!(journal.admit_prompt("other", "original 🙂 prompt", "other label").is_err());
+        let state = load(&rook.store, session).unwrap().unwrap();
+        assert_eq!(state.task, "redacted preview");
+        assert_eq!(state.prompt.unwrap().seq, one);
+        assert_eq!(rook.store.not_on_disk_yet(), 0);
+        drop(journal);
+        drop(rook);
+        let rook = engine(dir.path());
+        let state = load(&rook.store, session).unwrap().unwrap();
+        assert_eq!(state.status, "interrupted");
+        let admission = state.prompt.unwrap();
+        let events = rook.store.events(session, 0, 100).unwrap();
+        assert_eq!(events.iter().filter(|e| e.record.kind == EventKind::UserMessage).count(), 1);
+        let event = events.iter().find(|e| e.seq == admission.seq).unwrap();
+        assert_eq!(admission.body, event.record.body.to_string());
+        assert_eq!(rook.store.get(&event.record.body).unwrap(), "original 🙂 prompt".as_bytes());
+    }
+
+    #[test]
+    fn an_old_execution_cannot_admit_into_its_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let rook = engine(dir.path());
+        let session = rook.start_session("ownership").unwrap();
+        let old = Journal::start(&rook, session, None).unwrap();
+        old.finish("failed", None).unwrap();
+        let current = Journal::start(&rook, session, None).unwrap();
+        assert!(old.admit_prompt("stale", "stale", "").is_err());
+        assert!(load(&rook.store, session).unwrap().unwrap().prompt.is_none());
+        assert!(rook.store.events(session, 0, 100).unwrap().is_empty());
+        current.admit_prompt("current", "current", "").unwrap();
+        let state = load(&rook.store, session).unwrap().unwrap();
+        assert_eq!(state.turn, current.turn);
+        let mut legacy = serde_json::to_value(state).unwrap();
+        legacy.as_object_mut().unwrap().remove("prompt");
+        assert!(serde_json::from_value::<Execution>(legacy).unwrap().prompt.is_none());
     }
 }

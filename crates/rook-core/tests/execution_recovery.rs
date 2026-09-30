@@ -88,6 +88,12 @@ async fn recovery_child() {
         let recovered = rook.execution(session).unwrap();
         assert_eq!(recovered[0].status, "interrupted");
         assert_eq!(recovered[0].unknown.len(), 1);
+        let prompt = recovered[0].prompt.as_ref().expect("admission survives a killed writer");
+        let events = rook.store.events(session, 0, 100).unwrap();
+        assert_eq!(events.iter().filter(|e| e.record.kind == rook_store::EventKind::UserMessage).count(), 1);
+        let event = events.iter().find(|e| e.seq == prompt.seq).unwrap();
+        assert_eq!(event.record.body.to_string(), prompt.body);
+        assert_eq!(rook.store.get(&event.record.body).unwrap(), b"perform one operation");
         let mut agent = AgentLoop::new(&rook, Arc::new(Script(Mutex::new(false))), session);
         agent.tools.register(Arc::new(Effect { wait: false }));
         agent.allow_everything_not_denied();

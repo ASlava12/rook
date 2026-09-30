@@ -2118,6 +2118,7 @@ async fn a_prompt_hook_can_refuse_the_turn_and_add_context() {
         "prompt awaiting admission by configured hooks",
         "the rejected prompt must not be copied into the execution receipt"
     );
+    assert!(rook.execution(session).unwrap()[0].prompt.is_none());
 }
 
 #[tokio::test]
@@ -2134,6 +2135,13 @@ async fn a_session_start_hook_contributes_data_outside_the_system_prompt() {
     assert!(!request.messages[0].content.contains("this repo pins nightly"));
     assert!(request.messages[1].content.contains("this repo pins nightly"));
     assert!(request.messages[1].content.contains("\"authority\":\"data\""));
+    let execution = rook.execution(session).unwrap().remove(0);
+    let admitted = execution.prompt.unwrap();
+    assert!(admitted.seq > execution.start_seq, "hook recovery notes precede the prompt");
+    let event = rook.store.events(session, admitted.seq, 1).unwrap().remove(0);
+    assert_eq!(event.record.kind, rook_store::EventKind::UserMessage);
+    assert_eq!(event.record.body.to_string(), admitted.body);
+    assert_eq!(rook.store.get(&event.record.body).unwrap(), b"hello");
 }
 
 #[tokio::test]
@@ -7292,6 +7300,14 @@ async fn attachments_reach_the_model_survive_reopening_and_fork_with_their_promp
     ];
     agent.run("describe").await.unwrap();
     drop(agent);
+    let admission = f.rook.execution(session).unwrap().remove(0).prompt.unwrap();
+    let event = f.rook.store.events(session, admission.seq, 1).unwrap().remove(0);
+    assert_eq!(admission.label, "rook:attachments:v1");
+    assert_eq!(event.record.label, admission.label);
+    assert_eq!(event.record.body.to_string(), admission.body);
+    let stored: serde_json::Value =
+        serde_json::from_slice(&f.rook.store.get(&event.record.body).unwrap()).unwrap();
+    assert!(stored.to_string().contains("screen.png"));
     {
         let calls = seen.lock().unwrap();
         let message = calls[0].messages.iter().find(|m| !m.images.is_empty()).unwrap();

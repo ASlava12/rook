@@ -760,12 +760,48 @@ impl Store {
         batch: [NewEvent<'_>; N],
         values: &[(&str, &[u8])],
     ) -> Result<[u64; N]> {
+        self.append_events_transaction(session, batch, !values.is_empty(), |txn, _| {
+            if !values.is_empty() {
+                let mut kv = txn.open_table(schema::KV)?;
+                for (key, value) in values {
+                    kv.insert(*key, *value)?;
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// Derive a companion receipt from the event's actual sequence in the same
+    /// durable transaction. The callback must only encode state: another store
+    /// write from inside it would wait for this transaction's own write lock.
+    pub fn append_event_with_receipt(
+        &self,
+        session: u128,
+        event: NewEvent<'_>,
+        key: &str,
+        receipt: impl FnOnce(u64) -> Result<Vec<u8>>,
+    ) -> Result<u64> {
+        let [seq] = self.append_events_transaction(session, [event], true, |txn, [seq]| {
+            let bytes = receipt(seq)?;
+            txn.open_table(schema::KV)?.insert(key, bytes.as_slice())?;
+            Ok(())
+        })?;
+        Ok(seq)
+    }
+
+    fn append_events_transaction<const N: usize>(
+        &self,
+        session: u128,
+        batch: [NewEvent<'_>; N],
+        durable: bool,
+        receipt: impl FnOnce(&redb::WriteTransaction, [u64; N]) -> Result<()>,
+    ) -> Result<[u64; N]> {
         // A checkpoint and a compaction are the two events a session can be
         // returned to, so they are the two that have to be on the disk rather
         // than in the page cache — and because an `Immediate` commit carries
         // everything before it, making these durable makes the turn that led up
         // to them durable too. Everything else rides along.
-        let ordinary = values.is_empty()
+        let ordinary = !durable
             && batch.iter().all(|event| !matches!(event.kind, EventKind::Checkpoint | EventKind::Compaction))
             && self.unflushed.load(Ordering::Relaxed).saturating_add(N as u64) <= EVENTS_PER_FLUSH;
 
@@ -786,7 +822,7 @@ impl Store {
                 Some(value) => postcard::from_bytes(value.value())?,
                 None => return Err(StoreError::MissingSession(format_session_id(session))),
             };
-            if !values.is_empty() {
+            if durable {
                 meta.updated_at = now_unix();
                 let encoded = postcard::to_stdvec(&meta)?;
                 sessions.insert(key.as_slice(), encoded.as_slice())?;
@@ -846,12 +882,7 @@ impl Store {
             }
             sequences[index] = seq;
         }
-        if !values.is_empty() {
-            let mut kv = txn.open_table(schema::KV)?;
-            for (key, value) in values {
-                kv.insert(*key, *value)?;
-            }
-        }
+        receipt(&txn, sequences)?;
         txn.commit()?;
         match ordinary {
             true => self.unflushed.fetch_add(N as u64, Ordering::Relaxed),

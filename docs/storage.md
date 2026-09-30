@@ -242,6 +242,7 @@ an unfinished turn.
 Ordinary event appends are batched, but durability is explicit at the boundaries
 where losing intent or an answer would change recovery:
 
+- when a prompt and its admission receipt commit together, after prompt hooks allow it;
 - before an operation can run, and after its result is recorded;
 - when a background operation or execution changes state;
 - when an active work iteration or evaluation result is saved;
@@ -255,6 +256,15 @@ effect and its receipt, startup preserves the operation as unknown and pauses
 changes pending inspection. `rook session recovery <id>` shows the receipt;
 `work --resume` reuses the saved iteration and completed evaluation results.
 It does not automatically replay uncertain commands.
+
+The execution journal records an admitted prompt's exact event sequence, body
+object ID and label in the same transaction as the prompt. A receipt encoding
+failure commits neither the event nor the changed session counters. Concurrent
+admission of the same prompt into one execution returns the existing sequence;
+a different prompt or an obsolete execution owner is rejected. This does not
+make a new frontend submission idempotent across separate executions, nor does
+it authorize replay of tools. Older journal JSON without this optional prompt
+marker is read without inferring that admission did or did not happen.
 
 The journal is session-scoped JSON in KV; existing postcard records are unchanged.
 Recovery state serialization is bounded to 8 MiB, execution previews to 2 KiB,

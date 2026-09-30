@@ -284,12 +284,43 @@ correction retries do not establish every execution lifecycle boundary.
 Directed reads identified the existing pieces to reuse for follow-ups:
 `execution::Journal::start` reserves one execution per session and persists its
 turn ID; `Rook::completed_turn` verifies that the saved outcome belongs to that
-turn. `AgentLoop::begin_turn` currently logs the user prompt before admitting it
-to the journal. Follow-up admission therefore needs one durable reservation and
-one transcript write, with recovery distinguishing reserved, admitted and
-completed work. Simply accepting the existing steering receipt and calling
-`run_with` would log the prompt twice and leave a crash gap between acceptance
-and execution. This is a pending implementation requirement, not current behavior.
+turn. The sixth block makes `AgentLoop::begin_turn` commit the prompt and its
+execution admission together after prompt hooks permit it. A store transaction
+encodes the receipt using the actual event sequence, rather than a sequence
+observed before a concurrent writer. Encoding failure rolls back the event,
+receipt and session counters. The optional JSON marker contains the prompt's
+sequence, object ID and label; existing postcard records do not change. Admission
+of an identical prompt into the same execution returns that sequence, while a
+different prompt or stale execution owner is rejected. Attachment prompts use
+the same path with their existing encoded payload and label. Older execution
+JSON without the marker remains readable; absence is not treated as proof that
+an old prompt was never admitted.
+
+Focused store and core checks passed for encoding failure, concurrent appends,
+concurrent identical admission, interrupted/reopened journals, stale ownership
+and old JSON. The full agent-loop integration suite passed, including added
+assertions for rejecting prompt hooks, notes before the prompt and attachments.
+The existing killed-process recovery scenario now verifies that the original
+prompt and its matching admission marker survive together, before resumption
+checks unknown operations. Logs: `/tmp/rook-pi-admission-store.log`,
+`/tmp/rook-pi-admission-core.log`, `/tmp/rook-pi-admission-loop.log` and
+`/tmp/rook-pi-admission-recovery.log`.
+
+The sixth block's full isolated `cargo xtask ci` passed with exit status 0 in
+549.1 seconds, including the full TUI suite and doctests
+(`/tmp/rook-pi-admission-ci.log`). The combined CI/compaction process exited 0.
+Compaction retained 4.02 MiB on disk, 37.1x dictionary compression and 5.8x
+end-to-end (`/tmp/rook-pi-admission-compaction.log`). Rust sources remained
+unchanged during this gate. The earlier targeted integration compile failure
+was a missing qualified `EventKind` in a new test; it was fixed before the
+passing targeted run and full gate.
+
+Follow-up admission still needs a durable queue-to-execution reservation that
+names a complete ordinary turn or whole goal, and recovery distinguishing
+reserved, admitted and completed work. The new transaction is a prerequisite,
+not automatic follow-up execution or frontend submission deduplication. Simply
+accepting a steering receipt and calling `run_with` still logs it twice; the
+future follow-up path must bind its reservation to this admission instead.
 
 Eligibility must use `agent::finished` for an ordinary completed turn, and the
 whole managed run's `Status::Completed` for `/goal`; stage endings, limits,
@@ -300,6 +331,21 @@ preserves the session's observer and controls. Stable caller IDs must name both
 the submission and its intended goal generation; a retry after replacement must
 never silently retarget a new goal. All these changes still require CLI/API/TUI/
 browser parity and restart/race tests before the queue capability is complete.
+
+The next integration must carry a reserved execution identity from the queue
+into `Journal::start` and this prompt admission, rather than generating another
+turn on retry. It also needs to exclude a fresh manual turn while that
+reservation owns the session, preserve unresolved operation recovery, and reuse
+a recorded outcome after a crash between outcome recording and publication.
+The daemon's `work::supervise` currently restarts runnable managed goals only;
+ordinary follow-up recovery needs its own durable eligibility scan using the
+existing live-session registry. Frontends must keep the observer and input
+channels across the continuation and publish terminal `Done` only when the
+chain ends. Creating an `AgentLoop` per follow-up is necessary: its secrets,
+deadline, token allowance, failed claims and delegation counter are turn-local,
+whereas policy, approval/input channels and MCP/LSP/jobs equipment are shared.
+An agent attached to a managed run still holds only its run ID; generation-aware
+acceptance must be added before replacement-goal lifecycle guarantees are made.
 
 `/tmp/rook-pi-message-queue` retains its older staged baseline and preparation
 patch. Main is now authoritative; do not reapply that worktree or merge its diff
