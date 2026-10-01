@@ -82,6 +82,45 @@ impl Drop for Timer {
     }
 }
 
+/// Read existing v1 timing notes without another storage format or index.
+/// Concurrent input receipts can appear between the result and its timing;
+/// inspect at most sixteen following records, and match the exact result seq.
+/// Missing, malformed, cancelled or out-of-window measurements stay unknown.
+pub(crate) fn tool_measurement(
+    rook: &Rook,
+    result: &rook_store::Event,
+) -> Result<Option<crate::transcript::ToolMeasurement>> {
+    if result.record.kind != EventKind::ToolResult {
+        return Ok(None);
+    }
+    let Some(from) = result.seq.checked_add(1) else { return Ok(None) };
+    for event in rook.store.events(result.session, from, 16)? {
+        if event.record.kind != EventKind::Note || event.record.label != TIMING_LABEL {
+            continue;
+        }
+        let size = rook.store.stat_object(&event.record.body)?.map(|m| m.size_raw).unwrap_or(0);
+        if size > MAX_TIMING {
+            continue;
+        }
+        let bytes = rook.store.get_range(&event.record.body, 0, MAX_TIMING as usize)?;
+        let Ok(sample) = serde_json::from_slice::<Timing>(&bytes) else { continue };
+        if !matches!(sample.phase, Phase::ToolDispatch) || sample.result_seq != Some(result.seq) {
+            continue;
+        }
+        let failed = match sample.status {
+            Status::Completed => false,
+            Status::Failed => true,
+            Status::Cancelled => continue,
+        };
+        return Ok(Some(crate::transcript::ToolMeasurement {
+            failed,
+            duration_ms: sample.duration_ms,
+            timing_seq: event.seq,
+        }));
+    }
+    Ok(None)
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Report {
     pub version: u32,

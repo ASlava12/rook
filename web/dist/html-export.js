@@ -67,6 +67,10 @@ export async function exportHistoryHtml(session, from = 0, through = null, read 
       const tool = entry.kind === 'tool-call' || entry.kind === 'tool-result';
       add(`<article id="event-${seq}"><h2><a href="#event-${seq}">#${seq}</a> · ${escapeHtml(entry.kind)}${entry.label ? ` · ${escapeHtml(entry.label)}` : ''}</h2>`);
       if (entry.doing) add(`<p class="meta">${escapeHtml(entry.doing)}</p>`);
+      if (tool && entry.tool_measurement) {
+        const m = entry.tool_measurement;
+        add(`<p class="meta">saved ${m.failed ? 'failure' : 'completion'} · dispatch ${escapeHtml(m.duration_ms)} ms · timing #${escapeHtml(m.timing_seq)} (includes waits/hooks; current files/tests not verified)</p>`);
+      }
       if (tool) add('<details><summary>Show tool content</summary>');
       const preview = await bodyPreview(base, seq, read);
       add(`<pre>${preview.body}</pre>`);

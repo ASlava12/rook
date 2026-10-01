@@ -13,6 +13,62 @@ struct Rook {
 }
 
 #[test]
+fn saved_tool_measurements_match_in_local_cli_daemon_history_and_html_export() {
+    let rook = Rook::new();
+    let session = rook_store::new_session_id();
+    let id = rook_store::format_session_id(session);
+    {
+        let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+        store
+            .create_session(&rook_store::SessionMeta::new(
+                session,
+                "tool cards",
+                rook.workspace.path().display().to_string(),
+                rook_store::now_unix(),
+            ))
+            .unwrap();
+        store
+            .append_event(
+                session,
+                rook_store::NewEvent::new(
+                    rook_store::EventKind::ToolResult,
+                    rook_store::Kind::ToolResult,
+                    b"apparently passed",
+                )
+                .label("run_command"),
+            )
+            .unwrap();
+        store
+            .append_event(
+                session,
+                rook_store::NewEvent::new(
+                    rook_store::EventKind::Note,
+                    rook_store::Kind::Message,
+                    br#"{"phase":"tool_dispatch","status":"failed","duration_ms":42,"result_seq":0}"#,
+                )
+                .label("rook:timing:v1"),
+            )
+            .unwrap();
+    }
+    let check = |filename: &str| {
+        let page = rook.json(&["session", "history", &id]);
+        let expected = serde_json::json!({"failed":true,"duration_ms":42,"timing_seq":1});
+        assert_eq!(page["items"][0]["tool_measurement"], expected);
+        assert_eq!(rook.json(&["session", "entry", &id, "0"])["entry"]["tool_measurement"], expected);
+        let text = rook.ok(&["session", "history", &id]);
+        assert!(text.contains("saved failure") && text.contains("dispatch 42 ms"), "{text}");
+        let destination = rook.home.path().join(filename);
+        rook.ok(&["session", "export-html", &id, "--output", destination.to_str().unwrap()]);
+        let html = std::fs::read_to_string(destination).unwrap();
+        assert!(html.contains("saved failure") && html.contains("timing #1"), "{html}");
+        page
+    };
+    let local = check("local.html");
+    let _daemon = Daemon::start(&rook);
+    assert_eq!(check("remote.html"), local);
+}
+
+#[test]
 fn request_tool_catalog_is_the_same_locally_and_through_the_daemon() {
     let rook = Rook::new();
     let session = rook_store::new_session_id();

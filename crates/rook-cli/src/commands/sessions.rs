@@ -253,6 +253,9 @@ pub(crate) fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, js
                     "#{} {} byte {} / {}\n{}",
                     page.entry.seq, page.entry.kind, page.offset, page.total_bytes, page.entry.body
                 );
+                if let Some(measurement) = page.entry.tool_measurement {
+                    println!("{}", measurement.text());
+                }
                 if let Some(offset) = page.next_offset {
                     println!("next: --offset {offset}");
                 }
@@ -541,6 +544,9 @@ fn show_transcript(entries: &[rook_core::TranscriptEntry], json: bool) -> Result
             if e.truncated { "(elided)" } else { "" }
         );
         println!("{}\n", e.body);
+        if let Some(measurement) = e.tool_measurement {
+            println!("{}\n", measurement.text());
+        }
     }
     Ok(())
 }

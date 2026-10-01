@@ -135,6 +135,10 @@ async fn diagnostics_measure_real_execution_bound_export_and_preserve_private_da
         .collect();
     assert_eq!(results.len(), 1, "timing notes must not duplicate execution receipts");
     assert_eq!(tools[0]["result_seq"], results[0].seq);
+    let measurement =
+        rook.transcript_entry(session, results[0].seq, 0).unwrap().entry.tool_measurement.unwrap();
+    assert!(!measurement.failed);
+    assert_eq!(measurement.duration_ms, tools[0]["duration_ms"].as_u64().unwrap());
     let text = report.json().unwrap();
     for private in [
         "private-session-title",
@@ -158,10 +162,18 @@ async fn diagnostics_measure_real_execution_bound_export_and_preserve_private_da
     let end = rook.store.get_session(session).unwrap().unwrap().next_seq;
     let fork = rook.fork_session(session, end).unwrap().id;
     assert_eq!(samples(&rook.diagnostics(fork, false).unwrap(), "tool_dispatch"), tools);
+    assert_eq!(
+        rook.transcript_entry(fork, results[0].seq, 0).unwrap().entry.tool_measurement,
+        Some(measurement)
+    );
     drop(agent);
     drop(rook);
     let rook = rook_at(root.path(), config);
     assert_eq!(samples(&rook.diagnostics(session, false).unwrap(), "tool_dispatch"), tools);
+    assert_eq!(
+        rook.transcript_entry(session, results[0].seq, 0).unwrap().entry.tool_measurement,
+        Some(measurement)
+    );
 
     let compacted = rook.start_session("compaction timing").unwrap();
     rook.log(compacted, EventKind::UserMessage, "", &"private-older-prompt ".repeat(1000)).unwrap();

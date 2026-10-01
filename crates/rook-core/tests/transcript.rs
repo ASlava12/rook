@@ -20,6 +20,78 @@ fn add(rook: &Rook, session: u128, text: &str) -> u64 {
 }
 
 #[test]
+fn tool_cards_require_an_exact_bounded_saved_measurement_and_never_infer_success_from_text() {
+    let root = tempfile::tempdir().unwrap();
+    let rook = open(root.path(), Config::default());
+    let session = rook.start_session("measured results").unwrap();
+    let result = rook.log(session, EventKind::ToolResult, "run_command", "Everything passed").unwrap();
+    let note = |text: &str| rook.log(session, EventKind::Note, "rook:timing:v1", text).unwrap();
+    note(&format!(
+        r#"{{"phase":"model_request","status":"completed","duration_ms":1,"result_seq":{result}}}"#
+    ));
+    note(r#"{"phase":"tool_dispatch","status":"completed","duration_ms":2,"result_seq":999}"#);
+    note("not JSON");
+    note(&"x".repeat(1025));
+    note(&format!(
+        r#"{{"phase":"tool_dispatch","status":"cancelled","duration_ms":3,"result_seq":{result}}}"#
+    ));
+    let timing_seq = note(&format!(
+        r#"{{"phase":"tool_dispatch","status":"failed","duration_ms":42,"result_seq":{result}}}"#
+    ));
+    let expected = rook_core::transcript::ToolMeasurement { failed: true, duration_ms: 42, timing_seq };
+    let entry = rook.transcript_entry(session, result, 0).unwrap().entry;
+    assert_eq!(
+        entry.tool_measurement,
+        Some(expected),
+        "status comes from the linked dispatch note, not the answer's prose"
+    );
+    assert_eq!(rook.transcript(session, result, 1, 128).unwrap()[0].tool_measurement, Some(expected));
+    assert_eq!(
+        rook.transcript_page(
+            session,
+            &PageRequest { from: Some(result), limit: Some(1), ..Default::default() }
+        )
+        .unwrap()
+        .items[0]
+            .tool_measurement,
+        Some(expected)
+    );
+    let fork_before_timing = rook.fork_session(session, timing_seq).unwrap().id;
+    assert_eq!(
+        rook.transcript_entry(fork_before_timing, result, 0).unwrap().entry.tool_measurement,
+        None,
+        "a branch cannot borrow an excluded timing event from its parent"
+    );
+    assert_eq!(
+        rook.transcript_entry(session, timing_seq, 0).unwrap().entry.tool_measurement,
+        None,
+        "only a tool result gets a tool measurement"
+    );
+
+    let unmeasured = rook.log(session, EventKind::ToolResult, "run_command", "error: failed").unwrap();
+    for _ in 0..16 {
+        add(&rook, session, "concurrent input");
+    }
+    note(&format!(
+        r#"{{"phase":"tool_dispatch","status":"failed","duration_ms":123,"result_seq":{unmeasured}}}"#
+    ));
+    assert_eq!(
+        rook.transcript_entry(session, unmeasured, 0).unwrap().entry.tool_measurement,
+        None,
+        "the reader never scans beyond sixteen following events"
+    );
+    let mut old_response = serde_json::to_value(entry).unwrap();
+    old_response.as_object_mut().unwrap().remove("tool_measurement");
+    assert!(
+        serde_json::from_value::<rook_core::TranscriptEntry>(old_response)
+            .unwrap()
+            .tool_measurement
+            .is_none(),
+        "older daemon responses remain readable"
+    );
+}
+
+#[test]
 fn pages_reach_both_ends_of_a_long_session_without_growing_or_skipping_events() {
     let root = tempfile::tempdir().unwrap();
     let mut config = Config::default();

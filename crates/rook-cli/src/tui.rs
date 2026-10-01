@@ -214,15 +214,15 @@ fn what_it_serves(said: &rook_core::models::Answered) -> String {
 
 /// One call, as the pane that answers "what did that actually do" reads it.
 ///
-/// The mark is not stored anywhere — `ToolDone`'s `failed` is a stream event and
-/// the log keeps the result, not a verdict about it — so the pane shows what
-/// came back and lets it speak, rather than inventing a tick from the text.
+/// Saved dispatch measurements come from timing notes linked to the result;
+/// older and unmeasured results keep an unknown status.
 struct Call {
     seq: u64,
     doing: String,
     name: String,
     given: String,
     came_back: Option<String>,
+    measurement: Option<rook_core::transcript::ToolMeasurement>,
     elided: bool,
 }
 
@@ -249,6 +249,7 @@ fn paired(entries: Vec<TranscriptEntry>) -> Vec<Call> {
                     name: entry.label,
                     given: entry.body,
                     came_back: None,
+                    measurement: None,
                     elided: entry.truncated,
                 });
             }
@@ -256,6 +257,7 @@ fn paired(entries: Vec<TranscriptEntry>) -> Vec<Call> {
                 let waited = waiting.iter().position(|at| calls[*at].name == entry.label);
                 if let Some(at) = waited.map(|at| waiting.remove(at)) {
                     calls[at].came_back = Some(entry.body);
+                    calls[at].measurement = entry.tool_measurement;
                     calls[at].elided |= entry.truncated;
                 }
             }
@@ -4675,6 +4677,20 @@ impl App {
                     Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
                 )));
                 lines.push(Line::from(""));
+                if let Some(measurement) = call.measurement {
+                    lines.push(Line::from(Span::styled(
+                        format!(
+                            "saved {} · dispatch {} ms · timing #{}",
+                            if measurement.failed { "failure" } else { "completion" },
+                            measurement.duration_ms,
+                            measurement.timing_seq,
+                        ),
+                        Style::default().fg(if measurement.failed { Color::Red } else { Color::DarkGray }),
+                    )));
+                    lines.push(Line::from("includes waits/hooks; current files/tests not verified"));
+                } else if call.came_back.is_some() {
+                    lines.push(Line::from("saved status/duration unavailable"));
+                }
                 lines.push(Line::from(Span::styled("given", Style::default().fg(Color::DarkGray))));
                 for line in call.given.lines() {
                     lines.push(Line::from(Span::raw(format!("  {line}"))));
@@ -6648,6 +6664,45 @@ and the next line"
         assert_eq!(calls[0].came_back, None, "and it is not invented");
     }
 
+    #[test]
+    fn paired_calls_keep_their_results_measurements_and_leave_older_status_unknown() {
+        let mut entries = logged(&[
+            ("tool-call", "run_command", "first"),
+            ("tool-call", "run_command", "second"),
+            ("tool-result", "run_command", "passed"),
+            ("tool-result", "run_command", "error"),
+        ]);
+        let measurement =
+            rook_core::transcript::ToolMeasurement { failed: true, duration_ms: 42, timing_seq: 4 };
+        entries[2].tool_measurement = Some(measurement);
+        let calls = paired(entries);
+        assert_eq!(calls[1].given, "first");
+        assert_eq!(calls[1].measurement, Some(measurement));
+        assert_eq!(calls[0].given, "second");
+        assert_eq!(calls[0].measurement, None, "failure is not inferred from prose");
+        let home = tempfile::tempdir().unwrap();
+        let rook = rook_core::Rook::from_parts(
+            rook_store::Store::open(home.path().join("store")).unwrap(),
+            rook_core::Config::default(),
+            rook_skills::Environment::bare("linux", "x86_64", "0.1.0"),
+            rook_skills::SkillIndex::default(),
+            home.path().to_path_buf(),
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let mut app = super::App::new(crate::source::Source::Local(rook.into()), runtime, true);
+        app.calls = calls;
+        app.call_state.select(Some(1));
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|frame| app.draw_calls(frame, frame.area())).unwrap();
+        let buffer = terminal.backend().buffer();
+        let text = (0..30)
+            .map(|row| (0..120).map(|column| buffer[(column, row)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("saved failure") && text.contains("dispatch 42 ms"), "{text}");
+        assert!(text.contains("current files/tests not verified"), "{text}");
+    }
+
     /// Entries as the log hands them over, with the fields the pairing reads.
     fn logged(events: &[(&str, &str, &str)]) -> Vec<TranscriptEntry> {
         events
@@ -6666,6 +6721,7 @@ and the next line"
                 truncated: false,
                 body: (*body).to_string(),
                 doing: String::new(),
+                tool_measurement: None,
             })
             .collect()
     }

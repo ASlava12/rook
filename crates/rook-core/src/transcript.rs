@@ -85,6 +85,25 @@ pub struct EntryPage {
     pub previous_offset: Option<u64>,
     pub total_bytes: u64,
 }
+/// A saved dispatch measurement, attributed to its timing event in this
+/// session. Includes approval waits and hooks; it does not verify today's
+/// workspace, or infer a verdict from the tool's text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolMeasurement {
+    pub failed: bool,
+    pub duration_ms: u64,
+    pub timing_seq: u64,
+}
+impl ToolMeasurement {
+    pub fn text(&self) -> String {
+        format!(
+            "saved {} · dispatch {} ms · timing #{} (includes waits/hooks; current files/tests not verified)",
+            if self.failed { "failure" } else { "completion" },
+            self.duration_ms,
+            self.timing_seq,
+        )
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Quote {
     pub text: String,
@@ -198,6 +217,7 @@ fn entry_from(rook: &Rook, event: &Event, body: String, truncated: bool) -> Resu
         truncated,
         body,
         doing,
+        tool_measurement: crate::diagnostics::tool_measurement(rook, event)?,
     })
 }
 struct Count {

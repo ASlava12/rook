@@ -36,7 +36,7 @@ test('saved tool cards stay compact until opened and page large content on deman
     if (path.endsWith('/history')) value = {
       items: [
         { seq: 0, kind: 'tool-call', label: 'run_command', doing: 'run cargo test', bytes: 11, body: 'not shown' },
-        { seq: 1, kind: 'tool-result', label: 'run_command', doing: '', bytes: 50000, body: 'not shown' },
+        { seq: 1, kind: 'tool-result', label: 'run_command', doing: '', bytes: 50000, body: 'not shown', tool_measurement: { failed: true, duration_ms: 42, timing_seq: 2 } },
       ], previous: null, next: null, through: 2,
     };
     else if (path.endsWith('/history/1?offset=0')) value = {
@@ -53,6 +53,7 @@ test('saved tool cards stay compact until opened and page large content on deman
   const card = panel.find(node => node.tag === 'details' && node.className === 'entry tool-card' && node.textContent.includes('tool-result'));
   assert(card);
   assert.match(card.textContent, /run_command · 50000 stored bytes/);
+  assert.match(card.textContent, /saved failure · dispatch 42 ms · timing #2 \(includes waits\/hooks\)/);
   assert.doesNotMatch(card.textContent, /not shown|first part/);
   assert.deepEqual(paths, ['/api/sessions/session/history']);
 
@@ -62,6 +63,7 @@ test('saved tool cards stay compact until opened and page large content on deman
   assert.deepEqual(paths, ['/api/sessions/session/history', '/api/sessions/session/history/1?offset=0']);
   assert.match(card.textContent, /<script>first part<\/script>/);
   assert.match(card.textContent, /current files and test results are not verified/);
+  assert.match(card.textContent, /saved status\/duration unavailable/, 'an older daemon body response does not inherit a verdict');
   const next = card.find(node => node.tag === 'button' && node.textContent === 'Next part');
   assert(next);
   next.listeners.click();

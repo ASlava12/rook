@@ -23,7 +23,7 @@ function history(entries, bodies) {
 test('browser export scopes, escapes, shortens and attributes saved history', async () => {
   const entries = [
     { seq: 0, kind: 'user', label: '', doing: '' },
-    { seq: 1, kind: 'tool-call', label: '<script>', doing: 'run & inspect' },
+    { seq: 1, kind: 'tool-result', label: '<script>', doing: 'run & inspect', tool_measurement: { failed: true, duration_ms: 42, timing_seq: 3 } },
     { seq: 2, kind: 'assistant', label: '', doing: '' },
   ];
   const source = history(entries, ['outside-before', `<script>alert('bad')</script>${'&'.repeat(9000)}`, 'outside-after']);
@@ -33,6 +33,7 @@ test('browser export scopes, escapes, shortens and attributes saved history', as
   assert.match(result.html, /Session session · selected events #1–#1 · snapshot ended before #3/);
   assert.match(result.html, /&lt;script&gt;alert\(&#39;bad&#39;\)&lt;\/script&gt;/);
   assert.match(result.html, /run &amp; inspect/);
+  assert.match(result.html, /saved failure · dispatch 42 ms · timing #3/);
   assert.match(result.html, /<details><summary>Show tool content<\/summary>/);
   assert.match(result.html, /Body shortened after 8192 bytes/);
   assert.doesNotMatch(result.html, /outside-before|outside-after|<script>/);

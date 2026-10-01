@@ -920,11 +920,12 @@ impl History {
                 .unwrap_or_else(|| "No bookmarks in this session. Mark an event with m.".into())
         } else if let Some(page) = &self.entry {
             format!(
-                "#{} · byte {} / {}{}\n\n{}",
+                "#{} · byte {} / {}{}\n{}\n{}",
                 page.entry.seq,
                 page.offset,
                 page.total_bytes,
                 if page.next_offset.is_some() { " · n reads more" } else { "" },
+                page.entry.tool_measurement.map(|m| m.text()).unwrap_or_default(),
                 page.entry.body
             )
         } else if let Some(hits) = &self.hits {
@@ -944,10 +945,11 @@ impl History {
                 .and_then(|p| p.items.get(self.at))
                 .map(|e| {
                     format!(
-                        "#{} {}{}\n\n{}",
+                        "#{} {}{}\n{}\n{}",
                         e.seq,
                         e.kind,
                         if e.truncated { " · Enter reads full body in pages" } else { "" },
+                        e.tool_measurement.map(|m| m.text()).unwrap_or_default(),
                         e.body
                     )
                 })

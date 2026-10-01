@@ -1858,3 +1858,46 @@ passed. That test passed alone on retry (exit 0). The final full
 `cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0 (`ci: ok`, 758.9 seconds),
 including 116 CLI/TUI unit tests, all 85 CLI integration tests and doctests.
 Windows ran no PTY tests. Queue remains In progress.
+
+## Saved tool dispatch measurements in cards (2026-10-01)
+
+Saved tool-result cards now use the existing v1 timing notes for a measured
+failure/completion and dispatch duration, with the timing event number as
+source. The shared bounded page, body-part and transcript readers expose an
+optional field; TUI calls/history, CLI history, browser cards and both HTML
+export paths consume it. Missing fields in older daemon responses remain
+compatible. No event schema, stored timing payload or format version changes.
+
+Lookup examines at most sixteen following records and checks each timing
+object's raw size against 1 KiB before loading it. It requires the exact
+result sequence and tool-dispatch phase. Malformed, oversized, cancelled,
+unmatched and out-of-window notes leave status/duration unknown; answer text
+does not prove success. Duration includes approval waits and hooks. Copied
+branch history cannot read timing notes excluded by its fork boundary, and
+the UI states that saved completion does not verify current files or tests.
+
+Focused coverage checks real measured execution, restart/fork preservation,
+bounded lookup, old JSON, TUI same-name result pairing, browser expansion and
+local/daemon history plus HTML export parity. A real Edge headless page against
+a separate scratch daemon with synthetic history verified compact/expanded
+cards by mouse click, bounded body parts and Next part, text escaping, saved
+measurement after reload and measured HTML export. The scratch processes were
+stopped. An overlapping CLI test's automatic daemon build exited 1 because
+Windows refused to replace that running scratch executable; rerunning it
+after cleanup exited 0.
+
+The core transcript/diagnostics tests, TUI same-name pairing and TestBackend
+rendering test, local/daemon CLI integration test, JavaScript syntax checks,
+four browser module tests and the real Edge probe exited 0. Required
+`cargo xtask compaction` exited 0: 4.02 MiB on disk, 37.1x dictionary
+compression and 5.8x end-to-end; the storage claims did not move.
+Final `cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0 (`ci: ok`, 838.3
+seconds), including 117 CLI/TUI unit tests, all 86 CLI integration tests,
+core suites and doctests. Windows ran no PTY tests.
+
+Inline tool cards remains In progress: diff metadata, live TUI expansion and
+live TUI interaction checks remain open. Queue lifecycle/frontend checks,
+branch live checks, HTML download interaction and both Pending capabilities
+(phase routing and declarative extension UI) also remain in scope. The next
+implementation block should advance the remaining card behavior or a Pending
+capability; this block is not completion of the overall transfer.

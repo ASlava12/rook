@@ -1051,6 +1051,7 @@ impl Rook {
                     _ => String::new(),
                 },
                 body,
+                tool_measurement: crate::diagnostics::tool_measurement(self, &e)?,
             });
         }
         Ok(out)
@@ -2256,6 +2257,10 @@ pub struct TranscriptEntry {
     /// name where watching it live showed the work. Empty for everything else.
     #[serde(default)]
     pub doing: String,
+    /// Saved dispatch status and duration, when an attributable measurement
+    /// is available. Absent on older daemon responses and unmeasured results.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_measurement: Option<crate::transcript::ToolMeasurement>,
 }
 
 /// The note a capture carries when a skill arrived from a source, and the

@@ -232,6 +232,17 @@ The browser history panel also renders saved tool calls and results as native
 expandable cards. Their summaries come from bounded page metadata; opening a
 card fetches one bounded body part by event number, and further parts require
 an explicit next/previous action. Event text remains DOM text, not HTML.
+Saved tool results also expose optional dispatch measurements from existing
+`rook:timing:v1` notes, matched by exact result event number and phase.
+Readers inspect at most sixteen following event records and reject timing
+bodies over 1 KiB before loading them. Missing, invalid, cancelled and
+out-of-window measurements remain unknown; result prose never supplies a
+verdict. The TUI calls/history panes, CLI history, browser cards and HTML
+exports show the saved status, duration and timing event source. Dispatch
+duration includes approval waits and hooks, and historical completion does
+not verify current workspace files or tests. Forks see only copied notes;
+stored event structs and the timing format are unchanged. Older daemon JSON
+responses without this optional field remain readable.
 Live browser tool notices are expandable cards as well. The tab matches
 same-name completions in arrival order and reports failure plus elapsed time
 observed in that tab. This is live transport state, not a persisted verdict or

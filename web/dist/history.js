@@ -91,6 +91,7 @@ export function historyPanel(session, quote, rewind, branch) {
       detail.replaceChildren(
         el('h3', {}, `#${e.seq} · ${e.kind} ${e.label}`),
         el('p', { class: 'sub' }, `Bytes ${result.offset}–${result.next_offset ?? result.total_bytes} of ${result.total_bytes}`),
+        e.tool_measurement ? el('p', { class: 'sub' }, `Saved ${e.tool_measurement.failed ? 'failure' : 'completion'} · dispatch ${e.tool_measurement.duration_ms} ms · timing #${e.tool_measurement.timing_seq}. Includes waits/hooks; current files and tests are not verified.`) : null,
         el('pre', { class: 'body' }, e.body),
         el('div', { class: 'row' },
           button('Previous part', () => open(seq, result.previous_offset), result.previous_offset == null),
@@ -103,7 +104,13 @@ export function historyPanel(session, quote, rewind, branch) {
   }
   function toolCard(e) {
     const card = el('details', { class: 'entry tool-card' });
-    const summary = el('summary', {}, `#${e.seq} · ${e.kind} · ${e.doing || e.label || 'tool'}${e.bytes == null ? '' : ` · ${e.bytes} stored bytes`}`);
+    const title = `#${e.seq} · ${e.kind} · ${e.doing || e.label || 'tool'}${e.bytes == null ? '' : ` · ${e.bytes} stored bytes`}`;
+    const summary = el('summary');
+    function measured(measurement) {
+      const status = measurement ? `saved ${measurement.failed ? 'failure' : 'completion'} · dispatch ${measurement.duration_ms} ms · timing #${measurement.timing_seq} (includes waits/hooks)` : 'saved status/duration unavailable';
+      summary.textContent = title + (e.kind === 'tool-result' ? ` · ${status}` : '');
+    }
+    measured(e.tool_measurement);
     const body = el('pre', { class: 'body' });
     const parts = el('div', { class: 'row' });
     const meta = el('p', { class: 'sub' }, 'Open to read one bounded part of the saved event.');
@@ -113,6 +120,7 @@ export function historyPanel(session, quote, rewind, branch) {
       read(`${base}/${e.seq}?offset=${offset}`, result => {
         if (!card.isConnected) return;
         loaded = true;
+        measured(result.entry.tool_measurement);
         body.textContent = result.entry.body;
         meta.textContent = `Bytes ${result.offset}–${result.next_offset ?? result.total_bytes} of ${result.total_bytes}. Saved history; current files and test results are not verified here.`;
         parts.replaceChildren(
