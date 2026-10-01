@@ -1147,3 +1147,21 @@ test exited 0. Full `cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0
 (`ci: ok`, 602.6 seconds). This block changed only browser assets and docs,
 so it did not rerun compaction. A live manual Chrome interaction check remains
 open; the embedded-module check confirms that the daemon serves the new file.
+
+## Correction receipt across a daemon restart
+
+A real-process test now holds a conversation goal during a model request,
+submits a caller-owned correction, kills the daemon, reads that receipt through
+the local `rook session queue` path, and starts a new daemon. Retrying the exact
+socket frame returns the original reference, ID and submission timestamp. The
+managed run keeps its generation, the combined queue contains one correction,
+and reusing that ID with different text is rejected. The focused test exited
+0 after correcting its initial CLI command path (`session queue`, not a root
+`queue` command). This establishes retry identity across one interrupted goal
+run and both store access paths. It does not yet cover acceptance after the
+restart, goal replacement, CLI/TUI prompt retry, or caller-owned goal controls.
+Queue remains In progress; all Pending rows and branch live checks remain open.
+
+The full `cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0 (`ci: ok`,
+687.2 seconds), including all 76 CLI integration tests and doctests. No
+production storage code changed, so compaction was not rerun for this block.

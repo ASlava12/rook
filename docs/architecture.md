@@ -332,6 +332,16 @@ boundary; tool policy and containment remain independent enforcement layers.
 stage admission and completion verification. Session goals reuse their existing
 conversation; standalone runs use iteration sessions. `rookd::work` schedules these
 turns independently of HTTP/WebSocket lifetimes. TUI `/goal` uses the existing
-chat registry for streaming and approvals and continues in the same session, including after restart. CLI `task`, the optional
-Tasks now describe schedules, exposed through `/api/tasks`. The TUI and web views share this API; each occurrence reserves a session ID durably, then creates an ordinary goal session. `/api/work` remains the execution and legacy compatibility API. Calendar computation and persistence live in `rook-core::schedules`.
+chat registry for streaming and approvals and continues in the same session,
+including after restart.
+
+Scoped correction receipts retain their caller ID and goal generation across
+daemon restarts; local `session queue` reads and socket retries resolve the same
+saved receipt. A changed text with that ID is refused.
+
+Scheduled tasks are exposed through `/api/tasks`; the TUI and web views share
+this API. Each occurrence reserves a session ID durably, then creates an
+ordinary goal session. `/api/work` remains the execution and legacy
+compatibility API. Calendar computation and persistence live in
+`rook-core::schedules`.
 See [durable work](durable-work.md) and [ADR-0014](adr/0014-durable-work.md).

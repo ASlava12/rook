@@ -310,6 +310,118 @@ fn socket_corrections_reuse_caller_receipts_and_old_frames_still_work() {
 }
 
 #[test]
+fn goal_correction_retry_keeps_its_receipt_across_daemon_restart() {
+    rook_llm::init_tls();
+    let rook = Rook::new();
+    let model = Model::new();
+    rook.write_config(&config(&model.url, "initial", "ask", rook.workspace.path()));
+    let session = {
+        let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+        let id = rook_store::new_session_id();
+        store
+            .create_session(&rook_store::SessionMeta::new(
+                id,
+                "restart correction",
+                rook.workspace.path().display().to_string(),
+                rook_store::now_unix(),
+            ))
+            .unwrap();
+        rook_store::format_session_id(id)
+    };
+    let daemon = Daemon::start(&rook);
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let address = format!("{}/api/chat", daemon.address.replacen("http", "ws", 1));
+    let mut first = runtime.block_on(async {
+        let (mut socket, _) = tokio_tungstenite::connect_async(&address).await.unwrap();
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                json!({
+                    "type":"prompt","session":session,"text":"/goal RESTART_GOAL"
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        socket
+    });
+    assert!(model.next()["messages"].to_string().contains("RESTART_GOAL"));
+    let work_url = format!("{}/api/work/{session}", daemon.address);
+    let generation = runtime.block_on(get(&client, &work_url))["generation"].clone();
+    let page = runtime.block_on(get(&client, &format!("{}/api/sessions/{session}/queue", daemon.address)));
+    let target = page["submission_target"].as_str().unwrap().to_owned();
+    let correction = json!({
+        "type":"prompt","session":session,"text":"RESTART_CORRECTION",
+        "id":"stable-correction","target":target
+    });
+    runtime.block_on(async {
+        first
+            .send(tokio_tungstenite::tungstenite::Message::Text(correction.to_string().into()))
+            .await
+            .unwrap();
+    });
+    let admitted = runtime.block_on(socket_event(&mut first, "interjected"))["receipt"].clone();
+    let reference = admitted["reference"].as_str().unwrap().to_owned();
+    drop(first);
+    drop(daemon);
+    std::fs::remove_file(rook.home.path().join("rookd.addr")).unwrap();
+
+    // The direct CLI path reads the same receipt while the daemon is down.
+    let local = rook.json(&["session", "queue", &session, "show", &reference]);
+    assert_eq!(local["receipt"]["id"], "stable-correction");
+    assert_eq!(local["reference"], reference);
+    let daemon = Daemon::start(&rook);
+    assert!(model.requests.recv_timeout(std::time::Duration::from_secs(30)).is_ok(), "goal did not resume");
+    let address = format!("{}/api/chat", daemon.address.replacen("http", "ws", 1));
+    let mut retry = runtime.block_on(async {
+        let (mut socket, _) = tokio_tungstenite::connect_async(&address).await.unwrap();
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(correction.to_string().into()))
+            .await
+            .unwrap();
+        socket
+    });
+    let repeated = runtime.block_on(socket_event(&mut retry, "interjected"))["receipt"].clone();
+    assert_eq!(repeated["reference"], admitted["reference"]);
+    assert_eq!(repeated["id"], admitted["id"]);
+    assert_eq!(repeated["submitted_at"], admitted["submitted_at"]);
+    assert_eq!(
+        runtime.block_on(get(&client, &format!("{}/api/work/{session}", daemon.address)))["generation"],
+        generation
+    );
+    let page = runtime.block_on(get(
+        &client,
+        &format!("{}/api/sessions/{session}/queue?include_finished=true", daemon.address),
+    ));
+    assert_eq!(
+        page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["receipt"]["id"] == "stable-correction")
+            .count(),
+        1,
+        "{page}"
+    );
+    runtime.block_on(async {
+        retry
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                json!({
+                    "type":"prompt","session":session,"text":"CHANGED_CORRECTION",
+                    "id":"stable-correction","target":target
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+    });
+    let failed = runtime.block_on(socket_event(&mut retry, "failed"));
+    assert!(failed["message"].as_str().unwrap().contains("different text"), "{failed}");
+}
+
+#[test]
 fn first_socket_prompt_retries_join_then_acknowledge_without_another_session_or_turn() {
     rook_llm::init_tls();
     let rook = Rook::new();
