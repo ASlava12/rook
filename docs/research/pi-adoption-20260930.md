@@ -1953,3 +1953,49 @@ Inline cards remain In progress: live browser result loading, live TUI card
 expansion and interaction checks remain; Pending phase routing
 and declarative extension UI, queue lifecycle checks, branch live checks and
 HTML download interaction remain in the original scope.
+
+## Live browser result cards (2026-10-02)
+
+Tool completion now includes an optional exact same-session `result_seq`.
+Core publishes it after consuming the result's receipt/image binding and
+attempting to persist dispatch timing. The daemon forwards this small reference;
+old JSON without it remains readable. No event struct, stored object or storage
+version changed, and result bodies are not added to live delivery frames.
+
+Live browser cards replace their running notice with the shared saved-event
+reader after completion. Opening during execution stays open. The reader keeps
+the original session/event source, reads one bounded body part per expansion
+or paging action, and exposes saved measurement and optional diff companions.
+Each card allows one outstanding read and ignores responses after removal.
+Resumed chat uses the same compact cards. The observed elapsed time in the tab
+remains labelled separately from saved dispatch duration; historical results
+and previews never verify current files or tests. Existing pending-call and
+scrollback caps still apply. Old completion frames retain their history notice.
+
+Local core tests read both successful and failed saved results inside the
+completion callback and verify timing attribution there. A daemon integration
+reads the actual write result, measurement and change-note before the next
+model reply is released. Its initial fixture withheld the extra autonomous
+checker request and timed out after the intended result assertions; using an
+ordinary assist turn with an explicit file allow rule corrected the fixture,
+and the repeated test exited 0. Wire compatibility, browser module tests and
+syntax checks passed. An initial module test also caught a null child in the
+new optional-button rendering; omitted controls now leave no DOM text.
+
+A fresh scratch daemon and real Edge headless mouse interactions verified
+actual write/read/error tool calls, no eager history reads, compact expansion,
+bounded first/next result and diff parts, saved duration/failure attribution
+and resumed-chat cards (exit 0). Scratch daemon/model/browser processes were
+stopped before the full gate. Final `cargo xtask ci` with
+`RUST_TEST_THREADS=1` exited 0 (`ci: ok`, 744.9 seconds), including the new
+daemon integration, local core callback checks, compatibility checks and
+doctests. Windows did not run the Unix PTY suite. Storage code and persisted
+formats were not changed in this block.
+
+Inline cards remain In progress: live TUI expansion/interaction still needs
+work. The original queue lifecycle, branch live checks, HTML download interaction,
+phase routing and declarative extension UI scope remains open.
+The next card block should retain `result_seq` through the local TUI
+`TurnEvent::ToolDone` and daemon event handler, associate it with the correct
+bounded chat row, and open the existing history reader from that row. Verify
+both local and daemon interaction; rendering alone does not close that gap.

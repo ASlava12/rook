@@ -3561,7 +3561,13 @@ async fn a_turn_reports_a_tool_finishing_as_well_as_starting() {
             rook_core::agent::Progress::Delta(rook_llm::Delta::ToolCall(c)) => {
                 seen.push(format!("start {}", c.name))
             }
-            rook_core::agent::Progress::ToolDone { name, failed } => {
+            rook_core::agent::Progress::ToolDone { name, failed, result_seq } => {
+                let seq = result_seq.expect("saved read_file result must be available live");
+                let page = f.rook.transcript_entry(session, seq, 0).unwrap();
+                assert_eq!(page.entry.kind, "tool-result");
+                assert_eq!(page.entry.label, name);
+                let measurement = page.entry.tool_measurement.expect("timing committed before notification");
+                assert_eq!(measurement.failed, failed);
                 seen.push(format!("done {name} failed={failed}"))
             }
             _ => {}

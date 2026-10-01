@@ -312,6 +312,9 @@ pub enum ChatEvent {
     ToolDone {
         name: String,
         failed: bool,
+        /// Same-session saved result; absent for old senders or unsaved calls.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result_seq: Option<u64>,
     },
     /// What a turn changed about what the agent believes, said the way file
     /// changes are: an agent that quietly drops what it was told to remember is

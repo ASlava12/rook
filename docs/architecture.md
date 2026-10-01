@@ -269,7 +269,16 @@ format version are unchanged; older daemon JSON can omit the new field.
 Live browser tool notices are expandable cards as well. The tab matches
 same-name completions in arrival order and reports failure plus elapsed time
 observed in that tab. This is live transport state, not a persisted verdict or
-tool duration; saved results remain in session history. Pending card metadata
+tool duration. Completion also carries an optional exact result event number
+from that session. Core emits it after binding result receipts/images and
+attempting to save dispatch timing, so an observer can immediately browse the
+committed result without guessing from the latest event or tool name. Older
+JSON can omit the reference; calls without one keep their history notice.
+Live completion, resumed chat and history use the same expandable card reader.
+Each reader admits one request at a time and replaces its bounded body part;
+result and diff parts load only on explicit expansion or paging. Disconnected
+cards ignore late replies. The saved timing and change-note source remain
+historical, separate from the tab's observed elapsed time. Pending card metadata
 is capped at 128 entries in addition to bounded chat scrollback.
 `rook session context` also shows the last attempted model request's bounded
 tool catalog: configured provider ID, native or prompt-encoded delivery,

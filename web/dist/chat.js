@@ -2,6 +2,7 @@
 // a turn that can be stopped, and the agent's questions answered in place.
 import { $, el, api, ago, md, state, nav, notify, askToNotify, jsonWithin } from './lib.js';
 import { historyPanel } from './history.js';
+import { savedToolCard } from './tool-card.js';
 import { branchPanel } from './branches.js';
 import { mcpPanel } from './mcp.js';
 import { queuePanel, takeRestored } from './queue.js';
@@ -135,12 +136,13 @@ function toolStarted(e) {
   const summary = el('summary', {}, `· ${e.doing || e.name}`);
   const meta = el('p', { class: 'sub' }, 'Running; saved result is available in history after completion.');
   const card = el('details', { class: 'live-tool-card' }, summary, meta);
-  if (!block('tool', card)) return;
+  const container = block('tool', card);
+  if (!container) return;
   if (pendingCalls.length >= MAX_PENDING_CALLS) {
     const old = pendingCalls.shift();
     old.meta.textContent = 'Status no longer retained in this tab; inspect saved history.';
   }
-  pendingCalls.push({ name: e.name, meta, started: Date.now() });
+  pendingCalls.push({ name: e.name, doing: e.doing, meta, card, container, session: state.chat.session, started: Date.now() });
 }
 
 function toolFinished(e) {
@@ -150,6 +152,11 @@ function toolFinished(e) {
   const [call] = pendingCalls.splice(at, 1);
   const observed = Math.max(0, Date.now() - call.started);
   call.meta.textContent = `${e.failed ? 'Failed' : 'Finished'} · observed ${observed} ms in this tab. Read the saved result in history; this status does not verify current files or tests.`;
+  if (e.result_seq != null && call.session && call.container.isConnected) {
+    const saved = savedToolCard(call.session, { seq: e.result_seq, kind: 'tool-result', label: e.name, doing: call.doing });
+    saved.open = call.card.open;
+    call.container.replaceChildren(call.meta, saved);
+  }
   current = null;
 }
 
@@ -606,8 +613,7 @@ export async function resume(session) {
     for (const e of items) {
       if (e.kind === 'user') say('you', `› ${e.body}`);
       else if (e.kind === 'assistant') { current = null; saidByModel(e.body); current = null; }
-      else if (e.kind === 'tool-call') say('tool', `· ${e.doing || e.label}`);
-      else if (e.kind === 'tool-result') say('stat', e.body.split('\n').slice(0, 3).join('\n'));
+      else if (e.kind === 'tool-call' || e.kind === 'tool-result') block('tool', savedToolCard(session, e));
       // `wrote` is JSON for `changes` to read, not prose for anybody. The same
       // question is `note_is_for_a_person` in rook-core, which the window asks.
       else if (e.kind === 'note' && e.label !== 'wrote') say('stat', `${e.label}: ${e.body}`);

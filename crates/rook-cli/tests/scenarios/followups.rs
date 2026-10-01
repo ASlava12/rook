@@ -161,6 +161,64 @@ async fn enqueue(client: &reqwest::Client, url: &str, id: &str) -> Value {
 }
 
 #[test]
+fn live_tool_completion_points_to_a_readable_measured_result_before_the_next_model_reply() {
+    rook_llm::init_tls();
+    let rook = Rook::new();
+    let model = Model::with_messages(vec![json!({
+        "role":"assistant", "content":"", "tool_calls":[{
+            "index":0,"id":"write-once","type":"function","function":{
+                "name":"write_file","arguments":"{\"path\":\"evidence.txt\",\"content\":\"after\\n\"}"
+            }
+        }]
+    })]);
+    std::fs::write(rook.workspace.path().join("evidence.txt"), "before\n").unwrap();
+    rook.write_config(
+        &config(&model.url, "initial", "ask", rook.workspace.path())
+            .replace("mode='ask'", "mode='ask'\nallow=['evidence.txt']"),
+    );
+    let daemon = Daemon::start(&rook);
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let mut socket = runtime.block_on(async {
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!(
+            "{}/api/chat",
+            daemon.address.replacen("http", "ws", 1)
+        ))
+        .await
+        .unwrap();
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                json!({"type":"prompt","text":"write evidence"}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        socket
+    });
+    let started = runtime.block_on(socket_event(&mut socket, "started"));
+    let session = started["session"].as_str().unwrap();
+    model.next();
+    model.release.store(1, Ordering::SeqCst);
+    let completed = runtime.block_on(socket_event(&mut socket, "tool_done"));
+    assert_eq!(completed["name"], "write_file");
+    assert_eq!(completed["failed"], false);
+    let seq = completed["result_seq"].as_u64().expect("exact saved result reference");
+    let base = format!("{}/api/sessions/{session}/history", daemon.address);
+    let page = runtime.block_on(get(&client, &format!("{base}/{seq}?offset=0")));
+    assert_eq!(page["entry"]["kind"], "tool-result");
+    assert_eq!(page["entry"]["label"], "write_file");
+    assert_eq!(page["entry"]["tool_measurement"]["failed"], false);
+    assert!(page["entry"]["tool_measurement"]["duration_ms"].is_u64());
+    let note = page["entry"]["change_note"].as_u64().unwrap();
+    let changes = runtime.block_on(get(&client, &format!("{base}/{note}?offset=0")));
+    let text = changes["entry"]["body"].as_str().unwrap();
+    assert!(text.contains("-before") && text.contains("+after"), "{text}");
+    assert_eq!(std::fs::read_to_string(rook.workspace.path().join("evidence.txt")).unwrap(), "after\n");
+    model.next(); // The next reply is still withheld while the result is browsed.
+    model.release.store(2, Ordering::SeqCst);
+    runtime.block_on(socket_event(&mut socket, "done"));
+}
+
+#[test]
 fn socket_stop_uses_observed_goal_generation_and_replays_once() {
     rook_llm::init_tls();
     let rook = Rook::new();

@@ -42,12 +42,17 @@ fn a_question_with_no_choices_is_free_text() {
 
 #[test]
 fn a_finished_tool_call_is_reported_as_its_own_event() {
-    let event = ChatEvent::ToolDone { name: "read_file".into(), failed: false };
+    let event = ChatEvent::ToolDone { name: "read_file".into(), failed: false, result_seq: None };
     assert_eq!(
         serde_json::to_value(&event).unwrap(),
         serde_json::json!({ "type": "tool_done", "name": "read_file", "failed": false }),
         "the browser branches on this tag by hand"
     );
+    let older: ChatEvent =
+        serde_json::from_str(r#"{"type":"tool_done","name":"read_file","failed":false}"#).unwrap();
+    assert!(matches!(older, ChatEvent::ToolDone { result_seq: None, .. }));
+    let saved = ChatEvent::ToolDone { name: "read_file".into(), failed: true, result_seq: Some(0) };
+    assert_eq!(serde_json::to_value(saved).unwrap()["result_seq"], 0);
 }
 
 #[test]

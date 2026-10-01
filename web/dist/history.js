@@ -1,6 +1,7 @@
 // One page at a time, including search and the body of a large event. The
 // durable cursor belongs to the server; DOM positions never address history.
 import { el, api } from './lib.js';
+import { savedToolCard } from './tool-card.js';
 import { downloadHistoryHtml } from './html-export.js';
 
 export function historyPanel(session, quote, rewind, branch) {
@@ -102,69 +103,8 @@ export function historyPanel(session, quote, rewind, branch) {
           rewind ? button(`Rewind to #${seq}`, () => rewind(seq)) : null));
     });
   }
-  function toolCard(e) {
-    const card = el('details', { class: 'entry tool-card' });
-    const title = `#${e.seq} · ${e.kind} · ${e.doing || e.label || 'tool'}${e.bytes == null ? '' : ` · ${e.bytes} stored bytes`}`;
-    const summary = el('summary');
-    function measured(measurement) {
-      const status = measurement ? `saved ${measurement.failed ? 'failure' : 'completion'} · dispatch ${measurement.duration_ms} ms · timing #${measurement.timing_seq} (includes waits/hooks)` : 'saved status/duration unavailable';
-      summary.textContent = title + (e.kind === 'tool-result' ? ` · ${status}` : '');
-    }
-    measured(e.tool_measurement);
-    const body = el('pre', { class: 'body' });
-    const parts = el('div', { class: 'row' });
-    const savedChanges = el('div');
-    let changeSource = null;
-    function changes(seq) {
-      if (seq == null || seq === changeSource) return;
-      changeSource = seq;
-      const preview = el('details', { class: 'saved-diff' });
-      const text = el('pre', { class: 'body' });
-      const controls = el('div', { class: 'row' });
-      const source = el('p', { class: 'sub' }, 'Historical tool-reported preview; current files and tests are not verified.');
-      let opened = false;
-      function load(offset) {
-        if (pending) { notice.textContent = 'History reader is busy; try this preview again.'; return; }
-        read(`${base}/${seq}?offset=${offset}`, result => {
-          if (!preview.isConnected) return;
-          opened = true;
-          text.replaceChildren(...result.entry.body.split('\n').map(line =>
-            el('span', { class: line.startsWith('+') ? 'diff-added' : line.startsWith('-') ? 'diff-removed' : line.startsWith('@@') ? 'diff-hunk' : null }, `${line}\n`)));
-          source.textContent = `Source event #${seq} · bytes ${result.offset}–${result.next_offset ?? result.total_bytes} of ${result.total_bytes}. Historical tool-reported preview; current files and tests are not verified.`;
-          controls.replaceChildren(
-            button('Previous diff part', () => load(result.previous_offset), result.previous_offset == null),
-            button('Next diff part', () => load(result.next_offset), result.next_offset == null),
-            button('Open change event', () => open(seq, result.offset)));
-        });
-      }
-      preview.addEventListener('toggle', () => { if (preview.open && !opened) load(0); });
-      preview.append(el('summary', {}, `Saved file changes · source event #${seq}`), source, text, controls);
-      savedChanges.replaceChildren(preview);
-    }
-    changes(e.change_note);
-    const meta = el('p', { class: 'sub' }, 'Open to read one bounded part of the saved event.');
-    let loaded = false;
-    function part(offset) {
-      if (pending) { notice.textContent = 'History reader is busy; try this card again.'; return; }
-      read(`${base}/${e.seq}?offset=${offset}`, result => {
-        if (!card.isConnected) return;
-        loaded = true;
-        measured(result.entry.tool_measurement);
-        changes(result.entry.change_note);
-        body.textContent = result.entry.body;
-        meta.textContent = `Bytes ${result.offset}–${result.next_offset ?? result.total_bytes} of ${result.total_bytes}. Saved history; current files and test results are not verified here.`;
-        parts.replaceChildren(
-          button('Previous part', () => part(result.previous_offset), result.previous_offset == null),
-          button('Next part', () => part(result.next_offset), result.next_offset == null),
-          button('Open event', () => open(e.seq, result.offset)));
-      });
-    }
-    card.addEventListener('toggle', () => { if (card.open && !loaded) part(0); });
-    card.append(summary, meta, body, parts, savedChanges);
-    return card;
-  }
   function row(e, snippet = e.body, offset = 0) {
-    if (e.kind === 'tool-call' || e.kind === 'tool-result') return toolCard(e);
+    if (e.kind === 'tool-call' || e.kind === 'tool-result') return savedToolCard(session, e, open);
     return el('article', { class: 'entry' },
       el('div', { class: 'hd' }, button(`#${e.seq} · ${e.kind} ${e.label}`, () => open(e.seq, offset))),
       el('pre', {}, snippet),

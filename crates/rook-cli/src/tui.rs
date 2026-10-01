@@ -2207,7 +2207,7 @@ impl App {
             // The daemon sends the tool's name and not its arguments, so a
             // window attached to one says less than a window running the turn
             // itself. What it must not do is say it twice.
-            ChatEvent::ToolDone { name, failed } => self.chat.tool_done(&name, failed),
+            ChatEvent::ToolDone { name, failed, .. } => self.chat.tool_done(&name, failed),
             ChatEvent::Step { at, of } => self.chat.step = Some((at, of)),
             ChatEvent::Remembered { text } => self.chat.push("stat", &format!("  remembered: {text}")),
             ChatEvent::Forgot { text } => self.chat.push("stat", &format!("  forgot: {text}")),
@@ -3872,7 +3872,9 @@ impl App {
                             TurnEvent::Heard(text.to_string(), receipt.cloned())
                         }
                         Progress::Step { at, of } => TurnEvent::Step(at, of),
-                        Progress::ToolDone { name, failed } => TurnEvent::ToolDone(name.to_string(), failed),
+                        Progress::ToolDone { name, failed, .. } => {
+                            TurnEvent::ToolDone(name.to_string(), failed)
+                        }
                         Progress::Delta(Delta::Effort(report)) => TurnEvent::Effort(report.describe()),
                         Progress::Context { used, size } => TurnEvent::Context { used, size },
                         Progress::Spent { input, output, cached } => {

@@ -257,7 +257,7 @@ impl Watching {
             Progress::Delegating { at, doing } => {
                 format!("\n    {}\n", rook_core::calls::delegating(at, doing))
             }
-            Progress::ToolDone { name, failed } => self.calls.finished(name, failed),
+            Progress::ToolDone { name, failed, .. } => self.calls.finished(name, failed),
             // What the tool knows and nobody else does: how long it has been
             // running and how long since it printed. A quarter of a minute of a
             // silent command reads as a hang otherwise.

@@ -308,6 +308,8 @@ pub enum Progress<'a> {
     ToolDone {
         name: &'a str,
         failed: bool,
+        /// Exact result in this session, available before observers are notified.
+        result_seq: Option<u64>,
     },
     /// One delegated sub-task finished. They run concurrently and the parent
     /// waits for all of them, so without this a delegation is minutes of
@@ -1598,7 +1600,6 @@ impl<'a> AgentLoop<'a> {
                     }
                 };
                 let recorded_body = rook_store::ObjectId::of(result.as_bytes());
-                on_progress(Progress::ToolDone { name: &call.name, failed });
                 for (_, name) in dropped.iter().filter(|(id, _)| *id == call.id) {
                     result.push_str(&format!(
                         "\n\n[`{name}` came with this same call id and was not made — one id per \
@@ -1655,6 +1656,7 @@ impl<'a> AgentLoop<'a> {
                     },
                     result_seq,
                 );
+                on_progress(Progress::ToolDone { name: &call.name, failed, result_seq });
             }
 
             // Told three times that it is asking the same thing again, and

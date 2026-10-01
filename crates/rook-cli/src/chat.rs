@@ -1051,7 +1051,7 @@ async fn turn(
             let _ = writeln!(out, "\n    {}", rook_core::calls::delegating(at, doing));
             let _ = out.flush();
         }
-        Progress::ToolDone { name, failed } => {
+        Progress::ToolDone { name, failed, .. } => {
             print!("{}", calls.finished(name, failed));
             let _ = out.flush();
         }

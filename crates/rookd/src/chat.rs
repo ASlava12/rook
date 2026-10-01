@@ -1809,7 +1809,9 @@ fn as_event(progress: Progress<'_>, workspace: &std::path::Path) -> Option<ChatE
         Progress::Heard { text, receipt } => {
             ChatEvent::Agent { receipt: receipt.cloned(), text: format!("  ✓ taken up: {text}") }
         }
-        Progress::ToolDone { name, failed } => ChatEvent::ToolDone { name: name.to_string(), failed },
+        Progress::ToolDone { name, failed, result_seq } => {
+            ChatEvent::ToolDone { name: name.to_string(), failed, result_seq }
+        }
         Progress::Step { at, of } => ChatEvent::Step { at, of },
         // A model that has been asked and has not begun to answer, said the
         // same way a tool that is taking a while is: a line that is replaced
