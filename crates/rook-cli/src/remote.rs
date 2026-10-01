@@ -264,6 +264,12 @@ impl Watching {
                     let _ = out.flush();
                 }
             }
+            ChatEvent::Agent { text, receipt: None } => {
+                if !self.json {
+                    let _ = writeln!(out, "\n{text}");
+                    let _ = out.flush();
+                }
+            }
             ChatEvent::Error { message } => {
                 eprintln!("{message}");
             }

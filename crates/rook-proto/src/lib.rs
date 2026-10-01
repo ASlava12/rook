@@ -142,8 +142,9 @@ pub enum ClientMessage {
     Prompt {
         session: Option<String>,
         text: String,
-        /// Caller-owned receipt ID when this prompt corrects a running turn.
-        /// Older clients omit it; a retry must reuse the same ID and text.
+        /// Caller-owned receipt ID for a new turn or a correction. Reuse the
+        /// same ID, text and options after an uncertain socket disconnect.
+        /// Older clients may omit it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         /// Opaque `submission_target` from the queue page. Send with `id` to
@@ -385,6 +386,8 @@ pub enum ChatEvent {
         /// Why it ended. A turn that ran out of steps and one that finished
         /// read the same without it, and they are not the same thing to
         /// whoever asked for the work.
+        /// `already_admitted` acknowledges an ID retry without running a turn;
+        /// its zero counters are not the original turn's outcome.
         #[serde(default)]
         stopped: String,
     },

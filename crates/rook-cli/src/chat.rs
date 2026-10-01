@@ -726,13 +726,17 @@ async fn through_the_daemon(
             let Ok(event) = serde_json::from_str::<ChatEvent>(&frame.text) else { continue };
             if let Some(over) = watching.saw(event, &to_daemon) {
                 crate::notify::attention();
-                let ChatEvent::Done { steps, input_tokens, output_tokens, compactions, .. } = over.done
+                let ChatEvent::Done { steps, input_tokens, output_tokens, compactions, stopped, .. } =
+                    over.done
                 else {
                     break;
                 };
                 // Kept, so the next line lands in the same conversation rather
                 // than starting one beside it.
                 session = Some(over.session.clone());
+                if stopped == "already_admitted" {
+                    break;
+                }
                 println!();
                 eprintln!(
                     "[session {} · {steps} steps · {input_tokens} in / {output_tokens} out tokens \

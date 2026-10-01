@@ -1055,3 +1055,41 @@ target still contains zero runnable tests. No compaction rerun was needed.
 The initial-prompt and goal-control
 retry identities, retry retention, cross-lifecycle coverage, branch synthesis
 and Pending rows remain open.
+
+## Caller identity for an ordinary socket prompt
+
+The socket's existing optional `id` now covers an ordinary prompt that starts
+a turn, including the first prompt with no session ID. A bounded 75-byte claim
+stores the session, payload fingerprint, admission state and execution turn.
+Creating the first session and its claim is atomic; the execution journal binds
+the claim to a turn before hooks or model work; accepting the UserMessage and
+marking the claim admitted is one transaction. A repeat of the same ID, text
+and options joins that live turn or gets an explicit `already_admitted` terminal
+acknowledgement. The acknowledgement does not invent a reply or claim the old
+turn's counters. A turn interrupted before prompt admission requires recovery
+inspection before a new request, because its hooks may already have run. A
+changed payload is rejected. Session deletion removes its
+claims. The browser now supplies a caller ID for a new prompt; CLI and TUI
+already supplied one. Named sessions admit at most `work.max_messages` prompt
+claims; retries of saved IDs still work at that limit. Older frames without an
+ID still work.
+
+Focused core tests cover first-session atomicity, payload conflicts, admitted
+events and deletion, plus isolation between named sessions. A real-daemon socket
+test covers retries while running and after completion for both a new and an
+existing session, conflict rejection, one model request per prompt and no
+correction queue entry. The first run after the journal binding change timed
+out waiting for the scripted provider under a daemon rebuild; a subsequent
+run exited 0, as did the core tests. The first full `cargo xtask ci` exited 1 at the clippy gate:
+the new prompt admission and daemon turn-start functions each exceeded the
+seven-argument lint. The claim is now owned by the execution journal and the
+turn-start variant. The final full CI with `RUST_TEST_THREADS=1` exited 0
+(`ci: ok`, 634.4 seconds), including all 74 CLI integration tests. Required
+`cargo xtask compaction` exited 0 with 4.02 MiB on disk, 37.1x dictionary
+compression and 5.8x end-to-end. No postcard schema or store format version
+changed.
+
+This does not yet make `/goal` creation and controls idempotent. CLI/TUI and
+browser still need retained IDs and an explicit retry action after uncertain
+delivery; correction IDs also need lifecycle coverage across restart. Queue
+remains In progress, as do branch live checks and all Pending rows.

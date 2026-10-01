@@ -683,6 +683,48 @@ impl Store {
         Ok(())
     }
 
+    /// Reserve a caller's first-session request and create its session in one
+    /// transaction. A repeated key returns the original bounded receipt;
+    /// callers check its content before reusing the session it names.
+    pub fn create_session_with_value_once(
+        &self,
+        meta: &SessionMeta,
+        key: &str,
+        value: &[u8],
+        maximum: usize,
+    ) -> Result<Option<Vec<u8>>> {
+        if value.len() > maximum {
+            return Err(StoreError::Encoding("session request receipt exceeds its limit".into()));
+        }
+        let txn = self.db.begin_write()?;
+        let existing = {
+            let kv = txn.open_table(schema::KV)?;
+            match kv.get(key)? {
+                Some(found) if found.value().len() > maximum => {
+                    return Err(StoreError::Encoding(
+                        "saved session request receipt exceeds its limit".into(),
+                    ));
+                }
+                Some(found) => Some(found.value().to_vec()),
+                None => None,
+            }
+        };
+        if existing.is_none() {
+            {
+                let mut sessions = txn.open_table(schema::SESSIONS)?;
+                let id = schema::session_key(meta.id);
+                if sessions.get(id.as_slice())?.is_some() {
+                    return Err(StoreError::Db("new session ID already exists".into()));
+                }
+                let encoded = postcard::to_stdvec(meta)?;
+                sessions.insert(id.as_slice(), encoded.as_slice())?;
+            }
+            txn.open_table(schema::KV)?.insert(key, value)?;
+        }
+        txn.commit()?;
+        Ok(existing)
+    }
+
     /// Change a session's record in place.
     ///
     /// The read and the write are one transaction, which reading it, changing a
@@ -1096,10 +1138,21 @@ impl Store {
             let mut kv = txn.open_table(schema::KV)?;
             let suffix = format!("/{session:032x}");
             let checkpoints = format!("checkpoint-order/{session}/");
+            let prompts = format!("chat-prompt/session/{session:032x}/");
+            let session_bytes = session.to_be_bytes();
             let orphaned: Vec<String> = kv
                 .iter()?
-                .filter_map(|entry| entry.ok().map(|(key, _)| key.value().to_string()))
-                .filter(|key| key.ends_with(&suffix) || key.starts_with(&checkpoints))
+                .filter_map(|entry| {
+                    let (key, value) = entry.ok()?;
+                    let name = key.value();
+                    (name.ends_with(&suffix)
+                        || name.starts_with(&checkpoints)
+                        || name.starts_with(&prompts)
+                        || (name.starts_with("chat-prompt/new/")
+                            && value.value().len() >= session_bytes.len()
+                            && value.value().starts_with(&session_bytes)))
+                    .then(|| name.to_string())
+                })
                 .collect();
             for key in orphaned {
                 kv.remove(key.as_str())?;
@@ -1137,6 +1190,26 @@ impl Store {
         Ok(())
     }
 
+    /// Publish several companions only while their session still exists.
+    /// Deletion and this write serialize at the store transaction boundary.
+    pub fn kv_update_session_values(&self, session: u128, puts: &[(&str, &[u8])]) -> Result<()> {
+        let txn = self.db.begin_write()?;
+        {
+            let sessions = txn.open_table(schema::SESSIONS)?;
+            if sessions.get(schema::session_key(session).as_slice())?.is_none() {
+                return Err(StoreError::MissingSession(format_session_id(session)));
+            }
+        }
+        {
+            let mut kv = txn.open_table(schema::KV)?;
+            for (key, value) in puts {
+                kv.insert(*key, *value)?;
+            }
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
     pub fn kv_get(&self, key: &str) -> Result<Option<Vec<u8>>> {
         let txn = self.db.begin_read()?;
         let kv = txn.open_table(schema::KV)?;
@@ -1154,6 +1227,59 @@ impl Store {
             Some(value) => Ok(Some(value.value().to_vec())),
             None => Ok(None),
         }
+    }
+
+    /// Claim one bounded value beside a session, limiting the number of keys
+    /// in its prefix inside the same transaction as the insert. Existing keys
+    /// remain readable at the cap so an uncertain submission can still retry.
+    pub fn kv_claim_session_limited(
+        &self,
+        session: u128,
+        key: &str,
+        prefix: &str,
+        value: &[u8],
+        maximum_value: usize,
+        maximum_items: usize,
+    ) -> Result<Option<Vec<u8>>> {
+        if value.len() > maximum_value || !key.starts_with(prefix) {
+            return Err(StoreError::Encoding("session claim exceeds its bound or prefix".into()));
+        }
+        let txn = self.db.begin_write()?;
+        {
+            let sessions = txn.open_table(schema::SESSIONS)?;
+            if sessions.get(schema::session_key(session).as_slice())?.is_none() {
+                return Err(StoreError::MissingSession(format_session_id(session)));
+            }
+        }
+        let existing = {
+            let mut kv = txn.open_table(schema::KV)?;
+            let existing = match kv.get(key)? {
+                Some(found) if found.value().len() > maximum_value => {
+                    return Err(StoreError::Encoding("saved session claim exceeds its bound".into()));
+                }
+                Some(found) => Some(found.value().to_vec()),
+                None => None,
+            };
+            if existing.is_none() {
+                let mut count = 0usize;
+                for entry in kv.range(prefix..)? {
+                    let (found, _) = entry?;
+                    if !found.value().starts_with(prefix) {
+                        break;
+                    }
+                    count += 1;
+                    if count >= maximum_items {
+                        return Err(StoreError::Encoding(format!(
+                            "session has {maximum_items} saved prompt claims; start a new session"
+                        )));
+                    }
+                }
+                kv.insert(key, value)?;
+            }
+            existing
+        };
+        txn.commit()?;
+        Ok(existing)
     }
 
     /// Mutate a bounded session companion under the store's write transaction.

@@ -224,6 +224,7 @@ export function connect() {
         break;
       }
       case 'done': {
+        if (e.stopped === 'already_admitted') { done(); break; }
         if (typeof e.reply === 'string' && current?.dataset.text !== e.reply) {
           current = null;
           saidByModel(e.reply);
@@ -647,7 +648,8 @@ export async function renderChat() {
       }
       return;
     }
-    const message = { type: 'prompt', session: state.chat.session, text, options };
+    const message = { type: 'prompt', session: state.chat.session, text,
+      id: crypto.randomUUID(), options };
     if (!jsonWithin(message, 16 * 1024 * 1024)) {
       say('err', 'The prompt and attachments exceed the 16 MiB message limit; the draft was retained.'); return;
     }

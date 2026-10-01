@@ -19,6 +19,7 @@ pub mod branches;
 pub mod calls;
 pub mod catalog;
 pub mod changes;
+pub mod chat_submission;
 mod completion;
 pub mod config;
 pub mod context;

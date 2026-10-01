@@ -114,8 +114,25 @@ pub(crate) fn diagnostic_state(store: &Store, session: u128) -> Result<serde_jso
 }
 
 fn save(store: &Store, session: u128, state: &mut Execution) -> Result<()> {
+    save_with_claim(store, session, state, None)
+}
+
+fn save_with_claim(
+    store: &Store,
+    session: u128,
+    state: &mut Execution,
+    claim: Option<(&str, &[u8])>,
+) -> Result<()> {
     state.updated_at = rook_store::now_unix();
-    store.kv_set(&key(session), &crate::persistence::encode(state)?)?;
+    let receipt = crate::persistence::encode(state)?;
+    let execution_key = key(session);
+    match claim {
+        Some((claim_key, claim_value)) => store.kv_update_session_values(
+            session,
+            &[(execution_key.as_str(), receipt.as_slice()), (claim_key, claim_value)],
+        )?,
+        None => store.kv_set(&execution_key, &receipt)?,
+    }
     let protect = state.status == "running" || !state.unknown.is_empty() || !state.background.is_empty();
     store.update_session(session, |meta| {
         meta.tags.retain(|tag| tag != "rook:execution");
@@ -224,6 +241,7 @@ pub(crate) struct Journal {
     session: u128,
     turn: String,
     resumed: bool,
+    submission_key: Option<String>,
 }
 
 impl Journal {
@@ -232,6 +250,16 @@ impl Journal {
         session: u128,
         jobs: Option<&rook_tools::jobs::Jobs>,
         continuing: bool,
+    ) -> Result<Arc<Self>> {
+        Self::start_with_claim(rook, session, jobs, continuing, None)
+    }
+
+    pub(crate) fn start_with_claim(
+        rook: &Rook,
+        session: u128,
+        jobs: Option<&rook_tools::jobs::Jobs>,
+        continuing: bool,
+        submission_key: Option<&str>,
     ) -> Result<Arc<Self>> {
         let _queue = crate::work::receipts::WRITING.lock().unwrap_or_else(|e| e.into_inner());
         let mut active = ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
@@ -276,7 +304,18 @@ impl Journal {
             background: previous.as_ref().map(|s| s.background.clone()).unwrap_or_default(),
             unknown: previous.map(|s| s.unknown).unwrap_or_default(),
         };
-        save(&rook.store, session, &mut state)?;
+        let claim = submission_key
+            .map(|key| {
+                crate::chat_submission::started_value(&rook.store, key, session, &turn)
+                    .map(|value| (key, value))
+            })
+            .transpose()?;
+        save_with_claim(
+            &rook.store,
+            session,
+            &mut state,
+            claim.as_ref().map(|(key, value)| (*key, value.as_slice())),
+        )?;
         active.insert(identity, turn.clone());
         Ok(Arc::new(Self {
             output_dir: rook.output_dir.clone(),
@@ -284,6 +323,7 @@ impl Journal {
             session,
             turn,
             resumed: false,
+            submission_key: submission_key.map(str::to_owned),
         }))
     }
 
@@ -313,6 +353,7 @@ impl Journal {
                     session,
                     turn: state.turn,
                     resumed: true,
+                    submission_key: None,
                 }),
                 messages[at].clone(),
             )));
@@ -377,6 +418,7 @@ impl Journal {
                 session,
                 turn,
                 resumed: false,
+                submission_key: None,
             }),
             message,
         )))
@@ -498,6 +540,12 @@ impl Journal {
             values.push((crate::message_queue::key(self.session), crate::persistence::encode(&messages)?));
             values.push((format!("goal/{:032x}", self.session), body.as_bytes().to_vec()));
         }
+        if let Some(key) = self.submission_key.as_deref() {
+            values.push((
+                key.to_owned(),
+                crate::chat_submission::admitted_value(&self.store, key, self.session, &self.turn)?,
+            ));
+        }
         let references: Vec<_> = values.iter().map(|(key, bytes)| (key.as_str(), bytes.as_slice())).collect();
         let encode = |seq| {
             state.prompt = Some(PromptAdmission {
@@ -520,8 +568,17 @@ impl Journal {
                 |[_, seq]| encode(seq),
             )?;
             seq
-        } else {
+        } else if values.is_empty() {
             self.store.append_event_with_receipt(self.session, prompt, &key(self.session), encode)?
+        } else {
+            let [seq] = self.store.append_events_with_receipt(
+                self.session,
+                [prompt],
+                &key(self.session),
+                &references,
+                |[seq]| encode(seq),
+            )?;
+            seq
         };
         Ok((seq, notice))
     }

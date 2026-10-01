@@ -2149,6 +2149,10 @@ impl App {
                 self.finished();
             }
             ChatEvent::Done { steps, input_tokens, output_tokens, files_changed, stopped, .. } => {
+                if stopped == "already_admitted" {
+                    self.finished();
+                    return;
+                }
                 if let Some(why) = rook_core::agent::why_it_stopped(&stopped) {
                     self.chat.push("stat", &format!("  {why}"));
                 }

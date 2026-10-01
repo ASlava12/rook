@@ -507,6 +507,9 @@ pub type FollowUpModel<'a> =
 pub struct AgentLoop<'a> {
     execution: Option<std::sync::Weak<crate::execution::Journal>>,
     reserved_execution: Option<std::sync::Arc<crate::execution::Journal>>,
+    /// Socket admission receipt for this top-level prompt only. Follow-ups
+    /// build a fresh loop and never inherit its caller identity.
+    pub submission_key: Option<String>,
     launched_job: std::sync::Mutex<Option<String>>,
     pub options: rook_proto::TurnOptions,
     effective_options: Option<rook_proto::TurnOptions>,
@@ -662,6 +665,7 @@ impl<'a> AgentLoop<'a> {
         Self {
             execution: None,
             reserved_execution: None,
+            submission_key: None,
             launched_job: Default::default(),
             options: Default::default(),
             effective_options: None,
@@ -818,11 +822,12 @@ impl<'a> AgentLoop<'a> {
         // Keep the top-level turn marked through final validation and file I/O too.
         let journal = match self.reserved_execution.take() {
             Some(journal) => journal,
-            None => crate::execution::Journal::start(
+            None => crate::execution::Journal::start_with_claim(
                 self.rook,
                 self.session,
                 self.tool_ctx.jobs.as_deref(),
                 continuing,
+                self.submission_key.as_deref(),
             )?,
         };
         if let Some(outcome) = journal.recovered_outcome()? {

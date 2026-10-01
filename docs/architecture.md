@@ -143,6 +143,18 @@ Their socket reader has a separate write half, so waiting for display capacity
 does not prevent sending Cancel or an answer. Only the view's relay waits for
 capacity; it holds no engine or live-registry lock.
 
+An ordinary socket prompt may carry a caller ID. For a new conversation,
+`rookd` reserves that ID and creates the session in one store transaction.
+For a named idle session it reserves a bounded session companion. The execution
+journal binds the ID to its turn, then marks it admitted in the same transaction
+as the UserMessage. A retry of the same text and options joins the matching live
+turn or receives an `already_admitted` acknowledgement without starting another;
+a conflicting retry is rejected. A turn that ended before admission requires
+recovery inspection before a new request. Removing a session removes its claim. Frames
+without an ID keep their legacy behavior.
+Named-session claims share the configured `work.max_messages` receipt limit;
+existing IDs remain readable when the limit is reached.
+
 The live replay has independent event and encoded-byte limits
 (`server.chat_replay_events`, `server.chat_replay_bytes`). Broadcast notifications
 carry sequence numbers rather than retaining payloads. Joining snapshots and

@@ -137,6 +137,24 @@ fn config(endpoint: &str, model: &str, mode: &str, workspace: &std::path::Path) 
 async fn get(client: &reqwest::Client, url: &str) -> Value {
     client.get(url).send().await.unwrap().error_for_status().unwrap().json().await.unwrap()
 }
+
+async fn socket_event(
+    socket: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    kind: &str,
+) -> Value {
+    for _ in 0..128 {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(30), socket.next())
+            .await
+            .expect("socket response timed out")
+            .expect("socket closed")
+            .expect("socket read failed");
+        let event: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        if event["type"] == kind {
+            return event;
+        }
+    }
+    panic!("socket never sent {kind}")
+}
 async fn enqueue(client: &reqwest::Client, url: &str, id: &str) -> Value {
     let page = get(client, url).await;
     client.post(url).json(&json!({"action":"follow_up","target":page["follow_up_target"],"id":id,"text":format!("TASK_{id}")})).send().await.unwrap().error_for_status().unwrap().json().await.unwrap()
@@ -289,6 +307,106 @@ fn socket_corrections_reuse_caller_receipts_and_old_frames_still_work() {
     });
     model.release.store(1, Ordering::SeqCst);
     model.release.store(2, Ordering::SeqCst);
+}
+
+#[test]
+fn first_socket_prompt_retries_join_then_acknowledge_without_another_session_or_turn() {
+    rook_llm::init_tls();
+    let rook = Rook::new();
+    let model = Model::new();
+    rook.write_config(&config(&model.url, "initial", "ask", rook.workspace.path()));
+    let daemon = Daemon::start(&rook);
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let address = format!("{}/api/chat", daemon.address.replacen("http", "ws", 1));
+    let prompt = json!({"type":"prompt","session":null,"text":"FIRST_SOCKET_TASK","id":"first-stable"});
+    let mut first = runtime.block_on(async {
+        let (mut socket, _) = tokio_tungstenite::connect_async(&address).await.unwrap();
+        socket.send(tokio_tungstenite::tungstenite::Message::Text(prompt.to_string().into())).await.unwrap();
+        socket
+    });
+    let started = runtime.block_on(socket_event(&mut first, "started"));
+    let session = started["session"].as_str().unwrap().to_string();
+    assert!(rook_store::parse_session_id(&session).is_some());
+    // Keep the original model response in flight across the retry. A failure
+    // before that request is a socket error, not a model timeout.
+    if model.requests.recv_timeout(std::time::Duration::from_secs(90)).is_err() {
+        panic!("turn ended before model request: {}", runtime.block_on(socket_event(&mut first, "failed")));
+    }
+
+    let mut retry = runtime.block_on(async {
+        let (mut socket, _) = tokio_tungstenite::connect_async(&address).await.unwrap();
+        socket.send(tokio_tungstenite::tungstenite::Message::Text(prompt.to_string().into())).await.unwrap();
+        socket
+    });
+    let attached = runtime.block_on(socket_event(&mut retry, "attached"));
+    assert_eq!(attached["session"], session);
+    assert_eq!(attached["running"], true);
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let queue = runtime.block_on(get(&client, &format!("{}/api/sessions/{session}/queue", daemon.address)));
+    assert_eq!(queue["items"].as_array().unwrap().len(), 0, "a retry is not a correction: {queue}");
+
+    runtime.block_on(async {
+        retry
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                json!({
+                    "type":"prompt","session":null,"text":"DIFFERENT_TASK","id":"first-stable"
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+    });
+    let conflict = runtime.block_on(socket_event(&mut retry, "failed"));
+    assert!(conflict["message"].as_str().unwrap().contains("different prompt"), "{conflict}");
+    model.release.store(1, Ordering::SeqCst);
+    let done = runtime.block_on(socket_event(&mut first, "done"));
+    assert_ne!(done["stopped"], "already_admitted");
+    drop(first);
+    drop(retry);
+
+    let mut after = runtime.block_on(async {
+        let (mut socket, _) = tokio_tungstenite::connect_async(&address).await.unwrap();
+        socket.send(tokio_tungstenite::tungstenite::Message::Text(prompt.to_string().into())).await.unwrap();
+        socket
+    });
+    assert_eq!(runtime.block_on(socket_event(&mut after, "started"))["session"], session);
+    assert_eq!(runtime.block_on(socket_event(&mut after, "done"))["stopped"], "already_admitted");
+
+    let named = json!({"type":"prompt","session":session,"text":"NAMED_SOCKET_TASK","id":"named-stable"});
+    runtime.block_on(async {
+        after.send(tokio_tungstenite::tungstenite::Message::Text(named.to_string().into())).await.unwrap();
+    });
+    assert_eq!(runtime.block_on(socket_event(&mut after, "started"))["session"], session);
+    model.requests.recv_timeout(std::time::Duration::from_secs(90)).unwrap();
+    let mut named_retry = runtime.block_on(async {
+        let (mut socket, _) = tokio_tungstenite::connect_async(&address).await.unwrap();
+        socket.send(tokio_tungstenite::tungstenite::Message::Text(named.to_string().into())).await.unwrap();
+        socket
+    });
+    assert_eq!(runtime.block_on(socket_event(&mut named_retry, "attached"))["running"], true);
+    model.release.store(2, Ordering::SeqCst);
+    runtime.block_on(socket_event(&mut after, "done"));
+    runtime.block_on(async {
+        after.send(tokio_tungstenite::tungstenite::Message::Text(named.to_string().into())).await.unwrap();
+    });
+    assert_eq!(runtime.block_on(socket_event(&mut after, "started"))["session"], session);
+    assert_eq!(runtime.block_on(socket_event(&mut after, "done"))["stopped"], "already_admitted");
+    drop(named_retry);
+    drop(after);
+    drop(daemon);
+    let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+    assert_eq!(store.list_sessions().unwrap().len(), 1);
+    let id = rook_store::parse_session_id(&session).unwrap();
+    assert_eq!(
+        store
+            .events(id, 0, 100)
+            .unwrap()
+            .iter()
+            .filter(|event| event.record.kind == rook_store::EventKind::UserMessage)
+            .count(),
+        2,
+    );
 }
 
 #[test]

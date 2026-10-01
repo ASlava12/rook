@@ -305,9 +305,54 @@ async fn serve(
                     true => rook_core::agent::CARRY_ON.to_string(),
                     false => text,
                 };
+                let requested_goal = text.strip_prefix("/goal ").map(str::trim).filter(|s| !s.is_empty());
+                // Cover the first-session claim and live registration with the
+                // same admission lock used for ordinary turn starts. A second
+                // socket must see either the saved claim or its live turn.
+                let admission = state.work.0.lock().await;
+                let claimed = match (session.as_deref(), submission_id.as_deref(), requested_goal) {
+                    (None, Some(request), None) => {
+                        if submission_target.is_some() {
+                            report_window(&outbound, "a new session has no queue target".into()).await;
+                            continue;
+                        }
+                        rook_core::chat_submission::claim(
+                            &*engine.read().await,
+                            None,
+                            request,
+                            &text,
+                            &options,
+                        )
+                        .map(Some)
+                    }
+                    (Some(named), Some(request), None) => match rook_store::parse_session_id(named) {
+                        Some(id) => rook_core::chat_submission::read(
+                            &*engine.read().await,
+                            id,
+                            request,
+                            &text,
+                            &options,
+                        ),
+                        None => Ok(None),
+                    },
+                    _ => Ok(None),
+                };
+                let claimed = match claimed {
+                    Ok(value) => value,
+                    Err(error) => {
+                        report_window(&outbound, error.to_string()).await;
+                        continue;
+                    }
+                };
+                if let Some(claim) = &claimed
+                    && repeat_claim(&state, &engine, claim, &outbound, &mut watching, live_snapshots).await
+                {
+                    continue;
+                }
                 let id = match session.as_deref().and_then(rook_store::parse_session_id) {
                     Some(id) => Some(id),
                     None if session.is_some() => None,
+                    None if claimed.is_some() => claimed.as_ref().map(|claim| claim.session),
                     None => {
                         let started = engine.read().await.start_session("");
                         match started {
@@ -323,7 +368,6 @@ async fn serve(
                     report_window(&outbound, format!("no session {:?}", session.unwrap_or_default())).await;
                     continue;
                 };
-                let requested_goal = text.strip_prefix("/goal ").map(str::trim).filter(|s| !s.is_empty());
                 let goal = session_goal(&*engine.read().await, id);
                 let existing = match goal {
                     Ok(run) => run.filter(|r| !r.status.terminal()),
@@ -333,6 +377,11 @@ async fn serve(
                     }
                 };
                 if requested_goal.is_some() || existing.is_some() {
+                    if claimed.is_some() {
+                        report_window(&outbound, "this prompt has a pending ordinary-turn receipt; inspect that turn before starting a goal".into()).await;
+                        continue;
+                    }
+                    drop(admission);
                     if !options.attachments.is_empty() && existing.is_some() {
                         report_window(&outbound, "Attachments cannot be added to a running goal.".into())
                             .await;
@@ -467,7 +516,7 @@ async fn serve(
                     }
                     continue;
                 }
-                let _admission = state.work.0.lock().await;
+                let _admission = admission;
                 // Typed while that session's turn runs, it goes to the turn:
                 // the window had to wait or cancel, and cancelling loses
                 // everything the turn had done to say one sentence to it.
@@ -508,6 +557,33 @@ async fn serve(
                     }
                     continue;
                 }
+                if submission_target.is_some() {
+                    report_window(
+                        &outbound,
+                        "queue target is stale; this session has no running turn".into(),
+                    )
+                    .await;
+                    continue;
+                }
+                let submission_key = match (claimed, submission_id.as_deref()) {
+                    (Some(claim), _) => Some(claim.key),
+                    (None, Some(request)) => {
+                        match rook_core::chat_submission::claim(
+                            &*engine.read().await,
+                            Some(id),
+                            request,
+                            &text,
+                            &options,
+                        ) {
+                            Ok(claim) => Some(claim.key),
+                            Err(error) => {
+                                report_window(&outbound, error.to_string()).await;
+                                continue;
+                            }
+                        }
+                    }
+                    (None, None) => None,
+                };
                 // Before the turn, because a setting changed while the daemon
                 // ran took a restart — and the restart was something a person
                 // had to be told to do.
@@ -528,8 +604,16 @@ async fn serve(
                         continue;
                     }
                 };
-                let live =
-                    begin(&state, &engine, &shared, &settings, id, StartTurn::Prompt(text), options).await;
+                let live = begin(
+                    &state,
+                    &engine,
+                    &shared,
+                    &settings,
+                    id,
+                    StartTurn::Prompt(text, submission_key),
+                    options,
+                )
+                .await;
                 watching = Some(carry_view(&live, id, outbound.clone(), watching, live_snapshots, false));
                 state.remember(id, live).await;
             }
@@ -543,6 +627,69 @@ async fn serve(
     }
     drop(outbound);
     let _ = writer.await;
+}
+
+async fn repeat_claim(
+    state: &Arc<AppState>,
+    engine: &Arc<tokio::sync::RwLock<rook_core::Rook>>,
+    claim: &rook_core::chat_submission::Claim,
+    outbound: &delivery::Sender,
+    watching: &mut Option<Watching>,
+    live_snapshots: bool,
+) -> bool {
+    use rook_core::chat_submission::Status;
+    if claim.status == Status::Created {
+        return false;
+    }
+    let live = state.live.read().await.get(&claim.session).filter(|live| live.running()).cloned();
+    let same_turn = match claim.status {
+        Status::Pending if claim.turn.is_none() => true,
+        Status::Pending | Status::Admitted => {
+            rook_core::chat_submission::current_turn(&*engine.read().await, claim).unwrap_or(false)
+        }
+        Status::Created => false,
+    };
+    let session = rook_store::format_session_id(claim.session);
+    if same_turn && let Some(live) = live.as_ref() {
+        let _ = outbound.send(ChatEvent::Attached { session, running: true }).await;
+        *watching = Some(watch(live, claim.session, outbound.clone(), watching.take(), live_snapshots));
+        return true;
+    }
+    if claim.status == Status::Pending && live.is_some() {
+        let _ = outbound.send(ChatEvent::Failed {
+            message: "this pending prompt belongs to an earlier turn; stop or finish the current turn before retrying it".into(),
+        }).await;
+        return true;
+    }
+    if claim.status == Status::Pending && claim.turn.is_some() {
+        let _ = outbound.send(ChatEvent::Failed {
+            message: "the earlier turn ended before admitting this prompt; inspect its recovery record before sending a new request".into(),
+        }).await;
+        return true;
+    }
+    if claim.status == Status::Admitted {
+        let _ = outbound.send(ChatEvent::Started { session }).await;
+        let _ = outbound.send(ChatEvent::Agent {
+            text: "This prompt was already admitted; no new turn was started. Read session history for its recorded result.\n".into(),
+            receipt: None,
+        }).await;
+        let _ = outbound
+            .send(ChatEvent::Done {
+                reply: None,
+                steps: 0,
+                input_tokens: 0,
+                output_tokens: 0,
+                delegated: Vec::new(),
+                compactions: 0,
+                decisions: Vec::new(),
+                open_questions: Vec::new(),
+                files_changed: Vec::new(),
+                stopped: "already_admitted".into(),
+            })
+            .await;
+        return true;
+    }
+    false
 }
 
 fn correction_id(supplied: &Option<String>) -> String {
@@ -718,7 +865,7 @@ async fn send_inputs(live: &Live, to_window: &delivery::Sender) -> Result<(), de
 
 /// Start a turn that belongs to the daemon.
 enum StartTurn {
-    Prompt(String),
+    Prompt(String, Option<String>),
     FollowUps,
 }
 
@@ -802,7 +949,7 @@ pub(crate) async fn resume_goal(state: &Arc<AppState>, run: &Run) -> Result<Arc<
         &shared,
         &settings,
         session,
-        StartTurn::Prompt(run.goal.clone()),
+        StartTurn::Prompt(run.goal.clone(), None),
         conversation.options.clone(),
     )
     .await)
@@ -1070,7 +1217,7 @@ async fn turn(
     let _ = outbound.send(ChatEvent::Started { session: rook_store::format_session_id(session) });
 
     if let Err(error) =
-        connection.settings.save_followups(&rook, session, matches!(&prompt, StartTurn::Prompt(_)))
+        connection.settings.save_followups(&rook, session, matches!(&prompt, StartTurn::Prompt(_, _)))
     {
         return ended_badly(&rook, session, &outbound, error);
     }
@@ -1098,6 +1245,10 @@ async fn turn(
     let shared = shared.get_or_init(|| Shared::for_project(&rook)).await;
 
     let mut agent = AgentLoop::new(&rook, provider.into(), session);
+    agent.submission_key = match &prompt {
+        StartTurn::Prompt(_, key) => key.clone(),
+        StartTurn::FollowUps => None,
+    };
     followups::configure(&mut agent, connection.settings.clone());
     agent.policy = connection.settings.policy.clone();
     agent.effort = connection.settings.effort();
@@ -1116,7 +1267,7 @@ async fn turn(
         }
     };
     let result = match prompt {
-        StartTurn::Prompt(prompt) => agent.run_with(&prompt, &mut progress).await.map(Some),
+        StartTurn::Prompt(prompt, _) => agent.run_with(&prompt, &mut progress).await.map(Some),
         StartTurn::FollowUps => agent.run_followups(&mut progress).await,
     };
 
@@ -2065,7 +2216,7 @@ mod tests {
             Default::default(),
             outbound,
             session,
-            StartTurn::Prompt("find the leak".into()),
+            StartTurn::Prompt("find the leak".into(), None),
         )
         .await;
 
