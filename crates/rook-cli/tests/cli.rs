@@ -13,6 +13,124 @@ struct Rook {
 }
 
 #[test]
+fn daemon_repl_retains_a_failed_prompt_until_explicit_retry_or_discard() {
+    let rook = Rook::new();
+    rook.write_config("[agent]\nmodel='missing-model'\ninstall_servers=false\n");
+    let session = rook_store::new_session_id();
+    let id = rook_store::format_session_id(session);
+    {
+        let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+        store
+            .create_session(&rook_store::SessionMeta::new(
+                session,
+                "REPL retry",
+                rook.workspace.path().display().to_string(),
+                rook_store::now_unix(),
+            ))
+            .unwrap();
+    }
+    let _daemon = Daemon::start(&rook);
+    let output = rook.chat_in_session(&id, "FIRST_UNCERTAIN\nSECOND_MUST_WAIT\n/retry\n/discard\n/quit\n");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(stderr.matches("Prompt saved").count(), 2, "{stderr}");
+    assert!(stderr.contains("Resolve the saved prompt"), "{stderr}");
+    assert!(stderr.contains("no default endpoint"), "{stderr}");
+    let history = rook.json(&["session", "history", &id]);
+    let history = history.to_string();
+    assert_eq!(history.matches("no default endpoint").count(), 2, "{history}");
+    assert!(!history.contains("SECOND_MUST_WAIT"), "{history}");
+}
+
+#[test]
+fn daemon_repl_retry_finds_a_restarted_daemon_at_its_new_address() {
+    use std::io::Write;
+    let rook = Rook::new();
+    rook.write_config("[agent]\nmodel='missing-model'\ninstall_servers=false\n");
+    let session = rook_store::new_session_id();
+    let id = rook_store::format_session_id(session);
+    {
+        let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+        store
+            .create_session(&rook_store::SessionMeta::new(
+                session,
+                "REPL reconnect",
+                rook.workspace.path().display().to_string(),
+                rook_store::now_unix(),
+            ))
+            .unwrap();
+    }
+    let daemon = Daemon::start(&rook);
+    let stderr_path = rook.home.path().join("repl-restart.err");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rook"))
+        .env("ROOK_HOME", rook.home.path())
+        .env("ROOK_LOG", "error")
+        .args(["--workspace", rook.workspace.path().to_str().unwrap(), "chat", "--session", &id])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::fs::File::create(&stderr_path).unwrap())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    input.write_all(b"FIRST_BEFORE_RESTART\n").unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !std::fs::read_to_string(&stderr_path).unwrap_or_default().contains("Prompt saved") {
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!("REPL never reported the first failed prompt");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    drop(daemon);
+    std::fs::remove_file(rook.home.path().join("rookd.addr")).unwrap();
+    let restarted = Daemon::start(&rook);
+    input.write_all(b"/retry\n/quit\n").unwrap();
+    drop(input);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while child.try_wait().unwrap().is_none() {
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!("REPL did not finish its saved retry after daemon restart");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let output = child.wait_with_output().unwrap();
+    let stderr = std::fs::read_to_string(stderr_path).unwrap();
+    assert!(output.status.success(), "{stderr}");
+    assert_eq!(stderr.matches("Prompt saved").count(), 2, "{stderr}");
+    assert!(!stderr.contains("Cannot reconnect"), "{stderr}");
+    assert!(stderr.contains(&format!("reconnected to rookd at {}", restarted.address)), "{stderr}");
+    assert_eq!(stderr.matches("no default endpoint").count(), 2, "{stderr}");
+    assert!(rook.json(&["session", "history", &id]).to_string().contains("no default endpoint"));
+}
+
+#[test]
+fn daemon_repl_keeps_a_new_session_after_its_first_prompt_fails() {
+    use std::io::Write;
+    let rook = Rook::new();
+    rook.write_config("[agent]\nmodel='missing-model'\ninstall_servers=false\n");
+    let _daemon = Daemon::start(&rook);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rook"))
+        .env("ROOK_HOME", rook.home.path())
+        .env("ROOK_LOG", "error")
+        .args(["--workspace", rook.workspace.path().to_str().unwrap(), "chat"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"FIRST\n/discard\nSECOND\n/quit\n").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let sessions = rook.json(&["session", "ls", "--all"]);
+    let sessions = sessions.as_array().unwrap();
+    assert_eq!(sessions.len(), 1, "both failed prompts must use the first session: {sessions:?}");
+    let id = sessions[0]["id"].as_str().unwrap();
+    let history = rook.json(&["session", "history", id]).to_string();
+    assert_eq!(history.matches("no default endpoint").count(), 2, "{history}");
+}
+
+#[test]
 fn model_branch_suggestion_is_reviewable_locally_and_through_daemon() {
     rook_llm::init_tls();
     use std::io::{Read, Write};

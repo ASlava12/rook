@@ -2879,6 +2879,10 @@ impl App {
     /// past the choices works here exactly as it does in the plain CLI.
     fn command(&mut self, command: &str) {
         let (name, rest) = command.split_once(' ').unwrap_or((command, ""));
+        if self.source.daemon_base().is_none() && matches!(name, "retry" | "discard") {
+            self.chat.push("stat", "No daemon prompt is saved in local mode.");
+            return;
+        }
         if self.source.daemon_base().is_some() && name == "retry" {
             if !rest.trim().is_empty() {
                 self.chat.push("err", "use /retry without arguments");
@@ -5231,26 +5235,8 @@ fn slash(prompt: &str) -> Option<&str> {
     prompt.strip_prefix('/').filter(|c| !c.starts_with("btw ") && !c.contains('\n'))
 }
 
-const TUI_RETRY_COMMANDS: &[(&str, &str, &str)] = &[
-    ("retry", "", "resend the saved daemon prompt with its original ID"),
-    ("discard", "", "clear a saved prompt that may already have arrived"),
-];
-
 fn tui_commands_matching(typed: &str) -> Vec<&'static (&'static str, &'static str, &'static str)> {
-    let mut found = crate::chat::commands_matching(typed);
-    let typed = typed.trim_start_matches('/');
-    let (name, exact) = match typed.split_once(' ') {
-        Some((name, _)) => (name, true),
-        None => (typed, false),
-    };
-    found.extend(
-        TUI_RETRY_COMMANDS.iter().filter(
-            |(command, ..)| {
-                if exact { *command == name } else { command.starts_with(name) }
-            },
-        ),
-    );
-    found
+    crate::chat::commands_matching(typed)
 }
 
 /// Why this command cannot run while a turn is running, if it cannot.

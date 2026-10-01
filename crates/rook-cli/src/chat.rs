@@ -76,6 +76,8 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("schema-retries", "[0..3]", "format-only correction attempts"),
     ("followup", "<text>", "queue a new turn after the current turn or goal finishes"),
     ("queue", "", "inspect pending messages; the TUI opens an editable queue"),
+    ("retry", "", "resend a saved daemon prompt with its original ID (daemon mode)"),
+    ("discard", "", "forget a saved daemon prompt that may already have arrived (daemon mode)"),
     ("turns", "[before]", "recorded turn results and cumulative token usage"),
     ("tree", "[session-id]", "browse conversation branches; switching leaves files unchanged"),
     ("summary-draft", "<target-session>", "show bounded excerpts from this branch for review"),
@@ -276,6 +278,10 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
                 }
                 if let Some(command) = line.strip_prefix('/') {
                     let (name, rest) = command.split_once(' ').unwrap_or((command, ""));
+                    if matches!(name, "retry" | "discard") {
+                        println!("No daemon prompt is saved in local mode.");
+                        continue;
+                    }
                     if name == "session" && !rest.trim().is_empty() {
                         match rook.session_named(rest.trim()) {
                             Ok(target) if branch_offer.offer(Some(session), target) => {
@@ -344,26 +350,129 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
 /// Commands with routed reads and writes work here too. The remaining local
 /// commands explain why they need a direct store, while turn settings stay on
 /// this connection and carry into the selected session.
+struct DaemonLink {
+    base: String,
+    to: tokio::sync::mpsc::UnboundedSender<rook_proto::ClientMessage>,
+    events: rook_core::delivery::Receiver,
+    socket: tokio::task::JoinHandle<Result<()>>,
+    view_bytes: usize,
+}
+
+impl DaemonLink {
+    fn open(base: &str, workspace: &std::path::Path) -> Result<Self> {
+        let (to, mut outgoing) = tokio::sync::mpsc::unbounded_channel();
+        let (incoming, events) = crate::remote::channel(workspace)?;
+        let view_bytes = incoming.byte_limit();
+        let (base, here) = (base.to_owned(), workspace.to_path_buf());
+        let socket_base = base.clone();
+        let socket =
+            tokio::spawn(
+                async move { crate::remote::hold(&socket_base, &here, &mut outgoing, incoming).await },
+            );
+        Ok(Self { base, to, events, socket, view_bytes })
+    }
+
+    fn closed(&self) -> bool {
+        self.to.is_closed() || self.socket.is_finished()
+    }
+
+    async fn reconnect(
+        &mut self,
+        workspace: &std::path::Path,
+        settings: &std::collections::BTreeMap<String, String>,
+    ) -> Result<()> {
+        // A restarted daemon can bind a new port. Resolve its live address off
+        // the async executor before sending the retained frame.
+        let base = tokio::task::spawn_blocking(|| crate::source::Daemon::running().map(|d| d.base))
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("no running rookd found"))?;
+        let fresh = Self::open(&base, workspace)?;
+        for (name, value) in settings {
+            fresh.to.send(rook_proto::ClientMessage::Setting { name: name.clone(), value: value.clone() })?;
+        }
+        self.socket.abort();
+        *self = fresh;
+        eprintln!("reconnected to rookd at {base}");
+        Ok(())
+    }
+
+    async fn watch(
+        &mut self,
+        watching: &mut crate::remote::Watching,
+        retry: &mut crate::remote::PromptRetry,
+        session: &mut Option<String>,
+    ) -> bool {
+        use rook_proto::ChatEvent;
+        while let Some(frame) = self.events.recv().await {
+            let Ok(event) = serde_json::from_str::<ChatEvent>(&frame.text) else { continue };
+            if let ChatEvent::Started { session: started } = &event
+                && retry.started(started)
+            {
+                *session = Some(started.clone());
+            }
+            if let Some(over) = watching.saw(event, &self.to) {
+                crate::notify::attention();
+                match over.done {
+                    ChatEvent::Done { steps, input_tokens, output_tokens, compactions, stopped, .. } => {
+                        if !over.session.is_empty() {
+                            *session = Some(over.session.clone());
+                        }
+                        if stopped == "already_admitted" {
+                            retry.acknowledged();
+                            return false;
+                        }
+                        retry.completed(Some(&over.session));
+                        println!();
+                        eprintln!(
+                            "[session {} · {steps} steps · {input_tokens} in / {output_tokens} out tokens · {} tool calls{}]",
+                            over.session,
+                            over.tools,
+                            match compactions {
+                                0 => String::new(),
+                                n => format!(" · {n} compactions"),
+                            }
+                        );
+                    }
+                    ChatEvent::Cancelled => retry.completed(Some(&over.session)),
+                    ChatEvent::Failed { message } => {
+                        eprintln!("{message}");
+                        retry.disconnected();
+                    }
+                    _ => {}
+                }
+                if retry.pending() {
+                    eprintln!(
+                        "Prompt saved; /retry resends its original ID and options, /discard clears it."
+                    );
+                }
+                return false;
+            }
+        }
+        retry.disconnected();
+        eprintln!("Daemon connection closed. Saved prompt can be resent with /retry.");
+        true
+    }
+}
+
 async fn through_the_daemon(
     daemon: &crate::source::Daemon,
     workspace: &std::path::Path,
     resume: Option<String>,
     yes: bool,
 ) -> Result<()> {
-    use rook_proto::{ChatEvent, ClientMessage};
+    use rook_proto::ClientMessage;
 
     eprintln!("using the running rookd at {}", daemon.base);
-    let (to_daemon, mut outgoing) = tokio::sync::mpsc::unbounded_channel();
-    let (incoming, mut events) = crate::remote::channel(workspace)?;
-    let view_bytes = incoming.byte_limit();
-    let (base, here) = (daemon.base.clone(), workspace.to_path_buf());
-    let socket =
-        tokio::spawn(async move { crate::remote::hold(&base, &here, &mut outgoing, incoming).await });
+    let mut link = DaemonLink::open(&daemon.base, workspace)?;
 
     let mut editor = editor()?;
     let history = rook_core::paths::home().join("history");
     let _ = editor.load_history(&history);
-    let mut watching = crate::remote::Watching::new(yes, false, view_bytes);
+    let mut watching = crate::remote::Watching::new(yes, false, link.view_bytes);
+    let mut retry = crate::remote::PromptRetry::default();
+    let mut disconnected = false;
+    let mut settings = std::collections::BTreeMap::<String, String>::new();
+    let mut prompt_settings = std::collections::BTreeMap::<String, String>::new();
     let mut session = match resume {
         Some(spec) => {
             let here = workspace.to_path_buf();
@@ -398,6 +507,32 @@ async fn through_the_daemon(
             true => rook_core::agent::CARRY_ON.to_string(),
             false => line.trim().to_string(),
         };
+        if line == "/retry" {
+            let Some(frame) = retry.retry() else {
+                eprintln!("No saved prompt to retry.");
+                continue;
+            };
+            if let Err(error) = link.reconnect(workspace, &prompt_settings).await {
+                retry.disconnected();
+                eprintln!("Cannot reconnect: {error}. Prompt remains saved for /retry.");
+                continue;
+            }
+            watching = crate::remote::Watching::new(yes, false, link.view_bytes);
+            if link.to.send(frame).is_err() {
+                retry.disconnected();
+                disconnected = true;
+                eprintln!("Daemon connection closed. Prompt remains saved for /retry.");
+                continue;
+            }
+            disconnected = link.watch(&mut watching, &mut retry, &mut session).await;
+            continue;
+        }
+        if line == "/discard" {
+            retry.discard();
+            prompt_settings.clear();
+            println!("Saved prompt discarded; it may already have reached the daemon.");
+            continue;
+        }
         if let Some(command) = line.strip_prefix('/')
             && !line.starts_with("/goal ")
         {
@@ -409,6 +544,12 @@ async fn through_the_daemon(
                 continue;
             }
             let (name, rest) = command.split_once(' ').unwrap_or((command, ""));
+            if retry.pending() && matches!(name, "session" | "model" | "stance" | "mode" | "effort") {
+                eprintln!(
+                    "Resolve the saved prompt with /retry or /discard before changing its session or settings."
+                );
+                continue;
+            }
             branch_offer.retain_for(name);
             match name {
                 "quit" | "exit" => break,
@@ -432,7 +573,12 @@ async fn through_the_daemon(
                                 let id = rook_store::format_session_id(target);
                                 session = Some(id.clone());
                                 summary_boundary = None;
-                                to_daemon.send(ClientMessage::Attach { session: id.clone() })?;
+                                if disconnected || link.closed() {
+                                    link.reconnect(workspace, &settings).await?;
+                                    watching = crate::remote::Watching::new(yes, false, link.view_bytes);
+                                    disconnected = false;
+                                }
+                                link.to.send(ClientMessage::Attach { session: id.clone() })?;
                                 println!("continuing {id}; workspace files stay as they are");
                             }
                         }
@@ -599,7 +745,7 @@ async fn through_the_daemon(
                             .timeout(std::time::Duration::from_secs(30))
                             .build()?;
                         let mut response = client
-                            .get(format!("{}/api/sessions/{session}/{name}{cursor}", daemon.base))
+                            .get(format!("{}/api/sessions/{session}/{name}{cursor}", link.base))
                             .send()
                             .await?
                             .error_for_status()?;
@@ -639,7 +785,7 @@ async fn through_the_daemon(
                             let report: rook_core::diagnostics::Report = client
                                 .get(format!(
                                     "{}/api/sessions/{}/diagnostics?logs={logs}",
-                                    daemon.base,
+                                    link.base,
                                     rook_store::format_session_id(session)
                                 ))
                                 .send()
@@ -666,7 +812,7 @@ async fn through_the_daemon(
                             .build()?;
                         let url = format!(
                             "{}/api/sessions/{}/recovery",
-                            daemon.base,
+                            link.base,
                             rook_store::format_session_id(session)
                         );
                         let result: Result<String> = async {
@@ -702,60 +848,78 @@ async fn through_the_daemon(
                         "stance" => "mode",
                         other => other,
                     };
-                    let _ = to_daemon
-                        .send(ClientMessage::Setting { name: name.into(), value: rest.trim().into() });
+                    let value = rest.trim();
+                    if value.len() > 256 {
+                        eprintln!("Setting value exceeds 256 bytes.");
+                        continue;
+                    }
+                    settings.insert(name.into(), value.into());
+                    if disconnected || link.closed() {
+                        if let Err(error) = link.reconnect(workspace, &settings).await {
+                            eprintln!("Cannot reconnect: {error}");
+                            disconnected = true;
+                            continue;
+                        }
+                        watching = crate::remote::Watching::new(yes, false, link.view_bytes);
+                        disconnected = false;
+                    } else {
+                        let _ =
+                            link.to.send(ClientMessage::Setting { name: name.into(), value: value.into() });
+                    }
                 }
                 other => println!(
                     "`/{other}` reads this process's store, and the daemon at {} is holding it. \
                      `/model`, `/stance` and `/effort` work here; the rest work in `rook tui` or \
                      with the daemon stopped.",
-                    daemon.base
+                    link.base
                 ),
             }
             continue;
         }
         branch_offer.pair = None;
-        to_daemon.send(ClientMessage::Prompt {
+        if retry.pending() {
+            eprintln!("Resolve the saved prompt with /retry or /discard before sending another.");
+            continue;
+        }
+        if line.len() > rook_core::attachments::MAX_FRAME_BYTES || !crate::remote::within_frame(&output) {
+            eprintln!("Prompt or options exceed the 16 MiB socket frame limit.");
+            continue;
+        }
+        let opening = ClientMessage::Prompt {
             session: session.clone(),
             text: line,
             id: Some(rook_store::format_session_id(rook_store::new_session_id())),
             target: None,
             options: crate::turn_options::for_turn(&mut output),
-        })?;
-        while let Some(frame) = events.recv().await {
-            let Ok(event) = serde_json::from_str::<ChatEvent>(&frame.text) else { continue };
-            if let Some(over) = watching.saw(event, &to_daemon) {
-                crate::notify::attention();
-                let ChatEvent::Done { steps, input_tokens, output_tokens, compactions, stopped, .. } =
-                    over.done
-                else {
-                    break;
-                };
-                // Kept, so the next line lands in the same conversation rather
-                // than starting one beside it.
-                session = Some(over.session.clone());
-                if stopped == "already_admitted" {
-                    break;
-                }
-                println!();
-                eprintln!(
-                    "[session {} · {steps} steps · {input_tokens} in / {output_tokens} out tokens \
-                     · {} tool calls{}]",
-                    over.session,
-                    over.tools,
-                    match compactions {
-                        0 => String::new(),
-                        n => format!(" · {n} compactions"),
-                    }
-                );
-                break;
+        };
+        if let Err(error) = retry.remember(&opening) {
+            if let ClientMessage::Prompt { options, .. } = opening {
+                output.attachments = options.attachments;
             }
+            eprintln!("{error}");
+            continue;
         }
+        prompt_settings = settings.clone();
+        if disconnected || link.closed() {
+            if let Err(error) = link.reconnect(workspace, &prompt_settings).await {
+                retry.disconnected();
+                eprintln!("Cannot reconnect: {error}. Prompt remains saved for /retry.");
+                continue;
+            }
+            watching = crate::remote::Watching::new(yes, false, link.view_bytes);
+        }
+        if link.to.send(opening).is_err() {
+            retry.disconnected();
+            disconnected = true;
+            eprintln!("Daemon connection closed. Prompt remains saved for /retry.");
+            continue;
+        }
+        disconnected = link.watch(&mut watching, &mut retry, &mut session).await;
     }
 
     let _ = editor.save_history(&history);
-    drop(to_daemon);
-    let _ = socket.await;
+    drop(link.to);
+    let _ = link.socket.await;
     Ok(())
 }
 

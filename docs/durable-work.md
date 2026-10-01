@@ -114,6 +114,12 @@ after receipt changes and periodically for changes from another window. Before
 the first session ID is available, a local pending message gets the same short
 preview.
 
+If a daemon-backed TUI or plain REPL reports **Prompt saved** after a connection
+or turn failure, `/retry` resends its original ID, session, text and options.
+`/discard` releases that saved prompt so another can be sent; the old one may
+already have reached the daemon. The plain REPL finds the current daemon address
+again on retry. Both saved prompts live only until their terminal process exits.
+
 - **e** loads the selected message for editing. Ctrl-S saves, Enter adds a line,
   and Escape cancels the edit. A conflict retains the unsaved text.
 - **d** withdraws the selected pending message.

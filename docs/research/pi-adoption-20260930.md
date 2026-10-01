@@ -1194,3 +1194,32 @@ including all 76 CLI integration tests and doctests. No storage code changed,
 so compaction was not rerun. The existing bottom pinned queue preview and its
 draft growth and approval layout test still pass; a live Windows TUI interaction
 check remains open.
+
+## Plain REPL retry of an uncertain daemon prompt
+
+The daemon-backed REPL now saves one bounded prompt frame before sending it.
+`/retry` resends the same session target, caller ID, text and turn options;
+`/discard` explicitly frees it. A new prompt and changes to the session or
+connection settings wait until the saved frame is resolved. The retry opens a
+fresh socket, resolves the daemon's current address after a restart, and
+reapplies the small setting snapshot from the original request. Terminal
+failures print their reason and retain the prompt; an observed start and
+completion or `already_admitted` clears it. The frame lives only as long as
+the REPL process. Local mode reports that no daemon prompt is saved.
+
+The existing frame identity tests cover exact bytes, bounded copying and
+uncertain completion. New real-daemon REPL tests cover failure, blocked new
+input, explicit retry/discard, retry after a daemon restart on a new port, and
+reuse of a newly created session after its first prompt fails.
+This changes no wire or store format. Queue remains In progress: caller-owned
+goal controls, further lifecycle coverage and live frontend checks remain.
+Branch live checks and all Pending rows remain open.
+
+The first full `cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0 before the
+new-session failure case was added. The next attempt exited 1 at a Clippy
+`collapsible_if` warning; after that fix, one existing follow-up recovery
+integration test timed out in the full suite and the gate exited 1. That test
+passed alone (exit 0, 33.9 seconds). The final full CI exited 0 (`ci: ok`,
+742.7 seconds), including all 79 CLI integration tests and doctests. No
+storage code changed, so compaction was not rerun. A closed REPL still cannot
+restore its in-memory outbox; live interactive terminal checks remain open.

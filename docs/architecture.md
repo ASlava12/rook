@@ -172,6 +172,13 @@ After a daemon socket failure, `/retry` resends that frame and `/discard`
 explicitly releases it; a new prompt cannot silently replace the ID. An
 observed start and completion or `already_admitted` acknowledgement resolves
 the retained frame. Closing the TUI process does not persist this outbox.
+The daemon-backed plain REPL uses the same bounded frame and explicit
+`/retry`/`/discard` contract. It holds the original connection settings while
+the frame is unresolved and re-discovers the daemon's live address before a
+manual retry, so a restart on another port cannot send to the old process.
+The REPL retains a new session ID from `Started` even if that turn later fails,
+so a prompt after explicit discard stays in the same conversation. The local
+REPL has no socket outbox.
 
 The live replay has independent event and encoded-byte limits
 (`server.chat_replay_events`, `server.chat_replay_bytes`). Broadcast notifications

@@ -77,12 +77,15 @@ impl PromptRetry {
         frame
     }
 
-    pub fn started(&mut self, session: &str) {
+    pub fn started(&mut self, session: &str) -> bool {
         if self.in_flight
             && let Some(ClientMessage::Prompt { session: intended, .. }) = &self.frame
             && intended.as_deref().is_none_or(|id| id == session)
         {
             self.started_session = Some(session.to_owned());
+            true
+        } else {
+            false
         }
     }
 
