@@ -73,6 +73,12 @@ under their format limits and shows only visible text, never base64 images or
 opaque provider state. Quoting reads history and edits the frontend draft; it
 neither appends an event nor starts or interrupts a turn.
 
+While a turn is running, the TUI keeps a bounded preview of the next queued
+message at the bottom of the chat, directly above the status line. The composer
+and approval controls sit above it, so streaming output and a growing draft do
+not move the preview. The queue page supplies ordering and count in both local
+and daemon modes.
+
 An explicitly reviewed branch summary is a bounded Note in the target session.
 Its record names the source session and last source event. Replay treats the
 summary as attributed source data, while transcript reading renders that

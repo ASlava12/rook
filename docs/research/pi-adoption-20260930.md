@@ -1041,3 +1041,17 @@ algorithm changed. The focused real-process test exited 0. The full
 including all 73 CLI integration tests. The single-thread setting addresses
 the previously observed parallel daemon-test timeouts. No compaction rerun was
 needed for this block.
+
+## Queue preview at the bottom of the TUI
+
+The existing bounded next-message preview now occupies the bottom of the chat,
+directly above the status line. The draft composer and any approval controls
+sit above it. A wrapping draft or continuing model output therefore cannot
+move the preview away from the lower edge. The focused layout test checks both
+draft heights and an approval panel; it exited 0. The queue source, admission
+rules and storage format did not change. Full `cargo xtask ci` with
+`RUST_TEST_THREADS=1` exited 0 (`ci: ok`, 679.8 seconds); the Windows PTY
+target still contains zero runnable tests. No compaction rerun was needed.
+The initial-prompt and goal-control
+retry identities, retry retention, cross-lifecycle coverage, branch synthesis
+and Pending rows remain open.

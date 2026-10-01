@@ -3902,13 +3902,7 @@ impl App {
         } else {
             0
         };
-        let [log, preview, ask, input] = Layout::vertical([
-            Constraint::Min(3),
-            Constraint::Length(pinned),
-            Constraint::Length(blocking),
-            Constraint::Length(typed),
-        ])
-        .areas(area);
+        let [log, ask, input, preview] = chat_layout(area, blocking, typed, pinned);
 
         let mut lines: Vec<Line> = Vec::new();
         for (kind, body) in &self.chat.log {
@@ -5166,6 +5160,18 @@ fn while_running(command: &str) -> Option<&'static str> {
 /// yet. Behind ratatui's `unstable-rendered-line-info`, which is why no
 /// hand-rolled word wrapper is here — this is the wrapper that will do the
 /// rendering, asked what it is about to do.
+fn chat_layout(area: Rect, blocking: u16, typed: u16, pinned: u16) -> [Rect; 4] {
+    // A growing draft changes the composer height. The next submission stays
+    // at the bottom of the chat, immediately above the status line.
+    Layout::vertical([
+        Constraint::Min(3),
+        Constraint::Length(blocking),
+        Constraint::Length(typed),
+        Constraint::Length(pinned),
+    ])
+    .areas(area)
+}
+
 fn rendered_rows(body: &Paragraph, width: u16) -> u16 {
     u16::try_from(body.line_count(width)).unwrap_or(u16::MAX)
 }
@@ -5456,6 +5462,22 @@ and the next line"
         assert_eq!(super::App::named_newline(false), named, "otherwise, what arrives without asking");
     }
     use super::*;
+
+    #[test]
+    fn queued_message_stays_at_the_bottom_as_output_and_draft_grow() {
+        let area = Rect::new(0, 0, 100, 29); // status line occupies row 29
+        let [short_log, _, short_input, short_preview] = chat_layout(area, 0, 3, 3);
+        let [long_log, _, long_input, long_preview] = chat_layout(area, 0, 10, 3);
+        assert_eq!(short_preview, long_preview, "a wrapped draft must not move the queue");
+        assert_eq!(short_preview.bottom(), area.bottom());
+        assert_eq!(short_input.bottom(), short_preview.y);
+        assert_eq!(long_input.bottom(), long_preview.y);
+        assert!(long_log.height < short_log.height, "only the conversation yields space");
+
+        let [_, approval, input, preview] = chat_layout(area, 6, 3, 3);
+        assert_eq!(preview, short_preview, "approval controls must not move the queue");
+        assert_eq!(approval.bottom(), input.y);
+    }
 
     fn asking_to_run(command: &str) -> ApprovalRequest {
         ApprovalRequest {
