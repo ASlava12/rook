@@ -1540,3 +1540,23 @@ also exited 0; the existing benchmark remained 4.02 MiB on disk, 37.1x
 dictionary compression and 5.8x end-to-end. The intermittent extra-goal-note
 assertion is addressed by the stage-write removal; other queue lifecycle and
 frontend gaps in the table remain open.
+
+## Live browser tool cards
+
+The live browser chat now renders tool starts as compact expandable cards.
+Completions update the earliest pending card with the same tool name, even if
+other status messages followed the start. Each card shows the streamed failure
+flag and elapsed time observed by this tab, explicitly distinct from a saved
+tool duration or a fresh check of current files. The saved result is reached
+through history. Pending card metadata is bounded at 128; a turn ending without
+a completion marks remaining cards as unobserved. Four focused Node tests for
+live cards, saved cards and socket Stop exited 0; JavaScript syntax validation
+and the mandatory full CI result follow below.
+
+Inline tool cards remain In progress: persisted failure/duration/diff metadata,
+TUI parity and actual browser interaction are still open. The context
+provenance inspector remains Pending because current context usage reports
+logged-event totals rather than a request-specific manifest.
+Full `cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0 (`ci: ok`,
+742.1 seconds), including 84/84 CLI integration tests. This browser-only
+block changed no storage behavior, so compaction was not rerun.

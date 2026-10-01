@@ -123,12 +123,43 @@ function renderStopRetry() {
 
 // The one line a call in flight keeps, rewritten rather than repeated.
 let callStatus = null;
+const MAX_PENDING_CALLS = 128;
+let pendingCalls = [];
 function stillGoing(text) {
   if (callStatus && callStatus.isConnected) callStatus.textContent = text;
   else callStatus = say('stat', text);
 }
 
+function toolStarted(e) {
+  current = null; callStatus = null;
+  const summary = el('summary', {}, `· ${e.doing || e.name}`);
+  const meta = el('p', { class: 'sub' }, 'Running; saved result is available in history after completion.');
+  const card = el('details', { class: 'live-tool-card' }, summary, meta);
+  if (!block('tool', card)) return;
+  if (pendingCalls.length >= MAX_PENDING_CALLS) {
+    const old = pendingCalls.shift();
+    old.meta.textContent = 'Status no longer retained in this tab; inspect saved history.';
+  }
+  pendingCalls.push({ name: e.name, meta, started: Date.now() });
+}
+
+function toolFinished(e) {
+  callStatus = null;
+  const at = pendingCalls.findIndex(call => call.name === e.name);
+  if (at < 0) return;
+  const [call] = pendingCalls.splice(at, 1);
+  const observed = Math.max(0, Date.now() - call.started);
+  call.meta.textContent = `${e.failed ? 'Failed' : 'Finished'} · observed ${observed} ms in this tab. Read the saved result in history; this status does not verify current files or tests.`;
+  current = null;
+}
+
+function clearPendingCalls() {
+  for (const call of pendingCalls) call.meta.textContent = 'Turn ended before this tab saw a result; inspect saved history.';
+  pendingCalls = [];
+}
+
 function done() {
+  clearPendingCalls();
   retainedInputs.clear();
   state.chat.busy = false;
   state.chat.waiting = false;
@@ -182,7 +213,7 @@ export function connect() {
         const candidates = [...retainedInputs, ...visible.map(node => [node.dataset.inputKey, node])];
         retainedInputs = new Map(candidates.filter(([key]) => active.has(key)));
         if (out) out.replaceChildren();
-        current = null; callStatus = null;
+        current = null; callStatus = null; pendingCalls = [];
         state.chat.session = e.session;
         state.chat.spent = null; state.chat.context = null; state.chat.modelRequest = null;
         state.chat.waiting = false;
@@ -192,12 +223,13 @@ export function connect() {
         renderSettings(); renderPicker();
         break;
       }
-      case 'started': goalGeneration = null; goalObserved = false; turnId = null; retryPrompt.started(e.session); state.chat.session = e.session; state.chat.spent = null; state.chat.context = null; state.chat.modelRequest = null; renderSettings(); renderPicker(); break;
+      case 'started': clearPendingCalls(); goalGeneration = null; goalObserved = false; turnId = null; retryPrompt.started(e.session); state.chat.session = e.session; state.chat.spent = null; state.chat.context = null; state.chat.modelRequest = null; renderSettings(); renderPicker(); break;
       // Joined a turn this page did not start. Said out loud either way: a
       // page that quietly starts streaming looks like it is answering
       // something you did not ask, and one that says nothing after asking
       // cannot be told from a daemon that did not hear.
       case 'attached':
+        if (state.chat.session !== e.session) clearPendingCalls();
         goalGeneration = null;
         goalObserved = false;
         turnId = null;
@@ -227,19 +259,13 @@ export function connect() {
       case 'agent': if (e.receipt) receiptNotice(e.receipt, e.text); else say('agent', e.text); break;
       // `doing` says which file, which command; a daemon older than the
       // field sends nothing and the name is what it always said.
-      case 'tool': callStatus = null; say('tool', `· ${e.doing || e.name}`); break;
+      case 'tool': toolStarted(e); break;
       // A call taking a while, saying whether anything is happening in it. On
       // the same line each time, because it is a state and not a log: a call
       // that runs for ten minutes would otherwise leave a hundred and twenty
       // lines saying the same thing in different numbers.
       case 'tool_working': stillGoing(`  ${e.name}: ${e.said}`); break;
-      case 'tool_done': {
-        callStatus = null;
-        const last = chatOut() && chatOut().lastElementChild;
-        if (last && last.className === 'tool') last.append(e.failed ? ' ✗' : ' ✓');
-        current = null;
-        break;
-      }
+      case 'tool_done': toolFinished(e); break;
       case 'model_request': state.chat.modelRequest = e; renderSettings(); break;
       case 'settings': state.chat.settings = e; renderSettings(); break;
       case 'spent': state.chat.spent = e; renderSettings(); break;

@@ -215,6 +215,11 @@ The browser history panel also renders saved tool calls and results as native
 expandable cards. Their summaries come from bounded page metadata; opening a
 card fetches one bounded body part by event number, and further parts require
 an explicit next/previous action. Event text remains DOM text, not HTML.
+Live browser tool notices are expandable cards as well. The tab matches
+same-name completions in arrival order and reports failure plus elapsed time
+observed in that tab. This is live transport state, not a persisted verdict or
+tool duration; saved results remain in session history. Pending card metadata
+is capped at 128 entries in addition to bounded chat scrollback.
 
 ## The agent loop
 
