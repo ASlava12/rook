@@ -219,6 +219,79 @@ fn live_tool_completion_points_to_a_readable_measured_result_before_the_next_mod
 }
 
 #[test]
+fn live_command_and_search_details_are_readable_from_the_daemon_before_the_next_reply() {
+    rook_llm::init_tls();
+    let rook = Rook::new();
+    let model = Model::with_messages(vec![json!({"role":"assistant","content":"","tool_calls":[
+        {"index":0,"id":"command","type":"function","function":{"name":"run_command","arguments":"{\"command\":\"exit 7\"}"}},
+        {"index":1,"id":"search","type":"function","function":{"name":"search","arguments":"{\"path\":\"haystack.txt\",\"pattern\":\"needle\",\"limit\":1}"}}
+    ]})]);
+    std::fs::write(rook.workspace.path().join("haystack.txt"), "needle needle\nneedle\n").unwrap();
+    rook.write_config(
+        &config(&model.url, "initial", "ask", rook.workspace.path())
+            .replace("mode='ask'", "mode='ask'\nallow=['exit 7']"),
+    );
+    let daemon = Daemon::start(&rook);
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let mut socket = runtime.block_on(async {
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!(
+            "{}/api/chat",
+            daemon.address.replacen("http", "ws", 1)
+        ))
+        .await
+        .unwrap();
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                json!({"type":"prompt","text":"run command and search"}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        socket
+    });
+    let started = runtime.block_on(socket_event(&mut socket, "started"));
+    let session = started["session"].as_str().unwrap();
+    model.next();
+    model.release.store(1, Ordering::SeqCst);
+    let mut names = Vec::new();
+    for _ in 0..2 {
+        let completed = runtime.block_on(socket_event(&mut socket, "tool_done"));
+        let name = completed["name"].as_str().unwrap();
+        names.push(name.to_string());
+        let seq = completed["result_seq"].as_u64().unwrap();
+        let page = runtime.block_on(get(
+            &client,
+            &format!("{}/api/sessions/{session}/history/{seq}?offset=0", daemon.address),
+        ));
+        assert_eq!(page["entry"]["label"], name);
+        let details = &page["entry"]["tool_details"];
+        assert!(details["note_seq"].as_u64().unwrap() < seq);
+        if name == "run_command" {
+            assert_eq!(details["exit_code"], 7);
+            assert_eq!(completed["failed"], true);
+            assert_eq!(page["entry"]["tool_measurement"]["failed"], true);
+        } else {
+            assert_eq!(name, "search");
+            assert_eq!(details["matches"], 2);
+            assert_eq!(details["files_scanned"], 1);
+            assert_eq!(details["complete"], true);
+        }
+    }
+    names.sort();
+    assert_eq!(names, ["run_command", "search"]);
+    let next = model.next();
+    assert!(
+        next["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| !m["content"].as_str().unwrap_or("").contains("search_complete"))
+    );
+    model.release.store(2, Ordering::SeqCst);
+    runtime.block_on(socket_event(&mut socket, "done"));
+}
+
+#[test]
 fn socket_stop_uses_observed_goal_generation_and_replays_once() {
     rook_llm::init_tls();
     let rook = Rook::new();

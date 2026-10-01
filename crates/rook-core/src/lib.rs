@@ -77,4 +77,5 @@ pub use service::{
 
 mod provider_history;
 mod tool_changes;
+mod tool_details;
 mod tool_images;

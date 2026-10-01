@@ -520,6 +520,12 @@ impl<'a> AgentLoop<'a> {
             *self.launched_job.lock().unwrap_or_else(|e| e.into_inner()) =
                 outcome.meta.get("job").and_then(serde_json::Value::as_str).map(str::to_owned);
         }
+        let details = crate::tool_details::note(
+            &call.name,
+            &outcome,
+            self.tools.get(&call.name).and_then(|tool| tool.mcp_source(&call.arguments)),
+            &self.vault,
+        );
         let mut text = match self.after_tool(call, &outcome).await {
             Some(extra) => format!("{}\n\n{extra}", outcome.content),
             None => outcome.content,
@@ -538,13 +544,17 @@ impl<'a> AgentLoop<'a> {
         // MCP server's answer are all the same question here.
         let mut text = self.vault.redact(&text);
         let changes = crate::tool_changes::note(&call.name, outcome.meta.get("file_changes"), &self.vault);
-        match crate::tool_images::record_with_changes(
+        let preview = changes
+            .as_deref()
+            .map(|text| (crate::tool_changes::LABEL, text))
+            .or_else(|| details.as_deref().map(|text| (crate::tool_details::LABEL, text)));
+        match crate::tool_images::record_with_preview(
             self.rook,
             self.session,
             &call.name,
             &mut text,
             &outcome.images,
-            changes.as_deref(),
+            preview,
         ) {
             Ok(seq) if matches!(call.name.as_str(), "run_command" | "job") => {
                 if let Err(why) = crate::results::register_output(self.rook, self.session, seq, &outcome.meta)

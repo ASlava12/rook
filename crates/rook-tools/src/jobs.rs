@@ -415,6 +415,9 @@ impl crate::Tool for JobTool {
             Some(job) => {
                 let mut outcome = crate::ToolOutcome::ok(format!("{}\n{}", describe(&job), job.output))
                     .with("running", job.exit_code.is_none());
+                if let Some(code) = job.exit_code {
+                    outcome = outcome.with("exit_code", code);
+                }
                 if let Some(path) = job.output_file {
                     outcome
                         .content

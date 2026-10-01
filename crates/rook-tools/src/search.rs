@@ -98,13 +98,16 @@ impl Tool for Search {
             let mut total = 0usize;
             let mut files_scanned = 0usize;
             let mut gave_up = false;
+            let mut skipped_text = false;
             // Not following links is the default; stated because it is the
             // workspace boundary, and a default is not a decision. `require_git`
             // is not the default: without it a `.gitignore` is silently ignored
             // outside a repository, and a Rook workspace need not be one.
-            for entry in
-                ignore::WalkBuilder::new(&root).follow_links(false).require_git(false).build().flatten()
-            {
+            for entry in ignore::WalkBuilder::new(&root).follow_links(false).require_git(false).build() {
+                let Ok(entry) = entry else {
+                    skipped_text = true;
+                    continue;
+                };
                 if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
                     continue;
                 }
@@ -120,11 +123,17 @@ impl Tool for Search {
                     gave_up = true;
                     break;
                 }
-                let Ok(file) = std::fs::File::open(path) else { continue };
+                let Ok(file) = std::fs::File::open(path) else {
+                    skipped_text = true;
+                    continue;
+                };
                 let mut reader = std::io::BufReader::new(file);
                 // Skip binaries cheaply rather than regexing megabytes of them,
                 // and without reading the rest of the file to find out.
-                let Ok(prefix) = reader.fill_buf() else { continue };
+                let Ok(prefix) = reader.fill_buf() else {
+                    skipped_text = true;
+                    continue;
+                };
                 if prefix.iter().take(4096).any(|b| *b == 0) {
                     continue;
                 }
@@ -138,13 +147,18 @@ impl Tool for Search {
                 loop {
                     line.clear();
                     match reader.by_ref().take(MAX_LINE).read_until(b'\n', &mut line) {
-                        Ok(0) | Err(_) => break,
+                        Ok(0) => break,
+                        Err(_) => {
+                            skipped_text = true;
+                            break;
+                        }
                         Ok(_) => n += 1,
                     }
                     // Longer than any source line: a minified bundle or a blob
                     // with no NUL in its first pages. Nothing after it is worth
                     // the read either.
                     if !line.ends_with(b"\n") && line.len() as u64 == MAX_LINE {
+                        skipped_text = true;
                         break;
                     }
                     let text = String::from_utf8_lossy(&line);
@@ -167,14 +181,14 @@ impl Tool for Search {
                     }
                 }
             }
-            (hits, total, files_scanned, gave_up)
+            (hits, total, files_scanned, gave_up, skipped_text)
         })
         .await
         .map_err(|e| ToolError::Invalid { tool: "search".into(), message: e.to_string() })?;
 
-        let (hits, total, files_scanned, gave_up) = result;
+        let (hits, total, files_scanned, gave_up, skipped_text) = result;
         let looked_in = shown_root.display().to_string();
-        let truncated = total > hits.len() || gave_up;
+        let truncated = total > hits.len() || gave_up || skipped_text;
         let mut body = match (hits.is_empty(), files_scanned) {
             (false, _) => hits.join("\n"),
             // A filter that let nothing through has not answered the question,
@@ -200,6 +214,9 @@ impl Tool for Search {
                 "\n[stopped after {most_files} files; narrow `path` or `glob` to search the rest]"
             ));
         }
+        if skipped_text {
+            body.push_str("\n[partial scan: unreadable paths or oversized text lines were skipped]");
+        }
         Ok(ToolOutcome {
             images: Vec::new(),
             content: body,
@@ -209,6 +226,7 @@ impl Tool for Search {
             meta: Default::default(),
         }
         .with("matches", total as u64)
-        .with("files_scanned", files_scanned as u64))
+        .with("files_scanned", files_scanned as u64)
+        .with("search_complete", !gave_up && !skipped_text))
     }
 }

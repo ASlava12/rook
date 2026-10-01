@@ -525,6 +525,11 @@ pub trait Tool: Send + Sync {
         (self.name(), args)
     }
 
+    /// Configured MCP identity, independent of text or metadata returned by a server.
+    fn mcp_source(&self, _args: &serde_json::Value) -> Option<(&str, &str)> {
+        None
+    }
+
     /// Paths this call is about to modify, so the caller can checkpoint them
     /// first. Empty for read-only tools.
     fn touched_paths(&self, _args: &serde_json::Value) -> Vec<String> {

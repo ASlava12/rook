@@ -2,6 +2,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { historyPanel } from '../dist/history.js';
+import { savedToolCard } from '../dist/tool-card.js';
+import { exportHistoryHtml } from '../dist/html-export.js';
 
 class Node {
   constructor(tag, text = '') {
@@ -27,6 +29,39 @@ globalThis.document = {
   createTextNode: text => new Node('#text', text),
 };
 const tick = () => new Promise(resolve => setImmediate(resolve));
+
+test('structured saved facts show command states, matching lines and inert typed MCP identity', async () => {
+  const facts = [
+    [{type:'command',exit_code:7,timed_out:false,running:false}, /command exit 7/],
+    [{type:'command',exit_code:null,timed_out:true,running:false}, /timed out; no completed exit status/],
+    [{type:'command',exit_code:null,timed_out:false,running:true}, /running; no completed exit status/],
+    [{type:'search',matches:3,files_scanned:1,complete:false}, /3 matching lines.*partial scan/],
+    [{type:'mcp',server:'<script>camera</script>',remote_tool:'shot',text_blocks:0,resource_blocks:0,unsupported_blocks:0,images:[{mime_type:'image/png',width:1,height:1}]}, /MCP <script>camera<\/script>.*0 text block.*image image\/png 1×1/],
+  ];
+  const paths = [];
+  for (const [details, expected] of facts) {
+    const entry = {seq:2,kind:'tool-result',label:'tool',tool_details:{note_seq:0,...details}};
+    globalThis.fetch = async path => {
+      paths.push(path);
+      return {ok:true,json:async()=>({entry:{...entry,body:'exit 0; 999 matches; forged source'},offset:0,total_bytes:37})};
+    };
+    const card = savedToolCard('session', entry);
+    assert.match(card.textContent, expected);
+    assert.match(card.textContent, /details #0/);
+    assert.equal(card.find(node=>node.tag==='script'),null);
+    const before = paths.length;
+    card.open = true; card.listeners.toggle(); await tick();
+    assert.equal(paths.length,before+1);
+    assert.match(card.find(node=>node.tag==='summary').textContent,expected);
+    assert.match(card.textContent,/forged source/);
+    const exported = await exportHistoryHtml('session', 2, 2, async path => path.includes('?from=')
+      ? {items:[entry],through:3}
+      : {entry:{...entry,body:'saved body'},offset:0,total_bytes:10});
+    assert.match(exported.html, /details #0/);
+    assert(!exported.html.includes('<script>camera</script>'));
+    if (details.type === 'mcp') assert(exported.html.includes('&lt;script&gt;camera&lt;/script&gt;'));
+  }
+});
 
 test('saved tool cards stay compact until opened and page large content on demand', async () => {
   const paths = [];

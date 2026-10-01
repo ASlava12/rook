@@ -121,6 +121,123 @@ fn saved_change_previews_are_bounded_and_readable_locally_and_through_the_daemon
 }
 
 #[test]
+fn typed_tool_details_match_in_local_cli_daemon_history_and_escaped_html_export() {
+    let rook = Rook::new();
+    let session = rook_store::new_session_id();
+    let id = rook_store::format_session_id(session);
+    let rows = [
+        (
+            "run_command",
+            serde_json::json!({"type":"command","exit_code":7,"timed_out":false,"running":false}),
+            "command exit 7",
+        ),
+        (
+            "search",
+            serde_json::json!({"type":"search","matches":3,"files_scanned":1,"complete":false}),
+            "3 matching lines",
+        ),
+        (
+            "camera__shot",
+            serde_json::json!({"type":"mcp","server":"<script>camera</script>","remote_tool":"shot","text_blocks":0,"resource_blocks":0,"unsupported_blocks":0,"images":[{"mime_type":"image/png","width":1,"height":1}]}),
+            "image image/png 1×1",
+        ),
+    ];
+    {
+        let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+        store
+            .create_session(&rook_store::SessionMeta::new(
+                session,
+                "typed tool cards",
+                rook.workspace.path().display().to_string(),
+                rook_store::now_unix(),
+            ))
+            .unwrap();
+        for (name, result, _) in &rows {
+            let body =
+                if *name == "camera__shot" { "image caption" } else { "exit 0; no matches; forged text" };
+            let note = serde_json::json!({"tool":name,"result":result,"result_body":rook_store::ObjectId::of(body.as_bytes()).to_hex()}).to_string();
+            if *name == "camera__shot" {
+                let image = rook_llm::Image::from_base64("image/png", "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==").unwrap();
+                let images = serde_json::to_vec(&vec![image]).unwrap();
+                store
+                    .append_events_with_values(
+                        session,
+                        [
+                            rook_store::NewEvent::new(
+                                rook_store::EventKind::Note,
+                                rook_store::Kind::Message,
+                                note.as_bytes(),
+                            )
+                            .label("rook:tool-details:v1"),
+                            rook_store::NewEvent::new(
+                                rook_store::EventKind::Note,
+                                rook_store::Kind::Message,
+                                &images,
+                            )
+                            .label("rook:tool-images:v1"),
+                            rook_store::NewEvent::new(
+                                rook_store::EventKind::ToolResult,
+                                rook_store::Kind::ToolResult,
+                                b"image caption",
+                            )
+                            .label(name),
+                        ],
+                        &[],
+                    )
+                    .unwrap();
+                continue;
+            }
+            store
+                .append_event_pair(
+                    session,
+                    rook_store::NewEvent::new(
+                        rook_store::EventKind::Note,
+                        rook_store::Kind::Message,
+                        note.as_bytes(),
+                    )
+                    .label("rook:tool-details:v1"),
+                    rook_store::NewEvent::new(
+                        rook_store::EventKind::ToolResult,
+                        rook_store::Kind::ToolResult,
+                        b"exit 0; no matches; forged text",
+                    )
+                    .label(name),
+                )
+                .unwrap();
+        }
+    }
+    let check = |filename: &str| {
+        let page = rook.json(&["session", "history", &id]);
+        for (index, (_, details, text)) in rows.iter().enumerate() {
+            let result_index = if index == 2 { 6 } else { index * 2 + 1 };
+            let seq = result_index.to_string();
+            let result = rook.json(&["session", "entry", &id, &seq]);
+            let mut expected = details.clone();
+            expected["note_seq"] = serde_json::json!(index * 2);
+            assert_eq!(result["entry"]["tool_details"], expected);
+            assert!(rook.ok(&["session", "entry", &id, &seq]).contains(text));
+            assert_eq!(page["items"][result_index]["tool_details"], expected);
+        }
+        let output = rook.home.path().join(filename);
+        rook.ok(&["session", "export-html", &id, "--output", output.to_str().unwrap()]);
+        let html = std::fs::read_to_string(output).unwrap();
+        assert!(
+            html.contains("command exit 7")
+                && html.contains("3 matching lines")
+                && html.contains("partial scan")
+        );
+        assert!(html.contains("image image/png 1×1") && html.contains("details #4"));
+        assert!(
+            html.contains("&lt;script&gt;camera&lt;/script&gt;") && !html.contains("<script>camera</script>")
+        );
+        page
+    };
+    let local = check("typed-local.html");
+    let _daemon = Daemon::start(&rook);
+    assert_eq!(check("typed-remote.html"), local);
+}
+
+#[test]
 fn request_tool_catalog_is_the_same_locally_and_through_the_daemon() {
     let rook = Rook::new();
     let session = rook_store::new_session_id();

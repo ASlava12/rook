@@ -243,6 +243,29 @@ duration includes approval waits and hooks, and historical completion does
 not verify current workspace files or tests. Forks see only copied notes;
 stored event structs and the timing format are unchanged. Older daemon JSON
 responses without this optional field remain readable.
+Command, search and MCP outcomes also have a display-only
+`rook:tool-details:v1` companion, committed atomically before the result and
+before its image companion when present. The optional `tool_details` in
+transcript JSON names that exact source event. Readers inspect at most two
+preceding records, check the 4 KiB object bound before decoding and require
+the recorded tool name and exact result body hash to match. Binding uses the
+final redacted/hook-expanded text and image caption, so a fork cut at a companion
+cannot assign its facts to another result with a different body. The writer admits bounded names/image metadata
+before copying and stops during JSON encoding at 4 KiB. Stored postcard structs
+and the storage version are unchanged; old JSON and unmeasured results remain
+readable. These notes do not enter model replay or compaction summaries.
+Command exit codes come from structured outcomes, with separate timeout,
+background-running and unavailable states; a dispatch completing is not a
+background process completing. Search counts are matching lines, with scanned
+file count and explicit partial-scan status for file limits, unreadable paths
+or oversized text lines. A display limit alone does not make the scan partial.
+MCP identity comes from the configured tool/catalog route, including deferred
+calls, rather than server-returned metadata. Typed text/resource/unsupported
+counts and validated image MIME/dimensions describe the original outcome;
+transport or image-validation failures leave content types unavailable.
+Image metadata requires an adjacent retained image companion and never embeds
+base64 in transcript views. CLI, TUI readers/calls, browser cards and both HTML
+exporters render these saved facts with their source and preserve text escaping.
 `write_file` and `edit_file` also report bounded saved change previews. Rook
 stores a redacted plain-text `rook:tool-changes:v1` note atomically before the
 result (before the image companion when present). The result's optional

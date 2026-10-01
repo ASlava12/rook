@@ -80,6 +80,10 @@ impl Tool for McpTool {
         }
     }
 
+    fn mcp_source(&self, _args: &serde_json::Value) -> Option<(&str, &str)> {
+        Some((self.server.name(), &self.remote_name))
+    }
+
     fn advertisement(&self, _lazy: bool) -> ToolSpec {
         self.spec()
     }
@@ -116,7 +120,19 @@ impl Tool for McpTool {
             full_bytes: full,
             meta: Default::default(),
         }
-        .with("server", self.server.name()))
+        .with("server", self.server.name())
+        .with(
+            "text_blocks",
+            result.content.iter().filter(|c| matches!(c, rook_mcp::Content::Text { .. })).count() as u64,
+        )
+        .with(
+            "resource_blocks",
+            result.content.iter().filter(|c| matches!(c, rook_mcp::Content::Resource { .. })).count() as u64,
+        )
+        .with(
+            "unsupported_blocks",
+            result.content.iter().filter(|c| matches!(c, rook_mcp::Content::Unknown)).count() as u64,
+        ))
     }
 }
 

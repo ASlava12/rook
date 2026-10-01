@@ -207,6 +207,15 @@ async fn mcp_images_survive_a_batch_store_reopen_fork_and_explicit_retrieval() {
     let entries = rook.transcript(session, 0, 100, 10000).unwrap();
     assert!(entries.iter().all(|entry| !entry.body.contains(PNG)), "transcripts must not print base64");
     let result_id = entries.iter().find(|entry| entry.kind == "tool-result").unwrap().seq;
+    let saved_details =
+        entries.iter().find(|entry| entry.seq == result_id).unwrap().tool_details.clone().unwrap();
+    assert!(
+        saved_details.text().contains("MCP camera / shot")
+            && saved_details.text().contains("image image/png 1×1")
+    );
+    assert!(matches!(&saved_details.result, rook_core::transcript::ToolResultDetails::Mcp {
+        text_blocks: Some(0), images, ..
+    } if images.len() == 1));
     let end = rook.store.get_session(session).unwrap().unwrap().next_seq;
     let fork = rook.fork_session(session, end).unwrap().id;
     let context = rook.context_usage(session, Some(32000)).unwrap();
@@ -216,6 +225,10 @@ async fn mcp_images_survive_a_batch_store_reopen_fork_and_explicit_retrieval() {
     drop(rook);
     let rook = rook_at(root.path());
     for id in [session, fork] {
+        assert_eq!(
+            rook.transcript_entry(id, result_id, 0).unwrap().entry.tool_details,
+            Some(saved_details.clone())
+        );
         let model = Model::new(vec![Message::assistant("I can still see the recent images.")]);
         AgentLoop::new(&rook, model.clone(), id).run("describe the screenshots").await.unwrap();
         let seen = model.seen.lock().unwrap();
@@ -264,6 +277,15 @@ async fn mcp_images_survive_a_batch_store_reopen_fork_and_explicit_retrieval() {
     );
     let result = deferred.run("Find and call the screenshot tool").await.unwrap();
     assert!(result.tools_called.contains(&"mcp_call".into()));
+    let deferred_result = rook.transcript(session, 0, 100, 4096).unwrap();
+    let details = deferred_result
+        .iter()
+        .find(|e| e.kind == "tool-result" && e.label == "mcp_call")
+        .unwrap()
+        .tool_details
+        .as_ref()
+        .unwrap();
+    assert!(details.text().contains("MCP camera / shot"), "{}", details.text());
     {
         let requests = model.seen.lock().unwrap();
         assert!(requests.iter().all(|r| !r.tools.iter().any(|t| t.name == "camera__shot")));

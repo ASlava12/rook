@@ -323,6 +323,58 @@ async fn saved_change_cards_keep_the_call_snapshot_after_later_writes_and_do_not
     );
 }
 
+#[tokio::test]
+async fn command_and_search_cards_persist_actual_outcomes_without_changing_model_replay() {
+    let f = fixture();
+    std::fs::write(f.workspace.path().join("haystack.txt"), "needle needle\nneedle\n").unwrap();
+    let session = f.rook.start_session("typed tool cards").unwrap();
+    let model = Arc::new(ScriptedProvider::new(vec![
+        call("run_command", serde_json::json!({"command":"exit 7"})),
+        call("search", serde_json::json!({"path":"haystack.txt","pattern":"needle","limit":1})),
+        reply("inspected"),
+    ]));
+    let mut agent = AgentLoop::new(&f.rook, model.clone(), session);
+    agent.allow_everything_not_denied();
+    agent.run("run command and search").await.unwrap();
+    let entries = f.rook.transcript(session, 0, 100, 4096).unwrap();
+    let results: Vec<_> = entries.iter().filter(|e| e.kind == "tool-result").collect();
+    assert_eq!(results.len(), 2);
+    assert!(results.iter().all(|e| e.tool_measurement.is_some()));
+    let command = results.iter().find(|e| e.label == "run_command").unwrap();
+    assert!(matches!(
+        command.tool_details.as_ref().unwrap().result,
+        rook_core::transcript::ToolResultDetails::Command {
+            exit_code: Some(7),
+            timed_out: false,
+            running: false
+        }
+    ));
+    let search = results.iter().find(|e| e.label == "search").unwrap();
+    assert!(
+        matches!(
+            search.tool_details.as_ref().unwrap().result,
+            rook_core::transcript::ToolResultDetails::Search { matches: 2, files_scanned: 1, complete: true }
+        ),
+        "counts are matching lines, not regex occurrences; a display limit does not mean a partial scan"
+    );
+    assert!(search.body.contains("1 more matches"));
+    let saved = search.tool_details.clone();
+    std::fs::write(f.workspace.path().join("haystack.txt"), "changed since search\n").unwrap();
+    let child = f.rook.fork_session(session, search.seq + 1).unwrap().id;
+    assert_eq!(f.rook.transcript_entry(child, search.seq, 0).unwrap().entry.tool_details, saved);
+    assert_eq!(f.rook.transcript_entry(session, search.seq, 0).unwrap().entry.tool_details, saved);
+    assert!(
+        model
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|r| &r.messages)
+            .all(|m| !m.content.contains("search_complete") && !m.content.contains("text_blocks")),
+        "display companions never become additional model messages"
+    );
+}
+
 /// "Как будто не пишет на диск агент" — asked two and a half hours into a
 /// turn that had indeed written nothing. What a turn wrote is the one thing
 /// that tells a working turn from a stuck one, and it was nowhere in what a

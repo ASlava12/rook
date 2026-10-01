@@ -90,7 +90,9 @@ impl Tool for RunCommand {
             let spill =
                 ctx.spill_dir.as_deref().and_then(|dir| Spill::open(dir, ctx.max_spill_bytes, redactions));
             let id = jobs.start_captured(&command, &cwd, isolation, spill)?;
-            return Ok(ToolOutcome::ok(format!("started {id}; `job` reads what it prints")).with("job", id));
+            return Ok(ToolOutcome::ok(format!("started {id}; `job` reads what it prints"))
+                .with("job", id)
+                .with("running", true));
         }
 
         // Resolved before anything is spawned, so a name nobody set is a

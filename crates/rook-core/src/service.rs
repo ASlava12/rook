@@ -1053,6 +1053,7 @@ impl Rook {
                 body,
                 tool_measurement: crate::diagnostics::tool_measurement(self, &e)?,
                 change_note: crate::tool_changes::source(self, &e)?,
+                tool_details: crate::tool_details::load(self, &e)?,
             });
         }
         Ok(out)
@@ -2265,6 +2266,8 @@ pub struct TranscriptEntry {
     /// Event number of the bounded saved change preview, if recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub change_note: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_details: Option<crate::transcript::ToolDetails>,
 }
 
 /// The note a capture carries when a skill arrived from a source, and the

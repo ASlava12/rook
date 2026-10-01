@@ -35,7 +35,7 @@ use serde::{Deserialize, Serialize};
 
 use transport::Transport;
 
-pub use protocol::{PROTOCOL_VERSION, RpcError, ServerInfo, ToolDescriptor, ToolResult};
+pub use protocol::{Content, PROTOCOL_VERSION, RpcError, ServerInfo, ToolDescriptor, ToolResult};
 
 #[derive(Debug, thiserror::Error)]
 pub enum McpError {

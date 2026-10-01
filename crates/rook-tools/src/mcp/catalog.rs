@@ -326,6 +326,9 @@ impl Tool for Call {
             None => (self.name(), args),
         }
     }
+    fn mcp_source(&self, args: &Value) -> Option<(&str, &str)> {
+        named(&self.0, args)?.mcp_source(&args["arguments"])
+    }
     fn risk(&self, args: &Value) -> Risk {
         match named(&self.0, args) {
             Some(tool) => tool.risk(&args["arguments"]),

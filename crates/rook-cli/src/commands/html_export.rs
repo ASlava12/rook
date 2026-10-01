@@ -181,6 +181,11 @@ fn write_html(
                     escaped(out, &measurement.text())?;
                     out.write_all(b"</p>")?;
                 }
+                if let Some(details) = &entry.tool_details {
+                    out.write_all(b"<p class=\"meta\">")?;
+                    escaped(out, &details.text())?;
+                    out.write_all(b"</p>")?;
+                }
                 out.write_all(b"<details><summary>Show tool content</summary>")?;
             }
             out.write_all(b"<pre>")?;

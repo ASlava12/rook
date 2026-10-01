@@ -2048,3 +2048,87 @@ search match count and MCP attribution). The queue lifecycle, branch live
 checks, HTML download interaction, phase routing, declarative extension UI and
 later terminal experiments remain in the original scope. Live TUI expansion
 is now implemented and exercised; it is no longer the next missing card block.
+
+## Structured tool card facts (2026-10-02)
+
+The remaining type-specific audit found that command/search/MCP structured
+metadata reached hooks but was lost from saved history. New display-only
+`rook:tool-details:v1` notes retain bounded command exit/timeout/background
+state, search matching-line/scanned-file counts and partial-scan status, and
+configured MCP server/remote-tool identity with typed content counts and
+validated image descriptors. The companion is atomic with its result, preceding
+the existing image note if present; existing diff/image adjacency and stored
+postcard formats are preserved. These notes never add model replay messages.
+
+Names and image descriptors are admitted before copying; JSON encoding stops
+at 4 KiB. The reader checks raw size before decoding and inspects at most two
+preceding records in the same session. It matches the exact tool label and
+stored result-body hash (bound after redaction/hooks and the image caption), rejects
+malformed/contradictory data and cannot borrow facts from earlier results.
+Image descriptors require an adjacent image companion. Forks/reopen preserve
+copied facts; old results/responses remain readable without guessing from text.
+The fork-cutoff regression also checks an orphaned copied companion followed
+by a different result of the same tool; its body hash prevents false attribution.
+MCP identity comes from the registered route, including `mcp_call` overflow,
+and cannot be supplied by a server's `meta.server`. Known secrets are redacted.
+
+Command completion, process exit, timeout and an ongoing background job are
+different states. Job results now expose an actual available exit code as
+structured metadata. Search counts are matching lines, not regex occurrences;
+shortening the displayed hits alone does not mark a partial scan. The audit
+also found silently skipped oversized text lines/unreadable paths, which now
+mark an incomplete scan in metadata and result text.
+
+CLI history/entry, TUI Calls/history/recalled result rows, browser cards and
+both HTML exporters show the saved facts and companion source. Live links still
+use exact bounded result references; expanding a result reads the saved facts
+without putting bodies/images into live transport frames. Typed MCP image
+descriptors preserve the distinction from textual captions; browser pixel
+presentation remains open, with terminal image preview still a later experiment.
+
+Targeted structured-note bounds/identity/reopen/fork/image pairing, real local
+command/search dispatch, search scan limits and oversized lines, direct/deferred
+MCP image persistence, TUI pairing/rendering and browser module/export checks
+passed (exit 0). Local CLI and daemon history/entry/escaped HTML checks passed,
+as did real-daemon command/search completion before a withheld next model reply.
+The initial redaction test kept a secret without resolving it; resolving the
+fixture value exercises the vault's handed-out redaction contract and passed.
+
+A fresh scratch daemon and real Edge headless mouse interaction exercised
+actual command/search/MCP calls, typed text/resource/unsupported/image facts,
+no eager history reads, bounded result parts at 0/4096, inert script-looking
+text, resumed chat and browser HTML facts/escaping (exit 0). The first helper
+launch supplied malformed PowerShell argument quoting and the daemon rejected
+its workspace before opening the store; the corrected helper used a fresh
+process. Scratch model/daemon/browser processes were stopped before CI; the
+installed user daemon was left running.
+
+The first full CI exited 1 (25.5 seconds) on two explicit-auto-deref Clippy
+findings in the new CLI fixture. Those expressions now use automatic coercion.
+The repeated gate exited 0 (693.4 seconds) on the intermediate tree before
+the final result-body binding change; it is not the final-tree gate. Final
+binding/fork-cutoff, expanded-redaction byte bounds and direct/deferred MCP
+checks passed (exit 0), as did final local/daemon detail checks. A newly built
+daemon and fresh Edge/model/store repeated the full browser scenario after
+binding and identity-bound changes (exit 0); those scratch processes were stopped.
+Final `cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0 (`ci: ok`,
+683.5 seconds), including the binding/bounds regressions, local/daemon detail
+checks, existing queue/branch/recovery scenarios, core suites and doctests.
+Windows ran no Unix PTY tests; this block's new TUI presentation was exercised
+by the actual reader/pairing/rendering test, and the preceding block retains
+the real Windows local/daemon F5/F6/F7 interaction evidence.
+Final `cargo xtask compaction` exited 0: 4.02 MiB on disk, 37.1x dictionary
+compression and 5.8x end-to-end for its measurement fixture. Published fixture
+claims and storage formats remain unchanged; real tool calls now add bounded
+display companions. No scratch processes remain running.
+
+Inline cards remain
+In progress pending the final special-tool/result presentation audit (including
+successful `load_skill` navigation and MCP pixel presentation). Original queue
+lifecycle, branch live checks, HTML download interaction, phase routing,
+declarative extension UI and terminal experiment scope remains open.
+The next card block should link existing non-ToolResult outcomes (especially
+SkillLoaded/Error for `load_skill`) without duplicating model replay, and add
+explicit bounded browser retrieval of retained pixels with historical source
+attribution. Keep encoded image data out of live delivery and default history
+pages; terminal pixel rendering remains a later experiment.

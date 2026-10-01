@@ -17,6 +17,32 @@ async fn a_match_is_reported_with_its_path_and_line() {
     assert!(found.contains("a.rs:2:fn two() {}"), "{found}");
 }
 
+#[tokio::test]
+async fn saved_counts_distinguish_a_short_display_from_an_incomplete_search() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "needle needle\nneedle\n").unwrap();
+    std::fs::write(dir.path().join("b.txt"), "needle\n").unwrap();
+    let mut ctx = ToolContext::new(dir.path().into());
+    let args = serde_json::json!({"pattern":"needle","path":"a.txt","limit":1});
+    let result = Search.call(&ctx, &args).await.unwrap();
+    assert_eq!(result.meta["matches"], 2);
+    assert_eq!(result.meta["files_scanned"], 1);
+    assert_eq!(result.meta["search_complete"], true);
+    assert!(result.truncated && result.content.contains("1 more matches"));
+    ctx.max_files_searched = 1;
+    let result = Search.call(&ctx, &serde_json::json!({"pattern":"needle"})).await.unwrap();
+    assert_eq!(result.meta["files_scanned"], 1, "two actual text files exceed the one-file scan budget");
+    assert_eq!(result.meta["search_complete"], false);
+    assert!(result.content.contains("stopped after 1 files"));
+    let large = "x".repeat(4 << 20);
+    assert!(large.len() > 1024 * 1024, "this actually exceeds the text line cap");
+    std::fs::write(dir.path().join("large.txt"), large).unwrap();
+    let result =
+        Search.call(&ctx, &serde_json::json!({"pattern":"needle","path":"large.txt"})).await.unwrap();
+    assert_eq!(result.meta["search_complete"], false);
+    assert!(result.truncated && result.content.contains("oversized text lines"));
+}
+
 /// Read from a real turn: a model checked its rename with `glob: "*.py"`,
 /// which as a substring matches no path on any machine. The search answered
 /// "no matches", the model read that as "the old name is gone everywhere", and

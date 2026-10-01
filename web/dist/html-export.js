@@ -1,6 +1,7 @@
 // A local review download assembled from bounded history pages. The browser
 // never asks the daemon to write a file or publish a conversation.
 import { api } from './lib.js';
+import { toolDetailsText } from './tool-card.js';
 
 const MAX_EVENTS = 512;
 const MAX_BODY_BYTES = 8192;
@@ -72,6 +73,7 @@ export async function exportHistoryHtml(session, from = 0, through = null, read 
         add(`<p class="meta">saved ${m.failed ? 'failure' : 'completion'} · dispatch ${escapeHtml(m.duration_ms)} ms · timing #${escapeHtml(m.timing_seq)} (includes waits/hooks; current files/tests not verified)</p>`);
       }
       if (tool && entry.change_note != null) add(`<p class="meta">Saved file changes: source event #${escapeHtml(entry.change_note)}. Read that event in Rook for a bounded historical preview.</p>`);
+      if (tool && entry.tool_details) add(`<p class="meta">${escapeHtml(toolDetailsText(entry.tool_details))}</p>`);
       if (tool) add('<details><summary>Show tool content</summary>');
       const preview = await bodyPreview(base, seq, read);
       add(`<pre>${preview.body}</pre>`);

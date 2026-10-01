@@ -94,6 +94,93 @@ pub struct ToolMeasurement {
     pub duration_ms: u64,
     pub timing_seq: u64,
 }
+/// Display-only facts from the saved tool outcome. They describe this call,
+/// never the current workspace, and are not reconstructed from output prose.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolDetails {
+    pub note_seq: u64,
+    #[serde(flatten)]
+    pub result: ToolResultDetails,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolResultDetails {
+    Command {
+        exit_code: Option<i32>,
+        timed_out: bool,
+        running: bool,
+    },
+    Search {
+        matches: u64,
+        files_scanned: u64,
+        complete: bool,
+    },
+    Mcp {
+        server: String,
+        remote_tool: String,
+        text_blocks: Option<u64>,
+        resource_blocks: Option<u64>,
+        unsupported_blocks: Option<u64>,
+        images: Vec<ToolImage>,
+    },
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolImage {
+    pub mime_type: String,
+    pub width: u32,
+    pub height: u32,
+}
+impl ToolDetails {
+    pub fn text(&self) -> String {
+        let summary = match &self.result {
+            ToolResultDetails::Command { exit_code, timed_out, running } => {
+                if *timed_out {
+                    "command timed out; no completed exit status".into()
+                } else if *running {
+                    "background command started/running; no completed exit status".into()
+                } else {
+                    exit_code
+                        .map(|code| format!("command exit {code}"))
+                        .unwrap_or_else(|| "command exit status unavailable".into())
+                }
+            }
+            ToolResultDetails::Search { matches, files_scanned, complete } => format!(
+                "search {matches} matching lines in {files_scanned} scanned files{}",
+                if *complete { "" } else { " (partial scan; more may exist)" }
+            ),
+            ToolResultDetails::Mcp {
+                server,
+                remote_tool,
+                text_blocks,
+                resource_blocks,
+                unsupported_blocks,
+                images,
+            } => {
+                let mut text = format!("MCP {server} / {remote_tool}");
+                if let Some(count) = text_blocks {
+                    text.push_str(&format!(" · {count} text block(s)"));
+                }
+                if let Some(count) = resource_blocks {
+                    text.push_str(&format!(" · {count} resource block(s)"));
+                }
+                if let Some(count) = unsupported_blocks {
+                    text.push_str(&format!(" · {count} unsupported block(s)"));
+                }
+                if text_blocks.is_none() {
+                    text.push_str(" · content types unavailable");
+                }
+                for image in images {
+                    text.push_str(&format!(
+                        " · image {} {}×{} (pixels retained in history)",
+                        image.mime_type, image.width, image.height
+                    ));
+                }
+                text
+            }
+        };
+        format!("saved {summary} · details #{}", self.note_seq)
+    }
+}
 impl ToolMeasurement {
     pub fn text(&self) -> String {
         format!(
@@ -219,6 +306,7 @@ fn entry_from(rook: &Rook, event: &Event, body: String, truncated: bool) -> Resu
         doing,
         tool_measurement: crate::diagnostics::tool_measurement(rook, event)?,
         change_note: crate::tool_changes::source(rook, event)?,
+        tool_details: crate::tool_details::load(rook, event)?,
     })
 }
 struct Count {

@@ -22,11 +22,11 @@ export function savedToolCard(session, e, open) {
   const card = el('details', { class: 'entry tool-card' });
   const title = `#${e.seq} · ${e.kind} · ${e.doing || e.label || 'tool'}${e.bytes == null ? '' : ` · ${e.bytes} stored bytes`}`;
   const summary = el('summary');
-  function measured(measurement) {
+  function measured(measurement, details) {
     const status = measurement ? `saved ${measurement.failed ? 'failure' : 'completion'} · dispatch ${measurement.duration_ms} ms · timing #${measurement.timing_seq} (includes waits/hooks)` : 'saved status/duration unavailable';
-    summary.textContent = title + (e.kind === 'tool-result' ? ` · ${status}` : '');
+    summary.textContent = title + (e.kind === 'tool-result' ? ` · ${status}${details ? ` · ${toolDetailsText(details)}` : ''}` : '');
   }
-  measured(e.tool_measurement);
+  measured(e.tool_measurement, e.tool_details);
   const body = el('pre', { class: 'body' });
   const parts = el('div', { class: 'row' });
   const savedChanges = el('div');
@@ -63,7 +63,7 @@ export function savedToolCard(session, e, open) {
     read(`${base}/${e.seq}?offset=${offset}`, result => {
       if (!card.isConnected) return;
       loaded = true;
-      measured(result.entry.tool_measurement);
+      measured(result.entry.tool_measurement, result.entry.tool_details);
       changes(result.entry.change_note);
       body.textContent = result.entry.body;
       meta.textContent = `Bytes ${result.offset}–${result.next_offset ?? result.total_bytes} of ${result.total_bytes}. Saved history; current files and test results are not verified here.`;
@@ -76,4 +76,21 @@ export function savedToolCard(session, e, open) {
   card.addEventListener('toggle', () => { if (card.open && !loaded) part(0); });
   card.append(summary, meta, notice, body, parts, savedChanges);
   return card;
+}
+
+export function toolDetailsText(d) {
+  let text;
+  if (d.type === 'command') {
+    text = d.timed_out ? 'command timed out; no completed exit status' : d.running ? 'background command started/running; no completed exit status' : d.exit_code == null ? 'command exit status unavailable' : `command exit ${d.exit_code}`;
+  } else if (d.type === 'search') {
+    text = `search ${d.matches} matching lines in ${d.files_scanned} scanned files${d.complete ? '' : ' (partial scan; more may exist)'}`;
+  } else if (d.type === 'mcp') {
+    text = `MCP ${d.server} / ${d.remote_tool}`;
+    for (const [key, label] of [['text_blocks', 'text'], ['resource_blocks', 'resource'], ['unsupported_blocks', 'unsupported']]) {
+      if (d[key] != null) text += ` · ${d[key]} ${label} block(s)`;
+    }
+    if (d.text_blocks == null) text += ' · content types unavailable';
+    for (const image of d.images) text += ` · image ${image.mime_type} ${image.width}×${image.height} (pixels retained in history)`;
+  } else return 'saved tool details unavailable';
+  return `saved ${text} · details #${d.note_seq}`;
 }

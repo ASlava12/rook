@@ -1826,7 +1826,7 @@ pub const WROTE: &str = "wrote";
 /// constant: it is JSON for `changes` to read, and it belongs on a screen no
 /// more than a row of a database does.
 pub fn note_is_for_a_person(label: &str) -> bool {
-    label != WROTE
+    !matches!(label, WROTE | crate::tool_details::LABEL)
 }
 
 const SAY_IT: &str = "\

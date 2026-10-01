@@ -27,15 +27,44 @@ pub(crate) fn record_with_changes(
     images: &[Image],
     changes: Option<&str>,
 ) -> Result<u64> {
-    if changes.is_some_and(|text| text.len() > crate::tool_changes::MAX_BYTES) {
-        return Err(CoreError::Other("saved tool changes exceed the 32 KiB preview limit".into()));
+    record_with_preview(
+        rook,
+        session,
+        name,
+        text,
+        images,
+        changes.map(|text| (crate::tool_changes::LABEL, text)),
+    )
+}
+
+pub(crate) fn record_with_preview(
+    rook: &Rook,
+    session: u128,
+    name: &str,
+    text: &mut String,
+    images: &[Image],
+    preview: Option<(&str, &str)>,
+) -> Result<u64> {
+    if let Some((label, text)) = preview {
+        let limit = match label {
+            crate::tool_changes::LABEL => crate::tool_changes::MAX_BYTES,
+            crate::tool_details::LABEL => crate::tool_details::MAX_BYTES,
+            _ => return Err(CoreError::Other("unknown saved tool preview type".into())),
+        };
+        if text.len() > limit {
+            return Err(CoreError::Other("saved tool preview exceeds its byte limit".into()));
+        }
     }
     if images.is_empty() {
-        if let Some(changes) = changes {
+        let details = preview
+            .filter(|(label, _)| *label == crate::tool_details::LABEL)
+            .map(|(_, preview)| crate::tool_details::bind(preview, text))
+            .transpose()?;
+        let preview = details.as_deref().map(|text| (crate::tool_details::LABEL, text)).or(preview);
+        if let Some((label, preview)) = preview {
             let [_, result] = rook.store.append_event_pair(
                 session,
-                NewEvent::new(EventKind::Note, Kind::Message, changes.as_bytes())
-                    .label(crate::tool_changes::LABEL),
+                NewEvent::new(EventKind::Note, Kind::Message, preview.as_bytes()).label(label),
                 NewEvent::new(EventKind::ToolResult, Kind::ToolResult, text.as_bytes()).label(name),
             )?;
             return Ok(result);
@@ -53,12 +82,16 @@ pub(crate) fn record_with_changes(
     // Screenshots of two different states can have identical captions and
     // lengths. The loop detector must still see that the answer changed.
     text.push_str(&format!("\n[{} tool image(s); content {}]", images.len(), ObjectId::of(&data).to_hex()));
-    if let Some(changes) = changes {
+    let details = preview
+        .filter(|(label, _)| *label == crate::tool_details::LABEL)
+        .map(|(_, preview)| crate::tool_details::bind(preview, text))
+        .transpose()?;
+    let preview = details.as_deref().map(|text| (crate::tool_details::LABEL, text)).or(preview);
+    if let Some((label, preview)) = preview {
         let [_, _, result] = rook.store.append_events_with_values(
             session,
             [
-                NewEvent::new(EventKind::Note, Kind::Message, changes.as_bytes())
-                    .label(crate::tool_changes::LABEL),
+                NewEvent::new(EventKind::Note, Kind::Message, preview.as_bytes()).label(label),
                 NewEvent::new(EventKind::Note, Kind::Message, &data).label(LABEL),
                 NewEvent::new(EventKind::ToolResult, Kind::ToolResult, text.as_bytes()).label(name),
             ],
