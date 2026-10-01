@@ -1810,3 +1810,21 @@ timed out waiting for goal resume; the other 84 CLI integration tests passed.
 That test passed alone on retry (exit 0), and the second full `cargo xtask ci`
 exited 0 (`ci: ok`, 725.7 seconds), including all 85 CLI integration tests
 and doctests. Queue remains In progress.
+
+## Retry an uncertain ordinary Stop in an open TUI
+
+A daemon socket failure used to end the TUI turn and erase an ordinary Stop's
+caller ID. The open TUI now retains its bounded session/turn/ID attempt, shows
+`/retry-stop` and `/discard-stop`, and resends the exact scoped Stop frame on
+retry. A daemon acknowledgement clears it, while a different turn or session
+cannot inherit it. A local TUI test simulates the failed socket, exact retry,
+reattachment to the same turn, acknowledgement and successor turn. The daemon
+protocol's restart and duplicate-Stop scenarios were already covered by CLI
+integration tests. Persistence after the TUI process closes and live daemon
+TUI interaction remain open; Queue stays In progress. No stored or wire format
+changes in this block.
+
+The two focused TUI tests and full `cargo xtask ci` exited 0 (`ci: ok`,
+713.5 seconds), including 112 CLI/TUI unit tests, all 85 CLI integration
+tests and doctests. Windows ran no PTY tests. No store format or storage
+implementation changed, so compaction was not rerun.

@@ -81,6 +81,10 @@ and daemon modes.
 The TUI executes slash commands as interface actions while a turn runs.
 Their command text does not become a queued user correction; plain messages,
 `/followup` and `/goal` retain their explicit delivery paths.
+If a daemon connection fails after an ordinary Stop, the open TUI retains the
+session, turn and caller ID. `/retry-stop` resends the same scoped request;
+`/discard-stop` clears it. An acknowledgement or a successor turn clears the
+attempt. Closing the TUI still loses an unacknowledged attempt.
 
 An explicitly reviewed branch summary is a bounded Note in the target session.
 Its record names the source session and last source event. Replay treats the

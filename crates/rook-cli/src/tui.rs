@@ -702,6 +702,27 @@ struct Adding {
     global: bool,
 }
 
+/// The same caller ID must be reused after an uncertain socket delivery.
+/// A turn ID keeps an ordinary Stop from affecting its successor.
+#[derive(Clone)]
+struct StopAttempt {
+    session: u128,
+    generation: Option<String>,
+    turn: Option<String>,
+    id: String,
+}
+
+impl StopAttempt {
+    fn frame(&self) -> ClientMessage {
+        ClientMessage::Stop {
+            id: self.id.clone(),
+            session: Some(rook_store::format_session_id(self.session)),
+            generation: self.generation.clone(),
+            turn: self.turn.clone(),
+        }
+    }
+}
+
 #[derive(Default)]
 struct Chat {
     last_effort: Option<String>,
@@ -734,7 +755,7 @@ struct Chat {
     /// Generation announced by the daemon for this observed managed turn.
     goal_generation: Option<String>,
     turn_id: Option<String>,
-    stop_attempt: Option<(Option<String>, Option<String>, String)>,
+    stop_attempt: Option<StopAttempt>,
     pending: Option<ApprovalRequest>,
     asking: Option<Asking>,
     /// Lines back from the newest, so zero is pinned to the bottom.
@@ -1194,9 +1215,6 @@ impl Chat {
         self.busy = false;
         self.remote = None;
         self.turn_id = None;
-        if self.stop_attempt.as_ref().is_some_and(|(generation, _, _)| generation.is_none()) {
-            self.stop_attempt = None;
-        }
         let waiting = self.pending.take().is_some() || self.asking.take().is_some();
         if waiting {
             self.push("stat", "  the turn ended, so what it was waiting for is gone");
@@ -2125,15 +2143,15 @@ impl App {
             ChatEvent::Text { text } => self.chat.push("text", &text),
             ChatEvent::Goal { generation } => self.chat.goal_generation = generation,
             ChatEvent::Turn { id } => {
-                if self.chat.turn_id.as_ref() != Some(&id)
-                    && self.chat.stop_attempt.as_ref().is_some_and(|(generation, _, _)| generation.is_none())
-                {
+                if self.chat.stop_attempt.as_ref().is_some_and(|attempt| {
+                    attempt.generation.is_none() && attempt.turn.as_deref() != Some(&id)
+                }) {
                     self.chat.stop_attempt = None;
                 }
                 self.chat.turn_id = Some(id);
             }
             ChatEvent::StopApplied { id, already_applied, .. } => {
-                if self.chat.stop_attempt.as_ref().is_some_and(|(_, _, saved)| saved == &id) {
+                if self.chat.stop_attempt.as_ref().is_some_and(|attempt| attempt.id == id) {
                     self.chat.stop_attempt = None;
                     self.chat.push(
                         "stat",
@@ -2282,13 +2300,15 @@ impl App {
             ChatEvent::Failed { message } => {
                 self.chat.prompt_retry.disconnected();
                 self.chat.push("err", &message);
-                if let Some((Some(generation), _, id)) = self.chat.stop_attempt.clone()
-                    && let Some(session) = self.chat.session
-                {
-                    self.chat.push("stat", &format!(
-                        "Stop delivery uncertain. Inspect the goal, then retry: rook task pause {} --control-id {id} --generation {generation}",
-                        rook_store::format_session_id(session)
-                    ));
+                if let Some(attempt) = self.chat.stop_attempt.as_ref() {
+                    let advice = match attempt.generation.as_deref() {
+                        Some(generation) => format!(
+                            "Stop delivery uncertain. Inspect the goal, then retry: rook task pause {} --control-id {} --generation {generation}",
+                            rook_store::format_session_id(attempt.session), attempt.id
+                        ),
+                        None => "Stop delivery uncertain. Use /retry-stop with the same turn and ID, or /discard-stop.".into(),
+                    };
+                    self.chat.push("stat", &advice);
                 }
                 if self.chat.prompt_retry.pending() {
                     self.chat.push(
@@ -2695,6 +2715,10 @@ impl App {
         match action {
             Action::Stop => {
                 if let Some(say) = self.chat.remote.clone() {
+                    let Some(observed_session) = self.chat.session else {
+                        self.chat.push("err", "Wait for the session identity before Stop.");
+                        return;
+                    };
                     let generation = self.chat.goal_generation.clone();
                     let turn = if generation.is_some() { None } else { self.chat.turn_id.clone() };
                     if generation.is_none() && turn.is_none() {
@@ -2702,22 +2726,30 @@ impl App {
                         return;
                     }
                     let id = match self.chat.stop_attempt.as_ref() {
-                        Some((observed, observed_turn, id))
-                            if *observed == generation && *observed_turn == turn =>
+                        Some(attempt)
+                            if attempt.session == observed_session
+                                && attempt.generation == generation
+                                && attempt.turn == turn =>
                         {
-                            id.clone()
+                            attempt.id.clone()
                         }
                         _ => rook_store::format_session_id(rook_store::new_session_id()),
                     };
-                    self.chat.stop_attempt = Some((generation.clone(), turn.clone(), id.clone()));
-                    if let (Some(session), Some(observed)) = (self.chat.session, generation.as_ref()) {
+                    let attempt = StopAttempt {
+                        session: observed_session,
+                        generation: generation.clone(),
+                        turn: turn.clone(),
+                        id: id.clone(),
+                    };
+                    let frame = attempt.frame();
+                    self.chat.stop_attempt = Some(attempt);
+                    if let Some(observed) = generation.as_ref() {
                         self.chat.push("stat", &format!(
                             "Stop ID {id}; retry: rook task pause {} --control-id {id} --generation {observed}",
-                            rook_store::format_session_id(session)
+                            rook_store::format_session_id(observed_session)
                         ));
                     }
-                    let session = self.chat.session.map(rook_store::format_session_id);
-                    let _ = say.send(ClientMessage::Stop { id, session, generation, turn });
+                    let _ = say.send(frame);
                     self.chat.push("stat", "[stopping]");
                 } else {
                     match self.turn.take_if(|turn| !turn.is_finished()) {
@@ -3014,12 +3046,55 @@ impl App {
         }
     }
 
+    /// A socket failure leaves the original caller-owned Stop uncertain.
+    /// Reuse its session, turn and ID so a restarted daemon can acknowledge
+    /// an already applied Stop without touching a later turn.
+    fn retry_stop(&mut self) {
+        if self.chat.busy {
+            self.chat.push("err", "Wait for the current turn before retrying Stop.");
+        } else if let Some(attempt) = self.chat.stop_attempt.clone() {
+            if self.chat.session != Some(attempt.session) {
+                self.chat.push("err", "Return to the stopped session before retrying Stop.");
+                return;
+            }
+            let frame = attempt.frame();
+            let sent = self.chat.remote.as_ref().is_some_and(|remote| remote.send(frame.clone()).is_ok());
+            if sent || self.talk_to_daemon(frame) {
+                self.chat.push("stat", &format!("Retrying Stop with caller ID {}.", attempt.id));
+            } else {
+                self.chat.push("err", "Stop retained; retry when the daemon is available.");
+            }
+        } else {
+            self.chat.push("err", "No Stop attempt to retry.");
+        }
+    }
+
     /// One question per Enter. The input line is the answer field, so typing
     /// past the choices works here exactly as it does in the plain CLI.
     fn command(&mut self, command: &str) {
         let (name, rest) = command.split_once(' ').unwrap_or((command, ""));
-        if self.source.daemon_base().is_none() && matches!(name, "retry" | "discard") {
-            self.chat.push("stat", "No daemon prompt is saved in local mode.");
+        if self.source.daemon_base().is_none()
+            && matches!(name, "retry" | "discard" | "retry-stop" | "discard-stop")
+        {
+            self.chat.push("stat", "No daemon delivery is saved in local mode.");
+            return;
+        }
+        if name == "retry-stop" {
+            if !rest.trim().is_empty() {
+                self.chat.push("err", "use /retry-stop without arguments");
+            } else {
+                self.retry_stop();
+            }
+            return;
+        }
+        if name == "discard-stop" {
+            if !rest.trim().is_empty() {
+                self.chat.push("err", "use /discard-stop without arguments");
+            } else if self.chat.stop_attempt.take().is_some() {
+                self.chat.push("stat", "Saved Stop discarded; it may already have reached the daemon.");
+            } else {
+                self.chat.push("stat", "No Stop attempt to discard.");
+            }
             return;
         }
         if self.source.daemon_base().is_some() && name == "retry" {
@@ -3053,6 +3128,7 @@ impl App {
             self.chat.remote = None;
             self.chat.busy = false;
             self.chat.session = None;
+            self.chat.stop_attempt = None;
             self.chat.joining = None;
             self.chat.pending = None;
             self.chat.asking = None;
@@ -3317,6 +3393,9 @@ impl App {
             return;
         }
         self.chat.busy = false;
+        if self.chat.session != Some(id) {
+            self.chat.stop_attempt = None;
+        }
         self.chat.pending = None;
         self.chat.asking = None;
         self.chat.running_calls = Default::default();
@@ -5222,6 +5301,7 @@ impl App {
             key("              /btw <question> asks without joining the conversation"),
             key("              /continue carries a turn stopped at a limit on from there"),
             key("              /retry resends a saved daemon prompt; /discard clears it"),
+            key("              /retry-stop resends an uncertain Stop; /discard-stop clears it"),
             key("              y / a / n answer an approval"),
             key("              enter     answer a question, one at a time"),
             key("              /…        tab completes; the list shows as you type"),
@@ -5407,7 +5487,17 @@ fn slash(prompt: &str) -> Option<&str> {
 }
 
 fn tui_commands_matching(typed: &str) -> Vec<&'static (&'static str, &'static str, &'static str)> {
-    crate::chat::commands_matching(typed)
+    const TUI_ONLY: &[(&str, &str, &str)] = &[
+        ("retry-stop", "", "resend an uncertain Stop with its original turn and ID"),
+        ("discard-stop", "", "forget an uncertain Stop attempt"),
+    ];
+    let mut matching = crate::chat::commands_matching(typed);
+    let typed = typed.trim_start_matches('/');
+    match typed.split_once(' ') {
+        Some((name, _)) => matching.extend(TUI_ONLY.iter().filter(|(command, ..)| *command == name)),
+        None => matching.extend(TUI_ONLY.iter().filter(|(command, ..)| command.starts_with(typed))),
+    }
+    matching
 }
 
 /// Why this command cannot run while a turn is running, if it cannot.
@@ -5515,9 +5605,60 @@ mod tests {
     fn retry_commands_are_in_tui_completion_without_replacing_shared_commands() {
         let names: Vec<_> = tui_commands_matching("/re").into_iter().map(|(name, ..)| *name).collect();
         assert!(names.contains(&"retry"));
+        assert!(names.contains(&"retry-stop"));
         assert!(tui_commands_matching("/discard ").iter().any(|(name, ..)| *name == "discard"));
+        assert!(tui_commands_matching("/discard-stop ").iter().any(|(name, ..)| *name == "discard-stop"));
         assert!(tui_commands_matching("/session").iter().any(|(name, ..)| *name == "session"));
         assert!(tui_commands_matching("/export-html ").iter().any(|(name, ..)| *name == "export-html"));
+    }
+
+    #[test]
+    fn uncertain_ordinary_stop_keeps_its_identity_until_acknowledged() {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let rook = rook_core::Rook::from_parts(
+            rook_store::Store::open(home.path().join("store")).unwrap(),
+            rook_core::Config::default(),
+            rook_skills::Environment::bare("linux", "x86_64", "0.1.0"),
+            rook_skills::SkillIndex::default(),
+            workspace.path().to_path_buf(),
+        );
+        let session = rook.start_session("stop retry").unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let mut app = super::App::new(crate::source::Source::Local(std::sync::Arc::new(rook)), runtime, true);
+        app.chat.session = Some(session);
+        app.chat.turn_id = Some("turn-one".into());
+        app.chat.busy = true;
+        let (remote, mut received) = tokio::sync::mpsc::unbounded_channel();
+        app.chat.remote = Some(remote);
+        app.on_action(super::Action::Stop);
+        let first = received.try_recv().unwrap();
+        let saved = app.chat.stop_attempt.clone().unwrap();
+        assert!(saved.generation.is_none());
+        assert_eq!(saved.turn.as_deref(), Some("turn-one"));
+        app.heard_from_daemon(super::ChatEvent::Failed { message: "socket lost".into() });
+        assert_eq!(app.chat.stop_attempt.as_ref().unwrap().id, saved.id);
+        assert_eq!(serde_json::to_value(first).unwrap(), serde_json::to_value(saved.frame()).unwrap());
+        assert!(app.chat.log.iter().any(|(_, line)| line.contains("/retry-stop")));
+        let (reconnected, mut repeated) = tokio::sync::mpsc::unbounded_channel();
+        app.chat.remote = Some(reconnected);
+        app.retry_stop();
+        assert_eq!(
+            serde_json::to_value(repeated.try_recv().unwrap()).unwrap(),
+            serde_json::to_value(saved.frame()).unwrap(),
+            "retry must send the original caller ID and turn"
+        );
+        app.heard_from_daemon(super::ChatEvent::Turn { id: "turn-one".into() });
+        assert!(app.chat.stop_attempt.is_some(), "reattaching to the same turn retains retry identity");
+        app.heard_from_daemon(super::ChatEvent::StopApplied {
+            id: saved.id.clone(),
+            generation: None,
+            already_applied: true,
+        });
+        assert!(app.chat.stop_attempt.is_none());
+        app.chat.stop_attempt = Some(saved);
+        app.heard_from_daemon(super::ChatEvent::Turn { id: "turn-two".into() });
+        assert!(app.chat.stop_attempt.is_none(), "a successor must not inherit the old Stop");
     }
 
     #[test]
