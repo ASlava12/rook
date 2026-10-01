@@ -128,6 +128,34 @@ async fn mcp_server() -> (Arc<rook_mcp::Server>, tokio::task::JoinHandle<()>) {
 }
 
 #[tokio::test]
+async fn request_catalog_records_deferred_mcp_tool_from_the_attempted_turn() {
+    let root = tempfile::tempdir().unwrap();
+    let rook = rook_at(root.path());
+    let (server, task) = mcp_server().await;
+    let descriptors = server.list_tools().await.unwrap();
+    let model = Model::new(vec![Message::assistant("done")]);
+    let session = rook.start_session("deferred catalog").unwrap();
+    let mut agent = AgentLoop::new(&rook, model.clone(), session);
+    agent.tools.register_mcp_catalog(
+        [(server, descriptors)],
+        rook_tools::mcp::CatalogLimits { max_server_tools: 0, ..Default::default() },
+    );
+    agent.run("inspect the available tools").await.unwrap();
+    let request = &model.seen.lock().unwrap()[0];
+    assert!(request.tools.iter().any(|tool| tool.name == "mcp_tools"));
+    assert!(request.tools.iter().any(|tool| tool.name == "mcp_call"));
+    assert!(!request.tools.iter().any(|tool| tool.name == "camera__shot"));
+    let saved = rook.context_usage(session, None).unwrap().last_request.unwrap();
+    assert_eq!(
+        (saved.catalog.mcp.discovered, saved.catalog.mcp.advertised, saved.catalog.mcp.deferred),
+        (1, 0, 1)
+    );
+    assert_eq!(saved.catalog.mcp.deferred_names, ["camera__shot"]);
+    assert_eq!(saved.catalog.mcp.omitted_deferred, 0);
+    task.abort();
+}
+
+#[tokio::test]
 async fn mcp_images_survive_a_batch_store_reopen_fork_and_explicit_retrieval() {
     // The only test in this process; keep vault and prompt state in its fixture.
     let home = tempfile::tempdir().unwrap();

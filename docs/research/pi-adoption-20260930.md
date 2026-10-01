@@ -11,7 +11,7 @@ Source: Pi `ee602414c703be8da722ec56de7f2399e62581ac`; starting Rook:
 | Configurable keyboard actions and prompt undo | Complete | Shared registry/config/help, bounded Unicode edit tests, remapped-key and external-editor PTY checks, full CI passed |
 | Branch navigation and optional branch summary | In progress | Existing session/event IDs, bounded tree/history, explicit workspace semantics, attributable summary |
 | Inline tool cards | In progress | Compact/expanded results, errors/duration/diffs, bounded loading, TUI/browser verification |
-| Context provenance inspector | In progress | Request-specific sources, discovered vs loaded skills, deferred tools, CLI/API/TUI/browser |
+| Context provenance inspector | In progress | Request-specific sources and loaded skills, deferred MCP tools in CLI/API; dedicated TUI/browser views pending |
 | Local HTML export | In progress | Selected history scope, bounded streaming, escaped content, no publication, cross-frontend access |
 | Opt-in phase-based model routing | Pending | Explicit policy, continuity/capability constraints, actual route/cost reporting, comparison without claiming unmeasured savings |
 | Declarative extension UI | Pending | Bounded status/progress/forms/result contract, trust boundary, text fallback and frontend parity |
@@ -1725,3 +1725,26 @@ integration tests and 235 agent-loop tests. This extends the existing service
 note without changing the store event layout or wire routes. Deferred tool
 state and dedicated TUI/browser context views remain open; the inspector row
 stays In progress.
+
+## Deferred MCP tools in the request inspector
+
+The request-attempt note now records the MCP catalog installed for that turn:
+discovered tools, tools advertised directly to the model, and tools available
+through `mcp_tools` and `mcp_call`. It copies at most 16 deferred names and
+counts the remainder. The summary is assembled from the same stable catalog
+that chooses direct advertisements, after duplicate names and schema budgets
+are resolved. It does not copy remote descriptions or schemas. The separate
+`agent.lazy_tools` setting abbreviates ordinary advertised schemas; it does
+not make them deferred. The count describes the catalog at request setup,
+not the later reachability of a server.
+
+The existing request note keeps its 16 KiB ceiling, trimming deferred names
+if needed, and old notes default the new field to an empty summary. The
+storage event layout and daemon API route stay unchanged. Focused tests
+passed for a real MCP catalog with byte and count overflow, for a scripted
+model request whose only MCP tool is deferred, and for local and daemon CLI
+reports including an old note. `cargo xtask compaction` exited 0 (4.02 MiB
+on disk, 37.1x dictionary and 5.8x end-to-end compression). Full
+`cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0 (`ci: ok`, 747.6
+seconds), including 85 CLI integration tests. Dedicated TUI/browser context
+views remain open, so this capability stays In progress.

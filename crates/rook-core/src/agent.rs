@@ -1085,6 +1085,7 @@ impl<'a> AgentLoop<'a> {
                 self.rook.config.agent.lazy_tools,
                 used,
                 specs,
+                self.tools.mcp_catalog_summary(),
                 source_manifest.clone(),
             );
             let mut body = serde_json::to_string(&catalog)?;
@@ -1093,6 +1094,8 @@ impl<'a> AgentLoop<'a> {
                     catalog.omitted_tools = catalog.tool_count - catalog.tools.len();
                 } else if catalog.sources.sources.pop().is_some() {
                     catalog.sources.omitted_sources += 1;
+                } else if catalog.mcp.deferred_names.pop().is_some() {
+                    catalog.mcp.omitted_deferred += 1;
                 } else {
                     break;
                 }

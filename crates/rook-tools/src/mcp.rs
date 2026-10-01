@@ -12,7 +12,7 @@ use rook_mcp::{Server, ToolDescriptor};
 use crate::{Result, Tool, ToolContext, ToolOutcome};
 
 mod catalog;
-pub use catalog::CatalogLimits;
+pub use catalog::{CatalogLimits, CatalogSummary};
 
 /// Preserve ordinary names; encode ambiguous or oversized pairs with a digest
 /// of the original strings, before sanitization can make two tools identical.

@@ -566,6 +566,7 @@ pub trait Tool: Send + Sync {
 #[derive(Clone, Default)]
 pub struct ToolBox {
     tools: Vec<Arc<dyn Tool>>,
+    mcp_catalog: mcp::CatalogSummary,
 }
 
 impl ToolBox {
@@ -593,7 +594,14 @@ impl ToolBox {
     /// instruction it may weigh against the rest of its prompt becomes a tool it
     /// cannot call, because it was never given one.
     pub fn without(&self, dropped: &[&str]) -> Self {
-        Self { tools: self.tools.iter().filter(|t| !dropped.contains(&t.name())).cloned().collect() }
+        Self {
+            tools: self.tools.iter().filter(|t| !dropped.contains(&t.name())).cloned().collect(),
+            mcp_catalog: self.mcp_catalog.clone(),
+        }
+    }
+
+    pub fn mcp_catalog_summary(&self) -> &mcp::CatalogSummary {
+        &self.mcp_catalog
     }
 
     pub fn get(&self, name: &str) -> Option<&Arc<dyn Tool>> {

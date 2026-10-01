@@ -119,6 +119,10 @@ async fn overflow_stays_discoverable_callable_and_bounded_without_changing_schem
     assert!(tools.get("alpha__last").is_none(), "fixture must exceed advertisement budget");
     assert_eq!(tools.get("alpha__first").unwrap().spec().parameters, small.input_schema);
     assert!(tools.get("beta__first").is_some());
+    let summary = tools.mcp_catalog_summary();
+    assert_eq!((summary.discovered, summary.advertised, summary.deferred), (3, 2, 1));
+    assert_eq!(summary.deferred_names, ["alpha__last"]);
+    assert_eq!(summary.omitted_deferred, 0);
 
     let mut ctx = ToolContext::new(std::env::temp_dir());
     ctx.max_output_bytes = 4096;
@@ -177,6 +181,7 @@ async fn overflow_stays_discoverable_callable_and_bounded_without_changing_schem
         CatalogLimits { max_server_tools: 0, ..limits },
     );
     assert_eq!(deferred.names(), ["mcp_tools", "mcp_call"]);
+    assert_eq!((deferred.mcp_catalog_summary().advertised, deferred.mcp_catalog_summary().deferred), (0, 2));
     let many: Vec<_> =
         (0..40).map(|n| descriptor(&format!("tool_{n:02}"), "A structured operation.")).collect();
     let input_bytes: usize = many
@@ -204,6 +209,12 @@ async fn overflow_stays_discoverable_callable_and_bounded_without_changing_schem
         let specs = bounded.specs();
         let direct: Vec<_> = specs.iter().filter(|s| s.name.starts_with("alpha__")).collect();
         assert!(!direct.is_empty() && direct.len() < many.len());
+        let summary = bounded.mcp_catalog_summary();
+        assert_eq!(summary.discovered, many.len());
+        assert_eq!(summary.advertised, direct.len());
+        assert_eq!(summary.deferred, many.len() - direct.len());
+        assert_eq!(summary.deferred_names.len(), summary.deferred.min(16));
+        assert_eq!(summary.omitted_deferred, summary.deferred - summary.deferred_names.len());
         assert!(serde_json::to_vec(&specs).unwrap().len() <= bound.max_bytes);
         assert!(
             direct.iter().map(|s| serde_json::to_vec(s).unwrap().len() + 1).sum::<usize>()
@@ -219,6 +230,8 @@ async fn overflow_stays_discoverable_callable_and_bounded_without_changing_schem
         CatalogLimits { max_tools: 3, max_server_tools: 128, max_server_bytes: 262144, ..Default::default() },
     );
     assert_eq!(count_limited.specs().len(), 3, "two helpers plus one direct tool");
+    assert_eq!(count_limited.mcp_catalog_summary().advertised, 1);
+    assert_eq!(count_limited.mcp_catalog_summary().deferred, 39);
     task1.abort();
     task2.abort();
 }

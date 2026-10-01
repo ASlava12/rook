@@ -111,6 +111,9 @@ pub struct RequestCatalog {
     pub tool_count: usize,
     pub tools: Vec<RequestTool>,
     pub omitted_tools: usize,
+    /// MCP catalog at setup; deferred entries use mcp_tools/mcp_call.
+    #[serde(default)]
+    pub mcp: rook_tools::mcp::CatalogSummary,
     #[serde(default)]
     pub sources: SourceManifest,
 }
@@ -154,6 +157,7 @@ impl RequestCatalog {
         lazy: bool,
         used_tokens: usize,
         specs: &[rook_llm::ToolSpec],
+        mcp: &rook_tools::mcp::CatalogSummary,
         sources: SourceManifest,
     ) -> Self {
         const MAX_TOOLS: usize = 32;
@@ -173,6 +177,7 @@ impl RequestCatalog {
             tool_count: specs.len(),
             omitted_tools: specs.len().saturating_sub(tools.len()),
             tools,
+            mcp: mcp.clone(),
             sources,
         }
     }
@@ -398,6 +403,7 @@ mod tests {
             true,
             123,
             &specs,
+            &Default::default(),
             super::SourceManifest::default(),
         );
         let encoded = serde_json::to_string(&catalog).unwrap();

@@ -1,5 +1,9 @@
 //! Keep the advertised prefix bounded without discarding callable tools.
-use std::{collections::BTreeMap, io::Write, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::Write,
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use rook_llm::ToolSpec;
@@ -24,6 +28,18 @@ impl Default for CatalogLimits {
     fn default() -> Self {
         Self { max_bytes: 65536, max_tools: 64, max_server_bytes: 16384, max_server_tools: 16 }
     }
+}
+
+/// Snapshot of one installed MCP catalog. Names are bounded before copying;
+/// schemas and server descriptions stay in the catalog itself.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CatalogSummary {
+    pub discovered: usize,
+    pub advertised: usize,
+    pub deferred: usize,
+    pub deferred_names: Vec<String>,
+    pub omitted_deferred: usize,
 }
 impl CatalogLimits {
     fn bounded(self) -> Self {
@@ -97,6 +113,7 @@ impl ToolBox {
             entries.insert(tool.name.clone(), Arc::new(tool));
         }
         if entries.is_empty() {
+            self.mcp_catalog = CatalogSummary::default();
             return;
         }
         let catalog = Arc::new(Catalog { entries });
@@ -110,6 +127,7 @@ impl ToolBox {
             .saturating_add(4);
         let mut used: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
         let mut advertised = 2;
+        let mut direct_names = BTreeSet::new();
         for tool in catalog.entries.values() {
             let (bytes, count) = used.entry(tool.server.name()).or_default();
             let available =
@@ -130,8 +148,23 @@ impl ToolBox {
             advertised += 1;
             *bytes += cost;
             total += cost;
+            direct_names.insert(tool.name.as_str());
             self.register(tool.clone());
         }
+        let mut summary = CatalogSummary {
+            discovered: catalog.entries.len(),
+            advertised: direct_names.len(),
+            deferred: catalog.entries.len() - direct_names.len(),
+            ..Default::default()
+        };
+        for name in catalog.entries.keys().filter(|name| !direct_names.contains(name.as_str())) {
+            if summary.deferred_names.len() == 16 {
+                summary.omitted_deferred += 1;
+            } else {
+                summary.deferred_names.push(name.clone());
+            }
+        }
+        self.mcp_catalog = summary;
         self.register(find);
         self.register(call);
     }

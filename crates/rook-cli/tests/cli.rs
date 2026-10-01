@@ -48,6 +48,7 @@ fn request_tool_catalog_is_the_same_locally_and_through_the_daemon() {
     assert_eq!(direct["last_request"]["catalog"]["tools"][0]["name"], "read_file");
     assert_eq!(direct["last_request"]["event_seq"], 0);
     assert_eq!(direct["last_request"]["catalog"]["sources"]["sources"].as_array().unwrap().len(), 0);
+    assert_eq!(direct["last_request"]["catalog"]["mcp"]["discovered"], 0);
     let text = rook.ok(&["session", "context", &id]);
     assert!(text.contains("read_file") && text.contains("scripted/test"), "{text}");
 
@@ -59,6 +60,8 @@ fn request_tool_catalog_is_the_same_locally_and_through_the_daemon() {
             "provider_id": "scripted/test", "delivery": "native", "detail": "stub",
             "used_tokens": 210, "tool_count": 1, "omitted_tools": 0,
             "tools": [{"name": "read_file", "estimated_tokens": 12}],
+            "mcp": {"discovered": 3, "advertised": 1, "deferred": 2,
+                    "deferred_names": ["alpha__last", "beta__last"], "omitted_deferred": 0},
             "sources": {
                 "discovered_skills": 2, "applicable_skills": 1, "advertised_skills": 1,
                 "loaded_skill_events": 1,
@@ -84,13 +87,28 @@ fn request_tool_catalog_is_the_same_locally_and_through_the_daemon() {
     let direct = rook.json(&["session", "context", &id]);
     assert_eq!(direct["last_request"]["catalog"]["sources"]["sources"][0]["inclusion"], "card");
     assert_eq!(direct["last_request"]["catalog"]["sources"]["loaded_skill_events"], 1);
+    assert_eq!(direct["last_request"]["catalog"]["mcp"]["deferred_names"][0], "alpha__last");
     assert_eq!(direct["last_request"]["event_seq"], 1);
     let text = rook.ok(&["session", "context", &id]);
-    assert!(text.contains("greeting") && text.contains("card") && text.contains("loaded events"), "{text}");
+    assert!(
+        text.contains("greeting")
+            && text.contains("card")
+            && text.contains("loaded events")
+            && text.contains("alpha__last")
+            && text.contains("mcp_tools / mcp_call"),
+        "{text}"
+    );
     let _daemon = Daemon::start(&rook);
     assert_eq!(rook.json(&["session", "context", &id]), direct);
     let text = rook.ok(&["session", "context", &id]);
-    assert!(text.contains("greeting") && text.contains("card") && text.contains("loaded events"), "{text}");
+    assert!(
+        text.contains("greeting")
+            && text.contains("card")
+            && text.contains("loaded events")
+            && text.contains("alpha__last")
+            && text.contains("mcp_tools / mcp_call"),
+        "{text}"
+    );
 }
 
 #[test]

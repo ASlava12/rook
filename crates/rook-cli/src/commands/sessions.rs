@@ -435,6 +435,21 @@ fn show_context(usage: &rook_core::ContextUsage, json: bool) -> Result<()> {
         if request.omitted_tools > 0 {
             println!("{} more offered tools omitted from this bounded view", request.omitted_tools);
         }
+        if request.mcp.discovered > 0 {
+            println!(
+                "\nMCP catalog  {} discovered · {} directly offered · {} deferred via mcp_tools / mcp_call",
+                request.mcp.discovered, request.mcp.advertised, request.mcp.deferred
+            );
+            for name in &request.mcp.deferred_names {
+                println!("  {name}");
+            }
+            if request.mcp.omitted_deferred > 0 {
+                println!(
+                    "{} more deferred names omitted from this bounded view",
+                    request.mcp.omitted_deferred
+                );
+            }
+        }
         let sources = &request.sources;
         if sources.discovered_skills > 0 || !sources.sources.is_empty() {
             println!(

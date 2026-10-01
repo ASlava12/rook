@@ -242,6 +242,13 @@ the loaded-event count includes only skill bodies still in live context after
 compaction. A card does not imply that its body was loaded. Origins and token
 counts describe the recorded request attempt; the inspector does not reread
 those files or claim they still match the workspace.
+The same note snapshots the MCP catalog installed for that attempt. It counts
+discovered tools, those offered directly in the request, and tools reached
+through `mcp_tools` and `mcp_call`; at most 16 deferred names are copied, with
+an omitted count. These are catalog entries available at setup, not a claim
+that a remote server remained reachable when the model later called it.
+`agent.lazy_tools` uses shorter advertised schemas and does not itself defer
+tools. Older request notes default the MCP summary to empty.
 
 ## The agent loop
 
