@@ -1165,3 +1165,32 @@ Queue remains In progress; all Pending rows and branch live checks remain open.
 The full `cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0 (`ci: ok`,
 687.2 seconds), including all 76 CLI integration tests and doctests. No
 production storage code changed, so compaction was not rerun for this block.
+
+## TUI retry of an uncertain socket prompt
+
+The TUI now retains one exact daemon prompt frame while its process remains
+open. It measures the JSON frame before copying the text and options into the
+outbox, with the existing 16 MiB socket limit. `/retry` reuses the original
+session target, ID, text and options, reconnecting if the old daemon channel
+closed; `/discard` explicitly frees the candidate. A new prompt is held until
+the candidate is resolved. The TUI clears it after observing its own start and
+completion or an `already_admitted` acknowledgement. Connection and server
+failures leave it available. The retry commands appear in TUI completion,
+palette and help. The retained frame is in process memory, so a closed TUI
+cannot restore it; the plain REPL still needs a retry action.
+
+Focused tests cover exact retry identity, uncertain and known endings, payload
+conflicts, size enforcement before cloning, and TUI command discovery. They
+exited 0, as did targeted Clippy. A live TUI interaction check remains open;
+the real-daemon protocol admission is covered by the earlier WebSocket tests.
+Queue remains In progress, alongside caller-owned goal controls and remaining
+lifecycle coverage. Pending capability rows and branch live checks are open.
+
+The first full `cargo xtask ci` with `RUST_TEST_THREADS=1` exited 1 because
+`killed_followups_resume_once_with_saved_settings_and_cancelled_ones_stay_stopped`
+timed out waiting for its mock model. That unrelated integration test passed
+alone on retry (exit 0). The second full CI exited 0 (`ci: ok`, 667.9 seconds),
+including all 76 CLI integration tests and doctests. No storage code changed,
+so compaction was not rerun. The existing bottom pinned queue preview and its
+draft growth and approval layout test still pass; a live Windows TUI interaction
+check remains open.

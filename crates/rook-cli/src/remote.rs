@@ -7,6 +7,8 @@
 
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
+use serde::Serialize;
+use std::io::Write;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -18,6 +20,96 @@ use rook_proto::{ChatEvent, ClientMessage};
 pub fn channel(workspace: &std::path::Path) -> Result<(delivery::Sender, delivery::Receiver)> {
     let config = rook_core::Config::load_for(workspace)?;
     Ok(delivery::channel(config.server.chat_queue_events, config.server.chat_queue_bytes))
+}
+
+/// Count JSON before cloning a prompt with attachments for an uncertain send.
+pub fn within_frame(value: &impl Serialize) -> bool {
+    struct Counter(usize);
+    impl Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if bytes.len() > self.0 {
+                return Err(std::io::Error::other("socket frame limit exceeded"));
+            }
+            self.0 -= bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    serde_json::to_writer(Counter(rook_core::attachments::MAX_FRAME_BYTES), value).is_ok()
+}
+
+/// One caller-owned prompt identity retained across daemon socket failures.
+/// The terminal process owns it; a new prompt requires explicit resolution.
+#[derive(Default)]
+pub struct PromptRetry {
+    frame: Option<ClientMessage>,
+    in_flight: bool,
+    started_session: Option<String>,
+}
+
+impl PromptRetry {
+    pub fn pending(&self) -> bool {
+        self.frame.is_some()
+    }
+
+    pub fn remember(&mut self, frame: &ClientMessage) -> Result<()> {
+        anyhow::ensure!(!self.pending(), "resolve the saved prompt first with /retry or /discard");
+        anyhow::ensure!(matches!(frame, ClientMessage::Prompt { .. }), "only prompts can be retried");
+        anyhow::ensure!(within_frame(frame), "prompt exceeds the 16 MiB socket frame limit");
+        self.frame = Some(frame.clone());
+        self.in_flight = true;
+        self.started_session = None;
+        Ok(())
+    }
+
+    pub fn frame(&self) -> Option<ClientMessage> {
+        self.frame.clone()
+    }
+
+    pub fn retry(&mut self) -> Option<ClientMessage> {
+        let frame = self.frame();
+        if frame.is_some() {
+            self.in_flight = true;
+            self.started_session = None;
+        }
+        frame
+    }
+
+    pub fn started(&mut self, session: &str) {
+        if self.in_flight
+            && let Some(ClientMessage::Prompt { session: intended, .. }) = &self.frame
+            && intended.as_deref().is_none_or(|id| id == session)
+        {
+            self.started_session = Some(session.to_owned());
+        }
+    }
+
+    pub fn completed(&mut self, session: Option<&str>) {
+        if self.in_flight && self.started_session.as_deref() == session && session.is_some() {
+            self.discard();
+        } else {
+            self.disconnected();
+        }
+    }
+
+    pub fn acknowledged(&mut self) {
+        if self.in_flight {
+            self.discard();
+        }
+    }
+
+    pub fn disconnected(&mut self) {
+        self.in_flight = false;
+        self.started_session = None;
+    }
+
+    pub fn discard(&mut self) {
+        self.frame = None;
+        self.in_flight = false;
+        self.started_session = None;
+    }
 }
 
 /// Hold one conversation until the socket closes or the sender is dropped.
@@ -295,6 +387,55 @@ impl Watching {
 #[cfg(test)]
 mod audit_tests {
     use super::*;
+    fn prompt() -> ClientMessage {
+        ClientMessage::Prompt {
+            session: None,
+            text: "/goal inspect".into(),
+            id: Some("caller-one".into()),
+            target: None,
+            options: Default::default(),
+        }
+    }
+
+    #[test]
+    fn saved_prompt_retries_exactly_after_uncertain_delivery_and_blocks_replacement() {
+        let mut saved = PromptRetry::default();
+        saved.remember(&prompt()).unwrap();
+        assert!(saved.remember(&prompt()).is_err());
+        saved.started("new-session");
+        saved.disconnected();
+        saved.completed(Some("new-session"));
+        assert_eq!(
+            serde_json::to_value(saved.retry()).unwrap(),
+            serde_json::to_value(Some(prompt())).unwrap()
+        );
+        saved.started("new-session");
+        saved.completed(Some("other-session"));
+        assert!(saved.pending());
+        saved.retry();
+        saved.acknowledged();
+        assert!(!saved.pending());
+
+        saved.remember(&prompt()).unwrap();
+        saved.started("new-session");
+        saved.completed(Some("new-session"));
+        assert!(!saved.pending());
+    }
+
+    #[test]
+    fn oversized_escaped_prompt_is_refused_before_copying_and_discard_allows_another() {
+        let mut saved = PromptRetry::default();
+        let mut frame = prompt();
+        if let ClientMessage::Prompt { text, .. } = &mut frame {
+            *text = "\\".repeat(rook_core::attachments::MAX_FRAME_BYTES / 2 + 1);
+        }
+        assert!(!within_frame(&frame));
+        assert!(saved.remember(&frame).is_err());
+        assert!(!saved.pending());
+        saved.remember(&prompt()).unwrap();
+        saved.discard();
+        assert!(!saved.pending());
+    }
     #[test]
     fn terminal_failures_end_a_run_but_setting_errors_do_not() {
         let (send, _) = mpsc::unbounded_channel();

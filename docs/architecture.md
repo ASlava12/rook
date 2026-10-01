@@ -167,6 +167,11 @@ its start and completion, a matching `already_admitted` reply, or explicit
 discard. A new prompt waits for the saved candidate to be resolved.
 Large frames can exceed browser storage quota and then remain retryable only
 while that tab stays loaded.
+The TUI likewise retains one size-checked prompt frame while its process runs.
+After a daemon socket failure, `/retry` resends that frame and `/discard`
+explicitly releases it; a new prompt cannot silently replace the ID. An
+observed start and completion or `already_admitted` acknowledgement resolves
+the retained frame. Closing the TUI process does not persist this outbox.
 
 The live replay has independent event and encoded-byte limits
 (`server.chat_replay_events`, `server.chat_replay_bytes`). Broadcast notifications

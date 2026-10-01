@@ -724,6 +724,10 @@ struct Chat {
     /// approvals, answers and a cancellation. `None` when the turn is this
     /// process's own.
     remote: Option<mpsc::UnboundedSender<ClientMessage>>,
+    /// Exact bounded prompt frame for manual retry after an uncertain socket
+    /// failure. Only an observed start and completion, duplicate ack, or an
+    /// explicit discard resolves it.
+    prompt_retry: crate::remote::PromptRetry,
     /// What the call in flight last said about itself, while it is in flight.
     /// Cleared when it ends, because a finished call says nothing.
     working: Option<String>,
@@ -2008,6 +2012,7 @@ impl App {
                 }
             }
             ChatEvent::Started { session } => {
+                self.chat.prompt_retry.started(&session);
                 self.chat.session = rook_store::parse_session_id(&session);
                 self.flush_interjections();
             }
@@ -2145,14 +2150,21 @@ impl App {
                 }
             }
             ChatEvent::Cancelled => {
+                self.chat
+                    .prompt_retry
+                    .completed(self.chat.session.map(rook_store::format_session_id).as_deref());
                 self.chat.push("stat", "[stopped]");
                 self.finished();
             }
             ChatEvent::Done { steps, input_tokens, output_tokens, files_changed, stopped, .. } => {
                 if stopped == "already_admitted" {
+                    self.chat.prompt_retry.acknowledged();
                     self.finished();
                     return;
                 }
+                self.chat
+                    .prompt_retry
+                    .completed(self.chat.session.map(rook_store::format_session_id).as_deref());
                 if let Some(why) = rook_core::agent::why_it_stopped(&stopped) {
                     self.chat.push("stat", &format!("  {why}"));
                 }
@@ -2167,7 +2179,14 @@ impl App {
                 self.chat.push("err", &message);
             }
             ChatEvent::Failed { message } => {
+                self.chat.prompt_retry.disconnected();
                 self.chat.push("err", &message);
+                if self.chat.prompt_retry.pending() {
+                    self.chat.push(
+                        "stat",
+                        "Prompt saved. Use /retry with its original ID and options, or /discard to clear it.",
+                    );
+                }
                 self.finished();
             }
         }
@@ -2665,6 +2684,20 @@ impl App {
     /// second window is another client of it rather than a second copy that
     /// cannot exist.
     fn send_to_daemon(&mut self, prompt: String) {
+        if self.chat.prompt_retry.pending() {
+            self.chat.push("err", "Resolve the saved prompt with /retry or /discard before sending another.");
+            self.chat.input.set(&prompt);
+            self.chat.ended();
+            return;
+        }
+        if prompt.len() > rook_core::attachments::MAX_FRAME_BYTES
+            || !crate::remote::within_frame(&*self.shared.output.borrow())
+        {
+            self.chat.push("err", "Prompt or options exceed the 16 MiB socket frame limit.");
+            self.chat.input.set(&prompt);
+            self.chat.ended();
+            return;
+        }
         let opening = ClientMessage::Prompt {
             session: self.chat.session.map(rook_store::format_session_id),
             text: prompt,
@@ -2672,15 +2705,34 @@ impl App {
             target: None,
             options: crate::turn_options::for_turn(&mut self.shared.output.borrow_mut()),
         };
+        if let Err(error) = self.chat.prompt_retry.remember(&opening) {
+            self.chat.push("err", &error.to_string());
+            if let ClientMessage::Prompt { text, options, .. } = opening {
+                self.chat.input.set(&text);
+                self.shared.output.borrow_mut().attachments = options.attachments;
+            }
+            self.chat.ended();
+            return;
+        }
+        if let Some(frame) = self.chat.prompt_retry.frame() {
+            self.send_saved_prompt(frame);
+        }
+    }
+
+    fn send_saved_prompt(&mut self, frame: ClientMessage) {
         // On the socket this window already has, if it has one: attaching to a
         // session opens one before there is a prompt, and a second socket would
         // be a second view of the same daemon arguing with the first.
         if let Some(say) = &self.chat.remote {
-            let _ = say.send(opening);
-            return;
+            if say.send(frame.clone()).is_ok() {
+                return;
+            }
+            self.chat.remote = None;
         }
-        if !self.talk_to_daemon(opening) {
+        if !self.talk_to_daemon(frame) {
             self.chat.busy = false;
+            self.chat.prompt_retry.disconnected();
+            self.chat.push("err", "Prompt retained; use /retry when the daemon is available.");
         }
     }
 
@@ -2787,7 +2839,7 @@ impl App {
             }
             return;
         }
-        let matches = crate::chat::commands_matching(self.chat.input.as_str());
+        let matches = tui_commands_matching(self.chat.input.as_str());
         let Some((first, args, _)) = matches.first() else { return };
         let common = matches.iter().skip(1).fold(first.to_string(), |common, (name, ..)| {
             common.chars().zip(name.chars()).take_while(|(a, b)| a == b).map(|(a, _)| a).collect()
@@ -2827,6 +2879,29 @@ impl App {
     /// past the choices works here exactly as it does in the plain CLI.
     fn command(&mut self, command: &str) {
         let (name, rest) = command.split_once(' ').unwrap_or((command, ""));
+        if self.source.daemon_base().is_some() && name == "retry" {
+            if !rest.trim().is_empty() {
+                self.chat.push("err", "use /retry without arguments");
+            } else if self.chat.busy {
+                self.chat.push("err", "Wait for the current turn to finish before retrying a saved prompt.");
+            } else if let Some(frame) = self.chat.prompt_retry.retry() {
+                self.chat.push("stat", "Retrying the saved prompt with its original ID and options.");
+                self.chat.began();
+                self.send_saved_prompt(frame);
+            } else {
+                self.chat.push("err", "No saved prompt to retry.");
+            }
+            return;
+        }
+        if self.source.daemon_base().is_some() && name == "discard" {
+            if !rest.trim().is_empty() {
+                self.chat.push("err", "use /discard without arguments");
+            } else {
+                self.chat.prompt_retry.discard();
+                self.chat.push("stat", "Saved prompt discarded; it may already have reached the daemon.");
+            }
+            return;
+        }
         if self.source.daemon_base().is_some() && name == "new" {
             self.connection_epoch = self.connection_epoch.wrapping_add(1);
             if let Some(observer) = self.turn.take() {
@@ -3221,8 +3296,25 @@ impl App {
     }
 
     fn send(&mut self) {
+        if self.source.daemon_base().is_some()
+            && self.chat.input.as_str().len() > rook_core::attachments::MAX_FRAME_BYTES
+        {
+            self.chat.push("err", "Prompt exceeds the 16 MiB socket frame limit.");
+            return;
+        }
         let prompt = self.chat.input.take().trim().to_string();
         if prompt.is_empty() {
+            return;
+        }
+        if self.source.daemon_base().is_some()
+            && !self.chat.busy
+            && self.chat.prompt_retry.pending()
+            && (slash(&prompt).is_none()
+                || prompt.starts_with("/goal ")
+                || rook_core::agent::carrying_on(&prompt))
+        {
+            self.chat.push("err", "Resolve the saved prompt with /retry or /discard first.");
+            self.chat.input.set(&prompt);
             return;
         }
         // Kept whatever happens to it next — a refused turn is the one most
@@ -3247,6 +3339,12 @@ impl App {
                     self.chat.input.set(&prompt);
                 }
             }
+            return;
+        }
+        if let Some(command @ ("retry" | "discard")) = slash(&prompt)
+            && self.source.daemon_base().is_some()
+        {
+            self.command(command);
             return;
         }
         if let Some(command) = slash(&prompt)
@@ -3839,18 +3937,15 @@ impl App {
             .filter(|pane| matches(pane.name(), pane.what()))
             .map(|pane| (pane.name().to_string(), pane.what().to_string()))
             .collect();
-        out.extend(
-            crate::chat::commands_matching("/")
-                .into_iter()
-                .filter(|(name, _, what)| matches(name, what))
-                .map(|(name, args, what)| {
-                    let name = match args.is_empty() {
-                        true => format!("/{name}"),
-                        false => format!("/{name} {args}"),
-                    };
-                    (name, (*what).to_string())
-                }),
-        );
+        out.extend(tui_commands_matching("/").into_iter().filter(|(name, _, what)| matches(name, what)).map(
+            |(name, args, what)| {
+                let name = match args.is_empty() {
+                    true => format!("/{name}"),
+                    false => format!("/{name} {args}"),
+                };
+                (name, (*what).to_string())
+            },
+        ));
         out.extend(ACTIONS.iter().filter(|spec| matches(spec.id, spec.help)).map(|spec| {
             (format!("action: {}", spec.id), format!("{} [{}]", spec.help, self.bindings.label(spec.action)))
         }));
@@ -3864,7 +3959,7 @@ impl App {
         // `/help` and in the Help tab, which is where you look after giving up.
         // Shown while one is typed, they are a menu.
         let completing = match self.chat.input.as_str().starts_with('/') {
-            true => crate::chat::commands_matching(self.chat.input.as_str()),
+            true => tui_commands_matching(self.chat.input.as_str()),
             false => Vec::new(),
         };
         let mentioned = self.mentioned();
@@ -4951,6 +5046,7 @@ impl App {
             )),
             key("              /btw <question> asks without joining the conversation"),
             key("              /continue carries a turn stopped at a limit on from there"),
+            key("              /retry resends a saved daemon prompt; /discard clears it"),
             key("              y / a / n answer an approval"),
             key("              enter     answer a question, one at a time"),
             key("              /…        tab completes; the list shows as you type"),
@@ -5135,6 +5231,28 @@ fn slash(prompt: &str) -> Option<&str> {
     prompt.strip_prefix('/').filter(|c| !c.starts_with("btw ") && !c.contains('\n'))
 }
 
+const TUI_RETRY_COMMANDS: &[(&str, &str, &str)] = &[
+    ("retry", "", "resend the saved daemon prompt with its original ID"),
+    ("discard", "", "clear a saved prompt that may already have arrived"),
+];
+
+fn tui_commands_matching(typed: &str) -> Vec<&'static (&'static str, &'static str, &'static str)> {
+    let mut found = crate::chat::commands_matching(typed);
+    let typed = typed.trim_start_matches('/');
+    let (name, exact) = match typed.split_once(' ') {
+        Some((name, _)) => (name, true),
+        None => (typed, false),
+    };
+    found.extend(
+        TUI_RETRY_COMMANDS.iter().filter(
+            |(command, ..)| {
+                if exact { *command == name } else { command.starts_with(name) }
+            },
+        ),
+    );
+    found
+}
+
 /// Why this command cannot run while a turn is running, if it cannot.
 ///
 /// Named rather than allow-listed, and the four of them are one thing: each
@@ -5206,6 +5324,13 @@ fn kind_style(kind: &str) -> Style {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn retry_commands_are_in_tui_completion_without_replacing_shared_commands() {
+        let names: Vec<_> = tui_commands_matching("/re").into_iter().map(|(name, ..)| *name).collect();
+        assert!(names.contains(&"retry"));
+        assert!(tui_commands_matching("/discard ").iter().any(|(name, ..)| *name == "discard"));
+        assert!(tui_commands_matching("/session").iter().any(|(name, ..)| *name == "session"));
+    }
 
     #[test]
     fn request_effort_status_changes_are_visible_without_repeating_every_step() {
