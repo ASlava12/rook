@@ -84,7 +84,11 @@ Their command text does not become a queued user correction; plain messages,
 If a daemon connection fails after an ordinary Stop, the open TUI retains the
 session, turn and caller ID. `/retry-stop` resends the same scoped request;
 `/discard-stop` clears it. An acknowledgement or a successor turn clears the
-attempt. Closing the TUI still loses an unacknowledged attempt.
+attempt. A bounded private retry journal under `ROOK_HOME` keeps one pending
+attempt per workspace and session across window restarts. Opening that session
+restores the ID for explicit retry and pins a retry hint in the TUI footer even
+after a live snapshot replaces the chat. The daemon remains the authority on
+whether the Stop was applied.
 
 An explicitly reviewed branch summary is a bounded Note in the target session.
 Its record names the source session and last source event. Replay treats the

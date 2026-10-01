@@ -1828,3 +1828,33 @@ The two focused TUI tests and full `cargo xtask ci` exited 0 (`ci: ok`,
 713.5 seconds), including 112 CLI/TUI unit tests, all 85 CLI integration
 tests and doctests. Windows ran no PTY tests. No store format or storage
 implementation changed, so compaction was not rerun.
+
+## Ordinary Stop retry across TUI window restart
+
+The TUI now writes an ordinary Stop's workspace, session, turn and caller ID
+to a private sidecar before sending it. The file is capped at 64 KiB and 64
+sessions, read under its byte limit, validated before identities are copied,
+and atomically replaced under a cross-process lock. Reopening the same session
+restores the uncertain attempt for explicit `/retry-stop` or `/discard-stop`;
+an acknowledgement or successor turn clears only the matching saved ID.
+The footer keeps the retry hint visible when a daemon snapshot replaces the
+chat log, which would otherwise erase the one-time recovery notice.
+The daemon's existing durable receipt still decides whether a retry was
+already applied. Concurrent windows can each retry their own in-memory ID;
+the sidecar retains the latest pending ID per workspace and session. No
+existing store value or wire frame changed.
+
+Focused tests cover two TUI instances, exact frame retry and cleanup, the
+footer after a snapshot,
+workspace isolation, an overwritten ID, invalid IDs and oversized files.
+Live daemon TUI interaction and broader queue lifecycle checks remain open.
+The focused journal tests and two-window TUI test exited 0. Required
+`cargo xtask compaction` exited 0: 4.02 MiB on disk, 37.1x dictionary
+compression and 5.8x end-to-end. An initial full CI before the footer hint
+exited 0, but the footer changed afterwards, so it was not the final gate.
+The first full CI on the final tree exited 1 when an existing daemon follow-up
+recovery test timed out after 90 seconds; the other 84 CLI integration tests
+passed. That test passed alone on retry (exit 0). The final full
+`cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0 (`ci: ok`, 758.9 seconds),
+including 116 CLI/TUI unit tests, all 85 CLI integration tests and doctests.
+Windows ran no PTY tests. Queue remains In progress.

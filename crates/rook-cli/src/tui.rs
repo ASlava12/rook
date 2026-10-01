@@ -39,6 +39,7 @@ mod keys;
 mod mcp;
 mod mcp_auth;
 mod queue;
+mod stop_retry;
 mod tasks;
 mod wrapping;
 
@@ -1320,6 +1321,7 @@ struct App {
     source: crate::source::Source,
     runtime: tokio::runtime::Runtime,
     chat: Chat,
+    stop_retry: Option<stop_retry::Journal>,
     tasks: tasks::Tasks,
     mcp: mcp::Connections,
     queue: queue::Queue,
@@ -1483,6 +1485,14 @@ impl App {
         let history = history::History::new(&source);
         let context = context::ContextPane::default();
         let queue = queue::Queue::new(&source, config.work.max_message_bytes);
+        let (stop_retry, stop_retry_error) = if source.daemon_base().is_some() {
+            match stop_retry::Journal::new(rook_core::paths::home(), &workspace) {
+                Ok(journal) => (Some(journal), None),
+                Err(error) => (None, Some(error)),
+            }
+        } else {
+            (None, None)
+        };
         let mcp_controls = mcp::Connections::new(&source, &runtime, mcp.clone());
         let (bindings, binding_error) = match config.tui.bindings() {
             Ok(bindings) => (bindings, None),
@@ -1508,6 +1518,7 @@ impl App {
                 history: remembered_prompts(),
                 ..Chat::default()
             },
+            stop_retry,
             files_here: None,
             most_files: config.sandbox.max_files_searched,
             // Only when the window is configured. Otherwise it is the
@@ -1588,6 +1599,9 @@ impl App {
         app.reload();
         if let Some(error) = binding_error {
             app.chat.push("err", &format!("Invalid TUI settings; using default keys: {error}"));
+        }
+        if let Some(error) = stop_retry_error {
+            app.chat.push("err", &format!("Stop retry cannot survive window close: {error}"));
         }
         app
     }
@@ -2146,13 +2160,13 @@ impl App {
                 if self.chat.stop_attempt.as_ref().is_some_and(|attempt| {
                     attempt.generation.is_none() && attempt.turn.as_deref() != Some(&id)
                 }) {
-                    self.chat.stop_attempt = None;
+                    self.clear_stop_attempt();
                 }
                 self.chat.turn_id = Some(id);
             }
             ChatEvent::StopApplied { id, already_applied, .. } => {
                 if self.chat.stop_attempt.as_ref().is_some_and(|attempt| attempt.id == id) {
-                    self.chat.stop_attempt = None;
+                    self.clear_stop_attempt();
                     self.chat.push(
                         "stat",
                         if already_applied {
@@ -2267,7 +2281,7 @@ impl App {
                 }
             }
             ChatEvent::Cancelled => {
-                self.chat.stop_attempt = None;
+                self.clear_stop_attempt();
                 self.chat
                     .prompt_retry
                     .completed(self.chat.session.map(rook_store::format_session_id).as_deref());
@@ -2275,7 +2289,7 @@ impl App {
                 self.finished();
             }
             ChatEvent::Done { steps, input_tokens, output_tokens, files_changed, stopped, .. } => {
-                self.chat.stop_attempt = None;
+                self.clear_stop_attempt();
                 if stopped == "already_admitted" {
                     self.chat.prompt_retry.acknowledged();
                     self.finished();
@@ -2742,6 +2756,12 @@ impl App {
                         id: id.clone(),
                     };
                     let frame = attempt.frame();
+                    if let Some(journal) = &self.stop_retry
+                        && let Err(error) = journal.save(&attempt)
+                    {
+                        self.chat
+                            .push("err", &format!("Stop will only be retryable in this window: {error}"));
+                    }
                     self.chat.stop_attempt = Some(attempt);
                     if let Some(observed) = generation.as_ref() {
                         self.chat.push("stat", &format!(
@@ -3069,6 +3089,15 @@ impl App {
         }
     }
 
+    fn clear_stop_attempt(&mut self) {
+        if let Some(attempt) = self.chat.stop_attempt.take()
+            && let Some(journal) = &self.stop_retry
+            && let Err(error) = journal.clear(&attempt)
+        {
+            self.chat.push("err", &format!("Could not clear saved Stop retry: {error}"));
+        }
+    }
+
     /// One question per Enter. The input line is the answer field, so typing
     /// past the choices works here exactly as it does in the plain CLI.
     fn command(&mut self, command: &str) {
@@ -3090,7 +3119,8 @@ impl App {
         if name == "discard-stop" {
             if !rest.trim().is_empty() {
                 self.chat.push("err", "use /discard-stop without arguments");
-            } else if self.chat.stop_attempt.take().is_some() {
+            } else if self.chat.stop_attempt.is_some() {
+                self.clear_stop_attempt();
                 self.chat.push("stat", "Saved Stop discarded; it may already have reached the daemon.");
             } else {
                 self.chat.push("stat", "No Stop attempt to discard.");
@@ -3396,6 +3426,11 @@ impl App {
         if self.chat.session != Some(id) {
             self.chat.stop_attempt = None;
         }
+        let recovered_stop = if self.chat.stop_attempt.is_none() {
+            self.stop_retry.as_ref().map(|journal| journal.load(id))
+        } else {
+            None
+        };
         self.chat.pending = None;
         self.chat.asking = None;
         self.chat.running_calls = Default::default();
@@ -3403,6 +3438,20 @@ impl App {
         self.chat.joining = self.source.daemon_base().map(|_| id);
         self.chat.session = Some(id);
         self.recall_conversation(id, Some(next_seq));
+        match recovered_stop {
+            Some(Ok(Some(attempt))) => {
+                self.chat.push(
+                    "stat",
+                    &format!(
+                        "  saved Stop ID {} has uncertain delivery · /retry-stop or /discard-stop",
+                        attempt.id
+                    ),
+                );
+                self.chat.stop_attempt = Some(attempt);
+            }
+            Some(Err(error)) => self.chat.push("err", &format!("Could not read saved Stop retry: {error}")),
+            _ => {}
+        }
         self.chat.push(
             "stat",
             &format!(
@@ -4065,6 +4114,13 @@ impl App {
                 spans.push(Span::styled(*key, Style::default().fg(Color::Cyan)));
                 spans.push(Span::raw(*what));
             }
+        } else if self.chat.stop_attempt.is_some() {
+            let hint = if self.chat.busy {
+                "Stop sent · stop key repeats it  "
+            } else {
+                "Stop uncertain · /retry-stop or /discard-stop  "
+            };
+            spans.push(Span::styled(hint, Style::default().fg(Color::Yellow)));
         } else {
             for (action, what) in [
                 (Action::Palette, "commands"),
@@ -5659,6 +5715,63 @@ mod tests {
         app.chat.stop_attempt = Some(saved);
         app.heard_from_daemon(super::ChatEvent::Turn { id: "turn-two".into() });
         assert!(app.chat.stop_attempt.is_none(), "a successor must not inherit the old Stop");
+    }
+
+    #[test]
+    fn a_new_tui_window_recovers_the_saved_stop_for_its_session() {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let rook = std::sync::Arc::new(rook_core::Rook::from_parts(
+            rook_store::Store::open(home.path().join("store")).unwrap(),
+            rook_core::Config::default(),
+            rook_skills::Environment::bare("linux", "x86_64", "0.1.0"),
+            rook_skills::SkillIndex::default(),
+            workspace.path().to_path_buf(),
+        ));
+        let session = rook.start_session("saved stop").unwrap();
+        let turn = rook_store::format_session_id(rook_store::new_session_id());
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let mut first = super::App::new(crate::source::Source::Local(rook.clone()), runtime, true);
+        first.stop_retry =
+            Some(super::stop_retry::Journal::new(home.path().to_path_buf(), workspace.path()).unwrap());
+        first.chat.session = Some(session);
+        first.chat.turn_id = Some(turn);
+        first.chat.busy = true;
+        let (remote, mut sent) = tokio::sync::mpsc::unbounded_channel();
+        first.chat.remote = Some(remote);
+        first.on_action(super::Action::Stop);
+        let original = serde_json::to_value(sent.try_recv().unwrap()).unwrap();
+        let id = first.chat.stop_attempt.as_ref().unwrap().id.clone();
+        drop(first);
+
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let mut reopened = super::App::new(crate::source::Source::Local(rook), runtime, true);
+        reopened.stop_retry =
+            Some(super::stop_retry::Journal::new(home.path().to_path_buf(), workspace.path()).unwrap());
+        reopened.continue_known(session, "saved stop".into(), 1);
+        assert_eq!(reopened.chat.stop_attempt.as_ref().unwrap().id, id);
+        reopened.heard_from_daemon(super::ChatEvent::Snapshot {
+            session: rook_store::format_session_id(session),
+            running: false,
+            truncated: false,
+            approvals: Vec::new(),
+            questions: Vec::new(),
+        });
+        let mut screen = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        screen.draw(|frame| reopened.draw(frame)).unwrap();
+        let footer: String =
+            (0..100).map(|column| screen.backend().buffer()[(column, 29)].symbol()).collect();
+        assert!(footer.contains("/retry-stop"), "snapshot must not hide the recovered retry: {footer}");
+        let (remote, mut sent) = tokio::sync::mpsc::unbounded_channel();
+        reopened.chat.remote = Some(remote);
+        reopened.retry_stop();
+        assert_eq!(serde_json::to_value(sent.try_recv().unwrap()).unwrap(), original);
+        reopened.heard_from_daemon(super::ChatEvent::StopApplied {
+            id,
+            generation: None,
+            already_applied: true,
+        });
+        assert!(reopened.stop_retry.as_ref().unwrap().load(session).unwrap().is_none());
     }
 
     #[test]
