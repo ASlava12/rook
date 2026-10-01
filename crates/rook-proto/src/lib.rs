@@ -210,6 +210,12 @@ pub enum ApprovalDecision {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChatEvent {
+    /// A caller-owned Stop was durably applied (or had already been applied).
+    StopApplied {
+        id: String,
+        generation: Option<String>,
+        already_applied: bool,
+    },
     /// Current nonterminal goal, if any, for a client about to stop this turn.
     Goal {
         generation: Option<String>,

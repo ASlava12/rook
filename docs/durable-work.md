@@ -129,9 +129,18 @@ generation, Stop reports an error and leaves the goal running; reattach and
 retry. Old clients can still send `{"type":"cancel"}`. An identified Stop
 without a generation stops an ordinary turn, but refuses to pause a goal.
 The TUI and browser retain a Stop ID for repeated presses during the same
-turn; the socket protocol does not yet expose a manual retry after restarting
-the client. A resumed goal may report its current paused status on a duplicate
-prompt, so inspect the goal before choosing a new continuation.
+turn. The daemon emits `stop_applied` with the same ID after saving the pause;
+this acknowledgement resolves an uncertain Stop. The TUI prints the goal ID,
+generation and exact `rook task pause ... --control-id ... --generation ...`
+retry command before sending. If the socket disconnects before confirmation,
+the TUI keeps that ID while rejoining the goal. The browser saves one bounded
+goal Stop in tab storage before sending and offers **Retry saved Stop** and
+**Discard saved Stop** after a reload. Explicit retry reads the current goal,
+checks the saved generation and uses the identified HTTP control, including
+when no live socket remains after a daemon restart. Ordinary-turn Stop has no durable turn identity,
+so it is not offered for retry after a reload. A resumed goal may report its
+current paused status on a duplicate prompt; inspect the goal before choosing
+a new continuation.
 
 ## Edit or withdraw queued messages
 

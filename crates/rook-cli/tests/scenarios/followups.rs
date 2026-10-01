@@ -168,8 +168,10 @@ fn socket_stop_uses_observed_goal_generation_and_replays_once() {
     rook.write_config(&config(&model.url, "initial", "ask", rook.workspace.path()));
     let session = rook_store::new_session_id();
     let id = rook_store::format_session_id(session);
-    rook_store::Store::open(rook.home.path().join("store"))
-        .unwrap()
+    let ordinary = rook_store::new_session_id();
+    let ordinary_id = rook_store::format_session_id(ordinary);
+    let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+    store
         .create_session(&rook_store::SessionMeta::new(
             session,
             "stop identity",
@@ -177,6 +179,15 @@ fn socket_stop_uses_observed_goal_generation_and_replays_once() {
             rook_store::now_unix(),
         ))
         .unwrap();
+    store
+        .create_session(&rook_store::SessionMeta::new(
+            ordinary,
+            "ordinary stop identity",
+            rook.workspace.path().display().to_string(),
+            rook_store::now_unix(),
+        ))
+        .unwrap();
+    drop(store);
     let daemon = Daemon::start(&rook);
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let client = reqwest::Client::builder().no_proxy().build().unwrap();
@@ -203,6 +214,12 @@ fn socket_stop_uses_observed_goal_generation_and_replays_once() {
     let started = runtime.block_on(socket_event(&mut socket, "agent"));
     assert!(started["text"].as_str().unwrap().contains("Goal started"), "{started}");
     runtime.block_on(async {
+        socket.send(tokio_tungstenite::tungstenite::Message::Text(
+            json!({"type":"stop","id":"x".repeat(65),"generation":generation}).to_string().into(),
+        )).await.unwrap();
+        let error = socket_event(&mut socket, "error").await;
+        assert!(error["message"].as_str().unwrap().contains("Stop ID must"), "{error}");
+        assert_ne!(get(&client, &work).await["status"], "paused");
         let stop = json!({"type":"stop","id":"stop-once","generation":generation});
         socket.send(tokio_tungstenite::tungstenite::Message::Text(stop.to_string().into())).await.unwrap();
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -210,12 +227,19 @@ fn socket_stop_uses_observed_goal_generation_and_replays_once() {
             assert!(tokio::time::Instant::now() < deadline, "Stop did not pause the goal");
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
+        let receipt = socket_event(&mut socket, "stop_applied").await;
+        assert_eq!(receipt["id"], "stop-once");
+        assert_eq!(receipt["generation"], generation);
+        assert_eq!(receipt["already_applied"], false);
         let first = socket_event(&mut socket, "agent").await;
         assert!(first["text"].as_str().unwrap().contains("Pausing goal"), "{first}");
         client.post(format!("{work}/control")).json(&json!("resume"))
             .send().await.unwrap().error_for_status().unwrap();
         assert_ne!(get(&client, &work).await["status"], "paused");
         socket.send(tokio_tungstenite::tungstenite::Message::Text(stop.to_string().into())).await.unwrap();
+        let receipt = socket_event(&mut socket, "stop_applied").await;
+        assert_eq!(receipt["id"], "stop-once");
+        assert_eq!(receipt["already_applied"], true);
         let event = socket_event(&mut socket, "agent").await;
         assert!(event["text"].as_str().unwrap().contains("already applied"), "{event}");
         assert_ne!(get(&client, &work).await["status"], "paused", "a replay paused the resumed goal");
@@ -231,6 +255,36 @@ fn socket_stop_uses_observed_goal_generation_and_replays_once() {
         let error = socket_event(&mut socket, "error").await;
         assert!(error["message"].as_str().unwrap().contains("earlier run generation"), "{error}");
         assert_ne!(get(&client, &work).await["status"], "paused");
+    });
+    let mut ordinary_socket = runtime.block_on(async {
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!(
+            "{}/api/chat",
+            daemon.address.replacen("http", "ws", 1)
+        ))
+        .await
+        .unwrap();
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                json!({"type":"prompt","session":ordinary_id,"text":"ordinary task"}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        let goal = socket_event(&mut socket, "goal").await;
+        assert!(goal["generation"].is_null(), "{goal}");
+        socket
+    });
+    runtime.block_on(async {
+        ordinary_socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                json!({"type":"stop","id":"ordinary-stop"}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        let receipt = socket_event(&mut ordinary_socket, "stop_applied").await;
+        assert_eq!(receipt["id"], "ordinary-stop");
+        assert!(receipt["generation"].is_null());
+        assert_eq!(receipt["already_applied"], false);
+        let _ = socket_event(&mut ordinary_socket, "cancelled").await;
     });
 }
 

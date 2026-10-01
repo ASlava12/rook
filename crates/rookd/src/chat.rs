@@ -208,6 +208,31 @@ async fn serve(
                     ClientMessage::Stop { id, generation } => Some((id, generation)),
                     _ => None,
                 };
+                if let Some((request, generation)) = &control {
+                    if request.is_empty()
+                        || request.len() > 64
+                        || !request
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+                    {
+                        let _ = outbound
+                            .send(ChatEvent::Error {
+                                message: "Stop ID must be 1–64 letters, digits, hyphens or underscores"
+                                    .into(),
+                            })
+                            .await;
+                        continue;
+                    }
+                    if generation
+                        .as_ref()
+                        .is_some_and(|generation| rook_store::parse_session_id(generation).is_none())
+                    {
+                        let _ = outbound
+                            .send(ChatEvent::Error { message: "invalid Stop generation".into() })
+                            .await;
+                        continue;
+                    }
+                }
                 let Some(session) = watching.as_ref().map(|w| w.session) else { continue };
                 let id = rook_store::format_session_id(session);
                 let goal = session_goal(&*engine.read().await, session);
@@ -239,6 +264,15 @@ async fn serve(
                         };
                         match paused {
                             Ok(already_applied) => {
+                                if let Some((request, generation)) = &control {
+                                    let _ = outbound
+                                        .send(ChatEvent::StopApplied {
+                                            id: request.clone(),
+                                            generation: generation.clone(),
+                                            already_applied,
+                                        })
+                                        .await;
+                                }
                                 let _ = outbound
                                     .send(ChatEvent::Agent {
                                         receipt: None,
@@ -274,8 +308,22 @@ async fn serve(
                     continue;
                 }
                 let _admission = state.work.0.lock().await;
-                if let Err(error) = followups::pause(&*engine.read().await, session, None) {
-                    report_window(&outbound, format!("Could not save the pause for restart: {error}")).await;
+                match followups::pause(&*engine.read().await, session, None) {
+                    Ok(()) => {
+                        if let Some((request, generation)) = &control {
+                            let _ = outbound
+                                .send(ChatEvent::StopApplied {
+                                    id: request.clone(),
+                                    generation: generation.clone(),
+                                    already_applied: false,
+                                })
+                                .await;
+                        }
+                    }
+                    Err(error) => {
+                        report_window(&outbound, format!("Could not save the pause for restart: {error}"))
+                            .await;
+                    }
                 }
                 let cancelled = state.live.write().await.remove(&session);
                 if let Some(live) = cancelled {

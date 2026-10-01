@@ -1308,3 +1308,34 @@ visible receipt. Ordinary-turn Stop still lacks a turn identity, so a delayed
 frame can target a later ordinary turn in the same session. Live TUI/browser
 interaction checks and broader goal handoff/restart coverage remain open.
 Branch live checks and all five Pending capability rows remain open.
+
+## Stop acknowledgement and retained browser retry
+
+The socket now emits `stop_applied` with the caller ID, observed goal
+generation and duplicate flag after a managed Pause receipt commits. It also
+acknowledges an identified ordinary-turn Stop after its recovery pause is
+saved. TUI Ctrl-C prints its ID and exact CLI retry command before sending;
+an uncertain disconnect retains the goal Stop ID for a same-generation retry
+after reattach. A matching acknowledgement clears it. The browser writes one
+small goal Stop to per-tab storage before sending, restores it after a reload,
+and offers explicit Retry/Discard controls. Retry requires the same session and
+saved goal generation, then uses the identified HTTP control even when the
+socket is gone; a mismatched acknowledgement cannot settle it.
+Browser Stop waits for a `goal` event before deciding whether it is stopping a
+managed goal or an ordinary turn. Ordinary-turn Stop is deliberately not saved
+for reload retry until a durable turn identity exists. Neither path changes a
+stored record or the legacy `cancel` frame.
+
+The browser tests cover exact reload retry, HTTP control payload, stale-goal
+rejection, storage refusal, bounded invalid saved data and acknowledgement
+matching. The real-daemon test checks first and duplicate goal receipts,
+malformed Stop IDs and an ordinary-turn receipt. The focused real-daemon test
+and four browser tests exited 0; JavaScript syntax and Rust formatting checks
+also exited 0. The full `cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0
+(`ci: ok`, 670.6 seconds), including all 82 CLI integration tests, Clippy and
+doctests. No storage implementation or stored format changed, so compaction
+was not rerun.
+
+Queue remains In progress. Ordinary-turn Stop identity, live browser/TUI
+interaction checks and a restart check for retained Stop controls remain open.
+The branch and all five Pending capability rows remain open.

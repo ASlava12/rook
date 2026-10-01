@@ -1153,7 +1153,9 @@ impl Chat {
     fn ended(&mut self) {
         self.busy = false;
         self.remote = None;
-        self.stop_attempt = None;
+        if self.stop_attempt.as_ref().is_some_and(|(generation, _)| generation.is_none()) {
+            self.stop_attempt = None;
+        }
         let waiting = self.pending.take().is_some() || self.asking.take().is_some();
         if waiting {
             self.push("stat", "  the turn ended, so what it was waiting for is gone");
@@ -2055,6 +2057,19 @@ impl App {
             }
             ChatEvent::Text { text } => self.chat.push("text", &text),
             ChatEvent::Goal { generation } => self.chat.goal_generation = generation,
+            ChatEvent::StopApplied { id, already_applied, .. } => {
+                if self.chat.stop_attempt.as_ref().is_some_and(|(_, saved)| saved == &id) {
+                    self.chat.stop_attempt = None;
+                    self.chat.push(
+                        "stat",
+                        if already_applied {
+                            "[saved Stop was already applied]"
+                        } else {
+                            "[Stop acknowledged by daemon]"
+                        },
+                    );
+                }
+            }
             ChatEvent::FollowUp { id } => {
                 self.chat.began();
                 self.chat.push("stat", &format!("Starting follow-up {id}"));
@@ -2158,6 +2173,7 @@ impl App {
                 }
             }
             ChatEvent::Cancelled => {
+                self.chat.stop_attempt = None;
                 self.chat
                     .prompt_retry
                     .completed(self.chat.session.map(rook_store::format_session_id).as_deref());
@@ -2165,6 +2181,7 @@ impl App {
                 self.finished();
             }
             ChatEvent::Done { steps, input_tokens, output_tokens, files_changed, stopped, .. } => {
+                self.chat.stop_attempt = None;
                 if stopped == "already_admitted" {
                     self.chat.prompt_retry.acknowledged();
                     self.finished();
@@ -2189,6 +2206,14 @@ impl App {
             ChatEvent::Failed { message } => {
                 self.chat.prompt_retry.disconnected();
                 self.chat.push("err", &message);
+                if let Some((Some(generation), id)) = self.chat.stop_attempt.clone()
+                    && let Some(session) = self.chat.session
+                {
+                    self.chat.push("stat", &format!(
+                        "Stop delivery uncertain. Inspect the goal, then retry: rook task pause {} --control-id {id} --generation {generation}",
+                        rook_store::format_session_id(session)
+                    ));
+                }
                 if self.chat.prompt_retry.pending() {
                     self.chat.push(
                         "stat",
@@ -2585,13 +2610,19 @@ impl App {
         }
         match action {
             Action::Stop => {
-                if let Some(say) = &self.chat.remote {
+                if let Some(say) = self.chat.remote.clone() {
                     let generation = self.chat.goal_generation.clone();
                     let id = match self.chat.stop_attempt.as_ref() {
                         Some((observed, id)) if *observed == generation => id.clone(),
                         _ => rook_store::format_session_id(rook_store::new_session_id()),
                     };
                     self.chat.stop_attempt = Some((generation.clone(), id.clone()));
+                    if let (Some(session), Some(observed)) = (self.chat.session, generation.as_ref()) {
+                        self.chat.push("stat", &format!(
+                            "Stop ID {id}; retry: rook task pause {} --control-id {id} --generation {observed}",
+                            rook_store::format_session_id(session)
+                        ));
+                    }
                     let _ = say.send(ClientMessage::Stop { id, generation });
                     self.chat.push("stat", "[stopping]");
                 } else {

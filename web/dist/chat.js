@@ -7,6 +7,7 @@ import { mcpPanel } from './mcp.js';
 import { queuePanel, takeRestored } from './queue.js';
 import { pendingSubmission, submissionError, submitSteering } from './submission.js';
 import { promptRetry } from './prompt-retry.js';
+import { stopRetry } from './stop-retry.js';
 
 // Scrollback, not the record: the session holds every word of this and the
 // sessions tab reads it back, so a tab left open for a day need not keep an
@@ -19,8 +20,9 @@ let socket = null;
 let current = null;
 let retainedInputs = new Map();
 const retryPrompt = promptRetry();
+const retryStop = stopRetry();
 let goalGeneration = null;
-let stopAttempt = null;
+let goalObserved = false;
 
 const chatOut = () => $('#stream');
 
@@ -99,11 +101,20 @@ function working() {
   if (send) send.textContent = '…';
   if (stop) stop.hidden = false;
   renderPromptRetry();
+  renderStopRetry();
 }
 
 function renderPromptRetry() {
   const visible = !!retryPrompt.candidate() && !state.chat.busy;
   for (const id of ['#retry-prompt', '#discard-prompt']) {
+    const button = $(id);
+    if (button) button.hidden = !visible;
+  }
+}
+
+function renderStopRetry() {
+  const visible = !!retryStop.candidate() || !!retryStop.error();
+  for (const id of ['#retry-stop', '#discard-stop']) {
     const button = $(id);
     if (button) button.hidden = !visible;
   }
@@ -133,6 +144,7 @@ function done() {
   if (send) send.textContent = 'Send';
   if (stop) stop.hidden = true;
   renderPromptRetry();
+  renderStopRetry();
 }
 
 export function connect() {
@@ -158,7 +170,7 @@ export function connect() {
       }
       case 'snapshot': {
         goalGeneration = null;
-        stopAttempt = null;
+        goalObserved = false;
         const active = new Set([
           ...e.approvals.map(id => `approval:${id}`),
           ...e.questions.map(id => `question:${id}`),
@@ -178,14 +190,14 @@ export function connect() {
         renderSettings(); renderPicker();
         break;
       }
-      case 'started': goalGeneration = null; stopAttempt = null; retryPrompt.started(e.session); state.chat.session = e.session; state.chat.spent = null; state.chat.context = null; state.chat.modelRequest = null; renderSettings(); renderPicker(); break;
+      case 'started': goalGeneration = null; goalObserved = false; retryPrompt.started(e.session); state.chat.session = e.session; state.chat.spent = null; state.chat.context = null; state.chat.modelRequest = null; renderSettings(); renderPicker(); break;
       // Joined a turn this page did not start. Said out loud either way: a
       // page that quietly starts streaming looks like it is answering
       // something you did not ask, and one that says nothing after asking
       // cannot be told from a daemon that did not hear.
       case 'attached':
         goalGeneration = null;
-        stopAttempt = null;
+        goalObserved = false;
         if (state.chat.session !== e.session) {
           state.chat.context = null; state.chat.modelRequest = null;
           state.chat.spent = null;
@@ -195,7 +207,11 @@ export function connect() {
         renderPicker();
         if (e.running) { say('stat', '[joined a turn already running here]'); working(); }
         break;
-      case 'goal': goalGeneration = e.generation; break;
+      case 'goal': goalGeneration = e.generation; goalObserved = true; break;
+      case 'stop_applied':
+        retryStop.settled(e.id);
+        renderStopRetry();
+        break;
       case 'follow_up':
         say('stat', `Starting follow-up ${e.id}`); callStatus = null;
         state.chat.spent = null; state.chat.context = null; state.chat.modelRequest = null;
@@ -227,7 +243,7 @@ export function connect() {
       case 'forgot': say('stat', `forgot: ${e.text}`); break;
       case 'failed': retryPrompt.disconnected(); say('err', e.message); done(); break;
       case 'error': say('err', e.message); break;
-      case 'cancelled': stopAttempt = null; retryPrompt.disconnected(); say('stat', '[stopped]'); done(); break;
+      case 'cancelled': retryPrompt.disconnected(); say('stat', '[stopped]'); done(); break;
       case 'interjected':
         if (e.receipt) receiptNotice(e.receipt, e.text);
         else { say('you', `› ${e.text}`); say('stat', '(the turn will see this at its next step)'); }
@@ -243,7 +259,6 @@ export function connect() {
         break;
       }
       case 'done': {
-        stopAttempt = null;
         if (e.stopped === 'already_admitted') { retryPrompt.settled(); done(); break; }
         retryPrompt.completed(state.chat.session);
         if (typeof e.reply === 'string' && current?.dataset.text !== e.reply) {
@@ -291,6 +306,7 @@ export function connect() {
       retryPrompt.disconnected();
       say('err', retryPrompt.candidate()
         ? 'disconnected; use Retry saved prompt if its delivery is uncertain' : 'disconnected');
+      if (retryStop.candidate()) say('stat', 'Stop delivery is uncertain; reconnect, inspect the goal, then use Retry saved Stop');
       done();
     }
   };
@@ -305,10 +321,52 @@ function send(message) {
 
 export function stop() {
   if (!state.chat.busy) return;
-  if (!stopAttempt || stopAttempt.generation !== goalGeneration) {
-    stopAttempt = { id: crypto.randomUUID(), generation: goalGeneration };
+  if (!goalObserved) {
+    say('err', 'Wait for the current goal identity before stopping this turn');
+    return;
   }
-  send({ type: 'stop', ...stopAttempt });
+  if (goalGeneration === null) {
+    send({ type: 'stop', id: crypto.randomUUID() });
+    say('stat', 'Stopping the observed ordinary turn');
+    return;
+  }
+  try {
+    const { frame, persisted } = retryStop.remember(state.chat.session, goalGeneration);
+    const note = goalGeneration
+      ? `Stop ID ${frame.id}; retry with rook task pause ${state.chat.session} --control-id ${frame.id} --generation ${goalGeneration}`
+      : `Stop ID ${frame.id} for session ${state.chat.session}`;
+    say('stat', persisted ? note : `${note}; browser storage unavailable, keep this ID`);
+    renderStopRetry();
+    send(frame);
+  } catch (error) { say('err', String(error)); }
+}
+
+export async function retrySavedStop() {
+  const saved = retryStop.candidate();
+  if (!saved) { say('err', retryStop.error() || 'No saved Stop to retry'); return; }
+  if (state.chat.session !== saved.session) {
+    say('err', `Open session ${saved.session} before retrying its Stop`);
+    return;
+  }
+  const path = `/api/work/${encodeURIComponent(saved.session)}`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000);
+  try {
+    const current = await api(path, undefined, controller.signal);
+    if (current.generation !== saved.generation) throw new Error('The saved Stop belongs to an earlier goal generation');
+    const outcome = await api(`${path}/control`,
+      { id: saved.id, generation: saved.generation, action: 'pause' }, controller.signal);
+    if (outcome.id !== saved.id || outcome.generation !== saved.generation ||
+        typeof outcome.already_applied !== 'boolean' || typeof outcome.run?.status !== 'string') {
+      throw new Error('Stop control acknowledgement is incomplete');
+    }
+    retryStop.settled(saved.id);
+    renderStopRetry();
+    say('stat', outcome.already_applied
+      ? `Stop ${saved.id} was already applied; current goal: ${outcome.run.status}`
+      : `Stop ${saved.id} applied; current goal: ${outcome.run.status}`);
+  } catch (error) { say('err', `Saved Stop ${saved.id} still needs inspection: ${error?.error || error?.message || error}`); }
+  finally { clearTimeout(timeout); }
 }
 
 function waitingOn(what) {
@@ -593,6 +651,11 @@ export async function renderChat() {
     } }, 'Retry saved prompt');
   const discardButton = el('button', { id: 'discard-prompt', type: 'button', hidden: true,
     onclick: () => { retryPrompt.discard(); renderPromptRetry(); } }, 'Discard saved prompt');
+  const retryStopButton = el('button', { id: 'retry-stop', type: 'button', hidden: true,
+    title: 'Retry the saved Stop with its original caller ID and goal generation',
+    onclick: retrySavedStop }, 'Retry saved Stop');
+  const discardStopButton = el('button', { id: 'discard-stop', type: 'button', hidden: true,
+    onclick: () => { retryStop.discard(); renderStopRetry(); } }, 'Discard saved Stop');
   const stopButton = el('button', { id: 'stop', type: 'button', hidden: true, onclick: stop }, 'Stop');
 
   let loadingAttachments = false;
@@ -717,7 +780,8 @@ export async function renderChat() {
     if (state.chat.busy) return;
     say('you', `› ${text}`);
     working();
-  } }, input, sendButton, followupButton, retryButton, discardButton, stopButton);
+  } }, input, sendButton, followupButton, retryButton, discardButton,
+  retryStopButton, discardStopButton, stopButton);
   // Naming a file meant knowing the path and typing it, which in a browser
   // means leaving the page to go and look. The ranking is the daemon's, so the
   // page offers the same list the terminal does.
@@ -777,7 +841,7 @@ export async function renderChat() {
   renderSettings();
   connect();
   if (state.chat.busy) working();
-  else renderPromptRetry();
+  else { renderPromptRetry(); renderStopRetry(); }
   if (state.chat.session && !state.chat.busy) await resume(state.chat.session);
   input.focus();
 }
