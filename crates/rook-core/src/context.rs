@@ -38,11 +38,43 @@ pub struct SourceManifest {
     pub discovered_skills: usize,
     pub applicable_skills: usize,
     pub advertised_skills: usize,
+    #[serde(default)]
+    pub loaded_skill_events: usize,
     pub sources: Vec<RequestSource>,
     pub omitted_sources: usize,
 }
 
 impl SourceManifest {
+    /// A skill body actually in this request, from a live tool result or
+    /// retained replay. Read only its envelope metadata, not another copy of
+    /// the potentially large body.
+    pub(crate) fn add_loaded_skill(&mut self, name: &str, body: &str) {
+        #[derive(Deserialize)]
+        struct Envelope {
+            rook_source: SkillSource,
+        }
+        #[derive(Deserialize)]
+        struct SkillSource {
+            kind: String,
+            origin: String,
+            complete: Option<bool>,
+        }
+        let mut values = serde_json::Deserializer::from_str(body).into_iter::<Envelope>();
+        let Some(Ok(envelope)) = values.next() else { return };
+        if envelope.rook_source.kind != "skill" {
+            return;
+        }
+        self.loaded_skill_events += 1;
+        self.add(
+            "skill",
+            name,
+            &envelope.rook_source.origin,
+            "loaded",
+            estimate_tokens(body),
+            envelope.rook_source.complete,
+        );
+    }
+
     pub(crate) fn add(
         &mut self,
         kind: &str,

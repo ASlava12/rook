@@ -595,6 +595,41 @@ async fn load_skill_pulls_a_body_in_on_demand() {
     let entries = f.rook.transcript(session, 0, 100, 8192).unwrap();
     let skill_entry = entries.iter().find(|e| e.kind == "skill").expect("a skill load must be logged");
     assert!(skill_entry.body.contains("Always greet in the user's own language"));
+    let request_notes: Vec<serde_json::Value> = f
+        .rook
+        .transcript(session, 0, 100, 20_000)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.label == rook_core::context::REQUEST_CATALOG_LABEL)
+        .map(|e| serde_json::from_str(&e.body).unwrap())
+        .collect();
+    assert_eq!(request_notes.len(), 2);
+    assert_eq!(request_notes[0]["sources"]["loaded_skill_events"], 0);
+    assert_eq!(request_notes[1]["sources"]["loaded_skill_events"], 1);
+    assert!(request_notes[1]["sources"]["sources"].as_array().unwrap().iter().any(|source| {
+        source["name"] == "greeting@1.0.0"
+            && source["inclusion"] == "loaded"
+            && source["origin"].as_str().unwrap().ends_with("SKILL.md")
+    }));
+
+    // A later turn rebuilds from the retained skill event. The inspector must
+    // still say the body was loaded even after its original tool call ended.
+    AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(vec![reply("again")])), session)
+        .run("continue")
+        .await
+        .unwrap();
+    let saved = f.rook.context_usage(session, None).unwrap().last_request.unwrap();
+    assert_eq!(saved.catalog.sources.loaded_skill_events, 1);
+
+    let compacted =
+        serde_json::json!({"through_seq": skill_entry.seq, "summary": "A greeting recipe was read earlier."});
+    f.rook.log(session, rook_store::EventKind::Compaction, "test", &compacted.to_string()).unwrap();
+    AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(vec![reply("after summary")])), session)
+        .run("continue again")
+        .await
+        .unwrap();
+    let saved = f.rook.context_usage(session, None).unwrap().last_request.unwrap();
+    assert_eq!(saved.catalog.sources.loaded_skill_events, 0, "the skill body is now only summarized");
 }
 
 #[tokio::test]
@@ -3696,6 +3731,33 @@ async fn eager_skill_body_is_recorded_as_inline_for_the_attempted_request() {
 }
 
 #[tokio::test]
+async fn request_manifest_names_volatile_sources_actually_sent_on_the_first_turn() {
+    let f = fixture();
+    let mut fact = rook_core::Fact::new("builds use the pinned compiler", rook_core::Scope::Global);
+    fact.pinned = true;
+    f.rook.remember(fact, None).unwrap();
+    std::fs::write(f.workspace.path().join("source.rs"), "fn main() {}\n").unwrap();
+    let session = f.rook.start_session("volatile sources").unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![reply(r#"{"ok":true}"#)]));
+    let mut agent = AgentLoop::new(&f.rook, provider.clone(), session);
+    agent.options.output_schema = Some(serde_json::json!({"type":"object","required":["ok"]}));
+    agent.run("report the build").await.unwrap();
+
+    let sent = provider.share();
+    let sent = sent.lock().unwrap();
+    let payload = sent[0].messages.iter().map(|m| m.content.as_str()).collect::<Vec<_>>().join("\n");
+    let manifest = f.rook.context_usage(session, None).unwrap().last_request.unwrap().catalog.sources;
+    for kind in ["runtime", "memory", "workspace_listing", "output_schema"] {
+        assert!(
+            manifest.sources.iter().any(|source| source.kind == kind && source.estimated_tokens > 0),
+            "{kind} was sent and must be attributed: {manifest:?}"
+        );
+    }
+    assert!(payload.contains("pinned compiler") && payload.contains("source.rs"));
+    assert!(payload.contains("user-selected output schema"));
+}
+
+#[tokio::test]
 async fn the_reported_cost_matches_the_request_that_gets_built() {
     let f = fixture();
     let session = f.rook.start_session("cost").unwrap();
@@ -5787,6 +5849,9 @@ async fn the_todo_tool_keeps_a_list_and_hands_it_back() {
     let carried: String = seen.lock().unwrap()[0].messages.iter().map(|m| m.content.clone()).collect();
     assert!(carried.contains("The plan you are keeping"), "{carried}");
     assert!(carried.contains("[ ] fix the bug"), "{carried}");
+    let sources = rook.context_usage(session, None).unwrap().last_request.unwrap().catalog.sources;
+    assert!(sources.sources.iter().any(|source| source.kind == "plan" && source.origin == "session plan"));
+    assert!(!sources.sources.iter().any(|source| source.kind == "plan_reminder"));
 }
 
 /// Off by default, which is the decision: no tool, and the line that asks for a

@@ -1630,6 +1630,10 @@ impl<'a> AgentLoop<'a> {
                         None => crate::sources::tool_result(&call.name, &result),
                     }
                 };
+                if call.name == LOAD_SKILL && !failed {
+                    let name = outcome.skills_loaded.last().map(String::as_str).unwrap_or(LOAD_SKILL);
+                    source_manifest.add_loaded_skill(name, &shown);
+                }
                 let mut message = Message::tool_result(&call.id, shown);
                 let has_images = !images.is_empty();
                 message.images = images;

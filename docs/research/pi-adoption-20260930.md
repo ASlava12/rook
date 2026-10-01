@@ -1688,3 +1688,40 @@ Full `cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0 (`ci: ok`,
 701.4 seconds), including 85 CLI integration tests, 78 daemon tests and the
 18 `ask` tests. This block changed no storage behavior or format, so the
 compaction benchmark was not rerun.
+
+## Live request sources beyond the prefix
+
+The request-attempt manifest now includes sources added beside the latest
+prompt: the runtime date, recalled memory, a saved plan or its missing-plan
+reminder, the initial workspace sketch, prompt hook context, recovery block
+and selected output schema. These entries are recorded when Rook constructs
+that request; the inspector does not reread memory, files or settings later.
+
+Successful `load_skill` calls add a `loaded` source only after the body is
+available to the model. Rebuilding from session history discovers retained
+`SkillLoaded` events, including recipe skills, and omits ones that were
+summarised away by compaction. `loaded_skill_events` is an event count, not a
+count of distinct skill names; repeated loads remain distinguishable. A
+catalog card is still only a card. Old request notes default the new counter
+to zero. The existing 32-entry source list and 16 KiB combined note ceiling
+still apply, so omitted source rows are counted separately.
+
+The focused tests compare the first request before a skill load with the
+next request, then check a later replay and a compaction that removes the
+individual skill event. They also check volatile sources against a scripted
+provider request, and the saved plan on a later turn. The CLI fixture checks
+old and new note formats locally and through the real daemon. Targeted and
+full verification results follow below.
+
+The three focused agent-loop invocations passed: on-demand load and later
+replay/compaction, first-turn volatile sources, and the persisted plan on a
+later turn. The focused CLI integration check passed with one test, comparing
+the saved manifest locally and through a real daemon; older notes without
+the counter remain readable. The post-fix skill-load test passed again.
+`cargo xtask compaction` exited 0 (4.02 MiB on disk, 37.1x dictionary and
+5.8x end-to-end compression). Full `cargo xtask ci` with
+`RUST_TEST_THREADS=1` exited 0 (`ci: ok`, 775.8 seconds), including 85 CLI
+integration tests and 235 agent-loop tests. This extends the existing service
+note without changing the store event layout or wire routes. Deferred tool
+state and dedicated TUI/browser context views remain open; the inspector row
+stays In progress.

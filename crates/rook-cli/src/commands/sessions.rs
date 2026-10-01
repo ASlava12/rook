@@ -438,8 +438,11 @@ fn show_context(usage: &rook_core::ContextUsage, json: bool) -> Result<()> {
         let sources = &request.sources;
         if sources.discovered_skills > 0 || !sources.sources.is_empty() {
             println!(
-                "\nskills       {} discovered · {} applicable · {} advertised",
-                sources.discovered_skills, sources.applicable_skills, sources.advertised_skills
+                "\nskills       {} discovered · {} applicable · {} advertised · {} loaded events in live context",
+                sources.discovered_skills,
+                sources.applicable_skills,
+                sources.advertised_skills,
+                sources.loaded_skill_events
             );
             let rows: Vec<Vec<String>> = sources
                 .sources

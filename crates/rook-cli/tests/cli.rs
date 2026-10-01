@@ -61,8 +61,11 @@ fn request_tool_catalog_is_the_same_locally_and_through_the_daemon() {
             "tools": [{"name": "read_file", "estimated_tokens": 12}],
             "sources": {
                 "discovered_skills": 2, "applicable_skills": 1, "advertised_skills": 1,
+                "loaded_skill_events": 1,
                 "sources": [{"kind": "skill", "name": "greeting", "origin": "project",
-                             "inclusion": "card", "estimated_tokens": 17}],
+                             "inclusion": "card", "estimated_tokens": 17},
+                            {"kind": "skill", "name": "greeting@1.0.0", "origin": "project/SKILL.md",
+                             "inclusion": "loaded", "estimated_tokens": 45, "complete": true}],
                 "omitted_sources": 0
             }
         });
@@ -80,13 +83,14 @@ fn request_tool_catalog_is_the_same_locally_and_through_the_daemon() {
     }
     let direct = rook.json(&["session", "context", &id]);
     assert_eq!(direct["last_request"]["catalog"]["sources"]["sources"][0]["inclusion"], "card");
+    assert_eq!(direct["last_request"]["catalog"]["sources"]["loaded_skill_events"], 1);
     assert_eq!(direct["last_request"]["event_seq"], 1);
     let text = rook.ok(&["session", "context", &id]);
-    assert!(text.contains("greeting") && text.contains("card"), "{text}");
+    assert!(text.contains("greeting") && text.contains("card") && text.contains("loaded events"), "{text}");
     let _daemon = Daemon::start(&rook);
     assert_eq!(rook.json(&["session", "context", &id]), direct);
     let text = rook.ok(&["session", "context", &id]);
-    assert!(text.contains("greeting") && text.contains("card"), "{text}");
+    assert!(text.contains("greeting") && text.contains("card") && text.contains("loaded events"), "{text}");
 }
 
 #[test]

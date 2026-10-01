@@ -233,12 +233,15 @@ records this as a service note before sending the request. It is excluded
 from model replay, contains no prompt or schema body, and remains readable
 through the daemon's existing context API. A recorded attempt does not prove
 the provider accepted it or that current tools match that old request.
-The same note lists bounded request-prefix sources: project instruction paths
-and whether each was complete, environment and hook context, and skills shown
-as catalog cards or inlined bodies. Skill counts distinguish discovered,
-applicable and advertised entries. A card does not imply that its body was
-loaded. Origins and token counts describe the recorded request attempt; the
-inspector does not reread those files or claim they still match the workspace.
+The same note lists bounded sources assembled for that request: project
+instruction paths and whether each was complete, environment and hook
+context, skills shown as catalog cards or inlined bodies, and sources added
+beside the prompt such as recalled memory, plan, workspace sketch and output
+schema. Skill counts distinguish discovered, applicable and advertised entries;
+the loaded-event count includes only skill bodies still in live context after
+compaction. A card does not imply that its body was loaded. Origins and token
+counts describe the recorded request attempt; the inspector does not reread
+those files or claim they still match the workspace.
 
 ## The agent loop
 

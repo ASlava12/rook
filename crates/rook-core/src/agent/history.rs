@@ -73,11 +73,26 @@ impl<'a> AgentLoop<'a> {
     pub(super) fn history(&self) -> Result<Vec<Message>> {
         replay(self.rook, self.session)
     }
+
+    pub(super) fn history_with_sources(
+        &self,
+        sources: &mut crate::context::SourceManifest,
+    ) -> Result<Vec<Message>> {
+        replay_inner(self.rook, self.session, Some(sources))
+    }
 }
 
 /// The same replay feeds requests and context reports, including provider state,
 /// interrupted calls and image/result pruning.
 pub(crate) fn replay(rook: &crate::Rook, session: u128) -> Result<Vec<Message>> {
+    replay_inner(rook, session, None)
+}
+
+fn replay_inner(
+    rook: &crate::Rook,
+    session: u128,
+    mut sources: Option<&mut crate::context::SourceManifest>,
+) -> Result<Vec<Message>> {
     let (from_seq, summary) = rook.last_compaction(session)?;
     let events = rook.store.events(session, from_seq, usize::MAX)?;
     let mut messages = Vec::with_capacity(events.len() + 1);
@@ -150,8 +165,8 @@ pub(crate) fn replay(rook: &crate::Rook, session: u128) -> Result<Vec<Message>> 
         {
             return Err(crate::CoreError::Other("branch summary record exceeds its byte limit".into()));
         }
-        let body = match rook.store.get(&event.record.body) {
-            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        let (body, body_readable) = match rook.store.get(&event.record.body) {
+            Ok(bytes) => (String::from_utf8_lossy(&bytes).into_owned(), true),
             // Preserve a visible gap: dropping an unreadable instruction
             // silently makes the model continue a different conversation.
             Err(why) => {
@@ -160,15 +175,18 @@ pub(crate) fn replay(rook: &crate::Rook, session: u128) -> Result<Vec<Message>> 
                     at = event.record.ts,
                     "an event could not be read back and is a hole in this request: {why}"
                 );
-                format!(
-                    "[this {} was recorded but cannot be read back from the store: {why}. \
+                (
+                    format!(
+                        "[this {} was recorded but cannot be read back from the store: {why}. \
                          Its content is currently unavailable. If it mattered, say so and ask for it \
                          again rather than guessing what it said.]",
-                    match event.record.kind {
-                        EventKind::UserMessage => "message from the user",
-                        EventKind::ToolResult => "tool result",
-                        _ => "part of the conversation",
-                    }
+                        match event.record.kind {
+                            EventKind::UserMessage => "message from the user",
+                            EventKind::ToolResult => "tool result",
+                            _ => "part of the conversation",
+                        }
+                    ),
+                    false,
                 )
             }
         };
@@ -204,11 +222,12 @@ pub(crate) fn replay(rook: &crate::Rook, session: u128) -> Result<Vec<Message>> 
                 messages.push(Message::assistant(with_thinking(thought.take(), &body)))
             }
             EventKind::SkillLoaded => {
-                let message = Message::user(crate::sources::replay_skill(
-                    &body,
-                    &rook.workspace,
-                    &rook.config.agent.trusted_sources,
-                ));
+                let body =
+                    crate::sources::replay_skill(&body, &rook.workspace, &rook.config.agent.trusted_sources);
+                if body_readable && let Some(sources) = sources.as_deref_mut() {
+                    sources.add_loaded_skill(&event.record.label, &body);
+                }
+                let message = Message::user(body);
                 if let Some(batch) = &mut batch {
                     batch.auxiliary.push(message);
                 } else {
