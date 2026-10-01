@@ -296,6 +296,10 @@ const CHANGES_THINGS: &[&str] =
 /// the model stops asking for a tool, not when the tool has run. A front end
 /// with only the deltas shows every call as still working.
 pub enum Progress<'a> {
+    /// The execution receipt that owns this top-level ordinary turn.
+    Turn {
+        id: &'a str,
+    },
     /// A new queued turn starts on the same live observer and control channel.
     FollowUp {
         id: &'a str,
@@ -833,6 +837,9 @@ impl<'a> AgentLoop<'a> {
         if let Some(outcome) = journal.recovered_outcome()? {
             journal.finish(&outcome.stopped, self.tool_ctx.jobs.as_deref())?;
             return Ok(outcome);
+        }
+        if self.depth == 0 && !self.checking {
+            on_progress(Progress::Turn { id: journal.turn() });
         }
         self.execution = Some(std::sync::Arc::downgrade(&journal));
         // From here until the turn ends, this session is marked as having one in

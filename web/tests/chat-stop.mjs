@@ -62,3 +62,25 @@ test('browser Stop waits for goal identity, saves before sending, and retries th
   await chat.retrySavedStop();
   assert.equal(values.has('rook:pending-stop'), true, 'stale-generation retry must stay inspectable');
 });
+
+test('browser sends the observed ordinary turn and waits for a successor identity', () => {
+  state.chat.busy = true;
+  state.chat.session = 'ordinary-session';
+  const socket = chat.connect();
+  socket.receive({ type: 'attached', session: 'ordinary-session', running: true });
+  socket.receive({ type: 'goal', generation: null });
+  const before = socket.sent.length;
+  chat.stop();
+  assert.equal(socket.sent.length, before);
+  socket.receive({ type: 'turn', id: 'first-turn' });
+  chat.stop();
+  assert.equal(socket.sent.at(-1).turn, 'first-turn');
+  assert.equal(socket.sent.at(-1).generation, undefined);
+  socket.receive({ type: 'follow_up', id: 'next-message' });
+  const sent = socket.sent.length;
+  chat.stop();
+  assert.equal(socket.sent.length, sent);
+  socket.receive({ type: 'turn', id: 'second-turn' });
+  chat.stop();
+  assert.equal(socket.sent.at(-1).turn, 'second-turn');
+});

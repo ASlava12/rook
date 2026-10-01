@@ -21,6 +21,7 @@ pub(super) struct Replay {
     finished: bool,
     /// Latest goal identity survives transcript eviction for an attached view.
     goal_generation: Option<Option<String>>,
+    turn_id: Option<String>,
 }
 
 impl Default for Replay {
@@ -43,6 +44,7 @@ impl Replay {
             truncated: false,
             finished: false,
             goal_generation: None,
+            turn_id: None,
         }
     }
 
@@ -54,6 +56,9 @@ impl Replay {
         }
         if let ChatEvent::Goal { generation } = &event {
             self.goal_generation = Some(generation.as_ref().filter(|g| g.len() <= 64).cloned());
+        }
+        if let ChatEvent::Turn { id } = &event {
+            self.turn_id = (id.len() <= 64).then(|| id.clone());
         }
         let kind = state_kind(&event);
         if let Some(kind) = kind
@@ -139,6 +144,9 @@ impl Replay {
         if let Some(generation) = &self.goal_generation {
             events.push(ChatEvent::Goal { generation: generation.clone() });
         }
+        if let Some(id) = &self.turn_id {
+            events.push(ChatEvent::Turn { id: id.clone() });
+        }
         if let Some(terminal) = terminal {
             events.push(terminal);
         }
@@ -179,6 +187,20 @@ mod tests {
         replay.push(ChatEvent::Goal { generation: None });
         let (events, _) = replay.snapshot();
         assert!(matches!(events.last(), Some(ChatEvent::Goal { generation: None })));
+    }
+
+    #[test]
+    fn latest_ordinary_turn_identity_survives_replay_eviction() {
+        let mut replay = Replay::new(2, 4096, 4096);
+        replay.push(ChatEvent::Turn { id: "first".into() });
+        replay.push(ChatEvent::Turn { id: "second".into() });
+        for _ in 0..8 {
+            replay.push(text("output"));
+        }
+        let (events, truncated) = replay.snapshot();
+        assert!(truncated);
+        assert!(matches!(events.last(), Some(ChatEvent::Turn { id }) if id == "second"));
+        assert!(replay.turn_id.as_ref().is_some_and(|id| id == "second"));
     }
 
     #[test]

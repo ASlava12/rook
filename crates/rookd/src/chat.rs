@@ -205,10 +205,10 @@ async fn serve(
             }
             ClientMessage::Cancel | ClientMessage::Stop { .. } => {
                 let control = match incoming {
-                    ClientMessage::Stop { id, generation } => Some((id, generation)),
+                    ClientMessage::Stop { id, generation, turn } => Some((id, generation, turn)),
                     _ => None,
                 };
-                if let Some((request, generation)) = &control {
+                if let Some((request, generation, turn)) = &control {
                     if request.is_empty()
                         || request.len() > 64
                         || !request
@@ -232,6 +232,11 @@ async fn serve(
                             .await;
                         continue;
                     }
+                    if turn.as_ref().is_some_and(|turn| rook_store::parse_session_id(turn).is_none()) {
+                        let _ =
+                            outbound.send(ChatEvent::Error { message: "invalid Stop turn ID".into() }).await;
+                        continue;
+                    }
                 }
                 let Some(session) = watching.as_ref().map(|w| w.session) else { continue };
                 let id = rook_store::format_session_id(session);
@@ -239,7 +244,7 @@ async fn serve(
                 match goal {
                     Ok(Some(run)) if !run.status.terminal() => {
                         let paused = match control.as_ref() {
-                            Some((request, Some(generation))) => managed::control_identified(
+                            Some((request, Some(generation), _)) => managed::control_identified(
                                 &*engine.read().await,
                                 &id,
                                 IdentifiedControl {
@@ -249,7 +254,7 @@ async fn serve(
                                 },
                             )
                             .map(|outcome| outcome.already_applied),
-                            Some((_, None)) => {
+                            Some((_, None, _)) => {
                                 let _ = outbound
                                     .send(ChatEvent::Error {
                                         message: "goal identity is not known yet; attach and retry Stop"
@@ -264,7 +269,7 @@ async fn serve(
                         };
                         match paused {
                             Ok(already_applied) => {
-                                if let Some((request, generation)) = &control {
+                                if let Some((request, generation, _)) = &control {
                                     let _ = outbound
                                         .send(ChatEvent::StopApplied {
                                             id: request.clone(),
@@ -297,7 +302,7 @@ async fn serve(
                     }
                     _ => {}
                 }
-                if control.as_ref().is_some_and(|(_, generation)| generation.is_some()) {
+                if control.as_ref().is_some_and(|(_, generation, _)| generation.is_some()) {
                     let _ = outbound
                         .send(ChatEvent::Error {
                             message:
@@ -308,9 +313,34 @@ async fn serve(
                     continue;
                 }
                 let _admission = state.work.0.lock().await;
-                match followups::pause(&*engine.read().await, session, None) {
+                let rook = engine.read().await;
+                let observed_live = watching.as_ref().and_then(|w| w.live.upgrade());
+                let current_live = state.live.read().await.get(&session).cloned();
+                let matching_live =
+                    observed_live.as_ref().zip(current_live.as_ref()).is_some_and(|(observed, current)| {
+                        std::sync::Arc::ptr_eq(observed, current) && current.running()
+                    });
+                if control.as_ref().is_some_and(|(_, _, turn)| turn.is_some()) && !matching_live {
+                    let _ = outbound.send(ChatEvent::Error {
+                        message: "the observed ordinary turn is no longer active; attach and inspect the current turn".into(),
+                    }).await;
+                    continue;
+                }
+                let pause = || {
+                    followups::pause(&rook, session, None)
+                        .map_err(|error| rook_core::CoreError::Other(error.to_string()))?;
+                    if let Some(live) = &current_live {
+                        live.stop();
+                    }
+                    Ok(())
+                };
+                let result = match control.as_ref().and_then(|(_, _, turn)| turn.as_deref()) {
+                    Some(turn) => rook_core::execution::control_active_turn(&rook, session, turn, pause),
+                    None => pause(),
+                };
+                match result {
                     Ok(()) => {
-                        if let Some((request, generation)) = &control {
+                        if let Some((request, generation, _)) = &control {
                             let _ = outbound
                                 .send(ChatEvent::StopApplied {
                                     id: request.clone(),
@@ -321,13 +351,12 @@ async fn serve(
                         }
                     }
                     Err(error) => {
-                        report_window(&outbound, format!("Could not save the pause for restart: {error}"))
-                            .await;
+                        let _ = outbound.send(ChatEvent::Error { message: error.to_string() }).await;
+                        continue;
                     }
                 }
                 let cancelled = state.live.write().await.remove(&session);
-                if let Some(live) = cancelled {
-                    live.stop();
+                if cancelled.is_some() {
                     // The browser only leaves its working state on Done or
                     // Error; aborting silently leaves it stuck forever.
                     let _ = outbound.send(ChatEvent::Cancelled).await;
@@ -1720,6 +1749,7 @@ async fn ended_goal(
 /// already been given.
 fn as_event(progress: Progress<'_>, workspace: &std::path::Path) -> Option<ChatEvent> {
     Some(match progress {
+        Progress::Turn { id } => ChatEvent::Turn { id: id.into() },
         Progress::Delta(Delta::Effort(report)) => ChatEvent::ModelRequest {
             model: report.provider.clone(),
             requested_effort: report.requested.as_str().into(),

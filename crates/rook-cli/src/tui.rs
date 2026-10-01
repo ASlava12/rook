@@ -696,7 +696,8 @@ struct Chat {
     busy: bool,
     /// Generation announced by the daemon for this observed managed turn.
     goal_generation: Option<String>,
-    stop_attempt: Option<(Option<String>, String)>,
+    turn_id: Option<String>,
+    stop_attempt: Option<(Option<String>, Option<String>, String)>,
     pending: Option<ApprovalRequest>,
     asking: Option<Asking>,
     /// Lines back from the newest, so zero is pinned to the bottom.
@@ -1153,7 +1154,8 @@ impl Chat {
     fn ended(&mut self) {
         self.busy = false;
         self.remote = None;
-        if self.stop_attempt.as_ref().is_some_and(|(generation, _)| generation.is_none()) {
+        self.turn_id = None;
+        if self.stop_attempt.as_ref().is_some_and(|(generation, _, _)| generation.is_none()) {
             self.stop_attempt = None;
         }
         let waiting = self.pending.take().is_some() || self.asking.take().is_some();
@@ -1995,6 +1997,7 @@ impl App {
             }
             ChatEvent::Snapshot { session, running, truncated, approvals, questions } => {
                 self.chat.goal_generation = None;
+                self.chat.turn_id = None;
                 self.chat.session = rook_store::parse_session_id(&session);
                 self.chat.log.clear();
                 self.chat.receipt_lines.clear();
@@ -2020,6 +2023,7 @@ impl App {
             }
             ChatEvent::Started { session } => {
                 self.chat.goal_generation = None;
+                self.chat.turn_id = None;
                 self.chat.prompt_retry.started(&session);
                 self.chat.session = rook_store::parse_session_id(&session);
                 self.flush_interjections();
@@ -2029,6 +2033,7 @@ impl App {
             // for a second, like a window answering something you did not ask.
             ChatEvent::Attached { session, running } => {
                 self.chat.goal_generation = None;
+                self.chat.turn_id = None;
                 self.chat.session = rook_store::parse_session_id(&session);
                 if running {
                     self.flush_interjections();
@@ -2057,8 +2062,16 @@ impl App {
             }
             ChatEvent::Text { text } => self.chat.push("text", &text),
             ChatEvent::Goal { generation } => self.chat.goal_generation = generation,
+            ChatEvent::Turn { id } => {
+                if self.chat.turn_id.as_ref() != Some(&id)
+                    && self.chat.stop_attempt.as_ref().is_some_and(|(generation, _, _)| generation.is_none())
+                {
+                    self.chat.stop_attempt = None;
+                }
+                self.chat.turn_id = Some(id);
+            }
             ChatEvent::StopApplied { id, already_applied, .. } => {
-                if self.chat.stop_attempt.as_ref().is_some_and(|(_, saved)| saved == &id) {
+                if self.chat.stop_attempt.as_ref().is_some_and(|(_, _, saved)| saved == &id) {
                     self.chat.stop_attempt = None;
                     self.chat.push(
                         "stat",
@@ -2071,6 +2084,7 @@ impl App {
                 }
             }
             ChatEvent::FollowUp { id } => {
+                self.chat.turn_id = None;
                 self.chat.began();
                 self.chat.push("stat", &format!("Starting follow-up {id}"));
             }
@@ -2206,7 +2220,7 @@ impl App {
             ChatEvent::Failed { message } => {
                 self.chat.prompt_retry.disconnected();
                 self.chat.push("err", &message);
-                if let Some((Some(generation), id)) = self.chat.stop_attempt.clone()
+                if let Some((Some(generation), _, id)) = self.chat.stop_attempt.clone()
                     && let Some(session) = self.chat.session
                 {
                     self.chat.push("stat", &format!(
@@ -2612,18 +2626,27 @@ impl App {
             Action::Stop => {
                 if let Some(say) = self.chat.remote.clone() {
                     let generation = self.chat.goal_generation.clone();
+                    let turn = if generation.is_some() { None } else { self.chat.turn_id.clone() };
+                    if generation.is_none() && turn.is_none() {
+                        self.chat.push("stat", "[waiting for the current turn identity before Stop]");
+                        return;
+                    }
                     let id = match self.chat.stop_attempt.as_ref() {
-                        Some((observed, id)) if *observed == generation => id.clone(),
+                        Some((observed, observed_turn, id))
+                            if *observed == generation && *observed_turn == turn =>
+                        {
+                            id.clone()
+                        }
                         _ => rook_store::format_session_id(rook_store::new_session_id()),
                     };
-                    self.chat.stop_attempt = Some((generation.clone(), id.clone()));
+                    self.chat.stop_attempt = Some((generation.clone(), turn.clone(), id.clone()));
                     if let (Some(session), Some(observed)) = (self.chat.session, generation.as_ref()) {
                         self.chat.push("stat", &format!(
                             "Stop ID {id}; retry: rook task pause {} --control-id {id} --generation {observed}",
                             rook_store::format_session_id(session)
                         ));
                     }
-                    let _ = say.send(ClientMessage::Stop { id, generation });
+                    let _ = say.send(ClientMessage::Stop { id, generation, turn });
                     self.chat.push("stat", "[stopping]");
                 } else {
                     match self.turn.take_if(|turn| !turn.is_finished()) {
@@ -3621,7 +3644,8 @@ impl App {
                         Progress::Spent { input, output, cached } => {
                             TurnEvent::Spent { input, output, cached }
                         }
-                        Progress::Delta(Delta::Done { .. } | Delta::ReasoningDone(_)) => return,
+                        Progress::Turn { .. }
+                        | Progress::Delta(Delta::Done { .. } | Delta::ReasoningDone(_)) => return,
                     };
                     let _ = emit.send(event);
                 })

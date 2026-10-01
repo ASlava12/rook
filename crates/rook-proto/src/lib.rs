@@ -174,6 +174,9 @@ pub enum ClientMessage {
         id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         generation: Option<String>,
+        /// Observed execution turn for ordinary work. Older clients omit it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn: Option<String>,
     },
     /// Join a turn this daemon is already running, without starting one.
     ///
@@ -210,6 +213,10 @@ pub enum ApprovalDecision {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChatEvent {
+    /// Durable execution turn currently running under this observer.
+    Turn {
+        id: String,
+    },
     /// A caller-owned Stop was durably applied (or had already been applied).
     StopApplied {
         id: String,

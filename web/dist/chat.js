@@ -23,6 +23,7 @@ const retryPrompt = promptRetry();
 const retryStop = stopRetry();
 let goalGeneration = null;
 let goalObserved = false;
+let turnId = null;
 
 const chatOut = () => $('#stream');
 
@@ -171,6 +172,7 @@ export function connect() {
       case 'snapshot': {
         goalGeneration = null;
         goalObserved = false;
+        turnId = null;
         const active = new Set([
           ...e.approvals.map(id => `approval:${id}`),
           ...e.questions.map(id => `question:${id}`),
@@ -190,7 +192,7 @@ export function connect() {
         renderSettings(); renderPicker();
         break;
       }
-      case 'started': goalGeneration = null; goalObserved = false; retryPrompt.started(e.session); state.chat.session = e.session; state.chat.spent = null; state.chat.context = null; state.chat.modelRequest = null; renderSettings(); renderPicker(); break;
+      case 'started': goalGeneration = null; goalObserved = false; turnId = null; retryPrompt.started(e.session); state.chat.session = e.session; state.chat.spent = null; state.chat.context = null; state.chat.modelRequest = null; renderSettings(); renderPicker(); break;
       // Joined a turn this page did not start. Said out loud either way: a
       // page that quietly starts streaming looks like it is answering
       // something you did not ask, and one that says nothing after asking
@@ -198,6 +200,7 @@ export function connect() {
       case 'attached':
         goalGeneration = null;
         goalObserved = false;
+        turnId = null;
         if (state.chat.session !== e.session) {
           state.chat.context = null; state.chat.modelRequest = null;
           state.chat.spent = null;
@@ -208,11 +211,13 @@ export function connect() {
         if (e.running) { say('stat', '[joined a turn already running here]'); working(); }
         break;
       case 'goal': goalGeneration = e.generation; goalObserved = true; break;
+      case 'turn': turnId = e.id; break;
       case 'stop_applied':
         retryStop.settled(e.id);
         renderStopRetry();
         break;
       case 'follow_up':
+        turnId = null;
         say('stat', `Starting follow-up ${e.id}`); callStatus = null;
         state.chat.spent = null; state.chat.context = null; state.chat.modelRequest = null;
         working(); renderSettings(); break;
@@ -326,7 +331,8 @@ export function stop() {
     return;
   }
   if (goalGeneration === null) {
-    send({ type: 'stop', id: crypto.randomUUID() });
+    if (!turnId) { say('err', 'Wait for the current turn identity before stopping it'); return; }
+    send({ type: 'stop', id: crypto.randomUUID(), turn: turnId });
     say('stat', 'Stopping the observed ordinary turn');
     return;
   }

@@ -1339,3 +1339,32 @@ was not rerun.
 Queue remains In progress. Ordinary-turn Stop identity, live browser/TUI
 interaction checks and a restart check for retained Stop controls remain open.
 The branch and all five Pending capability rows remain open.
+
+## Ordinary socket Stop scoped to the active turn
+
+Each top-level ordinary execution now announces its existing durable turn ID
+over the chat socket. Rejoin replay retains only the latest bounded ID even
+when transcript chunks are evicted. TUI and browser Stop send the observed ID;
+after a queued follow-up starts, they wait for its new ID. The daemon checks
+the ID against both the persisted running execution and this process's active
+guard under the same writer lock that reserves follow-ups. It then saves the
+follow-up pause and aborts the matching live turn before releasing the lock.
+A delayed Stop for an earlier ordinary turn receives a nonterminal error. The
+optional wire field preserves old socket clients and changes no stored format.
+
+The browser test covers waiting for first and successor turn identities. The
+real-daemon scenario starts two ordinary turns in one session, rejects a Stop
+from the first during the second, then acknowledges and cancels the second
+using its own ID. Replay eviction has a focused test. Ordinary Stop receipt
+survival across daemon restart and exact retry remains open; this block adds
+identity safety but no durable ordinary Stop acknowledgement record. Live
+browser/TUI interaction checks, remaining queue lifecycle checks, branch
+semantic synthesis and all five Pending capability rows remain in scope.
+
+Focused browser tests (2), replay test, and both real-daemon Stop scenarios
+exited 0. JavaScript syntax and Rust formatting checks passed. Required
+`cargo xtask compaction` exited 0 with 4.02 MiB on disk, 37.1x dictionary
+compression and 5.8x end-to-end. Full `cargo xtask ci` with
+`RUST_TEST_THREADS=1` exited 0 (`ci: ok`, 744.6 seconds), including all 83 CLI
+integration tests and doctests. The Windows PTY target had zero runnable tests;
+interactive TUI behavior remains unverified on this runner.

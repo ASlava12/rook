@@ -361,6 +361,15 @@ control. Repeating that prompt after another pause finds the saved control
 receipt and leaves the later pause intact. Older socket prompts without IDs
 still use the legacy transition.
 
+Socket Stop controls for ordinary turns carry the execution receipt's turn ID.
+The daemon compares it with the current active receipt under the same writer
+lock that reserves follow-ups, then saves the pause and aborts that live turn.
+An old Stop cannot stop the next ordinary turn in the same session. The daemon
+announces the turn ID in live events and retains only the latest ID in bounded
+replay. Goal Stop continues to use the managed goal generation and its durable
+identified control receipt; older ordinary Stop frames without a turn ID keep
+their legacy behavior.
+
 Scheduled tasks are exposed through `/api/tasks`; the TUI and web views share
 this API. Each occurrence reserves a session ID durably, then creates an
 ordinary goal session. `/api/work` remains the execution and legacy

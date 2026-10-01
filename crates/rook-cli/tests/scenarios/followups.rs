@@ -289,6 +289,88 @@ fn socket_stop_uses_observed_goal_generation_and_replays_once() {
 }
 
 #[test]
+fn socket_stop_rejects_an_earlier_ordinary_turn() {
+    rook_llm::init_tls();
+    let rook = Rook::new();
+    let model = Model::new();
+    rook.write_config(&config(&model.url, "initial", "ask", rook.workspace.path()));
+    let session = rook_store::new_session_id();
+    let session_id = rook_store::format_session_id(session);
+    {
+        let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+        store
+            .create_session(&rook_store::SessionMeta::new(
+                session,
+                "ordinary Stop turn",
+                rook.workspace.path().display().to_string(),
+                rook_store::now_unix(),
+            ))
+            .unwrap();
+    }
+    let daemon = Daemon::start(&rook);
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut socket = runtime.block_on(async {
+        let (socket, _) = tokio_tungstenite::connect_async(format!(
+            "{}/api/chat",
+            daemon.address.replacen("http", "ws", 1)
+        ))
+        .await
+        .unwrap();
+        socket
+    });
+    runtime.block_on(async {
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                json!({"type":"prompt","session":session_id,"text":"first turn"}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+    });
+    let first = runtime.block_on(socket_event(&mut socket, "turn"))["id"].as_str().unwrap().to_owned();
+    model.next();
+    runtime.block_on(async {
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                json!({"type":"stop","id":"first-stop","turn":first}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(socket_event(&mut socket, "stop_applied").await["id"], "first-stop");
+        socket_event(&mut socket, "cancelled").await;
+        // The aborted task drops its execution guard before a successor starts.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                json!({"type":"prompt","session":session_id,"text":"second turn"}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+    });
+    let second = runtime.block_on(socket_event(&mut socket, "turn"))["id"].as_str().unwrap().to_owned();
+    assert_ne!(first, second);
+    model.next();
+    runtime.block_on(async {
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                json!({"type":"stop","id":"late-first-stop","turn":first}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        let error = socket_event(&mut socket, "error").await;
+        assert!(error["message"].as_str().unwrap().contains("earlier ordinary turn"), "{error}");
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                json!({"type":"stop","id":"second-stop","turn":second}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        let applied = socket_event(&mut socket, "stop_applied").await;
+        assert_eq!(applied["id"], "second-stop");
+        socket_event(&mut socket, "cancelled").await;
+    });
+}
+
+#[test]
 fn a_retried_continue_prompt_does_not_resume_a_later_paused_goal() {
     rook_llm::init_tls();
     let rook = Rook::new();

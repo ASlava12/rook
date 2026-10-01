@@ -83,6 +83,36 @@ pub(crate) fn current(rook: &Rook, session: u128) -> Result<Option<Execution>> {
     load(&rook.store, session)
 }
 
+/// Run a synchronous control only while the caller's observed execution is
+/// still this process's active turn. The reservation writer uses the same lock,
+/// so a queued follow-up cannot take ownership between the check and control.
+pub fn control_active_turn<T>(
+    rook: &Rook,
+    session: u128,
+    expected: &str,
+    control: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    if rook_store::parse_session_id(expected).is_none() {
+        return Err(CoreError::Other("invalid observed turn ID".into()));
+    }
+    let _writing = crate::work::receipts::WRITING.lock().unwrap_or_else(|e| e.into_inner());
+    let state = load(&rook.store, session)?;
+    let active = ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
+    let same_active =
+        active.get(&(rook.store.root().to_path_buf(), session)).is_some_and(|turn| turn == expected);
+    drop(active);
+    if !same_active
+        || state
+            .as_ref()
+            .is_none_or(|state| state.status != "running" || state.owner != *OWNER || state.turn != expected)
+    {
+        return Err(CoreError::Other(
+            "this Stop belongs to an earlier ordinary turn; inspect the current turn".into(),
+        ));
+    }
+    control()
+}
+
 pub(crate) fn is_active(rook: &Rook, session: u128) -> bool {
     ACTIVE.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&(rook.store.root().to_path_buf(), session))
 }
@@ -245,6 +275,10 @@ pub(crate) struct Journal {
 }
 
 impl Journal {
+    pub(crate) fn turn(&self) -> &str {
+        &self.turn
+    }
+
     pub(crate) fn start(
         rook: &Rook,
         session: u128,

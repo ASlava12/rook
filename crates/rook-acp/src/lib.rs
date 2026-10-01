@@ -499,6 +499,7 @@ async fn prompt(
                 // A step counter has no slot either: the editor draws its
                 // progress from the tool calls it is shown.
                 Progress::Spent { .. }
+                | Progress::Turn { .. }
                 | Progress::Step { .. }
                 | Progress::Delta(Delta::Done { .. } | Delta::ReasoningDone(_)) => {
                     return;
