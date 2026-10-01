@@ -1022,3 +1022,22 @@ with `RUST_TEST_THREADS=1` exited 0 (`ci: ok`, 728.1 seconds), including all
 72 CLI integration tests and both follow-up scenarios. This records the
 parallel-run instability rather than counting the failed gates as passes.
 The block changes no store format or algorithm, so compaction was not rerun.
+
+## REPL branch navigation offer
+
+The local and daemon REPL now offer a reviewed summary when `/session ID`
+selects another conversation. The first command prints the departing source,
+target and review commands without switching or writing history. Existing
+`/summary-draft`, `/summary-suggest` and `/summary` paths supply the draft and
+explicit save. Repeating the same `/session ID` continues after review or skips
+the summary. A different target replaces the pending offer; an unrelated
+command, prompt or Ctrl-C clears it. The daemon REPL can now resolve and switch
+sessions through its routed source, attaching its socket to the selected one.
+The integration test checks reviewed transfer and no-write skip in both local
+and real-daemon modes. Live browser/TUI interaction checks and the queue gaps
+still remain, along with every Pending row in the table. No store format or
+algorithm changed. The focused real-process test exited 0. The full
+`cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0 (`ci: ok`, 667.5 seconds),
+including all 73 CLI integration tests. The single-thread setting addresses
+the previously observed parallel daemon-test timeouts. No compaction rerun was
+needed for this block.

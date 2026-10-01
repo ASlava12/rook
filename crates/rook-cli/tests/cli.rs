@@ -203,6 +203,66 @@ fn branch_summary_draft_scopes_fork_events_locally_and_through_daemon() {
 }
 
 #[test]
+fn repl_branch_switch_offers_review_and_explicit_skip_locally_and_through_daemon() {
+    for routed in [false, true] {
+        let rook = Rook::new();
+        let source = rook_store::new_session_id();
+        let target = rook_store::new_session_id();
+        let skipped = rook_store::new_session_id();
+        let from = rook_store::format_session_id(source);
+        let to = rook_store::format_session_id(target);
+        let skip = rook_store::format_session_id(skipped);
+        {
+            let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+            for id in [source, target, skipped] {
+                store
+                    .create_session(&rook_store::SessionMeta::new(
+                        id,
+                        "branch",
+                        rook.workspace.path().display().to_string(),
+                        1,
+                    ))
+                    .unwrap();
+            }
+            store
+                .append_event(
+                    source,
+                    rook_store::NewEvent::new(
+                        rook_store::EventKind::UserMessage,
+                        rook_store::Kind::Message,
+                        b"source-only finding",
+                    ),
+                )
+                .unwrap();
+        }
+        let daemon = routed.then(|| Daemon::start(&rook));
+        let reviewed = rook.chat_in_session(
+            &from,
+            &format!(
+                "/session {from}\n/session {to}\n/summary-draft {to}\n/summary {to} Reviewed historical finding\n/session {to}\n/quit\n"
+            ),
+        );
+        assert!(reviewed.status.success(), "{}", String::from_utf8_lossy(&reviewed.stderr));
+        let stdout = String::from_utf8_lossy(&reviewed.stdout);
+        assert!(stdout.contains("Carry a reviewed summary"), "{stdout}");
+        assert_eq!(stdout.matches("Carry a reviewed summary").count(), 1, "{stdout}");
+        assert!(stdout.contains("source-only finding"), "{stdout}");
+        assert!(stdout.to_lowercase().contains("saved attributed summary"), "{stdout}");
+        assert!(stdout.contains(&format!("continuing {to}")), "{stdout}");
+        let history = rook.json(&["session", "history", &to]);
+        assert!(history.to_string().contains("Reviewed historical finding"), "{history}");
+
+        let skipped = rook.chat_in_session(&from, &format!("/session {skip}\n/session {skip}\n/quit\n"));
+        assert!(skipped.status.success(), "{}", String::from_utf8_lossy(&skipped.stderr));
+        let stdout = String::from_utf8_lossy(&skipped.stdout);
+        assert!(stdout.contains("Carry a reviewed summary"), "{stdout}");
+        assert!(stdout.contains(&format!("continuing {skip}")), "{stdout}");
+        assert!(!rook.json(&["session", "history", &skip]).to_string().contains("branch-summary"));
+        drop(daemon);
+    }
+}
+
+#[test]
 fn branch_names_and_bookmarks_have_the_same_cli_result_with_and_without_the_daemon() {
     let rook = Rook::new();
     let id = rook_store::new_session_id();
@@ -521,6 +581,21 @@ impl Rook {
         child.stdin.take().unwrap().write_all(lines.as_bytes()).unwrap();
         let out = child.wait_with_output().unwrap();
         String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    fn chat_in_session(&self, session: &str, lines: &str) -> Output {
+        use std::io::Write;
+        let mut child = Command::new(env!("CARGO_BIN_EXE_rook"))
+            .env("ROOK_HOME", self.home.path())
+            .env("ROOK_LOG", "error")
+            .args(["--workspace", self.workspace.path().to_str().unwrap(), "chat", "--session", session])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(lines.as_bytes()).unwrap();
+        child.wait_with_output().unwrap()
     }
 
     fn run(&self, args: &[&str]) -> Output {

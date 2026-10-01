@@ -84,7 +84,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("summary-at", "<target-session> <event> <text>", "carry only if the source still ends at this event"),
     ("context", "[window]", "what this conversation costs, and of what"),
     ("skills", "[name]", "skills that apply here, or one skill's body"),
-    ("session", "[id|last]", "this one's totals, or continue another"),
+    ("session", "[id|last]", "inspect this conversation or review a transfer before switching"),
     (
         "task",
         "[list|show|run|enable|disable|cancel-run|delete]",
@@ -129,6 +129,49 @@ fn help_text() -> String {
     }
     out.push_str("\nCtrl-C stops the turn in flight. Ctrl-D leaves.");
     out
+}
+
+#[derive(Default)]
+struct BranchSwitchOffer {
+    pair: Option<(u128, u128)>,
+}
+
+impl BranchSwitchOffer {
+    /// The first choice offers a review; repeating the same choice continues.
+    fn offer(&mut self, source: Option<u128>, target: u128) -> bool {
+        let Some(source) = source.filter(|source| *source != target) else {
+            self.pair = None;
+            return false;
+        };
+        let pair = (source, target);
+        if self.pair == Some(pair) {
+            self.pair = None;
+            false
+        } else {
+            self.pair = Some(pair);
+            true
+        }
+    }
+
+    fn retain_for(&mut self, command: &str) {
+        if !matches!(
+            command,
+            "tree" | "session" | "summary-draft" | "summary-suggest" | "summary" | "summary-at"
+        ) {
+            self.pair = None;
+        }
+    }
+}
+
+fn describe_branch_switch(source: u128, target: u128) -> String {
+    let source = rook_store::format_session_id(source);
+    let target = rook_store::format_session_id(target);
+    format!(
+        "Carry a reviewed summary of {source} into {target}?\n\
+         /summary-draft {target} loads recorded excerpts; /summary-suggest {target} asks the model.\n\
+         Review and save with /summary {target} <text>, or skip it.\n\
+         Repeat /session {target} to continue; workspace files stay as they are."
+    )
 }
 
 pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: bool) -> Result<()> {
@@ -212,6 +255,7 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
     let mut editor = editor()?;
     let history = rook_core::paths::home().join("history");
     let _ = editor.load_history(&history);
+    let mut branch_offer = BranchSwitchOffer::default();
 
     loop {
         match editor.readline("› ") {
@@ -231,6 +275,22 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
                     continue;
                 }
                 if let Some(command) = line.strip_prefix('/') {
+                    let (name, rest) = command.split_once(' ').unwrap_or((command, ""));
+                    if name == "session" && !rest.trim().is_empty() {
+                        match rook.session_named(rest.trim()) {
+                            Ok(target) if branch_offer.offer(Some(session), target) => {
+                                println!("{}", describe_branch_switch(session, target));
+                                continue;
+                            }
+                            Err(error) => {
+                                println!("{error}");
+                                continue;
+                            }
+                            Ok(_) => {}
+                        }
+                    } else {
+                        branch_offer.retain_for(name);
+                    }
                     if let Some(result) =
                         crate::turn_options::configure(command, &mut shared.output.borrow_mut())
                     {
@@ -251,13 +311,17 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
                     }
                     continue;
                 }
+                branch_offer.pair = None;
                 let named = shared.model.borrow().clone();
                 let provider = rook_core::models::chosen(&rook.config, named.as_deref())?;
                 runtime.block_on(turn(&rook, provider, session, &shared, &line));
             }
             // Ctrl-C at the prompt clears the line rather than leaving; the
             // reflex from every other REPL is to press it to abandon input.
-            Err(ReadlineError::Interrupted) => continue,
+            Err(ReadlineError::Interrupted) => {
+                branch_offer.pair = None;
+                continue;
+            }
             Err(ReadlineError::Eof) => break,
             Err(e) => return Err(e.into()),
         }
@@ -277,10 +341,9 @@ pub fn run(workspace: Option<std::path::PathBuf>, resume: Option<String>, yes: b
 /// what a connection has set — the stance, the effort, the endpoint — and a
 /// connection per prompt would forget all three between one line and the next.
 ///
-/// The slash commands are not here. They read and write this process's store
-/// directly, and a window over a socket has none: the three that are settings
-/// go over as settings, and the rest say so rather than half-working, which is
-/// the same answer the TUI gives.
+/// Commands with routed reads and writes work here too. The remaining local
+/// commands explain why they need a direct store, while turn settings stay on
+/// this connection and carry into the selected session.
 async fn through_the_daemon(
     daemon: &crate::source::Daemon,
     workspace: &std::path::Path,
@@ -301,9 +364,20 @@ async fn through_the_daemon(
     let history = rook_core::paths::home().join("history");
     let _ = editor.load_history(&history);
     let mut watching = crate::remote::Watching::new(yes, false, view_bytes);
-    let mut session = resume;
+    let mut session = match resume {
+        Some(spec) => {
+            let here = workspace.to_path_buf();
+            let id = tokio::task::spawn_blocking(move || {
+                crate::source::Source::open(Some(here.clone()))?.session_named(&spec, &here)
+            })
+            .await??;
+            Some(rook_store::format_session_id(id))
+        }
+        None => None,
+    };
     let mut output = rook_proto::TurnOptions::default();
     let mut summary_boundary: Option<(u128, u128, u64)> = None;
+    let mut branch_offer = BranchSwitchOffer::default();
 
     loop {
         // Blocking on stdin inside an async function, which is what a REPL is:
@@ -312,7 +386,10 @@ async fn through_the_daemon(
         let line = match editor.readline("› ") {
             Ok(line) if line.trim().is_empty() => continue,
             Ok(line) => line,
-            Err(ReadlineError::Interrupted) => continue,
+            Err(ReadlineError::Interrupted) => {
+                branch_offer.pair = None;
+                continue;
+            }
             Err(ReadlineError::Eof) => break,
             Err(e) => return Err(e.into()),
         };
@@ -332,8 +409,36 @@ async fn through_the_daemon(
                 continue;
             }
             let (name, rest) = command.split_once(' ').unwrap_or((command, ""));
+            branch_offer.retain_for(name);
             match name {
                 "quit" | "exit" => break,
+                "session" => {
+                    if rest.trim().is_empty() {
+                        println!("{}", session.as_deref().unwrap_or("no session open"));
+                        continue;
+                    }
+                    let here = workspace.to_path_buf();
+                    let spec = rest.trim().to_string();
+                    let target = tokio::task::spawn_blocking(move || {
+                        crate::source::Source::open(Some(here.clone()))?.session_named(&spec, &here)
+                    })
+                    .await?;
+                    match target {
+                        Ok(target) => {
+                            let source = session.as_deref().and_then(rook_store::parse_session_id);
+                            if branch_offer.offer(source, target) {
+                                println!("{}", describe_branch_switch(source.unwrap_or(target), target));
+                            } else {
+                                let id = rook_store::format_session_id(target);
+                                session = Some(id.clone());
+                                summary_boundary = None;
+                                to_daemon.send(ClientMessage::Attach { session: id.clone() })?;
+                                println!("continuing {id}; workspace files stay as they are");
+                            }
+                        }
+                        Err(error) => eprintln!("{error}"),
+                    }
+                }
                 "summary-suggest" => {
                     let Some(from) = session.as_deref().and_then(rook_store::parse_session_id) else {
                         eprintln!("open a source conversation first");
@@ -609,6 +714,7 @@ async fn through_the_daemon(
             }
             continue;
         }
+        branch_offer.pair = None;
         to_daemon.send(ClientMessage::Prompt {
             session: session.clone(),
             text: line,

@@ -64,7 +64,11 @@ mode, a running turn must finish or be stopped before switching conversations.
 Through the daemon, switching changes the observed session; the previous turn
 keeps running. In the browser, **Conversation branches** is available in both
 Chat and Sessions, with separate Explore, Read history and Continue buttons.
-The REPL `/tree [session-id]` prints a page; `/session ID` continues a session.
+The REPL `/tree [session-id]` prints a page. `/session ID` on another branch
+first offers a summary review; `/summary-draft ID` loads excerpts and
+`/summary-suggest ID` requests a model draft. Review and save with `/summary ID
+TEXT`, or repeat `/session ID` to continue without saving a summary. This works
+locally and through the daemon. `/session` without an ID shows the current one.
 In the TUI tree, `c` on a different branch offers `d` for recorded excerpts,
 `s` for a model draft, `c` again to continue without a summary, and Esc to
 cancel. The draft appears in chat for review and must be saved with `/summary`
