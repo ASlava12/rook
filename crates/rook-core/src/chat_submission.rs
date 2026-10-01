@@ -201,10 +201,36 @@ pub(crate) fn admitted_value(store: &Store, key: &str, session: u128, turn: &str
     Ok(value)
 }
 
+/// A conversation goal is admitted when its generation and saved goal become
+/// durable, before its first model turn. Its generation occupies the same
+/// fixed-size owner slot as an ordinary execution turn.
+pub(crate) fn goal_admitted_value(
+    store: &Store,
+    key: &str,
+    session: u128,
+    generation: &str,
+) -> Result<Vec<u8>> {
+    let mut value = store
+        .kv_get_limited(key, RECORD)?
+        .ok_or_else(|| CoreError::Other("chat goal receipt disappeared before admission".into()))?;
+    if value.len() != RECORD
+        || value[..16] != session.to_be_bytes()
+        || value[16] != 0
+        || value[49..] != *PENDING_TURN
+        || generation.parse::<ulid::Ulid>().is_err()
+    {
+        return Err(CoreError::Other("chat goal receipt changed before admission".into()));
+    }
+    value[16] = 1;
+    value[49..].copy_from_slice(generation.as_bytes());
+    Ok(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::execution::Journal;
+    use rook_proto::work::{Conversation, Start};
 
     fn engine(root: &std::path::Path) -> Rook {
         Rook::from_parts(
@@ -282,5 +308,44 @@ mod tests {
         assert_eq!(claim(&rook, Some(one), "same-id", "first", &options).unwrap().status, Status::Pending);
         rook.delete_session(one).unwrap();
         assert!(read(&rook, one, "same-id", "first", &options).unwrap().is_none());
+    }
+
+    #[test]
+    fn goal_creation_admits_the_claim_with_its_generation_and_goal_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let rook = engine(dir.path());
+        let options = TurnOptions::default();
+        let first = claim(&rook, None, "goal-caller", "/goal inspect", &options).unwrap();
+        let request = Start {
+            goal: "inspect".into(),
+            workspace: None,
+            autonomous: false,
+            max_iterations: None,
+            max_tokens: None,
+            max_seconds: None,
+            conversation: Some(Conversation {
+                session: rook_store::format_session_id(first.session),
+                model: None,
+                effort: "high".into(),
+                stance: "assist".into(),
+                options: options.clone(),
+            }),
+        };
+        let run = crate::work::managed::start_with_claim(&rook, request.clone(), Some(&first.key)).unwrap();
+        let admitted = claim(&rook, None, "goal-caller", "/goal inspect", &options).unwrap();
+        assert_eq!(admitted.status, Status::Admitted);
+        assert_eq!(admitted.turn.as_deref(), Some(run.generation.as_str()));
+        assert_eq!(rook.goal(first.session).unwrap().as_deref(), Some("inspect"));
+        assert!(crate::work::managed::start_with_claim(&rook, request, Some(&first.key)).is_err());
+        assert_eq!(rook.store.list_sessions().unwrap().len(), 1);
+        assert_eq!(
+            rook.store
+                .events(first.session, 0, 100)
+                .unwrap()
+                .iter()
+                .filter(|e| e.record.label == "goal")
+                .count(),
+            1
+        );
     }
 }

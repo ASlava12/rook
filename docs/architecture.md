@@ -154,6 +154,11 @@ recovery inspection before a new request. Removing a session removes its claim. 
 without an ID keep their legacy behavior.
 Named-session claims share the configured `work.max_messages` receipt limit;
 existing IDs remain readable when the limit is reached.
+The same caller ID can guard `/goal` creation. The managed run generation, goal
+note, current goal value and admitted claim commit together. Retrying that ID
+joins its live generation or gets `already_admitted`; it cannot create another
+generation or silently attach to a later goal. A pending claim with a different
+active goal requires inspection. Frames without IDs retain their old behavior.
 
 The live replay has independent event and encoded-byte limits
 (`server.chat_replay_events`, `server.chat_replay_bytes`). Broadcast notifications

@@ -126,6 +126,12 @@ fn save(rook: &Rook, saved: &Saved) -> Result<()> {
 }
 
 pub fn start(rook: &Rook, request: Start) -> Result<Run> {
+    start_with_claim(rook, request, None)
+}
+
+/// Start a conversation goal and atomically acknowledge its caller-owned
+/// socket claim. Legacy callers omit the claim and retain the same API.
+pub fn start_with_claim(rook: &Rook, request: Start, claim_key: Option<&str>) -> Result<Run> {
     let _lock = WRITING.lock().unwrap_or_else(|e| e.into_inner());
     let config = &rook.config.work;
     if request.goal.trim().is_empty() || request.goal.len() > config.max_goal_bytes {
@@ -216,17 +222,48 @@ pub fn start(rook: &Rook, request: Start) -> Result<Run> {
         index.push(run.id.clone());
     }
     let index = crate::persistence::encode(&index)?;
-    rook.store.kv_update(&[(INDEX, &index), (&key(&run.id)?, &record)], &[])?;
-    rook.store.flush()?;
+    let run_key = key(&run.id)?;
     if let Some(conversation) = &run.conversation {
         let session =
             rook_store::parse_session_id(&conversation.session).ok_or_else(|| bad("invalid session"))?;
-        rook.set_goal(session, &run.goal)?;
+        let mut values =
+            vec![(INDEX.to_string(), index), (format!("goal/{session:032x}"), run.goal.as_bytes().to_vec())];
+        if let Some(claim_key) = claim_key {
+            values.push((
+                claim_key.to_owned(),
+                crate::chat_submission::goal_admitted_value(
+                    &rook.store,
+                    claim_key,
+                    session,
+                    &run.generation,
+                )?,
+            ));
+        }
+        let references: Vec<_> = values.iter().map(|(key, bytes)| (key.as_str(), bytes.as_slice())).collect();
+        rook.store.append_events_with_receipt(
+            session,
+            [rook_store::NewEvent::new(
+                rook_store::EventKind::Note,
+                rook_store::Kind::Message,
+                run.goal.as_bytes(),
+            )
+            .label("goal")],
+            &run_key,
+            &references,
+            |_| Ok(record),
+        )?;
+        rook.store.flush()?;
         rook.store.update_session(session, |m| {
             if !m.tags.iter().any(|t| t == "rook:work") {
                 m.tags.push("rook:work".into());
             }
         })?;
+        rook.store.flush()?;
+    } else {
+        if claim_key.is_some() {
+            return Err(bad("a chat goal claim requires a conversation"));
+        }
+        rook.store.kv_update(&[(INDEX, &index), (&run_key, &record)], &[])?;
         rook.store.flush()?;
     }
     Ok(run)

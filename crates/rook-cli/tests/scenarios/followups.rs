@@ -410,6 +410,80 @@ fn first_socket_prompt_retries_join_then_acknowledge_without_another_session_or_
 }
 
 #[test]
+fn first_socket_goal_retry_keeps_one_generation_and_no_extra_goal_event() {
+    rook_llm::init_tls();
+    let rook = Rook::new();
+    let model = Model::new();
+    rook.write_config(&config(&model.url, "initial", "ask", rook.workspace.path()));
+    let daemon = Daemon::start(&rook);
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let address = format!("{}/api/chat", daemon.address.replacen("http", "ws", 1));
+    let prompt = json!({"type":"prompt","session":null,"text":"/goal GOAL_RETRY_TASK","id":"goal-stable"});
+    let mut first = runtime.block_on(async {
+        let (mut socket, _) = tokio_tungstenite::connect_async(&address).await.unwrap();
+        socket.send(tokio_tungstenite::tungstenite::Message::Text(prompt.to_string().into())).await.unwrap();
+        socket
+    });
+    assert!(model.next()["messages"].to_string().contains("GOAL_RETRY_TASK"));
+    let started = runtime.block_on(socket_event(&mut first, "started"));
+    let session = started["session"].as_str().unwrap().to_string();
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let work_url = format!("{}/api/work/{session}", daemon.address);
+    let first_run = runtime.block_on(get(&client, &work_url));
+    let mut retry = runtime.block_on(async {
+        let (mut socket, _) = tokio_tungstenite::connect_async(&address).await.unwrap();
+        socket.send(tokio_tungstenite::tungstenite::Message::Text(prompt.to_string().into())).await.unwrap();
+        socket
+    });
+    assert_eq!(runtime.block_on(socket_event(&mut retry, "attached"))["session"], session);
+    runtime.block_on(async {
+        retry
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                json!({
+                    "type":"prompt","session":null,"text":"/goal DIFFERENT_TASK","id":"goal-stable"
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+    });
+    let conflict = runtime.block_on(socket_event(&mut retry, "failed"));
+    assert!(conflict["message"].as_str().unwrap().contains("different prompt"), "{conflict}");
+    runtime.block_on(async {
+        client
+            .post(format!("{work_url}/control"))
+            .json(&"cancel")
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+    });
+    drop(first);
+    drop(retry);
+    let mut after = runtime.block_on(async {
+        let (mut socket, _) = tokio_tungstenite::connect_async(&address).await.unwrap();
+        socket.send(tokio_tungstenite::tungstenite::Message::Text(prompt.to_string().into())).await.unwrap();
+        socket
+    });
+    assert_eq!(runtime.block_on(socket_event(&mut after, "started"))["session"], session);
+    assert_eq!(runtime.block_on(socket_event(&mut after, "done"))["stopped"], "already_admitted");
+    assert_eq!(runtime.block_on(get(&client, &work_url))["generation"], first_run["generation"]);
+    drop(after);
+    drop(daemon);
+    let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+    let id = rook_store::parse_session_id(&session).unwrap();
+    assert_eq!(store.list_sessions().unwrap().iter().filter(|entry| entry.id == id).count(), 1);
+    // Admission records the requested goal; the work iteration records its
+    // effective goal once more. A retry must not add a third note.
+    assert_eq!(
+        store.events(id, 0, 100).unwrap().iter().filter(|event| event.record.label == "goal").count(),
+        2
+    );
+}
+
+#[test]
 fn killed_followups_resume_once_with_saved_settings_and_cancelled_ones_stay_stopped() {
     rook_llm::init_tls();
     let rook = Rook::new();

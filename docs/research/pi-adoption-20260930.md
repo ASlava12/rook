@@ -1093,3 +1093,29 @@ This does not yet make `/goal` creation and controls idempotent. CLI/TUI and
 browser still need retained IDs and an explicit retry action after uncertain
 delivery; correction IDs also need lifecycle coverage across restart. Queue
 remains In progress, as do branch live checks and all Pending rows.
+
+## Caller identity for socket goal creation
+
+The optional socket `id` now also guards `/goal` creation, for both a new
+conversation and a named session. A bounded claim uses the existing 75-byte
+record and stores the managed run generation as its admission owner. The goal
+note, current goal value, managed run, run index and admitted claim commit in
+one store transaction. A retry of the same text and options joins its live
+generation or receives `already_admitted` without fabricating an old result;
+it cannot create a second generation. An ID reused with changed text or
+options is rejected. A pending claim faced with a different active goal is
+held for inspection. Old frames without an ID still use the existing path.
+
+Focused core tests verify atomic admission, generation identity and the goal
+event. A real-daemon WebSocket test covers live retry, conflicting payload,
+retry after cancellation, unchanged generation and the existing goal notes.
+The core and daemon tests exited 0. This block does not cover caller-owned
+control IDs, explicit CLI/TUI/browser retry after uncertain delivery, or
+correction receipts across restart. Queue remains In progress; branch live
+checks and all Pending capabilities remain open.
+
+The first full CI run exited 1 at a Clippy nested-condition warning. After
+that syntax fix, full `cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0
+(`ci: ok`, 659.4 seconds), including all 75 CLI integration tests. Required
+`cargo xtask compaction` exited 0 with 4.02 MiB on disk, 37.1x dictionary
+compression and 5.8x end-to-end. No stored record size or wire schema changed.
