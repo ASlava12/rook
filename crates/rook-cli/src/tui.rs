@@ -258,6 +258,35 @@ fn paired(entries: Vec<TranscriptEntry>) -> Vec<Call> {
     calls
 }
 
+/// The call pane shows the newest bounded slice of history. Ask for its end
+/// first, since a long session's first 2,000 events can predate the call the
+/// person just watched. The history page reads only one bounded entry.
+fn recent_calls(source: &crate::source::Source, session: u128) -> Result<(Vec<Call>, bool)> {
+    const EVENTS: u64 = 2_000;
+    let through = match source.transcript_page(
+        session,
+        &rook_core::transcript::PageRequest { limit: Some(1), ..Default::default() },
+    ) {
+        Ok(page) => page.through,
+        Err(page_error) => {
+            // An installed daemon can predate the bounded history route. Its
+            // session list already carries the same next_seq boundary.
+            source
+                .sessions()?
+                .into_iter()
+                .find(|summary| summary.meta.id == session)
+                .map(|summary| summary.meta.next_seq)
+                .ok_or(page_error)?
+        }
+    };
+    let from = through.saturating_sub(EVENTS);
+    let mut entries = source.transcript(session, from, EVENTS as usize, 8_000)?;
+    // A live turn can append after the end was observed. Keep one coherent
+    // window and leave newer calls for the next reload.
+    entries.retain(|entry| entry.seq < through);
+    Ok((paired(entries), from > 0))
+}
+
 /// How often the loop wakes to drain turn events when no key is pressed.
 const TICK: Duration = Duration::from_millis(60);
 
@@ -1322,11 +1351,11 @@ struct App {
     patience: std::time::Duration,
     sessions: Vec<SessionSummary>,
     session_state: ListState,
-    /// Every call this conversation made, newest first, with what it was given
-    /// and what came back. Read from the session's own log rather than kept as
-    /// the turn runs: a window that attached to a daemon mid-turn saw none of
-    /// the earlier ones, and the log has them all.
+    /// The newest bounded calls, with what they were given and what came back.
+    /// Read from the log so a window attached mid-turn sees earlier calls too.
     calls: Vec<Call>,
+    calls_older: bool,
+    calls_error: Option<String>,
     call_state: ListState,
     transcript: Vec<TranscriptEntry>,
     /// What the selected session was for and what it did, which is usually why
@@ -1491,6 +1520,8 @@ impl App {
             sessions: Vec::new(),
             session_state: ListState::default(),
             calls: Vec::new(),
+            calls_older: false,
+            calls_error: None,
             call_state: ListState::default(),
             transcript: Vec::new(),
             selected: None,
@@ -1634,13 +1665,17 @@ impl App {
     /// earlier calls and the log has them all.
     fn load_calls(&mut self) {
         self.calls.clear();
+        self.calls_older = false;
+        self.calls_error = None;
         self.call_state.select(None);
         let Some(session) = self.chat.session else { return };
-        // Enough of a result to answer the question, not the whole object: a
-        // command's output can be megabytes, and `store cat` is what reads one
-        // of those whole.
-        let entries = self.source.transcript(session, 0, 2_000, 8_000).unwrap_or_default();
-        self.calls = paired(entries);
+        match recent_calls(&self.source, session) {
+            Ok((calls, older)) => {
+                self.calls = calls;
+                self.calls_older = older;
+            }
+            Err(error) => self.calls_error = Some(rook_llm::truncate(&error.to_string(), 256)),
+        }
         self.call_state.select((!self.calls.is_empty()).then_some(0));
     }
 
@@ -4450,7 +4485,11 @@ impl App {
                 ]))
             })
             .collect();
-        let title = format!(" calls ({}) ", self.calls.len());
+        let title = if self.calls_older {
+            format!(" recent calls ({}) · older in session history ", self.calls.len())
+        } else {
+            format!(" calls ({}) ", self.calls.len())
+        };
         f.render_stateful_widget(
             List::new(rows).block(bordered(&title)).highlight_symbol("▌"),
             list,
@@ -4459,9 +4498,16 @@ impl App {
 
         let mut lines: Vec<Line> = Vec::new();
         match self.call_state.selected().and_then(|at| self.calls.get(at)) {
+            None if self.calls_error.is_some() => lines.push(Line::from(Span::styled(
+                format!("could not read calls: {}", self.calls_error.as_deref().unwrap_or_default()),
+                Style::default().fg(Color::Red),
+            ))),
             None => lines.push(Line::from(Span::styled(
                 match self.chat.session {
                     None => "nothing has been asked in this conversation yet.",
+                    Some(_) if self.calls_older => {
+                        "no calls in the newest 2,000 events; older calls are in session history."
+                    }
                     Some(_) => "no calls in this conversation — the model has answered from what it knew.",
                 },
                 Style::default().fg(Color::DarkGray),
@@ -5413,6 +5459,36 @@ fn kind_style(kind: &str) -> Style {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn call_pane_reads_latest_calls_after_a_long_session() {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let store = rook_store::Store::open(home.path().join("store")).unwrap();
+        let (skills, _) = rook_skills::SkillIndex::discover(&[]);
+        let rook = rook_core::Rook::from_parts(
+            store,
+            rook_core::Config::default(),
+            rook_skills::Environment::bare("linux", "x86_64", "0.1.0"),
+            skills,
+            workspace.path().to_path_buf(),
+        );
+        let session = rook.start_session("long calls").unwrap();
+        rook.log(session, rook_store::EventKind::ToolCall, "ask", r#"{"questions":["old"]}"#).unwrap();
+        rook.log(session, rook_store::EventKind::ToolResult, "ask", "old error").unwrap();
+        for _ in 0..2_001 {
+            rook.log(session, rook_store::EventKind::Note, "progress", "step").unwrap();
+        }
+        rook.log(session, rook_store::EventKind::ToolCall, "ask", r#"{"questions":["recent"]}"#).unwrap();
+        rook.log(session, rook_store::EventKind::ToolResult, "ask", "recent error").unwrap();
+
+        let (calls, older) =
+            super::recent_calls(&crate::source::Source::Local(rook.into()), session).unwrap();
+        assert!(older, "the pane must disclose that its event window has a beginning");
+        assert_eq!(calls.len(), 1, "old calls must not displace the newest call");
+        assert!(calls[0].given.contains("recent"));
+        assert_eq!(calls[0].came_back.as_deref(), Some("recent error"));
+    }
+
     #[test]
     fn retry_commands_are_in_tui_completion_without_replacing_shared_commands() {
         let names: Vec<_> = tui_commands_matching("/re").into_iter().map(|(name, ..)| *name).collect();

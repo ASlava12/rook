@@ -70,6 +70,11 @@ Defaults preserve the existing palette, editor and history gestures:
 | Submit | Enter |
 | Newline | Ctrl+J, Shift+Enter, Alt+Enter |
 
+The Tool calls pane shows calls from the newest 2,000 saved events, with their
+bounded arguments and results. Its title says when older calls are outside that
+window; Session history can inspect them by event number. Press `r` in the pane
+to reload calls made since it opened.
+
 Long draft lines wrap to the input width, including pasted text without spaces.
 The box grows to ten rows and then scrolls vertically to keep the cursor visible.
 When rows are outside the box, its border shows how many are hidden above and

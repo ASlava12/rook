@@ -1560,3 +1560,26 @@ logged-event totals rather than a request-specific manifest.
 Full `cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0 (`ci: ok`,
 742.1 seconds), including 84/84 CLI integration tests. This browser-only
 block changed no storage behavior, so compaction was not rerun.
+
+## Recent TUI tool-call details
+
+The TUI's Tool calls pane now reads the newest 2,000 saved events instead of
+starting at event zero. It obtains the session end from a one-entry bounded
+history page; when attached to an older daemon without that route, it uses
+the existing session summary's `next_seq`. The pane labels older history as
+outside its window and reports read failures instead of claiming there were
+no calls. Arguments and results remain capped at 8,000 displayed bytes per
+event. A local-store regression test seeds a session past 2,000 events and
+checks that the latest failed `ask` call and its result appear. Against the
+currently running older daemon, the fallback routes found all six `ask` calls
+in session `01M3T336VB22NEP5AY77T5NYB4`; the previous front-end range
+found only the first two. This repairs a TUI inspection gap, while the five
+invalid `ask` attempts themselves came from the agent's tool arguments.
+
+Inline tool cards remain In progress: persisted failure/duration/diff
+metadata, live TUI expansion and actual browser interaction are still open.
+The queue, branch live checks and Pending rows remain open. The focused test
+exited 0, as did targeted CLI Clippy. Full `cargo xtask ci` with
+`RUST_TEST_THREADS=1` exited 0 (`ci: ok`, 780.8 seconds), including 109 CLI
+unit tests and 84 real CLI integration tests. No storage implementation or
+format changed, so compaction was not rerun.
