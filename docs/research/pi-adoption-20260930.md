@@ -1477,3 +1477,18 @@ Full `cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0 (`ci: ok`,
 654.9 seconds), including all 84 CLI integration tests, the 108 CLI unit
 tests, Clippy and doctests. No stored format or storage implementation changed,
 so compaction was not rerun.
+
+## Correction acceptance after daemon restart
+
+The existing real-daemon goal-correction retry scenario now verifies the next
+boundary, not only persistence of the queued receipt: after restart the saved
+correction occurs exactly once in the resumed model request, and its receipt
+has an acceptance timestamp. Retrying the caller ID then returns the same
+receipt and the queue still contains one matching entry. The focused scenario
+exited 0 twice, including the once-only assertion. Five isolated repeats of
+the separate first-goal retry scenario also exited 0; its earlier extra-goal
+note under the full suite was not reproduced, so that race remains open.
+Full `cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0 (`ci: ok`,
+651.2 seconds), including all 84 CLI integration tests, Clippy and doctests.
+This block changed only the recovery assertion and documentation, so
+compaction was not rerun.

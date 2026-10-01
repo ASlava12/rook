@@ -364,6 +364,10 @@ including after restart.
 Scoped correction receipts retain their caller ID and goal generation across
 daemon restarts; local `session queue` reads and socket retries resolve the same
 saved receipt. A changed text with that ID is refused.
+The real-daemon recovery scenario checks that a correction submitted before
+shutdown enters the resumed model request exactly once, with its acceptance
+receipt persisted before that request. The same caller ID retrieves the
+original receipt on retry after restart.
 
 Identified `/api/work/{id}/control` mutations save a bounded control ID receipt
 beside the run state under the managed-work write lock. A repeat with the same

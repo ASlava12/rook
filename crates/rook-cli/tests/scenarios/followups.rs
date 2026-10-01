@@ -708,7 +708,16 @@ fn goal_correction_retry_keeps_its_receipt_across_daemon_restart() {
     assert_eq!(local["receipt"]["id"], "stable-correction");
     assert_eq!(local["reference"], reference);
     let daemon = Daemon::start(&rook);
-    assert!(model.requests.recv_timeout(std::time::Duration::from_secs(30)).is_ok(), "goal did not resume");
+    let resumed =
+        model.requests.recv_timeout(std::time::Duration::from_secs(30)).expect("goal did not resume");
+    assert_eq!(
+        resumed["messages"].to_string().matches("RESTART_CORRECTION").count(),
+        1,
+        "saved correction must enter the resumed model request once: {resumed}"
+    );
+    let accepted = runtime
+        .block_on(get(&client, &format!("{}/api/sessions/{session}/queue/{reference}", daemon.address)));
+    assert!(accepted["receipt"]["applied_at"].is_number(), "{accepted}");
     let address = format!("{}/api/chat", daemon.address.replacen("http", "ws", 1));
     let mut retry = runtime.block_on(async {
         let (mut socket, _) = tokio_tungstenite::connect_async(&address).await.unwrap();
