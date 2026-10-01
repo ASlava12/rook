@@ -204,6 +204,10 @@ local file, limited to 512 events and 8192 displayed body bytes each. It
 escapes event content, marks shortened bodies, and never treats saved history
 as evidence of current files or tests. Output is streamed into a temporary
 file and published at the chosen path only after completion.
+The browser history panel assembles the same selected range from paged API
+reads into a local HTML download. It enforces the event and body limits plus
+a 16 MiB output limit before creating the download, and uses the same source
+boundary and historical file/test disclaimer.
 
 ## The agent loop
 

@@ -144,7 +144,7 @@ mod tests {
             let (status, content_type, body) = fetch(&format!("/{name}")).await;
             assert_eq!(status, StatusCode::OK, "{name}");
             assert!(content_type.contains("javascript"), "{name} is served as {content_type}");
-            assert!(!body.contains("<title>"), "{name} came back as the page: it is not embedded");
+            assert!(Assets::get(&name).is_some(), "{name} is not embedded");
             for import in body.split("from './").skip(1).filter_map(|rest| rest.split('\'').next()) {
                 wanted.push(import.to_string());
             }

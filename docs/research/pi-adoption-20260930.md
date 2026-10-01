@@ -1429,3 +1429,30 @@ selection that leaves no destination. Full `cargo xtask ci` with
 `RUST_TEST_THREADS=1` exited 0 (`ci: ok`, 682.6 seconds), including all 84 CLI
 integration tests, Clippy and doctests. This block changed no storage code,
 so compaction was not rerun.
+
+## Browser HTML history download
+
+The browser history panel now offers first/last event inputs and a Download
+selected HTML action. Blank bounds select the events on the displayed page.
+The browser reads the same saved history and body pages as CLI daemon mode,
+pins the initial history end, and escapes labels, summaries and body text.
+Tool content is expandable. It stops after 512 events, 8192 body bytes per
+event or 16 MiB of generated HTML, before creating a download. The file
+identifies the saved session and source range and explicitly declines to
+verify current workspace files or test results. It is a local browser
+download; no daemon file, upload or publication is involved.
+
+Three Node checks exited 0: scoped/escaped/shortened content, an over-limit
+refusal, and an explicit history-panel click yielding the selected filename.
+JavaScript syntax checks exited 0. A TUI/REPL in-chat entry point and live
+browser interaction remain, so Local HTML export stays In progress.
+The first full `cargo xtask ci` exited 1. The browser asset test incorrectly
+treated the export module's literal `<title>` inside an HTML template as the
+SPA fallback; it now checks that the module is in the asset set and served as
+JavaScript, and its targeted rerun exited 0. An existing first-goal socket
+retry test intermittently counted a third `goal` note (expected two); it passed
+alone and in the repeat full suite. This queue lifecycle race remains to
+investigate. The repeat full CI with `RUST_TEST_THREADS=1` exited 0
+(`ci: ok`, 679.8 seconds), including all 84 CLI integration tests, daemon
+asset checks, Clippy and doctests. No storage implementation changed, so
+compaction was not rerun.

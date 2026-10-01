@@ -1,6 +1,7 @@
 // One page at a time, including search and the body of a large event. The
 // durable cursor belongs to the server; DOM positions never address history.
 import { el, api } from './lib.js';
+import { downloadHistoryHtml } from './html-export.js';
 
 export function historyPanel(session, quote, rewind, branch) {
   const base = `/api/sessions/${encodeURIComponent(session)}/history`;
@@ -160,6 +161,30 @@ export function historyPanel(session, quote, rewind, branch) {
   }
   const needle = el('input', { placeholder: 'Find literal text', 'aria-label': 'Search history', maxlength: 256 });
   const number = el('input', { placeholder: 'Event number', 'aria-label': 'Jump to event', inputmode: 'numeric', pattern: '[0-9]+', maxlength: 20 });
+  const exportFrom = el('input', { placeholder: 'First shown', 'aria-label': 'First event to export', inputmode: 'numeric', pattern: '[0-9]+', maxlength: 16 });
+  const exportThrough = el('input', { placeholder: 'Last shown', 'aria-label': 'Last event to export', inputmode: 'numeric', pattern: '[0-9]+', maxlength: 16 });
+  async function download(event) {
+    event.preventDefault();
+    if (pending) return;
+    const parse = (field, fallback) => {
+      if (!field.value) return fallback;
+      if (!/^[0-9]{1,16}$/.test(field.value)) throw new Error('Enter a nonnegative event number.');
+      const value = Number(field.value);
+      if (!Number.isSafeInteger(value)) throw new Error('Event number is too large.');
+      return value;
+    };
+    try {
+      const from = parse(exportFrom, page?.items[0]?.seq ?? 0);
+      const through = parse(exportThrough, page?.items.at(-1)?.seq ?? null);
+      pending = true;
+      root.setAttribute('aria-busy', 'true');
+      notice.textContent = 'Preparing a bounded local HTML download…';
+      const result = await downloadHistoryHtml(session, from, through);
+      if (root.isConnected) notice.textContent = `Downloaded ${result.events} event(s); ${result.shortened} shortened bodies.`;
+    } catch (error) {
+      if (root.isConnected) notice.textContent = error.error || error.message || String(error);
+    } finally { pending = false; root.removeAttribute('aria-busy'); }
+  }
   root.append(el('form', { class: 'row', onsubmit: event => {
     event.preventDefault();
     if (pending) return;
@@ -173,6 +198,8 @@ export function historyPanel(session, quote, rewind, branch) {
     event.preventDefault();
     if (/^[0-9]{1,20}$/.test(number.value)) open(number.value);
   } }, number, el('button', { type: 'submit' }, 'Jump')),
+  el('form', { class: 'row', onsubmit: download },
+    exportFrom, exportThrough, el('button', { type: 'submit' }, 'Download selected HTML')),
   bookmarkPanel, notice, totals, paging, rows, detail, bookmarkEditor);
   // Let the caller attach the panel before even a cached request can finish.
   queueMicrotask(() => { if (root.isConnected) load(); });
