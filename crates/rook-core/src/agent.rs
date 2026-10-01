@@ -1055,8 +1055,9 @@ impl<'a> AgentLoop<'a> {
             } else {
                 rook_llm::prompted::history(&messages)
             });
+            let mut advertised = self.tool_specs();
             if native_tools {
-                request.tools = self.tool_specs();
+                request.tools = std::mem::take(&mut advertised);
             }
             request.effort = Some(self.effort);
             request.max_output_tokens = self.room_for_output(used);
@@ -1074,6 +1075,24 @@ impl<'a> AgentLoop<'a> {
                 outcome.stopped = "work_paused".into();
                 break;
             }
+            // This describes this request attempt, not a future reconstruction
+            // from whatever skills or tools happen to be installed later. Notes
+            // with this label are excluded from model history.
+            let specs = if native_tools { &request.tools } else { &advertised };
+            let mut catalog = crate::context::RequestCatalog::capture(
+                self.provider.id(),
+                native_tools,
+                self.rook.config.agent.lazy_tools,
+                used,
+                specs,
+            );
+            let mut body = serde_json::to_string(&catalog)?;
+            while body.len() > crate::context::REQUEST_CATALOG_MAX_BYTES {
+                catalog.tools.pop();
+                catalog.omitted_tools = catalog.tool_count - catalog.tools.len();
+                body = serde_json::to_string(&catalog)?;
+            }
+            self.rook.log(self.session, EventKind::Note, crate::context::REQUEST_CATALOG_LABEL, &body)?;
             let mut timing = crate::diagnostics::Timer::start(
                 self.rook,
                 self.session,

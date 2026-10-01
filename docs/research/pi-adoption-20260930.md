@@ -11,7 +11,7 @@ Source: Pi `ee602414c703be8da722ec56de7f2399e62581ac`; starting Rook:
 | Configurable keyboard actions and prompt undo | Complete | Shared registry/config/help, bounded Unicode edit tests, remapped-key and external-editor PTY checks, full CI passed |
 | Branch navigation and optional branch summary | In progress | Existing session/event IDs, bounded tree/history, explicit workspace semantics, attributable summary |
 | Inline tool cards | In progress | Compact/expanded results, errors/duration/diffs, bounded loading, TUI/browser verification |
-| Context provenance inspector | Pending | Request-specific sources, discovered vs loaded skills, deferred tools, CLI/API/TUI/browser |
+| Context provenance inspector | In progress | Request-specific sources, discovered vs loaded skills, deferred tools, CLI/API/TUI/browser |
 | Local HTML export | In progress | Selected history scope, bounded streaming, escaped content, no publication, cross-frontend access |
 | Opt-in phase-based model routing | Pending | Explicit policy, continuity/capability constraints, actual route/cost reporting, comparison without claiming unmeasured savings |
 | Declarative extension UI | Pending | Bounded status/progress/forms/result contract, trust boundary, text fallback and frontend parity |
@@ -1583,3 +1583,37 @@ exited 0, as did targeted CLI Clippy. Full `cargo xtask ci` with
 `RUST_TEST_THREADS=1` exited 0 (`ci: ok`, 780.8 seconds), including 109 CLI
 unit tests and 84 real CLI integration tests. No storage implementation or
 format changed, so compaction was not rerun.
+
+## Recorded tool catalog for the last request attempt
+
+Before each model request, Rook records a bounded service note with the
+configured provider ID, native versus prompt-encoded delivery, stub versus
+full schema mode, context estimate, and the tools advertised for that attempt.
+The note contains at most 32 tool names, each capped at 64 bytes, plus an
+omitted count; the serialized note is capped at 16 KiB. It stores no schema
+body or prompt text. Schema token counts are estimates from serialized bytes,
+not a provider bill. The provider ID is the configured route and does not
+claim which physical endpoint a failover provider used. The note is excluded
+from model replay and changes no postcard schema or existing record layout.
+
+`rook session context ID` and its JSON/API equivalent expose the last
+recorded request catalog with its event number. The entry is labelled an
+attempt because a provider can reject the request after Rook records it.
+Older sessions simply have no catalog. A focused agent-loop test compares the
+saved names with a scripted provider request and checks that prompt text is
+absent. A focused CLI test compares direct store and real-daemon JSON and text
+output. This begins the inspector. Individual instruction origins,
+discovered versus loaded skills, deferred tools, and a dedicated TUI/browser
+view remain in scope. Full CI and compaction results follow below.
+
+The first full `cargo xtask ci` exited 1 because three existing agent-loop
+tests asserted exact journal positions and did not yet include the new service
+note. Their expectations now check the note and retain the previous event
+ordering checks. The targeted `agent_loop` suite then passed 233/233. The
+corrected full gate with `RUST_TEST_THREADS=1` exited 0 (`ci: ok`, 756.5
+seconds), including 85 CLI integration tests, 233 agent-loop tests, Clippy
+and doctests. `cargo xtask compaction` exited 0 with 4.02 MiB on disk, 37.1x
+dictionary compression and 5.8x end-to-end. That benchmark fixture does not
+contain the new service note, so its figures do not measure the note's space
+cost. The new note uses the existing event type; stored record formats are
+unchanged.

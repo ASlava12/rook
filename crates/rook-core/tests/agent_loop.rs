@@ -496,18 +496,19 @@ async fn a_plain_turn_is_logged_end_to_end() {
 
     let entries = f.rook.transcript(session, 0, 100, 4096).unwrap();
     assert_eq!(entries.iter().filter(|e| e.label == "rook:timing:v1").count(), 1);
-    // Timing receipts supplement the conversation; keep its original ordering assertions.
+    // Timing and request-catalog notes supplement the conversation.
     let entries: Vec<_> = entries.into_iter().filter(|e| e.label != "rook:timing:v1").collect();
     let kinds: Vec<&str> = entries.iter().map(|e| e.kind.as_str()).collect();
     assert_eq!(
         kinds,
-        vec!["user", "assistant", "note", "note", "note"],
+        vec!["user", "note", "assistant", "note", "note", "note"],
         "both sides, the completion check and the result pair must be in the log"
     );
     assert_eq!(entries[0].body, "say hello");
-    assert_eq!(entries[3].label, "turn-summary");
-    assert_eq!(entries[4].label, "turn-result");
-    let (_, saved): (String, rook_core::agent::TurnOutcome) = serde_json::from_str(&entries[4].body).unwrap();
+    assert_eq!(entries[1].label, rook_core::context::REQUEST_CATALOG_LABEL);
+    assert_eq!(entries[4].label, "turn-summary");
+    assert_eq!(entries[5].label, "turn-result");
+    let (_, saved): (String, rook_core::agent::TurnOutcome) = serde_json::from_str(&entries[5].body).unwrap();
     assert_eq!(saved.reply, outcome.reply);
 }
 
@@ -555,22 +556,27 @@ async fn a_tool_call_runs_and_both_halves_reach_the_log() {
 
     let entries = f.rook.transcript(session, 0, 100, 8192).unwrap();
     assert_eq!(entries.iter().filter(|e| e.label == "rook:timing:v1").count(), 3);
-    // Timing receipts supplement the conversation; keep its original ordering assertions.
+    // Timing and request-catalog notes supplement the conversation.
     let entries: Vec<_> = entries.into_iter().filter(|e| e.label != "rook:timing:v1").collect();
     let kinds: Vec<&str> = entries.iter().map(|e| e.kind.as_str()).collect();
-    assert_eq!(kinds, vec!["user", "note", "tool-call", "tool-result", "assistant", "note", "note", "note"]);
-    assert_eq!(entries[6].label, "turn-summary");
-    assert_eq!(entries[7].label, "turn-result");
-    assert!(entries[3].body.contains("line two"), "{}", entries[3].body);
-    assert_eq!(entries[1].label, "usage", "tool-only usage is durable before the effect");
+    assert_eq!(
+        kinds,
+        vec!["user", "note", "note", "tool-call", "tool-result", "note", "assistant", "note", "note", "note"]
+    );
+    assert_eq!(entries[1].label, rook_core::context::REQUEST_CATALOG_LABEL);
+    assert_eq!(entries[5].label, rook_core::context::REQUEST_CATALOG_LABEL);
+    assert_eq!(entries[8].label, "turn-summary");
+    assert_eq!(entries[9].label, "turn-result");
+    assert!(entries[4].body.contains("line two"), "{}", entries[4].body);
+    assert_eq!(entries[2].label, "usage", "tool-only usage is durable before the effect");
     let meta = f.rook.store.get_session(session).unwrap().unwrap();
     assert_eq!(meta.tokens_in, u64::from(outcome.input_tokens));
     assert_eq!(meta.tokens_out, u64::from(outcome.output_tokens));
     // Read back, a call says what it was doing — the same words a front end
     // watching it live shows. It said `read_file` here, which answers "it read
     // something" and never "which file".
-    assert_eq!(entries[2].label, "read_file", "the log keeps the tool's own name");
-    assert_eq!(entries[2].doing, "read hello.txt", "and the entry says what it was for");
+    assert_eq!(entries[3].label, "read_file", "the log keeps the tool's own name");
+    assert_eq!(entries[3].doing, "read hello.txt", "and the entry says what it was for");
     assert!(entries[0].doing.is_empty(), "nothing else claims to be a call");
 }
 
@@ -1319,14 +1325,15 @@ async fn a_turn_that_broke_keeps_what_it_had_already_said() {
 
     let entries = f.rook.transcript(session, 0, usize::MAX, 4096).unwrap();
     assert_eq!(entries.iter().filter(|e| e.label == "rook:timing:v1").count(), 1);
-    // Timing receipts supplement the conversation; keep its original ordering assertions.
+    // Timing and request-catalog notes supplement the conversation.
     let entries: Vec<_> = entries.into_iter().filter(|e| e.label != "rook:timing:v1").collect();
     let kinds: Vec<&str> = entries.iter().map(|e| e.kind.as_str()).collect();
     assert_eq!(
         kinds,
-        vec!["user", "reasoning", "assistant", "note"],
+        vec!["user", "note", "reasoning", "assistant", "note"],
         "what it said is in the log, and why it stopped: {kinds:?}"
     );
+    assert_eq!(entries[1].label, rook_core::context::REQUEST_CATALOG_LABEL);
     let said = entries.iter().find(|e| e.kind == "assistant").expect("the half-answer");
     assert_eq!(said.body, "the port is 8080, and the host");
     assert_eq!(said.label, "cut off", "labelled as what it is, not as a finished answer");
@@ -3302,6 +3309,10 @@ async fn tools_an_endpoint_cannot_be_sent_are_put_in_the_prompt_and_read_back() 
         "the history must not reintroduce native function messages"
     );
     assert!(turns[1].messages.iter().any(|message| message.content.contains("untrusted tool observation")));
+    let catalog = rook.context_usage(session, None).unwrap().last_request.unwrap().catalog;
+    assert_eq!(catalog.delivery, "prompt");
+    assert!(catalog.tool_count > 0, "prompt-encoded tools are still offered to the model");
+    assert!(catalog.tools.iter().any(|tool| tool.name == "read_file"));
 }
 
 /// Small and quantised models sometimes finish a sentence in a script nobody
@@ -3618,6 +3629,35 @@ async fn what_context_reports_is_what_a_turn_actually_carries() {
 
     assert_eq!(after.live_tokens, before, "none of that reaches a turn, so none of it is its cost");
     assert!(after.logged_tokens > after.live_tokens, "but it is still what the store holds");
+}
+
+#[tokio::test]
+async fn context_reports_the_catalog_of_the_request_that_was_actually_attempted() {
+    let f = fixture();
+    let session = f.rook.start_session("request tools").unwrap();
+    assert!(f.rook.context_usage(session, None).unwrap().last_request.is_none());
+    let provider = Arc::new(ScriptedProvider::new(vec![reply("done")]));
+    AgentLoop::new(&f.rook, provider.clone(), session).run("check tools").await.unwrap();
+
+    let sent = provider.share();
+    let sent = sent.lock().unwrap();
+    let saved = f.rook.context_usage(session, None).unwrap().last_request.unwrap();
+    let catalog = saved.catalog;
+    assert_eq!(catalog.provider_id, "scripted/test");
+    assert_eq!(catalog.delivery, "native");
+    assert_eq!(catalog.detail, "stub");
+    assert_eq!(catalog.tool_count, sent[0].tools.len());
+    assert_eq!(catalog.omitted_tools, catalog.tool_count - catalog.tools.len());
+    assert_eq!(
+        catalog.tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(),
+        sent[0].tools.iter().take(32).map(|tool| tool.name.as_str()).collect::<Vec<_>>()
+    );
+    assert!(catalog.tools.iter().all(|tool| tool.estimated_tokens > 0));
+    assert!(saved.event_seq > 0);
+    let recorded = f.rook.transcript(session, saved.event_seq, 1, 20_000).unwrap();
+    assert_eq!(recorded[0].kind, "note");
+    assert!(!recorded[0].body.contains("check tools"), "tool catalog must not store prompt text");
+    assert!(recorded[0].bytes <= rook_core::context::REQUEST_CATALOG_MAX_BYTES as u64);
 }
 
 #[tokio::test]

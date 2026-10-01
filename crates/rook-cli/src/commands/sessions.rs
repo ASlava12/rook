@@ -420,6 +420,24 @@ fn show_context(usage: &rook_core::ContextUsage, json: bool) -> Result<()> {
         })
         .collect();
     print!("{}", fmt::table(&["kind", "events", "bytes", "tokens", ""], &rows));
+    if let Some(saved) = &usage.last_request {
+        let request = &saved.catalog;
+        println!(
+            "\nlast request attempt  event #{} · {} · {} {} tools · ~{} tokens used",
+            saved.event_seq, request.provider_id, request.delivery, request.detail, request.used_tokens
+        );
+        let rows: Vec<Vec<String>> = request
+            .tools
+            .iter()
+            .map(|tool| vec![tool.name.clone(), format!("~{}", tool.estimated_tokens)])
+            .collect();
+        print!("{}", fmt::table(&["offered tool", "schema tokens"], &rows));
+        if request.omitted_tools > 0 {
+            println!("{} more offered tools omitted from this bounded view", request.omitted_tools);
+        }
+    } else {
+        println!("\nno recorded request catalog (older session or no model request)");
+    }
     Ok(())
 }
 

@@ -7,6 +7,93 @@
 
 use serde::{Deserialize, Serialize};
 
+/// A bounded record of the tools offered in one attempted model request.
+/// It contains names and sizes, never schemas or prompt bodies.
+pub const REQUEST_CATALOG_LABEL: &str = "request-tool-catalog";
+pub const REQUEST_CATALOG_MAX_BYTES: usize = 16 * 1024;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RequestTool {
+    pub name: String,
+    /// Approximate tokens for the advertised name, description and schema.
+    pub estimated_tokens: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RequestCatalog {
+    /// Configured provider ID; a routing provider may choose another endpoint.
+    pub provider_id: String,
+    /// Native tool definitions or schemas embedded in the prompt.
+    pub delivery: String,
+    /// Stub schemas retain argument shapes; full schemas include descriptions.
+    pub detail: String,
+    pub used_tokens: usize,
+    pub tool_count: usize,
+    pub tools: Vec<RequestTool>,
+    pub omitted_tools: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SavedRequestCatalog {
+    pub event_seq: u64,
+    pub catalog: RequestCatalog,
+}
+
+fn prefix(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_owned();
+    }
+    let end = floor_char_boundary(text.as_bytes(), max_bytes.saturating_sub('…'.len_utf8()));
+    format!("{}…", &text[..end])
+}
+
+/// Count serialized bytes without making another copy of a potentially large
+/// external tool schema. The result is an estimate, not a provider token bill.
+fn json_bytes(value: &impl Serialize) -> usize {
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(bytes.len());
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    let _ = serde_json::to_writer(&mut count, value);
+    count.0
+}
+
+impl RequestCatalog {
+    pub(crate) fn capture(
+        provider_id: &str,
+        native: bool,
+        lazy: bool,
+        used_tokens: usize,
+        specs: &[rook_llm::ToolSpec],
+    ) -> Self {
+        const MAX_TOOLS: usize = 32;
+        let tools = specs
+            .iter()
+            .take(MAX_TOOLS)
+            .map(|spec| RequestTool {
+                name: prefix(&spec.name, 64),
+                estimated_tokens: json_bytes(spec).div_ceil(4),
+            })
+            .collect::<Vec<_>>();
+        Self {
+            provider_id: prefix(provider_id, 96),
+            delivery: if native { "native" } else { "prompt" }.into(),
+            detail: if lazy { "stub" } else { "full" }.into(),
+            used_tokens,
+            tool_count: specs.len(),
+            omitted_tools: specs.len().saturating_sub(tools.len()),
+            tools,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ContextBudget {
     /// Tokens.
@@ -211,6 +298,26 @@ pub fn shorten_result(text: &str, budget_tokens: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::ContextBudget;
+
+    #[test]
+    fn request_catalog_bounds_names_and_never_copies_full_schema_text() {
+        let specs = (0..100)
+            .map(|i| rook_llm::ToolSpec {
+                name: format!("tool_{i}_{}", "\u{1f}".repeat(100)),
+                description: if i == 0 { "hidden schema text ".repeat(50_000) } else { "short".into() },
+                parameters: serde_json::json!({"type":"object"}),
+            })
+            .collect::<Vec<_>>();
+        let catalog = super::RequestCatalog::capture("configured/test", true, true, 123, &specs);
+        let encoded = serde_json::to_string(&catalog).unwrap();
+        assert_eq!(catalog.tool_count, 100);
+        assert_eq!(catalog.tools.len(), 32);
+        assert_eq!(catalog.omitted_tools, 68);
+        assert!(catalog.tools.iter().all(|tool| tool.name.len() <= 64));
+        assert!(catalog.tools[0].name.ends_with('…'), "a shortened name must be visibly partial");
+        assert!(encoded.len() <= super::REQUEST_CATALOG_MAX_BYTES);
+        assert!(!encoded.contains("hidden schema text"));
+    }
 
     /// Tool results were 79% of a forty-step turn's context and were re-sent on
     /// every step of it. The ceiling touches the few that are large — a median

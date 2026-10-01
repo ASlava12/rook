@@ -13,6 +13,50 @@ struct Rook {
 }
 
 #[test]
+fn request_tool_catalog_is_the_same_locally_and_through_the_daemon() {
+    let rook = Rook::new();
+    let session = rook_store::new_session_id();
+    let id = rook_store::format_session_id(session);
+    {
+        let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+        store
+            .create_session(&rook_store::SessionMeta::new(
+                session,
+                "tool provenance",
+                rook.workspace.path().display().to_string(),
+                rook_store::now_unix(),
+            ))
+            .unwrap();
+        let catalog = serde_json::json!({
+            "provider_id": "scripted/test", "delivery": "native", "detail": "stub",
+            "used_tokens": 200, "tool_count": 1, "omitted_tools": 0,
+            "tools": [{"name": "read_file", "estimated_tokens": 12}]
+        });
+        store
+            .append_event(
+                session,
+                rook_store::NewEvent::new(
+                    rook_store::EventKind::Note,
+                    rook_store::Kind::Message,
+                    catalog.to_string().as_bytes(),
+                )
+                .label(rook_core::context::REQUEST_CATALOG_LABEL),
+            )
+            .unwrap();
+    }
+    let direct = rook.json(&["session", "context", &id]);
+    assert_eq!(direct["last_request"]["catalog"]["tools"][0]["name"], "read_file");
+    assert_eq!(direct["last_request"]["event_seq"], 0);
+    let text = rook.ok(&["session", "context", &id]);
+    assert!(text.contains("read_file") && text.contains("scripted/test"), "{text}");
+
+    let _daemon = Daemon::start(&rook);
+    assert_eq!(rook.json(&["session", "context", &id]), direct);
+    let text = rook.ok(&["session", "context", &id]);
+    assert!(text.contains("read_file") && text.contains("scripted/test"), "{text}");
+}
+
+#[test]
 fn identified_goal_controls_retry_through_cli_after_daemon_restart() {
     let rook = Rook::new();
     rook.write_config("[agent]\nmodel='missing-model'\ninstall_servers=false\n");

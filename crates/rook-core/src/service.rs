@@ -1099,6 +1099,7 @@ impl Rook {
         let budget = crate::context::ContextBudget::new(window, self.config.agent.compact_at);
         let mut by_kind: BTreeMap<String, KindUsage> = BTreeMap::new();
         let mut compactions = 0;
+        let mut request_record = None;
 
         for event in self.store.events(session, 0, usize::MAX)? {
             let kind = event.record.kind;
@@ -1106,6 +1107,9 @@ impl Rook {
                 compactions += 1;
             }
             let bytes = self.store.stat_object(&event.record.body)?.map(|m| m.size_raw).unwrap_or(0);
+            if kind == EventKind::Note && event.record.label == crate::context::REQUEST_CATALOG_LABEL {
+                request_record = Some((event.seq, event.record.body, bytes));
+            }
             let entry = by_kind.entry(kind.as_str().to_string()).or_default();
             entry.events += 1;
             entry.bytes += bytes;
@@ -1123,6 +1127,13 @@ impl Rook {
         // Use exactly what the next turn would carry. A separate event-kind
         // estimate lost signed state, missing-call results and pruning rules.
         let live = crate::agent::history::replay(self, session)?.iter().map(crate::attachments::tokens).sum();
+        let last_request = request_record.and_then(|(event_seq, object, bytes)| {
+            (bytes <= crate::context::REQUEST_CATALOG_MAX_BYTES as u64)
+                .then(|| self.store.get_range(&object, 0, bytes as usize).ok())
+                .flatten()
+                .and_then(|body| serde_json::from_slice(&body).ok())
+                .map(|catalog| crate::context::SavedRequestCatalog { event_seq, catalog })
+        });
 
         Ok(ContextUsage {
             window,
@@ -1134,6 +1145,7 @@ impl Rook {
             compactions,
             replay_from: self.last_compaction(session)?.0,
             by_kind: by_kind.into_iter().collect(),
+            last_request,
         })
     }
 
@@ -2156,6 +2168,10 @@ pub struct ContextUsage {
     /// represented by the last compaction's summary.
     pub replay_from: u64,
     pub by_kind: Vec<(String, KindUsage)>,
+    /// Catalog offered on the last recorded request attempt, if this Rook
+    /// version saw one. It says nothing about the current filesystem or tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_request: Option<crate::context::SavedRequestCatalog>,
 }
 
 /// What a user typed where a session was wanted: an id, or `last` for the most

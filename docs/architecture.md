@@ -220,6 +220,13 @@ same-name completions in arrival order and reports failure plus elapsed time
 observed in that tab. This is live transport state, not a persisted verdict or
 tool duration; saved results remain in session history. Pending card metadata
 is capped at 128 entries in addition to bounded chat scrollback.
+`rook session context` also shows the last attempted model request's bounded
+tool catalog: configured provider ID, native or prompt-encoded delivery,
+stub or full schemas, estimated schema tokens and omitted-name count. Rook
+records this as a service note before sending the request. It is excluded
+from model replay, contains no prompt or schema body, and remains readable
+through the daemon's existing context API. A recorded attempt does not prove
+the provider accepted it or that current tools match that old request.
 
 ## The agent loop
 
