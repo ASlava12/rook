@@ -118,6 +118,14 @@ applies to the identified HTTP and CLI path.
 An old stored run without a generation still uses the bare action route from
 the CLI; inspect its state after an uncertain response.
 
+When `/continue` resumes a paused goal over the chat socket, its prompt ID is
+also the resume control ID. Retrying that exact prompt after a later pause
+cannot resume the goal again, including across a daemon restart. A client that
+omits the prompt ID retains the older behavior. Ctrl-C and the browser Stop
+button still send the legacy socket cancel frame; they do not yet have a
+retryable pause ID. A resumed goal may report its current paused status on a
+duplicate prompt, so inspect the goal before choosing a new continuation.
+
 ## Edit or withdraw queued messages
 
 Open **message queue** from Ctrl-P, or type `/queue`, in the TUI. The panel shows

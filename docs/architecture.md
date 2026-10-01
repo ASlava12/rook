@@ -356,6 +356,10 @@ beside the run state under the managed-work write lock. A repeat with the same
 action and generation reads the current run without applying the control again;
 an old generation cannot affect a replacement conversation goal. The bare
 action request and response remain compatible with older clients.
+The socket's `/continue` prompt reuses its caller ID for a paused goal's resume
+control. Repeating that prompt after another pause finds the saved control
+receipt and leaves the later pause intact. Older socket prompts without IDs
+still use the legacy transition.
 
 Scheduled tasks are exposed through `/api/tasks`; the TUI and web views share
 this API. Each occurrence reserves a session ID durably, then creates an

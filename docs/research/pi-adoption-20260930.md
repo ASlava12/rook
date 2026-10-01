@@ -1252,3 +1252,28 @@ The required `cargo xtask compaction` exited 0 with 4.02 MiB on disk, 37.1x
 dictionary compression and 5.8x end-to-end. The saved managed-work JSON has
 one optional bounded receipt list; postcard and existing HTTP forms did not
 change.
+
+## Socket continuation control identity
+
+A chat socket `/continue` prompt already carries a caller-owned ID in current
+TUI, REPL and browser clients. When it resumes a paused managed goal, the
+daemon now uses that ID and the observed goal generation with the identified
+control receipt. A delayed retry after a later pause finds the original resume
+receipt and leaves the newer pause intact. Prompts without IDs and older goals
+without a generation keep the legacy resume path. This changes no socket
+frame or stored record format beyond the optional receipt list added above.
+The real-daemon test starts a conversation goal, resumes it by socket, pauses
+again, restarts the daemon, and retries the exact prompt. The second resume is
+rejected as already applied while the goal remains paused; an ID-less legacy
+prompt still resumes. Socket cancel/pause commands do not yet carry caller IDs,
+and payload identity for a retry of an already resumed prompt still needs
+broader lifecycle coverage. Queue stays In progress; branch live checks and
+all Pending rows remain.
+
+The focused real-daemon scenario exited 0 with both identified and legacy
+continuation frames. The first full `cargo xtask ci` exited 1: the existing
+`continuing_a_killed_predecessor_releases_its_followups_only_after_completion`
+test exceeded its 90-second mock-model wait while the other 80 CLI tests
+passed. That test passed alone on retry (exit 0, 60.0 seconds). The next full
+CI exited 0 (`ci: ok`, 703.8 seconds), including all 81 CLI integration tests
+and doctests. This block changed no storage code, so compaction was not rerun.

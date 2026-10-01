@@ -161,6 +161,87 @@ async fn enqueue(client: &reqwest::Client, url: &str, id: &str) -> Value {
 }
 
 #[test]
+fn a_retried_continue_prompt_does_not_resume_a_later_paused_goal() {
+    rook_llm::init_tls();
+    let rook = Rook::new();
+    rook.write_config("[agent]\nmodel='missing-model'\ninstall_servers=false\n");
+    let session = rook_store::new_session_id();
+    let id = rook_store::format_session_id(session);
+    {
+        let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+        store
+            .create_session(&rook_store::SessionMeta::new(
+                session,
+                "resume identity",
+                rook.workspace.path().display().to_string(),
+                rook_store::now_unix(),
+            ))
+            .unwrap();
+    }
+    let daemon = Daemon::start(&rook);
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let work = format!("{}/api/work/{id}", daemon.address);
+    runtime.block_on(async {
+        client
+            .post(format!("{}/api/work", daemon.address))
+            .json(&json!({
+                "goal":"Wait for explicit continuation", "autonomous":false,
+                "conversation":{"session":id, "model":null, "effort":"high", "stance":"autonomous"},
+                "max_iterations":0, "max_tokens":0, "max_seconds":0,
+            }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+    });
+    assert_eq!(rook.json(&["task", "pause", &id])["run"]["status"], "paused");
+    let prompt = json!({"type":"prompt","session":id,"id":"continue-once","text":"/continue"});
+    runtime.block_on(async {
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!(
+            "{}/api/chat",
+            daemon.address.replacen("http", "ws", 1)
+        ))
+        .await
+        .unwrap();
+        socket.send(tokio_tungstenite::tungstenite::Message::Text(prompt.to_string().into())).await.unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        while get(&client, &work).await["status"] == "paused" {
+            assert!(tokio::time::Instant::now() < deadline, "first continuation did not resume the goal");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    });
+    assert_eq!(rook.json(&["task", "pause", &id])["run"]["status"], "paused");
+    drop(daemon);
+    std::fs::remove_file(rook.home.path().join("rookd.addr")).unwrap();
+    let daemon = Daemon::start(&rook);
+    runtime.block_on(async {
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!(
+            "{}/api/chat",
+            daemon.address.replacen("http", "ws", 1)
+        ))
+        .await
+        .unwrap();
+        socket.send(tokio_tungstenite::tungstenite::Message::Text(prompt.to_string().into())).await.unwrap();
+        let error = socket_event(&mut socket, "failed").await;
+        assert!(error.to_string().contains("paused by user"), "{error}");
+        assert_eq!(get(&client, &format!("{}/api/work/{id}", daemon.address)).await["status"], "paused");
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                json!({"type":"prompt","session":id,"text":"/continue"}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        while get(&client, &format!("{}/api/work/{id}", daemon.address)).await["status"] == "paused" {
+            assert!(tokio::time::Instant::now() < deadline, "legacy continuation no longer resumes");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    });
+}
+
+#[test]
 fn socket_corrections_reuse_caller_receipts_and_old_frames_still_work() {
     rook_llm::init_tls();
     let rook = Rook::new();

@@ -17,7 +17,7 @@ use rook_core::work::managed;
 use rook_llm::Delta;
 use rook_proto::AskQuestion;
 use rook_proto::queue::Change;
-use rook_proto::work::{Action, Conversation, Run, Start, Status, Steer};
+use rook_proto::work::{Action, Conversation, IdentifiedControl, Run, Start, Status, Steer};
 use rook_proto::{ApprovalDecision, ChatEvent, ClientMessage};
 use rook_tools::ask::{AskRequest, ChannelAsker};
 use rook_tools::policy::{Approval, ChannelApprover};
@@ -457,7 +457,22 @@ async fn serve(
                                     interjected = Some(notice);
                                 }
                                 if !run.status.runnable() {
-                                    managed::control(&rook, &run.id, Action::Resume)
+                                    if let Some(control_id) =
+                                        submission_id.as_deref().filter(|_| !run.generation.is_empty())
+                                    {
+                                        managed::control_identified(
+                                            &rook,
+                                            &run.id,
+                                            IdentifiedControl {
+                                                id: control_id.into(),
+                                                generation: run.generation,
+                                                action: Action::Resume,
+                                            },
+                                        )
+                                        .map(|outcome| outcome.run)
+                                    } else {
+                                        managed::control(&rook, &run.id, Action::Resume)
+                                    }
                                 } else {
                                     Ok(run)
                                 }
