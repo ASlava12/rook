@@ -11,7 +11,7 @@ Source: Pi `ee602414c703be8da722ec56de7f2399e62581ac`; starting Rook:
 | Configurable keyboard actions and prompt undo | Complete | Shared registry/config/help, bounded Unicode edit tests, remapped-key and external-editor PTY checks, full CI passed |
 | Branch navigation and optional branch summary | In progress | Existing session/event IDs, bounded tree/history, explicit workspace semantics, attributable summary |
 | Inline tool cards | In progress | Compact/expanded results, errors/duration/diffs, bounded loading, TUI/browser verification |
-| Context provenance inspector | In progress | Request-specific sources and loaded skills, deferred MCP tools in CLI/API/TUI; dedicated browser view pending |
+| Context provenance inspector | Complete | Request-specific sources and loaded skills, deferred MCP tools in CLI/API/TUI/browser; bounded notes, old-note compatibility, local/daemon and full CI passed |
 | Local HTML export | In progress | Selected history scope, bounded streaming, escaped content, no publication, cross-frontend access |
 | Opt-in phase-based model routing | Pending | Explicit policy, continuity/capability constraints, actual route/cost reporting, comparison without claiming unmeasured savings |
 | Declarative extension UI | Pending | Bounded status/progress/forms/result contract, trust boundary, text fallback and frontend parity |
@@ -1769,3 +1769,25 @@ storage paths. No storage format or wire route changed in this block. Full
 `cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0 (`ci: ok`, 651.7
 seconds), including 110 TUI/CLI unit tests and 85 CLI integration tests.
 Browser context UI is still pending.
+
+## Browser context provenance view
+
+The browser now has a Context tab, also reachable from the selected session's
+controls. It reads `/api/sessions/{id}/context` with that session's workspace,
+shows the live estimate separately from the saved last request attempt, and
+renders offered tools, deferred MCP tools and source origins as DOM text.
+Session changes and refreshes discard responses from earlier reads. The list
+shows at most 100 sessions, and the browser caps displayed tool, source and
+deferred-name rows even though the recorded note is already bounded.
+
+The focused browser suite passed 22/22 tests, including source text that
+resembles HTML, old notes without provenance fields, workspace routing,
+refresh and session switching. A focused `rookd` API test passed with a real
+saved note and confirmed that the response contains recorded names but no
+prompt body; the embedded-module route test passed too. JavaScript syntax
+checks for the three touched modules exited 0. Full `cargo xtask ci` with
+`RUST_TEST_THREADS=1` exited 0 (`ci: ok`, 836.9 seconds), including 85 CLI
+integration tests and the new daemon API test. This block changes neither
+the store format nor the context API. With the CLI, API, TUI and browser
+views verified, the inspector row is Complete. Queue, branch, tool-card and
+HTML-export gaps and both Pending capabilities remain in scope.

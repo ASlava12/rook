@@ -253,6 +253,11 @@ The TUI's context pane uses the same local or daemon context source as the
 CLI/API. It separates the live estimate from the saved request attempt and
 labels the latter historical; `r` reads the latest note again. The pane never
 reads today's project files to explain an older request.
+The browser's Context tab reads the same daemon endpoint for the selected
+session and passes that session's workspace for the effective model window.
+It renders the live estimate and historical request in separate sections,
+using DOM text nodes for saved names and origins. Selecting another session
+or refreshing invalidates older in-flight reads.
 
 ## The agent loop
 

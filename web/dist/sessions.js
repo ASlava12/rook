@@ -1,6 +1,6 @@
 // Sessions: what each one changed on disk, its transcript as it grows, and
 // the two things a person does with one — continue it, or rewind it.
-import { $, el, api, ago, state } from './lib.js';
+import { $, el, api, ago, state, nav } from './lib.js';
 import { continueIn, quoteIntoDraft, branchFromEvent } from './chat.js';
 import { historyPanel } from './history.js';
 import { branchPanel } from './branches.js';
@@ -37,6 +37,7 @@ export async function renderSessions() {
     const chosen = items.find(s => String(s.id) === String(state.session)) || {};
     right.append(el('div', { class: 'row' },
       el('button', { onclick: () => continueIn(state.session) }, 'Continue in chat'),
+      el('button', { onclick: () => nav.go('context') }, 'Inspect context'),
       el('label', {}, 'goal '),
       el('input', { id: 'goal', placeholder: 'what this session is for', value: chosen.goal || '' }),
       el('button', { onclick: async () => {

@@ -2310,6 +2310,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn browser_context_reads_the_recorded_request_without_rebuilding_its_sources() {
+        let f = fixture();
+        let id = rook_store::format_session_id(f.session);
+        let note = serde_json::json!({
+            "provider_id":"scripted/test", "delivery":"native", "detail":"stub",
+            "used_tokens":400, "tool_count":1, "omitted_tools":0,
+            "tools":[{"name":"mcp_tools","estimated_tokens":25}],
+            "mcp":{"discovered":1,"advertised":0,"deferred":1,
+                   "deferred_names":["camera__shot"],"omitted_deferred":0},
+            "sources":{"discovered_skills":1,"applicable_skills":1,"advertised_skills":1,
+                       "loaded_skill_events":1,"sources":[{"kind":"skill","name":"camera",
+                       "origin":"project/SKILL.md","inclusion":"loaded","estimated_tokens":40,
+                       "complete":true}],"omitted_sources":0}
+        });
+        f.state
+            .rook
+            .read()
+            .await
+            .log(
+                f.session,
+                rook_store::EventKind::Note,
+                rook_core::context::REQUEST_CATALOG_LABEL,
+                &note.to_string(),
+            )
+            .unwrap();
+        let (status, body) = get(&f, &format!("/api/sessions/{id}/context")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let saved = &body["last_request"];
+        assert_eq!(saved["event_seq"], 1);
+        assert_eq!(saved["catalog"]["mcp"]["deferred_names"][0], "camera__shot");
+        assert_eq!(saved["catalog"]["sources"]["sources"][0]["origin"], "project/SKILL.md");
+        assert!(!body.to_string().contains("find the leak"), "request provenance excludes prompt bodies");
+    }
+
+    #[tokio::test]
     async fn a_changes_request_for_something_that_is_not_a_session_is_a_client_error() {
         let f = fixture();
         let (status, _) = get(&f, "/api/sessions/not-a-ulid/changes").await;

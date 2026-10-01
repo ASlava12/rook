@@ -3,11 +3,13 @@ import { $, el, api, state, nav, errorCard } from './lib.js';
 import { renderChat } from './chat.js';
 import { renderTasks } from './tasks.js';
 import { renderSessions } from './sessions.js';
+import { renderContext } from './context.js';
 import { renderSearch, renderMemory, renderSkills, renderJobs, renderStore, renderCheckpoints, renderDocs, renderSecrets } from './views.js';
 
 const tabs = {
   chat: renderChat,
   sessions: renderSessions,
+  context: renderContext,
   tasks: renderTasks,
   search: renderSearch,
   memory: renderMemory,
