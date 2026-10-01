@@ -3,6 +3,7 @@
 use super::AgentLoop;
 use super::LOAD_SKILL;
 use super::budget::cacheable;
+use crate::context::SourceManifest;
 use crate::context::estimate_tokens;
 use crate::error::Result;
 use rook_llm::{Message, Role};
@@ -41,6 +42,13 @@ fn bundled(skill: &rook_skills::Skill) -> String {
     // ways, and a model reading it has no way to know they are the same place.
     let dir = skill.dir.canonicalize().unwrap_or_else(|_| skill.dir.clone());
     format!("\n\nBundled with this skill, under {}:{}{more}", dir.display(), listed.join(""))
+}
+
+fn skill_path(resolved: &rook_skills::Resolved) -> std::path::PathBuf {
+    let file = resolved.variant.as_ref().map(|v| v.body.clone()).unwrap_or_else(|| {
+        if resolved.skill.dir.join("SKILL.md").is_file() { "SKILL.md".into() } else { "skill.md".into() }
+    });
+    resolved.skill.dir.join(file)
 }
 
 /// How much of the workspace a session's first turn is shown. Sixty lines is
@@ -127,7 +135,12 @@ impl<'a> AgentLoop<'a> {
     /// External prompt material, kept out of the system role and labelled by
     /// the harness. The same boundary is used by normal turns and asides.
     pub fn source_context(&self) -> String {
+        self.source_context_with_manifest().0
+    }
+
+    fn source_context_with_manifest(&self) -> (String, SourceManifest) {
         let mut s = String::new();
+        let mut manifest = SourceManifest::default();
         let env = self.rook.env();
         let mut detected = String::new();
         if !env.languages.is_empty() {
@@ -140,13 +153,31 @@ impl<'a> AgentLoop<'a> {
         }
 
         if !detected.is_empty() {
-            s.push_str(&crate::sources::data("environment", "detected tool versions", &detected));
+            let source = crate::sources::data("environment", "detected tool versions", &detected);
+            manifest.add(
+                "environment",
+                "detected tool versions",
+                "local probe",
+                "included",
+                estimate_tokens(&source),
+                None,
+            );
+            s.push_str(&source);
             s.push('\n');
         }
 
         if !self.native_tools() {
             let schemas = serde_json::to_string(&self.tool_specs()).unwrap_or_default();
-            s.push_str(&crate::sources::data("tool_catalog", "available tool schemas", &schemas));
+            let source = crate::sources::data("tool_catalog", "available tool schemas", &schemas);
+            manifest.add(
+                "tool_catalog",
+                "prompted tool schemas",
+                "Rook",
+                "included",
+                estimate_tokens(&source),
+                None,
+            );
+            s.push_str(&source);
             s.push('\n');
         }
 
@@ -159,26 +190,47 @@ impl<'a> AgentLoop<'a> {
             // instructions that stop mid-sentence read as instructions that
             // end there — and a note after the end says nothing about which
             // end went.
-            s.push_str(&crate::sources::instructions(
+            let source = crate::sources::instructions(
                 "project_instructions",
                 &standing.from,
                 &self.rook.workspace,
                 &standing.text,
                 standing.elided == 0,
                 &self.rook.config.agent.trusted_sources,
-            ));
+            );
+            let origin = standing.from.canonicalize().unwrap_or_else(|_| standing.from.clone());
+            manifest.add(
+                "project_instructions",
+                standing.from.file_name().unwrap_or_default().to_string_lossy().as_ref(),
+                origin.to_string_lossy().as_ref(),
+                "included",
+                estimate_tokens(&source),
+                Some(standing.elided == 0),
+            );
+            s.push_str(&source);
             s.push('\n');
         }
 
         if let Ok(extra) = self.session_context.lock()
             && let Some(text) = extra.as_deref().filter(|t| !t.trim().is_empty())
         {
-            s.push_str(&crate::sources::data("hook_context", "session_start hook", text));
+            let source = crate::sources::data("hook_context", "session_start hook", text);
+            manifest.add(
+                "hook_context",
+                "session_start hook",
+                "session hook",
+                "included",
+                estimate_tokens(&source),
+                None,
+            );
+            s.push_str(&source);
             s.push('\n');
         }
 
         let cards = self.rook.catalog();
+        manifest.discovered_skills = cards.len();
         let mut applicable: Vec<_> = cards.iter().filter(|c| c.applicable).collect();
+        manifest.applicable_skills = applicable.len();
         // Nearest first, so that when there are more than fit, what goes is
         // what we shipped rather than what somebody wrote for this workspace.
         // Both lists below are cut short — one by a count, the other by a
@@ -196,10 +248,11 @@ impl<'a> AgentLoop<'a> {
         if !applicable.is_empty() {
             s.push_str("\n## Skills\n");
             let listed = if self.rook.config.agent.lazy_skills {
-                self.skill_cards(&mut s, &applicable)
+                self.skill_cards(&mut s, &applicable, &mut manifest)
             } else {
-                self.skill_bodies(&mut s, &applicable)
+                self.skill_bodies(&mut s, &applicable, &mut manifest)
             };
+            manifest.advertised_skills = listed;
             // Named rather than silently dropped: a model that cannot see a
             // skill and is not told any exist will not go looking for one.
             if let Some(omitted) = applicable.len().checked_sub(listed).filter(|n| *n > 0) {
@@ -209,10 +262,15 @@ impl<'a> AgentLoop<'a> {
                 ));
             }
         }
-        s
+        (s, manifest)
     }
 
-    fn skill_cards(&self, s: &mut String, applicable: &[&rook_skills::SkillCard]) -> usize {
+    fn skill_cards(
+        &self,
+        s: &mut String,
+        applicable: &[&rook_skills::SkillCard],
+        manifest: &mut SourceManifest,
+    ) -> usize {
         s.push_str(&format!(
             "Call `{LOAD_SKILL}` with a name to consult its recipe; its trust is stated in the result.\n"
         ));
@@ -221,11 +279,10 @@ impl<'a> AgentLoop<'a> {
             // No version: `load_skill` takes a name, and `resolve` picks the
             // version from the environment — so a version here is ~100 tokens
             // per fifty skills that the model cannot act on.
-            s.push_str(&crate::sources::data(
-                "skill_catalog",
-                &c.source,
-                &format!("- {}: {}", c.name, c.description),
-            ));
+            let source =
+                crate::sources::data("skill_catalog", &c.source, &format!("- {}: {}", c.name, c.description));
+            manifest.add("skill", &c.name, &c.source, "card", estimate_tokens(&source), None);
+            s.push_str(&source);
             s.push('\n');
         }
         applicable.len().min(cap)
@@ -237,7 +294,12 @@ impl<'a> AgentLoop<'a> {
     /// Bounded by a share of the context window rather than a count: bodies vary
     /// from a paragraph to several pages, and a library that filled the window
     /// would leave no room for the work.
-    fn skill_bodies(&self, s: &mut String, applicable: &[&rook_skills::SkillCard]) -> usize {
+    fn skill_bodies(
+        &self,
+        s: &mut String,
+        applicable: &[&rook_skills::SkillCard],
+        manifest: &mut SourceManifest,
+    ) -> usize {
         let mut left = self.budget.window / 4;
         let mut shown = 0;
         for card in applicable {
@@ -249,6 +311,8 @@ impl<'a> AgentLoop<'a> {
             }
             left -= tokens;
             shown += 1;
+            let path = skill_path(&resolved).canonicalize().unwrap_or_else(|_| skill_path(&resolved));
+            manifest.add("skill", &card.name, path.to_string_lossy().as_ref(), "inline", tokens, Some(true));
             s.push_str(&source);
             s.push('\n');
         }
@@ -256,9 +320,6 @@ impl<'a> AgentLoop<'a> {
     }
 
     pub(super) fn skill_source(&self, resolved: &rook_skills::Resolved) -> String {
-        let file = resolved.variant.as_ref().map(|v| v.body.clone()).unwrap_or_else(|| {
-            if resolved.skill.dir.join("SKILL.md").is_file() { "SKILL.md".into() } else { "skill.md".into() }
-        });
         // Named, and by where it came from: a body on its own is anonymous, and
         // a model that had just written a skill and loaded it back decided it
         // had been handed "the environment's built-in default" and went looking
@@ -272,7 +333,7 @@ impl<'a> AgentLoop<'a> {
         );
         crate::sources::instructions(
             "skill",
-            &resolved.skill.dir.join(file),
+            &skill_path(resolved),
             &self.rook.workspace,
             &body,
             true,
@@ -307,9 +368,9 @@ impl<'a> AgentLoop<'a> {
     /// The prompt itself is not appended: it was logged before this, so
     /// replaying the session already ends with it, and the log is the only
     /// source of truth for what was said.
-    pub(super) fn request_messages(&self, prompt: &str) -> Result<Vec<Message>> {
+    pub(super) fn request_messages(&self, prompt: &str) -> Result<(Vec<Message>, SourceManifest)> {
         let mut messages = vec![cacheable(Message::system(self.system_prompt()))];
-        let sources = self.source_context();
+        let (sources, manifest) = self.source_context_with_manifest();
         let has_sources = !sources.is_empty();
         if has_sources {
             messages.push(cacheable(Message::user(sources)));
@@ -384,6 +445,6 @@ impl<'a> AgentLoop<'a> {
                 crate::sources::data("output_schema", "user-selected output schema", &schema.to_string())
             )));
         }
-        Ok(messages)
+        Ok((messages, manifest))
     }
 }

@@ -1617,3 +1617,47 @@ dictionary compression and 5.8x end-to-end. That benchmark fixture does not
 contain the new service note, so its figures do not measure the note's space
 cost. The new note uses the existing event type; stored record formats are
 unchanged.
+
+## Request-prefix source provenance
+
+The request-attempt note now also records the sources assembled for the
+request prefix. Project instructions retain their canonical file origin,
+estimated tokens and whether the read was complete. Environment, prompted
+tool schemas and session hook context are listed when included. Skills have
+separate discovered, applicable and advertised counts. Each advertised skill
+entry says whether Rook sent only a lazy catalog card or inlined the body;
+the former is not reported as a loaded skill. The record is made while the
+request is built, so changing or deleting a file later cannot rewrite what
+the inspector says was selected for that attempt.
+
+The source list keeps at most 32 entries; names and origins are clipped before
+copying, and the combined service note still has the 16 KiB ceiling. Old
+tool-catalog notes deserialize with an empty source manifest. The service
+note is skipped during model replay without reading its body. CLI text and
+JSON use the same saved note locally and through the daemon. On-demand
+`load_skill` results, volatile per-step additions, deferred tool state, and
+dedicated TUI/browser views remain open for the context provenance row.
+
+Rechecking session `01M3T336VB22NEP5AY77T5NYB4` against the live daemon
+found one valid `ask` at event 1641, which timed out after 1800 seconds with
+no chosen answer. Events 2404, 2408, 2412 and 2416 were malformed `ask`
+attempts for a later, similar decision and failed argument validation before
+any question reached the TUI. The earlier malformed call was event 1637.
+The TUI's previous 2,000-event tool pane limit hid the later attempts, which
+explains a misleading inspection result. Current TUI question delivery uses
+the pending-input map on reconnect and clears a resolved question through
+`Inputs`; the stored events do not show repeated valid question delivery.
+This was model-side repetition with a TUI inspection gap, not evidence that
+the question panel sent the same request repeatedly.
+
+Both focused agent-loop tests passed: the saved lazy request names the exact
+project instruction origin and greeting catalog card, and eager mode records
+the greeting body as inline. The first focused CLI run exited 1 because its
+new fixture tried to reopen the Windows store while the daemon held its lock;
+moving that fixture write before daemon startup made the rerun pass. The
+rerun checks legacy notes, new notes, local text/JSON and the real daemon.
+`cargo xtask compaction` exited 0 (4.02 MiB on disk, 37.1x dictionary and
+5.8x end-to-end compression); its fixture does not include these notes. Full
+`cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0 (`ci: ok`, 918.1 seconds),
+including 85 CLI integration tests and 234 agent-loop tests. The existing
+store event layout and wire routes remain unchanged.

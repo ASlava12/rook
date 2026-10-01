@@ -882,7 +882,7 @@ impl<'a> AgentLoop<'a> {
         mut on_progress: F,
     ) -> Result<TurnOutcome> {
         let loaded_recipe_skill = self.begin_turn(prompt, &mut on_progress).await?;
-        let mut messages = self.request_messages(prompt)?;
+        let (mut messages, mut source_manifest) = self.request_messages(prompt)?;
         let mut outcome = TurnOutcome {
             steps: 0,
             stopped: "end_turn".into(),
@@ -1004,7 +1004,7 @@ impl<'a> AgentLoop<'a> {
                 // so what sits beside the prompt — the date, and whatever was
                 // recalled — vanished at the first compaction. It also made the
                 // guard below believe the summary had shrunk something.
-                messages = self.request_messages(prompt)?;
+                (messages, source_manifest) = self.request_messages(prompt)?;
                 // The anchor counted messages that are no longer there.
                 anchor = None;
                 worth_compacting = measured(&messages, anchor) < before;
@@ -1085,11 +1085,17 @@ impl<'a> AgentLoop<'a> {
                 self.rook.config.agent.lazy_tools,
                 used,
                 specs,
+                source_manifest.clone(),
             );
             let mut body = serde_json::to_string(&catalog)?;
             while body.len() > crate::context::REQUEST_CATALOG_MAX_BYTES {
-                catalog.tools.pop();
-                catalog.omitted_tools = catalog.tool_count - catalog.tools.len();
+                if catalog.tools.pop().is_some() {
+                    catalog.omitted_tools = catalog.tool_count - catalog.tools.len();
+                } else if catalog.sources.sources.pop().is_some() {
+                    catalog.sources.omitted_sources += 1;
+                } else {
+                    break;
+                }
                 body = serde_json::to_string(&catalog)?;
             }
             self.rook.log(self.session, EventKind::Note, crate::context::REQUEST_CATALOG_LABEL, &body)?;
@@ -1126,7 +1132,7 @@ impl<'a> AgentLoop<'a> {
                     self.report(Reported::Open(said));
                     outcome.compactions += 1;
                     self.compact().await;
-                    messages = self.request_messages(prompt)?;
+                    (messages, source_manifest) = self.request_messages(prompt)?;
                     anchor = None;
                     continue;
                 }

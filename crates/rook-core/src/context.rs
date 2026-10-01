@@ -19,6 +19,54 @@ pub struct RequestTool {
     pub estimated_tokens: usize,
 }
 
+/// One harness-selected source in the request prefix. Its content stays in
+/// the actual request and is never copied into the inspection record.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RequestSource {
+    pub kind: String,
+    pub name: String,
+    pub origin: String,
+    /// `included`, `card`, or `inline`; a card is not a loaded skill body.
+    pub inclusion: String,
+    pub estimated_tokens: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub complete: Option<bool>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SourceManifest {
+    pub discovered_skills: usize,
+    pub applicable_skills: usize,
+    pub advertised_skills: usize,
+    pub sources: Vec<RequestSource>,
+    pub omitted_sources: usize,
+}
+
+impl SourceManifest {
+    pub(crate) fn add(
+        &mut self,
+        kind: &str,
+        name: &str,
+        origin: &str,
+        inclusion: &str,
+        estimated_tokens: usize,
+        complete: Option<bool>,
+    ) {
+        if self.sources.len() >= 32 {
+            self.omitted_sources += 1;
+            return;
+        }
+        self.sources.push(RequestSource {
+            kind: kind.into(),
+            name: prefix(name, 64),
+            origin: prefix(origin, 192),
+            inclusion: inclusion.into(),
+            estimated_tokens,
+            complete,
+        });
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RequestCatalog {
     /// Configured provider ID; a routing provider may choose another endpoint.
@@ -31,6 +79,8 @@ pub struct RequestCatalog {
     pub tool_count: usize,
     pub tools: Vec<RequestTool>,
     pub omitted_tools: usize,
+    #[serde(default)]
+    pub sources: SourceManifest,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -72,6 +122,7 @@ impl RequestCatalog {
         lazy: bool,
         used_tokens: usize,
         specs: &[rook_llm::ToolSpec],
+        sources: SourceManifest,
     ) -> Self {
         const MAX_TOOLS: usize = 32;
         let tools = specs
@@ -90,6 +141,7 @@ impl RequestCatalog {
             tool_count: specs.len(),
             omitted_tools: specs.len().saturating_sub(tools.len()),
             tools,
+            sources,
         }
     }
 }
@@ -308,7 +360,14 @@ mod tests {
                 parameters: serde_json::json!({"type":"object"}),
             })
             .collect::<Vec<_>>();
-        let catalog = super::RequestCatalog::capture("configured/test", true, true, 123, &specs);
+        let catalog = super::RequestCatalog::capture(
+            "configured/test",
+            true,
+            true,
+            123,
+            &specs,
+            super::SourceManifest::default(),
+        );
         let encoded = serde_json::to_string(&catalog).unwrap();
         assert_eq!(catalog.tool_count, 100);
         assert_eq!(catalog.tools.len(), 32);

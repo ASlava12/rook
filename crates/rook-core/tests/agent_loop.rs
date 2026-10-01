@@ -3634,6 +3634,8 @@ async fn what_context_reports_is_what_a_turn_actually_carries() {
 #[tokio::test]
 async fn context_reports_the_catalog_of_the_request_that_was_actually_attempted() {
     let f = fixture();
+    let instructions = f.workspace.path().join("AGENTS.md");
+    std::fs::write(&instructions, "Use the local conventions.\n").unwrap();
     let session = f.rook.start_session("request tools").unwrap();
     assert!(f.rook.context_usage(session, None).unwrap().last_request.is_none());
     let provider = Arc::new(ScriptedProvider::new(vec![reply("done")]));
@@ -3653,11 +3655,44 @@ async fn context_reports_the_catalog_of_the_request_that_was_actually_attempted(
         sent[0].tools.iter().take(32).map(|tool| tool.name.as_str()).collect::<Vec<_>>()
     );
     assert!(catalog.tools.iter().all(|tool| tool.estimated_tokens > 0));
+    assert!(catalog.sources.discovered_skills >= catalog.sources.applicable_skills);
+    assert!(catalog.sources.applicable_skills >= catalog.sources.advertised_skills);
+    assert!(catalog.sources.sources.iter().any(|source| {
+        source.kind == "project_instructions"
+            && source.origin == instructions.canonicalize().unwrap().to_string_lossy()
+            && source.complete == Some(true)
+            && source.estimated_tokens > 0
+    }));
+    assert!(
+        catalog.sources.sources.iter().any(|source| {
+            source.kind == "skill" && source.name == "greeting" && source.inclusion == "card"
+        })
+    );
+    assert!(!catalog.sources.sources.iter().any(|source| source.inclusion == "inline"));
     assert!(saved.event_seq > 0);
     let recorded = f.rook.transcript(session, saved.event_seq, 1, 20_000).unwrap();
     assert_eq!(recorded[0].kind, "note");
     assert!(!recorded[0].body.contains("check tools"), "tool catalog must not store prompt text");
     assert!(recorded[0].bytes <= rook_core::context::REQUEST_CATALOG_MAX_BYTES as u64);
+}
+
+#[tokio::test]
+async fn eager_skill_body_is_recorded_as_inline_for_the_attempted_request() {
+    let f = fixture();
+    let mut config = Config::default();
+    config.agent.lazy_skills = false;
+    let rook = with_config(&f, "inline-source-record", config);
+    let session = rook.start_session("inline").unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![reply("ok")]));
+    AgentLoop::new(&rook, provider, session).run("greet").await.unwrap();
+
+    let record = rook.context_usage(session, None).unwrap().last_request.unwrap();
+    let source = record.catalog.sources.sources.into_iter().find(|s| s.name == "greeting").unwrap();
+    assert_eq!(source.kind, "skill");
+    assert_eq!(source.inclusion, "inline");
+    assert!(source.origin.ends_with("SKILL.md"));
+    assert!(source.estimated_tokens > 0);
+    assert_eq!(source.complete, Some(true));
 }
 
 #[tokio::test]

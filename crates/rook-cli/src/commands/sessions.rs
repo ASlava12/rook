@@ -435,6 +435,34 @@ fn show_context(usage: &rook_core::ContextUsage, json: bool) -> Result<()> {
         if request.omitted_tools > 0 {
             println!("{} more offered tools omitted from this bounded view", request.omitted_tools);
         }
+        let sources = &request.sources;
+        if sources.discovered_skills > 0 || !sources.sources.is_empty() {
+            println!(
+                "\nskills       {} discovered · {} applicable · {} advertised",
+                sources.discovered_skills, sources.applicable_skills, sources.advertised_skills
+            );
+            let rows: Vec<Vec<String>> = sources
+                .sources
+                .iter()
+                .map(|source| {
+                    vec![
+                        source.kind.clone(),
+                        source.name.clone(),
+                        source.inclusion.clone(),
+                        source.origin.clone(),
+                        format!(
+                            "~{}{}",
+                            source.estimated_tokens,
+                            if source.complete == Some(false) { " partial" } else { "" }
+                        ),
+                    ]
+                })
+                .collect();
+            print!("{}", fmt::table(&["source", "name", "included as", "origin", "tokens"], &rows));
+            if sources.omitted_sources > 0 {
+                println!("{} more included sources omitted from this bounded view", sources.omitted_sources);
+            }
+        }
     } else {
         println!("\nno recorded request catalog (older session or no model request)");
     }

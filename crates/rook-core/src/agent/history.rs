@@ -105,6 +105,10 @@ pub(crate) fn replay(rook: &crate::Rook, session: u128) -> Result<Vec<Message>> 
     let mut last_at = 0i64;
 
     for event in events {
+        if event.record.kind == EventKind::Note && event.record.label == crate::context::REQUEST_CATALOG_LABEL
+        {
+            continue;
+        }
         if event.record.kind == EventKind::Note && event.record.label == crate::tool_images::LABEL {
             continue;
         }
