@@ -11,7 +11,7 @@ Source: Pi `ee602414c703be8da722ec56de7f2399e62581ac`; starting Rook:
 | Configurable keyboard actions and prompt undo | Complete | Shared registry/config/help, bounded Unicode edit tests, remapped-key and external-editor PTY checks, full CI passed |
 | Branch navigation and optional branch summary | In progress | Existing session/event IDs, bounded tree/history, explicit workspace semantics, attributable summary |
 | Inline tool cards | In progress | Compact/expanded results, errors/duration/diffs, bounded loading, TUI/browser verification |
-| Context provenance inspector | In progress | Request-specific sources and loaded skills, deferred MCP tools in CLI/API; dedicated TUI/browser views pending |
+| Context provenance inspector | In progress | Request-specific sources and loaded skills, deferred MCP tools in CLI/API/TUI; dedicated browser view pending |
 | Local HTML export | In progress | Selected history scope, bounded streaming, escaped content, no publication, cross-frontend access |
 | Opt-in phase-based model routing | Pending | Explicit policy, continuity/capability constraints, actual route/cost reporting, comparison without claiming unmeasured savings |
 | Declarative extension UI | Pending | Bounded status/progress/forms/result contract, trust boundary, text fallback and frontend parity |
@@ -1748,3 +1748,24 @@ on disk, 37.1x dictionary and 5.8x end-to-end compression). Full
 `cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0 (`ci: ok`, 747.6
 seconds), including 85 CLI integration tests. Dedicated TUI/browser context
 views remain open, so this capability stays In progress.
+
+## TUI context provenance pane
+
+The palette's `context` pane and `/context [window-tokens]` now read the
+current session through the existing `Source::context_usage` path, whether
+the store is local or held by `rookd`. The pane shows the live estimate and
+per-kind costs first, then labels the last request attempt by its event number
+and renders its bounded offered tools, deferred MCP names and included source
+manifest. It explicitly warns that recorded origins and tools may differ from
+the current workspace or server. `r` refreshes the saved view; j/k and page
+keys scroll it. An empty session is explained without opening a store.
+
+The focused TUI test passed with a real local store note. It checks the
+deferred MCP and loaded-skill rows, then appends a legacy note without these
+fields and refreshes the pane to confirm that the old attempt replaces the
+new one. The CLI and daemon integration test from the preceding block already
+checks the same `Source::context_usage` route and serialized note on both
+storage paths. No storage format or wire route changed in this block. Full
+`cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0 (`ci: ok`, 651.7
+seconds), including 110 TUI/CLI unit tests and 85 CLI integration tests.
+Browser context UI is still pending.

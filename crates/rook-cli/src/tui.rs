@@ -31,6 +31,7 @@ use tokio::sync::mpsc;
 
 use crate::fmt;
 
+mod context;
 mod draft;
 mod editor;
 mod history;
@@ -57,6 +58,7 @@ enum Overlay {
     /// Every call this conversation made, with what it was given and what came
     /// back. `^o`, from the conversation, for the call you are looking at.
     Calls,
+    Context,
     Tasks,
     Sessions,
     History,
@@ -73,8 +75,9 @@ enum Overlay {
 
 impl Overlay {
     /// The panes the palette offers, in the order somebody reaches for them.
-    const PANES: [Overlay; 13] = [
+    const PANES: [Overlay; 14] = [
         Overlay::Calls,
+        Overlay::Context,
         Overlay::Tasks,
         Overlay::Sessions,
         Overlay::History,
@@ -93,6 +96,7 @@ impl Overlay {
         match self {
             Overlay::Palette => "commands",
             Overlay::Calls => "calls",
+            Overlay::Context => "context",
             Overlay::Tasks => "tasks",
             Overlay::Sessions => "sessions",
             Overlay::History => "history",
@@ -113,6 +117,7 @@ impl Overlay {
         match self {
             Overlay::Palette => "everything reachable from here",
             Overlay::Calls => "what each call was given and what came back",
+            Overlay::Context => "current context cost and the last request's recorded sources and tools",
             Overlay::Tasks => "scheduled tasks and their session history",
             Overlay::Sessions => "past conversations — enter continues one here",
             Overlay::History => "find, jump and quote messages in this conversation",
@@ -135,6 +140,9 @@ impl Overlay {
         match self {
             Overlay::Palette => &[("↑↓ ", "choose  "), ("⏎ ", "open  "), ("esc ", "close  ")],
             Overlay::Calls => &[("j/k ", "move  "), ("r ", "reload  "), ("esc ", "close  ")],
+            Overlay::Context => {
+                &[("j/k ", "scroll  "), ("PgUp/PgDn ", "page  "), ("r ", "refresh  "), ("Esc ", "close")]
+            }
             Overlay::Tasks => &[
                 ("n ", "new  "),
                 ("Enter ", "session  "),
@@ -1324,6 +1332,7 @@ struct App {
     /// implementation rather than two that drift.
     shared: crate::chat::Session,
     history: history::History,
+    context: context::ContextPane,
     /// Source boundary of the model draft currently offered for review.
     summary_boundary: Option<(u128, u128, u64)>,
     turn: Option<tokio::task::JoinHandle<()>>,
@@ -1452,6 +1461,7 @@ impl App {
 
         let tasks = tasks::Tasks::new(&source, &runtime, &config.work);
         let history = history::History::new(&source);
+        let context = context::ContextPane::default();
         let queue = queue::Queue::new(&source, config.work.max_message_bytes);
         let mcp_controls = mcp::Connections::new(&source, &runtime, mcp.clone());
         let (bindings, binding_error) = match config.tui.bindings() {
@@ -1469,6 +1479,7 @@ impl App {
             queue,
             tasks,
             history,
+            context,
             summary_boundary: None,
             editor: None,
             runtime,
@@ -2414,6 +2425,12 @@ impl App {
             }
             return;
         }
+        if overlay == Overlay::Context {
+            if self.context.key(key, &self.source) {
+                self.overlay = None;
+            }
+            return;
+        }
         if overlay == Overlay::Sessions && key.code == KeyCode::Char('f') {
             let session = self.session_state.selected().and_then(|i| self.sessions.get(i)).map(|s| s.meta.id);
             self.history.open(session);
@@ -2601,6 +2618,8 @@ impl App {
                         self.overlay = Overlay::PANES.iter().copied().find(|pane| pane.name() == name);
                         if self.overlay == Some(Overlay::History) {
                             self.history.open(self.chat.session);
+                        } else if self.overlay == Some(Overlay::Context) {
+                            self.context.open(&self.source, self.chat.session, None);
                         } else if self.overlay == Some(Overlay::Queue) {
                             self.queue.open(self.chat.session);
                         } else if self.overlay == Some(Overlay::Mcp) {
@@ -3076,6 +3095,19 @@ impl App {
             };
             self.overlay = Some(Overlay::History);
             self.history.open_tree(session, self.chat.session);
+            return;
+        }
+        if name == "context" {
+            let window = if rest.trim().is_empty() {
+                None
+            } else {
+                match rest.trim().parse::<usize>() {
+                    Ok(window) => Some(window),
+                    Err(_) => return self.chat.push("err", "use /context [window-tokens]"),
+                }
+            };
+            self.context.open(&self.source, self.chat.session, window);
+            self.overlay = Some(Overlay::Context);
             return;
         }
         if name == "summary-draft" {
@@ -3943,6 +3975,7 @@ impl App {
             match overlay {
                 Overlay::Palette => self.draw_palette(f, area),
                 Overlay::Calls => self.draw_calls(f, area),
+                Overlay::Context => self.context.draw(f, area),
                 Overlay::Tasks => self.tasks.draw(f, area),
                 Overlay::History => self.history.draw(f, area),
                 Overlay::Mcp => self.mcp.draw(f, area),

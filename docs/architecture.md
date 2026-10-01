@@ -249,6 +249,10 @@ an omitted count. These are catalog entries available at setup, not a claim
 that a remote server remained reachable when the model later called it.
 `agent.lazy_tools` uses shorter advertised schemas and does not itself defer
 tools. Older request notes default the MCP summary to empty.
+The TUI's context pane uses the same local or daemon context source as the
+CLI/API. It separates the live estimate from the saved request attempt and
+labels the latter historical; `r` reads the latest note again. The pane never
+reads today's project files to explain an older request.
 
 ## The agent loop
 
