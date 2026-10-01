@@ -2132,3 +2132,50 @@ SkillLoaded/Error for `load_skill`) without duplicating model replay, and add
 explicit bounded browser retrieval of retained pixels with historical source
 attribution. Keep encoded image data out of live delivery and default history
 pages; terminal pixel rendering remains a later experiment.
+
+## Successful skill result navigation (2026-10-02)
+
+The special-result audit found that `Journal::complete` already retains an
+ordinary `ToolResult` for built-ins whose own final event is `SkillLoaded`,
+`Error` or `Note`. Successful `load_skill` alone bypassed the live result
+lookup to preserve its scoped source envelope for the model. Completion now
+looks up the existing exact-label/body-hash result independently of that
+envelope decision. Its live reference and saved dispatch measurement use the
+existing journal result; no extra result/skill event is appended. The loaded
+instructions and source-manifest handling remain unchanged. Stored structs,
+writers, format versions and old completion-frame compatibility are unchanged.
+
+Focused local tests passed (exit 0) for successful loading, repeated identical
+loading, failure, distinct result references, timing readable inside the live
+callback, preservation of the original skill envelope and one tool answer per
+call in subsequent replay. A real daemon integration passed (exit 0), holding
+the next model reply while reading the exact success/failure results and their
+saved measurements through HTTP. Its subprocesses use the existing daemon
+serialization guard.
+
+A fresh scratch daemon and real Edge mouse interaction passed (exit 0):
+identical loads have separate cards, results load only on expansion, each
+request addresses the original session/event, success/failure and timing are
+saved, script-looking skill text stays inert, and resumed chat retains the
+cards. The next model reply was withheld during expansion; its eventual request
+retained the original scoped skill envelopes. Real Windows PTY checks exercised
+local `tui --alone` and daemon TUI F5/F6/F7 result navigation, saved success and
+failure measurements, and draft preservation. Both TUI processes exited 0.
+Browser module tests passed (exit 0). All owned scratch processes were stopped
+and their absence verified before the full gate.
+
+Final `cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0 (`ci: ok`,
+661.6 seconds), including both new regression tests, existing queue/branch/
+recovery scenarios, core and provider suites, and doctests. Its log is
+`target/pi-skill-result-links-ci.log`. Windows ran no Unix PTY tests; the
+local/daemon interactions above used real Windows PTY processes. No storage
+writer was changed.
+
+Inline cards remain In progress for explicit bounded browser retrieval and
+presentation of retained MCP pixels, with original session/result attribution.
+Inspect image-companion identity as well as adjacency, including a fork ending
+at an image note before a different result is appended. Keep encoded images out
+of live delivery and default history pages. Terminal image rendering remains a
+later experiment. Original queue lifecycle, branch live checks, HTML download
+interaction, phase routing, declarative extension UI and terminal experiments
+remain open; successful `load_skill` navigation is no longer a missing block.

@@ -1607,27 +1607,29 @@ impl<'a> AgentLoop<'a> {
                     ));
                 }
                 let mut images = Vec::new();
-                let mut result_seq = None;
+                // The execution journal also retains answers from built-ins
+                // that log SkillLoaded/Error instead of their own ToolResult.
+                // Their live link is independent of the model's source envelope.
+                let recorded = self
+                    .rook
+                    .store
+                    .get_session(self.session)
+                    .ok()
+                    .flatten()
+                    .and_then(|m| m.next_seq.checked_sub(1))
+                    .and_then(|seq| self.rook.store.events(self.session, seq, 1).ok())
+                    .and_then(|events| events.into_iter().next())
+                    .filter(|e| {
+                        e.record.kind == EventKind::ToolResult
+                            && e.record.label == call.name
+                            && e.record.body == recorded_body
+                    });
+                let result_seq = recorded.as_ref().map(|event| event.seq);
                 let shown = if call.name == LOAD_SKILL && !failed {
                     result
                 } else {
-                    let recorded = self
-                        .rook
-                        .store
-                        .get_session(self.session)
-                        .ok()
-                        .flatten()
-                        .and_then(|m| m.next_seq.checked_sub(1))
-                        .and_then(|seq| self.rook.store.events(self.session, seq, 1).ok())
-                        .and_then(|events| events.into_iter().next())
-                        .filter(|e| {
-                            e.record.kind == EventKind::ToolResult
-                                && e.record.label == call.name
-                                && e.record.body == recorded_body
-                        });
                     match recorded {
                         Some(event) => {
-                            result_seq = Some(event.seq);
                             images = crate::tool_images::load(self.rook, &event)?;
                             crate::results::fresh(&event, &result)
                         }

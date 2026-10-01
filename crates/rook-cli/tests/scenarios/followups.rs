@@ -292,6 +292,81 @@ fn live_command_and_search_details_are_readable_from_the_daemon_before_the_next_
 }
 
 #[test]
+fn daemon_skill_completion_links_success_repeated_success_and_failure_before_the_next_reply() {
+    rook_llm::init_tls();
+    let rook = Rook::new();
+    rook.skill(
+        "greeting",
+        "---\nname: greeting\ndescription: Use when greeting.\nversion: 1.0.0\n---\nSKILL_LINK_MARKER\n",
+    );
+    let calls: Vec<_> = ["greeting", "greeting", "no-such-skill"]
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            json!({"index":index,"id":format!("skill-{index}"),"type":"function","function":{
+                "name":"load_skill","arguments":json!({"name":name}).to_string()
+            }})
+        })
+        .collect();
+    let model = Model::with_messages(vec![json!({"role":"assistant","content":"","tool_calls":calls})]);
+    rook.write_config(&config(&model.url, "initial", "ask", rook.workspace.path()));
+    let daemon = Daemon::start(&rook);
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let mut socket = runtime.block_on(async {
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!(
+            "{}/api/chat",
+            daemon.address.replacen("http", "ws", 1)
+        ))
+        .await
+        .unwrap();
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                json!({"type":"prompt","text":"load the greeting skill twice and try a missing skill"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        socket
+    });
+    let started = runtime.block_on(socket_event(&mut socket, "started"));
+    let session = started["session"].as_str().unwrap();
+    model.next();
+    model.release.store(1, Ordering::SeqCst);
+    let mut completed = Vec::new();
+    for failed in [false, false, true] {
+        let event = runtime.block_on(socket_event(&mut socket, "tool_done"));
+        assert_eq!(event["name"], "load_skill");
+        assert_eq!(event["failed"], failed);
+        let seq = event["result_seq"].as_u64().expect("saved built-in result must be linked live");
+        let page = runtime.block_on(get(
+            &client,
+            &format!("{}/api/sessions/{session}/history/{seq}?offset=0", daemon.address),
+        ));
+        assert_eq!(page["entry"]["kind"], "tool-result");
+        assert_eq!(page["entry"]["label"], "load_skill");
+        assert_eq!(page["entry"]["tool_measurement"]["failed"], failed);
+        assert!(page["entry"]["tool_measurement"]["timing_seq"].as_u64().unwrap() > seq);
+        let body = page["entry"]["body"].as_str().unwrap().to_string();
+        assert!(body.contains(if failed { "no-such-skill" } else { "SKILL_LINK_MARKER" }));
+        completed.push((seq, body));
+    }
+    assert!(completed.windows(2).all(|pair| pair[0].0 < pair[1].0));
+    let next = model.next();
+    let tools: Vec<_> = next["messages"].as_array().unwrap().iter().filter(|m| m["role"] == "tool").collect();
+    assert_eq!(tools.len(), 3);
+    for (tool, (_, body)) in tools[..2].iter().zip(&completed[..2]) {
+        assert_eq!(tool["content"], *body, "navigation must preserve the loaded skill's source envelope");
+        let envelope: Value = serde_json::from_str(body).unwrap();
+        assert!(envelope.get("result_id").is_none());
+        assert!(envelope["rook_source"]["origin"].as_str().unwrap().ends_with("SKILL.md"));
+    }
+    model.release.store(2, Ordering::SeqCst);
+    runtime.block_on(socket_event(&mut socket, "done"));
+}
+
+#[test]
 fn socket_stop_uses_observed_goal_generation_and_replays_once() {
     rook_llm::init_tls();
     let rook = Rook::new();

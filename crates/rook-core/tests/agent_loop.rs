@@ -3635,6 +3635,75 @@ async fn a_turn_reports_a_tool_finishing_as_well_as_starting() {
 }
 
 #[tokio::test]
+async fn skill_completion_links_each_saved_answer_without_wrapping_loaded_instructions_again() {
+    let f = fixture();
+    let session = f.rook.start_session("skill sources").unwrap();
+    let mut batch = call("load_skill", serde_json::json!({"name":"greeting"}));
+    batch.message.tool_calls[0].id = "first".into();
+    batch.message.tool_calls.push(ToolCall {
+        id: "second".into(),
+        name: "load_skill".into(),
+        arguments: serde_json::json!({"name":"greeting"}),
+    });
+    batch.message.tool_calls.push(ToolCall {
+        id: "missing".into(),
+        name: "load_skill".into(),
+        arguments: serde_json::json!({"name":"no-such-skill"}),
+    });
+    let provider = Arc::new(ScriptedProvider::new(vec![batch, reply("done")]));
+    let mut completed = Vec::new();
+    AgentLoop::new(&f.rook, provider.clone(), session)
+        .run_with("load twice and try a missing skill", |progress| {
+            if let rook_core::agent::Progress::ToolDone { name, failed, result_seq } = progress {
+                assert_eq!(name, "load_skill");
+                let seq = result_seq.expect("built-in answers have execution-journal results");
+                let page = f.rook.transcript_entry(session, seq, 0).unwrap();
+                assert_eq!(page.entry.kind, "tool-result");
+                assert_eq!(page.entry.label, name);
+                let measurement = page.entry.tool_measurement.unwrap();
+                assert_eq!(measurement.failed, failed);
+                assert!(measurement.timing_seq > seq, "timing is saved before the live link arrives");
+                if failed {
+                    assert!(page.entry.body.contains("no-such-skill"));
+                } else {
+                    let envelope: serde_json::Value = serde_json::from_str(&page.entry.body).unwrap();
+                    assert!(envelope["rook_source"]["content"].as_str().unwrap().contains("Always greet"));
+                }
+                completed.push((seq, failed));
+            }
+        })
+        .await
+        .unwrap();
+    assert_eq!(completed.len(), 3);
+    assert!(completed.windows(2).all(|pair| pair[0].0 < pair[1].0));
+    assert_eq!(completed.iter().map(|(_, failed)| *failed).collect::<Vec<_>>(), [false, false, true]);
+    let entries = f.rook.transcript(session, 0, 100, 8192).unwrap();
+    let results: Vec<_> = entries.iter().filter(|e| e.kind == "tool-result").collect();
+    assert_eq!(results.len(), 3, "linking must reuse the journal's results");
+    assert_eq!(entries.iter().filter(|e| e.kind == "skill").count(), 2);
+    assert_eq!(entries.iter().filter(|e| e.kind == "error").count(), 1);
+    {
+        let requests = provider.share();
+        let requests = requests.lock().unwrap();
+        let tools: Vec<_> =
+            requests.last().unwrap().messages.iter().filter(|m| m.role == Role::Tool).collect();
+        assert_eq!(tools.len(), 3);
+        for (tool, saved) in tools[..2].iter().zip(&results[..2]) {
+            assert_eq!(tool.content, saved.body, "scoped instructions retain their original envelope");
+            let envelope: serde_json::Value = serde_json::from_str(&tool.content).unwrap();
+            assert!(envelope.get("result_id").is_none());
+            assert!(envelope["rook_source"]["origin"].as_str().unwrap().ends_with("SKILL.md"));
+        }
+    }
+    let resumed = Arc::new(ScriptedProvider::new(vec![reply("resumed")]));
+    AgentLoop::new(&f.rook, resumed.clone(), session).run("continue").await.unwrap();
+    let requests = resumed.share();
+    let requests = requests.lock().unwrap();
+    let tools: Vec<_> = requests.last().unwrap().messages.iter().filter(|m| m.role == Role::Tool).collect();
+    assert_eq!(tools.len(), 3, "later replay still contains one answer per call");
+}
+
+#[tokio::test]
 async fn a_loaded_skill_names_the_files_bundled_with_it() {
     let f = fixture();
     let dir = f._skill_dir.path().join("greeting");

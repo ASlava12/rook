@@ -297,6 +297,11 @@ from that session. Core emits it after binding result receipts/images and
 attempting to save dispatch timing, so an observer can immediately browse the
 committed result without guessing from the latest event or tool name. Older
 JSON can omit the reference; calls without one keep their history notice.
+Successful `load_skill` completions link the execution journal's existing
+`ToolResult`, alongside the separately retained `SkillLoaded` event. Finding
+the live link also binds saved dispatch timing; it does not wrap the scoped
+skill instructions again or add replay events. Failed built-ins use their
+existing journal results as well, even when their own event is an `Error`.
 Live completion, resumed chat and history use the same expandable card reader.
 Each reader admits one request at a time and replaces its bounded body part;
 result and diff parts load only on explicit expansion or paging. Disconnected
