@@ -6,6 +6,7 @@ import { branchPanel } from './branches.js';
 import { mcpPanel } from './mcp.js';
 import { queuePanel, takeRestored } from './queue.js';
 import { pendingSubmission, submissionError, submitSteering } from './submission.js';
+import { promptRetry } from './prompt-retry.js';
 
 // Scrollback, not the record: the session holds every word of this and the
 // sessions tab reads it back, so a tab left open for a day need not keep an
@@ -17,6 +18,7 @@ let socket = null;
 // delta so a fence or a list that arrives in pieces still ends up drawn.
 let current = null;
 let retainedInputs = new Map();
+const retryPrompt = promptRetry();
 
 const chatOut = () => $('#stream');
 
@@ -94,6 +96,15 @@ function working() {
   const send = $('#send'), stop = $('#stop');
   if (send) send.textContent = '…';
   if (stop) stop.hidden = false;
+  renderPromptRetry();
+}
+
+function renderPromptRetry() {
+  const visible = !!retryPrompt.candidate() && !state.chat.busy;
+  for (const id of ['#retry-prompt', '#discard-prompt']) {
+    const button = $(id);
+    if (button) button.hidden = !visible;
+  }
 }
 
 // The one line a call in flight keeps, rewritten rather than repeated.
@@ -119,6 +130,7 @@ function done() {
   const send = $('#send'), stop = $('#stop');
   if (send) send.textContent = 'Send';
   if (stop) stop.hidden = true;
+  renderPromptRetry();
 }
 
 export function connect() {
@@ -162,7 +174,7 @@ export function connect() {
         renderSettings(); renderPicker();
         break;
       }
-      case 'started': state.chat.session = e.session; state.chat.spent = null; state.chat.context = null; state.chat.modelRequest = null; renderSettings(); renderPicker(); break;
+      case 'started': retryPrompt.started(e.session); state.chat.session = e.session; state.chat.spent = null; state.chat.context = null; state.chat.modelRequest = null; renderSettings(); renderPicker(); break;
       // Joined a turn this page did not start. Said out loud either way: a
       // page that quietly starts streaming looks like it is answering
       // something you did not ask, and one that says nothing after asking
@@ -206,9 +218,9 @@ export function connect() {
       case 'context': state.chat.context = e; renderSettings(); break;
       case 'remembered': say('stat', `remembered: ${e.text}`); break;
       case 'forgot': say('stat', `forgot: ${e.text}`); break;
-      case 'failed': say('err', e.message); done(); break;
+      case 'failed': retryPrompt.disconnected(); say('err', e.message); done(); break;
       case 'error': say('err', e.message); break;
-      case 'cancelled': say('stat', '[stopped]'); done(); break;
+      case 'cancelled': retryPrompt.disconnected(); say('stat', '[stopped]'); done(); break;
       case 'interjected':
         if (e.receipt) receiptNotice(e.receipt, e.text);
         else { say('you', `› ${e.text}`); say('stat', '(the turn will see this at its next step)'); }
@@ -224,7 +236,8 @@ export function connect() {
         break;
       }
       case 'done': {
-        if (e.stopped === 'already_admitted') { done(); break; }
+        if (e.stopped === 'already_admitted') { retryPrompt.settled(); done(); break; }
+        retryPrompt.completed(state.chat.session);
         if (typeof e.reply === 'string' && current?.dataset.text !== e.reply) {
           current = null;
           saidByModel(e.reply);
@@ -265,7 +278,14 @@ export function connect() {
   socket.addEventListener('open', () => {
     if (socket === connection && state.chat.session) connection.send(JSON.stringify({ type: 'attach', session: state.chat.session }));
   }, { once: true });
-  socket.onclose = () => { if (socket === connection) { say('err', 'disconnected'); done(); } };
+  socket.onclose = () => {
+    if (socket === connection) {
+      retryPrompt.disconnected();
+      say('err', retryPrompt.candidate()
+        ? 'disconnected; use Retry saved prompt if its delivery is uncertain' : 'disconnected');
+      done();
+    }
+  };
   return socket;
 }
 
@@ -550,6 +570,18 @@ export async function renderChat() {
   const input = el('textarea', { id: 'chat-input', rows: 3, 'aria-label': 'Prompt', placeholder: 'Ask the agent… (Enter sends, Shift+Enter adds a line, Esc stops)', autofocus: true }, state.chat.draft || '');
   const sendButton = el('button', { id: 'send', type: 'submit' }, 'Send');
   const followupButton = el('button', { type: 'submit', value: 'follow_up', title: 'Start a separate turn after this turn or goal finishes' }, 'Queue follow-up');
+  const retryButton = el('button', { id: 'retry-prompt', type: 'button', hidden: true,
+    title: 'Resend the exact previous prompt and caller ID after uncertain delivery',
+    onclick: () => {
+      if (state.chat.busy) return;
+      const frame = retryPrompt.retry();
+      if (!frame) return;
+      send(frame);
+      say('stat', 'Retrying the saved prompt with its original ID and options');
+      working();
+    } }, 'Retry saved prompt');
+  const discardButton = el('button', { id: 'discard-prompt', type: 'button', hidden: true,
+    onclick: () => { retryPrompt.discard(); renderPromptRetry(); } }, 'Discard saved prompt');
   const stopButton = el('button', { id: 'stop', type: 'button', hidden: true, onclick: stop }, 'Stop');
 
   let loadingAttachments = false;
@@ -648,10 +680,17 @@ export async function renderChat() {
       }
       return;
     }
+    if (retryPrompt.candidate()) {
+      say('err', 'Resolve the saved prompt first: use Retry saved prompt or Discard saved prompt. Your draft is retained.');
+      return;
+    }
     const message = { type: 'prompt', session: state.chat.session, text,
       id: crypto.randomUUID(), options };
     if (!jsonWithin(message, 16 * 1024 * 1024)) {
       say('err', 'The prompt and attachments exceed the 16 MiB message limit; the draft was retained.'); return;
+    }
+    if (!retryPrompt.remember(message)) {
+      say('stat', 'Browser storage could not retain this prompt across reloads; keep this tab open to retry it.');
     }
     send(message);
     input.value = '';
@@ -667,7 +706,7 @@ export async function renderChat() {
     if (state.chat.busy) return;
     say('you', `› ${text}`);
     working();
-  } }, input, sendButton, followupButton, stopButton);
+  } }, input, sendButton, followupButton, retryButton, discardButton, stopButton);
   // Naming a file meant knowing the path and typing it, which in a browser
   // means leaving the page to go and look. The ranking is the daemon's, so the
   // page offers the same list the terminal does.
@@ -727,6 +766,7 @@ export async function renderChat() {
   renderSettings();
   connect();
   if (state.chat.busy) working();
+  else renderPromptRetry();
   if (state.chat.session && !state.chat.busy) await resume(state.chat.session);
   input.focus();
 }

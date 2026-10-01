@@ -1119,3 +1119,31 @@ that syntax fix, full `cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0
 (`ci: ok`, 659.4 seconds), including all 75 CLI integration tests. Required
 `cargo xtask compaction` exited 0 with 4.02 MiB on disk, 37.1x dictionary
 compression and 5.8x end-to-end. No stored record size or wire schema changed.
+
+## Browser retry of an uncertain socket prompt
+
+The browser now retains one exact prompt frame, including caller ID, original
+session target, text and options, and exposes Retry saved prompt and Discard
+saved prompt beside the composer. A retry resends that frame. The bounded
+outbox attempts tab session-storage persistence across reloads; if the browser
+rejects a large frame for quota, the loaded tab still retains it. A new prompt
+waits until the saved candidate is resolved. A start and completion seen on the
+same connection clear a known prompt; an ordinary `Done` after reconnect does
+not prove which caller ID it acknowledged, so the candidate remains until
+explicit discard or duplicate-admission acknowledgement. This can leave a
+retry button visible after successful work; repeating that ID is safe and
+produces the recorded-admission response. Queue submissions keep their separate scoped
+outbox.
+
+The focused Node tests cover exact-frame restoration, retry identity, known
+completion, explicit discard, new-prompt admission and storage-quota fallback.
+Browser syntax and the embedded-module
+test are checked. No wire or store format changed. CLI/TUI manual retry,
+goal-control identity and correction lifecycle tests still remain. The queue
+row stays In progress; branch live checks and Pending rows remain open.
+
+All nine targeted Node tests, JavaScript syntax, and the `rookd` embedded-module
+test exited 0. Full `cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0
+(`ci: ok`, 602.6 seconds). This block changed only browser assets and docs,
+so it did not rerun compaction. A live manual Chrome interaction check remains
+open; the embedded-module check confirms that the daemon serves the new file.

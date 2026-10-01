@@ -159,6 +159,14 @@ note, current goal value and admitted claim commit together. Retrying that ID
 joins its live generation or gets `already_admitted`; it cannot create another
 generation or silently attach to a later goal. A pending claim with a different
 active goal requires inspection. Frames without IDs retain their old behavior.
+The browser keeps one exact prompt frame in its tab while delivery is uncertain,
+and attempts to retain it in session storage across reloads. Its explicit retry
+resends the same ID, destination, text and options. The browser leaves the
+candidate available after reconnect until the original turn is identified by
+its start and completion, a matching `already_admitted` reply, or explicit
+discard. A new prompt waits for the saved candidate to be resolved.
+Large frames can exceed browser storage quota and then remain retryable only
+while that tab stays loaded.
 
 The live replay has independent event and encoded-byte limits
 (`server.chat_replay_events`, `server.chat_replay_bytes`). Broadcast notifications
