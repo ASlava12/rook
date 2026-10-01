@@ -211,6 +211,10 @@ boundary and historical file/test disclaimer.
 The shared `/export-html [FROM..THROUGH] NEW_FILE` slash command reaches this
 writer from both REPL modes and the TUI; the TUI uses its history reader worker
 so an export does not block redraws or live turn output.
+The browser history panel also renders saved tool calls and results as native
+expandable cards. Their summaries come from bounded page metadata; opening a
+card fetches one bounded body part by event number, and further parts require
+an explicit next/previous action. Event text remains DOM text, not HTML.
 
 ## The agent loop
 

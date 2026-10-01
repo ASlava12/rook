@@ -101,7 +101,32 @@ export function historyPanel(session, quote, rewind, branch) {
           rewind ? button(`Rewind to #${seq}`, () => rewind(seq)) : null));
     });
   }
+  function toolCard(e) {
+    const card = el('details', { class: 'entry tool-card' });
+    const summary = el('summary', {}, `#${e.seq} · ${e.kind} · ${e.doing || e.label || 'tool'}${e.bytes == null ? '' : ` · ${e.bytes} stored bytes`}`);
+    const body = el('pre', { class: 'body' });
+    const parts = el('div', { class: 'row' });
+    const meta = el('p', { class: 'sub' }, 'Open to read one bounded part of the saved event.');
+    let loaded = false;
+    function part(offset) {
+      if (pending) { notice.textContent = 'History reader is busy; try this card again.'; return; }
+      read(`${base}/${e.seq}?offset=${offset}`, result => {
+        if (!card.isConnected) return;
+        loaded = true;
+        body.textContent = result.entry.body;
+        meta.textContent = `Bytes ${result.offset}–${result.next_offset ?? result.total_bytes} of ${result.total_bytes}. Saved history; current files and test results are not verified here.`;
+        parts.replaceChildren(
+          button('Previous part', () => part(result.previous_offset), result.previous_offset == null),
+          button('Next part', () => part(result.next_offset), result.next_offset == null),
+          button('Open event', () => open(e.seq, result.offset)));
+      });
+    }
+    card.addEventListener('toggle', () => { if (card.open && !loaded) part(0); });
+    card.append(summary, meta, body, parts);
+    return card;
+  }
   function row(e, snippet = e.body, offset = 0) {
+    if (e.kind === 'tool-call' || e.kind === 'tool-result') return toolCard(e);
     return el('article', { class: 'entry' },
       el('div', { class: 'hd' }, button(`#${e.seq} · ${e.kind} ${e.label}`, () => open(e.seq, offset))),
       el('pre', {}, snippet),

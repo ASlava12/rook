@@ -10,7 +10,7 @@ Source: Pi `ee602414c703be8da722ec56de7f2399e62581ac`; starting Rook:
 | Editable steering and follow-up queue | In progress | Core/CLI/API/TUI/browser, durable IDs, goal vs ordinary-turn boundaries, revoke/accept races, restart |
 | Configurable keyboard actions and prompt undo | Complete | Shared registry/config/help, bounded Unicode edit tests, remapped-key and external-editor PTY checks, full CI passed |
 | Branch navigation and optional branch summary | In progress | Existing session/event IDs, bounded tree/history, explicit workspace semantics, attributable summary |
-| Inline tool cards | Pending | Compact/expanded results, errors/duration/diffs, bounded loading, TUI/browser verification |
+| Inline tool cards | In progress | Compact/expanded results, errors/duration/diffs, bounded loading, TUI/browser verification |
 | Context provenance inspector | Pending | Request-specific sources, discovered vs loaded skills, deferred tools, CLI/API/TUI/browser |
 | Local HTML export | In progress | Selected history scope, bounded streaming, escaped content, no publication, cross-frontend access |
 | Opt-in phase-based model routing | Pending | Explicit policy, continuity/capability constraints, actual route/cost reporting, comparison without claiming unmeasured savings |
@@ -1491,4 +1491,29 @@ note under the full suite was not reproduced, so that race remains open.
 Full `cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0 (`ci: ok`,
 651.2 seconds), including all 84 CLI integration tests, Clippy and doctests.
 This block changed only the recovery assertion and documentation, so
+compaction was not rerun.
+
+## Browser history tool cards
+
+Saved tool calls and tool results in the browser history now appear as native
+compact `details` cards. Their title uses the recorded event number, kind,
+tool name or recorded `doing`, and raw body byte count. Opening a card fetches
+one bounded part through the existing history-entry API; next/previous buttons
+fetch further parts only on request. Bodies are inserted as DOM text so stored
+markup cannot become executable HTML. The card names saved-history scope and
+does not imply that historical file or test claims hold in the current tree.
+
+The browser DOM test confirms that tool body content is absent before opening,
+that the first page and next page each require their own request, and that
+saved markup stays text. Seven focused Node tests across history export,
+branches and cards exited 0, as did JavaScript syntax validation. Live chat
+cards, explicit failure/duration/diff metadata, TUI parity and actual browser
+interaction remain. Inline tool cards are now In progress.
+
+The first full `cargo xtask ci` on this block exited 1 after the existing
+`first_socket_goal_retry_keeps_one_generation_and_no_extra_goal_event` test
+observed a third `goal` note; all other targets continued. An unchanged-tree
+repeat with `RUST_TEST_THREADS=1` exited 0 (`ci: ok`, 677.6 seconds; 84/84 CLI
+integration tests). The intermittent goal-note assertion remains a queue
+lifecycle gap to resolve. This block did not change storage formats, so
 compaction was not rerun.
