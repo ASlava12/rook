@@ -280,6 +280,17 @@ result and diff parts load only on explicit expansion or paging. Disconnected
 cards ignore late replies. The saved timing and change-note source remain
 historical, separate from the tab's observed elapsed time. Pending card metadata
 is capped at 128 entries in addition to bounded chat scrollback.
+TUI chat completion retains the same result reference through local and daemon
+events. Each compact call row holds an exact session/event link for the lifetime
+of its byte-bounded scrollback row; trimming a prefix moves links and selection
+together, and replacement snapshots/session switches clear them. Identical
+call descriptions pair in announcement order. F5/F6 select previous/next saved
+results and reveal the selected row; F7 opens its existing bounded history
+reader (latest saved result by default). These are named, configurable actions
+in the common key registry and palette; the chat border shows active bindings.
+The draft and running turn stay intact while reading result parts or following
+`c` to a saved diff. Resumed chat also adds links and uses saved measurements;
+older results without a measurement keep their status/duration unknown.
 `rook session context` also shows the last attempted model request's bounded
 tool catalog: configured provider ID, native or prompt-encoded delivery,
 stub or full schemas, estimated schema tokens and omitted-name count. Rook

@@ -412,7 +412,7 @@ enum TurnEvent {
         name: String,
         said: String,
     },
-    ToolDone(String, bool),
+    ToolDone(String, bool, Option<u64>),
     /// Something typed while the turn ran, at the moment the turn took it up.
     ///
     /// The window said "the turn will see this at its next step" and then said
@@ -756,6 +756,11 @@ struct Chat {
     /// core's, because the chat REPL and `rook run` ask the same question and
     /// used to answer it by marking whatever line the cursor was on.
     running_calls: rook_core::calls::Running,
+    /// Links share the byte-bounded scrollback's lifetime. Never infer a source
+    /// from a tool's prose, a later session or the current selection.
+    tool_results: std::collections::BTreeMap<usize, (u128, u64)>,
+    tool_selected: Option<usize>,
+    focus_tool: bool,
     session: Option<u128>,
     /// Ignore the previous session's queued stream until Attach acknowledges the switch.
     joining: Option<u128>,
@@ -1171,7 +1176,7 @@ impl Chat {
     /// it, which is what the code did while the comment below said otherwise:
     /// every call read as two events, and a turn of a dozen calls filled the
     /// pane twice over.
-    fn tool_done(&mut self, name: &str, failed: bool) {
+    fn tool_done(&mut self, name: &str, failed: bool, result_seq: Option<u64>) {
         let (said, took) = self.running_calls.finished(name);
         // A long call says how long it was: `working…` counts the turn, not
         // which call it is waiting on, so a turn that sat on one command for a
@@ -1185,14 +1190,51 @@ impl Chat {
         let mark = mark.as_str();
         let unmarked = self
             .log
-            .iter_mut()
-            .find(|(kind, body)| *kind == "tool" && body.trim_start().trim_start_matches("· ") == said);
-        match unmarked {
-            Some((_, body)) => body.push_str(mark),
+            .iter()
+            .position(|(kind, body)| *kind == "tool" && body.trim_start().trim_start_matches("· ") == said);
+        let line = match unmarked {
+            Some(line) => {
+                self.log[line].1.push_str(mark);
+                line
+            }
             // A call whose start was never seen — a window that attached to a
             // daemon mid-turn — still says that it finished.
-            None => self.push("tool", &format!("  · {said}{mark}")),
+            None => {
+                self.log.push(("tool", format!("  · {said}{mark}")));
+                self.log.len().saturating_sub(1)
+            }
+        };
+        if let Some((session, seq)) = self.session.zip(result_seq) {
+            self.log[line].1.push_str(&format!(" · saved result #{seq}"));
+            self.tool_results.insert(line, (session, seq));
         }
+        self.trim();
+    }
+
+    fn selected_tool(&self) -> Option<(usize, u128, u64)> {
+        self.tool_selected
+            .and_then(|line| self.tool_results.get_key_value(&line))
+            .or_else(|| self.tool_results.last_key_value())
+            .map(|(&line, &(session, seq))| (line, session, seq))
+    }
+
+    fn select_tool(&mut self, forward: bool) {
+        let Some((line, ..)) = self.selected_tool() else { return };
+        let next = if forward {
+            self.tool_results.range((std::ops::Bound::Excluded(line), std::ops::Bound::Unbounded)).next()
+        } else {
+            self.tool_results.range(..line).next_back()
+        };
+        self.tool_selected = Some(next.map_or(line, |(&at, _)| at));
+        self.focus_tool = true;
+    }
+
+    fn clear_log(&mut self) {
+        self.log.clear();
+        self.receipt_lines.clear();
+        self.tool_results.clear();
+        self.tool_selected = None;
+        self.focus_tool = false;
     }
 
     /// A turn is under way, whether this window started it or joined it.
@@ -1268,12 +1310,25 @@ impl Chat {
     /// memory to stay recoverable.
     fn trim(&mut self) {
         let mut total: usize = self.log.iter().map(|(_, body)| body.len()).sum();
-        while total > MAX_SCROLLBACK && self.log.len() > 1 {
-            total -= self.log.remove(0).1.len();
+        let mut removed = 0;
+        for (_, body) in self.log.iter().take(self.log.len().saturating_sub(1)) {
+            if total <= MAX_SCROLLBACK {
+                break;
+            }
+            total -= body.len();
+            removed += 1;
+        }
+        if removed > 0 {
+            self.log.drain(..removed);
             self.receipt_lines = std::mem::take(&mut self.receipt_lines)
                 .into_iter()
-                .filter_map(|(line, notice)| line.checked_sub(1).map(|line| (line, notice)))
+                .filter_map(|(line, notice)| line.checked_sub(removed).map(|line| (line, notice)))
                 .collect();
+            self.tool_results = std::mem::take(&mut self.tool_results)
+                .into_iter()
+                .filter_map(|(line, source)| line.checked_sub(removed).map(|line| (line, source)))
+                .collect();
+            self.tool_selected = self.tool_selected.and_then(|line| line.checked_sub(removed));
         }
     }
 }
@@ -2028,7 +2083,9 @@ impl App {
                     self.chat.taken_up(&text, receipt);
                 }
                 TurnEvent::Step(at, of) => self.chat.step = Some((at, of)),
-                TurnEvent::ToolDone(name, failed) => self.chat.tool_done(&name, failed),
+                TurnEvent::ToolDone(name, failed, result_seq) => {
+                    self.chat.tool_done(&name, failed, result_seq)
+                }
                 TurnEvent::Context { used, size } => {
                     self.chat.carried = used.min(u32::MAX as usize) as u32;
                     self.context_window = size;
@@ -2100,8 +2157,7 @@ impl App {
                 self.chat.goal_generation = None;
                 self.chat.turn_id = None;
                 self.chat.session = rook_store::parse_session_id(&session);
-                self.chat.log.clear();
-                self.chat.receipt_lines.clear();
+                self.chat.clear_log();
                 self.chat.running_calls = Default::default();
                 self.chat.scroll = 0;
                 self.chat.drawn = 0;
@@ -2207,7 +2263,9 @@ impl App {
             // The daemon sends the tool's name and not its arguments, so a
             // window attached to one says less than a window running the turn
             // itself. What it must not do is say it twice.
-            ChatEvent::ToolDone { name, failed, .. } => self.chat.tool_done(&name, failed),
+            ChatEvent::ToolDone { name, failed, result_seq } => {
+                self.chat.tool_done(&name, failed, result_seq)
+            }
             ChatEvent::Step { at, of } => self.chat.step = Some((at, of)),
             ChatEvent::Remembered { text } => self.chat.push("stat", &format!("  remembered: {text}")),
             ChatEvent::Forgot { text } => self.chat.push("stat", &format!("  forgot: {text}")),
@@ -2811,6 +2869,16 @@ impl App {
                 self.history.open(self.chat.session);
                 self.overlay = Some(Overlay::History);
             }
+            Action::ToolPrevious => self.chat.select_tool(false),
+            Action::ToolNext => self.chat.select_tool(true),
+            Action::ToolResult => {
+                if let Some((_, session, seq)) = self.chat.selected_tool() {
+                    self.history.open_entry(Some(session), seq);
+                    self.overlay = Some(Overlay::History);
+                } else {
+                    self.chat.push("stat", "No saved tool result retained here; open conversation history.");
+                }
+            }
             Action::KillWord => self.chat.input.kill_word(),
             Action::KillStart => self.chat.input.kill_to_start(),
             Action::KillEnd => self.chat.input.kill_to_end(),
@@ -3178,8 +3246,7 @@ impl App {
             self.chat.joining = None;
             self.chat.pending = None;
             self.chat.asking = None;
-            self.chat.log.clear();
-            self.chat.receipt_lines.clear();
+            self.chat.clear_log();
             self.chat.spent = None;
             self.chat.running_calls = Default::default();
             self.chat.push("stat", "New conversation. Other sessions keep working.");
@@ -3510,8 +3577,7 @@ impl App {
     /// Sessions tab reads it back.
     fn recall_conversation(&mut self, session: u128, next_seq: Option<u64>) {
         const RECALLED: usize = 60;
-        self.chat.log.clear();
-        self.chat.receipt_lines.clear();
+        self.chat.clear_log();
         self.chat.scroll = 0;
         let events = next_seq
             .or_else(|| self.sessions.iter().find(|s| s.meta.id == session).map(|s| s.meta.next_seq))
@@ -3524,6 +3590,26 @@ impl App {
                 // What it was doing, the same words as while it was running.
                 "tool-call" => {
                     self.chat.push("tool", &format!("  · {}", rook_core::calls::within(&entry.doing, 72)))
+                }
+                "tool-result" => {
+                    let measured = entry
+                        .tool_measurement
+                        .map(|m| {
+                            format!(
+                                "saved {} · dispatch {} ms · timing #{}",
+                                if m.failed { "failure" } else { "completion" },
+                                m.duration_ms,
+                                m.timing_seq
+                            )
+                        })
+                        .unwrap_or_else(|| "saved status/duration unavailable".into());
+                    self.chat.push(
+                        "tool",
+                        &format!("  · {} · saved result #{} · {measured}", entry.label, entry.seq),
+                    );
+                    self.chat
+                        .tool_results
+                        .insert(self.chat.log.len().saturating_sub(1), (session, entry.seq));
                 }
                 // What the session says happened to it, which is what somebody
                 // reopening one has come to find out.
@@ -3872,8 +3958,8 @@ impl App {
                             TurnEvent::Heard(text.to_string(), receipt.cloned())
                         }
                         Progress::Step { at, of } => TurnEvent::Step(at, of),
-                        Progress::ToolDone { name, failed, .. } => {
-                            TurnEvent::ToolDone(name.to_string(), failed)
+                        Progress::ToolDone { name, failed, result_seq } => {
+                            TurnEvent::ToolDone(name.to_string(), failed, result_seq)
                         }
                         Progress::Delta(Delta::Effort(report)) => TurnEvent::Effort(report.describe()),
                         Progress::Context { used, size } => TurnEvent::Context { used, size },
@@ -4321,8 +4407,13 @@ impl App {
         let [log, ask, input, preview] = chat_layout(area, blocking, typed, pinned);
 
         let mut lines: Vec<Line> = Vec::new();
-        for (kind, body) in &self.chat.log {
-            let style = match *kind {
+        let selected = self.chat.selected_tool().map(|(line, ..)| line);
+        let mut focus_at = None;
+        for (index, (kind, body)) in self.chat.log.iter().enumerate() {
+            if self.chat.focus_tool && selected == Some(index) {
+                focus_at = Some(lines.len());
+            }
+            let mut style = match *kind {
                 "you" => Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
                 "tool" => Style::default().fg(Color::Magenta),
                 "agent" => Style::default().fg(Color::LightBlue),
@@ -4331,6 +4422,9 @@ impl App {
                 "err" => Style::default().fg(Color::Red),
                 _ => Style::default(),
             };
+            if selected == Some(index) {
+                style = style.bg(Color::Rgb(40, 44, 52)).add_modifier(Modifier::BOLD);
+            }
             // A bar down the left of what somebody said, and of what went
             // wrong. Colour alone told these apart, which is a difference a
             // person has to remember rather than see — and on a screen of
@@ -4394,6 +4488,17 @@ impl App {
         // turned up when the next thing was typed — which is the other half of
         // the same arithmetic, the line count growing until the scroll it
         // implied happened to reach far enough.
+        // Only explicit navigation moves the viewport. Count the prefix once
+        // from borrowed lines; completion never drags someone reading older text.
+        let focused_row = focus_at.map(|at| {
+            lines.iter().take(at).fold(0u16, |rows, line| {
+                rows.saturating_add(rendered_rows(
+                    &Paragraph::new(line.clone()).wrap(Wrap { trim: false }),
+                    log.width.saturating_sub(2),
+                ))
+            })
+        });
+        self.chat.focus_tool = false;
         let body = Paragraph::new(lines).wrap(Wrap { trim: false });
         let visible = log.height.saturating_sub(2);
         let total = rendered_rows(&body, log.width.saturating_sub(2));
@@ -4402,6 +4507,9 @@ impl App {
         }
         self.chat.drawn = total;
         let overflow = total.saturating_sub(visible);
+        if let Some(row) = focused_row {
+            self.chat.scroll = overflow.saturating_sub(row.min(overflow));
+        }
         // Not past the first line: scrolling into blank space above the
         // conversation reads as the pane having lost it.
         self.chat.scroll = self.chat.scroll.min(overflow);
@@ -4438,7 +4546,19 @@ impl App {
             // displaces the rest rather than being appended to it.
             back => format!(" {project}{session} — {back} lines back, End returns "),
         };
-        f.render_widget(body.block(bordered(&title)).scroll((scroll, 0)), log);
+        let mut frame = bordered(&title);
+        if let Some((_, _, seq)) = self.chat.selected_tool() {
+            frame = frame.title_bottom(
+                Line::from(format!(
+                    " {} prev · {} next · {} result #{seq} ",
+                    keys::hint(&self.bindings, Action::ToolPrevious),
+                    keys::hint(&self.bindings, Action::ToolNext),
+                    keys::hint(&self.bindings, Action::ToolResult),
+                ))
+                .style(Style::default().fg(Color::Cyan)),
+            );
+        }
+        f.render_widget(body.block(frame).scroll((scroll, 0)), log);
 
         if let Some((count, next)) = queued.filter(|_| pinned > 0) {
             let title = format!(" next to send · {count} queued · /queue manages ");
@@ -5398,7 +5518,7 @@ impl App {
             key("              /…        tab completes; the list shows as you type"),
             key("              PgUp/PgDn scroll back through the conversation"),
             key("              ↑ / ↓     the prompts already sent, newest first"),
-            key("              Named prompt actions below edit only the draft"),
+            key("              Named actions below use the active bindings"),
             key(&format!(
                 "              {} / {} cycle approvals / reasoning effort",
                 keys::hint(&self.bindings, Action::Stance),
@@ -6174,6 +6294,164 @@ and the next line"
     }
 
     #[test]
+    fn live_tool_links_pair_identical_calls_and_keep_their_original_session() {
+        let mut chat = Chat { session: Some(41), ..Default::default() };
+        chat.tool_started("read_file", "read same.txt");
+        chat.tool_started("read_file", "read same.txt");
+        chat.tool_done("read_file", false, Some(7));
+        chat.tool_done("read_file", true, Some(9));
+        assert_eq!(chat.tool_results.get(&0), Some(&(41, 7)));
+        assert_eq!(chat.tool_results.get(&1), Some(&(41, 9)));
+        chat.select_tool(false);
+        assert_eq!(chat.selected_tool(), Some((0, 41, 7)));
+        chat.session = Some(42);
+        chat.tool_done("read_file", false, Some(2)); // Joining after the start.
+        assert_eq!(chat.selected_tool(), Some((0, 41, 7)), "new completion keeps the selected source");
+        chat.select_tool(true);
+        assert_eq!(chat.selected_tool(), Some((1, 41, 9)));
+        chat.select_tool(true);
+        assert_eq!(chat.selected_tool(), Some((2, 42, 2)));
+        chat.tool_done("read_file", true, None); // Old daemon completion.
+        assert_eq!(chat.tool_results.len(), 3, "an old frame must not invent a link");
+        chat.clear_log();
+        assert!(chat.selected_tool().is_none() && chat.tool_results.is_empty());
+    }
+
+    #[test]
+    fn live_tool_links_leave_with_evicted_scrollback_and_keep_the_selected_row() {
+        let mut chat = Chat { session: Some(41), ..Default::default() };
+        let filler = "x".repeat(1024);
+        for seq in 0..4000 {
+            chat.tool_started("read_file", &format!("read {seq} {filler}"));
+            chat.tool_done("read_file", false, Some(seq));
+        }
+        assert!(4000 * filler.len() > MAX_SCROLLBACK, "the byte cap is reached");
+        assert!(chat.tool_results.len() < 4000);
+        assert_eq!(chat.tool_results.len(), chat.log.len());
+        for (line, (_, seq)) in &chat.tool_results {
+            assert!(chat.log[*line].1.contains(&format!("saved result #{seq}")));
+        }
+        chat.select_tool(false);
+        let source = chat.selected_tool().unwrap();
+        chat.push("text", &filler.repeat(2));
+        let kept = chat.selected_tool().unwrap();
+        assert_eq!((kept.1, kept.2), (source.1, source.2));
+        assert!(kept.0 < source.0, "selection shifts with the removed prefix");
+        chat.push("text", &filler.repeat(MAX_SCROLLBACK / filler.len() + 1));
+        assert!(
+            chat.tool_results.is_empty() && chat.selected_tool().is_none(),
+            "a large streamed replacement evicts every link"
+        );
+    }
+
+    #[test]
+    fn live_tool_navigation_opens_the_selected_result_without_changing_a_busy_draft() {
+        let home = tempfile::tempdir().unwrap();
+        let rook = rook_core::Rook::from_parts(
+            rook_store::Store::open(home.path().join("store")).unwrap(),
+            rook_core::Config::default(),
+            rook_skills::Environment::bare("windows", "x86_64", "0.1.0"),
+            rook_skills::SkillIndex::default(),
+            home.path().into(),
+        );
+        let session = rook.start_session("tool links").unwrap();
+        let first =
+            rook.log(session, rook_store::EventKind::ToolResult, "read_file", "FIRST_SAVED_RESULT").unwrap();
+        let second =
+            rook.log(session, rook_store::EventKind::ToolResult, "read_file", "SECOND_SAVED_RESULT").unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let mut app = super::App::new(crate::source::Source::Local(rook.into()), runtime, true);
+        app.chat.session = Some(session);
+        app.chat.busy = true;
+        app.chat.input.set("keep this draft");
+        app.to_loop
+            .send(super::TurnEvent::Tool { name: "read_file".into(), said: "read first.txt".into() })
+            .unwrap();
+        app.to_loop.send(super::TurnEvent::ToolDone("read_file".into(), false, Some(first))).unwrap();
+        app.drain_turn_events();
+        app.heard_from_daemon(rook_proto::ChatEvent::Tool {
+            name: "read_file".into(),
+            doing: "read second.txt".into(),
+        });
+        app.heard_from_daemon(rook_proto::ChatEvent::ToolDone {
+            name: "read_file".into(),
+            failed: false,
+            result_seq: Some(second),
+        });
+        app.chat.push("text", &"newer output ".repeat(500));
+        app.on_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::F(5),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|frame| app.draw_chat(frame, frame.area())).unwrap();
+        let text = (0..30)
+            .map(|row| {
+                (0..120).map(|col| terminal.backend().buffer()[(col, row)].symbol()).collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("read first.txt") && text.contains(&format!("F7 result #{first}")), "{text}");
+        assert!(app.chat.scroll > 0, "navigation reveals an older result above streaming output");
+        app.on_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::F(7),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert!(app.overlay == Some(super::Overlay::History));
+        assert_eq!(app.chat.input.as_str(), "keep this draft");
+        assert!(app.chat.busy);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            app.history.poll();
+            terminal.draw(|frame| app.history.draw(frame, frame.area())).unwrap();
+            let text = (0..30)
+                .map(|row| {
+                    (0..120).map(|col| terminal.backend().buffer()[(col, row)].symbol()).collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if text.contains("FIRST_SAVED_RESULT") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "bounded reader never returned the selected source: {text}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        app.overlay = None;
+        let mut settings = rook_core::keybindings::Settings::default();
+        settings.keys.insert("prompt.tool_result".into(), vec!["ctrl+t".into()]);
+        app.bindings = settings.bindings().unwrap();
+        app.on_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::F(7),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert!(app.overlay.is_none(), "the replaced default must stop opening results");
+        app.on_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('t'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ));
+        assert!(app.overlay == Some(super::Overlay::History));
+        assert_eq!(app.chat.input.as_str(), "keep this draft");
+        app.heard_from_daemon(rook_proto::ChatEvent::Snapshot {
+            session: rook_store::format_session_id(session),
+            running: true,
+            truncated: true,
+            approvals: Vec::new(),
+            questions: Vec::new(),
+        });
+        assert!(app.chat.tool_results.is_empty() && app.chat.selected_tool().is_none());
+        app.recall_conversation(session, Some(second + 1));
+        assert_eq!(app.chat.selected_tool().map(|(_, id, seq)| (id, seq)), Some((session, second)));
+        assert!(
+            app.chat.log.iter().any(|(_, text)| text.contains("saved status/duration unavailable")),
+            "old saved events gain links without fabricated verdicts"
+        );
+        assert_eq!(app.chat.input.as_str(), "keep this draft");
+    }
+
+    #[test]
     fn streamed_text_still_joins_into_one_block() {
         let mut chat = Chat::default();
         chat.push("text", "the sky ");
@@ -6380,7 +6658,7 @@ and the next line"
         assert_eq!(chat.log.len(), 1, "{:?}", chat.log);
         assert_eq!(chat.running(), Some("read src/main.rs"), "and it is what the turn is doing");
 
-        chat.tool_done("read_file", false);
+        chat.tool_done("read_file", false, None);
         assert_eq!(chat.log.len(), 1, "still one line: {:?}", chat.log);
         assert!(chat.log[0].1.ends_with('✓'), "{:?}", chat.log);
         assert_eq!(chat.running(), None, "and nothing is running");
@@ -6818,9 +7096,9 @@ and the next line"
         chat.tool_started("read_file", "read b.rs");
         chat.tool_started("run_command", "run cargo test");
 
-        chat.tool_done("read_file", false);
-        chat.tool_done("read_file", true);
-        chat.tool_done("run_command", false);
+        chat.tool_done("read_file", false, None);
+        chat.tool_done("read_file", true, None);
+        chat.tool_done("run_command", false, None);
 
         let marks: Vec<&str> = chat.log.iter().map(|(_, body)| body.as_str()).collect();
         assert_eq!(

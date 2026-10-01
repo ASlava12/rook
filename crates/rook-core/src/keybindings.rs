@@ -42,6 +42,9 @@ actions! {
     KillStart, "prompt.delete_start", Prompt, "Delete from the start to the cursor", ["ctrl+u"];
     KillEnd, "prompt.delete_end", Prompt, "Delete from the cursor to the end", ["ctrl+k"];
     Calls, "prompt.calls", Prompt, "Inspect tool arguments and results", ["ctrl+o"];
+    ToolPrevious, "prompt.tool_previous", Prompt, "Select the previous saved tool result in chat", ["f5"];
+    ToolNext, "prompt.tool_next", Prompt, "Select the next saved tool result in chat", ["f6"];
+    ToolResult, "prompt.tool_result", Prompt, "Open the selected saved tool result (latest by default)", ["f7"];
     Complete, "prompt.complete", Prompt, "Complete a command or file mention", ["tab"];
     Escape, "prompt.escape", Prompt, "Clear the prompt; quit when it is empty", ["escape"];
     Left, "prompt.left", Prompt, "Move left", ["left"];

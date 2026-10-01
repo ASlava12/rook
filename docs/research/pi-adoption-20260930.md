@@ -1999,3 +1999,52 @@ The next card block should retain `result_seq` through the local TUI
 `TurnEvent::ToolDone` and daemon event handler, associate it with the correct
 bounded chat row, and open the existing history reader from that row. Verify
 both local and daemon interaction; rendering alone does not close that gap.
+
+## Live TUI result navigation (2026-10-02)
+
+Local `TurnEvent::ToolDone` and daemon completion handling now retain the
+exact `result_seq`. The compact call row gains a saved-result event number.
+Metadata includes the original session and follows the existing byte-bounded
+scrollback; it cannot outlive the row. Prefix eviction shifts links and
+selection once per batch rather than rebuilding them for each dropped row.
+Replacement snapshots/new sessions clear them. Recalled history also exposes
+saved results; missing historical measurements never invent success or duration.
+
+Named actions `prompt.tool_previous` (F5), `prompt.tool_next` (F6) and
+`prompt.tool_result` (F7) select/reveal a row and open its existing bounded
+history reader. F7 defaults to the latest saved result. The selected row is
+highlighted, and the chat border shows configured shortcuts. The common
+palette/help/config registry exposes the actions. Navigation and result/diff
+parts leave the draft intact and do not pause the turn. Old completion frames
+without a result reference retain their plain notice and remain available
+through history.
+
+Tests cover identical descriptions, missing starts, old frames, original
+session attribution, replacement snapshot cleanup, recovered old results,
+source/selection eviction after exceeding the scrollback byte cap, local and
+daemon event handlers, actual asynchronous history reading, rendering a
+selected row above later output, draft preservation and a remapped result key.
+The targeted TUI suite and final focused tests passed. The initial render
+assertion used lower-case `f7`; active function-key hints use upper-case `F7`,
+and the corrected assertion passed.
+
+Real Windows PTY interaction with fresh stores and a bounded scripted model
+verified both `tui --alone` and daemon TUI: F5/F6/F7 source selection, saved
+success/failure and timing, result and diff parts at offsets 0/4096, `c` change
+source, scrolling the diff and retaining a busy draft. The local model reached
+its first-response deadline while the viewer was open; saved navigation and
+the draft survived that terminal event too. The daemon fixture streamed small
+chunks during review and retained the draft after its final output. Both TUI
+processes exited 0. Scratch daemon/model processes were stopped before CI.
+Stored structs, formats and storage code are unchanged. Final
+`cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0 (`ci: ok`, 748.7 seconds),
+including the new TUI lifecycle/navigation checks, existing queue/recovery
+and branch scenarios, core suites and doctests. Windows ran no Unix PTY
+tests; the Windows interactions described above used real PTY processes.
+
+Inline cards remain In progress until the remaining tool-type/presentation
+requirements are audited against the review (including command exit status,
+search match count and MCP attribution). The queue lifecycle, branch live
+checks, HTML download interaction, phase routing, declarative extension UI and
+later terminal experiments remain in the original scope. Live TUI expansion
+is now implemented and exercised; it is no longer the next missing card block.
