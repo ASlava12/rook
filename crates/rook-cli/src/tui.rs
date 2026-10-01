@@ -1029,6 +1029,8 @@ impl Chat {
     /// is, this side has no way to know. Saying only "the turn will see this"
     /// left a queue with no visible end.
     const QUEUED: &'static str = "  (the turn will see this at its next step)";
+    // An already displayed row from the former execute-and-queue behavior can
+    // still be acknowledged if the turn takes it up before this window closes.
     const RAN: &'static str = "  (done · the turn hears it at its next step)";
     const TAKEN: &'static str = "  ✓ taken up";
 
@@ -3543,9 +3545,8 @@ impl App {
             }
             return;
         }
-        // Typed while a turn runs, it goes to the turn. It used to be dropped
-        // where it was taken, so watching one go the wrong way left nothing to
-        // do but stop it and start again.
+        // A sentence typed while a turn runs goes to the turn. Slash commands
+        // instead act here; `/followup` and `/goal` have explicit paths above.
         if let Some(command) = slash(&prompt)
             && (command == "queue"
                 || command == "summary"
@@ -3570,30 +3571,18 @@ impl App {
         }
         if self.chat.busy {
             self.chat.push("you", &prompt);
-            // A slash command typed here used to be queued as its own text and
-            // nothing else, so `/goal …` set no goal: the line went to the model
-            // as a sentence beginning with a slash, and the window answered
-            // "the turn will see this", which reads as the command having been
-            // taken. Reported by somebody who set a goal that was never set.
-            //
-            // It runs now, and it is still queued, so nothing is lost: the
-            // setting takes effect at once and the turn hears about it at its
-            // next step, which is the soonest anything can reach a model whose
-            // request has already been sent.
-            let queued = match slash(&prompt) {
-                Some(command) => match while_running(command) {
-                    Some(why) => {
-                        self.chat.push("stat", &format!("  not while a turn is running: {why}"));
-                        self.chat.scroll = 0;
-                        return;
-                    }
-                    None => {
-                        self.command(command);
-                        Chat::RAN
-                    }
-                },
-                None => Chat::QUEUED,
-            };
+            // Slash commands act on this window or its settings. Their text is
+            // not a correction for the model to receive as a later user turn.
+            // `/goal` and `/followup` took their explicit paths above.
+            if let Some(command) = slash(&prompt) {
+                if let Some(why) = while_running(command) {
+                    self.chat.push("stat", &format!("  not while a turn is running: {why}"));
+                } else {
+                    self.command(command);
+                }
+                self.chat.scroll = 0;
+                return;
+            }
             let result = match self.chat.session {
                 Some(session) => self.queue.submit(session, &prompt, false),
                 None => {
@@ -3606,7 +3595,7 @@ impl App {
                     if self.chat.session.is_some() {
                         "  submitting · /queue retains the ID until confirmation"
                     } else {
-                        queued
+                        Chat::QUEUED
                     },
                 ),
                 Err(error) => {
@@ -5659,14 +5648,14 @@ mod tests {
     #[test]
     fn a_line_said_during_a_turn_is_ticked_when_the_turn_takes_it_up() {
         let mut chat = super::Chat::default();
-        chat.push("you", "/goal ship the prototype");
-        chat.push("stat", super::Chat::RAN);
+        chat.push("you", "ship the prototype");
+        chat.push("stat", super::Chat::QUEUED);
         chat.push("you", "and hurry");
         chat.push("stat", super::Chat::QUEUED);
 
         // Oldest first, because the turn takes them in the order they were
         // said, so the ticks land on the lines the queue emptied.
-        chat.taken_up("/goal ship the prototype", None);
+        chat.taken_up("ship the prototype", None);
         let marks: Vec<&str> =
             chat.log.iter().filter(|(k, _)| *k == "stat").map(|(_, b)| b.as_str()).collect();
         assert_eq!(marks, vec![super::Chat::TAKEN, super::Chat::QUEUED], "the first one only");
@@ -5704,6 +5693,35 @@ and the next line"
             None
         );
         assert_eq!(super::slash("just a sentence"), None);
+    }
+
+    #[test]
+    fn slash_commands_during_a_turn_leave_the_correction_queue_free() {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let rook = rook_core::Rook::from_parts(
+            rook_store::Store::open(home.path().join("store")).unwrap(),
+            rook_core::Config::default(),
+            rook_skills::Environment::bare("linux", "x86_64", "0.1.0"),
+            rook_skills::SkillIndex::default(),
+            workspace.path().to_path_buf(),
+        );
+        let session = rook.start_session("slash while busy").unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let mut app = super::App::new(crate::source::Source::Local(std::sync::Arc::new(rook)), runtime, true);
+        app.chat.session = Some(session);
+        app.chat.busy = true;
+        for command in ["/context", "/jobs", "/diff", "/help", "/rewind 0"] {
+            app.overlay = None;
+            app.chat.input.set(command);
+            app.send();
+            assert!(app.chat.input.is_empty(), "{command} was handled as a command");
+        }
+        assert!(app.chat.log.iter().any(|(_, line)| line.contains("not while a turn is running")));
+        assert!(!app.chat.log.iter().any(|(_, line)| line.contains("submitting · /queue")));
+        app.chat.input.set("actual correction");
+        app.send();
+        assert!(app.chat.log.iter().any(|(_, line)| line.contains("submitting · /queue")));
     }
 
     /// The few that cannot run while a turn is running, and why.

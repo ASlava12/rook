@@ -78,6 +78,9 @@ message at the bottom of the chat, directly above the status line. The composer
 and approval controls sit above it, so streaming output and a growing draft do
 not move the preview. The queue page supplies ordering and count in both local
 and daemon modes.
+The TUI executes slash commands as interface actions while a turn runs.
+Their command text does not become a queued user correction; plain messages,
+`/followup` and `/goal` retain their explicit delivery paths.
 
 An explicitly reviewed branch summary is a bounded Note in the target session.
 Its record names the source session and last source event. Replay treats the

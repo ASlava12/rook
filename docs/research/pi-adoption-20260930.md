@@ -1791,3 +1791,22 @@ integration tests and the new daemon API test. This block changes neither
 the store format nor the context API. With the CLI, API, TUI and browser
 views verified, the inspector row is Complete. Queue, branch, tool-card and
 HTML-export gaps and both Pending capabilities remain in scope.
+
+## TUI slash commands during a running turn
+
+The TUI previously executed a slash command while a turn was busy and then
+submitted the same literal text to the correction queue. A request to inspect
+`/context`, `/jobs` or `/diff` therefore became the next user message as
+well. Slash commands now finish in the interface without reserving a queue
+receipt. Ordinary text still enters the queue; `/followup` and `/goal` keep
+their explicit paths. Commands that would move or rewind a running turn are
+still rejected. A local TUI test executes read-only and rejected commands
+under a busy turn, then verifies that a real correction can be submitted.
+The dispatch branch is shared by local and daemon windows; live daemon TUI
+interaction remains part of the queue row's pending coverage. This block
+changes no stored or wire format. The focused TUI tests passed. The first
+`cargo xtask ci` exited 1 after an existing daemon-restart integration test
+timed out waiting for goal resume; the other 84 CLI integration tests passed.
+That test passed alone on retry (exit 0), and the second full `cargo xtask ci`
+exited 0 (`ci: ok`, 725.7 seconds), including all 85 CLI integration tests
+and doctests. Queue remains In progress.
