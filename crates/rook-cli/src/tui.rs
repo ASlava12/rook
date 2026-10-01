@@ -1668,6 +1668,20 @@ impl App {
             self.drain_turn_events();
             self.tasks.poll();
             self.history.poll();
+            if let Some(result) = self.history.take_export() {
+                match result {
+                    Ok((path, report)) => self.chat.push(
+                        "stat",
+                        &format!(
+                            "Saved {} event(s) to {} ({} shortened bodies).",
+                            report.events,
+                            path.display(),
+                            report.shortened
+                        ),
+                    ),
+                    Err(error) => self.chat.push("err", &format!("HTML export failed: {error}")),
+                }
+            }
             if let Some((target, result)) = self.history.take_suggestion() {
                 match result {
                     Ok(draft) => {
@@ -3156,6 +3170,23 @@ impl App {
             self.chat.push("stat", &said);
             return;
         }
+        if name == "export-html" {
+            let Some(session) = self.chat.session else {
+                return self.chat.push("err", "start or resume a session first");
+            };
+            match crate::commands::html_export::slash_arguments(rest) {
+                Ok((from, through, path)) => {
+                    if self.history.export(session, from, through, path) {
+                        self.chat
+                            .push("stat", "Preparing a bounded local HTML export in the history reader…");
+                    } else {
+                        self.chat.push("err", "History reader is busy; try export again when it finishes.");
+                    }
+                }
+                Err(error) => self.chat.push("err", &error.to_string()),
+            }
+            return;
+        }
         if name == "recovery" {
             let said = match self.chat.session {
                 Some(session) => {
@@ -3463,7 +3494,9 @@ impl App {
                 || command == "task"
                 || command.starts_with("task ")
                 || command == "diagnostics"
-                || command.starts_with("diagnostics "))
+                || command.starts_with("diagnostics ")
+                || command == "export-html"
+                || command.starts_with("export-html "))
         {
             self.command(command);
             return;
@@ -5386,6 +5419,7 @@ mod tests {
         assert!(names.contains(&"retry"));
         assert!(tui_commands_matching("/discard ").iter().any(|(name, ..)| *name == "discard"));
         assert!(tui_commands_matching("/session").iter().any(|(name, ..)| *name == "session"));
+        assert!(tui_commands_matching("/export-html ").iter().any(|(name, ..)| *name == "export-html"));
     }
 
     #[test]

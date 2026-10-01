@@ -1,6 +1,7 @@
 //! One bounded reader worker keeps navigation off the input/streaming thread.
 use super::*;
 use rook_core::transcript::{Cursor, EntryPage, Matches, Page, PageRequest};
+use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 
 pub(super) struct History {
@@ -29,10 +30,12 @@ pub(super) struct History {
     note: String,
     quote: Option<String>,
     suggestion: Option<(u128, Result<rook_core::branches::SummaryDraft, String>)>,
+    exported: Option<std::result::Result<(PathBuf, crate::commands::html_export::Report), String>>,
     send: Option<SyncSender<(u64, Command)>>,
     receive: Receiver<(u64, Result<Update>)>,
 }
 enum Command {
+    Export(u128, u64, Option<u64>, PathBuf),
     Draft(u128, u128),
     Suggest(u128, u128),
     Fork(u128, u64),
@@ -47,6 +50,7 @@ enum Command {
     Quote(u128, u64, u64),
 }
 enum Update {
+    Exported(std::result::Result<(PathBuf, crate::commands::html_export::Report), String>),
     Suggested(u128, Result<rook_core::branches::SummaryDraft, String>),
     Fork(rook_core::branches::Forked),
     Rename(rook_core::branches::Node),
@@ -61,6 +65,11 @@ enum Update {
 impl Command {
     fn read(self, source: &crate::source::Source) -> Result<Update> {
         Ok(match self {
+            Self::Export(session, from, through, path) => Update::Exported(
+                crate::commands::html_export::save(source, session, from, through, &path)
+                    .map(|report| (path, report))
+                    .map_err(|error| error.to_string()),
+            ),
             Self::Draft(from, target) => Update::Suggested(
                 target,
                 source.branch_summary_draft(from, target).map_err(|error| error.to_string()),
@@ -134,6 +143,7 @@ impl History {
             note,
             quote: None,
             suggestion: None,
+            exported: None,
             send,
             receive,
         }
@@ -195,8 +205,22 @@ impl History {
         self.epoch = self.epoch.wrapping_add(1);
         self.ask(Command::Suggest(source, target))
     }
+    pub(super) fn export(&mut self, session: u128, from: u64, through: Option<u64>, path: PathBuf) -> bool {
+        if self.pending {
+            return false;
+        }
+        self.epoch = self.epoch.wrapping_add(1);
+        self.ask(Command::Export(session, from, through, path))
+    }
     pub(super) fn poll(&mut self) {
         while let Ok((epoch, update)) = self.receive.try_recv() {
+            if let Ok(Update::Exported(result)) = update {
+                self.exported = Some(result);
+                if epoch == self.epoch {
+                    self.pending = false;
+                }
+                continue;
+            }
             // A committed fork survives closing the viewer while it was being
             // created. The app decides whether it can still replace the draft.
             if let Ok(Update::Fork(forked)) = update {
@@ -218,6 +242,9 @@ impl History {
             self.note.clear();
             match update {
                 Ok(Update::Fork(_)) => unreachable!("fork completion handled before stale read filtering"),
+                Ok(Update::Exported(_)) => {
+                    unreachable!("export completion handled before stale read filtering")
+                }
                 Ok(Update::Rename(node)) => {
                     if let Some(tree) = &mut self.tree {
                         for branch in tree
@@ -315,6 +342,11 @@ impl History {
     }
     pub(super) fn take_quote(&mut self) -> Option<String> {
         self.quote.take()
+    }
+    pub(super) fn take_export(
+        &mut self,
+    ) -> Option<std::result::Result<(PathBuf, crate::commands::html_export::Report), String>> {
+        self.exported.take()
     }
     pub(super) fn take_suggestion(
         &mut self,

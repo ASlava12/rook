@@ -1456,3 +1456,24 @@ investigate. The repeat full CI with `RUST_TEST_THREADS=1` exited 0
 (`ci: ok`, 679.8 seconds), including all 84 CLI integration tests, daemon
 asset checks, Clippy and doctests. No storage implementation changed, so
 compaction was not rerun.
+
+## Chat access to local HTML export
+
+`/export-html [FROM..THROUGH] NEW_FILE` is now in shared REPL/TUI help and
+completion. The path may contain spaces. Local REPL uses its already open
+Rook instance; daemon REPL reads through `Source` in a blocking worker; TUI
+uses its existing history reader thread and reports success or failure in
+chat. All three call the same bounded writer as `rook session export-html`,
+so they retain the 512-event and 8192-byte preview limits, escaping, source
+disclaimer and no-overwrite behavior. The ordinary CLI export still works
+with and without a daemon. Browser download has its own 16 MiB output cap.
+
+The extended CLI integration scenario passed for both slash REPL modes,
+including paths with spaces and byte-for-byte equality with CLI output.
+Parser and TUI command-discovery checks passed. A live interactive TUI check
+is unavailable in this Windows PTY test target, and live browser interaction
+is still open, so the table row remains In progress.
+Full `cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0 (`ci: ok`,
+654.9 seconds), including all 84 CLI integration tests, the 108 CLI unit
+tests, Clippy and doctests. No stored format or storage implementation changed,
+so compaction was not rerun.

@@ -208,6 +208,9 @@ The browser history panel assembles the same selected range from paged API
 reads into a local HTML download. It enforces the event and body limits plus
 a 16 MiB output limit before creating the download, and uses the same source
 boundary and historical file/test disclaimer.
+The shared `/export-html [FROM..THROUGH] NEW_FILE` slash command reaches this
+writer from both REPL modes and the TUI; the TUI uses its history reader worker
+so an export does not block redraws or live turn output.
 
 ## The agent loop
 

@@ -2,25 +2,52 @@
 //! direct and daemon modes. It never publishes the conversation.
 
 use std::io::{BufWriter, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
 
 use crate::source::Source;
 
+pub(crate) trait HistoryRead {
+    fn page(&self, session: u128, from: u64) -> Result<rook_core::transcript::Page>;
+    fn entry(&self, session: u128, seq: u64, offset: u64) -> Result<rook_core::transcript::EntryPage>;
+}
+impl HistoryRead for Source {
+    fn page(&self, session: u128, from: u64) -> Result<rook_core::transcript::Page> {
+        self.transcript_page(
+            session,
+            &rook_core::transcript::PageRequest { from: Some(from), before: None, limit: Some(PAGE) },
+        )
+    }
+    fn entry(&self, session: u128, seq: u64, offset: u64) -> Result<rook_core::transcript::EntryPage> {
+        self.transcript_entry(session, seq, offset)
+    }
+}
+impl HistoryRead for rook_core::Rook {
+    fn page(&self, session: u128, from: u64) -> Result<rook_core::transcript::Page> {
+        Ok(self.transcript_page(
+            session,
+            &rook_core::transcript::PageRequest { from: Some(from), before: None, limit: Some(PAGE) },
+        )?)
+    }
+    fn entry(&self, session: u128, seq: u64, offset: u64) -> Result<rook_core::transcript::EntryPage> {
+        Ok(self.transcript_entry(session, seq, offset)?)
+    }
+}
+
 const PAGE: usize = 64;
 const MAX_EVENTS: usize = 512;
 const MAX_BODY_BYTES: usize = 8192;
 
-pub(super) struct Report {
+pub(crate) struct Report {
     pub events: usize,
     pub shortened: usize,
     pub from: u64,
     pub through: u64,
 }
 
-pub(super) fn save(
-    source: &Source,
+pub(crate) fn save(
+    source: &impl HistoryRead,
     session: u128,
     from: u64,
     through: Option<u64>,
@@ -62,11 +89,11 @@ fn escaped(out: &mut impl Write, text: &str) -> Result<()> {
     Ok(())
 }
 
-fn body(source: &Source, session: u128, seq: u64, out: &mut impl Write) -> Result<bool> {
+fn body(source: &impl HistoryRead, session: u128, seq: u64, out: &mut impl Write) -> Result<bool> {
     let mut offset = 0u64;
     let mut written = 0usize;
     loop {
-        let page = source.transcript_entry(session, seq, offset)?;
+        let page = source.entry(session, seq, offset)?;
         ensure!(page.entry.seq == seq && page.offset >= offset, "history entry changed during export");
         let text = page.entry.body;
         let remaining = MAX_BODY_BYTES - written;
@@ -86,16 +113,13 @@ fn body(source: &Source, session: u128, seq: u64, out: &mut impl Write) -> Resul
 }
 
 fn write_html(
-    source: &Source,
+    source: &impl HistoryRead,
     session: u128,
     from: u64,
     through: Option<u64>,
     out: &mut impl Write,
 ) -> Result<Report> {
-    let mut page = source.transcript_page(
-        session,
-        &rook_core::transcript::PageRequest { from: Some(from), before: None, limit: Some(PAGE) },
-    )?;
+    let mut page = source.page(session, from)?;
     let end = page.through;
     ensure!(from < end || end == 0 && from == 0, "export starts after the saved history");
     let through = match through {
@@ -170,10 +194,7 @@ fn write_html(
         if !advanced || cursor > through {
             break;
         }
-        page = source.transcript_page(
-            session,
-            &rook_core::transcript::PageRequest { from: Some(cursor), before: None, limit: Some(PAGE) },
-        )?;
+        page = source.page(session, cursor)?;
         ensure!(page.through >= end, "saved history shrank during export");
     }
     if report.events == 0 {
@@ -187,6 +208,24 @@ fn write_html(
     Ok(report)
 }
 
+/// `NEW_FILE` may contain spaces. An optional `FROM..THROUGH` prefix selects
+/// an inclusive range; all other text is the destination path.
+pub(crate) fn slash_arguments(rest: &str) -> Result<(u64, Option<u64>, PathBuf)> {
+    let rest = rest.trim();
+    ensure!(!rest.is_empty(), "use /export-html [FROM..THROUGH] NEW_FILE");
+    let (first, path) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+    if let Some((from, through)) = first.split_once("..")
+        && !from.is_empty()
+        && !through.is_empty()
+        && from.bytes().all(|byte| byte.is_ascii_digit())
+        && through.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        ensure!(!path.trim().is_empty(), "use /export-html [FROM..THROUGH] NEW_FILE");
+        return Ok((from.parse()?, Some(through.parse()?), PathBuf::from(path.trim())));
+    }
+    Ok((0, None, PathBuf::from(rest)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,5 +235,14 @@ mod tests {
         let mut out = Vec::new();
         escaped(&mut out, "<script x=\"&\">'\0\n").unwrap();
         assert_eq!(String::from_utf8(out).unwrap(), "&lt;script x=&quot;&amp;&quot;&gt;&#39;&#xfffd;\n");
+    }
+
+    #[test]
+    fn slash_range_keeps_the_rest_of_a_path() {
+        let (from, through, path) = slash_arguments("2..8 review with spaces.html").unwrap();
+        assert_eq!((from, through), (2, Some(8)));
+        assert_eq!(path, PathBuf::from("review with spaces.html"));
+        assert_eq!(slash_arguments("my review.html").unwrap().2, PathBuf::from("my review.html"));
+        assert!(slash_arguments("2..8 ").is_err());
     }
 }

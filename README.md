@@ -282,6 +282,7 @@ rook session history last --before 1200
 rook session find last "connection refused" --json
 rook session entry last 1190 --offset 4096
 rook session quote last 1190          # attributed source text; never sends it
+rook session export-html last --from 1180 --through 1200 --output review.html
 ```
 
 History pages have `previous` (exclusive `--before`) and `next` (inclusive
@@ -291,6 +292,13 @@ pass them as `--from`, `--offset`, `--through` to continue the same scan. An emp
 hit page with a cursor means more history remains to scan. The first request
 fixes the search's upper event boundary so a running session cannot prolong it
 indefinitely. Entry and quote results expose `next_offset` for long bodies.
+`export-html` creates a new local review file without replacing an existing
+one. It allows at most 512 events and 8192 preview bytes per event. In chat,
+`/export-html 1180..1200 review.html` selects the same inclusive range;
+`/export-html review.html` starts at the retained history beginning. The
+browser history panel can download its displayed page or a chosen range.
+Exports describe saved conversation history; check current files and test
+results in the workspace before relying on historical claims.
 
 In the TUI, **Ctrl+F** opens this session's history, or **f** opens the selected
 session from the Sessions pane. **/** searches, **g** jumps to an event number,

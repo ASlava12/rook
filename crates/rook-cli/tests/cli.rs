@@ -2075,10 +2075,20 @@ fn html_export_scopes_and_escapes_history_locally_and_through_the_daemon() {
     assert!(!html.contains("outside-before") && !html.contains("outside-after"));
     assert!(!export(&local).status.success(), "existing export must not be replaced");
     assert_eq!(std::fs::read_to_string(&local).unwrap(), html);
+    let repl_local = rook.home.path().join("REPL local.html");
+    let lines = format!("/export-html 1..2 {}\n/quit\n", repl_local.display());
+    let result = rook.chat_in_session(&named, &lines);
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(std::fs::read_to_string(&repl_local).unwrap(), html);
     let _daemon = Daemon::start(&rook);
     let result = export(&remote);
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     assert_eq!(std::fs::read_to_string(&remote).unwrap(), html);
+    let repl_remote = rook.home.path().join("REPL daemon.html");
+    let lines = format!("/export-html 1..2 {}\n/quit\n", repl_remote.display());
+    let result = rook.chat_in_session(&named, &lines);
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(std::fs::read_to_string(&repl_remote).unwrap(), html);
     let invalid = rook.home.path().join("invalid.html");
     let result = rook.run(&[
         "session",

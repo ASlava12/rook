@@ -62,6 +62,7 @@ fn editor() -> Result<rustyline::Editor<Pasting, rustyline::history::DefaultHist
 /// second hand-written copy of the answer is one that drifts.
 pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("diagnostics", "[--logs] [new-file-path]", "export local diagnostics; logs are opt-in"),
+    ("export-html", "[FROM..THROUGH] NEW_FILE", "download bounded saved history as local HTML"),
     (
         "recovery",
         "[operation-id inspection note]",
@@ -804,6 +805,35 @@ async fn through_the_daemon(
                         eprintln!("start or resume a session first");
                     }
                 }
+                "export-html" => {
+                    let Some(id) = session.as_deref().and_then(rook_store::parse_session_id) else {
+                        eprintln!("start or resume a session first");
+                        continue;
+                    };
+                    let (from, through, output) = match crate::commands::html_export::slash_arguments(rest) {
+                        Ok(arguments) => arguments,
+                        Err(error) => {
+                            eprintln!("{error}");
+                            continue;
+                        }
+                    };
+                    let here = workspace.to_path_buf();
+                    let result = tokio::task::spawn_blocking(move || -> Result<String> {
+                        let source = crate::source::Source::open(Some(here))?;
+                        let report = crate::commands::html_export::save(&source, id, from, through, &output)?;
+                        Ok(format!(
+                            "Saved {} event(s) to {} ({} shortened bodies).",
+                            report.events,
+                            output.display(),
+                            report.shortened
+                        ))
+                    })
+                    .await?;
+                    match result {
+                        Ok(said) => println!("{said}"),
+                        Err(error) => eprintln!("{error}"),
+                    }
+                }
                 "recovery" => {
                     if let Some(session) = session.as_deref().and_then(rook_store::parse_session_id) {
                         let client = reqwest::Client::builder()
@@ -1193,6 +1223,16 @@ pub async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command
             let (logs, path) = crate::commands::sessions::diagnostic_arguments(rest)?;
             let report = rook.diagnostics(*session, logs)?;
             say!("Diagnostics saved to {}", report.save(&path)?.display());
+        }
+        "export-html" => {
+            let (from, through, output) = crate::commands::html_export::slash_arguments(rest)?;
+            let report = crate::commands::html_export::save(rook, *session, from, through, &output)?;
+            say!(
+                "Saved {} event(s) to {} ({} shortened bodies).",
+                report.events,
+                output.display(),
+                report.shortened
+            );
         }
         "recovery" => {
             if !rest.is_empty() {
