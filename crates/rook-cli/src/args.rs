@@ -521,6 +521,19 @@ pub(crate) enum SessionCmd {
         #[arg(long)]
         limit: Option<usize>,
     },
+    /// Save selected conversation events as a standalone local HTML review file.
+    ExportHtml {
+        id: String,
+        /// First event number (inclusive).
+        #[arg(long, default_value_t = 0)]
+        from: u64,
+        /// Last event number (inclusive); defaults to the current history end.
+        #[arg(long)]
+        through: Option<u64>,
+        /// New file to create; an existing file is never replaced.
+        #[arg(long)]
+        output: std::path::PathBuf,
+    },
     /// Search literal text within one transcript; follow the returned cursor.
     Find {
         id: String,

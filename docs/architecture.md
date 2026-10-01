@@ -198,6 +198,13 @@ clients receive ordinary events and a text marker for partial replay. An input
 or settings frame exceeding the socket budget closes that view without silently
 truncating a control or cancelling the daemon-owned turn.
 
+The CLI's local HTML review export uses the same paged transcript source in
+direct and daemon modes. It writes an inclusive selected range into a new
+local file, limited to 512 events and 8192 displayed body bytes each. It
+escapes event content, marks shortened bodies, and never treats saved history
+as evidence of current files or tests. Output is streamed into a temporary
+file and published at the chosen path only after completion.
+
 ## The agent loop
 
 [`AgentLoop::run`](../crates/rook-core/src/agent.rs) owns turn orchestration and

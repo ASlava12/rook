@@ -2006,6 +2006,110 @@ fn diagnostics_export_works_locally_and_through_the_daemon_without_overwriting_f
 }
 
 #[test]
+fn html_export_scopes_and_escapes_history_locally_and_through_the_daemon() {
+    let rook = Rook::new();
+    let id = rook_store::new_session_id();
+    let named = rook_store::format_session_id(id);
+    {
+        let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+        store
+            .create_session(&rook_store::SessionMeta::new(
+                id,
+                "HTML export",
+                rook.workspace.path().display().to_string(),
+                rook_store::now_unix(),
+            ))
+            .unwrap();
+        for (kind, label, body) in [
+            (rook_store::EventKind::UserMessage, "", "outside-before".to_string()),
+            (
+                rook_store::EventKind::ToolCall,
+                "<script>",
+                "<script>alert('bad')</script> & \"quoted\"".to_string(),
+            ),
+            (rook_store::EventKind::ToolResult, "run_command", format!("{}END", "&".repeat(9000))),
+            (rook_store::EventKind::AssistantMessage, "", "outside-after".to_string()),
+        ] {
+            store
+                .append_event(
+                    id,
+                    rook_store::NewEvent::new(kind, rook_store::Kind::Message, body.as_bytes()).label(label),
+                )
+                .unwrap();
+        }
+        for _ in 0..513 {
+            store
+                .append_event(
+                    id,
+                    rook_store::NewEvent::new(
+                        rook_store::EventKind::AssistantMessage,
+                        rook_store::Kind::Message,
+                        b"bounded export",
+                    ),
+                )
+                .unwrap();
+        }
+    }
+    let local = rook.home.path().join("local.html");
+    let remote = rook.home.path().join("remote.html");
+    let export = |path: &std::path::Path| {
+        rook.run(&[
+            "session",
+            "export-html",
+            named.as_str(),
+            "--from",
+            "1",
+            "--through",
+            "2",
+            "--output",
+            path.to_str().unwrap(),
+        ])
+    };
+    let result = export(&local);
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    let html = std::fs::read_to_string(&local).unwrap();
+    assert!(html.contains("selected events #1–#2"), "{html}");
+    assert!(html.contains("&lt;script&gt;alert(&#39;bad&#39;)&lt;/script&gt; &amp; &quot;quoted&quot;"));
+    assert!(html.contains("<details><summary>Show tool content</summary>"));
+    assert!(html.contains("Body shortened after 8192 bytes"));
+    assert!(!html.contains("outside-before") && !html.contains("outside-after"));
+    assert!(!export(&local).status.success(), "existing export must not be replaced");
+    assert_eq!(std::fs::read_to_string(&local).unwrap(), html);
+    let _daemon = Daemon::start(&rook);
+    let result = export(&remote);
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(std::fs::read_to_string(&remote).unwrap(), html);
+    let invalid = rook.home.path().join("invalid.html");
+    let result = rook.run(&[
+        "session",
+        "export-html",
+        &named,
+        "--from",
+        "2",
+        "--through",
+        "1",
+        "--output",
+        invalid.to_str().unwrap(),
+    ]);
+    assert!(!result.status.success());
+    assert!(!invalid.exists());
+    let too_large = rook.home.path().join("too-large.html");
+    let result = rook.run(&[
+        "session",
+        "export-html",
+        &named,
+        "--from",
+        "4",
+        "--through",
+        "516",
+        "--output",
+        too_large.to_str().unwrap(),
+    ]);
+    assert!(!result.status.success());
+    assert!(!too_large.exists());
+}
+
+#[test]
 fn recovery_inspection_and_acknowledgement_reach_the_daemon_and_reject_stale_ids() {
     let rook = Rook::new();
     let id = rook_store::new_session_id();

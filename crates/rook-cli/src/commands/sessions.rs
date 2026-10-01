@@ -166,6 +166,25 @@ pub(crate) fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, js
         }
         return Ok(());
     }
+    if let SessionCmd::ExportHtml { id, from, through, output } = &cmd {
+        let session = source.session_named(id, workspace)?;
+        let report = super::html_export::save(source, session, *from, *through, output)?;
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({"path":output,"events":report.events,
+                "shortened":report.shortened,"from":report.from,"through":report.through})
+            );
+        } else {
+            println!(
+                "saved {} event(s) to {} ({} shortened bodies)",
+                report.events,
+                output.display(),
+                report.shortened
+            );
+        }
+        return Ok(());
+    }
     // Both read, and both are what somebody wants while the daemon is up.
     if let SessionCmd::Recovery { id, acknowledge, note } = &cmd {
         let session = source.session_named(id, workspace)?;
@@ -296,6 +315,7 @@ pub(crate) fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, js
         | SessionCmd::Turns { .. }
         | SessionCmd::Queue { .. }
         | SessionCmd::History { .. }
+        | SessionCmd::ExportHtml { .. }
         | SessionCmd::Find { .. }
         | SessionCmd::Entry { .. }
         | SessionCmd::Quote { .. }

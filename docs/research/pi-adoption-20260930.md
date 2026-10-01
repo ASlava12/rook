@@ -12,7 +12,7 @@ Source: Pi `ee602414c703be8da722ec56de7f2399e62581ac`; starting Rook:
 | Branch navigation and optional branch summary | In progress | Existing session/event IDs, bounded tree/history, explicit workspace semantics, attributable summary |
 | Inline tool cards | Pending | Compact/expanded results, errors/duration/diffs, bounded loading, TUI/browser verification |
 | Context provenance inspector | Pending | Request-specific sources, discovered vs loaded skills, deferred tools, CLI/API/TUI/browser |
-| Local HTML export | Pending | Selected history scope, bounded streaming, escaped content, no publication, cross-frontend access |
+| Local HTML export | In progress | Selected history scope, bounded streaming, escaped content, no publication, cross-frontend access |
 | Opt-in phase-based model routing | Pending | Explicit policy, continuity/capability constraints, actual route/cost reporting, comparison without claiming unmeasured savings |
 | Declarative extension UI | Pending | Bounded status/progress/forms/result contract, trust boundary, text fallback and frontend parity |
 
@@ -1404,3 +1404,28 @@ compression and 5.8x end-to-end. Full `cargo xtask ci` with
 `RUST_TEST_THREADS=1` exited 0 (`ci: ok`, 743.2 seconds), including all 83 CLI
 integration tests, Clippy and doctests. The Windows PTY target still had zero
 runnable tests.
+
+## Bounded local HTML review export
+
+`rook session export-html ID --from N --through M --output new.html` writes a
+standalone conversation-history review file. It selects an inclusive event
+range against the saved history end observed when export starts. The writer
+reads existing bounded history and body pages through `Source`, so the same
+command works with a local store or a running daemon. It writes to a temporary
+file beside the destination, then persists without replacing an existing file.
+At most 512 events and 8192 displayed body bytes per event are admitted; a
+larger selection fails without leaving a destination. Long bodies carry an
+explicit shortened notice and their event number for further inspection.
+Every event label, summary and body is HTML-escaped, while tool calls and
+results have native expandable details. The file names its source session,
+range and snapshot boundary and makes no claim about current workspace files
+or current test results. Nothing is published or uploaded.
+
+The CLI path is implemented for local and daemon modes. Browser download and
+an in-chat TUI/REPL entry point remain, so the table row is In progress.
+Other queue gaps, branch live checks and the remaining Pending rows stay open.
+The focused local/daemon integration test exited 0, including an over-limit
+selection that leaves no destination. Full `cargo xtask ci` with
+`RUST_TEST_THREADS=1` exited 0 (`ci: ok`, 682.6 seconds), including all 84 CLI
+integration tests, Clippy and doctests. This block changed no storage code,
+so compaction was not rerun.

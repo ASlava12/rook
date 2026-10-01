@@ -4,6 +4,7 @@ pub(crate) mod config;
 mod config_edit;
 pub(crate) mod daemon;
 pub(crate) mod doctor;
+mod html_export;
 pub(crate) mod knowledge;
 pub(crate) mod lsp;
 pub(crate) mod mcp;
