@@ -2303,7 +2303,7 @@ impl App {
         }
         if overlay == Overlay::Sessions && key.code == KeyCode::Char('b') {
             let session = self.session_state.selected().and_then(|i| self.sessions.get(i)).map(|s| s.meta.id);
-            self.history.open_tree(session);
+            self.history.open_tree(session, self.chat.session);
             self.overlay = Some(Overlay::History);
             return;
         }
@@ -2874,7 +2874,7 @@ impl App {
                 }
             };
             self.overlay = Some(Overlay::History);
-            self.history.open_tree(session);
+            self.history.open_tree(session, self.chat.session);
             return;
         }
         if name == "summary-draft" {

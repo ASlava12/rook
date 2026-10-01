@@ -5,12 +5,14 @@ use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 
 pub(super) struct History {
     session: Option<u128>,
+    departed: Option<u128>,
     epoch: u64,
     pending: bool,
     page: Option<Page>,
     turns: Option<rook_core::turns::Page>,
     tree: Option<rook_core::branches::Page>,
     switch: Option<rook_core::branches::Node>,
+    offered_switch: Option<rook_core::branches::Node>,
     forked: Option<rook_core::branches::Forked>,
     renamed: Option<rook_core::branches::Node>,
     bookmarks: Option<rook_core::branches::Bookmarks>,
@@ -31,6 +33,7 @@ pub(super) struct History {
     receive: Receiver<(u64, Result<Update>)>,
 }
 enum Command {
+    Draft(u128, u128),
     Suggest(u128, u128),
     Fork(u128, u64),
     Rename(u128, String),
@@ -58,6 +61,10 @@ enum Update {
 impl Command {
     fn read(self, source: &crate::source::Source) -> Result<Update> {
         Ok(match self {
+            Self::Draft(from, target) => Update::Suggested(
+                target,
+                source.branch_summary_draft(from, target).map_err(|error| error.to_string()),
+            ),
             Self::Suggest(from, target) => Update::Suggested(
                 target,
                 source.branch_summary_suggest(from, target).map_err(|error| error.to_string()),
@@ -103,12 +110,14 @@ impl History {
         };
         Self {
             session: None,
+            departed: None,
             epoch: 0,
             pending: false,
             page: None,
             turns: None,
             tree: None,
             switch: None,
+            offered_switch: None,
             forked: None,
             renamed: None,
             bookmarks: None,
@@ -135,8 +144,9 @@ impl History {
     pub(super) fn open_turns(&mut self, session: Option<u128>, before: Option<u64>) {
         self.open_mode(session, |id| Command::Turns(id, before));
     }
-    pub(super) fn open_tree(&mut self, session: Option<u128>) {
+    pub(super) fn open_tree(&mut self, session: Option<u128>, departed: Option<u128>) {
         self.open_mode(session, |id| Command::Tree(id, None));
+        self.departed = departed;
     }
     fn open_mode(&mut self, session: Option<u128>, command: impl FnOnce(u128) -> Command) {
         self.epoch = self.epoch.wrapping_add(1);
@@ -146,6 +156,8 @@ impl History {
         self.turns = None;
         self.tree = None;
         self.switch = None;
+        self.offered_switch = None;
+        self.departed = None;
         self.hits = None;
         self.entry = None;
         self.bookmarks = None;
@@ -240,6 +252,7 @@ impl History {
                     };
                 }
                 Ok(Update::Tree(page)) => {
+                    self.offered_switch = None;
                     self.session = rook_store::parse_session_id(&page.selected.id);
                     self.at = page.ancestors.len();
                     self.tree = Some(page);
@@ -292,7 +305,10 @@ impl History {
                     self.scroll = 0;
                 }
                 Ok(Update::Quote(text)) => self.quote = Some(text),
-                Ok(Update::Suggested(target, result)) => self.suggestion = Some((target, result)),
+                Ok(Update::Suggested(target, result)) => {
+                    self.suggestion = Some((target, result));
+                    self.note = "Draft ready in chat · Esc returns to review and save it".into();
+                }
                 Err(e) => self.note = e.to_string(),
             }
         }
@@ -421,6 +437,10 @@ impl History {
             return false;
         }
         if key.code == KeyCode::Esc {
+            if self.offered_switch.take().is_some() {
+                self.note = "Transfer cancelled · c chooses a branch to continue".into();
+                return false;
+            }
             self.epoch = self.epoch.wrapping_add(1);
             self.pending = false;
             self.quote = None;
@@ -431,6 +451,28 @@ impl History {
             return false;
         };
         if self.tree.is_some() {
+            if let Some(offered) = self.offered_switch.take() {
+                match key.code {
+                    KeyCode::Char('c') if !self.pending => {
+                        self.switch = Some(offered);
+                        return false;
+                    }
+                    KeyCode::Char('d' | 's') if !self.pending => {
+                        if let (Some(source), Some(target)) =
+                            (self.departed, rook_store::parse_session_id(&offered.id))
+                        {
+                            let command = if key.code == KeyCode::Char('d') {
+                                Command::Draft(source, target)
+                            } else {
+                                Command::Suggest(source, target)
+                            };
+                            self.ask(command);
+                        }
+                        return false;
+                    }
+                    _ => self.note = "Enter explores · c continues selected · h reads history · n scans children · u earlier ancestors".into(),
+                }
+            }
             match key.code {
                 KeyCode::Char('e') => {
                     let selected = self.branch().and_then(|branch| {
@@ -447,7 +489,20 @@ impl History {
                     }
                 }
                 KeyCode::Char('c') if !self.pending => {
-                    self.switch = self.branch().cloned();
+                    if let Some(branch) = self.branch().cloned() {
+                        if let Some(departed) =
+                            self.departed.filter(|id| Some(*id) != rook_store::parse_session_id(&branch.id))
+                        {
+                            self.note = format!(
+                                "Summary {} → {}? d excerpts · s model · c skip · Esc cancel",
+                                rook_store::format_session_id(departed),
+                                branch.id
+                            );
+                            self.offered_switch = Some(branch);
+                        } else {
+                            self.switch = Some(branch);
+                        }
+                    }
                 }
                 KeyCode::Char('h') => {
                     if let Some(id) = self.branch().and_then(|n| rook_store::parse_session_id(&n.id)) {
@@ -644,7 +699,7 @@ impl History {
                 Constraint::Length(heading_height),
                 Constraint::Min(3),
                 Constraint::Length(6),
-                Constraint::Length(2),
+                Constraint::Length(3),
             ])
             .areas(area);
             if self.rename_target.is_some() {
@@ -874,5 +929,86 @@ impl History {
             detail,
         );
         f.render_widget(Paragraph::new(self.note.as_str()).wrap(Wrap { trim: false }), note);
+    }
+}
+
+#[cfg(test)]
+mod branch_offer_tests {
+    use super::*;
+
+    fn tree() -> (History, std::sync::mpsc::Receiver<(u64, Command)>) {
+        let store_dir = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let rook = rook_core::Rook::from_parts(
+            rook_store::Store::open(store_dir.path()).unwrap(),
+            rook_core::Config::default(),
+            rook_skills::Environment::bare("windows", "x86_64", "0.1.0"),
+            rook_skills::SkillIndex::default(),
+            workspace.path().to_path_buf(),
+        );
+        let source = crate::source::Source::Local(std::sync::Arc::new(rook));
+        let mut history = History::new(&source);
+        let (send, receive) = std::sync::mpsc::sync_channel(1);
+        history.send = Some(send);
+        let node = |id: u128| rook_core::branches::Node {
+            id: rook_store::format_session_id(id),
+            parent: None,
+            title: format!("branch {id}"),
+            workspace: "test".into(),
+            title_truncated: false,
+            workspace_truncated: false,
+            forked_at: None,
+            delegated: false,
+            next_seq: 1,
+            updated_at: 0,
+        };
+        history.session = Some(1);
+        history.departed = Some(1);
+        history.tree = Some(rook_core::branches::Page {
+            ancestors: vec![],
+            selected: node(1),
+            children: vec![node(2)],
+            next: None,
+            earlier_ancestor: None,
+            missing_parent: None,
+            scanned_sessions: 2,
+        });
+        history.at = 1;
+        (history, receive)
+    }
+
+    fn key(char: char) -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent::new(KeyCode::Char(char), KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn switching_other_branches_offers_review_or_explicit_skip() {
+        let (mut history, receive) = tree();
+        history.key(key('c'));
+        assert!(history.switch.is_none());
+        assert_eq!(history.offered_switch.as_ref().unwrap().id, rook_store::format_session_id(2));
+        assert!(receive.try_recv().is_err(), "an offer must not request or save a summary");
+
+        history.key(crossterm::event::KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(history.offered_switch.is_none());
+        assert!(history.switch.is_none());
+
+        history.key(key('c'));
+        history.key(key('c'));
+        assert_eq!(history.take_session().unwrap().id, rook_store::format_session_id(2));
+        assert!(receive.try_recv().is_err(), "skip must not request or save a summary");
+    }
+
+    #[test]
+    fn offered_excerpts_and_model_drafts_use_the_departed_source() {
+        for (choice, is_draft) in [('d', true), ('s', false)] {
+            let (mut history, receive) = tree();
+            history.key(key('c'));
+            history.key(key(choice));
+            assert!(history.switch.is_none());
+            let (_, command) = receive.try_recv().unwrap();
+            assert!(matches!(command, Command::Draft(1, 2)) == is_draft);
+            assert!(matches!(command, Command::Suggest(1, 2)) != is_draft);
+        }
     }
 }

@@ -998,3 +998,27 @@ targeted rerun. The corrected tree passed the full `cargo xtask ci` with exit
 web/tests/json-size.mjs` passed all six tests, and `node --check
 web/dist/branches.js` exited 0. Store formats and algorithms did not change,
 so compaction was not rerun for this block.
+
+## TUI branch navigation offer
+
+The TUI tree now holds the current chat session as the departing source while
+exploring other nodes. Pressing `c` on another branch offers bounded recorded
+excerpts (`d`), a model suggestion (`s`), explicit continuation without a
+summary (another `c`), or cancellation (Esc). A selected draft is returned to
+chat for review and still requires `/summary TARGET TEXT` before switching.
+The offer and skip path write no history. The existing local and daemon summary
+draft routes serve the same worker command, with source attribution and the
+shared-prefix bound from the preceding block. Unit tests verify offer, cancel,
+skip, and that both draft choices target the open source session. Live TUI
+interaction and a REPL navigation offer remain to verify; the branch row is
+still In progress. Queue gaps and all Pending rows remain open.
+
+The two focused TUI offer tests exited 0. The first full `cargo xtask ci`
+exited 1 in the CLI daemon suite: two existing killed-process follow-up
+scenarios timed out waiting for their scripted model under unrestricted
+parallel tests. Both passed separately. A full rerun with
+`RUST_TEST_THREADS=4` still exited 1 on one of them. The same complete gate
+with `RUST_TEST_THREADS=1` exited 0 (`ci: ok`, 728.1 seconds), including all
+72 CLI integration tests and both follow-up scenarios. This records the
+parallel-run instability rather than counting the failed gates as passes.
+The block changes no store format or algorithm, so compaction was not rerun.
