@@ -101,6 +101,23 @@ Creation supports `--stance`, `--seconds`, `--tokens`, `--max-iterations` and
 steering/control commands remain for compatibility with existing runs; they
 are not the Tasks panel. Use `/goal` for immediate conversational work.
 
+For immediate work, `rook task pause|resume|cancel RUN_ID` prints a control ID
+and goal generation to stderr before sending the request. If the response is
+lost, retry the same action with both `--control-id ID --generation GENERATION`.
+The daemon records the action and ID together; a duplicate returns the current
+run with `already_applied: true`, even after restart, without changing its state.
+A reused ID with a different action or a generation from a replaced goal is
+rejected. `POST /api/work/{id}/control` accepts
+`{"id":"...","generation":"...","action":"pause"}` and returns a control
+outcome containing `run`. Bare JSON actions such as `"pause"` still return a
+bare run for older clients. Identified controls are limited to 1,024 receipts
+per run; inspect the run if that limit is reached. Browser and live chat goal
+controls still use their existing protocol, so this retry guarantee currently
+applies to the identified HTTP and CLI path.
+
+An old stored run without a generation still uses the bare action route from
+the CLI; inspect its state after an uncertain response.
+
 ## Edit or withdraw queued messages
 
 Open **message queue** from Ctrl-P, or type `/queue`, in the TUI. The panel shows

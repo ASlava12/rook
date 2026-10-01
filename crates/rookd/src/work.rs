@@ -9,7 +9,9 @@ use axum::{
     routing::{get, post},
 };
 use rook_core::work::managed;
-use rook_proto::work::{Action, EditInstruction, Run, Start, Status, Steer, Steering, WithdrawInstruction};
+use rook_proto::work::{
+    ControlRequest, EditInstruction, Run, Start, Status, Steer, Steering, WithdrawInstruction,
+};
 use tokio::sync::Mutex;
 
 use crate::AppState;
@@ -207,9 +209,19 @@ async fn steer(
 async fn control(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-    Json(action): Json<Action>,
-) -> Result<Json<Run>, Failure> {
-    Ok(Json(managed::control(&*state.rook.read().await, &id, action).map_err(failure)?))
+    Json(request): Json<ControlRequest>,
+) -> Result<Json<serde_json::Value>, Failure> {
+    let rook = state.rook.read().await;
+    let result = match request {
+        ControlRequest::Legacy(action) => {
+            serde_json::to_value(managed::control(&rook, &id, action).map_err(failure)?).map_err(failure)?
+        }
+        ControlRequest::Identified(request) => {
+            serde_json::to_value(managed::control_identified(&rook, &id, request).map_err(failure)?)
+                .map_err(failure)?
+        }
+    };
+    Ok(Json(result))
 }
 
 async fn edit_instruction(

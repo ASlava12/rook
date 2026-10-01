@@ -2,7 +2,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use rook_proto::work::{Action, Run, Start, Steer, Steering};
+use rook_proto::work::{Action, ControlOutcome, IdentifiedControl, Run, Start, Steer, Steering};
 
 use crate::{
     args::TaskCmd,
@@ -99,9 +99,15 @@ fn execute(cmd: TaskCmd, workspace: Option<PathBuf>, yes: bool) -> Result<serde_
             }
             serde_json::to_value(receipt)?
         }
-        TaskCmd::Pause { id } => control(&daemon, &id, Action::Pause)?,
-        TaskCmd::Resume { id } => control(&daemon, &id, Action::Resume)?,
-        TaskCmd::Cancel { id } => control(&daemon, &id, Action::Cancel)?,
+        TaskCmd::Pause { id, control_id, generation } => {
+            control(&daemon, &id, Action::Pause, control_id, generation)?
+        }
+        TaskCmd::Resume { id, control_id, generation } => {
+            control(&daemon, &id, Action::Resume, control_id, generation)?
+        }
+        TaskCmd::Cancel { id, control_id, generation } => {
+            control(&daemon, &id, Action::Cancel, control_id, generation)?
+        }
         TaskCmd::Forget { id } => daemon.delete(&path(&id)?)?,
     };
     Ok(value)
@@ -114,8 +120,31 @@ fn path(id: &str) -> Result<String> {
     Ok(format!("/api/work/{id}"))
 }
 
-fn control(daemon: &Daemon, id: &str, action: Action) -> Result<serde_json::Value> {
-    daemon.post(&format!("{}/control", path(id)?), &serde_json::to_value(action)?)
+fn control(
+    daemon: &Daemon,
+    id: &str,
+    action: Action,
+    control_id: Option<String>,
+    generation: Option<String>,
+) -> Result<serde_json::Value> {
+    let (control_id, generation) = match (control_id, generation) {
+        (Some(control_id), Some(generation)) => (control_id, generation),
+        (None, None) => {
+            let run: Run = daemon.get(&path(id)?)?;
+            if run.generation.is_empty() {
+                eprintln!("legacy run has no generation; inspect its state after an uncertain response");
+                return daemon.post(&format!("{}/control", path(id)?), &serde_json::to_value(action)?);
+            }
+            (rook_store::format_session_id(rook_store::new_session_id()), run.generation)
+        }
+        _ => bail!("retry a control with both --control-id and --generation"),
+    };
+    // Both values reach stderr before the write so a lost response is retryable.
+    eprintln!("control {control_id} generation {generation}");
+    daemon.post(
+        &format!("{}/control", path(id)?),
+        &serde_json::to_value(IdentifiedControl { id: control_id, generation, action })?,
+    )
 }
 
 fn describe(value: &serde_json::Value) -> String {
@@ -150,6 +179,16 @@ fn describe(value: &serde_json::Value) -> String {
             ));
         }
         text
+    } else if let Ok(outcome) = serde_json::from_value::<ControlOutcome>(value.clone()) {
+        format!(
+            "control {} · generation {} · {}\n{} · {:?}\n{}",
+            outcome.id,
+            outcome.generation,
+            if outcome.already_applied { "already applied" } else { "applied" },
+            outcome.run.id,
+            outcome.run.status,
+            outcome.run.reason
+        )
     } else if let Ok(run) = serde_json::from_value::<Run>(value.clone()) {
         let mut text = format!(
             "{} · {:?} · {} iterations · {} tokens\n{}\n{}\nworkspace: {}",
@@ -203,9 +242,9 @@ pub(crate) fn slash(rest: &str, workspace: &Path) -> Result<String> {
         "run" => TaskCmd::Run { id },
         "delete" => TaskCmd::Delete { id },
         "cancel-run" => TaskCmd::CancelRun { id },
-        "pause" => TaskCmd::Pause { id },
-        "resume" => TaskCmd::Resume { id },
-        "cancel" => TaskCmd::Cancel { id },
+        "pause" => TaskCmd::Pause { id, control_id: None, generation: None },
+        "resume" => TaskCmd::Resume { id, control_id: None, generation: None },
+        "cancel" => TaskCmd::Cancel { id, control_id: None, generation: None },
         "forget" => TaskCmd::Forget { id },
         "steer" => {
             let (id, text) = rest.trim().split_once(' ').context("/task steer <id> <correction>")?;

@@ -13,6 +13,53 @@ struct Rook {
 }
 
 #[test]
+fn identified_goal_controls_retry_through_cli_after_daemon_restart() {
+    let rook = Rook::new();
+    rook.write_config("[agent]\nmodel='missing-model'\ninstall_servers=false\n");
+    let daemon = Daemon::start(&rook);
+    let run = rook.json(&["task", "start", "Wait for a control", "--yes"]);
+    let id = run["id"].as_str().unwrap();
+    let generation = run["generation"].as_str().unwrap();
+    let first = rook.run(&["--json", "task", "pause", id]);
+    assert!(first.status.success(), "{}", String::from_utf8_lossy(&first.stderr));
+    let stderr = String::from_utf8_lossy(&first.stderr);
+    assert!(stderr.contains("control ") && stderr.contains(generation), "{stderr}");
+    let first: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(first["already_applied"], false);
+    assert_eq!(first["run"]["status"], "paused");
+    let control_id = first["id"].as_str().unwrap().to_owned();
+    drop(daemon);
+    std::fs::remove_file(rook.home.path().join("rookd.addr")).unwrap();
+    let daemon = Daemon::start(&rook);
+    let repeated = rook.json(&["task", "pause", id, "--control-id", &control_id, "--generation", generation]);
+    assert_eq!(repeated["already_applied"], true);
+    assert_eq!(repeated["run"]["status"], "paused");
+    let conflict = rook.run(&["task", "cancel", id, "--control-id", &control_id, "--generation", generation]);
+    assert!(!conflict.status.success());
+    assert!(String::from_utf8_lossy(&conflict.stderr).contains("another action"));
+    use std::io::{Read, Write};
+    let address = daemon.address.strip_prefix("http://").unwrap();
+    let mut socket = std::net::TcpStream::connect(address).unwrap();
+    socket
+        .write_all(
+            format!(
+                "POST /api/work/{id}/control HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: 8\r\nConnection: close\r\n\r\n\"resume\""
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    let mut legacy = String::new();
+    socket.read_to_string(&mut legacy).unwrap();
+    assert!(legacy.starts_with("HTTP/1.1 200"), "{legacy}");
+    assert!(legacy.contains("\"status\":\"queued\""), "{legacy}");
+    assert!(!legacy.contains("\"run\":"), "legacy response remains a bare run: {legacy}");
+    let old_retry =
+        rook.json(&["task", "pause", id, "--control-id", &control_id, "--generation", generation]);
+    assert_eq!(old_retry["already_applied"], true);
+    assert_ne!(old_retry["run"]["status"], "paused");
+}
+
+#[test]
 fn daemon_repl_retains_a_failed_prompt_until_explicit_retry_or_discard() {
     let rook = Rook::new();
     rook.write_config("[agent]\nmodel='missing-model'\ninstall_servers=false\n");

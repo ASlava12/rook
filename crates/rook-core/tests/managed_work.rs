@@ -2,7 +2,9 @@
 use async_trait::async_trait;
 use rook_core::{Rook, agent::AgentLoop, work::managed as work};
 use rook_llm::{Message, Provider, Request, Response, StopReason, ToolCall, Usage};
-use rook_proto::work::{Action, EditInstruction, Start, Status, Steer, WithdrawInstruction};
+use rook_proto::work::{
+    Action, EditInstruction, IdentifiedControl, Start, Status, Steer, WithdrawInstruction,
+};
 use std::sync::{Arc, Mutex};
 
 fn engine(workspace: &std::path::Path, store: &std::path::Path) -> Rook {
@@ -33,6 +35,97 @@ fn start(rook: &Rook) -> rook_proto::work::Run {
 
 fn correction(id: &str, text: &str) -> Steer {
     Steer { id: id.into(), text: text.into() }
+}
+
+fn control(id: &str, generation: &str, action: Action) -> IdentifiedControl {
+    IdentifiedControl { id: id.into(), generation: generation.into(), action }
+}
+
+#[test]
+fn identified_controls_survive_reopen_without_reapplying_or_crossing_a_goal_generation() {
+    let workspace = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let rook = engine(workspace.path(), store.path());
+    let run = start(&rook);
+    assert!(work::control_identified(&rook, &run.id, control("", &run.generation, Action::Pause)).is_err());
+    assert!(
+        work::control_identified(&rook, &run.id, control("bad id", &run.generation, Action::Pause)).is_err()
+    );
+    let paused =
+        work::control_identified(&rook, &run.id, control("pause-one", &run.generation, Action::Pause))
+            .unwrap();
+    assert!(!paused.already_applied);
+    assert_eq!(paused.run.status, Status::Paused);
+    drop(rook);
+
+    let rook = engine(workspace.path(), store.path());
+    let resumed =
+        work::control_identified(&rook, &run.id, control("resume-one", &run.generation, Action::Resume))
+            .unwrap();
+    assert_eq!(resumed.run.status, Status::Queued);
+    let retry =
+        work::control_identified(&rook, &run.id, control("pause-one", &run.generation, Action::Pause))
+            .unwrap();
+    assert!(retry.already_applied);
+    assert_eq!(retry.run.status, Status::Queued, "the old pause must not undo a later resume");
+    assert!(
+        work::control_identified(&rook, &run.id, control("pause-one", &run.generation, Action::Cancel))
+            .is_err()
+    );
+    let cancelled =
+        work::control_identified(&rook, &run.id, control("cancel-one", &run.generation, Action::Cancel))
+            .unwrap();
+    assert_eq!(cancelled.run.status, Status::Cancelled);
+    assert!(
+        work::control_identified(&rook, &run.id, control("cancel-one", &run.generation, Action::Cancel))
+            .unwrap()
+            .already_applied
+    );
+    assert!(
+        work::control_identified(&rook, &run.id, control("cancel-two", &run.generation, Action::Cancel))
+            .is_err()
+    );
+
+    let session = rook.start_session("new goal").unwrap();
+    let old = conversation_goal(&rook, session, "old");
+    work::control_identified(&rook, &old.id, control("old-cancel", &old.generation, Action::Cancel)).unwrap();
+    let replacement = conversation_goal(&rook, session, "replacement");
+    assert_ne!(old.generation, replacement.generation);
+    assert!(
+        work::control_identified(
+            &rook,
+            &replacement.id,
+            control("old-cancel", &old.generation, Action::Cancel)
+        )
+        .is_err()
+    );
+    assert_eq!(work::read(&rook, &replacement.id).unwrap().run.status, Status::Queued);
+}
+
+#[test]
+fn identified_control_receipts_have_a_bound_without_losing_retry_identity() {
+    let workspace = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let rook = engine(workspace.path(), store.path());
+    let run = start(&rook);
+    work::control_identified(&rook, &run.id, control("first", &run.generation, Action::Pause)).unwrap();
+    work::update(&rook, &run.id, |saved| {
+        saved.controls.extend(
+            (1..1024)
+                .map(|number| work::ControlReceipt { id: format!("old-{number}"), action: Action::Pause }),
+        );
+        Ok(())
+    })
+    .unwrap();
+    assert!(
+        work::control_identified(&rook, &run.id, control("first", &run.generation, Action::Pause))
+            .unwrap()
+            .already_applied
+    );
+    assert!(
+        work::control_identified(&rook, &run.id, control("next", &run.generation, Action::Resume)).is_err()
+    );
+    assert_eq!(work::read(&rook, &run.id).unwrap().run.status, Status::Paused);
 }
 
 #[test]

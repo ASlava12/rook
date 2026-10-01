@@ -1223,3 +1223,32 @@ passed alone (exit 0, 33.9 seconds). The final full CI exited 0 (`ci: ok`,
 742.7 seconds), including all 79 CLI integration tests and doctests. No
 storage code changed, so compaction was not rerun. A closed REPL still cannot
 restore its in-memory outbox; live interactive terminal checks remain open.
+
+## Retryable managed goal controls
+
+`POST /api/work/{id}/control` now also accepts a caller-owned control ID,
+goal generation and action. The action and bounded receipt commit in the same
+managed-work record. An identical retry returns the current run without
+reapplying an earlier pause, resume or cancel; a conflicting action or stale
+goal generation is rejected. The old bare-action request and bare-run response
+remain supported, and old records deserialize with an empty receipt list.
+The CLI prints the ID and generation before sending, then accepts both as
+retry arguments. A pre-generation stored run falls back to the legacy action
+route. Receipts are capped at 1,024 per run, with duplicate lookup preceding
+the cap check. The core tests cover reopen, replacement, terminal retry and
+the cap; a real-daemon CLI test covers restart, conflict, unchanged legacy
+HTTP shape and a retry after a later resume.
+
+Queue remains In progress: live chat/browser goal controls still use their
+existing protocol, and more queue lifecycle and frontend checks remain.
+Branch live checks and all five Pending capability rows remain open. The TUI
+already pins the next queued message directly above the bottom status line
+while a turn streams; the composer and approvals appear above that preview.
+
+Focused core and real-daemon CLI tests exited 0. The full `cargo xtask ci`
+with `RUST_TEST_THREADS=1` exited 0 (`ci: ok`, 741.0 seconds), including all
+80 CLI integration tests, the TUI bottom-preview check, Clippy and doctests.
+The required `cargo xtask compaction` exited 0 with 4.02 MiB on disk, 37.1x
+dictionary compression and 5.8x end-to-end. The saved managed-work JSON has
+one optional bounded receipt list; postcard and existing HTTP forms did not
+change.

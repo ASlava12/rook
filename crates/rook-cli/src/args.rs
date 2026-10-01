@@ -780,14 +780,26 @@ pub(crate) enum TaskCmd {
     #[command(hide = true)]
     Pause {
         id: String,
+        #[arg(long, requires = "generation")]
+        control_id: Option<String>,
+        #[arg(long, requires = "control_id")]
+        generation: Option<String>,
     },
     #[command(hide = true)]
     Resume {
         id: String,
+        #[arg(long, requires = "generation")]
+        control_id: Option<String>,
+        #[arg(long, requires = "control_id")]
+        generation: Option<String>,
     },
     #[command(hide = true)]
     Cancel {
         id: String,
+        #[arg(long, requires = "generation")]
+        control_id: Option<String>,
+        #[arg(long, requires = "control_id")]
+        generation: Option<String>,
     },
     #[command(hide = true)]
     Forget {

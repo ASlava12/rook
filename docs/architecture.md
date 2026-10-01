@@ -351,6 +351,12 @@ Scoped correction receipts retain their caller ID and goal generation across
 daemon restarts; local `session queue` reads and socket retries resolve the same
 saved receipt. A changed text with that ID is refused.
 
+Identified `/api/work/{id}/control` mutations save a bounded control ID receipt
+beside the run state under the managed-work write lock. A repeat with the same
+action and generation reads the current run without applying the control again;
+an old generation cannot affect a replacement conversation goal. The bare
+action request and response remain compatible with older clients.
+
 Scheduled tasks are exposed through `/api/tasks`; the TUI and web views share
 this API. Each occurrence reserves a session ID durably, then creates an
 ordinary goal session. `/api/work` remains the execution and legacy

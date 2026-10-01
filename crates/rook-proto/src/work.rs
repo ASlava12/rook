@@ -108,12 +108,38 @@ pub struct Steer {
     pub text: String,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Action {
     Pause,
     Resume,
     Cancel,
+}
+
+/// A goal control whose retry must remain bound to one run generation.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdentifiedControl {
+    pub id: String,
+    pub generation: String,
+    pub action: Action,
+}
+
+/// A bare action preserves the earlier HTTP protocol.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ControlRequest {
+    Identified(IdentifiedControl),
+    Legacy(Action),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ControlOutcome {
+    pub id: String,
+    pub generation: String,
+    /// A duplicate returns the current run; it does not replay an old status.
+    pub already_applied: bool,
+    pub run: Run,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

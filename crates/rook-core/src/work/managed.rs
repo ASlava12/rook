@@ -3,7 +3,8 @@
 use super::receipts::WRITING;
 
 use rook_proto::work::{
-    Action, EditInstruction, Run, RunIdentity, Start, Status, Steer, Steering, WithdrawInstruction,
+    Action, ControlOutcome, EditInstruction, IdentifiedControl, Run, RunIdentity, Start, Status, Steer,
+    Steering, WithdrawInstruction,
 };
 use serde::{Deserialize, Serialize};
 
@@ -29,7 +30,17 @@ pub struct Saved {
     pub active: Option<Active>,
     pub failed_since: Option<u64>,
     pub idle: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub controls: Vec<ControlReceipt>,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ControlReceipt {
+    pub id: String,
+    pub action: Action,
+}
+
+const MAX_CONTROL_RECEIPTS: usize = 1024;
 
 pub fn now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()
@@ -217,6 +228,7 @@ pub fn start_with_claim(rook: &Rook, request: Start, claim_key: Option<&str>) ->
         active: None,
         failed_since: None,
         idle: 0,
+        controls: Vec::new(),
     })?;
     if !index.contains(&run.id) {
         index.push(run.id.clone());
@@ -346,34 +358,82 @@ pub fn withdraw_instruction_noticed(
 
 pub fn control(rook: &Rook, id: &str, action: Action) -> Result<Run> {
     update(rook, id, |saved| {
-        if saved.run.status.terminal() {
-            return Err(bad("this run has ended"));
-        }
-        match action {
-            Action::Pause => {
-                saved.run.status = Status::Paused;
-                saved.run.reason = "paused by user; an active operation finishes before stopping".into();
-            }
-            Action::Cancel => {
-                saved.run.status = Status::Cancelled;
-                saved.run.reason = "cancelled by user; an active operation finishes before stopping".into();
-            }
-            Action::Resume => {
-                if saved.run.status == Status::Limited {
-                    return Err(bad(
-                        "the saved run reached its budget; start a new run with an explicit new budget",
-                    ));
-                }
-                saved.run.status = Status::Queued;
-                saved.run.reason = "resumed by user".into();
-                saved.run.next_attempt_at = None;
-                saved.run.consecutive_failures = 0;
-                saved.failed_since = None;
-                saved.idle = 0;
-            }
-        }
+        apply_control(saved, action)?;
         Ok(saved.run.clone())
     })
+}
+
+/// Apply once per caller ID and generation, including after a daemon restart.
+/// The receipt and changed status share one stored JSON value.
+pub fn control_identified(rook: &Rook, id: &str, request: IdentifiedControl) -> Result<ControlOutcome> {
+    if request.id.is_empty()
+        || request.id.len() > 64
+        || !request.id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err(bad("control id must be 1–64 letters, digits, hyphens or underscores"));
+    }
+    if rook_store::parse_session_id(&request.generation).is_none() {
+        return Err(bad("invalid control generation"));
+    }
+    let _lock = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+    let mut saved = read(rook, id)?;
+    if saved.run.generation != request.generation {
+        return Err(bad("this control belongs to an earlier run generation; inspect the current goal"));
+    }
+    if let Some(known) = saved.controls.iter().find(|known| known.id == request.id) {
+        if known.action != request.action {
+            return Err(bad("control id was already used for another action"));
+        }
+        return Ok(ControlOutcome {
+            id: request.id,
+            generation: request.generation,
+            already_applied: true,
+            run: saved.run,
+        });
+    }
+    if saved.controls.len() >= MAX_CONTROL_RECEIPTS {
+        return Err(bad("control receipt limit reached for this run; inspect it before another control"));
+    }
+    apply_control(&mut saved, request.action)?;
+    saved.controls.push(ControlReceipt { id: request.id.clone(), action: request.action });
+    saved.run.updated_at = now();
+    save(rook, &saved)?;
+    Ok(ControlOutcome {
+        id: request.id,
+        generation: request.generation,
+        already_applied: false,
+        run: saved.run,
+    })
+}
+
+fn apply_control(saved: &mut Saved, action: Action) -> Result<()> {
+    if saved.run.status.terminal() {
+        return Err(bad("this run has ended"));
+    }
+    match action {
+        Action::Pause => {
+            saved.run.status = Status::Paused;
+            saved.run.reason = "paused by user; an active operation finishes before stopping".into();
+        }
+        Action::Cancel => {
+            saved.run.status = Status::Cancelled;
+            saved.run.reason = "cancelled by user; an active operation finishes before stopping".into();
+        }
+        Action::Resume => {
+            if saved.run.status == Status::Limited {
+                return Err(bad(
+                    "the saved run reached its budget; start a new run with an explicit new budget",
+                ));
+            }
+            saved.run.status = Status::Queued;
+            saved.run.reason = "resumed by user".into();
+            saved.run.next_attempt_at = None;
+            saved.run.consecutive_failures = 0;
+            saved.failed_since = None;
+            saved.idle = 0;
+        }
+    }
+    Ok(())
 }
 
 pub fn forget(rook: &Rook, id: &str) -> Result<()> {
