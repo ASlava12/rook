@@ -218,6 +218,7 @@ fn entry_from(rook: &Rook, event: &Event, body: String, truncated: bool) -> Resu
         body,
         doing,
         tool_measurement: crate::diagnostics::tool_measurement(rook, event)?,
+        change_note: crate::tool_changes::source(rook, event)?,
     })
 }
 struct Count {

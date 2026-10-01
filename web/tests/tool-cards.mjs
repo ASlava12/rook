@@ -72,3 +72,36 @@ test('saved tool cards stay compact until opened and page large content on deman
   assert.match(card.textContent, /second part/);
   assert.doesNotMatch(card.textContent, /first part/);
 });
+
+test('saved change previews load their source only when expanded and keep patch text inert', async () => {
+  const paths = [];
+  globalThis.fetch = async path => {
+    paths.push(path);
+    const value = path.endsWith('/history') ? {
+      items: [{seq:1,kind:'tool-result',label:'edit_file',change_note:0,bytes:10}], through:2,
+    } : path.endsWith('/history/0?offset=0') ? {
+      entry:{body:'Saved tool-reported file changes\nFile: a.rs\n-old\n+<script>unsafe()</script>\n'},offset:0,next_offset:20,total_bytes:99,
+    } : path.endsWith('/history/0?offset=20') ? {
+      entry:{body:'@@ next @@\n+new\n'},offset:20,next_offset:null,previous_offset:0,total_bytes:99,
+    } : null;
+    assert(value, `unexpected ${path}`);
+    return {ok:true,json:async()=>value};
+  };
+  const panel = historyPanel('session', () => {});
+  await tick();
+  const preview = panel.find(node => node.className === 'saved-diff');
+  assert(preview);
+  assert.match(preview.textContent, /source event #0/);
+  assert.deepEqual(paths, ['/api/sessions/session/history']);
+  preview.open = true; preview.listeners.toggle();
+  await tick();
+  assert.match(preview.textContent, /-old|<script>unsafe\(\)<\/script>/);
+  assert(preview.find(node => node.className === 'diff-added'));
+  assert.equal(preview.find(node => node.tag === 'script'), null);
+  assert.match(preview.textContent, /Historical tool-reported preview; current files and tests are not verified/);
+  const next = preview.find(node => node.tag === 'button' && node.textContent === 'Next diff part');
+  next.listeners.click(); await tick();
+  assert.equal(paths.at(-1), '/api/sessions/session/history/0?offset=20');
+  assert(preview.find(node => node.className === 'diff-hunk'));
+  assert.doesNotMatch(preview.textContent, /unsafe/);
+});

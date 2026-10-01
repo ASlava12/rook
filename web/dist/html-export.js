@@ -71,6 +71,7 @@ export async function exportHistoryHtml(session, from = 0, through = null, read 
         const m = entry.tool_measurement;
         add(`<p class="meta">saved ${m.failed ? 'failure' : 'completion'} · dispatch ${escapeHtml(m.duration_ms)} ms · timing #${escapeHtml(m.timing_seq)} (includes waits/hooks; current files/tests not verified)</p>`);
       }
+      if (tool && entry.change_note != null) add(`<p class="meta">Saved file changes: source event #${escapeHtml(entry.change_note)}. Read that event in Rook for a bounded historical preview.</p>`);
       if (tool) add('<details><summary>Show tool content</summary>');
       const preview = await bodyPreview(base, seq, read);
       add(`<pre>${preview.body}</pre>`);

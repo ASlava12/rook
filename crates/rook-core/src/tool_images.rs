@@ -16,7 +16,30 @@ pub(crate) fn record(
     text: &mut String,
     images: &[Image],
 ) -> Result<u64> {
+    record_with_changes(rook, session, name, text, images, None)
+}
+
+pub(crate) fn record_with_changes(
+    rook: &Rook,
+    session: u128,
+    name: &str,
+    text: &mut String,
+    images: &[Image],
+    changes: Option<&str>,
+) -> Result<u64> {
+    if changes.is_some_and(|text| text.len() > crate::tool_changes::MAX_BYTES) {
+        return Err(CoreError::Other("saved tool changes exceed the 32 KiB preview limit".into()));
+    }
     if images.is_empty() {
+        if let Some(changes) = changes {
+            let [_, result] = rook.store.append_event_pair(
+                session,
+                NewEvent::new(EventKind::Note, Kind::Message, changes.as_bytes())
+                    .label(crate::tool_changes::LABEL),
+                NewEvent::new(EventKind::ToolResult, Kind::ToolResult, text.as_bytes()).label(name),
+            )?;
+            return Ok(result);
+        }
         return rook.log(session, EventKind::ToolResult, name, text);
     }
     if images.len() > rook_llm::images::MAX_IMAGES_PER_MESSAGE {
@@ -30,6 +53,19 @@ pub(crate) fn record(
     // Screenshots of two different states can have identical captions and
     // lengths. The loop detector must still see that the answer changed.
     text.push_str(&format!("\n[{} tool image(s); content {}]", images.len(), ObjectId::of(&data).to_hex()));
+    if let Some(changes) = changes {
+        let [_, _, result] = rook.store.append_events_with_values(
+            session,
+            [
+                NewEvent::new(EventKind::Note, Kind::Message, changes.as_bytes())
+                    .label(crate::tool_changes::LABEL),
+                NewEvent::new(EventKind::Note, Kind::Message, &data).label(LABEL),
+                NewEvent::new(EventKind::ToolResult, Kind::ToolResult, text.as_bytes()).label(name),
+            ],
+            &[],
+        )?;
+        return Ok(result);
+    }
     let [_, result] = rook.store.append_event_pair(
         session,
         NewEvent::new(EventKind::Note, Kind::Message, &data).label(LABEL),

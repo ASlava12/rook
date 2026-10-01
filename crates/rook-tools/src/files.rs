@@ -9,6 +9,8 @@ use rook_llm::ToolSpec;
 
 use crate::{Result, Tool, ToolContext, ToolError, ToolOutcome, arg_str, arg_usize};
 
+mod changes;
+
 /// A directory where a file was expected, refused in words rather than in
 /// `Is a directory (os error 21)` — which names neither the argument that was
 /// wrong nor what a right one looks like, and reads as a broken tool rather
@@ -302,6 +304,7 @@ impl Tool for WriteFile {
         }
         let content = arg_str(args, self.name(), "content")?;
         let existed = path.exists();
+        let before = changes::before_write(ctx, &path, &content).await;
         ctx.write_text(&path, &content).await?;
         Ok(ToolOutcome::ok(format!(
             "{} {} ({} bytes)",
@@ -309,7 +312,11 @@ impl Tool for WriteFile {
             path.display(),
             content.len()
         ))
-        .with("created", !existed))
+        .with("created", !existed)
+        .with(
+            "file_changes",
+            json!({"files":[changes::file(&path, before.as_deref(), &content)],"omitted_files":0}),
+        ))
     }
 
     async fn preview(&self, ctx: &ToolContext, args: &serde_json::Value) -> Option<String> {
@@ -614,7 +621,15 @@ impl Tool for EditFile {
         for (path, text, before) in edited.iter().take(HUNKS_SHOWN) {
             said.push_str(&format!("\n\n{}", hunks(path, before, text)));
         }
-        Ok(ToolOutcome::ok(said).with("occurrences", replaced as u64))
+        let changes: Vec<_> = edited
+            .iter()
+            .take(HUNKS_SHOWN)
+            .map(|(path, text, before)| changes::file(path, Some(before), text))
+            .collect();
+        Ok(ToolOutcome::ok(said).with("occurrences", replaced as u64).with(
+            "file_changes",
+            json!({"files":changes,"omitted_files":edited.len().saturating_sub(HUNKS_SHOWN)}),
+        ))
     }
 
     async fn preview(&self, ctx: &ToolContext, args: &serde_json::Value) -> Option<String> {
@@ -738,7 +753,7 @@ fn diff(path: &std::path::Path, before: &str, after: &str) -> String {
     if before == after {
         return format!("{} would be written unchanged", path.display());
     }
-    crate::elide_middle(&unified(before, after, 3), MOST)
+    changes::preview(before, after, 3, MOST).0
 }
 
 /// The same change as an answer rather than a question: one line of context
@@ -749,15 +764,7 @@ fn hunks(path: &std::path::Path, before: &str, after: &str) -> String {
     if before == after {
         return format!("{} is unchanged", path.display());
     }
-    crate::elide_middle(&unified(before, after, 1), MOST)
-}
-
-fn unified(before: &str, after: &str, context: usize) -> String {
-    similar::TextDiff::from_lines(before, after)
-        .unified_diff()
-        .context_radius(context)
-        .header("before", "after")
-        .to_string()
+    changes::preview(before, after, 1, MOST).0
 }
 
 /// How many files of a refactor answer with their diff. The rest are named in

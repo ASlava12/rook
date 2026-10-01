@@ -170,6 +170,12 @@ fn write_html(
                 out.write_all(b"</p>")?;
             }
             if tool {
+                if let Some(note) = entry.change_note {
+                    write!(
+                        out,
+                        "<p class=\"meta\">Saved file changes: source event #{note}. Read that event in Rook for a bounded historical preview.</p>"
+                    )?;
+                }
                 if let Some(measurement) = entry.tool_measurement {
                     out.write_all(b"<p class=\"meta\">")?;
                     escaped(out, &measurement.text())?;

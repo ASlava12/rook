@@ -1052,6 +1052,7 @@ impl Rook {
                 },
                 body,
                 tool_measurement: crate::diagnostics::tool_measurement(self, &e)?,
+                change_note: crate::tool_changes::source(self, &e)?,
             });
         }
         Ok(out)
@@ -2261,6 +2262,9 @@ pub struct TranscriptEntry {
     /// is available. Absent on older daemon responses and unmeasured results.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_measurement: Option<crate::transcript::ToolMeasurement>,
+    /// Event number of the bounded saved change preview, if recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_note: Option<u64>,
 }
 
 /// The note a capture carries when a skill arrived from a source, and the

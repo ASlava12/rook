@@ -256,6 +256,9 @@ pub(crate) fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, js
                 if let Some(measurement) = page.entry.tool_measurement {
                     println!("{}", measurement.text());
                 }
+                if let Some(note) = page.entry.change_note {
+                    println!("saved changes: event #{note} · read with session entry {id} {note}");
+                }
                 if let Some(offset) = page.next_offset {
                     println!("next: --offset {offset}");
                 }
@@ -546,6 +549,9 @@ fn show_transcript(entries: &[rook_core::TranscriptEntry], json: bool) -> Result
         println!("{}\n", e.body);
         if let Some(measurement) = e.tool_measurement {
             println!("{}\n", measurement.text());
+        }
+        if let Some(note) = e.change_note {
+            println!("saved changes: event #{note} · open that event for a bounded historical preview\n");
         }
     }
     Ok(())

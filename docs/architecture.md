@@ -243,6 +243,29 @@ duration includes approval waits and hooks, and historical completion does
 not verify current workspace files or tests. Forks see only copied notes;
 stored event structs and the timing format are unchanged. Older daemon JSON
 responses without this optional field remain readable.
+`write_file` and `edit_file` also report bounded saved change previews. Rook
+stores a redacted plain-text `rook:tool-changes:v1` note atomically before the
+result (before the image companion when present). The result's optional
+`change_note` points to that event in the same session. Readers check at most
+two preceding records and reject preview objects over 32 KiB before loading
+the heading. Existing history body parts read the preview on demand; no
+current files are compared during history browsing. The browser renders added,
+removed and hunk lines as text spans inside an expandable saved-change card;
+TUI calls/history use `c` to open its bounded reader. CLI history/entry and
+HTML exports also identify the source event. Exporting only the result does
+not pull the change note into a selected range automatically.
+Preview production admits at most three files, labels up to 512 bytes and
+8 KiB per diff. The formatter keeps a bounded head and tail, evicting before
+copying new output chunks and reporting middle elision. It never builds the
+whole unified diff in memory. Diff computation has a 200 ms approximation
+budget on inputs at most 64 KiB
+each. Approval and model-result diff previews use the same bounded generator.
+An optional write preview reads old disk text through the capability root with
+a 64 KiB limit; editor-owned buffers have no bounded preview-read contract and
+leave old text unavailable. A missing or limited preview never prevents a
+write. These notes are display data, excluded from model replay/compaction,
+and forks retain only their own copied event history. Stored structs and the
+format version are unchanged; older daemon JSON can omit the new field.
 Live browser tool notices are expandable cards as well. The tab matches
 same-name completions in arrival order and reports failure plus elapsed time
 observed in that tab. This is live transport state, not a persisted verdict or

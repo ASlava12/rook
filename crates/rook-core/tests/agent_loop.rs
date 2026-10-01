@@ -281,6 +281,48 @@ async fn a_session_starts_knowing_what_is_in_the_workspace() {
     assert!(!sent.contains("listed to a depth of"), "only the first turn carries it:\n{sent}");
 }
 
+/// A saved change card describes the original call even when today's file is
+/// different. Its display companion must not become another model instruction.
+#[tokio::test]
+async fn saved_change_cards_keep_the_call_snapshot_after_later_writes_and_do_not_replay_extra_diff_notes() {
+    let f = fixture();
+    std::fs::write(f.rook.workspace.join("notes.md"), "before\n").unwrap();
+    let session = f.rook.start_session("saved change").unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        call("write_file", serde_json::json!({"path":"notes.md","content":"after\n"})),
+        reply("written"),
+    ]));
+    let mut agent = AgentLoop::new(&f.rook, provider, session);
+    agent.allow_everything_not_denied();
+    agent.run("write the change").await.unwrap();
+    let entries = f.rook.transcript(session, 0, 100, 4096).unwrap();
+    let result = entries.iter().find(|e| e.kind == "tool-result" && e.label == "write_file").unwrap();
+    let note = result.change_note.expect("the actual file call records its bounded preview");
+    assert!(
+        result.tool_measurement.is_some(),
+        "the additional companion must not hide the result from timing attribution"
+    );
+    let saved = f.rook.transcript_entry(session, note, 0).unwrap().entry.body;
+    assert!(saved.contains("-before") && saved.contains("+after"), "{saved}");
+    std::fs::write(f.rook.workspace.join("notes.md"), "later workspace contents\n").unwrap();
+    assert_eq!(f.rook.transcript_entry(session, note, 0).unwrap().entry.body, saved);
+    let fork = f.rook.fork_session(session, result.seq + 1).unwrap().id;
+    assert_eq!(f.rook.transcript_entry(fork, result.seq, 0).unwrap().entry.change_note, Some(note));
+    assert_eq!(f.rook.transcript_entry(fork, note, 0).unwrap().entry.body, saved);
+    let resumed = Arc::new(ScriptedProvider::new(vec![reply("continued")]));
+    AgentLoop::new(&f.rook, resumed.clone(), session).run("continue").await.unwrap();
+    assert!(
+        !resumed
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|r| &r.messages)
+            .any(|m| m.content.contains("Saved tool-reported file changes")),
+        "display companions must not add another copy to model replay"
+    );
+}
+
 /// "Как будто не пишет на диск агент" — asked two and a half hours into a
 /// turn that had indeed written nothing. What a turn wrote is the one thing
 /// that tells a working turn from a stuck one, and it was nowhere in what a

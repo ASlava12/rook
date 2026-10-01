@@ -140,7 +140,9 @@ impl Overlay {
     fn keys(self) -> &'static [(&'static str, &'static str)] {
         match self {
             Overlay::Palette => &[("↑↓ ", "choose  "), ("⏎ ", "open  "), ("esc ", "close  ")],
-            Overlay::Calls => &[("j/k ", "move  "), ("r ", "reload  "), ("esc ", "close  ")],
+            Overlay::Calls => {
+                &[("j/k ", "move  "), ("c ", "saved changes  "), ("r ", "reload  "), ("esc ", "close  ")]
+            }
             Overlay::Context => {
                 &[("j/k ", "scroll  "), ("PgUp/PgDn ", "page  "), ("r ", "refresh  "), ("Esc ", "close")]
             }
@@ -223,6 +225,7 @@ struct Call {
     given: String,
     came_back: Option<String>,
     measurement: Option<rook_core::transcript::ToolMeasurement>,
+    change_note: Option<u64>,
     elided: bool,
 }
 
@@ -250,6 +253,7 @@ fn paired(entries: Vec<TranscriptEntry>) -> Vec<Call> {
                     given: entry.body,
                     came_back: None,
                     measurement: None,
+                    change_note: None,
                     elided: entry.truncated,
                 });
             }
@@ -258,6 +262,7 @@ fn paired(entries: Vec<TranscriptEntry>) -> Vec<Call> {
                 if let Some(at) = waited.map(|at| waiting.remove(at)) {
                     calls[at].came_back = Some(entry.body);
                     calls[at].measurement = entry.tool_measurement;
+                    calls[at].change_note = entry.change_note;
                     calls[at].elided |= entry.truncated;
                 }
             }
@@ -2533,6 +2538,15 @@ impl App {
             self.reload();
             return;
         }
+        if overlay == Overlay::Calls && key.code == KeyCode::Char('c') {
+            if let Some(note) =
+                self.call_state.selected().and_then(|at| self.calls.get(at)).and_then(|call| call.change_note)
+            {
+                self.history.open_entry(self.chat.session, note);
+                self.overlay = Some(Overlay::History);
+            }
+            return;
+        }
         if overlay == Overlay::Models {
             match key.code {
                 // Asked here rather than on opening, because asking reaches
@@ -4691,6 +4705,9 @@ impl App {
                 } else if call.came_back.is_some() {
                     lines.push(Line::from("saved status/duration unavailable"));
                 }
+                if let Some(note) = call.change_note {
+                    lines.push(Line::from(format!("saved change preview #{note} · c opens bounded history")));
+                }
                 lines.push(Line::from(Span::styled("given", Style::default().fg(Color::DarkGray))));
                 for line in call.given.lines() {
                     lines.push(Line::from(Span::raw(format!("  {line}"))));
@@ -6675,9 +6692,11 @@ and the next line"
         let measurement =
             rook_core::transcript::ToolMeasurement { failed: true, duration_ms: 42, timing_seq: 4 };
         entries[2].tool_measurement = Some(measurement);
+        entries[2].change_note = Some(1);
         let calls = paired(entries);
         assert_eq!(calls[1].given, "first");
         assert_eq!(calls[1].measurement, Some(measurement));
+        assert_eq!(calls[1].change_note, Some(1));
         assert_eq!(calls[0].given, "second");
         assert_eq!(calls[0].measurement, None, "failure is not inferred from prose");
         let home = tempfile::tempdir().unwrap();
@@ -6701,6 +6720,13 @@ and the next line"
             .join("\n");
         assert!(text.contains("saved failure") && text.contains("dispatch 42 ms"), "{text}");
         assert!(text.contains("current files/tests not verified"), "{text}");
+        assert!(text.contains("saved change preview #1"), "{text}");
+        app.overlay = Some(super::Overlay::Calls);
+        app.on_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('c'),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert!(app.overlay == Some(super::Overlay::History));
     }
 
     /// Entries as the log hands them over, with the fields the pairing reads.
@@ -6722,6 +6748,7 @@ and the next line"
                 body: (*body).to_string(),
                 doing: String::new(),
                 tool_measurement: None,
+                change_note: None,
             })
             .collect()
     }

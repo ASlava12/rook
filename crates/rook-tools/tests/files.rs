@@ -9,6 +9,60 @@ struct Workspace {
     ctx: ToolContext,
 }
 
+#[tokio::test]
+async fn saved_file_changes_describe_the_actual_write_bound_diff_and_skip_large_old_text() {
+    let w = Workspace::new();
+    w.file("there.txt", "old\n");
+    let out = files::WriteFile
+        .call(&w.ctx, &serde_json::json!({"path":"there.txt","content":"new\n"}))
+        .await
+        .unwrap();
+    let diff = &out.meta["file_changes"]["files"][0];
+    assert!(
+        diff["diff"].as_str().unwrap().contains("-old") && diff["diff"].as_str().unwrap().contains("+new"),
+        "{diff}"
+    );
+    assert_eq!(diff["limited"], false);
+    assert_eq!(std::fs::read_to_string(w.dir.path().join("there.txt")).unwrap(), "new\n");
+    w.file("large.txt", &"x".repeat(65537));
+    let out = files::WriteFile
+        .call(&w.ctx, &serde_json::json!({"path":"large.txt","content":"small\n"}))
+        .await
+        .unwrap();
+    assert_eq!(out.meta["file_changes"]["files"][0]["limited"], true);
+    assert!(out.meta["file_changes"]["files"][0]["diff"].as_str().unwrap().contains("not captured"));
+    assert_eq!(
+        std::fs::read_to_string(w.dir.path().join("large.txt")).unwrap(),
+        "small\n",
+        "an unavailable optional diff never prevents a write"
+    );
+    let before = "before\n".repeat(7000);
+    let after = "after\n".repeat(7000);
+    assert!(before.len() < 65536 && before.len() > 8192);
+    w.file("many.txt", &before);
+    let out =
+        files::WriteFile.call(&w.ctx, &serde_json::json!({"path":"many.txt","content":after})).await.unwrap();
+    let diff = &out.meta["file_changes"]["files"][0];
+    assert_eq!(diff["limited"], true, "the full change exceeds the output budget");
+    assert!(diff["diff"].as_str().unwrap().len() <= 8192, "{diff}");
+    assert!(
+        diff["diff"].as_str().unwrap().contains("-before")
+            && diff["diff"].as_str().unwrap().contains("+after"),
+        "both sides of the rewrite survive shortening: {diff}"
+    );
+    let mut targets = Vec::new();
+    for at in 0..4 {
+        let name = format!("edit-{at}.txt");
+        w.file(&name, "old\n");
+        targets.push(serde_json::json!({"path":name,"edits":[{"old":"old","new":"new"}]}));
+    }
+    let out = files::EditFile.call(&w.ctx, &serde_json::json!({"files":targets})).await.unwrap();
+    assert!(!out.is_error, "{}", out.content);
+    assert_eq!(out.meta["file_changes"]["files"].as_array().unwrap().len(), 3);
+    assert_eq!(out.meta["file_changes"]["omitted_files"], 1);
+    assert!(out.meta["file_changes"]["files"][1]["path"].as_str().unwrap().ends_with("edit-1.txt"));
+}
+
 impl Workspace {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();

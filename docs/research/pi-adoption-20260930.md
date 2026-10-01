@@ -1901,3 +1901,55 @@ branch live checks, HTML download interaction and both Pending capabilities
 (phase routing and declarative extension UI) also remain in scope. The next
 implementation block should advance the remaining card behavior or a Pending
 capability; this block is not completion of the overall transfer.
+
+## Saved file-change previews in cards (2026-10-01)
+
+`write_file` and `edit_file` now produce saved, tool-reported diff previews
+from the text the call observed and wrote. Core validates borrowed metadata
+before copying it, redacts it through the turn's Vault, and stores a plain
+`rook:tool-changes:v1` note in the same atomic batch as the result. Image
+companions remain adjacent to their result. No stored struct or format
+version changes. The optional JSON `change_note` remains compatible with old
+daemon responses and points only into this session's own history.
+
+Bounds: three preview files, 512-byte labels, 8 KiB per diff, 64 KiB per
+comparison input and a 32 KiB committed note. Formatting keeps a bounded head
+and tail, evicting before copying new chunks; diff calculation uses a 200 ms budget with
+approximation. Approval/model-result hunks now use this generator as well,
+instead of allocating the full unified diff before shortening it. Optional
+`write_file` baseline reads have a capability-relative 64 KiB byte limit;
+large/unreadable text and editor-owned buffers are explicitly unavailable.
+Omitted files and limited previews are stated. Missing preview data does not
+make a successful write fail or invent file contents.
+
+Browser cards expand the saved change note on demand, highlight patch lines
+as DOM text and read more through bounded history parts. TUI calls/history
+open the source with `c`; CLI history/entry and HTML export show its event
+number. Selected HTML ranges do not import an excluded change note. Saved
+previews do not verify current files/tests and do not enter model replay or
+compaction. Core checks actual writes, later workspace changes, forks, Vault
+redaction, invalid metadata and image association. File tests reach both
+input/output caps and the file-count cap. Local/daemon CLI, TUI rendering/key
+and browser module checks passed. An initial redaction test omitted resolving
+its Vault secret; the corrected setup and repeated core test exited 0.
+
+A real Edge headless page on a new scratch daemon verified mouse expansion
+of the nested diff, bounded first/next parts, inert script-looking text,
+added/removed styles, source after reload and HTML scope/escaping (exit 0).
+Scratch processes and temporary source were removed. Compaction exited 0.
+The first full CI exited 1 (844.6 seconds) on the edit-preview contract:
+head-only truncation had replaced the existing head/tail elision. The generator
+now streams into bounded head/tail storage and reports the omitted bytes,
+preserving both removed and added text without building the full diff first.
+Both edit/file suites and the split-Unicode streamed-buffer check passed on
+that correction (exit 0). Final `cargo xtask ci` with `RUST_TEST_THREADS=1`
+exited 0 (`ci: ok`, 811.4 seconds), including 117 CLI/TUI unit tests, all 87
+CLI integration tests, the existing head/tail edit test, core suites and
+doctests. Windows ran no PTY tests. Final-tree `cargo xtask compaction` also
+exited 0: 4.02 MiB on disk, 37.1x dictionary compression and 5.8x end-to-end
+for its measurement fixture. The format and published fixture claims did not
+change; new previews do add bounded companion data to real sessions.
+Inline cards remain In progress: live browser result loading, live TUI card
+expansion and interaction checks remain; Pending phase routing
+and declarative extension UI, queue lifecycle checks, branch live checks and
+HTML download interaction remain in the original scope.

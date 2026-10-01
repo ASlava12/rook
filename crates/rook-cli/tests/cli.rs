@@ -69,6 +69,58 @@ fn saved_tool_measurements_match_in_local_cli_daemon_history_and_html_export() {
 }
 
 #[test]
+fn saved_change_previews_are_bounded_and_readable_locally_and_through_the_daemon() {
+    let rook = Rook::new();
+    let session = rook_store::new_session_id();
+    let id = rook_store::format_session_id(session);
+    {
+        let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+        store
+            .create_session(&rook_store::SessionMeta::new(
+                session,
+                "saved changes",
+                rook.workspace.path().display().to_string(),
+                rook_store::now_unix(),
+            ))
+            .unwrap();
+        let preview = format!(
+            "Saved tool-reported file changes\nHistorical preview; current files and tests are not verified.\nFile: notes.md\n-before\n+after\n{}",
+            "saved output\n".repeat(1000)
+        );
+        store
+            .append_event_pair(
+                session,
+                rook_store::NewEvent::new(
+                    rook_store::EventKind::Note,
+                    rook_store::Kind::Message,
+                    preview.as_bytes(),
+                )
+                .label("rook:tool-changes:v1"),
+                rook_store::NewEvent::new(
+                    rook_store::EventKind::ToolResult,
+                    rook_store::Kind::ToolResult,
+                    b"wrote notes.md",
+                )
+                .label("write_file"),
+            )
+            .unwrap();
+    }
+    let check = || {
+        let result = rook.json(&["session", "entry", &id, "1"]);
+        assert_eq!(result["entry"]["change_note"], 0);
+        let part = rook.json(&["session", "entry", &id, "0"]);
+        assert!(part["next_offset"].is_number());
+        assert!(part["entry"]["body"].as_str().unwrap().len() <= 4096);
+        assert!(part["entry"]["body"].as_str().unwrap().contains("-before\n+after"));
+        assert!(rook.ok(&["session", "entry", &id, "1"]).contains("saved changes: event #0"));
+        result
+    };
+    let local = check();
+    let _daemon = Daemon::start(&rook);
+    assert_eq!(check(), local);
+}
+
+#[test]
 fn request_tool_catalog_is_the_same_locally_and_through_the_daemon() {
     let rook = Rook::new();
     let session = rook_store::new_session_id();

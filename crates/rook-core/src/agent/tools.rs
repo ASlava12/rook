@@ -537,7 +537,15 @@ impl<'a> AgentLoop<'a> {
         // before the store keeps it. A command's output, a page, a file and an
         // MCP server's answer are all the same question here.
         let mut text = self.vault.redact(&text);
-        match crate::tool_images::record(self.rook, self.session, &call.name, &mut text, &outcome.images) {
+        let changes = crate::tool_changes::note(&call.name, outcome.meta.get("file_changes"), &self.vault);
+        match crate::tool_images::record_with_changes(
+            self.rook,
+            self.session,
+            &call.name,
+            &mut text,
+            &outcome.images,
+            changes.as_deref(),
+        ) {
             Ok(seq) if matches!(call.name.as_str(), "run_command" | "job") => {
                 if let Err(why) = crate::results::register_output(self.rook, self.session, seq, &outcome.meta)
                 {

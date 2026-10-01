@@ -151,6 +151,9 @@ impl History {
     pub(super) fn open(&mut self, session: Option<u128>) {
         self.open_mode(session, |id| Command::Page(id, PageRequest::default()));
     }
+    pub(super) fn open_entry(&mut self, session: Option<u128>, seq: u64) {
+        self.open_mode(session, |id| Command::Entry(id, seq, 0));
+    }
     pub(super) fn open_turns(&mut self, session: Option<u128>, before: Option<u64>) {
         self.open_mode(session, |id| Command::Turns(id, before));
     }
@@ -657,6 +660,17 @@ impl History {
             KeyCode::Char('h') => {
                 self.ask(Command::Page(session, PageRequest::default()));
             }
+            KeyCode::Char('c') => {
+                let note = self.entry.as_ref().and_then(|p| p.entry.change_note).or_else(|| {
+                    if self.hits.is_some() || self.turns.is_some() || self.show_bookmarks {
+                        return None;
+                    }
+                    self.page.as_ref()?.items.get(self.at)?.change_note
+                });
+                if let Some(note) = note {
+                    self.ask(Command::Entry(session, note, 0));
+                }
+            }
             KeyCode::Char('b') => {
                 self.entry = None;
                 self.hits = None;
@@ -815,7 +829,7 @@ impl History {
                 Some(true) => "jump to event #",
                 Some(false) => "find literal text",
                 None if self.turns.is_some() => "turn results · t refresh · n older · h history",
-                None => "history · m mark · l bookmarks · / find · g jump · B branch",
+                None => "history · c changes · m mark · l bookmarks · / find · g jump · B branch",
             }
         };
         let text = if self.editing.is_some() || self.mark_target.is_some() {
@@ -920,12 +934,16 @@ impl History {
                 .unwrap_or_else(|| "No bookmarks in this session. Mark an event with m.".into())
         } else if let Some(page) = &self.entry {
             format!(
-                "#{} · byte {} / {}{}\n{}\n{}",
+                "#{} · byte {} / {}{}\n{}\n{}{}",
                 page.entry.seq,
                 page.offset,
                 page.total_bytes,
                 if page.next_offset.is_some() { " · n reads more" } else { "" },
                 page.entry.tool_measurement.map(|m| m.text()).unwrap_or_default(),
+                page.entry
+                    .change_note
+                    .map(|seq| format!("saved changes #{seq} · c opens preview\n"))
+                    .unwrap_or_default(),
                 page.entry.body
             )
         } else if let Some(hits) = &self.hits {
@@ -945,11 +963,14 @@ impl History {
                 .and_then(|p| p.items.get(self.at))
                 .map(|e| {
                     format!(
-                        "#{} {}{}\n{}\n{}",
+                        "#{} {}{}\n{}\n{}{}",
                         e.seq,
                         e.kind,
                         if e.truncated { " · Enter reads full body in pages" } else { "" },
                         e.tool_measurement.map(|m| m.text()).unwrap_or_default(),
+                        e.change_note
+                            .map(|seq| format!("saved changes #{seq} · c opens preview\n"))
+                            .unwrap_or_default(),
                         e.body
                     )
                 })
