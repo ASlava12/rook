@@ -2129,6 +2129,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn text_choice_objects_reach_a_daemon_window_as_selectable_options() {
+        use rook_tools::{Tool, ToolContext, ask::AskUser};
+        let (said, _) = tokio::sync::broadcast::channel(16);
+        let live = parked(said);
+        let tool = AskUser(live.asker.clone());
+        let context = ToolContext::new(std::env::temp_dir());
+        let args = serde_json::json!({"questions": [{
+            "question": "Which approach?",
+            "choices": [{"id": "full", "text": "Full support"}, {"id": "json", "text": "JSON only"}]
+        }]});
+        let mut asking = Box::pin(tool.call(&context, &args));
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(asking.as_mut().poll(cx).is_pending())).await
+        );
+
+        let (_, replay, _) = live.join();
+        let ChatEvent::Ask { id, questions } = &replay[0] else { panic!("the question must reach the view") };
+        assert_eq!(questions[0].choices, ["Full support", "JSON only"]);
+        live.asker.answer(id, vec![vec!["Full support".into()]]);
+        let result = asking.await.unwrap();
+        assert!(result.content.contains("Full support"));
+        assert!(live.join().1.is_empty(), "resolved questions must leave replay");
+        live.stop();
+    }
+
+    #[tokio::test]
     async fn concurrent_publication_and_join_deliver_every_event_exactly_once() {
         for _ in 0..20 {
             let (said, _) = tokio::sync::broadcast::channel(1024);

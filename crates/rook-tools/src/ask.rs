@@ -14,6 +14,8 @@ use rook_llm::ToolSpec;
 /// More than a handful on one form and people stop reading them.
 const MAX_QUESTIONS: usize = 4;
 const MAX_CHOICES: usize = 4;
+const MAX_QUESTION_BYTES: usize = 4096;
+const MAX_CHOICE_BYTES: usize = 512;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Question {
@@ -144,21 +146,63 @@ impl Tool for AskUser {
 
 fn parse(args: &serde_json::Value) -> Result<Vec<Question>> {
     let invalid = |message: &str| crate::ToolError::Invalid { tool: "ask".into(), message: message.into() };
-
-    let mut questions: Vec<Question> =
-        serde_json::from_value(args.get("questions").cloned().unwrap_or_default()).map_err(|e| {
-            invalid(&format!("`questions` must be an array of {{question, choices?, multi?}}: {e}"))
-        })?;
-
-    if questions.is_empty() {
+    let entries = args.get("questions").and_then(serde_json::Value::as_array).ok_or_else(|| {
+        invalid(
+            "`questions` must be an array of {question, choices?, multi?}; for example: \
+                 {\"questions\":[{\"question\":\"Which target?\",\"choices\":[\"local\",\"remote\"]}]}",
+        )
+    })?;
+    if entries.is_empty() {
         return Err(invalid("nothing to ask — `questions` needs at least one entry"));
     }
-    questions.truncate(MAX_QUESTIONS);
-    for q in &mut questions {
-        if q.question.trim().is_empty() {
+    // Cap before copying strings. A model reply can contain far more than the
+    // form can show, and the ignored tail must not be allocated a second time.
+    let mut questions = Vec::with_capacity(entries.len().min(MAX_QUESTIONS));
+    for entry in entries.iter().take(MAX_QUESTIONS) {
+        let Some(entry) = entry.as_object() else {
+            return Err(invalid(
+                "each `questions` entry must be an object with `question` text; \
+                                put options in `choices`, not as more question strings",
+            ));
+        };
+        let Some(question) = entry.get("question").and_then(serde_json::Value::as_str) else {
+            return Err(invalid("each `questions` entry needs a string `question`"));
+        };
+        if question.trim().is_empty() {
             return Err(invalid("a question with no text cannot be answered"));
         }
-        q.choices.truncate(MAX_CHOICES);
+        if question.len() > MAX_QUESTION_BYTES {
+            return Err(invalid("question text exceeds 4096 bytes"));
+        }
+        let mut choices = Vec::new();
+        if let Some(raw) = entry.get("choices") {
+            let Some(raw) = raw.as_array() else {
+                return Err(invalid("`choices` must be an array of text options"));
+            };
+            for choice in raw.iter().take(MAX_CHOICES) {
+                // Earlier clients and some models send {id, text} options.
+                // Their visible text is enough: answers are echoed by text.
+                let Some(text) =
+                    choice.as_str().or_else(|| choice.get("text").and_then(serde_json::Value::as_str))
+                else {
+                    return Err(invalid(
+                        "each `choices` entry needs text, either a string or {\"text\":\"...\"}",
+                    ));
+                };
+                if text.trim().is_empty() {
+                    return Err(invalid("an empty choice cannot be selected"));
+                }
+                if text.len() > MAX_CHOICE_BYTES {
+                    return Err(invalid("choice text exceeds 512 bytes"));
+                }
+                choices.push(text.to_owned());
+            }
+        }
+        let multi = match entry.get("multi") {
+            None => false,
+            Some(value) => value.as_bool().ok_or_else(|| invalid("`multi` must be a boolean"))?,
+        };
+        questions.push(Question { question: question.to_owned(), choices, multi });
     }
     Ok(questions)
 }

@@ -1661,3 +1661,30 @@ rerun checks legacy notes, new notes, local text/JSON and the real daemon.
 `cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0 (`ci: ok`, 918.1 seconds),
 including 85 CLI integration tests and 234 agent-loop tests. The existing
 store event layout and wire routes remain unchanged.
+
+## Recovering from malformed `ask` calls
+
+The late `ask` attempts in `01M3T336VB22NEP5AY77T5NYB4` included two
+common shapes: bare question strings and choice objects with `{id, text}`.
+Rook now gives a bounded concrete example when `questions` has the wrong
+shape and explains that choices belong in the question object's `choices`
+field. It accepts choice objects with visible `text` as a compatibility
+input, ignoring their IDs because the answer protocol already echoes the
+selected text. This would have allowed event 2408's choice shape to reach a
+person or time out once, without the subsequent format retries. It does not
+assert that the model would have made the right decision after that timeout.
+
+Question text is capped at 4096 bytes and choice text at 512 bytes. Rook
+inspects at most four questions and four choices each before copying text
+into the pending request; malformed errors do not echo unbounded input. The
+wire protocol and saved session format are unchanged. Focused `rook-tools`
+tests pass 18/18, including the observed shapes and size limits. A focused
+`rookd` test also passes, showing a `{id, text}` option delivered as selectable
+text to a daemon window and removed from replay after answer. The first test
+invocation used an exact name without its module path and selected 0 tests;
+the corrected invocation ran and passed one test. Full CI result follows.
+
+Full `cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0 (`ci: ok`,
+701.4 seconds), including 85 CLI integration tests, 78 daemon tests and the
+18 `ask` tests. This block changed no storage behavior or format, so the
+compaction benchmark was not rerun.

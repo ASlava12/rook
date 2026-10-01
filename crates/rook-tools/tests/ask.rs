@@ -141,6 +141,77 @@ async fn the_wrong_shape_names_the_shape_it_wanted() {
     let tool = ask_tool(vec![vec!["a"]]);
     let err = call(&tool, serde_json::json!({"questions": "Which target?"})).await.unwrap_err().to_string();
     assert!(err.contains("array of {question, choices?, multi?}"), "{err}");
+    assert!(err.contains("\"choices\":[\"local\",\"remote\"]"), "a usable example: {err}");
+
+    let err = call(&tool, serde_json::json!({"questions": ["Which target?", "local", "remote"]}))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("each `questions` entry must be an object"), "{err}");
+    assert!(err.contains("put options in `choices`"), "{err}");
+}
+
+#[tokio::test]
+async fn choices_with_text_and_ids_reach_the_user_as_selectable_text() {
+    struct Recording(Arc<std::sync::Mutex<Vec<Question>>>);
+    #[async_trait]
+    impl Asker for Recording {
+        async fn ask(&self, questions: &[Question]) -> Vec<Answer> {
+            self.0.lock().unwrap().extend_from_slice(questions);
+            questions
+                .iter()
+                .map(|q| Answer { question: q.question.clone(), chosen: q.interpret("1").chosen })
+                .collect()
+        }
+    }
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let tool = AskUser(Arc::new(Recording(seen.clone())));
+    let out = call(
+        &tool,
+        serde_json::json!({"questions": [{
+            "question": "Which approach?",
+            "choices": [
+                {"id": "full", "text": "Add nbformat read/write"},
+                {"id": "json", "text": "Keep JSON only"}
+            ]
+        }]}),
+    )
+    .await
+    .unwrap();
+    let result: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(result["answers"][0]["chosen"], serde_json::json!(["Add nbformat read/write"]));
+    assert_eq!(seen.lock().unwrap()[0].choices, ["Add nbformat read/write", "Keep JSON only"]);
+}
+
+#[tokio::test]
+async fn question_and_choice_limits_are_checked_before_copying() {
+    let tool = ask_tool(vec![vec!["first"]]);
+    let err = call(&tool, serde_json::json!({"questions": [{"question": "x".repeat(4097)}]}))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("4096 bytes") && err.len() < 200, "the error cannot echo the input: {err}");
+    let err = call(
+        &tool,
+        serde_json::json!({"questions": [{
+            "question": "Which?", "choices": ["x".repeat(513)]
+        }]}),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("512 bytes") && err.len() < 200, "{err}");
+
+    let out = call(
+        &tool,
+        serde_json::json!({"questions": [{
+            "question": "Which?", "choices": ["first", "second", "third", "fourth", "x".repeat(100_000)]
+        }]}),
+    )
+    .await
+    .unwrap();
+    let result: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(result["answers"][0]["chosen"], serde_json::json!(["first"]));
 }
 
 #[tokio::test]

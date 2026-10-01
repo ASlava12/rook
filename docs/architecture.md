@@ -197,6 +197,12 @@ edited for active questions. New frontends request `live_snapshots=true`; legacy
 clients receive ordinary events and a text marker for partial replay. An input
 or settings frame exceeding the socket budget closes that view without silently
 truncating a control or cancelling the daemon-owned turn.
+The `ask` tool accepts up to four questions and four choices per question,
+checking text lengths before copying model arguments into a pending request.
+Canonical choices are strings; `{id, text}` choices from older callers are
+displayed by their `text`, and answers echo that visible text. Malformed
+questions return a bounded error with a valid call example instead of echoing
+the model's whole input.
 
 The CLI's local HTML review export uses the same paged transcript source in
 direct and daemon modes. It writes an inclusive selected range into a new
