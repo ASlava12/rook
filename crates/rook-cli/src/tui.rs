@@ -694,6 +694,9 @@ struct Chat {
     /// Ignore the previous session's queued stream until Attach acknowledges the switch.
     joining: Option<u128>,
     busy: bool,
+    /// Generation announced by the daemon for this observed managed turn.
+    goal_generation: Option<String>,
+    stop_attempt: Option<(Option<String>, String)>,
     pending: Option<ApprovalRequest>,
     asking: Option<Asking>,
     /// Lines back from the newest, so zero is pinned to the bottom.
@@ -1150,6 +1153,7 @@ impl Chat {
     fn ended(&mut self) {
         self.busy = false;
         self.remote = None;
+        self.stop_attempt = None;
         let waiting = self.pending.take().is_some() || self.asking.take().is_some();
         if waiting {
             self.push("stat", "  the turn ended, so what it was waiting for is gone");
@@ -1988,6 +1992,7 @@ impl App {
                 self.chat.asking = self.chat.asking.take().filter(|r| questions.contains(&r.id));
             }
             ChatEvent::Snapshot { session, running, truncated, approvals, questions } => {
+                self.chat.goal_generation = None;
                 self.chat.session = rook_store::parse_session_id(&session);
                 self.chat.log.clear();
                 self.chat.receipt_lines.clear();
@@ -2012,6 +2017,7 @@ impl App {
                 }
             }
             ChatEvent::Started { session } => {
+                self.chat.goal_generation = None;
                 self.chat.prompt_retry.started(&session);
                 self.chat.session = rook_store::parse_session_id(&session);
                 self.flush_interjections();
@@ -2020,6 +2026,7 @@ impl App {
             // that opens onto a session and finds it already working looks,
             // for a second, like a window answering something you did not ask.
             ChatEvent::Attached { session, running } => {
+                self.chat.goal_generation = None;
                 self.chat.session = rook_store::parse_session_id(&session);
                 if running {
                     self.flush_interjections();
@@ -2047,6 +2054,7 @@ impl App {
                 }
             }
             ChatEvent::Text { text } => self.chat.push("text", &text),
+            ChatEvent::Goal { generation } => self.chat.goal_generation = generation,
             ChatEvent::FollowUp { id } => {
                 self.chat.began();
                 self.chat.push("stat", &format!("Starting follow-up {id}"));
@@ -2578,7 +2586,13 @@ impl App {
         match action {
             Action::Stop => {
                 if let Some(say) = &self.chat.remote {
-                    let _ = say.send(ClientMessage::Cancel);
+                    let generation = self.chat.goal_generation.clone();
+                    let id = match self.chat.stop_attempt.as_ref() {
+                        Some((observed, id)) if *observed == generation => id.clone(),
+                        _ => rook_store::format_session_id(rook_store::new_session_id()),
+                    };
+                    self.chat.stop_attempt = Some((generation.clone(), id.clone()));
+                    let _ = say.send(ClientMessage::Stop { id, generation });
                     self.chat.push("stat", "[stopping]");
                 } else {
                     match self.turn.take_if(|turn| !turn.is_finished()) {

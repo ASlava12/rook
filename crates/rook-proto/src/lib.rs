@@ -168,6 +168,13 @@ pub enum ClientMessage {
     Setting { name: String, value: String },
     /// Stop the turn in flight, leaving what it already did in the log.
     Cancel,
+    /// Stop the observed turn. A managed goal requires its observed generation;
+    /// the caller ID makes a retry safe after an uncertain disconnect.
+    Stop {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        generation: Option<String>,
+    },
     /// Join a turn this daemon is already running, without starting one.
     ///
     /// A turn belongs to the daemon and not to the socket that asked for it, so
@@ -203,6 +210,10 @@ pub enum ApprovalDecision {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChatEvent {
+    /// Current nonterminal goal, if any, for a client about to stop this turn.
+    Goal {
+        generation: Option<String>,
+    },
     /// A queued turn begins without ending this session observer.
     FollowUp {
         id: String,

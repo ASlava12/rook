@@ -19,6 +19,8 @@ let socket = null;
 let current = null;
 let retainedInputs = new Map();
 const retryPrompt = promptRetry();
+let goalGeneration = null;
+let stopAttempt = null;
 
 const chatOut = () => $('#stream');
 
@@ -155,6 +157,8 @@ export function connect() {
         break;
       }
       case 'snapshot': {
+        goalGeneration = null;
+        stopAttempt = null;
         const active = new Set([
           ...e.approvals.map(id => `approval:${id}`),
           ...e.questions.map(id => `question:${id}`),
@@ -174,12 +178,14 @@ export function connect() {
         renderSettings(); renderPicker();
         break;
       }
-      case 'started': retryPrompt.started(e.session); state.chat.session = e.session; state.chat.spent = null; state.chat.context = null; state.chat.modelRequest = null; renderSettings(); renderPicker(); break;
+      case 'started': goalGeneration = null; stopAttempt = null; retryPrompt.started(e.session); state.chat.session = e.session; state.chat.spent = null; state.chat.context = null; state.chat.modelRequest = null; renderSettings(); renderPicker(); break;
       // Joined a turn this page did not start. Said out loud either way: a
       // page that quietly starts streaming looks like it is answering
       // something you did not ask, and one that says nothing after asking
       // cannot be told from a daemon that did not hear.
       case 'attached':
+        goalGeneration = null;
+        stopAttempt = null;
         if (state.chat.session !== e.session) {
           state.chat.context = null; state.chat.modelRequest = null;
           state.chat.spent = null;
@@ -189,6 +195,7 @@ export function connect() {
         renderPicker();
         if (e.running) { say('stat', '[joined a turn already running here]'); working(); }
         break;
+      case 'goal': goalGeneration = e.generation; break;
       case 'follow_up':
         say('stat', `Starting follow-up ${e.id}`); callStatus = null;
         state.chat.spent = null; state.chat.context = null; state.chat.modelRequest = null;
@@ -220,7 +227,7 @@ export function connect() {
       case 'forgot': say('stat', `forgot: ${e.text}`); break;
       case 'failed': retryPrompt.disconnected(); say('err', e.message); done(); break;
       case 'error': say('err', e.message); break;
-      case 'cancelled': retryPrompt.disconnected(); say('stat', '[stopped]'); done(); break;
+      case 'cancelled': stopAttempt = null; retryPrompt.disconnected(); say('stat', '[stopped]'); done(); break;
       case 'interjected':
         if (e.receipt) receiptNotice(e.receipt, e.text);
         else { say('you', `› ${e.text}`); say('stat', '(the turn will see this at its next step)'); }
@@ -236,6 +243,7 @@ export function connect() {
         break;
       }
       case 'done': {
+        stopAttempt = null;
         if (e.stopped === 'already_admitted') { retryPrompt.settled(); done(); break; }
         retryPrompt.completed(state.chat.session);
         if (typeof e.reply === 'string' && current?.dataset.text !== e.reply) {
@@ -297,7 +305,10 @@ function send(message) {
 
 export function stop() {
   if (!state.chat.busy) return;
-  send({ type: 'cancel' });
+  if (!stopAttempt || stopAttempt.generation !== goalGeneration) {
+    stopAttempt = { id: crypto.randomUUID(), generation: goalGeneration };
+  }
+  send({ type: 'stop', ...stopAttempt });
 }
 
 function waitingOn(what) {

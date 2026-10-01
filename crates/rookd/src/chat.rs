@@ -203,33 +203,75 @@ async fn serve(
                 }
                 let _ = outbound.send(setting.describe()).await;
             }
-            ClientMessage::Cancel => {
+            ClientMessage::Cancel | ClientMessage::Stop { .. } => {
+                let control = match incoming {
+                    ClientMessage::Stop { id, generation } => Some((id, generation)),
+                    _ => None,
+                };
                 let Some(session) = watching.as_ref().map(|w| w.session) else { continue };
                 let id = rook_store::format_session_id(session);
                 let goal = session_goal(&*engine.read().await, session);
                 match goal {
                     Ok(Some(run)) if !run.status.terminal() => {
-                        let paused = managed::control(&*engine.read().await, &id, Action::Pause);
+                        let paused = match control.as_ref() {
+                            Some((request, Some(generation))) => managed::control_identified(
+                                &*engine.read().await,
+                                &id,
+                                IdentifiedControl {
+                                    id: request.clone(),
+                                    generation: generation.clone(),
+                                    action: Action::Pause,
+                                },
+                            )
+                            .map(|outcome| outcome.already_applied),
+                            Some((_, None)) => {
+                                let _ = outbound
+                                    .send(ChatEvent::Error {
+                                        message: "goal identity is not known yet; attach and retry Stop"
+                                            .into(),
+                                    })
+                                    .await;
+                                continue;
+                            }
+                            None => {
+                                managed::control(&*engine.read().await, &id, Action::Pause).map(|_| false)
+                            }
+                        };
                         match paused {
-                            Ok(_) => {
+                            Ok(already_applied) => {
                                 let _ = outbound
                                     .send(ChatEvent::Agent {
                                         receipt: None,
-                                        text:
+                                        text: if already_applied {
+                                            "Stop was already applied; inspect the current goal before stopping it again."
+                                        } else {
                                             "Pausing goal after the active operation; /continue resumes it."
-                                                .into(),
+                                        }
+                                        .into(),
                                     })
                                     .await;
                             }
-                            Err(error) => report_window(&outbound, error.to_string()).await,
+                            Err(error) => {
+                                let _ = outbound.send(ChatEvent::Error { message: error.to_string() }).await;
+                            }
                         }
                         continue;
                     }
                     Err(error) => {
-                        report_window(&outbound, error).await;
+                        let _ = outbound.send(ChatEvent::Error { message: error }).await;
                         continue;
                     }
                     _ => {}
+                }
+                if control.as_ref().is_some_and(|(_, generation)| generation.is_some()) {
+                    let _ = outbound
+                        .send(ChatEvent::Error {
+                            message:
+                                "the observed goal is no longer active; attach and inspect the current turn"
+                                    .into(),
+                        })
+                        .await;
+                    continue;
                 }
                 let _admission = state.work.0.lock().await;
                 if let Err(error) = followups::pause(&*engine.read().await, session, None) {
@@ -255,6 +297,12 @@ async fn serve(
                 }
                 let running = live.as_ref().is_some_and(|l| l.running());
                 let _ = outbound.send(ChatEvent::Attached { session, running }).await;
+                match session_goal(&*engine.read().await, id) {
+                    Ok(run) => {
+                        let _ = outbound.send(goal_event(run.as_ref())).await;
+                    }
+                    Err(error) => report_window(&outbound, error).await,
+                }
                 if let Some(live) = live {
                     // What it is running under, not what this window was
                     // showing: a footer reading `autonomous` over a turn in
@@ -1017,6 +1065,14 @@ fn session_goal(rook: &rook_core::Rook, session: u128) -> Result<Option<Run>, St
     managed::for_session(rook, session).map_err(|e| e.to_string())
 }
 
+fn goal_event(run: Option<&Run>) -> ChatEvent {
+    ChatEvent::Goal {
+        generation: run
+            .filter(|run| !run.status.terminal() && rook_store::parse_session_id(&run.generation).is_some())
+            .map(|run| run.generation.clone()),
+    }
+}
+
 /// Recovery recreates the same live conversation, so joining it uses the
 /// existing session picker, stream and approval controls.
 pub(crate) async fn resume_goal(state: &Arc<AppState>, run: &Run) -> Result<Arc<Live>, String> {
@@ -1302,6 +1358,12 @@ async fn turn(
     // under its session before it starts one — a turn that names itself after
     // it is already running cannot be joined while it does so.
     let _ = outbound.send(ChatEvent::Started { session: rook_store::format_session_id(session) });
+    match session_goal(&rook, session) {
+        Ok(run) => {
+            let _ = outbound.send(goal_event(run.as_ref()));
+        }
+        Err(error) => return ended_badly(&rook, session, &outbound, error),
+    }
 
     if let Err(error) =
         connection.settings.save_followups(&rook, session, matches!(&prompt, StartTurn::Prompt(_, _)))
@@ -1417,13 +1479,21 @@ async fn goal_turn(
     };
     let _ = outbound.send(ChatEvent::Agent { receipt: None, text: "Goal started in this session; continuing automatically between stages. Ctrl-C pauses; /continue resumes.".into() });
     let mut announced_retry = None;
+    let mut announced_generation = None;
     loop {
         let rook = engine.read().await;
         let run = match managed::read(&rook, id) {
             Ok(saved) => saved.run,
             Err(error) => return ended_badly(&rook, session, outbound, error.to_string()),
         };
+        if announced_generation.as_deref() != Some(run.generation.as_str()) {
+            let _ = outbound.send(goal_event(Some(&run)));
+            announced_generation = Some(run.generation.clone());
+        }
         if !run.status.runnable() {
+            if run.status.terminal() {
+                let _ = outbound.send(goal_event(Some(&run)));
+            }
             if !ended_goal(&rook, outbound, session, run, connection, shared).await {
                 return;
             }
@@ -1474,6 +1544,9 @@ async fn goal_turn(
         .await;
         match result {
             Ok(run) if !run.status.runnable() => {
+                if run.status.terminal() {
+                    let _ = outbound.send(goal_event(Some(&run)));
+                }
                 if !ended_goal(&rook, outbound, session, run, connection, shared).await {
                     return;
                 }

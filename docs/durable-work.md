@@ -111,9 +111,8 @@ rejected. `POST /api/work/{id}/control` accepts
 `{"id":"...","generation":"...","action":"pause"}` and returns a control
 outcome containing `run`. Bare JSON actions such as `"pause"` still return a
 bare run for older clients. Identified controls are limited to 1,024 receipts
-per run; inspect the run if that limit is reached. Browser and live chat goal
-controls still use their existing protocol, so this retry guarantee currently
-applies to the identified HTTP and CLI path.
+per run; inspect the run if that limit is reached. The chat socket also uses
+these receipts for identified `/continue` and Stop requests.
 
 An old stored run without a generation still uses the bare action route from
 the CLI; inspect its state after an uncertain response.
@@ -122,9 +121,17 @@ When `/continue` resumes a paused goal over the chat socket, its prompt ID is
 also the resume control ID. Retrying that exact prompt after a later pause
 cannot resume the goal again, including across a daemon restart. A client that
 omits the prompt ID retains the older behavior. Ctrl-C and the browser Stop
-button still send the legacy socket cancel frame; they do not yet have a
-retryable pause ID. A resumed goal may report its current paused status on a
-duplicate prompt, so inspect the goal before choosing a new continuation.
+button send `{"type":"stop","id":"...","generation":"..."}` for a managed
+goal. The daemon announces that generation in a `goal` event when a turn starts,
+is joined, or switches goals. A Stop retry with the same ID cannot pause a
+goal again after a later resume. If the client has not observed the goal
+generation, Stop reports an error and leaves the goal running; reattach and
+retry. Old clients can still send `{"type":"cancel"}`. An identified Stop
+without a generation stops an ordinary turn, but refuses to pause a goal.
+The TUI and browser retain a Stop ID for repeated presses during the same
+turn; the socket protocol does not yet expose a manual retry after restarting
+the client. A resumed goal may report its current paused status on a duplicate
+prompt, so inspect the goal before choosing a new continuation.
 
 ## Edit or withdraw queued messages
 

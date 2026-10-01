@@ -19,6 +19,8 @@ pub(super) struct Replay {
     sequence: u64,
     truncated: bool,
     finished: bool,
+    /// Latest goal identity survives transcript eviction for an attached view.
+    goal_generation: Option<Option<String>>,
 }
 
 impl Default for Replay {
@@ -40,6 +42,7 @@ impl Replay {
             sequence: 0,
             truncated: false,
             finished: false,
+            goal_generation: None,
         }
     }
 
@@ -48,6 +51,9 @@ impl Replay {
         let sequence = self.sequence;
         if self.finished {
             return sequence;
+        }
+        if let ChatEvent::Goal { generation } = &event {
+            self.goal_generation = Some(generation.as_ref().filter(|g| g.len() <= 64).cloned());
         }
         let kind = state_kind(&event);
         if let Some(kind) = kind
@@ -130,6 +136,9 @@ impl Replay {
         // Started resets frontend counters. Restore current counters after
         // replaying history, but before the terminal event lets a CLI exit.
         events.extend(self.state.iter().map(|entry| entry.event.clone()));
+        if let Some(generation) = &self.goal_generation {
+            events.push(ChatEvent::Goal { generation: generation.clone() });
+        }
         if let Some(terminal) = terminal {
             events.push(terminal);
         }
@@ -154,6 +163,22 @@ mod tests {
 
     fn text(value: &str) -> ChatEvent {
         ChatEvent::Text { text: value.into() }
+    }
+
+    #[test]
+    fn latest_goal_identity_survives_replay_eviction_and_completion() {
+        let mut replay = Replay::new(2, 4096, 4096);
+        replay.push(ChatEvent::Goal { generation: Some("first".into()) });
+        replay.push(ChatEvent::Goal { generation: Some("second".into()) });
+        for _ in 0..8 {
+            replay.push(text("output"));
+        }
+        let (events, truncated) = replay.snapshot();
+        assert!(truncated);
+        assert!(matches!(events.last(), Some(ChatEvent::Goal { generation: Some(g) }) if g == "second"));
+        replay.push(ChatEvent::Goal { generation: None });
+        let (events, _) = replay.snapshot();
+        assert!(matches!(events.last(), Some(ChatEvent::Goal { generation: None })));
     }
 
     #[test]

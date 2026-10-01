@@ -1277,3 +1277,34 @@ test exceeded its 90-second mock-model wait while the other 80 CLI tests
 passed. That test passed alone on retry (exit 0, 60.0 seconds). The next full
 CI exited 0 (`ci: ok`, 703.8 seconds), including all 81 CLI integration tests
 and doctests. This block changed no storage code, so compaction was not rerun.
+
+## Socket Stop scoped to the observed goal
+
+The chat socket accepts an additive `stop` frame with a caller ID and optional
+managed-goal generation. The daemon announces the current nonterminal goal
+generation on start, attach and goal handoff; live replay retains the latest
+identity even when older output is evicted. TUI Ctrl-C and browser Stop send
+this frame. Repeated presses during one observed turn reuse the same ID.
+For a goal, Stop uses the existing atomic identified Pause control and rejects
+a missing or stale generation. A duplicate after a later resume reports that
+the Stop was already applied and leaves the resumed goal alone. An ordinary
+turn accepts an identified Stop without a generation. The legacy `cancel`
+frame remains accepted for older clients. Rejected Stop controls emit a
+nonterminal `error` event, so the UI continues watching the live turn.
+When a goal completes and ordinary follow-ups take over, a `goal` event clears
+the observed generation. No stored format changed.
+
+Focused daemon replay and real-daemon socket tests cover eviction, pause,
+resume, exact retry and rejection of missing or stale generations. JavaScript
+syntax validation also passed. The focused replay and final real-daemon tests
+each exited 0. The full `cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0
+(`ci: ok`, 708.2 seconds), including all 82 CLI integration tests, Clippy and
+doctests. No storage implementation or stored format changed, so compaction
+was not rerun for this block.
+
+Queue remains In progress. A socket Stop ID is retained only inside the live
+TUI/browser process; manual retry after losing that process still needs a
+visible receipt. Ordinary-turn Stop still lacks a turn identity, so a delayed
+frame can target a later ordinary turn in the same session. Live TUI/browser
+interaction checks and broader goal handoff/restart coverage remain open.
+Branch live checks and all five Pending capability rows remain open.
