@@ -84,6 +84,38 @@ pub(crate) fn pause(rook: &rook_core::Rook, session: u128, reason: Option<String
     Ok(())
 }
 
+/// Commit the ordinary Stop receipt and its recovery pause together. The
+/// frontend settings writer stays held through the store transaction, so a
+/// concurrent settings save cannot undo the pause with an older snapshot.
+pub(crate) fn pause_with_stop_receipt(
+    rook: &rook_core::Rook,
+    session: u128,
+    execution_key: &str,
+    execution: &[u8],
+) -> rook_core::Result<()> {
+    let _lock = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+    let saved = read(rook, session).map_err(rook_core::CoreError::Other)?;
+    let mut buffer = [0u8; 8192];
+    let driver_key = key(session);
+    if let Some(mut saved) = saved {
+        saved.paused = true;
+        saved.error = None;
+        let mut encoded = std::io::Cursor::new(&mut buffer[..]);
+        serde_json::to_writer(&mut encoded, &saved).map_err(|_| {
+            rook_core::CoreError::Other("follow-up settings exceed the recovery limit".into())
+        })?;
+        let len = encoded.position() as usize;
+        rook.store.kv_update_session_values(
+            session,
+            &[(execution_key, execution), (driver_key.as_str(), &buffer[..len])],
+        )?;
+    } else {
+        rook.store.kv_update_session_values(session, &[(execution_key, execution)])?;
+    }
+    rook.store.flush()?;
+    Ok(())
+}
+
 /// Caller holds the same admission lock as manual prompts and managed goals.
 pub(crate) async fn supervise(state: &Arc<AppState>, legacy_running: usize, cursor: &mut Option<u128>) {
     let (sessions, cap, scan) = {

@@ -29,6 +29,20 @@ test('a saved goal Stop retries exactly after a page reload and settles by calle
   assert.equal(stopRetry(saved).candidate(), null);
 });
 
+test('a saved ordinary Stop retains session, turn and caller ID after reload', () => {
+  const saved = storage();
+  const first = stopRetry(saved);
+  const { frame } = first.remember('session-one', null, 'turn-one');
+  assert.deepEqual(frame, { type: 'stop', session: 'session-one', id: frame.id,
+    generation: null, turn: 'turn-one' });
+  const restored = stopRetry(saved);
+  assert.deepEqual(restored.retry(), frame);
+  assert.deepEqual(restored.remember('session-one', null, 'turn-one').frame, frame);
+  assert.throws(() => restored.remember('session-one', null, 'turn-two'), /Resolve the saved Stop/);
+  restored.settled(frame.id);
+  assert.equal(stopRetry(saved).candidate(), null);
+});
+
 test('oversized or malformed saved Stop cannot be copied into a retry', () => {
   const saved = storage();
   saved.setItem('rook:pending-stop', 'x'.repeat(513));

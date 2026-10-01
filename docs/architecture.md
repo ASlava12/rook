@@ -370,6 +370,14 @@ replay. Goal Stop continues to use the managed goal generation and its durable
 identified control receipt; older ordinary Stop frames without a turn ID keep
 their legacy behavior.
 
+An identified ordinary Stop stores a caller ID and turn pair in the existing
+execution receipt, retaining the 64 newest pairs. The daemon commits that pair and the follow-up
+recovery pause in one session transaction before aborting the live task. Exact
+retries return an already-applied acknowledgement, including after another
+turn or daemon restart. A different turn with a retained ID is rejected. New
+socket clients include the session ID so a retry can reach an idle session
+without a live observer.
+
 Scheduled tasks are exposed through `/api/tasks`; the TUI and web views share
 this API. Each occurrence reserves a session ID durably, then creates an
 ordinary goal session. `/api/work` remains the execution and legacy

@@ -172,6 +172,10 @@ pub enum ClientMessage {
     /// the caller ID makes a retry safe after an uncertain disconnect.
     Stop {
         id: String,
+        /// Explicit destination permits an exact retry after the live observer
+        /// and its socket have disappeared. Older clients omit it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         generation: Option<String>,
         /// Observed execution turn for ordinary work. Older clients omit it.

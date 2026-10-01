@@ -2646,7 +2646,8 @@ impl App {
                             rook_store::format_session_id(session)
                         ));
                     }
-                    let _ = say.send(ClientMessage::Stop { id, generation, turn });
+                    let session = self.chat.session.map(rook_store::format_session_id);
+                    let _ = say.send(ClientMessage::Stop { id, session, generation, turn });
                     self.chat.push("stat", "[stopping]");
                 } else {
                     match self.turn.take_if(|turn| !turn.is_finished()) {

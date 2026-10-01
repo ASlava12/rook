@@ -1368,3 +1368,39 @@ compression and 5.8x end-to-end. Full `cargo xtask ci` with
 `RUST_TEST_THREADS=1` exited 0 (`ci: ok`, 744.6 seconds), including all 83 CLI
 integration tests and doctests. The Windows PTY target had zero runnable tests;
 interactive TUI behavior remains unverified on this runner.
+
+## Durable ordinary Stop receipt and retry
+
+An ordinary Stop now stores the 64 newest caller ID/turn pairs in the existing
+execution receipt, carrying them into later turns. An exact retained repeat returns
+`stop_applied` with `already_applied=true` without stopping a successor; reusing
+a retained ID for a different turn is rejected. The daemon commits the receipt and
+the frontend follow-up pause in one store transaction while both writers are
+held, then aborts the live task. A failed commit leaves no acknowledgement.
+The optional `session` field lets a fresh socket retry against an idle session
+after a daemon restart; older socket frames still work. Previous execution
+JSON decodes with an empty receipt list, and no version or postcard schema
+changed. Loading the existing execution value now enforces its 8 MiB encoded
+limit before copying it from the store. Eviction keeps long-lived sessions
+stoppable; a retry older than the retained
+window is rejected as stale once its original turn has ended.
+
+The browser saves one ordinary Stop with session, turn and caller ID before
+sending, restores it after reload, and offers the existing Retry/Discard
+controls. Ordinary retry uses the socket and waits for its acknowledgement;
+goal retry keeps its identified HTTP control route. The TUI includes session
+and turn IDs but still only retains an ordinary Stop attempt while its live
+process remains open. Live interactive browser/TUI checks and broader queue
+lifecycle coverage remain, as do branch synthesis and all five Pending rows.
+
+The first extended real-daemon run exited 1 while waiting for a mock model
+request before the Stop; that request is unrelated to the receipt boundary.
+The scenario now stops after the announced execution turn and passed on retry,
+including two turns, conflicting IDs, wrong-session refusal and exact retries
+through a new daemon. Focused core persistence and 64-entry rotation tests
+passed. Six browser tests and JavaScript syntax checks passed. Required
+`cargo xtask compaction` exited 0 with 4.02 MiB on disk, 37.1x dictionary
+compression and 5.8x end-to-end. Full `cargo xtask ci` with
+`RUST_TEST_THREADS=1` exited 0 (`ci: ok`, 743.2 seconds), including all 83 CLI
+integration tests, Clippy and doctests. The Windows PTY target still had zero
+runnable tests.

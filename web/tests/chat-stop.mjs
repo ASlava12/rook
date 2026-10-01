@@ -61,9 +61,11 @@ test('browser Stop waits for goal identity, saves before sending, and retries th
   globalThis.fetch = async () => ({ ok: true, json: async () => ({ generation: 'another-goal' }) });
   await chat.retrySavedStop();
   assert.equal(values.has('rook:pending-stop'), true, 'stale-generation retry must stay inspectable');
+  socket.receive({ type: 'stop_applied', id: socket.sent.at(-1).id, generation: socket.sent.at(-1).generation,
+    already_applied: true });
 });
 
-test('browser sends the observed ordinary turn and waits for a successor identity', () => {
+test('browser saves and retries the observed ordinary turn, then waits for a successor identity', async () => {
   state.chat.busy = true;
   state.chat.session = 'ordinary-session';
   const socket = chat.connect();
@@ -74,8 +76,14 @@ test('browser sends the observed ordinary turn and waits for a successor identit
   assert.equal(socket.sent.length, before);
   socket.receive({ type: 'turn', id: 'first-turn' });
   chat.stop();
-  assert.equal(socket.sent.at(-1).turn, 'first-turn');
-  assert.equal(socket.sent.at(-1).generation, undefined);
+  const first = socket.sent.at(-1);
+  assert.equal(first.turn, 'first-turn');
+  assert.equal(first.generation, null);
+  assert.equal(JSON.parse(values.get('rook:pending-stop')).turn, 'first-turn');
+  await chat.retrySavedStop();
+  assert.deepEqual(socket.sent.at(-1), first);
+  socket.receive({ type: 'stop_applied', id: first.id, generation: null, already_applied: true });
+  assert.equal(values.has('rook:pending-stop'), false);
   socket.receive({ type: 'follow_up', id: 'next-message' });
   const sent = socket.sent.length;
   chat.stop();

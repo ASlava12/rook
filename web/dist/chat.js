@@ -311,7 +311,7 @@ export function connect() {
       retryPrompt.disconnected();
       say('err', retryPrompt.candidate()
         ? 'disconnected; use Retry saved prompt if its delivery is uncertain' : 'disconnected');
-      if (retryStop.candidate()) say('stat', 'Stop delivery is uncertain; reconnect, inspect the goal, then use Retry saved Stop');
+      if (retryStop.candidate()) say('stat', 'Stop delivery is uncertain; reconnect, inspect the session, then use Retry saved Stop');
       done();
     }
   };
@@ -332,8 +332,12 @@ export function stop() {
   }
   if (goalGeneration === null) {
     if (!turnId) { say('err', 'Wait for the current turn identity before stopping it'); return; }
-    send({ type: 'stop', id: crypto.randomUUID(), turn: turnId });
-    say('stat', 'Stopping the observed ordinary turn');
+    try {
+      const { frame, persisted } = retryStop.remember(state.chat.session, null, turnId);
+      say('stat', `Stop ID ${frame.id} for ordinary turn ${turnId}${persisted ? '' : '; browser storage unavailable, keep this ID'}`);
+      renderStopRetry();
+      send(frame);
+    } catch (error) { say('err', String(error)); }
     return;
   }
   try {
@@ -352,6 +356,13 @@ export async function retrySavedStop() {
   if (!saved) { say('err', retryStop.error() || 'No saved Stop to retry'); return; }
   if (state.chat.session !== saved.session) {
     say('err', `Open session ${saved.session} before retrying its Stop`);
+    return;
+  }
+  if (saved.turn) {
+    try {
+      send(retryStop.retry());
+      say('stat', `Retried Stop ${saved.id} for ordinary turn ${saved.turn}; awaiting daemon acknowledgement`);
+    } catch (error) { say('err', `Saved Stop ${saved.id} still needs inspection: ${error}`); }
     return;
   }
   const path = `/api/work/${encodeURIComponent(saved.session)}`;

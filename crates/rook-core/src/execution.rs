@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::{CoreError, Result, Rook};
 
 const MAX_PENDING: usize = 64;
+const MAX_STOP_RECEIPTS: usize = 64;
 const MAX_FAMILY: usize = 256;
 const PREVIEW: usize = 2048;
 static OWNER: LazyLock<String> = LazyLock::new(|| ulid::Ulid::generate().to_string());
@@ -55,6 +56,15 @@ pub struct Execution {
     pub pending: Option<Operation>,
     pub background: Vec<Operation>,
     pub unknown: Vec<Operation>,
+    /// Caller-owned Stop IDs survive later turns in this session.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stop_receipts: Vec<StopReceipt>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StopReceipt {
+    pub id: String,
+    pub turn: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -83,34 +93,53 @@ pub(crate) fn current(rook: &Rook, session: u128) -> Result<Option<Execution>> {
     load(&rook.store, session)
 }
 
-/// Run a synchronous control only while the caller's observed execution is
-/// still this process's active turn. The reservation writer uses the same lock,
-/// so a queued follow-up cannot take ownership between the check and control.
-pub fn control_active_turn<T>(
+/// Commit an identified Stop once, even if a later turn or daemon has replaced
+/// its live owner. The callback atomically writes the updated execution and
+/// frontend follow-up pause while the reservation writer is held.
+pub fn stop_identified(
     rook: &Rook,
     session: u128,
     expected: &str,
-    control: impl FnOnce() -> Result<T>,
-) -> Result<T> {
+    id: &str,
+    commit: impl FnOnce(&str, &[u8]) -> Result<()>,
+) -> Result<bool> {
     if rook_store::parse_session_id(expected).is_none() {
         return Err(CoreError::Other("invalid observed turn ID".into()));
     }
+    if id.is_empty()
+        || id.len() > 64
+        || !id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err(CoreError::Other("invalid Stop ID".into()));
+    }
     let _writing = crate::work::receipts::WRITING.lock().unwrap_or_else(|e| e.into_inner());
-    let state = load(&rook.store, session)?;
+    let mut state = load(&rook.store, session)?
+        .ok_or_else(|| CoreError::Other("the observed ordinary turn has no execution receipt".into()))?;
+    if let Some(receipt) = state.stop_receipts.iter().find(|receipt| receipt.id == id) {
+        if receipt.turn != expected {
+            return Err(CoreError::Other("Stop ID was already used for another ordinary turn".into()));
+        }
+        return Ok(true);
+    }
     let active = ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
     let same_active =
         active.get(&(rook.store.root().to_path_buf(), session)).is_some_and(|turn| turn == expected);
-    drop(active);
-    if !same_active
-        || state
-            .as_ref()
-            .is_none_or(|state| state.status != "running" || state.owner != *OWNER || state.turn != expected)
-    {
+    if !same_active || state.status != "running" || state.owner != *OWNER || state.turn != expected {
         return Err(CoreError::Other(
             "this Stop belongs to an earlier ordinary turn; inspect the current turn".into(),
         ));
     }
-    control()
+    if state.stop_receipts.len() == MAX_STOP_RECEIPTS {
+        // A long-lived session must remain stoppable. An evicted old retry is
+        // still harmless: its turn no longer matches the active execution.
+        state.stop_receipts.remove(0);
+    }
+    state.stop_receipts.push(StopReceipt { id: id.into(), turn: expected.into() });
+    state.updated_at = rook_store::now_unix();
+    let encoded = crate::persistence::encode(&state)?;
+    commit(&key(session), &encoded)?;
+    drop(active);
+    Ok(false)
 }
 
 pub(crate) fn is_active(rook: &Rook, session: u128) -> bool {
@@ -118,9 +147,18 @@ pub(crate) fn is_active(rook: &Rook, session: u128) -> bool {
 }
 
 fn load(store: &Store, session: u128) -> Result<Option<Execution>> {
-    let Some(bytes) = store.kv_get(&key(session))? else { return Ok(None) };
+    let Some(bytes) = store.kv_get_limited(&key(session), 8 * 1024 * 1024)? else { return Ok(None) };
     let state: Execution = serde_json::from_slice(&bytes)?;
-    if state.version != 1 || state.background.len() > MAX_PENDING || state.unknown.len() > MAX_PENDING + 1 {
+    if state.version != 1
+        || state.background.len() > MAX_PENDING
+        || state.unknown.len() > MAX_PENDING + 1
+        || state.stop_receipts.len() > MAX_STOP_RECEIPTS
+        || state.stop_receipts.iter().any(|receipt| {
+            receipt.id.is_empty()
+                || receipt.id.len() > 64
+                || rook_store::parse_session_id(&receipt.turn).is_none()
+        })
+    {
         return Err(CoreError::Other(
             "unsupported or oversized execution receipt; preserve the store and inspect it before continuing"
                 .into(),
@@ -260,6 +298,7 @@ pub(crate) fn inherit(rook: &Rook, parent: u128, child: u128) -> Result<()> {
         pending: None,
         background: Vec::new(),
         unknown,
+        stop_receipts: Vec::new(),
     };
     save(&rook.store, child, &mut state)
 }
@@ -336,6 +375,7 @@ impl Journal {
             last_result_seq: None,
             pending: None,
             background: previous.as_ref().map(|s| s.background.clone()).unwrap_or_default(),
+            stop_receipts: previous.as_ref().map(|s| s.stop_receipts.clone()).unwrap_or_default(),
             unknown: previous.map(|s| s.unknown).unwrap_or_default(),
         };
         let claim = submission_key
@@ -427,6 +467,7 @@ impl Journal {
             last_result_seq: None,
             pending: None,
             background: previous.as_ref().map(|s| s.background.clone()).unwrap_or_default(),
+            stop_receipts: previous.as_ref().map(|s| s.stop_receipts.clone()).unwrap_or_default(),
             unknown: previous.map(|s| s.unknown).unwrap_or_default(),
         };
         // Protect before reserving. A crash here can leave a harmless protection
@@ -1176,9 +1217,90 @@ mod tests {
         let mut legacy = serde_json::to_value(state).unwrap();
         legacy.as_object_mut().unwrap().remove("prompt");
         legacy.as_object_mut().unwrap().remove("continuation");
+        legacy.as_object_mut().unwrap().remove("stop_receipts");
         let legacy = serde_json::from_value::<Execution>(legacy).unwrap();
         assert!(legacy.prompt.is_none());
         assert!(legacy.continuation.is_none());
+        assert!(legacy.stop_receipts.is_empty());
         assert_eq!(legacy.completion_boundary(), legacy.turn);
+    }
+
+    #[test]
+    fn identified_stop_receipts_survive_replacement_and_reopen_without_reapplication() {
+        let dir = tempfile::tempdir().unwrap();
+        let rook = engine(dir.path());
+        let session = rook.start_session("Stop receipts").unwrap();
+        let first = Journal::start(&rook, session, None, false).unwrap();
+        let commit = |key: &str, bytes: &[u8]| {
+            rook.store.kv_update_session_values(session, &[(key, bytes)])?;
+            rook.store.flush()?;
+            Ok(())
+        };
+        assert!(
+            stop_identified(&rook, session, first.turn(), "stop-1", |_, _| {
+                Err(CoreError::Other("commit failed".into()))
+            })
+            .is_err()
+        );
+        assert!(load(&rook.store, session).unwrap().unwrap().stop_receipts.is_empty());
+        assert!(!stop_identified(&rook, session, first.turn(), "stop-1", commit).unwrap());
+        first.finish("cancelled", None).unwrap();
+        let second = Journal::start(&rook, session, None, false).unwrap();
+        assert!(stop_identified(&rook, session, first.turn(), "stop-1", |_, _| panic!("reapplied")).unwrap());
+        assert!(
+            stop_identified(&rook, session, second.turn(), "stop-1", |_, _| panic!("reapplied")).is_err()
+        );
+        assert!(stop_identified(&rook, session, first.turn(), "new-stop", |_, _| panic!("stale")).is_err());
+        second.finish("cancelled", None).unwrap();
+        drop(first);
+        drop(second);
+        drop(rook);
+        let rook = engine(dir.path());
+        assert!(
+            stop_identified(
+                &rook,
+                session,
+                &load(&rook.store, session).unwrap().unwrap().stop_receipts[0].turn,
+                "stop-1",
+                |_, _| panic!("reapplied after reopen")
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn ordinary_stop_receipts_rotate_without_disabling_stop_for_long_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let rook = engine(dir.path());
+        let session = rook.start_session("bounded Stops").unwrap();
+        let journal = Journal::start(&rook, session, None, false).unwrap();
+        let mut state = load(&rook.store, session).unwrap().unwrap();
+        state.stop_receipts = (0..MAX_STOP_RECEIPTS)
+            .map(|n| StopReceipt { id: format!("stop-{n}"), turn: journal.turn().into() })
+            .collect();
+        save(&rook.store, session, &mut state).unwrap();
+        assert!(
+            stop_identified(&rook, session, journal.turn(), "stop-0", |_, _| panic!("reapplied")).unwrap()
+        );
+        journal.finish("cancelled", None).unwrap();
+        let next = Journal::start(&rook, session, None, false).unwrap();
+        assert!(
+            !stop_identified(&rook, session, next.turn(), "new-stop", |key, bytes| {
+                rook.store.kv_update_session_values(session, &[(key, bytes)])?;
+                rook.store.flush()?;
+                Ok(())
+            })
+            .unwrap()
+        );
+        let state = load(&rook.store, session).unwrap().unwrap();
+        assert_eq!(state.stop_receipts.len(), MAX_STOP_RECEIPTS);
+        assert!(!state.stop_receipts.iter().any(|receipt| receipt.id == "stop-0"));
+        assert!(state.stop_receipts.iter().any(|receipt| receipt.id == "new-stop"));
+        assert!(
+            stop_identified(&rook, session, next.turn(), "new-stop", |_, _| panic!("reapplied")).unwrap()
+        );
+        assert!(
+            stop_identified(&rook, session, journal.turn(), "stop-0", |_, _| panic!("old turn")).is_err()
+        );
     }
 }

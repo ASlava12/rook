@@ -327,7 +327,6 @@ fn socket_stop_rejects_an_earlier_ordinary_turn() {
             .unwrap();
     });
     let first = runtime.block_on(socket_event(&mut socket, "turn"))["id"].as_str().unwrap().to_owned();
-    model.next();
     runtime.block_on(async {
         socket
             .send(tokio_tungstenite::tungstenite::Message::Text(
@@ -348,8 +347,26 @@ fn socket_stop_rejects_an_earlier_ordinary_turn() {
     });
     let second = runtime.block_on(socket_event(&mut socket, "turn"))["id"].as_str().unwrap().to_owned();
     assert_ne!(first, second);
-    model.next();
     runtime.block_on(async {
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                json!({"type":"stop","id":"first-stop","session":session_id,"turn":first}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        let duplicate = socket_event(&mut socket, "stop_applied").await;
+        assert_eq!(duplicate["id"], "first-stop");
+        assert_eq!(duplicate["already_applied"], true);
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                json!({"type":"stop","id":"first-stop","session":session_id,"turn":second})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        let conflict = socket_event(&mut socket, "error").await;
+        assert!(conflict["message"].as_str().unwrap().contains("another ordinary turn"), "{conflict}");
         socket
             .send(tokio_tungstenite::tungstenite::Message::Text(
                 json!({"type":"stop","id":"late-first-stop","turn":first}).to_string().into(),
@@ -358,6 +375,11 @@ fn socket_stop_rejects_an_earlier_ordinary_turn() {
             .unwrap();
         let error = socket_event(&mut socket, "error").await;
         assert!(error["message"].as_str().unwrap().contains("earlier ordinary turn"), "{error}");
+        socket.send(tokio_tungstenite::tungstenite::Message::Text(
+            json!({"type":"stop","id":"wrong-session","session":rook_store::format_session_id(rook_store::new_session_id()),"turn":second}).to_string().into(),
+        )).await.unwrap();
+        let error = socket_event(&mut socket, "error").await;
+        assert!(error["message"].as_str().unwrap().contains("differs from the attached session"), "{error}");
         socket
             .send(tokio_tungstenite::tungstenite::Message::Text(
                 json!({"type":"stop","id":"second-stop","turn":second}).to_string().into(),
@@ -367,6 +389,29 @@ fn socket_stop_rejects_an_earlier_ordinary_turn() {
         let applied = socket_event(&mut socket, "stop_applied").await;
         assert_eq!(applied["id"], "second-stop");
         socket_event(&mut socket, "cancelled").await;
+    });
+    drop(socket);
+    drop(daemon);
+    std::fs::remove_file(rook.home.path().join("rookd.addr")).unwrap();
+    let restarted = Daemon::start(&rook);
+    runtime.block_on(async {
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!(
+            "{}/api/chat",
+            restarted.address.replacen("http", "ws", 1)
+        ))
+        .await
+        .unwrap();
+        for (id, turn) in [("first-stop", &first), ("second-stop", &second)] {
+            socket
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    json!({"type":"stop","id":id,"session":session_id,"turn":turn}).to_string().into(),
+                ))
+                .await
+                .unwrap();
+            let receipt = socket_event(&mut socket, "stop_applied").await;
+            assert_eq!(receipt["id"], id);
+            assert_eq!(receipt["already_applied"], true);
+        }
     });
 }
 
