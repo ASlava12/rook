@@ -766,7 +766,13 @@ pub async fn advance<'a>(
         }
         Ok(())
     })?;
-    rook.set_goal(session, &goal(&saved.run))?;
+    // Conversation goals are recorded with their generation at creation and
+    // updated atomically when a correction is accepted. Rewriting the goal
+    // here adds a duplicate note on every stage and can overwrite a correction
+    // accepted after this stage read its saved run.
+    if saved.run.conversation.is_none() {
+        rook.set_goal(session, &goal(&saved.run))?;
+    }
     let mut outcome = match saved.active.as_ref().and_then(|a| a.answer.clone()) {
         Some(answer) => answer,
         None => match agent.run_with(&prompt(&saved, rook), &mut progress).await {

@@ -373,6 +373,12 @@ shutdown enters the resumed model request exactly once, with its acceptance
 receipt persisted before that request. The same caller ID retrieves the
 original receipt on retry after restart.
 
+Conversation goals write the current goal and its history note when their
+generation is created. Accepted corrections update both in one transaction.
+Starting another stage reads that saved goal without writing it again; this
+also prevents a stage that read an older run from replacing a newer correction.
+Standalone work still records its effective goal in each new iteration session.
+
 Identified `/api/work/{id}/control` mutations save a bounded control ID receipt
 beside the run state under the managed-work write lock. A repeat with the same
 action and generation reads the current run without applying the control again;

@@ -1517,3 +1517,26 @@ repeat with `RUST_TEST_THREADS=1` exited 0 (`ci: ok`, 677.6 seconds; 84/84 CLI
 integration tests). The intermittent goal-note assertion remains a queue
 lifecycle gap to resolve. This block did not change storage formats, so
 compaction was not rerun.
+
+## Conversation goal note lifecycle
+
+The first-goal retry integration scenario exposed an unnecessary repeated
+`goal` note. A conversation goal already saves its generation, initial goal
+value and note atomically at admission. Accepted corrections likewise save
+their new effective goal and receipt in one transaction. Managed stage startup
+now reads those records without writing an extra goal note; standalone work
+still records its effective goal in each new iteration session. This also
+avoids a stage overwriting a correction accepted after it read its run.
+
+The real-daemon retry scenario now requires one initial `goal` note while
+checking one generation and an `already_admitted` response. The restart
+correction scenario continues to check exact-once delivery. Focused and full
+verification results follow below. The retry scenario passed once and then
+three more isolated runs; the daemon-restart correction scenario also passed.
+All five focused invocations exited 0.
+Full `cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0 (`ci: ok`,
+727.9 seconds), including 84/84 CLI integration tests. `cargo xtask compaction`
+also exited 0; the existing benchmark remained 4.02 MiB on disk, 37.1x
+dictionary compression and 5.8x end-to-end. The intermittent extra-goal-note
+assertion is addressed by the stage-write removal; other queue lifecycle and
+frontend gaps in the table remain open.

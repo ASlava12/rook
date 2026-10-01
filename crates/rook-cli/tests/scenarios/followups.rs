@@ -932,11 +932,11 @@ fn first_socket_goal_retry_keeps_one_generation_and_no_extra_goal_event() {
     let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
     let id = rook_store::parse_session_id(&session).unwrap();
     assert_eq!(store.list_sessions().unwrap().iter().filter(|entry| entry.id == id).count(), 1);
-    // Admission records the requested goal; the work iteration records its
-    // effective goal once more. A retry must not add a third note.
+    // Admission records the requested goal. Neither a stage nor a retry
+    // should add a duplicate note or overwrite a later accepted correction.
     assert_eq!(
         store.events(id, 0, 100).unwrap().iter().filter(|event| event.record.label == "goal").count(),
-        2
+        1
     );
 }
 
