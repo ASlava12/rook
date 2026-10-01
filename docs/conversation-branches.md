@@ -65,6 +65,10 @@ Through the daemon, switching changes the observed session; the previous turn
 keeps running. In the browser, **Conversation branches** is available in both
 Chat and Sessions, with separate Explore, Read history and Continue buttons.
 The REPL `/tree [session-id]` prints a page; `/session ID` continues a session.
+In the browser, **Continue in chat** on another branch first offers a reviewed
+summary. **Review summary** opens the existing editor, **Continue without
+summary** switches directly, and **Cancel** leaves the current conversation
+selected. Opening the offer does not generate a model draft or write history.
 
 To prepare a transfer, run `rook session summary-draft SOURCE TARGET` or
 `/summary-draft TARGET` in the REPL or TUI with the source conversation open.

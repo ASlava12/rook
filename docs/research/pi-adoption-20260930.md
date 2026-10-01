@@ -976,3 +976,25 @@ checks that local and real-daemon drafts exclude the shared event and agree on
 or format changed, so compaction was not rerun. The optional offer during navigation and live
 TUI/browser checks are still required for the branch row. The queue gaps and
 all Pending rows remain open.
+
+## Browser offer at branch navigation
+
+The browser's **Continue in chat** action now offers an optional summary when
+the chosen branch differs from the open one. A person can open the existing
+review editor, continue without a summary, or cancel. The offer itself makes no
+model request and writes no history; the editor still saves only after explicit
+review. Continuing the same branch remains direct. The selection keeps the
+current unsent chat draft under the existing browser behavior. A focused DOM
+interaction test covers the review and skip paths without a summary write.
+TUI/REPL navigation offers and live browser interaction are still outstanding;
+the branch row remains In progress, as do queue gaps and all Pending rows.
+
+The first full `cargo xtask ci` exited 1: an unrelated ACP tool-call test used
+a fixed four-second drain and observed only `usage_update` under the parallel
+Windows test load. The same test passed in isolation. It now waits for the
+actual `tool_call` or final response, with a 30-second deadline, and passed the
+targeted rerun. The corrected tree passed the full `cargo xtask ci` with exit
+0 (`ci: ok`, 331.2 seconds). `node --test web/tests/branch-offer.mjs
+web/tests/json-size.mjs` passed all six tests, and `node --check
+web/dist/branches.js` exited 0. Store formats and algorithms did not change,
+so compaction was not rerun for this block.

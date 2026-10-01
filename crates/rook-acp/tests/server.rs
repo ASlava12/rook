@@ -805,7 +805,20 @@ async fn a_tool_call_carries_a_name_for_a_program_and_a_title_for_a_person() {
     });
     editor.stdin.write_all(format!("{prompt}\n").as_bytes()).await.unwrap();
 
-    let seen = editor.drain(Duration::from_millis(4000)).await;
+    // Other workspace test binaries can saturate a Windows runner. Wait for the
+    // actual call rather than assuming it will arrive during a fixed 4s drain.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let mut seen = Vec::new();
+    while let Ok(Ok(Some(line))) = tokio::time::timeout_at(deadline, editor.lines.next_line()).await {
+        if let Ok(message) = serde_json::from_str::<serde_json::Value>(&line) {
+            let announced = message["params"]["update"]["sessionUpdate"] == "tool_call";
+            let finished = message["id"] == 3;
+            seen.push(message);
+            if announced || finished {
+                break;
+            }
+        }
+    }
     let call = seen
         .iter()
         .find(|m| m["params"]["update"]["sessionUpdate"] == "tool_call")

@@ -18,6 +18,7 @@ export function branchPanel(session, continueBranch, quote, forkEvent, renamed) 
     const title = (node.title || '(untitled)') + (node.title_truncated ? '…' : '');
     const position = node.forked_at == null ? (node.parent && !node.delegated ? ' · boundary unknown' : '') : node.delegated ? ` · delegated at #${node.forked_at}` : ` · fork before #${node.forked_at}`;
     const edit = el('div', { class: 'row' });
+    let reviewSummary;
     const heading = el('div', { class: 'hd' }, `${selected ? 'Selected: ' : ''}${title}${node.delegated ? ' · delegated task' : ''}${position}`);
     const article = el('article', { class: 'entry', style: `margin-left:${Math.min(depth, 8)}rem`, 'aria-label': `Branch ${title}` },
       heading,
@@ -27,8 +28,16 @@ export function branchPanel(session, continueBranch, quote, forkEvent, renamed) 
         if (!pending) history.replaceChildren(historyPanel(node.id, text => quote(node.id, text), undefined,
           forkEvent ? seq => forkEvent(node.id, seq) : undefined));
       }),
-      button('Continue in chat', () => { if (!pending) continueBranch(node.id); }),
-      button('Carry reviewed summary', () => {
+      button('Continue in chat', () => {
+        if (pending) return;
+        if (!departed || node.id === departed) return continueBranch(node.id);
+        edit.replaceChildren(el('p', { class: 'sub' },
+          `Carry a reviewed summary of ${departed} into ${node.id}? Historical file and test claims need verification in the current workspace.`),
+        button('Review summary', () => reviewSummary()),
+        button('Continue without summary', () => { if (!pending) continueBranch(node.id); }),
+        button('Cancel', () => edit.replaceChildren()));
+      }),
+      button('Carry reviewed summary', reviewSummary = () => {
         if (pending || !departed || node.id === departed) return;
         const input = el('textarea', { rows: 5, 'aria-label': `Summary of departed branch ${departed}` });
         let sourceThrough = null;
