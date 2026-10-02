@@ -1,0 +1,10 @@
+param([Parameter(Mandatory)][string]$Workspace)
+$ErrorActionPreference='Stop'
+[Console]::InputEncoding=[Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
+$null=[Console]::ReadLine()
+[Console]::WriteLine('{"ui":[{"kind":"status","id":"stream","text":"FORM_DISPLAY_ONLY"}]}')
+[Console]::WriteLine('{"form":{"id":"setup","title":"Typed extension setup","fields":[{"kind":"text","id":"name","label":"Name"},{"kind":"select","id":"target","label":"Target","choices":["local","remote"]},{"kind":"confirm","id":"confirm","label":"Continue"},{"kind":"integer","id":"count","label":"Count","min":1,"max":10}]}}')
+$taskAnswer=[Console]::ReadLine()
+[IO.File]::WriteAllText((Join-Path $Workspace 'hook-answer.json'),$taskAnswer)
+[Console]::WriteLine('{"reply":{"context":"EXPLICIT_FINAL_CONTEXT"}}')

@@ -55,15 +55,20 @@ export function promptRetry(suppliedStorage) {
       else this.disconnected();
     },
     admitted(id, session) {
-      if (inFlight && pending?.id === id && startedSession !== null && startedSession === session) {
-        this.settled();
+      // Recovery may deliver the durable receipt after the sending socket is
+      // gone. Its exact caller/session proves admission without a new send;
+      // an ordinary Done still cannot settle an uncertain prompt.
+      if (pending && pending.id === id && typeof session === 'string' && session.length > 0 &&
+          (pending.session === null || pending.session === session) &&
+          (startedSession === null || startedSession === session)) {
+        this.discard();
       }
     },
     disconnected() { inFlight = false; startedSession = null; },
     saved(admission) {
-      if (inFlight && pending?.id === admission?.id && typeof admission.session === 'string' && admission.session.length > 0 &&
+      if (pending && pending.id === admission?.id && typeof admission.session === 'string' && admission.session.length > 0 &&
           (pending.session === null || pending.session === admission.session) &&
-          (startedSession === null || startedSession === admission.session)) this.settled();
+          (startedSession === null || startedSession === admission.session)) this.discard();
     },
     settled() { if (inFlight) { pending = null; inFlight = false; startedSession = null; persist(); } },
     discard() { pending = null; inFlight = false; startedSession = null; persist(); },

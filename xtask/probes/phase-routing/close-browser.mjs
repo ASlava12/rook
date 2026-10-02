@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-const root=fs.readFileSync('target/phase-live-browser-root.txt','utf8').trim();
+const root=process.argv[2] || fs.readFileSync('target/phase-live-browser-root.txt','utf8').trim();
 const port=fs.readFileSync(path.join(root,'edge/DevToolsActivePort'),'utf8').split('\n')[0];
 const version=await(await fetch(`http://127.0.0.1:${port}/json/version`)).json();
 const socket=new WebSocket(version.webSocketDebuggerUrl);

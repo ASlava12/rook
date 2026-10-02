@@ -26,9 +26,7 @@ test('saved goal admission precedes Started and never binds an unrelated caller 
   pending.saved({session:'target', id:'caller'});
   assert.ok(pending.candidate());
   pending.disconnected();pending.saved({session:'source', id:'caller'});
-  assert.ok(pending.candidate(), 'uncertain sends require explicit retry');
-  pending.retry();pending.saved({session:'source', id:'caller'});
-  assert.equal(pending.candidate(), null);
+  assert.equal(pending.candidate(), null, 'the exact durable receipt settles an uncertain send without resending it');
   pending.remember({...frame, session:'target', id:'successor'});
   pending.saved({session:'source', id:'caller'});
   assert.equal(pending.candidate().id,'successor', 'a late source receipt cannot settle the target prompt');
@@ -38,9 +36,6 @@ test('durable admission frees a prompt before completion only for its exact call
   const saved = storage();
   const pending = promptRetry(saved);
   pending.remember({ type: 'prompt', session: 'one', id: 'caller', text: 'original', options: {} });
-  pending.admitted('caller', 'one');
-  assert.ok(pending.candidate(), 'a receipt without the matching start is insufficient');
-  pending.started('one');
   pending.admitted('other', 'one');
   pending.admitted('caller', 'two');
   assert.ok(pending.candidate(), 'unrelated receipts preserve the retry');
@@ -53,7 +48,24 @@ test('durable admission frees a prompt before completion only for its exact call
   assert.equal(pending.candidate().id, 'new', 'a late old receipt cannot clear the new prompt');
   pending.disconnected();
   pending.admitted('new', 'two');
-  assert.equal(pending.candidate().id, 'new', 'an unobserved receipt cannot settle an uncertain send');
+  assert.equal(pending.candidate(), null, 'the exact durable receipt recovered after disconnect settles admission');
+  assert.equal(promptRetry(saved).candidate(), null);
+});
+
+test('a recovered receipt acknowledges a new-session prompt without acknowledging unrelated endings', () => {
+  const saved = storage(), first = promptRetry(saved);
+  first.remember({type:'prompt', session:null, id:'new-session-caller', text:'original', options:{}});
+  first.started('created');first.disconnected();
+  const recovered = promptRetry(saved);
+  recovered.saved(null);recovered.admitted(undefined, 'created');
+  recovered.completed('created');
+  assert.ok(recovered.candidate(), 'an ending without caller identity is insufficient');
+  recovered.admitted('other', 'created');
+  assert.ok(recovered.candidate());
+  recovered.admitted('new-session-caller', 'created');
+  assert.equal(recovered.candidate(), null);
+  assert.equal(promptRetry(saved).candidate(), null);
+  recovered.saved(null);recovered.admitted(undefined, 'created');
 });
 
 test('an uncertain prompt reloads with its original frame and retry identity', () => {

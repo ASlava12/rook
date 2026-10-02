@@ -16,6 +16,8 @@ use tokio::io::AsyncWriteExt;
 
 use rook_tools::policy::{Decision, Rule};
 
+mod interactive;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Event {
@@ -59,11 +61,20 @@ pub struct HookConfig {
     pub timeout_secs: u64,
     /// Accept bounded display-only declarations in the reply's `ui` array.
     pub ui: bool,
+    /// Newline-delimited UI frames and typed form replies over stdin.
+    pub ui_stream: bool,
 }
 
 impl Default for HookConfig {
     fn default() -> Self {
-        Self { event: Event::PostTool, matches: None, command: String::new(), timeout_secs: 30, ui: false }
+        Self {
+            event: Event::PostTool,
+            matches: None,
+            command: String::new(),
+            timeout_secs: 30,
+            ui: false,
+            ui_stream: false,
+        }
     }
 }
 
@@ -129,7 +140,8 @@ impl Hooks {
     /// The first denial stops the rest: once the answer is no, running further
     /// commands only delays it.
     pub async fn run(&self, event: Event, subject: &str, payload: &serde_json::Value) -> Outcome {
-        self.run_with_ui(event, subject, payload, &crate::extension_ui::Settings::default(), |_| {}).await
+        self.run_with_ui(event, subject, payload, &crate::extension_ui::Settings::default(), None, |_| {})
+            .await
     }
 
     pub(crate) fn has_ui(&self) -> bool {
@@ -142,6 +154,7 @@ impl Hooks {
         subject: &str,
         payload: &serde_json::Value,
         settings: &crate::extension_ui::Settings,
+        asker: Option<&dyn rook_tools::ask::Asker>,
         mut on_ui: impl FnMut(crate::extension_ui::Batch),
     ) -> Outcome {
         let mut outcome = Outcome::default();
@@ -155,7 +168,7 @@ impl Hooks {
                 continue;
             }
 
-            let reply = match invoke(config, payload, *ordinal, settings, &mut on_ui).await {
+            let reply = match invoke(config, payload, *ordinal, settings, asker, &mut on_ui).await {
                 Ok(reply) => reply,
                 Err(e) => {
                     tracing::warn!("hook {:?} failed: {e}", config.command);
@@ -228,8 +241,14 @@ async fn invoke(
     payload: &serde_json::Value,
     ordinal: usize,
     settings: &crate::extension_ui::Settings,
+    asker: Option<&dyn rook_tools::ask::Asker>,
     on_ui: &mut impl FnMut(crate::extension_ui::Batch),
 ) -> std::io::Result<HookReply> {
+    if config.ui_stream {
+        // Optional form state must not enlarge every enclosing agent/delegation
+        // future, including turns without UI hooks, on Windows' small stacks.
+        return Box::pin(interactive::invoke(config, payload, ordinal, settings, asker, on_ui)).await;
+    }
     let input = crate::extension_ui::encoded(payload, 8 * 1024 * 1024)?;
     let mut command = shell(&config.command);
     rook_contain::on_its_own(command.as_std_mut());
@@ -254,7 +273,7 @@ async fn invoke(
             tokio::join!(feed, bounded(&mut out), bounded(&mut err), child.wait());
         (status, stdout, stderr)
     };
-    let (status, (stdout, truncated), (stderr, _)) =
+    let (status, (stdout, truncated, _), (stderr, _, _)) =
         tokio::time::timeout(Duration::from_secs(config.timeout_secs), finished).await.map_err(|_| {
             std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
@@ -305,18 +324,20 @@ async fn invoke(
 /// Not `take`: stopping the read leaves the writer blocked on a full pipe, so a
 /// hook that printed more than the cap would never exit and every one of them
 /// would end at its timeout. The pipe is drained; only the memory is bounded.
-async fn bounded(stream: &mut Option<impl tokio::io::AsyncRead + Unpin>) -> (String, bool) {
+async fn bounded(stream: &mut Option<impl tokio::io::AsyncRead + Unpin>) -> (String, bool, u64) {
     use tokio::io::AsyncReadExt;
-    let Some(stream) = stream else { return (String::new(), false) };
+    let Some(stream) = stream else { return (String::new(), false, 0) };
     let (mut kept, mut chunk) = (Vec::new(), vec![0u8; 16 * 1024]);
     let mut truncated = false;
+    let mut bytes = 0u64;
     while let Ok(n) = stream.read(&mut chunk).await {
         if n == 0 {
             break;
         }
         let room = MOST_REPLY_BYTES.saturating_sub(kept.len());
+        bytes = bytes.saturating_add(n as u64);
         truncated |= n > room;
         kept.extend_from_slice(&chunk[..n.min(room)]);
     }
-    (String::from_utf8_lossy(&kept).trim().to_string(), truncated)
+    (String::from_utf8_lossy(&kept).trim().to_string(), truncated, bytes)
 }

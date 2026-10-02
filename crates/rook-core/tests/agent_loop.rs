@@ -2336,6 +2336,138 @@ async fn extension_ui_truncation_is_refused_and_oversized_input_never_starts_a_h
     assert!(!marker.exists());
 }
 
+fn extension_stream_hook(workspace: &std::path::Path) -> rook_core::hooks::HookConfig {
+    let form = r#"{"form":{"id":"setup","title":"Typed extension setup","fields":[{"kind":"text","id":"name","label":"Name"},{"kind":"select","id":"target","label":"Target","choices":["local","remote"]},{"kind":"confirm","id":"confirm","label":"Continue"},{"kind":"integer","id":"count","label":"Count","min":1,"max":10}]}}"#;
+    let display = r#"{"ui":[{"kind":"status","id":"stream","text":"FORM_DISPLAY_ONLY"}]}"#;
+    let reply = r#"{"reply":{"context":"EXPLICIT_FINAL_CONTEXT"}}"#;
+    let answer = workspace.join("hook-answer.json");
+    let path = workspace.join(if cfg!(windows) { "hook.ps1" } else { "hook.sh" });
+    let (script, command) = if cfg!(windows) {
+        (
+            format!(
+                "$null=[Console]::ReadLine()\n[Console]::WriteLine('{display}')\n[Console]::WriteLine('{form}')\n$taskAnswer=[Console]::ReadLine()\n[IO.File]::WriteAllText('{}',$taskAnswer)\n[Console]::WriteLine('{reply}')\n",
+                answer.display().to_string().replace('\'', "''")
+            ),
+            format!("powershell -NoProfile -ExecutionPolicy Bypass -File \"{}\"", path.display()),
+        )
+    } else {
+        (
+            format!(
+                "IFS= read -r payload\nprintf '%s\\n' '{display}'\nprintf '%s\\n' '{form}'\nIFS= read -r answer || true\nprintf '%s' \"$answer\" > '{}'\nprintf '%s\\n' '{reply}'\n",
+                answer.display().to_string().replace('\'', "'\\''")
+            ),
+            format!("sh '{}'", path.display().to_string().replace('\'', "'\\''")),
+        )
+    };
+    std::fs::write(&path, script).unwrap();
+    rook_core::hooks::HookConfig {
+        ui: true,
+        ui_stream: true,
+        timeout_secs: 5,
+        ..hook(rook_core::hooks::Event::Prompt, &command)
+    }
+}
+
+#[tokio::test]
+async fn extension_stream_forms_use_live_input_and_keep_typed_values_out_of_model_and_saved_reports() {
+    use rook_tools::ask::ChannelAsker;
+    let f = fixture();
+    let rook = Arc::new(hooked(&f, vec![extension_stream_hook(f.workspace.path())]));
+    let session = rook.start_session("typed forms").unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let asker = Arc::new(ChannelAsker::new(tx, std::time::Duration::from_secs(30), Default::default()));
+    let provider = ScriptedProvider::new(vec![reply("done")]);
+    let seen = provider.share();
+    let run = tokio::spawn({
+        let rook = rook.clone();
+        let asker = asker.clone();
+        async move {
+            let mut agent = AgentLoop::new(&rook, Arc::new(provider), session);
+            agent.ask_via(asker);
+            agent.run("Use the extension form").await
+        }
+    });
+    let request = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv()).await.unwrap().unwrap();
+    assert_eq!(request.questions.len(), 4);
+    assert!(
+        request
+            .questions
+            .iter()
+            .all(|q| q.question.contains("Extension hook prompt #1") && q.question.contains("form setup"))
+    );
+    assert!(
+        rook.context_usage(session, None).unwrap().extension_ui.describe().contains("waiting for an answer")
+    );
+    // The command's five-second patience must not run while a person answers.
+    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+    assert_eq!(asker.current().len(), 1);
+    asker.answer(
+        &request.id,
+        vec![vec!["PRIVATE_TYPED_VALUE".into()], vec!["remote".into()], vec!["No".into()], vec!["7".into()]],
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(10), run).await.unwrap().unwrap().unwrap();
+    assert!(asker.current().is_empty());
+    let answer: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(f.workspace.path().join("hook-answer.json")).unwrap()).unwrap();
+    assert_eq!(answer["form_answer"]["status"], "answered");
+    assert_eq!(
+        answer["form_answer"]["values"],
+        serde_json::json!({"name":"PRIVATE_TYPED_VALUE","target":"remote","confirm":false,"count":7})
+    );
+    let sent: String =
+        seen.lock().unwrap().last().unwrap().messages.iter().map(|m| m.content.clone()).collect();
+    assert!(sent.contains("EXPLICIT_FINAL_CONTEXT"));
+    assert!(!sent.contains("PRIVATE_TYPED_VALUE") && !sent.contains("FORM_DISPLAY_ONLY"));
+    let saved = rook.context_usage(session, None).unwrap().extension_ui;
+    assert!(saved.describe().contains("Typed extension setup · answered"));
+    assert!(!serde_json::to_string(&saved).unwrap().contains("PRIVATE_TYPED_VALUE"));
+    assert!(
+        !rook
+            .transcript(session, 0, 200, 16384)
+            .unwrap()
+            .iter()
+            .any(|e| e.body.contains("PRIVATE_TYPED_VALUE"))
+    );
+}
+
+#[tokio::test]
+async fn extension_stream_cancellation_releases_input_and_records_interruption_without_delivering_an_answer()
+{
+    use rook_tools::ask::ChannelAsker;
+    let f = fixture();
+    let rook = Arc::new(hooked(&f, vec![extension_stream_hook(f.workspace.path())]));
+    let session = rook.start_session("cancel form").unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let asker = Arc::new(ChannelAsker::new(tx, std::time::Duration::from_secs(30), Default::default()));
+    let run = tokio::spawn({
+        let rook = rook.clone();
+        let asker = asker.clone();
+        async move {
+            let mut agent =
+                AgentLoop::new(&rook, Arc::new(ScriptedProvider::new(vec![reply("not reached")])), session);
+            agent.ask_via(asker);
+            agent.run("Wait for a form answer").await
+        }
+    });
+    let request = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv()).await.unwrap().unwrap();
+    run.abort();
+    assert!(run.await.unwrap_err().is_cancelled());
+    assert!(asker.current().is_empty());
+    asker.answer(&request.id, vec![vec!["late answer".into()]]);
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    assert!(
+        !f.workspace.path().join("hook-answer.json").exists(),
+        "a surviving extension would write even EOF as an answer"
+    );
+    assert!(
+        rook.context_usage(session, None)
+            .unwrap()
+            .extension_ui
+            .describe()
+            .contains("Typed extension setup · interrupted")
+    );
+}
+
 /// A hook command that keeps the payload it was handed, so a test can assert on
 /// the payload itself. Deliberately a shell builtin rather than an interpreter:
 /// a stock Windows and a stock FreeBSD have no `python3`.

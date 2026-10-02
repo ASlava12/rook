@@ -199,6 +199,175 @@ fn extension_ui_reports_survive_native_local_and_daemon_reopen_and_saved_prefix_
     }
 }
 
+fn extension_form_config(rook: &Rook, url: &str) -> String {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../xtask/probes/extension-ui")
+        .canonicalize()
+        .unwrap();
+    let command = if cfg!(windows) {
+        format!(
+            "powershell -NoProfile -ExecutionPolicy Bypass -File \"{}\" -Workspace \"{}\"",
+            root.join("hook.ps1").display(),
+            rook.workspace.path().display()
+        )
+    } else {
+        format!(
+            "sh {} {}",
+            shlex::try_quote(&root.join("hook.sh").display().to_string()).unwrap(),
+            shlex::try_quote(&rook.workspace.path().display().to_string()).unwrap()
+        )
+    };
+    format!(
+        "[agent]\nmodel='initial'\ninstall_servers=false\none_script=false\nplan_first=false\n[models.initial]\napi='openai'\nmodel='initial-model'\nurl='{url}'\ncontext_window=32768\n[[hooks]]\nevent='prompt'\nui=true\nui_stream=true\ntimeout_secs=5\ncommand={}\n",
+        serde_json::to_string(&command).unwrap()
+    )
+}
+
+#[test]
+fn extension_forms_use_native_unavailable_fallback_and_daemon_answer_reconnect_and_stop_paths() {
+    rook_llm::init_tls();
+    for case in ["unavailable", "answer", "reconnect", "stop", "unanswered"] {
+        let _local = (case == "unavailable").then(one_at_a_time);
+        let rook = Rook::new();
+        let model = Model::new();
+        model.release.store(16, Ordering::SeqCst);
+        rook.write_config(&extension_form_config(&rook, &model.url));
+        if case == "unavailable" {
+            let outcome = rook.json(&["run", "Use the extension."]);
+            let id = outcome["session"].as_str().unwrap();
+            let answer: Value = serde_json::from_slice(
+                &std::fs::read(rook.workspace.path().join("hook-answer.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(answer["form_answer"]["status"], "unavailable");
+            assert!(answer["form_answer"]["values"].is_null());
+            assert!(
+                rook.json(&["session", "context", id])["extension_ui"].to_string().contains("unavailable")
+            );
+            assert!(!model.next()["messages"].to_string().contains("FORM_DISPLAY_ONLY"));
+            continue;
+        }
+        let session = rook_store::new_session_id();
+        let id = rook_store::format_session_id(session);
+        {
+            let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+            store
+                .create_session(&rook_store::SessionMeta::new(
+                    session,
+                    "native extension form",
+                    rook.workspace.path().display().to_string(),
+                    rook_store::now_unix(),
+                ))
+                .unwrap();
+            store.flush().unwrap();
+        }
+        let daemon = Daemon::start(&rook);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let url = format!("{}/api/chat", daemon.address.replacen("http", "ws", 1));
+        let prompt =
+            json!({"type":"prompt","session":id,"id":"extension-prompt","text":"Use the extension."});
+        let mut socket = runtime.block_on(async {
+            let (mut socket, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+            socket
+                .send(tokio_tungstenite::tungstenite::Message::Text(prompt.to_string().into()))
+                .await
+                .unwrap();
+            socket
+        });
+        let turn = runtime.block_on(socket_event(&mut socket, "turn"))["id"].as_str().unwrap().to_string();
+        let mut ask = runtime.block_on(socket_event(&mut socket, "ask"));
+        assert_eq!(ask["questions"].as_array().unwrap().len(), 4);
+        assert!(
+            ask["questions"].as_array().unwrap().iter().all(|q| q["question"]
+                .as_str()
+                .unwrap()
+                .contains("Extension hook prompt #1")
+                && q["question"].as_str().unwrap().contains("form setup"))
+        );
+        let waiting = rook.json(&["session", "context", &id])["extension_ui"].clone();
+        assert!(waiting.to_string().contains("waiting for an answer"));
+        assert!(model.requests.try_recv().is_err());
+        if case == "reconnect" {
+            runtime.block_on(socket.close(None)).unwrap();
+            socket = runtime.block_on(async {
+                let (mut socket, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+                socket
+                    .send(tokio_tungstenite::tungstenite::Message::Text(prompt.to_string().into()))
+                    .await
+                    .unwrap();
+                socket
+            });
+            let replayed = runtime.block_on(socket_event(&mut socket, "ask"));
+            assert_eq!(replayed, ask);
+            ask = replayed;
+            assert_eq!(
+                rook.json(&["session", "context", &id])["extension_ui"],
+                waiting,
+                "reconnect reuses the existing question and reports"
+            );
+        }
+        if case == "stop" {
+            runtime.block_on(async {
+                socket
+                    .send(tokio_tungstenite::tungstenite::Message::Text(
+                        json!({"type":"stop","id":"form-stop","turn":turn}).to_string().into(),
+                    ))
+                    .await
+                    .unwrap();
+                socket_event(&mut socket, "stop_applied").await;
+                socket_event(&mut socket, "cancelled").await;
+            });
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !rook.json(&["session", "context", &id])["extension_ui"].to_string().contains("interrupted")
+            {
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            assert!(!rook.workspace.path().join("hook-answer.json").exists());
+            assert!(model.requests.try_recv().is_err());
+            continue;
+        }
+        let answers = if case == "unanswered" {
+            json!([[], [], [], []])
+        } else {
+            json!([["PRIVATE_NATIVE_INPUT"], ["remote"], ["No"], ["7"]])
+        };
+        runtime.block_on(async {
+            socket
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    json!({"type":"answers","id":ask["id"],"answers":answers}).to_string().into(),
+                ))
+                .await
+                .unwrap();
+            socket_event(&mut socket, "done").await;
+        });
+        let answer: Value =
+            serde_json::from_slice(&std::fs::read(rook.workspace.path().join("hook-answer.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            answer["form_answer"]["status"],
+            if case == "unanswered" { "unanswered" } else { "answered" }
+        );
+        if case != "unanswered" {
+            assert_eq!(
+                answer["form_answer"]["values"],
+                json!({"name":"PRIVATE_NATIVE_INPUT","target":"remote","confirm":false,"count":7})
+            );
+        }
+        let request = model.next();
+        assert!(request["messages"].to_string().contains("EXPLICIT_FINAL_CONTEXT"));
+        assert!(
+            !request["messages"].to_string().contains("PRIVATE_NATIVE_INPUT")
+                && !request["messages"].to_string().contains("FORM_DISPLAY_ONLY")
+        );
+        assert!(
+            !rook.json(&["session", "context", &id])["extension_ui"]
+                .to_string()
+                .contains("PRIVATE_NATIVE_INPUT")
+        );
+    }
+}
+
 async fn get(client: &reqwest::Client, url: &str) -> Value {
     client.get(url).send().await.unwrap().error_for_status().unwrap().json().await.unwrap()
 }

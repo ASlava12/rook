@@ -592,6 +592,10 @@
     "kind": "string",
     "help": "Shell command executed for the chosen event. Receives event JSON on stdin."
   },
+  "hooks.*.ui_stream": {
+    "kind": "boolean",
+    "help": "Enable newline-delimited display frames and typed forms; requires ui=true. User input uses the existing question channel. Command inactivity timeouts pause while waiting for the user."
+  },
   "hooks.*.ui": {
     "kind": "boolean",
     "help": "Accept bounded display-only status/progress/result declarations from this hook. Default off. Enabled replies must be complete JSON; reports never grant permission or enter model context."
@@ -792,7 +796,7 @@
   },
   "extension_ui.max_entries": {
     "kind": "integer",
-    "help": "Maximum items per declaration and retained extension reports, 1–128; default 32. Omitted updates are reported explicitly."
+    "help": "Maximum items per declaration, retained extension reports and frames per streamed hook, 1–128; default 32. Omitted updates are reported explicitly."
   },
   "extension_ui.max_state_bytes": {
     "kind": "integer",

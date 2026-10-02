@@ -5,6 +5,8 @@ use std::io::Write;
 
 use serde::{Deserialize, Serialize};
 
+pub(crate) mod forms;
+
 pub(crate) const LABEL: &str = "rook:extension-ui:v1";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

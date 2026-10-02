@@ -65,6 +65,7 @@ pub struct Pending<Q, A> {
     /// had answered and then waited out the whole timeout for nothing.
     waiting: Mutex<BTreeMap<String, Entry<Q, A>>>,
     next_id: AtomicU64,
+    epoch: String,
     patience: Duration,
     limits: Limits,
     changed: tokio::sync::watch::Sender<u64>,
@@ -79,7 +80,15 @@ impl<Q, A> Pending<Q, A> {
             max_bytes: limits.max_bytes.clamp(4096, 32 * 1024 * 1024),
         };
         let (changed, _) = tokio::sync::watch::channel(0);
-        Self { requests, waiting: Default::default(), next_id: AtomicU64::new(1), patience, limits, changed }
+        Self {
+            requests,
+            waiting: Default::default(),
+            next_id: AtomicU64::new(1),
+            epoch: ulid::Ulid::generate().to_string(),
+            patience,
+            limits,
+            changed,
+        }
     }
 
     pub fn changes(&self) -> tokio::sync::watch::Receiver<u64> {
@@ -111,7 +120,7 @@ impl<Q, A> Pending<Q, A> {
     where
         Q: Clone + Serialize,
     {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed).to_string();
+        let id = format!("{}-{}", self.epoch, self.next_id.fetch_add(1, Ordering::Relaxed));
         let (tx, rx) = oneshot::channel();
         let request = build(id.clone());
         let mut counted = Count { bytes: 0, limit: self.limits.max_bytes };
@@ -194,6 +203,30 @@ impl<Q, A> Drop for Waiting<'_, Q, A> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn new_channels_never_reuse_an_old_request_id_or_accept_its_late_answer() {
+        let (send, mut requests) = tokio::sync::mpsc::unbounded_channel();
+        let old = Pending::<String, bool>::new(send, Duration::from_secs(60), Limits::default());
+        let mut asking = Box::pin(old.ask(|id| id));
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(asking.as_mut().poll(cx).is_pending())).await
+        );
+        let old_id = requests.recv().await.unwrap();
+        drop(asking);
+        let (send, mut requests) = tokio::sync::mpsc::unbounded_channel();
+        let current = Pending::<String, bool>::new(send, Duration::from_secs(60), Limits::default());
+        let mut asking = Box::pin(current.ask(|id| id));
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(asking.as_mut().poll(cx).is_pending())).await
+        );
+        let current_id = requests.recv().await.unwrap();
+        assert_ne!(old_id, current_id);
+        current.answer(&old_id, true);
+        assert!(current.is_waiting());
+        current.answer(&current_id, false);
+        assert!(!asking.await.unwrap());
+    }
 
     #[tokio::test]
     async fn cancelling_a_question_removes_its_pending_entry() {

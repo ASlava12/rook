@@ -167,9 +167,9 @@ function clearPendingCalls() {
   pendingCalls = [];
 }
 
-function done() {
+function done(keepInputs = false) {
   clearPendingCalls();
-  retainedInputs.clear();
+  if (!keepInputs) retainedInputs.clear();
   state.chat.busy = false;
   state.chat.waiting = false;
   current = null;
@@ -178,7 +178,9 @@ function done() {
   // says so — the terminal had the same fault, where it was worse, because an
   // approval there holds the keyboard.
   for (const open of document.querySelectorAll('.approve, .ask-form')) {
-    open.replaceWith(el('div', { class: 'stat' }, 'the turn ended, so what it was waiting for is gone'));
+    if (keepInputs) {
+      for (const control of open.querySelectorAll('input, button')) control.disabled = true;
+    } else open.replaceWith(el('div', { class: 'stat' }, 'the turn ended, so what it was waiting for is gone'));
   }
   setTitle();
   const send = $('#send'), stop = $('#stop');
@@ -345,6 +347,8 @@ export function connect() {
   // opened again. Asking is how it finds out; before the turn outlived the
   // socket there was nothing to ask about.
   socket.addEventListener('open', () => {
+    const reconnect = $('#reconnect-chat');
+    if (socket === connection && reconnect) reconnect.hidden = true;
     if (socket === connection && state.chat.session) connection.send(JSON.stringify({ type: 'attach', session: state.chat.session }));
   }, { once: true });
   socket.onclose = () => {
@@ -353,7 +357,9 @@ export function connect() {
       say('err', retryPrompt.candidate()
         ? 'disconnected; use Retry saved prompt if its delivery is uncertain' : 'disconnected');
       if (retryStop.candidate()) say('stat', 'Stop delivery is uncertain; reconnect, inspect the session, then use Retry saved Stop');
-      done();
+      done(true);
+      const reconnect = $('#reconnect-chat');
+      if (reconnect) reconnect.hidden = false;
     }
   };
   return socket;
@@ -439,22 +445,33 @@ function answered() {
 
 // A recovered request with the same id is the same form. Keep partially typed
 // answers and selected choices while replacing the surrounding live transcript.
-function reuseInput(kind, id) {
+function inputShape(value) {
+  return jsonWithin(value, 65536) ? JSON.stringify(value) : null;
+}
+
+function reuseInput(kind, id, shape) {
   const key = `${kind}:${id}`, out = chatOut();
   if (!out) return false;
   const existing = [...out.querySelectorAll('[data-input-key]')]
     .find(node => node.dataset.inputKey === key);
   const kept = existing || retainedInputs.get(key);
   if (!kept) return false;
+  if (shape === null || (shape && kept.dataset.inputShape !== shape)) {
+    kept.replaceWith(el('div', { class: 'stat' }, 'request changed; previous draft discarded'));
+    retainedInputs.delete(key);
+    return false;
+  }
   retainedInputs.delete(key);
   if (!existing) out.append(kept);
+  for (const control of kept.querySelectorAll('input, button')) control.disabled = false;
   state.chat.waiting = true;
   setTitle();
   return true;
 }
 
 function askApproval(request) {
-  if (reuseInput('approval', request.id)) return;
+  const shape = inputShape(request);
+  if (reuseInput('approval', request.id, shape)) return;
   waitingOn(`${request.tool} wants to ${request.action}`);
   const decide = (decision) => {
     send({ type: 'approval', id: request.id, decision });
@@ -472,13 +489,14 @@ function askApproval(request) {
     el('button', { onclick: () => decide('for_run') }, 'Always this one'),
     ...(kinds ? [el('button', { onclick: () => decide('kind_for_run') }, `Every ${kinds}`)] : []),
     el('button', { onclick: () => decide('deny') }, 'Deny'));
-  if (box) box.dataset.inputKey = `approval:${request.id}`;
+  if (box) { box.dataset.inputKey = `approval:${request.id}`; box.dataset.inputShape = shape || ''; }
 }
 
 // One form for every question in the call: the agent asked them together
 // because they are independent, and a chain of dialogs would undo that.
 function askUser(request) {
-  if (reuseInput('question', request.id)) return;
+  const shape = inputShape(request.questions);
+  if (reuseInput('question', request.id, shape)) return;
   waitingOn(request.questions[0] ? request.questions[0].question : 'a question');
   const fields = request.questions.map((q, i) => {
     const name = `q${request.id}_${i}`;
@@ -509,6 +527,7 @@ function askUser(request) {
     el('button', { type: 'submit' }, 'Answer'),
     el('button', { type: 'button', onclick: () => submit(request.questions.map(() => [])) }, 'Skip'));
   form.dataset.inputKey = `question:${request.id}`;
+  form.dataset.inputShape = shape || '';
   const out = chatOut();
   if (out) { out.append(form); out.scrollTop = out.scrollHeight; }
 }
@@ -714,6 +733,8 @@ export async function renderChat() {
   const discardStopButton = el('button', { id: 'discard-stop', type: 'button', hidden: true,
     onclick: () => { retryStop.discard(); renderStopRetry(); } }, 'Discard saved Stop');
   const stopButton = el('button', { id: 'stop', type: 'button', hidden: true, onclick: stop }, 'Stop');
+  const reconnectButton = el('button', { id: 'reconnect-chat', type: 'button', hidden: true,
+    onclick: () => connect() }, 'Reconnect');
 
   let loadingAttachments = false;
   const attachmentsInput = el('input', { id: 'attachments', type: 'file', multiple: true, 'aria-label': 'Images or UTF-8 context files' });
@@ -857,7 +878,7 @@ export async function renderChat() {
     say('you', `› ${text}`);
     working();
   } }, input, sendButton, followupButton, retryButton, discardButton,
-  retryStopButton, discardStopButton, stopButton);
+  retryStopButton, discardStopButton, stopButton, reconnectButton);
   // Naming a file meant knowing the path and typing it, which in a browser
   // means leaving the page to go and look. The ranking is the daemon's, so the
   // page offers the same list the terminal does.

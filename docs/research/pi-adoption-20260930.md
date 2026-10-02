@@ -14,7 +14,7 @@ Source: Pi `ee602414c703be8da722ec56de7f2399e62581ac`; starting Rook:
 | Context provenance inspector | Complete | Request-specific sources and loaded skills, deferred MCP tools in CLI/API/TUI/browser; bounded notes, old-note compatibility, local/daemon and full CI passed |
 | Local HTML export | Complete | Inclusive saved ranges, bounded/escaped/attributed output, no overwrite/publication, CLI/REPL/local/shared TUI parity, actual browser download/rendering and full CI passed |
 | Opt-in phase-based model routing | In progress | Static policy, durable branch transition, historical receipts and compatible image/scoped-state handoffs implemented; native continuation/reopen/fork and automatic fallback verified; auxiliary/branch-summary receipts, physical-attempt lifecycle, saved rate estimates and frozen delegated aggregation implemented with explicit unknown facts; actual local/shared TUI and browser phase interactions verified; real comparison runner and failed target-availability pilot retained; finish completed same-task quality/cost/latency comparison without claiming unmeasured savings |
-| Declarative extension UI | In progress | Opt-in bounded source-owned hook status/progress/result/clear reports in saved Context; forms, typed answers, cancellation/reconnect and persistent live widget lifecycle/frontend parity remain |
+| Declarative extension UI | In progress | Opt-in bounded source-owned hook status/progress/result/clear reports in saved Context; streaming typed forms, cancellation/reconnect and actual local/shared TUI/browser interactions verified with full CI/compaction passed; persistent live chat widget lifecycle/frontend parity remain |
 
 Regular-scrollback TUI and terminal image preview remain experiments from the
 review, to assess after the main capabilities. Existing MCP/OAuth, durable goals,
@@ -3853,3 +3853,85 @@ The corrected full `cargo xtask ci` exited 0 (`ci: ok`, 908.7 seconds;
 `target/pi-extension-foundation-final-ci.log`), including the editable-field
 census, native CLI/daemon/TUI scenarios, workspace libraries, compatibility
 checks and doctests. Both mandatory gates are complete for this block.
+
+### Extension UI: streaming typed forms (2026-10-03)
+
+Explicit `hooks[].ui_stream = true` adds bounded NDJSON UI/form/terminal-reply
+frames while preserving ordinary hook behavior. Forms use the existing asker
+and question protocol with host-assigned source captions. Text, select,
+multi-select, confirm and integer fields return typed values through producer
+stdin only, without automatic model or journal recording. Explicit producer
+reply context remains model context. Missing, invalid and unavailable answers
+are distinct, have null values and never invent a default. Saved reports retain
+only source/title/status; cancellation removes input, kills the owned process
+group and saves interruption while waiting. Storage/event formats are unchanged.
+
+Line/total/frame budgets are admitted before copying/decoding, as are field,
+choice, answer and encoded-answer bounds. Command patience resets with arriving
+chunks and is suspended while asking the user; input patience/cancellation remain
+active. Pending IDs include a channel epoch so new channels cannot reuse old
+question/approval IDs. The asker moves selected values before typed validation
+rather than cloning potentially oversized answers.
+
+TUI multiline source/title/field captions now wrap with measured panel height.
+Browser disconnect keeps disabled drafts, exposes Reconnect and restores controls
+only after the same current ID/declaration is recovered. Changed declarations
+discard earlier drafts. The real-browser check exposed another recovery error:
+an exact durable prompt admission arriving after disconnect did not settle the
+saved retry, blocking the next prompt despite successful completion. Exact
+caller/session receipts now settle that retry without resending; unrelated
+endings/receipts cannot settle it.
+
+Focused form schema/typing, actual hook answer/cancellation and stream bound/
+silence checks exited 0 (`target/pi-extension-forms-unit.log`,
+`target/pi-extension-forms-core.log`, `target/pi-extension-forms-transport.log`).
+The real hook waited six seconds for a person, exceeding its five-second command
+patience without being killed. Final channel epoch/late-answer checks exited 0
+(`target/pi-extension-forms-final-pending.log`), and browser draft/admission/Stop/
+tool-card regressions exited 0 (`target/pi-extension-forms-browser-final-unit.log`).
+The final actual native CLI/daemon scenario exited 0
+(`target/pi-extension-forms-final-native-cli.log`), covering unavailable fallback,
+pending Context, exact replay after socket reconnect, typed answer, skip and Stop.
+
+Actual local and shared native TUI interaction drivers exited 0
+(`target/pi-extension-forms-local-tui.log`,
+`target/pi-extension-forms-shared-tui.log`); both actual TUI processes exited 0.
+Typed text/select/bool/int values, source captions, saved Context and absence of
+private fixture values from model requests were checked. The browser driver
+also exited 0 (`target/pi-extension-forms-browser-final.log`), verifying retained
+draft/selection after socket reconnect, typed answer, Context and Stop on the
+next prompt. These use a controlled HTTP fixture, not real inference. Durable
+probe scripts/instructions are in `xtask/probes/extension-ui/`; roots/artifacts
+are retained under `target/extension-live-*`, with successful proof records
+indexed in `target/pi-extension-forms-proof.json`.
+Earlier browser failures remain
+in `target/pi-extension-forms-browser.log` and
+`target/pi-extension-forms-browser-current.log`; they are not counted as passes.
+Owned fixture processes have been stopped with verified ownership.
+
+`cargo xtask compaction` exited 0 (`target/pi-extension-forms-compaction.log`):
+23.31 MiB logical, 5.29 MiB distinct objects, 0.14 MiB dictionary-compressed and
+4.02 MiB on disk. Existing published measurements and storage formats remain
+applicable.
+The first full CI exited 1 after 1071.7 seconds
+(`target/pi-extension-forms-ci.log`): the old panel test expected an unwrapped
+hint, and the new optional async form branch caused a Windows main-stack overflow
+in native delegation, also leaving a child-HTTP wait to expire. The streaming
+future is now boxed at its optional boundary so it cannot enlarge every agent
+future, including turns without UI hooks. The panel regression and both actual
+delegation regressions then exited 0 (`target/pi-extension-forms-panel-regression.log`,
+`target/pi-extension-forms-delegation-regression.log`). The corrected full
+`cargo xtask ci` exited 0 (`ci: ok`, 935.9 seconds;
+`target/pi-extension-forms-final-ci.log`), including formatting, Clippy, actual
+frontend builds, native CLI/daemon/TUI scenarios, workspace libraries,
+compatibility checks and doctests. Both mandatory gates are complete for this
+block. The failed gate remains retained and is not counted as a pass.
+
+Persistent live chat widgets remain open after forms; refreshing Context
+currently reads streaming reports while hooks run. The next UI block must
+deliver those source-owned updates into the chat with bounded retained state,
+replacement/clear, saved-prefix restoration, branch/reconnect lifecycle and
+actual local/daemon/frontend parity.
+The real phase comparison still needs a working implementation source; terminal
+scrollback/image experiments remain separate open review work. The full goal
+stays active.

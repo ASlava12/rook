@@ -11,8 +11,15 @@ They neither enter model replay nor grant permissions. Context reads fold the
 fixed saved prefix with byte/count admission, source-owned replacement and clear,
 and explicit omissions. CLI/API, local/shared TUI and browser show historical
 source/event attribution; these reports do not certify current files or tests.
-The existing store schema is unchanged. Forms and persistent live widgets remain
-unimplemented; see [the report contract](extension-ui.md).
+Optional `hooks[].ui_stream` uses bounded NDJSON frames and typed forms through
+the existing asker/channel, pausing command patience while awaiting the user.
+Answers go to producer stdin; saved Notes retain only source/title/status.
+Cancellation ends the owned process group and removes pending input. Channel
+epochs prevent stale answers binding after restart. Browser reconnect preserves
+disabled drafts until the exact current declaration is recovered, and exact
+durable prompt admissions settle retries without resending. The existing store
+schema and input protocol shapes are unchanged. Persistent chat widgets remain
+unfinished; see [the report/form contract](extension-ui.md).
 
 ## The shape
 

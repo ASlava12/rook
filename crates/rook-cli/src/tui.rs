@@ -1036,13 +1036,25 @@ impl Asking {
     /// what it is showing.
     fn panel(&self) -> Vec<Line<'static>> {
         let q = self.current();
-        let mut lines = vec![Line::from(Span::styled(q.question.clone(), Style::default().fg(Color::Cyan)))];
+        let mut lines: Vec<_> = q
+            .question
+            .lines()
+            .map(|line| Line::from(Span::styled(line.to_owned(), Style::default().fg(Color::Cyan))))
+            .collect();
         for (i, choice) in q.choices.iter().enumerate() {
             let recommended = if i == 0 && !q.multi { "  (recommended)" } else { "" };
             lines.push(Line::from(format!("  {}. {choice}{recommended}", i + 1)));
         }
         lines.push(Line::from(Span::styled(q.ask_line().to_string(), Style::default().fg(Color::DarkGray))));
         lines
+    }
+
+    fn height(&self, width: u16) -> u16 {
+        rendered_rows(
+            &Paragraph::new(self.panel()).wrap(Wrap { trim: false }),
+            width.saturating_sub(2).max(1),
+        )
+        .saturating_add(2)
     }
 }
 
@@ -4479,7 +4491,7 @@ impl App {
         let mentioned = self.mentioned();
         let blocking = match (&self.chat.pending, &self.chat.asking) {
             (Some(request), _) => approval_height(request, area.width, area.height),
-            (_, Some(asking)) => asking.panel().len() as u16 + 2,
+            (_, Some(asking)) => asking.height(area.width).min(area.height.saturating_sub(6).max(3)),
             _ if !mentioned.is_empty() => ((mentioned.len() + 2) as u16).min((area.height / 2).max(3)),
             _ if !completing.is_empty() => ((completing.len() + 2) as u16).min((area.height / 2).max(3)),
             _ => 0,
@@ -4723,7 +4735,10 @@ impl App {
                 ask,
             );
         } else if let Some(asking) = &self.chat.asking {
-            f.render_widget(Paragraph::new(asking.panel()).block(bordered(&asking.title())), ask);
+            f.render_widget(
+                Paragraph::new(asking.panel()).block(bordered(&asking.title())).wrap(Wrap { trim: false }),
+                ask,
+            );
         } else if !completing.is_empty() {
             let lines: Vec<Line> = completing
                 .iter()
@@ -7795,11 +7810,16 @@ and the next line"
     /// A ratatui buffer holds characters cell by cell, so what the screen shows
     /// has to be read back a row at a time rather than searched as text.
     fn screen(asking: &Asking, width: u16) -> Vec<String> {
-        let height = asking.panel().len() as u16 + 2;
+        let height = asking.height(width);
         let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
         terminal
             .draw(|f| {
-                f.render_widget(Paragraph::new(asking.panel()).block(bordered(&asking.title())), f.area());
+                f.render_widget(
+                    Paragraph::new(asking.panel())
+                        .block(bordered(&asking.title()))
+                        .wrap(Wrap { trim: false }),
+                    f.area(),
+                );
             })
             .unwrap();
         let buffer = terminal.backend().buffer().clone();
@@ -7820,14 +7840,34 @@ and the next line"
     }
 
     #[test]
-    fn the_panel_is_exactly_as_tall_as_what_it_draws() {
+    fn extension_form_source_title_and_field_wrap_as_separate_readable_rows() {
+        let q = question(
+            "Extension hook prompt #1 · source abcdef12\nTyped extension setup\nTarget (choose listed options)",
+            &["local", "remote"],
+            false,
+        );
+        let ask = asking(vec![q]);
+        let lines = screen(&ask, 40);
+        let shown = lines.join("\n");
+        assert!(shown.contains("Typed extension setup"));
+        assert!(shown.contains("Target (choose listed options)"));
+        assert!(shown.contains("1. local") && shown.contains("2. remote"));
+        assert!(ask.height(40) > ask.panel().len() as u16 + 2);
+    }
+
+    #[test]
+    fn the_panel_reserves_the_wrapped_hint_before_its_bottom_border() {
         let asking = asking(vec![question("Which?", &["a", "b", "c"], true)]);
         let lines = screen(&asking, 40);
 
-        assert_eq!(lines.len(), asking.panel().len() + 2, "one border row above and below");
+        assert_eq!(lines.len(), 8, "the 38-column interior wraps the hint onto a second row");
         assert!(lines.last().unwrap().starts_with('╰'), "the last row is the border: {lines:?}");
         assert!(!lines[2].contains("recommended"), "a multi-select recommends nothing: {lines:?}");
         assert!(lines[5].contains("numbers, comma-separated"), "{lines:?}");
+        assert!(
+            lines[5].contains("your own") && lines[6].contains("answer:"),
+            "the wrapped hint remains readable: {lines:?}"
+        );
     }
 
     #[test]

@@ -291,13 +291,10 @@ impl Asker for ChannelAsker {
         // A question nobody answered is one the model must decide for itself,
         // which is exactly what a skipped answer says.
         let chosen = self.0.ask(request).await.unwrap_or_default();
+        let mut chosen = chosen.into_iter();
         questions
             .iter()
-            .enumerate()
-            .map(|(i, q)| Answer {
-                question: q.question.clone(),
-                chosen: chosen.get(i).cloned().unwrap_or_default(),
-            })
+            .map(|q| Answer { question: q.question.clone(), chosen: chosen.next().unwrap_or_default() })
             .collect()
     }
 }

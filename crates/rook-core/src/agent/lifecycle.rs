@@ -23,11 +23,19 @@ impl AgentLoop<'_> {
             return self.hooks.run(event, subject, payload).await;
         }
         self.hooks
-            .run_with_ui(event, subject, payload, &self.rook.config.extension_ui, |batch| {
-                if let Err(why) = batch.record(self.rook, self.session, |value| self.vault.redact(value)) {
-                    tracing::warn!("extension display record failed: {why}");
-                }
-            })
+            .run_with_ui(
+                event,
+                subject,
+                payload,
+                &self.rook.config.extension_ui,
+                self.asker.as_deref(),
+                |batch| {
+                    if let Err(why) = batch.record(self.rook, self.session, |value| self.vault.redact(value))
+                    {
+                        tracing::warn!("extension display record failed: {why}");
+                    }
+                },
+            )
             .await
     }
     fn report_prompt_admission(&self, turn: &str, progress: &mut impl FnMut(Progress<'_>)) {

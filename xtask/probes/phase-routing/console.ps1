@@ -1,6 +1,6 @@
-param([ValidateSet('local','shared')][string]$Mode,[string]$Text,[ValidateSet('enter','escape','page-down','page-up','r','home')][string]$Key,[string]$Capture)
+param([ValidateSet('local','shared')][string]$Mode,[string]$Text,[ValidateSet('enter','escape','page-down','page-up','r','home')][string]$Key,[string]$Capture,[string]$RootPath)
 $ErrorActionPreference='Stop'
-$taskRoot=(Get-Content ('target/phase-live-'+$Mode+'-root.txt')).Trim()
+$taskRoot=if($RootPath){[IO.Path]::GetFullPath($RootPath)}else{(Get-Content ('target/phase-live-'+$Mode+'-root.txt')).Trim()}
 $taskProcesses=@(Get-CimInstance Win32_Process | Where-Object { $_.Name-eq'rook.exe' -and $_.CommandLine.Contains($taskRoot) -and $_.CommandLine.Contains('tui') })
 if($taskProcesses.Count-ne1){throw 'Expected one owned TUI'}
 Add-Type -TypeDefinition @'
