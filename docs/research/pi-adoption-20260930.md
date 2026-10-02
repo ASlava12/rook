@@ -12,7 +12,7 @@ Source: Pi `ee602414c703be8da722ec56de7f2399e62581ac`; starting Rook:
 | Branch navigation and optional branch summary | Complete | Existing session/event IDs, bounded tree/history, explicit workspace semantics, reviewed attributable summaries, local busy refusal, daemon live switches with retained prompts/attachments and full CI passed |
 | Inline tool cards | Complete | Compact/live/saved results, attributed errors/duration/diffs and command/search/MCP facts, explicit bounded browser pixels, terminal text fallback, local/daemon and full CI passed |
 | Context provenance inspector | Complete | Request-specific sources and loaded skills, deferred MCP tools in CLI/API/TUI/browser; bounded notes, old-note compatibility, local/daemon and full CI passed |
-| Local HTML export | In progress | Selected history scope, bounded streaming, escaped content, no publication, cross-frontend access |
+| Local HTML export | Complete | Inclusive saved ranges, bounded/escaped/attributed output, no overwrite/publication, CLI/REPL/local/shared TUI parity, actual browser download/rendering and full CI passed |
 | Opt-in phase-based model routing | Pending | Explicit policy, continuity/capability constraints, actual route/cost reporting, comparison without claiming unmeasured savings |
 | Declarative extension UI | Pending | Bounded status/progress/forms/result contract, trust boundary, text fallback and frontend parity |
 
@@ -2975,3 +2975,65 @@ Storage implementation and formats did not change, so compaction was not rerun.
 Next finish actual HTML download and TUI export interactions, then phase routing,
 declarative extension UI and the later terminal experiments. The full adoption
 goal remains active.
+
+## Actual HTML download and native export interactions
+
+The remaining export checks now use the shipped browser modules and actual
+native terminals on this Windows machine. A fresh isolated session contains
+multiline Unicode, HTML/script/image-looking text, a body longer than 8192
+bytes and a tail marker beyond the preview limit. Its scripted provider is
+bounded to 80 requests of at most 1 MiB; it does not assess model quality.
+
+Actual browser mouse actions opened history, selected only the user event and
+downloaded a real file to an owned download directory. Its bytes contain one
+source-attributed article, escaped markup and a visible 8192-byte shortening
+notice; the out-of-range reply and hidden tail are absent. Clearing both range
+fields downloads exactly the displayed page. A reversed range reports an error
+without another download. The populated Unicode draft remains unchanged, and
+neither export appends history nor sends another model request.
+
+The downloaded selected file was then opened as a local file in Edge. Its
+rendered DOM has one article, no scripts or images, and no executed probe.
+Script/image-looking text remains literal text. Its CSP rejects external
+resources, and recorded browser requests contain no request to the fixture's
+external media URL. The source session, selected range, snapshot end and
+historical file/test disclaimer are visible in the actual screenshot. The
+completed browser check exited 0 (`target/pi-html-live-browser.log`). Files,
+download-control/rendered screenshots and recorded proof are under
+`target/branch-admission-d927bc5210b144d4a14d6e26ab152a9b`.
+
+Actual shared TUI and `tui --alone` resumed the same saved session and used
+`/export-html 0..0 NEW_FILE` with an absolute path containing spaces. Both
+reported one saved event and one shortened body. Repeating the command reported
+the no-overwrite error, with the file's SHA-256 unchanged. Reversed bounds
+reported the range error and created no destination. Both idle terminals exited
+0. Shared-terminal refusal/final-file checks exited 0
+(`target/pi-html-live-native-daemon.log`); a direct CLI export also exited 0.
+The final byte comparison exited 0 (`target/pi-html-live-native-final.log`):
+local TUI, daemon TUI and CLI files match exactly, the local refusal preserves
+the original hash, saved history still ends at the original boundary, only the
+seed streamed model request exists, and workspace bytes remain unchanged.
+Native output is `target/pi-html-live-native-daemon-terminal.json` and
+`target/pi-html-live-native-local-terminal.json`. All owned model, daemon,
+browser and terminal processes were stopped and their absence checked; the
+installed user daemon was untouched.
+
+The three existing browser export checks executed and exited 0
+(`target/pi-html-live-browser-tests.log`), including refusal above 512 events
+before creating a download. The existing CLI integration scenario executed once
+and exited 0 (`target/pi-html-live-cli.log`, 51.66 seconds), including local and
+daemon CLI/REPL paths, tool details, escaping and the over-limit refusal that
+leaves no destination.
+
+The full `cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0 (`ci: ok`,
+679.8 seconds; `target/pi-html-live-ci.log`), including the executed export
+scenario, complete CLI/daemon/core suites, frontend checks, Clippy and doctests.
+No production/storage code or format changed, so compaction was not rerun.
+The Local HTML export row is now Complete: seven of the nine main capabilities
+are Complete. Next implement opt-in phase routing using the existing provider,
+model catalog, request history and accounting paths; preserve images, tool
+schemas and provider-owned reasoning on every route, and report measured
+dispatch/usage without claiming unmeasured savings. The pinned virtual-model
+documentation and `jev-router.ts` remain the reference for phase boundaries.
+Declarative extension UI and the later scrollback/image terminal experiments
+retain their original scope. The full adoption goal is active.

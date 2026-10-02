@@ -289,6 +289,11 @@ boundary and historical file/test disclaimer.
 The shared `/export-html [FROM..THROUGH] NEW_FILE` slash command reaches this
 writer from both REPL modes and the TUI; the TUI uses its history reader worker
 so an export does not block redraws or live turn output.
+Native local/daemon TUI exports and direct CLI output share the same writer
+bytes and no-overwrite behavior, including paths with spaces. Browser defaults
+export the displayed history page when its range fields are blank; explicit
+bounds select the requested saved range. Downloaded files declare a restrictive
+CSP; script and remote-image markup in historical bodies remains escaped text.
 The browser history panel also renders saved tool calls and results as native
 expandable cards. Their summaries come from bounded page metadata; opening a
 card fetches one bounded body part by event number, and further parts require

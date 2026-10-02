@@ -21,6 +21,15 @@ full stored outcome, and `h` returns to history. Esc closes without changing the
 draft. See [recorded turn results](durable-work.md#recorded-turn-results) for
 accounting scope and pagination limits.
 
+`/export-html [FROM..THROUGH] NEW_FILE` saves an inclusive range of this
+session's recorded history to a new local HTML file. For example,
+`/export-html 12..24 C:\reviews\selected history.html`; the path may contain
+spaces. Omit the range to export saved history. The history reader performs the
+export and reports the saved count, shortened bodies or error in chat. Existing
+files are never replaced. Exports contain at most 512 events and 8192 displayed
+body bytes per event, identify their source range and describe historical
+conversation evidence. They do not verify current workspace files or tests.
+
 `/tree [session-id]` opens [conversation branches](conversation-branches.md).
 The same view is `v` in history or `b` in the sessions pane. Enter explores a
 node, `h` reads its history, and `c` continues it while preserving the draft.
