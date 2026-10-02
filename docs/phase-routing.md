@@ -218,7 +218,7 @@ Context inspection exposes priced/unpriced ending counts and a separate
 them. Counts remain independent: subtracting old response receipts from new
 attempts could conceal a later failure. Neither completed nor failed establishes
 a verified bill. Full accounting remains unknown until missing facts/pricing,
-legacy history and delegated-session aggregation are covered.
+legacy history are covered. Delegated-session aggregation is described below.
 
 ## Branch-summary generation costs
 
@@ -239,3 +239,35 @@ prefix. Existing summary/receipt records and postcard layouts remain readable;
 attempt costs and coverage fields have JSON defaults. The older public
 config-only `suggest_summary` function remains for embedded callers without a
 store; session-owned integrations use `prepare_summary_suggestion`.
+
+## Frozen delegated costs
+
+Both ordinary delegation and verification checker execution save durable
+`rook:model-delegation:v1` notes on their parent. Admission precedes child
+generation. An ending captures the child's cost coverage at an exclusive saved
+event boundary before returning or collecting its result. A checker nudge stays
+in the same child session and is included once; collecting a finished child
+again adds neither costs nor tokens.
+
+Nested child counters and optional response/attempt estimates are flattened into
+the snapshot, using constant memory and bounded event pages. JSON is admitted
+under 4 KiB before copying/encoding. No child text, file or test result, secret
+or provider error body enters this ledger. Existing transcript layouts and
+token carriers are unchanged. Older coverage JSON defaults to no recorded child
+costs, which cannot prove that older delegated work was free.
+
+Context inspection in CLI/TUI/API/browser shows recorded direct child execution
+states, captured session counts, missing snapshots, unfinished descendants,
+pending attempts and separate parent-plus-captured response/attempt estimates.
+These two estimates overlap; do not add them. Completed execution is not a
+claim that a goal was met or that all native usage was reported. Missing facts
+remain unknown rather than USD zero.
+
+Parent history never consults the child's current transcript. A fork before the
+ending keeps historical admission pending; a fork after it inherits the frozen
+estimate. Later child activity and rate changes cannot modify either prefix.
+Failure and graceful cancellation retain their states. Cancellation can freeze
+a still-pending physical attempt before that attempt's own Drop saves its
+interruption. Process loss keeps durable parent and child admissions pending;
+neither scenario invents a zero-cost completion. Missing or unreadable child
+accounting retains an explicit missing snapshot.

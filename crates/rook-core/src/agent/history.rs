@@ -127,7 +127,8 @@ fn replay_inner(
             continue;
         }
         if event.record.kind == EventKind::Note
-            && (event.record.label == crate::model_attempt::LABEL
+            && (event.record.label == crate::model_delegation::LABEL
+                || event.record.label == crate::model_attempt::LABEL
                 || event.record.label == "branch summary usage")
         {
             continue;

@@ -127,9 +127,25 @@ produce a reviewable draft. The reviewed source boundary stays pinned before
 generation. Preparation releases the daemon engine guard before model I/O;
 no full Config clone is retained. The config-only compatibility entrypoint has
 no session/store accounting; product CLI/REPL/TUI/browser/API paths use the
-prepared, recorded entrypoint. Total cost remains unknown where usage/pricing,
-legacy history or delegated aggregation are uncovered. Existing postcard
-layouts are unchanged.
+prepared, recorded entrypoint.
+Delegated work and verification children retain durable parent-owned
+`rook:model-delegation:v1` admission/ending notes. An ending freezes a child
+cost snapshot at its saved exclusive event boundary, including flattened nested
+child costs, before result collection. Repeated collection adds no estimate or
+token charge. Parent inspection never follows live child sessions; a later child
+turn, restart, new prices or a parent fork cannot change that recorded snapshot.
+Normal completion, failure and cancellation retain distinct child execution
+states; process loss leaves admission pending. Execution completion does not
+establish a successful goal or a verified bill. Missing/unreadable snapshots and
+unfinished descendants/physical attempts remain explicit. Cancellation may
+capture a pending child attempt before its own interruption note is saved.
+Snapshots use constant-space bounded page folds and bounded 4 KiB JSON, never
+child text, file state or error bodies. They leave existing token counters and
+the last main response unchanged, stay out of model/restored chat history and
+remain inspectable in the journal. Context exposes separate parent-plus-captured
+response and attempt subtotals; these views overlap and must not be added.
+Total cost remains unknown where usage/pricing or legacy history is uncovered.
+Existing postcard layouts are unchanged.
 
 Durable transcript navigation lives in `rook-core::transcript`: bounded event
 pages, snapshot search cursors, body parts and attributed source-data quotes.

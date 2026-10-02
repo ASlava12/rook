@@ -1217,6 +1217,9 @@ async fn a_turn_goes_on_while_the_sub_agents_it_started_are_still_running() {
     assert_eq!(outcome.reply, "it says three");
     assert_eq!(outcome.tools_called, ["delegate", "subagents"]);
     assert_eq!(outcome.delegated.len(), 1, "the child's cost is the turn's");
+    let costs = f.rook.context_usage(session, Some(16000)).unwrap().cost_coverage.unwrap().delegated;
+    assert_eq!((costs.started, costs.completed, costs.pending), (1, 1, 0));
+    assert_eq!(costs.captured_sessions, 1, "nonblocking collection retains the same child ledger");
 }
 
 /// The point of starting them rather than waiting: a parent that sees a child
@@ -5290,6 +5293,17 @@ async fn a_checker_that_stops_without_a_verdict_is_asked_once_to_finish() {
         .count();
     assert_eq!(nudged, 1, "asked once, in the checker's own session");
     assert_eq!(outcome.delegated.len(), 1, "and not as a second checker");
+    let costs = f.rook.context_usage(session, Some(16000)).unwrap().cost_coverage.unwrap().delegated;
+    assert_eq!(
+        (costs.started, costs.completed, costs.failed, costs.captured_sessions),
+        (2, 1, 1, 2),
+        "the explicit checker and the later automatic checker failure are separate admissions"
+    );
+    assert_eq!(
+        costs.unpriced_receipts, 3,
+        "both checker rounds survive once; checkers do not classify completion"
+    );
+    assert!(costs.known_receipt_subtotal_usd.is_none(), "custom providers supply no verified bill");
 }
 
 /// Asked once. A checker that will not commit when told plainly to is reported
@@ -8338,4 +8352,29 @@ async fn a_step_limit_does_not_release_a_followup() {
     assert_eq!(report.items.len(), 5);
     assert_eq!(report.items[0].summary.reply, "last task finished");
     assert_eq!(report.items[4].summary.stopped, "max_steps");
+}
+
+#[tokio::test]
+async fn collecting_a_completed_child_again_does_not_duplicate_its_saved_costs_or_turn_tokens() {
+    let f = fixture();
+    let session = f.rook.start_session("collect once").unwrap();
+    let provider = Arc::new(ByPrompt(vec![
+        ("count the files", call("delegate", serde_json::json!({"task":"tally", "wait":false}))),
+        ("started: task01", call("subagents", serde_json::json!({"id":"task01", "wait_secs":20}))),
+        ("already reported", reply("collected once")),
+        ("there are three", call("subagents", serde_json::json!({"id":"task01", "wait_secs":20}))),
+        ("tally", reply("there are three")),
+    ]));
+    let outcome = AgentLoop::new(&f.rook, provider, session).run("count the files").await.unwrap();
+    assert_eq!(outcome.reply, "collected once");
+    assert_eq!(outcome.tools_called, ["delegate", "subagents", "subagents"]);
+    assert_eq!(outcome.delegated.len(), 1);
+    let costs = f.rook.context_usage(session, Some(16000)).unwrap().cost_coverage.unwrap().delegated;
+    assert_eq!((costs.started, costs.completed, costs.captured_sessions), (1, 1, 1));
+    assert_eq!(costs.unpriced_receipts, 2, "one child answer plus its completion check");
+    let child = rook_store::parse_session_id(&outcome.delegated[0]).unwrap();
+    let parent_meta = f.rook.store.get_session(session).unwrap().unwrap();
+    let child_meta = f.rook.store.get_session(child).unwrap().unwrap();
+    assert_eq!(u64::from(outcome.input_tokens), parent_meta.tokens_in + child_meta.tokens_in);
+    assert_eq!(u64::from(outcome.output_tokens), parent_meta.tokens_out + child_meta.tokens_out);
 }

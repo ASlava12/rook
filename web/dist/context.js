@@ -44,6 +44,19 @@ export function contextPanel(usage) {
       el('p', {}, `Attempt subtotal: ${c.attempt_known_subtotal_usd == null ? 'unknown (no priced attempts)' : `USD ${dollars(c.attempt_known_subtotal_usd)} configured-rate estimate`} · ${c.priced_attempts || 0} priced · ${c.unpriced_attempts || 0} unpriced endings`),
       el('p', { class: 'sub' }, 'Receipt and attempt subtotals overlap; do not add them.'),
       el('p', { class: 'sub' }, 'Total cost is unknown: retry/failure attempts may lack complete usage; legacy history and delegated-session costs can remain uncovered. Inherited receipts are historical, not new charges.')));
+    const d = c.delegated;
+    if (d?.started > 0) {
+      const combined = (own, child) => own == null && child == null ? null : (own ?? 0) + (child ?? 0);
+      const estimate = value => value == null ? 'unknown' : `USD ${dollars(value)} configured-rate estimate`;
+      current.append(el('section', {},
+        el('h3', {}, 'Delegated cost coverage · frozen child history'),
+        el('p', {}, `Recorded delegated sessions: ${d.started} started · ${d.completed || 0} completed · ${d.failed || 0} failed · ${d.interrupted || 0} interrupted · ${d.pending || 0} pending`),
+        el('p', {}, `Captured child history: ${d.captured_sessions || 0} sessions · ${d.missing_snapshots || 0} missing snapshots · ${d.unfinished_descendants || 0} unfinished descendants · ${d.attempts_pending || 0} pending attempts`),
+        el('p', {}, `Child receipts: ${d.priced_receipts || 0} priced · ${d.unpriced_receipts || 0} unpriced · ${d.usage_events_without_receipt || 0} usage events without receipt`),
+        el('p', {}, `Parent and captured children, response subtotal: ${estimate(combined(c.known_subtotal_usd, d.known_receipt_subtotal_usd))}`),
+        el('p', {}, `Parent and captured children, attempt subtotal: ${estimate(combined(c.attempt_known_subtotal_usd, d.known_attempt_subtotal_usd))}`),
+        el('p', { class: 'sub' }, 'Child snapshots retain their recorded boundaries; later child activity is excluded. Response and attempt subtotals overlap; do not add them.')));
+    }
   }
   if (!saved) return el('div', { class: 'context-view' }, current,
     el('section', { class: 'card' }, el('h2', {}, 'Last request attempt'),

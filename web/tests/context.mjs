@@ -124,3 +124,23 @@ test('cost coverage renders a known subset without presenting uncovered work as 
   assert.match(unknown.textContent, /unknown \(no priced attempts\)/);
   assert.doesNotMatch(unknown.textContent, /USD 0\.00000000/);
 });
+
+test('delegated estimates combine only captured history and keep absent bills unknown', () => {
+  const coverage = { known_subtotal_usd: 0.00001, attempt_known_subtotal_usd: 0.00002,
+    delegated: { started: 3, completed: 1, failed: 1, interrupted: 0, pending: 1,
+      captured_sessions: 4, missing_snapshots: 1, unfinished_descendants: 2, attempts_pending: 2,
+      priced_receipts: 3, unpriced_receipts: 1, usage_events_without_receipt: 2,
+      known_receipt_subtotal_usd: 0.00003, known_attempt_subtotal_usd: 0.00006 } };
+  const panel = contextPanel({ ...usage, cost_coverage: coverage });
+  assert.match(panel.textContent, /3 started · 1 completed · 1 failed · 0 interrupted · 1 pending/);
+  assert.match(panel.textContent, /4 sessions · 1 missing snapshots · 2 unfinished descendants · 2 pending attempts/);
+  assert.match(panel.textContent, /Child receipts: 3 priced · 1 unpriced · 2 usage events without receipt/);
+  assert.match(panel.textContent, /response subtotal: USD 0\.00004000/);
+  assert.match(panel.textContent, /attempt subtotal: USD 0\.00008000/);
+  assert.match(panel.textContent, /later child activity is excluded/);
+  assert.match(panel.textContent, /Response and attempt subtotals overlap; do not add them/);
+  const unknown = contextPanel({ ...usage, cost_coverage: { delegated: { started: 1, pending: 1 } } });
+  assert.match(unknown.textContent, /response subtotal: unknown/);
+  assert.match(unknown.textContent, /attempt subtotal: unknown/);
+  assert.doesNotMatch(unknown.textContent, /USD 0\.00000000/);
+});

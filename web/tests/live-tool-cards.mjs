@@ -116,6 +116,7 @@ test('resumed chat keeps human notes while auxiliary receipts and compaction usa
       { kind: 'note', label: 'btw', body: 'visible aside' },
       { kind: 'note', label: 'rook:model-aux:v1', body: '{"purpose":"aside","receipt":"internal data"}' },
       { kind: 'note', label: 'rook:model-attempt:v1', body: '{"state":"started","dispatch":"internal attempt"}' },
+      { kind: 'note', label: 'rook:model-delegation:v1', body: '{"state":"completed","coverage":"internal child costs"}' },
       { kind: 'note', label: 'compaction usage', body: 'compaction provider usage' },
       { kind: 'note', label: 'branch summary usage', body: 'summary provider usage' },
     ] }) };
@@ -124,5 +125,5 @@ test('resumed chat keeps human notes while auxiliary receipts and compaction usa
   await resume('recorded-costs');
   assert.deepEqual(requests, ['/api/sessions/recorded-costs/history']);
   assert.match(stream.textContent, /visible prompt.*visible answer.*visible aside/);
-  assert.doesNotMatch(stream.textContent, /rook:model-aux|rook:model-attempt|internal data|internal attempt|compaction provider usage|summary provider usage/);
+  assert.doesNotMatch(stream.textContent, /rook:model-aux|rook:model-attempt|rook:model-delegation|internal child costs|internal data|internal attempt|compaction provider usage|summary provider usage/);
 });

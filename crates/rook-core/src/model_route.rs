@@ -333,7 +333,7 @@ impl Receipt {
 }
 
 /// A subset of estimates in saved branch history, including inherited receipts.
-/// Retry/failure, delegated and branch-summary accounting is not complete yet.
+/// Omitted native usage and legacy history remain unknown, never zero charges.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CostCoverage {
@@ -353,6 +353,89 @@ pub struct CostCoverage {
     pub priced_attempts: u64,
     pub unpriced_attempts: u64,
     pub attempt_known_subtotal_usd: Option<f64>,
+    pub delegated: DelegatedCosts,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DelegatedCosts {
+    pub started: u64,
+    pub completed: u64,
+    pub failed: u64,
+    pub interrupted: u64,
+    pub pending: u64,
+    pub captured_sessions: u64,
+    pub missing_snapshots: u64,
+    pub unfinished_descendants: u64,
+    pub priced_receipts: u64,
+    pub unpriced_receipts: u64,
+    pub usage_events_without_receipt: u64,
+    pub attempts_started: u64,
+    pub attempts_pending: u64,
+    pub priced_attempts: u64,
+    pub unpriced_attempts: u64,
+    pub known_receipt_subtotal_usd: Option<f64>,
+    pub known_attempt_subtotal_usd: Option<f64>,
+}
+
+impl DelegatedCosts {
+    pub(crate) fn include(&mut self, record: &crate::model_delegation::Record) {
+        match record.state {
+            crate::model_delegation::State::Started => {
+                self.started += 1;
+                return;
+            }
+            crate::model_delegation::State::Completed => self.completed += 1,
+            crate::model_delegation::State::Failed => self.failed += 1,
+            crate::model_delegation::State::Interrupted => self.interrupted += 1,
+        }
+        if record.snapshot_missing {
+            self.missing_snapshots = self.missing_snapshots.saturating_add(1);
+            return;
+        }
+        self.captured_sessions = self.captured_sessions.saturating_add(1);
+        if let Some(c) = &record.coverage {
+            let nested = &c.delegated;
+            self.captured_sessions = self.captured_sessions.saturating_add(nested.captured_sessions);
+            self.missing_snapshots = self.missing_snapshots.saturating_add(nested.missing_snapshots);
+            self.unfinished_descendants = self
+                .unfinished_descendants
+                .saturating_add(nested.pending)
+                .saturating_add(nested.unfinished_descendants);
+            self.priced_receipts =
+                self.priced_receipts.saturating_add(c.priced_receipts).saturating_add(nested.priced_receipts);
+            self.unpriced_receipts = self
+                .unpriced_receipts
+                .saturating_add(c.unpriced_receipts)
+                .saturating_add(nested.unpriced_receipts);
+            self.usage_events_without_receipt = self
+                .usage_events_without_receipt
+                .saturating_add(c.usage_events_without_receipt)
+                .saturating_add(nested.usage_events_without_receipt);
+            self.attempts_started = self
+                .attempts_started
+                .saturating_add(c.attempts_started)
+                .saturating_add(nested.attempts_started);
+            self.attempts_pending = self
+                .attempts_pending
+                .saturating_add(c.attempts_pending)
+                .saturating_add(nested.attempts_pending);
+            self.priced_attempts =
+                self.priced_attempts.saturating_add(c.priced_attempts).saturating_add(nested.priced_attempts);
+            self.unpriced_attempts = self
+                .unpriced_attempts
+                .saturating_add(c.unpriced_attempts)
+                .saturating_add(nested.unpriced_attempts);
+            self.known_receipt_subtotal_usd = crate::model_accounting::add(
+                self.known_receipt_subtotal_usd,
+                crate::model_accounting::add(c.known_subtotal_usd, nested.known_receipt_subtotal_usd),
+            );
+            self.known_attempt_subtotal_usd = crate::model_accounting::add(
+                self.known_attempt_subtotal_usd,
+                crate::model_accounting::add(c.attempt_known_subtotal_usd, nested.known_attempt_subtotal_usd),
+            );
+        }
+    }
 }
 
 impl CostCoverage {
@@ -380,7 +463,7 @@ impl CostCoverage {
             .attempt_known_subtotal_usd
             .map(|usd| format!("USD {} configured-rate estimate", amount(usd)))
             .unwrap_or_else(|| "unknown (no priced attempts)".into());
-        format!(
+        let mut text = format!(
             "Cost coverage · saved branch history\nKnown subtotal: {subtotal}\nPriced receipts: {} · unpriced receipts: {} · usage events without receipt: {}\nRecorded physical attempts: {} started · {} completed · {} failed · {} incomplete · {} interrupted · {} pending\nAttempt subtotal: {attempt_subtotal} · {} priced · {} unpriced endings\nReceipt and attempt subtotals overlap; do not add them.\nTotal cost is unknown: retry/failure attempts may lack complete usage; legacy history and delegated-session costs can remain uncovered. Inherited receipts are historical, not new charges.\n",
             self.priced_receipts,
             self.unpriced_receipts,
@@ -393,7 +476,20 @@ impl CostCoverage {
             self.attempts_pending,
             self.priced_attempts,
             self.unpriced_attempts
-        )
+        );
+        if self.delegated.started > 0 {
+            let d = &self.delegated;
+            let money = |value: Option<f64>| {
+                value
+                    .map(|v| format!("USD {} configured-rate estimate", amount(v)))
+                    .unwrap_or_else(|| "unknown".into())
+            };
+            text.push_str(&format!("Recorded delegated sessions: {} started · {} completed · {} failed · {} interrupted · {} pending\nCaptured child history: {} sessions · {} missing snapshots · {} unfinished descendants · {} pending attempts\nChild receipts: {} priced · {} unpriced · {} usage events without receipt\nParent and captured children, response subtotal: {}\nParent and captured children, attempt subtotal: {}\nChild snapshots retain their recorded boundaries; later child activity is excluded. Response and attempt subtotals overlap; do not add them.\n",
+                d.started, d.completed, d.failed, d.interrupted, d.pending, d.captured_sessions, d.missing_snapshots, d.unfinished_descendants, d.attempts_pending, d.priced_receipts, d.unpriced_receipts, d.usage_events_without_receipt,
+                money(crate::model_accounting::add(self.known_subtotal_usd, d.known_receipt_subtotal_usd)),
+                money(crate::model_accounting::add(self.attempt_known_subtotal_usd, d.known_attempt_subtotal_usd))));
+        }
+        text
     }
 }
 

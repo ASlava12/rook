@@ -153,6 +153,266 @@ async fn get(client: &reqwest::Client, url: &str) -> Value {
 }
 
 #[test]
+fn delegated_native_costs_include_checker_nudges_and_stay_frozen_locally_and_through_daemon() {
+    rook_llm::init_tls();
+    for shared in [false, true] {
+        let _local = (!shared).then(one_at_a_time);
+        let rook = Rook::new();
+        let tool = |id: &str, name: &str, args: Value| json!({"role":"assistant","content":"","tool_calls":[{"index":0,"id":id,"type":"function","function":{"name":name,"arguments":args.to_string()}}]});
+        let model = Model::with_messages(vec![
+            tool("delegate-once", "delegate", json!({"task":"Report CHILD_EVIDENCE"})),
+            json!({"role":"assistant","content":"CHILD_EVIDENCE"}),
+            tool("verify-once", "verify", json!({"claim":"The reported evidence is sufficient"})),
+            json!({"role":"assistant","content":"I will consider the evidence."}),
+            json!({"role":"assistant","content":"VERDICT: holds"}),
+            json!({"role":"assistant","content":"PARENT_FINISHED"}),
+        ]);
+        model.release.store(16, Ordering::SeqCst);
+        let rates = "input_usd_per_million=2.0\noutput_usd_per_million=6.0\n";
+        let settings = config(&model.url, "initial", "readonly", rook.workspace.path())
+            .replace("model='initial'", "model='initial'\nerrand_model='followup'")
+            .replace(
+                "[models.initial]",
+                &format!("[models.initial]\nchecking_model='followup'\ncontext_window=65536\n{rates}"),
+            )
+            .replace("[models.followup]", &format!("[models.followup]\ncontext_window=65536\n{rates}"));
+        rook.write_config(&settings);
+        let mut daemon = shared.then(|| Daemon::start(&rook));
+        let output = rook.json(&["run", "Delegate once, then verify and finish."]);
+        let outcome = output.get("outcome").unwrap_or(&output);
+        assert_eq!(outcome["reply"], "PARENT_FINISHED", "{output}");
+        assert_eq!(outcome["delegated"].as_array().unwrap().len(), 2);
+        let parent = output["session"].as_str().unwrap();
+        let requests: Vec<_> = (0..6).map(|_| model.next()).collect();
+        assert_eq!(requests[0]["model"], "initial-model");
+        assert_eq!(requests[1]["model"], "followup-model", "configured child model must be the actual leaf");
+        assert!(
+            requests[4]["messages"].to_string().contains("stopped without a verdict"),
+            "the checker really needed its second generation"
+        );
+        assert!(requests.iter().all(|r| !r["messages"].to_string().contains("rook:model-delegation:v1")));
+        assert!(model.requests.try_recv().is_err());
+        let context = rook.json(&["session", "context", parent]);
+        let costs = &context["cost_coverage"];
+        let d = &costs["delegated"];
+        assert_eq!(d["started"], 2);
+        assert_eq!(d["completed"], 2);
+        assert_eq!(d["pending"], 0);
+        assert_eq!(d["captured_sessions"], 2, "a nudge is not a second child");
+        assert_eq!(d["missing_snapshots"], 0);
+        assert_eq!(d["priced_receipts"], 4);
+        assert_eq!(d["attempts_started"], 4);
+        assert_eq!(d["priced_attempts"], 4);
+        assert_eq!(d["usage_events_without_receipt"], 0);
+        assert!((d["known_receipt_subtotal_usd"].as_f64().unwrap() - 0.000032).abs() < 1e-15);
+        assert_eq!(d["known_attempt_subtotal_usd"], d["known_receipt_subtotal_usd"]);
+        assert_eq!(costs["priced_receipts"], 4);
+        assert!((costs["known_subtotal_usd"].as_f64().unwrap() - 0.000032).abs() < 1e-15);
+        assert_eq!(context["last_response"]["receipt"]["dispatch"]["model"], "initial-model");
+        assert!(rook.ok(&["session", "context", parent]).contains("response subtotal: USD 0.00006400"));
+        drop(daemon.take());
+        let (end, child) = {
+            let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+            let id = rook_store::parse_session_id(parent).unwrap();
+            let records: Vec<Value> = store
+                .events(id, 0, 256)
+                .unwrap()
+                .iter()
+                .filter(|e| e.record.label == "rook:model-delegation:v1")
+                .map(|e| serde_json::from_slice(&store.get(&e.record.body).unwrap()).unwrap())
+                .collect();
+            assert_eq!(records.len(), 4, "one admission and ending per actual child");
+            for pair in records.as_chunks::<2>().0 {
+                assert_eq!(pair[0]["state"], "started");
+                assert_eq!(pair[1]["state"], "completed");
+                assert_eq!(pair[0]["child_session"], pair[1]["child_session"]);
+                assert_eq!(pair[1]["parent_session"], parent);
+                assert!(pair[1]["child_through"].as_u64().unwrap() > 0);
+            }
+            let meta = store.get_session(id).unwrap().unwrap();
+            assert_eq!(
+                (meta.tokens_in, meta.tokens_out),
+                (4, 4),
+                "parent store counters retain only parent usage"
+            );
+            (meta.next_seq, records[0]["child_session"].as_str().unwrap().to_string())
+        };
+        rook.write_config(
+            &settings.replace(rates, "input_usd_per_million=99.0\noutput_usd_per_million=99.0\n"),
+        );
+        daemon = shared.then(|| Daemon::start(&rook));
+        let fork = rook.ok(&["session", "fork", parent, "--at", &end.to_string()]);
+        let branch = fork.split_whitespace().last().unwrap();
+        let later = rook.json(&["run", "LATER_CHILD_WORK", "--session", &child]);
+        assert!(
+            later.get("outcome").unwrap_or(&later)["reply"].as_str().unwrap().contains("Completed answer 7")
+        );
+        model.next();
+        assert!(
+            rook.json(&["session", "context", &child])["cost_coverage"]["known_subtotal_usd"]
+                .as_f64()
+                .unwrap()
+                > 0.000048
+        );
+        for id in [parent, branch] {
+            assert_eq!(
+                rook.json(&["session", "context", id])["cost_coverage"],
+                *costs,
+                "later child work and today's prices cannot change the recorded parent prefix"
+            );
+        }
+        drop(daemon);
+    }
+}
+
+#[test]
+fn delegated_admissions_survive_stop_and_process_loss_while_the_child_is_waiting_for_http() {
+    struct Process(std::process::Child);
+    impl Drop for Process {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    rook_llm::init_tls();
+    for case in ["stop", "daemon_crash", "local_crash"] {
+        let _local = (case == "local_crash").then(one_at_a_time);
+        let rook = Rook::new();
+        let model = Model::with_messages(vec![
+            json!({"role":"assistant","content":"","tool_calls":[{"index":0,"id":"start-child","type":"function","function":{"name":"delegate","arguments":json!({"task":"CHILD_WAITING"}).to_string()}}]}),
+        ]);
+        model.release.store(1, Ordering::SeqCst);
+        rook.write_config(&config(&model.url, "initial", "readonly", rook.workspace.path()));
+        let session = rook_store::new_session_id();
+        let id = rook_store::format_session_id(session);
+        {
+            let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+            store
+                .create_session(&rook_store::SessionMeta::new(
+                    session,
+                    "interrupted child",
+                    rook.workspace.path().display().to_string(),
+                    rook_store::now_unix(),
+                ))
+                .unwrap();
+        }
+        if case == "local_crash" {
+            let process = Process(
+                Command::new(env!("CARGO_BIN_EXE_rook"))
+                    .env("ROOK_HOME", rook.home.path())
+                    .env("ROOK_LOG", "error")
+                    .arg("--workspace")
+                    .arg(rook.workspace.path())
+                    .args(["run", "Delegate and wait.", "--session", &id])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap(),
+            );
+            model.next();
+            assert!(model.next()["messages"].to_string().contains("CHILD_WAITING"));
+            drop(process);
+        } else {
+            let daemon = Daemon::start(&rook);
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let mut socket = runtime.block_on(async {
+                let (mut socket, _) = tokio_tungstenite::connect_async(format!(
+                    "{}/api/chat",
+                    daemon.address.replacen("http", "ws", 1)
+                ))
+                .await
+                .unwrap();
+                socket
+                    .send(tokio_tungstenite::tungstenite::Message::Text(
+                        json!({"type":"prompt","session":id,"text":"Delegate and wait."}).to_string().into(),
+                    ))
+                    .await
+                    .unwrap();
+                socket
+            });
+            let turn =
+                runtime.block_on(socket_event(&mut socket, "turn"))["id"].as_str().unwrap().to_string();
+            model.next();
+            assert!(model.next()["messages"].to_string().contains("CHILD_WAITING"));
+            let busy = rook.json(&["session", "context", &id]);
+            assert_eq!(busy["cost_coverage"]["delegated"]["started"], 1);
+            assert_eq!(
+                busy["cost_coverage"]["delegated"]["pending"], 1,
+                "parent admission precedes the child's physical HTTP call"
+            );
+            if case == "stop" {
+                runtime.block_on(async {
+                    socket
+                        .send(tokio_tungstenite::tungstenite::Message::Text(
+                            json!({"type":"stop","id":"child-stop","turn":turn}).to_string().into(),
+                        ))
+                        .await
+                        .unwrap();
+                    assert_eq!(socket_event(&mut socket, "stop_applied").await["id"], "child-stop");
+                    socket_event(&mut socket, "cancelled").await;
+                });
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    let context = rook.json(&["session", "context", &id]);
+                    if context["cost_coverage"]["delegated"]["interrupted"] == 1 {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "Stop did not close the child ledger: {context}"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+            }
+            drop(socket);
+            drop(daemon);
+            std::fs::remove_file(rook.home.path().join("rookd.addr")).unwrap();
+        }
+        let context = rook.json(&["session", "context", &id]);
+        let coverage = &context["cost_coverage"];
+        let d = &coverage["delegated"];
+        assert_eq!(d["started"], 1, "{case}: {context}");
+        assert_eq!(d["completed"], 0);
+        assert_eq!(d["failed"], 0);
+        assert_eq!(d["interrupted"], u64::from(case == "stop"));
+        assert_eq!(d["pending"], u64::from(case != "stop"));
+        assert!(d["known_attempt_subtotal_usd"].is_null(), "no native child completion supplied a bill");
+        let end = {
+            let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+            let records: Vec<Value> = store
+                .events(session, 0, 256)
+                .unwrap()
+                .iter()
+                .filter(|e| e.record.label == "rook:model-delegation:v1")
+                .map(|e| serde_json::from_slice(&store.get(&e.record.body).unwrap()).unwrap())
+                .collect();
+            assert_eq!(records.len(), if case == "stop" { 2 } else { 1 });
+            let child = rook_store::parse_session_id(records[0]["child_session"].as_str().unwrap()).unwrap();
+            let meta = store.get_session(session).unwrap().unwrap();
+            assert_eq!((meta.tokens_in, meta.tokens_out), (1, 1), "child ledger adds no parent token charge");
+            let attempts: Vec<Value> = store
+                .events(child, 0, 256)
+                .unwrap()
+                .iter()
+                .filter(|e| e.record.label == "rook:model-attempt:v1")
+                .map(|e| serde_json::from_slice(&store.get(&e.record.body).unwrap()).unwrap())
+                .collect();
+            assert_eq!(attempts.len(), if case == "stop" { 2 } else { 1 });
+            assert_eq!(attempts[0]["state"], "started");
+            if case == "stop" {
+                assert_eq!(attempts[1]["state"], "interrupted");
+            }
+            meta.next_seq
+        };
+        let fork = rook.ok(&["session", "fork", &id, "--at", &end.to_string()]);
+        let branch = fork.split_whitespace().last().unwrap();
+        assert_eq!(rook.json(&["session", "context", branch])["cost_coverage"], *coverage);
+        assert!(model.requests.try_recv().is_err());
+    }
+}
+
+#[test]
 fn phase_routing_changes_the_physical_model_after_a_write_locally_and_through_the_daemon() {
     rook_llm::init_tls();
     for shared in [false, true] {

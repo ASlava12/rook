@@ -254,8 +254,12 @@ impl Crew<'_> {
         said: std::sync::Arc<Interjections>,
     ) -> Result<(String, TurnOutcome)> {
         let session = self.rook.fork_for_subtask(self.parent, task)?;
-        let mut tree =
-            if bounds.isolated { Some(crate::worktrees::create(self.rook, session).await?) } else { None };
+        let mut accounting = crate::model_delegation::Guard::start(self.rook, self.parent, session)?;
+        let mut tree = if bounds.isolated {
+            Some(accounting.returned(crate::worktrees::create(self.rook, session).await)?)
+        } else {
+            None
+        };
         let _finished = tree.as_ref().map(|_| crate::worktrees::Finished(self.rook, session));
         let isolated_rook = tree.as_ref().map(|tree| self.rook.for_workspace(tree.path.clone()));
         let rook = isolated_rook.as_ref().unwrap_or(self.rook);
@@ -313,14 +317,16 @@ impl Crew<'_> {
         let mut report = None;
         if let Some(tree) = tree.as_mut() {
             tree.finished = true;
-            tree.save(self.rook, session)?;
+            accounting.returned(tree.save(self.rook, session))?;
             report = Some(tree.report(session));
         }
-        let mut outcome =
-            result.map_err(|why| CoreError::Other(format!("{why}\n{}", report.as_deref().unwrap_or(""))))?;
+        let mut outcome = accounting.returned(
+            result.map_err(|why| CoreError::Other(format!("{why}\n{}", report.as_deref().unwrap_or("")))),
+        )?;
         if let Some(report) = report {
             outcome.reply.push_str(&format!("\n\n{report}"));
         }
+        accounting.finish(crate::model_delegation::State::Completed)?;
         Ok((rook_store::format_session_id(session), outcome))
     }
 }

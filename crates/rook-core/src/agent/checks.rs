@@ -512,6 +512,7 @@ impl<'a> AgentLoop<'a> {
         tokens: u64,
     ) -> Result<(String, TurnOutcome)> {
         let session = self.rook.fork_for_subtask(self.session, instruction)?;
+        let mut accounting = crate::model_delegation::Guard::start(self.rook, self.session, session)?;
         let mut child = AgentLoop::new(self.rook, self.provider.clone(), session);
         child.depth = self.depth + 1;
         child.by = self.by;
@@ -548,13 +549,13 @@ impl<'a> AgentLoop<'a> {
                     doing.send((0, crate::calls::doing(&call.name, Some(&call.arguments), &where_it_runs)));
             }
         };
-        let mut outcome = Box::pin(child.run_with(instruction, &mut relay)).await?;
+        let mut outcome = accounting.returned(Box::pin(child.run_with(instruction, &mut relay)).await)?;
         // A small model narrates what it would run and stops, or reasons its
         // way to the end and forgets the line. Asked once, in the same session,
         // it usually does what it said; a second silence is reported as one.
         if verdict_in(&outcome.reply).is_none() && !child.overspent(&outcome) && !child.out_of_time() {
             child.max_turn_tokens = child.left_to_spend(&outcome);
-            let finished = Box::pin(child.run_with(VERDICT_NUDGE, &mut relay)).await?;
+            let finished = accounting.returned(Box::pin(child.run_with(VERDICT_NUDGE, &mut relay)).await)?;
             outcome.reply = finished.reply;
             outcome.stopped = finished.stopped;
             outcome.steps += finished.steps;
@@ -563,6 +564,7 @@ impl<'a> AgentLoop<'a> {
             outcome.cached_tokens += finished.cached_tokens;
             outcome.tools_called.extend(finished.tools_called);
         }
+        accounting.finish(crate::model_delegation::State::Completed)?;
         Ok((rook_store::format_session_id(session), outcome))
     }
 }

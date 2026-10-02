@@ -1124,9 +1124,7 @@ impl Rook {
         let mut by_kind: BTreeMap<String, KindUsage> = BTreeMap::new();
         let mut compactions = 0;
         let mut request_record = None;
-        let mut last_response = None;
-        let mut coverage = crate::model_route::CostCoverage::default();
-        let mut usage_events = 0u64;
+        let mut accounting = crate::model_accounting::Fold::default();
         let through = self.store.get_session(session)?.map(|meta| meta.next_seq).unwrap_or(0);
         let mut next = 0;
 
@@ -1143,66 +1141,7 @@ impl Rook {
                 if kind == EventKind::Note && event.record.label == crate::context::REQUEST_CATALOG_LABEL {
                     request_record = Some((event.seq, event.record.body, bytes));
                 }
-                if kind == EventKind::Note && event.record.label == crate::model_route::LABEL {
-                    if bytes > crate::model_route::MAX_BYTES as u64 {
-                        return Err(CoreError::Other(
-                            "saved model route receipt exceeds 4096 bytes; preserve the store and inspect it"
-                                .into(),
-                        ));
-                    }
-                    let body = self.store.get_range(&event.record.body, 0, bytes as usize)?;
-                    let receipt = crate::model_route::Receipt::read(&body)?;
-                    coverage.include(&receipt, false);
-                    last_response = Some(crate::model_route::SavedReceipt { event_seq: event.seq, receipt });
-                }
-                if kind == EventKind::Note && event.record.label == crate::model_route::AUX_LABEL {
-                    if bytes > crate::model_route::MAX_BYTES as u64 {
-                        return Err(CoreError::Other("saved auxiliary model receipt exceeds 4096 bytes; preserve the store and inspect it".into()));
-                    }
-                    let body = self.store.get_range(&event.record.body, 0, bytes as usize)?;
-                    coverage.include(&crate::model_route::Auxiliary::read(&body)?.receipt, true);
-                }
-                if kind == EventKind::Note && event.record.label == crate::model_attempt::LABEL {
-                    if bytes > crate::model_route::MAX_BYTES as u64 {
-                        return Err(CoreError::Other(
-                            "saved model attempt exceeds 4096 bytes; preserve the store and inspect it"
-                                .into(),
-                        ));
-                    }
-                    let body = self.store.get_range(&event.record.body, 0, bytes as usize)?;
-                    let attempt = crate::model_attempt::Record::read(&body)?;
-                    match attempt.state {
-                        crate::model_attempt::State::Started => coverage.attempts_started += 1,
-                        crate::model_attempt::State::Completed => coverage.attempts_completed += 1,
-                        crate::model_attempt::State::Failed => coverage.attempts_failed += 1,
-                        crate::model_attempt::State::Incomplete => coverage.attempts_incomplete += 1,
-                        crate::model_attempt::State::Interrupted => coverage.attempts_interrupted += 1,
-                    }
-                    if !matches!(attempt.state, crate::model_attempt::State::Started) {
-                        if let Some(cost) = attempt.cost {
-                            coverage.priced_attempts += 1;
-                            coverage.attempt_known_subtotal_usd =
-                                Some(coverage.attempt_known_subtotal_usd.unwrap_or(0.0) + cost.estimated_usd);
-                        } else {
-                            coverage.unpriced_attempts += 1;
-                        }
-                    }
-                }
-                if kind == EventKind::AssistantMessage
-                    || event.record.tokens_in > 0
-                    || event.record.tokens_out > 0
-                    || (kind == EventKind::Note
-                        && matches!(
-                            event.record.label.as_str(),
-                            "usage"
-                                | "completion check"
-                                | "btw"
-                                | "compaction usage"
-                                | "branch summary usage"
-                        ))
-                {
-                    usage_events += 1;
-                }
+                accounting.include(&self.store, &event, bytes)?;
                 let entry = by_kind.entry(kind.as_str().to_string()).or_default();
                 entry.events += 1;
                 entry.bytes += bytes;
@@ -1218,18 +1157,7 @@ impl Rook {
                 };
             }
         }
-        coverage.usage_events_without_receipt =
-            usage_events.saturating_sub(coverage.main_receipts + coverage.auxiliary_receipts);
-        coverage.attempts_pending = coverage.attempts_started.saturating_sub(
-            coverage.attempts_completed
-                + coverage.attempts_failed
-                + coverage.attempts_incomplete
-                + coverage.attempts_interrupted,
-        );
-        let cost_coverage = (usage_events > 0
-            || coverage.main_receipts + coverage.auxiliary_receipts > 0
-            || coverage.attempts_started > 0)
-            .then_some(coverage);
+        let (cost_coverage, last_response) = accounting.finish();
 
         // Use exactly what the next turn would carry. A separate event-kind
         // estimate lost signed state, missing-call results and pruning rules.

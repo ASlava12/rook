@@ -1943,6 +1943,7 @@ pub fn note_is_for_a_person(label: &str) -> bool {
             | crate::tool_details::LABEL
             | crate::model_route::AUX_LABEL
             | crate::model_attempt::LABEL
+            | crate::model_delegation::LABEL
             | "compaction usage"
             | "branch summary usage"
     )

@@ -146,7 +146,9 @@ pub(crate) fn cmd_run(
         }
         // Before the loop borrows the agent, for the phrase a call is named by.
         let mut watching = crate::fmt::Watching::new(rook.workspace.clone(), json);
-        let outcome = agent.run_with(&prompt, |progress| watching.see(progress)).await?;
+        // A turn can recursively poll child agents. Keep its suspended state
+        // off the Windows main thread's smaller stack while driving the runtime.
+        let outcome = Box::pin(agent.run_with(&prompt, |progress| watching.see(progress))).await?;
         mcp.shutdown().await;
         let changes = rook.changes(session, false).ok();
         // A script that pipes this into something else has to be able to tell a

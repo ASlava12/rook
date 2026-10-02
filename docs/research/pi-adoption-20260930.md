@@ -13,7 +13,7 @@ Source: Pi `ee602414c703be8da722ec56de7f2399e62581ac`; starting Rook:
 | Inline tool cards | Complete | Compact/live/saved results, attributed errors/duration/diffs and command/search/MCP facts, explicit bounded browser pixels, terminal text fallback, local/daemon and full CI passed |
 | Context provenance inspector | Complete | Request-specific sources and loaded skills, deferred MCP tools in CLI/API/TUI/browser; bounded notes, old-note compatibility, local/daemon and full CI passed |
 | Local HTML export | Complete | Inclusive saved ranges, bounded/escaped/attributed output, no overwrite/publication, CLI/REPL/local/shared TUI parity, actual browser download/rendering and full CI passed |
-| Opt-in phase-based model routing | In progress | Static policy, durable branch transition, historical receipts and compatible image/scoped-state handoffs implemented; native continuation/reopen/fork and automatic fallback verified; auxiliary/branch-summary receipts, physical-attempt lifecycle and saved rate estimates implemented with explicit partial-cost coverage; finish delegated aggregation, uncovered-fact handling, live frontend checks and same-task comparison without claiming unmeasured savings |
+| Opt-in phase-based model routing | In progress | Static policy, durable branch transition, historical receipts and compatible image/scoped-state handoffs implemented; native continuation/reopen/fork and automatic fallback verified; auxiliary/branch-summary receipts, physical-attempt lifecycle, saved rate estimates and frozen delegated aggregation implemented with explicit unknown facts; finish live frontend checks and same-task comparison without claiming unmeasured savings |
 | Declarative extension UI | Pending | Bounded status/progress/forms/result contract, trust boundary, text fallback and frontend parity |
 
 Regular-scrollback TUI and terminal image preview remain experiments from the
@@ -3589,3 +3589,90 @@ Next complete delegated-session aggregation and uncovered-fact handling, then
 live phase-routing frontend interactions and same-task quality/cost/latency
 comparison. Declarative extension UI remains Pending; scrollback/image
 experiments retain their scope. The full adoption goal remains active.
+
+## Frozen delegated-session accounting
+
+Ordinary delegated errands and verification checkers now save parent-owned
+`rook:model-delegation:v1` admission/ending notes. Admission is immediately
+durable before child generation; normal result, error and graceful cancellation
+retain distinct execution states. Process loss leaves a pending admission.
+Completion means child execution returned, not that the child's goal was met.
+An ending freezes child cost coverage at an exclusive saved-history boundary
+before result collection, including flattened nested child costs. Checker
+nudges stay within one recorded child. Repeated collection cannot recharge it.
+
+The accounting fold reads fixed-prefix pages of at most 256 events and uses
+constant counters. Snapshots are bounded to 4 KiB before copying/encoding; the
+ledger contains IDs, numeric counts and optional estimates, never child text,
+workspace/test state or provider error bodies. Shared core folding also serves
+context inspection. Existing postcard records, main/auxiliary receipts, token
+carriers and last-response identity stay unchanged; older JSON defaults to no
+recorded delegated coverage. Restored model/TUI/browser history omits internal
+notes; the journal keeps them.
+
+CLI/TUI/API/browser context exposes direct child lifecycle, captured sessions,
+missing snapshots, unfinished descendants, pending physical attempts and
+separate parent-plus-captured response/attempt estimates. The two estimate views
+overlap and must not be added. Missing rates/native facts/snapshots remain
+unknown. Cancellation can capture a pending physical admission before its own
+Drop records interruption, so snapshots never assert a fully known bill.
+Parent/fork inspection never follows the live child: later turns, configuration
+changes and reopen cannot add another branch's work to a historical prefix.
+
+Validation and corrections for this block: the existing agent-loop suite exited
+0 (`target/pi-delegation-agent-loop.log`), and focused ledger plus browser DOM
+fixtures exited 0 (`target/pi-delegation-core.log`; context/restored-chat node
+modules). The first native fixture exited 101 because an explicit endpoint
+request requires approval; the fixture now uses the configured errand model.
+The next invocation exited 101 and exposed a real Windows CLI stack overflow
+in the local CLI while executing delegated work. Boxing the added wrapper
+futures did not resolve it: the combined native fixture exited 101 again
+(`target/pi-delegation-native-cli-verified.log`), including a blocked admission
+check that never reached HTTP. The wrappers were removed and synchronous guard
+closure now preserves the original child/checker execution shape. The direct
+retry still exited 101 (`target/pi-delegation-native-cli-direct.log`); finally
+boxing the CLI's main `run_with` future keeps its suspended state off the
+Windows main stack and the native local/daemon scenario exited 0
+(`target/pi-delegation-native-cli-boxed-turn.log`). It exercised the configured
+errand leaf, one checker with two generations, saved parent-plus-child costs,
+later child work, changed rates, reopen and a parent fork. Parent carriers
+retain 4/4 tokens, direct/nested child records add no second charge, and the
+combined response/attempt view independently retains USD 0.000064. This is
+controlled protocol evidence, not actual-model savings or quality evidence.
+
+Collection assertions initially failed to compile because turn counters are
+u32 while store counters are u64; corrected widening checks exited 0
+(`target/pi-delegation-collection-final.log`). Updated checker assertions also
+initially failed: the existing autonomous fixture really admits a later failed
+automatic checker, and checker turns intentionally omit completion classifiers.
+The fixture now asserts both actual admissions and the correct saved work,
+and exited 0 (`target/pi-delegation-checker-final-pass.log`). Final model-ledger
+unit checks exited 0 (`target/pi-delegation-model-core-final.log`); its combined
+shell invocation exited 101 solely because the earlier checker assertion
+failed, so that shell exit does not prove the final tree. All failed invocations
+remain distinct from final evidence. The remaining gates completed as recorded
+below.
+
+The final native Stop/daemon-crash/local-crash scenario exited 0
+(`target/pi-delegation-stop-crash-final.log`). It admitted actual child HTTP
+before stopping/killing the owned process: graceful Stop closed parent and
+child ledgers as interrupted; hard termination retained durable pending
+admissions after reopen. Parent carriers retained 1/1 tokens and zero extra
+charges from the ledger. A fork retained the same saved coverage without
+generating another request. Browser context/restored-chat fixtures exited 0
+again (`target/pi-delegation-browser-final.log`). `cargo xtask compaction`
+exited 0 (`target/pi-delegation-accounting-compaction.log`): 4.02 MiB on disk,
+37.1x dictionary compression and 5.8x end-to-end retain the published claims.
+Full `cargo xtask ci` exited 0 (`ci: ok`, 894.9 seconds;
+`target/pi-delegation-accounting-ci.log`). It reran the final ledger/receipt
+tests, original and updated agent-loop scenarios, repeated result collection,
+native local/daemon costs and Stop/process-loss scenarios, restored frontend
+fixtures, compatibility/queue/branch/goal suites, frontend builds, Clippy and
+doctests. Together with compaction's actual exit 0, this verifies the final
+block; no failed intermediate invocation is counted as proof. The code and
+documentation are ready to commit with no storage-format migration.
+
+Phase routing remains In progress: live frontend interactions and actual
+same-task quality/cost/latency comparison remain. Declarative extension UI is
+Pending, and terminal scrollback/image experiments retain their scope. The full
+adoption goal remains active.
