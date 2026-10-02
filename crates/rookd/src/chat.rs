@@ -1924,7 +1924,12 @@ fn as_event(progress: Progress<'_>, workspace: &std::path::Path) -> Option<ChatE
         Progress::Spent { input, output, cached } => {
             ChatEvent::Spent { input_tokens: input, output_tokens: output, cached_tokens: cached }
         }
-        Progress::Delta(Delta::Done { .. } | Delta::ReasoningDone(_)) => return None,
+        Progress::Delta(
+            Delta::Done { .. }
+            | Delta::ReasoningDone(_)
+            | Delta::Dispatch(_)
+            | Delta::ResponseMetadata { .. },
+        ) => return None,
     })
 }
 

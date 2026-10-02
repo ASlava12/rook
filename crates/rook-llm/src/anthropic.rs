@@ -113,6 +113,10 @@ impl Provider for Anthropic {
         &self.id
     }
 
+    fn dispatch_identity(&self) -> Option<crate::Dispatch> {
+        crate::Dispatch::bounded(self.id(), &self.model, false)
+    }
+
     fn context_window(&self) -> usize {
         self.config.context_window
     }
@@ -258,8 +262,8 @@ impl Provider for Anthropic {
             },
             stop_reason,
             usage: Usage {
-                input_tokens: wire.usage.input_tokens,
-                output_tokens: wire.usage.output_tokens,
+                input_tokens: wire.usage.input_tokens.unwrap_or(0),
+                output_tokens: wire.usage.output_tokens.unwrap_or(0),
                 cache_read_tokens: wire.usage.cache_read_input_tokens,
                 cache_write_tokens: wire.usage.cache_creation_input_tokens,
             },
@@ -298,6 +302,9 @@ impl Provider for Anthropic {
             let mut said_anything = false;
             let mut model = fallback_model;
             let mut usage = Usage::default();
+            let mut input_reported = false;
+            let mut output_reported = false;
+            let mut completion_confirmed = false;
             let mut stop = None;
             // Tool arguments arrive as JSON text spread over deltas, keyed by
             // the block index they belong to.
@@ -339,7 +346,8 @@ impl Provider for Anthropic {
                                 if let Some(m) = message.model {
                                     model = m;
                                 }
-                                usage.input_tokens = message.usage.input_tokens;
+                                input_reported = message.usage.input_tokens.is_some();
+                                usage.input_tokens = message.usage.input_tokens.unwrap_or(0);
                                 usage.cache_read_tokens = message.usage.cache_read_input_tokens;
                                 usage.cache_write_tokens = message.usage.cache_creation_input_tokens;
                             }
@@ -389,9 +397,13 @@ impl Provider for Anthropic {
                                 if let Some(reason) = delta.stop_reason {
                                     stop = Some(stop_reason(Some(&reason)));
                                 }
-                                usage.output_tokens = reported.output_tokens;
+                                output_reported = reported.output_tokens.is_some();
+                                usage.output_tokens = reported.output_tokens.unwrap_or(0);
                             }
-                            Event::MessageStop => break 'outer,
+                            Event::MessageStop => {
+                                completion_confirmed = true;
+                                break 'outer;
+                            }
                             Event::Error { error } => {
                                 Err(LlmError::Other(error.message))?;
                             }
@@ -419,6 +431,7 @@ impl Provider for Anthropic {
                     arguments: crate::parse_arguments(&arguments),
                 });
             }
+            yield Delta::ResponseMetadata { usage_reported: input_reported && output_reported, completion_confirmed };
             yield Delta::Done {
                 stop_reason: if had_tools { StopReason::ToolUse } else { stop.unwrap_or(StopReason::EndTurn) },
                 usage,
@@ -664,9 +677,9 @@ enum Block {
 #[derive(Default, Deserialize, Serialize)]
 struct WireUsage {
     #[serde(default)]
-    input_tokens: u32,
+    input_tokens: Option<u32>,
     #[serde(default)]
-    output_tokens: u32,
+    output_tokens: Option<u32>,
     #[serde(default)]
     cache_read_input_tokens: u32,
     #[serde(default)]

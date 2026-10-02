@@ -42,6 +42,7 @@ pub mod memory;
 pub mod mention;
 pub mod message_queue;
 pub mod model_catalog;
+pub mod model_route;
 pub mod models;
 mod output;
 pub mod paths;

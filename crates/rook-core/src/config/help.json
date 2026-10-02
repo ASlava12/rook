@@ -420,6 +420,10 @@
     "kind": "string",
     "help": "Opt in to analysis on this selected source, then use this named physical source after a successful file edit. Empty keeps one model. The branch phase survives reopen/compaction; incompatible image or provider reasoning state keeps the analysis model."
   },
+  "models.*.input_usd_per_million": {"kind":"number", "help":"Optional operator-supplied USD per million uncached input tokens. Finite 0..1000000. Missing pricing stays unknown; recorded estimates are not invoices."},
+  "models.*.output_usd_per_million": {"kind":"number", "help":"Optional operator-supplied USD per million output tokens. Both input and output rates are needed for a recorded estimate."},
+  "models.*.cache_read_usd_per_million": {"kind":"number", "help":"Optional operator-supplied USD per million cache-read tokens. Required for an estimate when the response reports cache reads."},
+  "models.*.cache_write_usd_per_million": {"kind":"number", "help":"Optional operator-supplied USD per million cache-write tokens. Required for an estimate when the response reports cache writes."},
   "models.*.endpoint": {
     "kind": "string",
     "help": "A name from [endpoints] to ask, where the address is written down once and several models share it."

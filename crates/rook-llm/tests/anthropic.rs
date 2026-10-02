@@ -238,7 +238,10 @@ async fn a_stream_assembles_text_thinking_and_a_tool_call() {
     let mut done = None;
     while let Some(delta) = stream.next().await {
         match delta.unwrap() {
-            Delta::Effort(_) => panic!("no retry wrapper in this direct dialect test"),
+            Delta::Effort(_) | Delta::Dispatch(_) => panic!("no retry wrapper in this direct dialect test"),
+            Delta::ResponseMetadata { usage_reported, completion_confirmed } => {
+                assert!(usage_reported && completion_confirmed);
+            }
             Delta::Text(t) => text.push_str(&t),
             Delta::Reasoning(t) => thinking.push_str(&t),
             Delta::ToolCall(c) => calls.push(c),

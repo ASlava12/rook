@@ -201,6 +201,12 @@ pub struct ModelSource {
     /// Opt in to analysis on this source, then implementation on this named
     /// source after a successful file edit. Empty keeps one model throughout.
     pub implementation_model: String,
+    /// Optional operator-supplied USD rates per million tokens. Absence means
+    /// unknown; no price is guessed from a model's name.
+    pub input_usd_per_million: Option<f64>,
+    pub output_usd_per_million: Option<f64>,
+    pub cache_read_usd_per_million: Option<f64>,
+    pub cache_write_usd_per_million: Option<f64>,
     /// A name from `[endpoints]` to ask, where the address is written down once
     /// and several models share it.
     ///

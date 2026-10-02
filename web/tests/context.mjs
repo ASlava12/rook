@@ -79,3 +79,27 @@ test('browser context reads the selected session and its workspace, then refresh
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(paths.at(-1), '/api/sessions/second/context?workspace=C%3A%2Fwork%20two');
 });
+
+test('response receipt keeps selected, dispatched and adapter-returned models distinct without inventing money', () => {
+  const panel = contextPanel({ ...usage, last_response: { event_seq: 24, receipt: {
+    selected: 'analysis', phase: 'implementation', dispatch: { provider: 'fallback', model: 'physical-fast' },
+    reported_model: '<script>server-echo</script>', usage: { input_tokens: 120, output_tokens: 7, cache_read_tokens: 80, cache_write_tokens: 10 }
+  } } });
+  assert.match(panel.textContent, /Selected: analysis · phase implementation/);
+  assert.match(panel.textContent, /Dispatched: fallback \/ physical-fast/);
+  assert.match(panel.textContent, /Reported model: <script>server-echo<\/script>/);
+  assert.match(panel.textContent, /120 input · 7 output · 80 cache read · 10 cache write/);
+  assert.match(panel.textContent, /Monetary cost: unknown/);
+  assert.match(panel.textContent, /input\/output counters reported: false/);
+  assert.match(panel.textContent, /configured fallback if omitted by server/);
+  assert.match(panel.textContent, /not total session spend/);
+  assert.equal(panel.find(node => node.tag === 'script'), null);
+  const priced = contextPanel({ ...usage, last_response: { event_seq: 25, receipt: {
+    selected: 'analysis', phase: 'implementation', dispatch: { provider: 'target', model: 'physical-fast' },
+    reported_model: 'echo', complete: true, usage_reported: true, elapsed_ms: 120, usage: { input_tokens: 1, output_tokens: 1 },
+    cost: { estimated_usd: 0.000008 }
+  } } });
+  assert.match(priced.textContent, /USD 0.00000800 estimate from recorded configured rates; not an invoice/);
+  assert.match(priced.textContent, /120 ms · completion confirmed: true/);
+  assert.match(priced.textContent, /input\/output counters reported: true/);
+});

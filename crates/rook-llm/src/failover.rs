@@ -378,6 +378,9 @@ mod tests {
         fn id(&self) -> &str {
             &self.id
         }
+        fn dispatch_identity(&self) -> Option<crate::Dispatch> {
+            crate::Dispatch::bounded(&self.id, &format!("physical-{}", self.id), true)
+        }
         fn context_window(&self) -> usize {
             match self.says {
                 Says::Answer => 128_000,
@@ -413,6 +416,31 @@ mod tests {
         let asked = Arc::new(AtomicUsize::new(0));
         let id = format!("{id}-{}", NEXT.fetch_add(1, Ordering::Relaxed));
         (Box::new(Fake { id, says, asked: asked.clone() }), asked)
+    }
+
+    #[tokio::test]
+    async fn dispatch_metadata_identifies_the_successful_leaf_without_guessing_from_the_preferred_route() {
+        use futures_util::StreamExt;
+        let (first, first_count) = saying("dispatch-unreachable", Says::Unreachable);
+        let (second, second_count) = saying("dispatch-answer", Says::Answer);
+        let physical = second.id().to_string();
+        let over = Failover::new(
+            vec![Box::new(crate::retry::Retrying::new(first)), Box::new(crate::retry::Retrying::new(second))],
+            Prefer::AsConfigured,
+        );
+        let mut stream = over.stream(Request::new(Vec::new())).await.unwrap();
+        let mut assembled = crate::Assembler::default();
+        while let Some(delta) = stream.next().await {
+            assembled.push(delta.unwrap()).unwrap();
+        }
+        let dispatch = assembled.dispatch().unwrap();
+        assert_ne!(over.id(), physical);
+        assert_eq!(dispatch.provider, physical);
+        assert_eq!(dispatch.model, format!("physical-{physical}"));
+        assert!(dispatch.input_includes_cache);
+        assert_eq!(assembled.finish().model, physical, "server-reported identity remains distinct");
+        assert_eq!(first_count.load(Ordering::Relaxed), 1);
+        assert_eq!(second_count.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]

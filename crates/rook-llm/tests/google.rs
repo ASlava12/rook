@@ -222,7 +222,10 @@ async fn a_stream_yields_text_as_it_arrives_and_calls_whole() {
     let (mut text, mut reasoning, mut calls, mut done) = (String::new(), String::new(), 0, None);
     while let Some(delta) = stream.next().await {
         match delta.unwrap() {
-            Delta::Effort(_) => panic!("no retry wrapper in this direct dialect test"),
+            Delta::Effort(_) | Delta::Dispatch(_) => panic!("no retry wrapper in this direct dialect test"),
+            Delta::ResponseMetadata { usage_reported, completion_confirmed } => {
+                assert!(usage_reported && completion_confirmed);
+            }
             Delta::Text(t) => text.push_str(&t),
             Delta::Reasoning(t) => reasoning.push_str(&t),
             // Google signs nothing and asks for nothing back.

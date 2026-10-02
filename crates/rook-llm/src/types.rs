@@ -182,6 +182,30 @@ pub struct Usage {
     pub cache_write_tokens: u32,
 }
 
+/// The physical candidate that opened this response, distinct from a selected
+/// policy and from a model name reported by the remote server. No URL or key.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Dispatch {
+    pub provider: String,
+    pub model: String,
+    /// Whether the provider's input count already includes cache read/write.
+    pub input_includes_cache: bool,
+}
+
+impl Dispatch {
+    /// Oversized legacy/custom identities stay unknown rather than being copied
+    /// into a new metadata channel or truncated into a different model name.
+    pub fn bounded(provider: &str, model: &str, input_includes_cache: bool) -> Option<Self> {
+        if [provider, model]
+            .into_iter()
+            .any(|s| s.is_empty() || s.len() > 256 || s.chars().any(char::is_control))
+        {
+            return None;
+        }
+        Some(Self { provider: provider.into(), model: model.into(), input_includes_cache })
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StopReason {
     EndTurn,

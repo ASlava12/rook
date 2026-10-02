@@ -52,7 +52,7 @@ impl AgentLoop<'_> {
                     let Some(delta) = delta else { break };
                     match delta {
                         Ok(delta) => {
-                            if !matches!(delta, rook_llm::Delta::Effort(_)) {
+                            if !matches!(delta, rook_llm::Delta::Effort(_) | rook_llm::Delta::Dispatch(_) | rook_llm::Delta::ResponseMetadata { .. }) {
                                 nothing_yet = false;
                             }
                             on_progress(Progress::Delta(&delta));

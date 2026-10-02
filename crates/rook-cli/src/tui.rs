@@ -4073,7 +4073,12 @@ impl App {
                         }
                         Progress::Turn { .. }
                         | Progress::PromptAdmitted { .. }
-                        | Progress::Delta(Delta::Done { .. } | Delta::ReasoningDone(_)) => return,
+                        | Progress::Delta(
+                            Delta::Done { .. }
+                            | Delta::ReasoningDone(_)
+                            | Delta::Dispatch(_)
+                            | Delta::ResponseMetadata { .. },
+                        ) => return,
                     };
                     let _ = emit.send(event);
                 })

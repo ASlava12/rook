@@ -562,6 +562,12 @@ pub trait Provider: Send + Sync {
         None
     }
 
+    /// A physical leaf may identify its configured request model. Routing
+    /// providers cannot promise one before choosing their successful candidate.
+    fn dispatch_identity(&self) -> Option<Dispatch> {
+        None
+    }
+
     /// Total context window in tokens. Used for budgeting before a request is
     /// sent, rather than discovering the limit by being rejected.
     fn context_window(&self) -> usize;

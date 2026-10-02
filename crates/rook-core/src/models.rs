@@ -29,6 +29,7 @@ pub fn provider_for(config: &Config, vault: &Vault, name: &str) -> Result<Box<dy
 
 fn validate_route(config: &Config, name: &str) -> Result<(), LlmError> {
     if let Some(source) = config.models.get(name) {
+        crate::model_route::validate_prices(source)?;
         crate::phase_routing::validate_source(config, name, source)?;
         if let Some(target) = config.models.get(&source.implementation_model) {
             checked_address(config, &source.implementation_model, target)?;
@@ -240,6 +241,7 @@ pub(crate) fn source_errors(config: &Config) -> Vec<String> {
         .flat_map(|(name, source)| {
             [
                 checked_address(config, name, source).err().map(|why| why.to_string()),
+                crate::model_route::validate_prices(source).err().map(|why| why.to_string()),
                 crate::phase_routing::validate_source(config, name, source).err().map(|why| why.to_string()),
             ]
             .into_iter()

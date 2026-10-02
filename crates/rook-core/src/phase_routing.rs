@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 use crate::{Config, CoreError, ModelSource, Result, Rook};
 
 pub(crate) const LABEL: &str = "rook:model-phase:v1";
+pub(crate) fn handoff_blocked(messages: &[rook_llm::Message]) -> bool {
+    messages.iter().any(|m| !m.reasoning.is_empty() || !m.images.is_empty())
+}
 const MAX_BYTES: usize = 16384;
 const MAX_POLICIES: usize = 16;
 static WRITING: Mutex<()> = Mutex::new(());
@@ -59,6 +62,10 @@ impl Selected {
 impl Provider for Selected {
     fn id(&self) -> &str {
         self.inner.id()
+    }
+
+    fn dispatch_identity(&self) -> Option<rook_llm::Dispatch> {
+        self.inner.dispatch_identity()
     }
     fn phase_routing(&self) -> Option<(&str, &str)> {
         Some((&self.selected, &self.target))

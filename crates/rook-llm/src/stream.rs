@@ -13,6 +13,12 @@ use crate::{Message, Response, Result, StopReason, ToolCall, Usage};
 pub enum Delta {
     /// Request metadata, never a model token or part of conversation history.
     Effort(crate::EffortReport),
+    Dispatch(crate::Dispatch),
+    /// Wire facts, distinct from the adapter's synthesized end-of-stream delta.
+    ResponseMetadata {
+        usage_reported: bool,
+        completion_confirmed: bool,
+    },
     Text(String),
     Reasoning(String),
     /// A whole block of reasoning, as the provider will want it back. Text for
@@ -39,12 +45,26 @@ pub struct Assembler {
     reasoning_blocks: Vec<serde_json::Value>,
     tool_calls: Vec<ToolCall>,
     finished: Option<(StopReason, Usage, String)>,
+    dispatch: Option<crate::Dispatch>,
+    usage_reported: bool,
+    completion_confirmed: Option<bool>,
 }
 
 impl Assembler {
     pub fn push(&mut self, delta: Delta) -> Result<()> {
         let bytes = match &delta {
             Delta::Effort(report) => report.describe().len(),
+            Delta::ResponseMetadata { .. } => 0,
+            Delta::Dispatch(report) => {
+                if crate::Dispatch::bounded(&report.provider, &report.model, report.input_includes_cache)
+                    .is_none()
+                {
+                    return Err(crate::LlmError::Decode(
+                        "dispatch metadata exceeds its identity limit".into(),
+                    ));
+                }
+                report.provider.len() + report.model.len()
+            }
             Delta::Text(t) | Delta::Reasoning(t) => t.len(),
             Delta::ReasoningDone(block) => json_bytes(block)?,
             Delta::ToolCall(call) => {
@@ -63,6 +83,11 @@ impl Assembler {
         }
         match delta {
             Delta::Effort(_) => {}
+            Delta::Dispatch(report) => self.dispatch = Some(report),
+            Delta::ResponseMetadata { usage_reported, completion_confirmed } => {
+                self.usage_reported = usage_reported;
+                self.completion_confirmed = Some(completion_confirmed);
+            }
             Delta::Text(t) => self.text.push_str(&t),
             Delta::Reasoning(t) => self.reasoning.push_str(&t),
             Delta::ReasoningDone(block) => self.reasoning_blocks.push(block),
@@ -74,6 +99,23 @@ impl Assembler {
 
     pub fn reasoning(&self) -> &str {
         &self.reasoning
+    }
+
+    pub fn dispatch(&self) -> Option<&crate::Dispatch> {
+        self.dispatch.as_ref()
+    }
+
+    pub fn has_done(&self) -> bool {
+        self.finished.is_some()
+    }
+
+    pub fn usage_reported(&self) -> bool {
+        self.usage_reported
+    }
+
+    pub fn completion_confirmed(&self) -> bool {
+        // Legacy/custom Done retains its contract; native adapters distinguish EOF.
+        self.has_done() && self.completion_confirmed.unwrap_or(true)
     }
 
     pub fn finish(self) -> Response {

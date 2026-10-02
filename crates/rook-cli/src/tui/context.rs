@@ -80,6 +80,10 @@ fn describe(usage: &ContextUsage) -> String {
     for (kind, row) in &usage.by_kind {
         let _ = writeln!(text, "  {kind:<16} {:>4} events · ~{} tokens", row.events, row.tokens);
     }
+    if let Some(saved) = &usage.last_response {
+        text.push('\n');
+        text.push_str(&rook_core::model_route::describe(saved));
+    }
     let Some(saved) = &usage.last_request else {
         text.push_str("\nNo recorded request attempt in this session.\n");
         return text;
@@ -181,6 +185,18 @@ mod tests {
         assert!(pane.text.contains("skill · camera · loaded · project/SKILL.md"));
         assert!(pane.text.contains("may differ from the current workspace"));
 
+        let response = serde_json::json!({"selected":"analysis","phase":"implementation","dispatch":{"provider":"physical","model":"target","input_includes_cache":true},"reported_model":"echo","usage":{"input_tokens":200,"output_tokens":7,"cache_read_tokens":80,"cache_write_tokens":10},"complete":true,"elapsed_ms":120});
+        rook.log(session, rook_store::EventKind::Note, "rook:model-route:v1", &response.to_string()).unwrap();
+        pane.key(KeyEvent::new(KeyCode::Char('r'), ratatui::crossterm::event::KeyModifiers::NONE), &source);
+        assert!(pane.text.contains("Selected: analysis · phase implementation"));
+        assert!(pane.text.contains("Dispatched: physical / target"));
+        assert!(pane.text.contains("Reported model: echo"));
+        assert!(pane.text.contains("200 input · 7 output · 80 cache read · 10 cache write"));
+        assert!(pane.text.contains("Monetary cost: unknown"));
+        assert!(pane.text.contains("120 ms · completion confirmed: true"));
+        assert!(pane.text.contains("input/output counters reported: false"));
+        assert!(pane.text.contains("configured fallback if omitted by server"));
+
         // Refresh follows the newest saved attempt, including an older note
         // format that predates MCP provenance.
         let older_format = serde_json::json!({
@@ -195,7 +211,7 @@ mod tests {
         )
         .unwrap();
         pane.key(KeyEvent::new(KeyCode::Char('r'), ratatui::crossterm::event::KeyModifiers::NONE), &source);
-        assert!(pane.text.contains("Last request attempt · event #1 · historical snapshot"));
+        assert!(pane.text.contains("Last request attempt · event #2 · historical snapshot"));
         assert!(pane.text.contains("scripted/next"));
         assert!(!pane.text.contains("camera__shot"));
     }

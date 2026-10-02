@@ -13,7 +13,7 @@ Source: Pi `ee602414c703be8da722ec56de7f2399e62581ac`; starting Rook:
 | Inline tool cards | Complete | Compact/live/saved results, attributed errors/duration/diffs and command/search/MCP facts, explicit bounded browser pixels, terminal text fallback, local/daemon and full CI passed |
 | Context provenance inspector | Complete | Request-specific sources and loaded skills, deferred MCP tools in CLI/API/TUI/browser; bounded notes, old-note compatibility, local/daemon and full CI passed |
 | Local HTML export | Complete | Inclusive saved ranges, bounded/escaped/attributed output, no overwrite/publication, CLI/REPL/local/shared TUI parity, actual browser download/rendering and full CI passed |
-| Opt-in phase-based model routing | In progress | Static opt-in policy and durable branch transition implemented; finish capability/continuity audit, actual route/cost reporting, live frontend checks and comparison without claiming unmeasured savings |
+| Opt-in phase-based model routing | In progress | Static policy, durable branch transition and historical dispatch/usage/rate receipts implemented; finish capability/continuity audit, comparison accounting, live frontend checks and same-task comparison without claiming unmeasured savings |
 | Declarative extension UI | Pending | Bounded status/progress/forms/result contract, trust boundary, text fallback and frontend parity |
 
 Regular-scrollback TUI and terminal image preview remain experiments from the
@@ -3101,3 +3101,101 @@ TUI/browser interactions, then compare quality, cost and latency on the same
 tasks without treating a scripted server as measured model quality or savings.
 Delegated/checking policy behavior also needs an explicit audit. Declarative
 extension UI and the scrollback/image experiments retain their original scope.
+
+## Historical dispatch, usage and configured-rate receipt
+
+The routing report now distinguishes a selected policy from the physical
+candidate that opened its response and the model value returned by the adapter.
+That value falls back to configuration when the server omits its model field;
+it is not proof of an unreported version behind a proxy. Bounded
+dispatch metadata is emitted inside the successful retry/fallback leaf, so the
+outer preferred-provider ID is not mistaken for the answering candidate.
+Legacy/custom providers without metadata stay unknown. The metadata is not a
+model token and does not clear the waiting-for-first-content state. Direct
+dialect tests retain their ordinary wire output; frontends ignore the internal
+metadata delta and obtain the saved report through the context API.
+
+The engine records one historical response receipt with all input/output/
+cache-read/cache-write counters, elapsed request/reception time and explicit
+stream-completion confirmation and primary-counter presence. The four native
+stream dialects distinguish omitted input/output counters from explicit zero;
+Google retains counters arriving in separate chunks, and Anthropic zero fresh
+input remains valid for a cached prompt. Native wire terminal markers are
+distinguished from synthesized EOF endings; an unconfirmed ending cannot produce
+a cost estimate. It commits atomically with the visible reply
+and any opaque state, preserving their required adjacency. Reads/encoding admit
+at most 4 KiB; identities admit 256 UTF-8 bytes before copying, and known secret
+values are withheld. No URL/key or additional model instruction is recorded.
+Reopen and prefix forks preserve exactly the applicable receipt. Old context
+JSON without a receipt still reads through optional defaults.
+
+Optional named-source USD-per-million rates are validated offline as finite
+0..1000000. Estimates use the actual dispatch source/model, subtract caches from
+inclusive input counts and add caches separately for fresh-input-only dialects.
+Required missing rates, unknown/mismatched identity, inconsistent cache counters,
+all-zero usage, either omitted primary counter or no completion marker leave money unknown. Recorded estimates
+retain their rate snapshot after configuration changes and are explicitly not
+verified invoices. These are operator-supplied rates; no market prices or model
+savings were inferred. Tiny positive estimates use scientific notation instead
+of rounding to a displayed zero.
+
+CLI, local/shared TUI and browser context views show this one response separately
+from the last request attempt and current live estimate. It is not total session
+spend. The current estimate now follows the next effective phase window, sharing
+the image/opaque-state handoff guard with the loop instead of retaining the
+analysis window after a successful route.
+
+Focused checks exited 0: the complete LLM suite
+(`target/pi-route-report-llm.log`), new successful-leaf fallback scenario
+(`target/pi-route-report-fallback.log`), four core receipt/rate/secrecy/bound
+checks (`target/pi-route-report-core-final.log`), actual local/daemon integration
+with restart, distinct requested/server model names, captured rates/usage and
+the effective target window (`target/pi-route-report-cli-final.log`, 58.66
+seconds including its owned daemon build), the native context-pane scenario
+(`target/pi-route-report-tui-final.log`) and all browser context checks
+(`target/pi-route-report-browser-tests-final.log`). Browser tests exercise the
+actual context module with a DOM fixture; native tests exercise its pane, not
+an actual interactive window. Live frontend interactions remain pending.
+Initial compilation exposed the Responses adapter's inner model field and new
+delta match arms; these were corrected. The attempted `rook-cli --lib` test
+failed because CLI is a binary target; the executed `--bin rook` scenario passed.
+Failed logs are retained and do not count as successful gates.
+
+The final storage-affecting block passed both mandatory gates with exit status
+0: `cargo xtask ci` (`ci: ok`, 756.5 seconds;
+`target/pi-route-report-ci-verified.log`) and `cargo xtask compaction`
+(`target/pi-route-report-compaction-verified.log`). Storage measurements remain
+4.02 MiB on disk, 37.1x dictionary compression and 5.8x end-to-end. The full gate
+executed the new local/daemon receipt scenario, native context-pane check,
+browser context fixtures, all four native wire-fact scenarios and core receipt
+tests, alongside the complete existing suites and doctests.
+
+The first full CI exited 1 (867.3 seconds; `target/pi-route-report-ci.log`):
+two agent-log scenarios asserted the old exact event sequence without response
+receipts. Every other target passed. The expectations now include one receipt
+after each response and assert its counters/completion/unknown physical identity
+and cost, while retaining the exact log, result, timing and metadata-spend checks.
+Both scenarios executed and exited 0 (`target/pi-route-report-plain-log.log` and
+`target/pi-route-report-tool-log.log`) before the subsequent full gates.
+The second full gate exited 0 (`ci: ok`, 705.9 seconds;
+`target/pi-route-report-ci-final.log`). Final review then exposed defaulted
+missing counters and overstated server-model provenance; these are corrected
+above and were verified by the final full gate. The dedicated native HTTP checks
+also executed and exited 0 (`target/pi-route-report-wire-facts-final.log`):
+twenty actual socket responses cover omitted/zero/split counters and transport
+EOF without a terminal marker. They do not assume a nonzero aggregate proves all
+counters were present or a synthesized Done verifies native wire completion.
+Custom/legacy providers retain their Done contract but cannot be priced without
+primary-counter metadata. The earlier green gate alone did not validate these
+subsequent changes. The complete LLM suite and focused core pricing checks also
+passed on the counter-presence implementation (`target/pi-route-report-llm-presence-final.log`
+and `target/pi-route-report-core-presence-final.log`); final terminal-marker
+changes are covered by the final full gate, not those earlier focused logs.
+The phase row remains In progress. Next audit capabilities/reasoning and
+delegated/checking continuity, complete comparison accounting (including
+auxiliary/non-streaming usage, failed attempts and explicit session-level
+missing-cost coverage), verify live TUI/browser
+interactions and compare quality/cost/latency on the same tasks. A scripted server
+proves request plumbing and arithmetic, not model quality or savings.
+Declarative extension UI and scrollback/image terminal experiments keep their
+original scope; the full adoption goal remains active.

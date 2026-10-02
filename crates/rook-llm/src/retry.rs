@@ -250,6 +250,10 @@ impl Provider for Retrying {
         self.inner.id()
     }
 
+    fn dispatch_identity(&self) -> Option<crate::Dispatch> {
+        self.inner.dispatch_identity()
+    }
+
     fn context_window(&self) -> usize {
         self.inner.context_window()
     }
@@ -319,6 +323,13 @@ impl Provider for Retrying {
         loop {
             match self.inner.stream(request.clone()).await {
                 Ok(stream) => {
+                    let stream: ResponseStream = match self.inner.dispatch_identity() {
+                        Some(identity) => Box::pin(
+                            futures_util::stream::once(async { Ok(crate::Delta::Dispatch(identity)) })
+                                .chain(stream),
+                        ),
+                        None => stream,
+                    };
                     let Some(requested) = requested else { return Ok(stream) };
                     // Use this attempt's request, not shared refusal state: a
                     // concurrent call could have learned a different answer.

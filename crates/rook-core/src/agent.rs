@@ -1127,6 +1127,7 @@ impl<'a> AgentLoop<'a> {
                 body = serde_json::to_string(&catalog)?;
             }
             self.rook.log(self.session, EventKind::Note, crate::context::REQUEST_CATALOG_LABEL, &body)?;
+            let route_started = std::time::Instant::now();
             let mut timing = crate::diagnostics::Timer::start(
                 self.rook,
                 self.session,
@@ -1194,6 +1195,9 @@ impl<'a> AgentLoop<'a> {
             if !thinking.is_empty() {
                 self.rook.log(self.session, EventKind::Reasoning, "", &self.vault.redact(&thinking)).ok();
             }
+            let dispatch = assembler.dispatch().cloned();
+            let route_complete = assembler.completion_confirmed();
+            let route_usage_reported = assembler.usage_reported();
             let mut response = assembler.finish();
             // Read back either way. Without native tools the object is the
             // only way a call arrives; with them, a small model still writes
@@ -1230,28 +1234,52 @@ impl<'a> AgentLoop<'a> {
                 cached: outcome.cached_tokens,
             });
 
-            let assistant_state =
-                match crate::provider_history::record(self.rook, self.session, &response, &self.vault) {
-                    Ok(seq) => seq,
-                    Err(error) => {
-                        // A response too large to retain was still billed. Stopping
-                        // before effects must not erase that cost on goal resume.
-                        self.rook
-                            .store
-                            .append_event(
-                                self.session,
-                                rook_store::NewEvent::new(
-                                    EventKind::Note,
-                                    rook_store::Kind::Message,
-                                    b"response could not be retained",
-                                )
-                                .label("usage")
-                                .usage(response.usage.input_tokens, response.usage.output_tokens),
+            let (selected, phase) = match &self.routing {
+                Some((selected, target)) => (
+                    selected.as_str(),
+                    if self.routed {
+                        "implementation"
+                    } else if crate::phase_routing::implementing(self.rook, self.session, selected, target)? {
+                        "implementation_held"
+                    } else {
+                        "analysis"
+                    },
+                ),
+                None => (self.provider.id(), "ordinary"),
+            };
+            let mut route =
+                crate::model_route::Receipt::new(selected, phase, dispatch, &response, &self.vault);
+            route.complete = route_complete;
+            route.usage_reported = route_usage_reported;
+            route.elapsed_ms = route_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+            route.price(&self.rook.config);
+            let assistant_state = match crate::provider_history::record(
+                self.rook,
+                self.session,
+                &response,
+                &self.vault,
+                Some(&route),
+            ) {
+                Ok(seq) => seq,
+                Err(error) => {
+                    // A response too large to retain was still billed. Stopping
+                    // before effects must not erase that cost on goal resume.
+                    self.rook
+                        .store
+                        .append_event(
+                            self.session,
+                            rook_store::NewEvent::new(
+                                EventKind::Note,
+                                rook_store::Kind::Message,
+                                b"response could not be retained",
                             )
-                            .ok();
-                        return Err(error);
-                    }
-                };
+                            .label("usage")
+                            .usage(response.usage.input_tokens, response.usage.output_tokens),
+                        )
+                        .ok();
+                    return Err(error);
+                }
+            };
             if !response.message.content.is_empty() {
                 outcome.reply = response.message.content.clone();
             }

@@ -69,8 +69,51 @@ the operation; the agent does not automatically repeat it. The phase note and
 cache are atomic with each other, not with the external filesystem operation.
 
 The selected session model remains the analysis source. A routing progress line
-and bounded dispatch note expose the target provider identity; request provenance
-and ordinary response usage records continue through their existing paths. Phase
-notes are not additional model instructions. A full selected-versus-dispatched
-route/cost report and same-task quality/cost/latency comparison remain pending.
-No savings have been measured or claimed.
+and bounded dispatch note expose the target provider identity. Phase notes and
+response receipts are not additional model instructions. Same-task quality,
+cost and latency comparison, compatible capability handoffs and live frontend
+interaction checks remain pending. No savings have been measured or claimed.
+
+## Route and cost receipt
+
+`rook session context ID`, TUI `/context` and the browser Context view show the
+last historical response separately from the last request attempt. The receipt
+distinguishes the selected policy, its phase, the physical candidate that opened
+the response and the model name returned by the adapter. The latter uses the
+configured model when the server omits its model field; it does not prove an
+unreported model version behind a proxy. A successful fallback
+reports its own identity. Legacy/custom providers with no dispatch metadata stay
+unknown. Names are admitted under 256 UTF-8 bytes before copying; known secret
+values are withheld, and no endpoint URL or credential is included.
+
+The receipt contains provider input/output/cache-read/cache-write counters,
+elapsed request/reception time including waits and retries, and whether the
+stream supplied a completion marker and both primary input/output counters.
+Native adapters distinguish a terminal marker from transport EOF; a synthesized
+end-of-stream delta alone cannot verify completion or produce a cost estimate.
+Explicitly reported zero is distinguished from an omitted counter, including
+zero fresh input for a fully cached Anthropic prompt. It describes one response, not total
+session spend or an invoice. Zero counters can mean the server omitted usage.
+It commits atomically with the visible response and any opaque assistant state,
+survives reopening, and follows only the saved prefix of a fork. Reads/encoding
+are limited to 4 KiB; oversized or unsupported stored data is refused.
+
+Optional rates are set per named physical source, in USD per million tokens:
+
+```toml
+# Under [models.implementation]; example arithmetic, not market prices.
+input_usd_per_million = 2.0
+output_usd_per_million = 6.0
+cache_read_usd_per_million = 0.2
+cache_write_usd_per_million = 3.0
+```
+
+Rates must be finite and in 0..1000000. Input/output rates are required for an
+estimate; a cache rate is required when its counter is nonzero. Cache counters
+are subtracted from inclusive input totals, and added separately for a dialect
+that reports fresh input only. Inconsistent counters, no confirmed completion,
+either primary counter omitted,
+all-zero counters, a missing/mismatched physical identity or missing rates leave
+the monetary estimate unknown. Rates and the computed estimate are saved in
+the receipt; changing configuration cannot reprice history. They are operator
+estimates from provider counters, not verified billed charges.

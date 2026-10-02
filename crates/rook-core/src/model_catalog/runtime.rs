@@ -155,6 +155,10 @@ impl Provider for Observed {
     fn id(&self) -> &str {
         self.inner.id()
     }
+
+    fn dispatch_identity(&self) -> Option<rook_llm::Dispatch> {
+        self.inner.dispatch_identity()
+    }
     fn context_window(&self) -> usize {
         self.inner.context_window()
     }

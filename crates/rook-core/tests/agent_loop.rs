@@ -595,14 +595,20 @@ async fn a_plain_turn_is_logged_end_to_end() {
     let kinds: Vec<&str> = entries.iter().map(|e| e.kind.as_str()).collect();
     assert_eq!(
         kinds,
-        vec!["user", "note", "assistant", "note", "note", "note"],
+        vec!["user", "note", "assistant", "note", "note", "note", "note"],
         "both sides, the completion check and the result pair must be in the log"
     );
     assert_eq!(entries[0].body, "say hello");
     assert_eq!(entries[1].label, rook_core::context::REQUEST_CATALOG_LABEL);
-    assert_eq!(entries[4].label, "turn-summary");
-    assert_eq!(entries[5].label, "turn-result");
-    let (_, saved): (String, rook_core::agent::TurnOutcome) = serde_json::from_str(&entries[5].body).unwrap();
+    assert_eq!(entries[3].label, "rook:model-route:v1", "one route receipt follows its response");
+    let receipt: rook_core::model_route::Receipt = serde_json::from_str(&entries[3].body).unwrap();
+    assert_eq!(receipt.usage.input_tokens, 100);
+    assert!(receipt.complete);
+    assert!(receipt.dispatch.is_none(), "a custom scripted provider cannot prove a physical endpoint");
+    assert!(receipt.cost.is_none());
+    assert_eq!(entries[5].label, "turn-summary");
+    assert_eq!(entries[6].label, "turn-result");
+    let (_, saved): (String, rook_core::agent::TurnOutcome) = serde_json::from_str(&entries[6].body).unwrap();
     assert_eq!(saved.reply, outcome.reply);
 }
 
@@ -655,22 +661,43 @@ async fn a_tool_call_runs_and_both_halves_reach_the_log() {
     let kinds: Vec<&str> = entries.iter().map(|e| e.kind.as_str()).collect();
     assert_eq!(
         kinds,
-        vec!["user", "note", "note", "tool-call", "tool-result", "note", "assistant", "note", "note", "note"]
+        vec![
+            "user",
+            "note",
+            "note",
+            "note",
+            "tool-call",
+            "tool-result",
+            "note",
+            "assistant",
+            "note",
+            "note",
+            "note",
+            "note"
+        ]
     );
     assert_eq!(entries[1].label, rook_core::context::REQUEST_CATALOG_LABEL);
-    assert_eq!(entries[5].label, rook_core::context::REQUEST_CATALOG_LABEL);
-    assert_eq!(entries[8].label, "turn-summary");
-    assert_eq!(entries[9].label, "turn-result");
-    assert!(entries[4].body.contains("line two"), "{}", entries[4].body);
+    assert_eq!(entries[6].label, rook_core::context::REQUEST_CATALOG_LABEL);
+    assert_eq!(entries[10].label, "turn-summary");
+    assert_eq!(entries[11].label, "turn-result");
+    assert!(entries[5].body.contains("line two"), "{}", entries[5].body);
     assert_eq!(entries[2].label, "usage", "tool-only usage is durable before the effect");
+    for index in [3, 8] {
+        assert_eq!(entries[index].label, "rook:model-route:v1");
+        let receipt: rook_core::model_route::Receipt = serde_json::from_str(&entries[index].body).unwrap();
+        assert_eq!(receipt.usage.input_tokens, 100);
+        assert!(receipt.complete);
+        assert!(receipt.dispatch.is_none());
+        assert!(receipt.cost.is_none());
+    }
     let meta = f.rook.store.get_session(session).unwrap().unwrap();
     assert_eq!(meta.tokens_in, u64::from(outcome.input_tokens));
     assert_eq!(meta.tokens_out, u64::from(outcome.output_tokens));
     // Read back, a call says what it was doing — the same words a front end
     // watching it live shows. It said `read_file` here, which answers "it read
     // something" and never "which file".
-    assert_eq!(entries[3].label, "read_file", "the log keeps the tool's own name");
-    assert_eq!(entries[3].doing, "read hello.txt", "and the entry says what it was for");
+    assert_eq!(entries[4].label, "read_file", "the log keeps the tool's own name");
+    assert_eq!(entries[4].doing, "read hello.txt", "and the entry says what it was for");
     assert!(entries[0].doing.is_empty(), "nothing else claims to be a call");
 }
 

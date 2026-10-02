@@ -163,7 +163,7 @@ fn phase_routing_changes_the_physical_model_after_a_write_locally_and_through_th
                 "[models.initial]",
                 "[models.initial]\nimplementation_model='followup'\ncontext_window=65536",
             )
-            .replace("[models.followup]", "[models.followup]\ncontext_window=32768");
+            .replace("[models.followup]", "[models.followup]\ncontext_window=32768\ninput_usd_per_million=2.0\noutput_usd_per_million=6.0");
         rook.write_config(&settings);
         let mut daemon = shared.then(|| Daemon::start(&rook));
         let output = rook.run(&["--json", "run", "Read evidence, write it once, then answer."]);
@@ -202,6 +202,24 @@ fn phase_routing_changes_the_physical_model_after_a_write_locally_and_through_th
             "followup-model",
             "saved branch phase survives a new process/daemon"
         );
+        let context = rook.json(&["session", "context", session]);
+        assert_eq!(context["window"], 32768, "the inspector uses the next effective routed context window");
+        let receipt = &context["last_response"]["receipt"];
+        assert_eq!(receipt["selected"], "initial");
+        assert_eq!(receipt["phase"], "implementation");
+        assert_eq!(receipt["dispatch"]["provider"], "followup");
+        assert_eq!(receipt["dispatch"]["model"], "followup-model");
+        assert_eq!(
+            receipt["reported_model"], "test",
+            "the server echo is not overwritten by the request model"
+        );
+        assert_eq!(receipt["usage"]["input_tokens"], 1);
+        assert_eq!(receipt["usage"]["output_tokens"], 1);
+        assert_eq!(receipt["complete"], true);
+        assert_eq!(receipt["usage_reported"], true);
+        assert!((receipt["cost"]["estimated_usd"].as_f64().unwrap() - 0.000008).abs() < 1e-12);
+        assert_eq!(receipt["cost"]["input_usd_per_million"], 2.0);
+        assert!(receipt["elapsed_ms"].as_u64().unwrap() > 0);
         assert!(model.requests.try_recv().is_err(), "no classifier or extra work request");
         drop(daemon);
         let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();

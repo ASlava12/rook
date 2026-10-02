@@ -502,7 +502,12 @@ async fn prompt(
                 | Progress::Turn { .. }
                 | Progress::PromptAdmitted { .. }
                 | Progress::Step { .. }
-                | Progress::Delta(Delta::Done { .. } | Delta::ReasoningDone(_)) => {
+                | Progress::Delta(
+                    Delta::Done { .. }
+                    | Delta::ReasoningDone(_)
+                    | Delta::Dispatch(_)
+                    | Delta::ResponseMetadata { .. },
+                ) => {
                     return;
                 }
             };

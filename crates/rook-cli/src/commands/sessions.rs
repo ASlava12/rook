@@ -443,6 +443,9 @@ fn show_context(usage: &rook_core::ContextUsage, json: bool) -> Result<()> {
         return Ok(());
     }
     let pct = usage.live_tokens as f64 / usage.usable.max(1) as f64 * 100.0;
+    if let Some(saved) = &usage.last_response {
+        println!("{}", rook_core::model_route::describe(saved));
+    }
     println!("window       {:>9}  (usable {}, compacts at {})", usage.window, usage.usable, usage.compact_at);
     println!(
         "in context   {:>9}  {:.0}% of usable {}",

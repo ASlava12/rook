@@ -58,6 +58,10 @@ impl Provider for Responses {
     fn id(&self) -> &str {
         self.inner.id()
     }
+    fn dispatch_identity(&self) -> Option<crate::Dispatch> {
+        crate::Dispatch::bounded(self.id(), &self.inner.model, true)
+    }
+
     fn context_window(&self) -> usize {
         self.inner.context_window()
     }
@@ -168,6 +172,11 @@ impl Provider for Responses {
                             if !remainder.is_empty() { yield Delta::Reasoning(remainder.into()); }
                             for block in decoded.message.reasoning { yield Delta::ReasoningDone(block); }
                             for call in decoded.message.tool_calls { yield Delta::ToolCall(call); }
+                            yield Delta::ResponseMetadata {
+                                usage_reported: value.pointer("/usage/input_tokens").and_then(Value::as_u64).is_some()
+                                    && value.pointer("/usage/output_tokens").and_then(Value::as_u64).is_some(),
+                                completion_confirmed: true,
+                            };
                             yield Delta::Done { stop_reason: decoded.stop_reason, usage: decoded.usage, model: decoded.model };
                             finished = true;
                             break 'read;

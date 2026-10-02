@@ -69,7 +69,15 @@ fn redact(value: &mut serde_json::Value, vault: &Vault) -> bool {
 
 /// Persist before effects. An atomic pair prevents a transcript answer without
 /// its provider state (or a state with an absent visible answer) after a crash.
-pub(crate) fn record(rook: &Rook, session: u128, response: &Response, vault: &Vault) -> Result<Option<u64>> {
+pub(crate) fn record(
+    rook: &Rook,
+    session: u128,
+    response: &Response,
+    vault: &Vault,
+    route: Option<&crate::model_route::Receipt>,
+) -> Result<Option<u64>> {
+    let route =
+        route.map(|r| crate::persistence::encode_with_limit(r, crate::model_route::MAX_BYTES)).transpose()?;
     let text = vault.redact(&response.message.content);
     let visible = if text.is_empty() {
         NewEvent::new(EventKind::Note, Kind::Message, b"tool-only response").label("usage")
@@ -78,7 +86,18 @@ pub(crate) fn record(rook: &Rook, session: u128, response: &Response, vault: &Va
     }
     .usage(response.usage.input_tokens, response.usage.output_tokens);
     if response.message.reasoning.is_empty() {
-        rook.store.append_event(session, visible)?;
+        match route {
+            Some(bytes) => {
+                rook.store.append_event_pair(
+                    session,
+                    visible,
+                    NewEvent::new(EventKind::Note, Kind::Message, &bytes).label(crate::model_route::LABEL),
+                )?;
+            }
+            None => {
+                rook.store.append_event(session, visible)?;
+            }
+        }
         return Ok(None);
     }
     let max = limit(rook)?;
@@ -103,11 +122,19 @@ pub(crate) fn record(rook: &Rook, session: u128, response: &Response, vault: &Va
         message.reasoning.clear();
     }
     let bytes = crate::persistence::encode_with_limit(&message, max)?;
-    let [seq, _] = rook.store.append_event_pair(
-        session,
-        NewEvent::new(EventKind::Note, Kind::Message, &bytes).label(LABEL),
-        visible,
-    )?;
+    let state = NewEvent::new(EventKind::Note, Kind::Message, &bytes).label(LABEL);
+    let seq = match route {
+        Some(route) => rook.store.append_events_with_values(
+            session,
+            [
+                state,
+                visible,
+                NewEvent::new(EventKind::Note, Kind::Message, &route).label(crate::model_route::LABEL),
+            ],
+            &[],
+        )?[0],
+        None => rook.store.append_event_pair(session, state, visible)?[0],
+    };
     if withheld {
         rook.log(session, EventKind::Note, "provider-state",
             "Signed provider state contained a known secret and was not retained. Resumed reasoning may need to restart.").ok();
@@ -286,10 +313,15 @@ mod tests {
         let mut response = response();
         response.message.reasoning[0]["thinking"] = json!("x".repeat(2048));
         assert!(serde_json::to_vec(&response.message).unwrap().len() > 1024);
-        assert!(record(&rook, session, &response, &Vault::empty()).unwrap_err().to_string().contains("1024"));
+        assert!(
+            record(&rook, session, &response, &Vault::empty(), None)
+                .unwrap_err()
+                .to_string()
+                .contains("1024")
+        );
         assert_eq!(rook.store.get_session(session).unwrap().unwrap().next_seq, before);
         rook.config.agent.max_provider_state_bytes = 4096;
-        let seq = record(&rook, session, &response, &Vault::empty()).unwrap().unwrap();
+        let seq = record(&rook, session, &response, &Vault::empty(), None).unwrap().unwrap();
         let event = rook.store.events(session, seq, 1).unwrap().remove(0);
         rook.config.agent.max_provider_state_bytes = 1024;
         assert!(load(&rook, &event).unwrap_err().to_string().contains("max_provider_state_bytes"));
@@ -306,7 +338,7 @@ mod tests {
         response.message.content = "private-access-token".into();
         response.message.tool_calls[0].arguments = json!({"nested":["private-access-token"]});
         response.message.reasoning[0]["thinking"] = json!("private-access-token");
-        let seq = record(&rook, session, &response, &vault).unwrap().unwrap();
+        let seq = record(&rook, session, &response, &vault, None).unwrap().unwrap();
         let events = rook.store.events(session, seq, 100).unwrap();
         for event in &events {
             assert!(
@@ -327,7 +359,7 @@ mod tests {
         let rook = fixture(root.path());
         let session = rook.start_session("binding").unwrap();
         let response = response();
-        let seq = record(&rook, session, &response, &Vault::empty()).unwrap().unwrap();
+        let seq = record(&rook, session, &response, &Vault::empty(), None).unwrap().unwrap();
         begin(&rook, session, Some(seq + 99), "original-id").unwrap();
         let marker = rook.store.events(session, seq + 2, 1).unwrap().remove(0);
         let mut batch = Batch::new(seq, &response.message);
@@ -338,7 +370,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let rook = fixture(root.path());
         let session = rook.start_session("compaction boundary").unwrap();
-        let seq = record(&rook, session, &response(), &Vault::empty()).unwrap().unwrap();
+        let seq = record(&rook, session, &response(), &Vault::empty(), None).unwrap().unwrap();
         begin(&rook, session, Some(seq), "original-id").unwrap();
         let call = rook.log(session, EventKind::ToolCall, "read_file", "{}").unwrap();
         let result = rook.log(session, EventKind::ToolResult, "read_file", "done").unwrap();
@@ -366,7 +398,7 @@ mod tests {
                 arguments: json!({"path":format!("file-{n}")}),
             })
             .collect();
-        let seq = record(&rook, session, &response, &Vault::empty()).unwrap().unwrap();
+        let seq = record(&rook, session, &response, &Vault::empty(), None).unwrap().unwrap();
         for call in &response.message.tool_calls {
             begin(&rook, session, Some(seq), &call.id).unwrap();
             rook.log(session, EventKind::ToolCall, &call.name, &call.arguments.to_string()).unwrap();

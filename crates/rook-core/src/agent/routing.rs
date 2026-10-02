@@ -46,7 +46,7 @@ impl crate::agent::AgentLoop<'_> {
         }
         // A signature/encrypted state or image cannot be silently translated
         // into another model's dialect. Keep the original model for this phase.
-        if messages.iter().any(|m| !m.reasoning.is_empty() || !m.images.is_empty()) {
+        if crate::phase_routing::handoff_blocked(messages) {
             if !self.routing_guard_reported {
                 let said = "Implementation phase recorded; keeping the analysis model to preserve images or provider-owned reasoning.";
                 progress(crate::agent::Progress::Working { call: "model routing", said });

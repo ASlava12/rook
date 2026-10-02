@@ -5,6 +5,7 @@ import { $, el, api, state } from './lib.js';
 let generation = 0;
 
 const limited = (value, size = 192) => String(value ?? '').slice(0, size);
+const dollars = value => Number(value) > 0 && Number(value) < 1e-8 ? Number(value).toExponential(3) : Number(value).toFixed(8);
 const rows = (headers, values) => el('table', {},
   el('thead', {}, el('tr', {}, headers.map(name => el('th', {}, name)))),
   el('tbody', {}, values.map(value => el('tr', {}, value.map(cell => el('td', {}, cell))))));
@@ -19,6 +20,20 @@ export function contextPanel(usage) {
     rows(['kind', 'events', 'tokens'], (usage.by_kind || []).slice(0, 32).map(([kind, value]) =>
       [limited(kind, 64), String(value.events), `~${value.tokens}`])));
   const saved = usage.last_request;
+  const response = usage.last_response;
+  if (response) {
+    const r = response.receipt;
+    const u = r.usage || {};
+    current.append(el('section', {},
+      el('h3', {}, `Last response · event #${response.event_seq} · historical receipt`),
+      el('p', {}, `Selected: ${limited(r.selected || 'unknown', 256)} · phase ${limited(r.phase, 32)}`),
+      el('p', {}, `Dispatched: ${r.dispatch ? `${limited(r.dispatch.provider, 256)} / ${limited(r.dispatch.model, 256)}` : 'unknown (legacy/custom provider)'}`),
+      el('p', {}, `Reported model: ${limited(r.reported_model || 'unknown', 256)} (adapter value; configured fallback if omitted by server)`),
+      el('p', {}, `Provider counters: ${u.input_tokens || 0} input · ${u.output_tokens || 0} output · ${u.cache_read_tokens || 0} cache read · ${u.cache_write_tokens || 0} cache write`),
+      el('p', {}, `Monetary cost: ${r.cost ? `USD ${dollars(r.cost.estimated_usd)} estimate from recorded configured rates; not an invoice` : 'unknown (missing pricing, identity or complete usage)'}`),
+      el('p', {}, `Elapsed: ${r.elapsed_ms || 0} ms · completion confirmed: ${Boolean(r.complete)} · input/output counters reported: ${Boolean(r.usage_reported)}`),
+      el('p', { class: 'sub' }, 'This is one response, not total session spend. Zero counters may mean omitted server usage.')));
+  }
   if (!saved) return el('div', { class: 'context-view' }, current,
     el('section', { class: 'card' }, el('h2', {}, 'Last request attempt'),
       el('p', { class: 'empty' }, 'No recorded request attempt in this session.')));

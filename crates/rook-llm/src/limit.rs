@@ -112,6 +112,10 @@ impl Provider for Limited {
         self.inner.id()
     }
 
+    fn dispatch_identity(&self) -> Option<crate::Dispatch> {
+        self.inner.dispatch_identity()
+    }
+
     fn context_window(&self) -> usize {
         self.inner.context_window()
     }

@@ -118,6 +118,10 @@ impl Provider for Google {
         &self.id
     }
 
+    fn dispatch_identity(&self) -> Option<crate::Dispatch> {
+        crate::Dispatch::bounded(self.id(), &self.model, true)
+    }
+
     fn context_window(&self) -> usize {
         self.config.context_window
     }
@@ -289,6 +293,8 @@ impl Provider for Google {
             let mut said_anything = false;
             let mut model = fallback_model;
             let mut usage = Usage::default();
+            let mut input_reported = false;
+            let mut output_reported = false;
             let mut finish = None;
             let mut calls = 0usize;
 
@@ -321,8 +327,16 @@ impl Provider for Google {
                         if let Some(m) = wire.model_version {
                             model = m;
                         }
-                        if wire.usage.prompt_token_count > 0 {
-                            usage = wire.usage.into();
+                        if let Some(input) = wire.usage.prompt_token_count {
+                            input_reported = true;
+                            usage.input_tokens = input;
+                        }
+                        if let Some(output) = wire.usage.candidates_token_count {
+                            output_reported = true;
+                            usage.output_tokens = output;
+                        }
+                        if let Some(cached) = wire.usage.cached_content_token_count {
+                            usage.cache_read_tokens = cached;
                         }
                         for candidate in wire.candidates {
                             if candidate.finish_reason.is_some() {
@@ -349,6 +363,7 @@ impl Provider for Google {
                 }
             }
 
+            yield Delta::ResponseMetadata { usage_reported: input_reported && output_reported, completion_confirmed: finish.is_some() };
             yield Delta::Done {
                 stop_reason: stop_reason(finish.as_deref(), calls > 0),
                 usage,
@@ -575,19 +590,19 @@ impl Part {
 #[derive(Default, Deserialize)]
 struct UsageMetadata {
     #[serde(default, rename = "promptTokenCount")]
-    prompt_token_count: u32,
+    prompt_token_count: Option<u32>,
     #[serde(default, rename = "candidatesTokenCount")]
-    candidates_token_count: u32,
+    candidates_token_count: Option<u32>,
     #[serde(default, rename = "cachedContentTokenCount")]
-    cached_content_token_count: u32,
+    cached_content_token_count: Option<u32>,
 }
 
 impl From<UsageMetadata> for Usage {
     fn from(m: UsageMetadata) -> Self {
         Usage {
-            input_tokens: m.prompt_token_count,
-            output_tokens: m.candidates_token_count,
-            cache_read_tokens: m.cached_content_token_count,
+            input_tokens: m.prompt_token_count.unwrap_or(0),
+            output_tokens: m.candidates_token_count.unwrap_or(0),
+            cache_read_tokens: m.cached_content_token_count.unwrap_or(0),
             cache_write_tokens: 0,
         }
     }

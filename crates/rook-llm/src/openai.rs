@@ -87,6 +87,10 @@ impl Provider for OpenAiCompatible {
         &self.id
     }
 
+    fn dispatch_identity(&self) -> Option<crate::Dispatch> {
+        crate::Dispatch::bounded(self.id(), &self.model, true)
+    }
+
     fn context_window(&self) -> usize {
         self.config.context_window
     }
@@ -179,8 +183,8 @@ impl Provider for OpenAiCompatible {
             },
             stop_reason,
             usage: Usage {
-                input_tokens: wire.usage.as_ref().map(|u| u.prompt_tokens).unwrap_or(0),
-                output_tokens: wire.usage.as_ref().map(|u| u.completion_tokens).unwrap_or(0),
+                input_tokens: wire.usage.as_ref().and_then(|u| u.prompt_tokens).unwrap_or(0),
+                output_tokens: wire.usage.as_ref().and_then(|u| u.completion_tokens).unwrap_or(0),
                 cache_read_tokens: wire.usage.as_ref().map(WireUsage::cached).unwrap_or(0),
                 ..Default::default()
             },
@@ -282,6 +286,8 @@ impl Provider for OpenAiCompatible {
             let mut said_anything = false;
             let mut tools = ToolCallBuffer::default();
             let mut usage = Usage::default();
+            let mut usage_reported = false;
+            let mut completion_confirmed = false;
             let mut model = fallback_model;
             let mut stop = None;
 
@@ -316,6 +322,7 @@ impl Provider for OpenAiCompatible {
                         let Some(data) = line.strip_prefix("data:") else { continue };
                         let data = data.trim();
                         if data == "[DONE]" {
+                            completion_confirmed = true;
                             break 'outer;
                         }
                         let Ok(parsed) = serde_json::from_str::<WireChunk>(data) else { continue };
@@ -323,9 +330,10 @@ impl Provider for OpenAiCompatible {
                             model = m;
                         }
                         if let Some(u) = parsed.usage {
+                            usage_reported = u.prompt_tokens.is_some() && u.completion_tokens.is_some();
                             usage = Usage {
-                                input_tokens: u.prompt_tokens,
-                                output_tokens: u.completion_tokens,
+                                input_tokens: u.prompt_tokens.unwrap_or(0),
+                                output_tokens: u.completion_tokens.unwrap_or(0),
                                 cache_read_tokens: u.cached(),
                                 ..Default::default()
                             };
@@ -358,6 +366,7 @@ impl Provider for OpenAiCompatible {
             for call in tools.drain()? {
                 yield Delta::ToolCall(call);
             }
+            yield Delta::ResponseMetadata { usage_reported, completion_confirmed: completion_confirmed || stop.is_some() };
             yield Delta::Done {
                 // The calls decide, not the word, as above.
                 stop_reason: if had_tools { StopReason::ToolUse } else { stop.unwrap_or(StopReason::EndTurn) },
@@ -717,9 +726,9 @@ struct WireDeltaFunction {
 #[derive(Deserialize)]
 struct WireUsage {
     #[serde(default)]
-    prompt_tokens: u32,
+    prompt_tokens: Option<u32>,
     #[serde(default)]
-    completion_tokens: u32,
+    completion_tokens: Option<u32>,
     /// What the provider served from its cache rather than reading again.
     ///
     /// Never read here before, so every turn over this route reported nothing

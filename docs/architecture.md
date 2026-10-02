@@ -74,6 +74,17 @@ silently downgrade. Recipes replace the selected policy; independent errands
 keep their existing selection. See [phase routing](phase-routing.md) for the
 opt-in configuration, persistence limits and remaining adoption work.
 
+The transport's successful retry/fallback leaf supplies bounded dispatch
+metadata, separately from the policy and adapter-returned model name (which
+falls back to configuration when omitted by the server). One response
+receipt stores that identity, all usage counters, primary-counter presence, completion confirmation,
+elapsed time and an optional estimate from operator-configured rates. It commits
+with the visible reply and opaque state, leaving their adjacency intact. Context
+inspection admits at most 4 KiB before copying a saved receipt and uses the next
+effective phase window. CLI, TUI and browser distinguish the last historical
+response from the last request attempt and current live context. Missing prices
+or unverifiable/partial counters never imply free usage.
+
 Durable transcript navigation lives in `rook-core::transcript`: bounded event
 pages, snapshot search cursors, body parts and attributed source-data quotes.
 CLI, TUI and browser use the same operations. The TUI owns one bounded reader

@@ -1091,19 +1091,33 @@ impl Rook {
     /// session's selected model and its learned window. `window` overrides it
     /// for asking how the same session would sit in a different model.
     pub fn context_usage(&self, session: u128, window: Option<usize>) -> Result<ContextUsage> {
+        let replay = crate::agent::history::replay(self, session)?;
         let window = match window {
             Some(window) => window,
-            None => match self.store.get_session(session)?.map(|meta| meta.model) {
-                Some(name) if !name.is_empty() && name != self.config.agent.model => {
-                    self.window_for_model(&name)
-                }
-                _ => self.context_window(),
-            },
+            None => {
+                let name = self
+                    .store
+                    .get_session(session)?
+                    .map(|meta| meta.model)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| self.config.agent.model.clone());
+                let target = self.config.models.get(&name).filter(|s| !s.implementation_model.is_empty());
+                let effective = if let Some(source) = target
+                    && !crate::phase_routing::handoff_blocked(&replay)
+                    && crate::phase_routing::implementing(self, session, &name, &source.implementation_model)?
+                {
+                    &source.implementation_model
+                } else {
+                    &name
+                };
+                self.window_for_model(effective)
+            }
         };
         let budget = crate::context::ContextBudget::new(window, self.config.agent.compact_at);
         let mut by_kind: BTreeMap<String, KindUsage> = BTreeMap::new();
         let mut compactions = 0;
         let mut request_record = None;
+        let mut response_record = None;
 
         for event in self.store.events(session, 0, usize::MAX)? {
             let kind = event.record.kind;
@@ -1113,6 +1127,9 @@ impl Rook {
             let bytes = self.store.stat_object(&event.record.body)?.map(|m| m.size_raw).unwrap_or(0);
             if kind == EventKind::Note && event.record.label == crate::context::REQUEST_CATALOG_LABEL {
                 request_record = Some((event.seq, event.record.body, bytes));
+            }
+            if kind == EventKind::Note && event.record.label == crate::model_route::LABEL {
+                response_record = Some((event.seq, event.record.body, bytes));
             }
             let entry = by_kind.entry(kind.as_str().to_string()).or_default();
             entry.events += 1;
@@ -1130,7 +1147,7 @@ impl Rook {
 
         // Use exactly what the next turn would carry. A separate event-kind
         // estimate lost signed state, missing-call results and pruning rules.
-        let live = crate::agent::history::replay(self, session)?.iter().map(crate::attachments::tokens).sum();
+        let live = replay.iter().map(crate::attachments::tokens).sum();
         let last_request = request_record.and_then(|(event_seq, object, bytes)| {
             (bytes <= crate::context::REQUEST_CATALOG_MAX_BYTES as u64)
                 .then(|| self.store.get_range(&object, 0, bytes as usize).ok())
@@ -1139,6 +1156,21 @@ impl Rook {
                 .map(|catalog| crate::context::SavedRequestCatalog { event_seq, catalog })
         });
 
+        let last_response = response_record
+            .map(|(event_seq, object, bytes)| {
+                if bytes > crate::model_route::MAX_BYTES as u64 {
+                    return Err(CoreError::Other(
+                        "saved model route receipt exceeds 4096 bytes; preserve the store and inspect it"
+                            .into(),
+                    ));
+                }
+                let body = self.store.get_range(&object, 0, bytes as usize)?;
+                Ok(crate::model_route::SavedReceipt {
+                    event_seq,
+                    receipt: crate::model_route::Receipt::read(&body)?,
+                })
+            })
+            .transpose()?;
         Ok(ContextUsage {
             window,
             usable: budget.usable(),
@@ -1150,6 +1182,7 @@ impl Rook {
             replay_from: self.last_compaction(session)?.0,
             by_kind: by_kind.into_iter().collect(),
             last_request,
+            last_response,
         })
     }
 
@@ -2177,6 +2210,9 @@ pub struct ContextUsage {
     /// version saw one. It says nothing about the current filesystem or tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_request: Option<crate::context::SavedRequestCatalog>,
+    /// One completed main-conversation response; this is not total spend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_response: Option<crate::model_route::SavedReceipt>,
 }
 
 /// What a user typed where a session was wanted: an id, or `last` for the most
