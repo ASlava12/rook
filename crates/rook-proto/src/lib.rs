@@ -220,6 +220,9 @@ pub enum ChatEvent {
     /// Durable execution turn currently running under this observer.
     Turn {
         id: String,
+        /// Present only after the caller's prompt and admission receipt commit.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt_id: Option<String>,
     },
     /// A caller-owned Stop was durably applied (or had already been applied).
     StopApplied {

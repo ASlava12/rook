@@ -171,6 +171,20 @@ recovery inspection before a new request. Removing a session removes its claim. 
 without an ID keep their legacy behavior.
 Named-session claims share the configured `work.max_messages` receipt limit;
 existing IDs remain readable when the limit is reached.
+After ordinary prompt admission commits, core reports its caller ID with the
+execution turn. The daemon adds optional `prompt_id` to the existing `turn`
+frame and retains it through bounded replay eviction. CLI, TUI and browser
+settle only the exact in-flight caller and observed session; `Started` alone
+does not settle an uncertain prompt. Leaving an admitted ordinary turn therefore
+allows a new prompt in another branch before the departed turn finishes.
+Legacy turn frames still omit the optional field and use completion/retry.
+TUI branch switches detach the previous daemon observer and advance its socket
+epoch, excluding already queued source errors and snapshots. The daemon's turn
+keeps running. Local busy turns refuse navigation before preparing a summary.
+The browser retains at most four admitted File references across view replacement
+and shows their names with an explicit clear action. Count and metadata byte
+limits precede copying references or reading contents. A conversation or view
+change during asynchronous file reading refuses submission and retains the draft.
 The same caller ID can guard `/goal` creation. The managed run generation, goal
 note, current goal value and admitted claim commit together. Retrying that ID
 joins its live generation or gets `already_admitted`; it cannot create another

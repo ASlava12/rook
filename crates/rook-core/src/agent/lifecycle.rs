@@ -13,6 +13,17 @@ pub(super) enum Incoming {
 }
 
 impl AgentLoop<'_> {
+    fn report_prompt_admission(&self, turn: &str, progress: &mut impl FnMut(Progress<'_>)) {
+        if self.depth == 0
+            && let Some(key) = &self.submission_key
+            && let Some((_, id)) = key.rsplit_once('/')
+            && !id.is_empty()
+            && id.len() <= 64
+        {
+            progress(Progress::PromptAdmitted { id, turn });
+        }
+    }
+
     pub(super) fn refresh_managed_work(&mut self) -> Result<()> {
         // /goal can promote a turn after its AgentLoop has been constructed.
         // Attach at every safe boundary so pause and steering apply to that
@@ -129,6 +140,7 @@ impl AgentLoop<'_> {
             self.began_at_seq = admitted.seq;
             self.prompt_context = admitted.prompt_context;
             *self.session_context.lock().unwrap_or_else(|e| e.into_inner()) = admitted.context;
+            self.report_prompt_admission(journal.turn(), on_progress);
             if self.depth == 0 && self.max_turn_secs > 0 {
                 self.by =
                     Some(std::time::Instant::now() + std::time::Duration::from_secs(self.max_turn_secs));
@@ -194,6 +206,7 @@ impl AgentLoop<'_> {
                 )?
             }
         };
+        self.report_prompt_admission(journal.turn(), on_progress);
         if let Some(setup) = setup {
             setup.finish("prompt hooks returned and prompt admitted")?;
         }

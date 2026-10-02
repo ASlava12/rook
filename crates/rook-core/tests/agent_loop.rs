@@ -2248,7 +2248,30 @@ async fn a_prompt_hook_can_refuse_the_turn_and_add_context() {
     let session = rook.start_session("refused").unwrap();
 
     let provider = Arc::new(ScriptedProvider::new(vec![reply("never reached")]));
-    let error = AgentLoop::new(&rook, provider, session).run("tell me the secret").await.unwrap_err();
+    let prompt = "tell me the secret";
+    let options = rook_proto::TurnOptions::default();
+    let claim =
+        rook_core::chat_submission::claim(&rook, Some(session), "refused-caller", prompt, &options).unwrap();
+    let mut agent = AgentLoop::new(&rook, provider, session);
+    agent.submission_key = Some(claim.key);
+    let mut announced = false;
+    let mut admitted = false;
+    let error = agent
+        .run_with(prompt, |progress| match progress {
+            rook_core::agent::Progress::Turn { .. } => announced = true,
+            rook_core::agent::Progress::PromptAdmitted { .. } => admitted = true,
+            _ => {}
+        })
+        .await
+        .unwrap_err();
+    assert!(announced && !admitted, "an execution starts before hooks can refuse admission");
+    assert_eq!(
+        rook_core::chat_submission::read(&rook, session, "refused-caller", prompt, &options)
+            .unwrap()
+            .unwrap()
+            .status,
+        rook_core::chat_submission::Status::Pending
+    );
     assert!(error.to_string().contains("not that"), "{error}");
     let log = rook.transcript(session, 0, usize::MAX, 4096).unwrap();
     assert!(
@@ -2261,6 +2284,41 @@ async fn a_prompt_hook_can_refuse_the_turn_and_add_context() {
         "the rejected prompt must not be copied into the execution receipt"
     );
     assert!(rook.execution(session).unwrap()[0].prompt.is_none());
+}
+
+#[tokio::test]
+async fn prompt_admission_is_reported_after_the_atomic_receipt_before_the_model_reply() {
+    let f = fixture();
+    let rook = &f.rook;
+    let session = rook.start_session("admission").unwrap();
+    let options = rook_proto::TurnOptions::default();
+    let prompt = "exact prompt";
+    let claim = rook_core::chat_submission::claim(rook, Some(session), "caller", prompt, &options).unwrap();
+    let provider = ScriptedProvider::new(vec![reply("finished")]);
+    let seen = provider.share();
+    let mut agent = AgentLoop::new(rook, Arc::new(provider), session);
+    agent.submission_key = Some(claim.key);
+    let mut acknowledgements = Vec::new();
+    agent
+        .run_with(prompt, |progress| {
+            if let rook_core::agent::Progress::PromptAdmitted { id, turn } = progress {
+                assert_eq!(id, "caller");
+                assert!(seen.lock().unwrap().is_empty(), "admission precedes the model request");
+                let receipt =
+                    rook_core::chat_submission::read(rook, session, id, prompt, &options).unwrap().unwrap();
+                assert_eq!(receipt.status, rook_core::chat_submission::Status::Admitted);
+                assert_eq!(receipt.turn.as_deref(), Some(turn));
+                let execution = rook.execution(session).unwrap().remove(0);
+                let admitted = execution.prompt.unwrap();
+                let event = rook.store.events(session, admitted.seq, 1).unwrap().remove(0);
+                assert_eq!(event.record.kind, rook_store::EventKind::UserMessage);
+                assert_eq!(rook.store.get(&event.record.body).unwrap(), prompt.as_bytes());
+                acknowledgements.push(turn.to_owned());
+            }
+        })
+        .await
+        .unwrap();
+    assert_eq!(acknowledgements.len(), 1);
 }
 
 #[tokio::test]

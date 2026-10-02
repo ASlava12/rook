@@ -22,6 +22,7 @@ pub(super) struct Replay {
     /// Latest goal identity survives transcript eviction for an attached view.
     goal_generation: Option<Option<String>>,
     turn_id: Option<String>,
+    prompt_id: Option<String>,
 }
 
 impl Default for Replay {
@@ -45,6 +46,7 @@ impl Replay {
             finished: false,
             goal_generation: None,
             turn_id: None,
+            prompt_id: None,
         }
     }
 
@@ -57,8 +59,16 @@ impl Replay {
         if let ChatEvent::Goal { generation } = &event {
             self.goal_generation = Some(generation.as_ref().filter(|g| g.len() <= 64).cloned());
         }
-        if let ChatEvent::Turn { id } = &event {
+        if let ChatEvent::Turn { id, prompt_id } = &event {
+            if self.turn_id.as_ref() != Some(id) {
+                self.prompt_id = None;
+            }
             self.turn_id = (id.len() <= 64).then(|| id.clone());
+            if self.turn_id.is_some()
+                && let Some(prompt_id) = prompt_id
+            {
+                self.prompt_id = (prompt_id.len() <= 64).then(|| prompt_id.clone());
+            }
         }
         let kind = state_kind(&event);
         if let Some(kind) = kind
@@ -145,7 +155,7 @@ impl Replay {
             events.push(ChatEvent::Goal { generation: generation.clone() });
         }
         if let Some(id) = &self.turn_id {
-            events.push(ChatEvent::Turn { id: id.clone() });
+            events.push(ChatEvent::Turn { id: id.clone(), prompt_id: self.prompt_id.clone() });
         }
         if let Some(terminal) = terminal {
             events.push(terminal);
@@ -192,15 +202,35 @@ mod tests {
     #[test]
     fn latest_ordinary_turn_identity_survives_replay_eviction() {
         let mut replay = Replay::new(2, 4096, 4096);
-        replay.push(ChatEvent::Turn { id: "first".into() });
-        replay.push(ChatEvent::Turn { id: "second".into() });
+        replay.push(ChatEvent::Turn { id: "first".into(), prompt_id: Some("old-prompt".into()) });
+        replay.push(ChatEvent::Turn { id: "second".into(), prompt_id: None });
         for _ in 0..8 {
             replay.push(text("output"));
         }
         let (events, truncated) = replay.snapshot();
         assert!(truncated);
-        assert!(matches!(events.last(), Some(ChatEvent::Turn { id }) if id == "second"));
+        assert!(matches!(events.last(), Some(ChatEvent::Turn { id, prompt_id: None }) if id == "second"));
         assert!(replay.turn_id.as_ref().is_some_and(|id| id == "second"));
+    }
+
+    #[test]
+    fn durable_prompt_admission_survives_eviction_without_acknowledging_a_successor() {
+        let mut replay = Replay::new(2, 4096, 4096);
+        replay.push(ChatEvent::Turn { id: "one".into(), prompt_id: None });
+        replay.push(ChatEvent::Turn { id: "one".into(), prompt_id: Some("caller".into()) });
+        for _ in 0..8 {
+            replay.push(text("output"));
+        }
+        let (events, truncated) = replay.snapshot();
+        assert!(truncated);
+        assert!(matches!(events.last(), Some(ChatEvent::Turn { id, prompt_id: Some(prompt) })
+            if id == "one" && prompt == "caller"));
+        replay.push(ChatEvent::Turn { id: "two".into(), prompt_id: None });
+        assert!(replay.prompt_id.is_none());
+        let oversized = "x".repeat(65);
+        assert!(oversized.len() > 64);
+        replay.push(ChatEvent::Turn { id: "two".into(), prompt_id: Some(oversized) });
+        assert!(replay.prompt_id.is_none());
     }
 
     #[test]

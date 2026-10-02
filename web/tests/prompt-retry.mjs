@@ -11,6 +11,28 @@ function storage() {
   };
 }
 
+test('durable admission frees a prompt before completion only for its exact caller and session', () => {
+  const saved = storage();
+  const pending = promptRetry(saved);
+  pending.remember({ type: 'prompt', session: 'one', id: 'caller', text: 'original', options: {} });
+  pending.admitted('caller', 'one');
+  assert.ok(pending.candidate(), 'a receipt without the matching start is insufficient');
+  pending.started('one');
+  pending.admitted('other', 'one');
+  pending.admitted('caller', 'two');
+  assert.ok(pending.candidate(), 'unrelated receipts preserve the retry');
+  pending.admitted('caller', 'one');
+  assert.equal(pending.candidate(), null);
+  assert.equal(promptRetry(saved).candidate(), null);
+  pending.remember({ type: 'prompt', session: 'two', id: 'new', text: 'next branch', options: {} });
+  pending.started('two');
+  pending.admitted('caller', 'one');
+  assert.equal(pending.candidate().id, 'new', 'a late old receipt cannot clear the new prompt');
+  pending.disconnected();
+  pending.admitted('new', 'two');
+  assert.equal(pending.candidate().id, 'new', 'an unobserved receipt cannot settle an uncertain send');
+});
+
 test('an uncertain prompt reloads with its original frame and retry identity', () => {
   const saved = storage();
   const first = promptRetry(saved);

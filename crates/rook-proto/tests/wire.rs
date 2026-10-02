@@ -5,6 +5,19 @@
 use rook_proto::{AskQuestion, ChatEvent, ClientMessage};
 
 #[test]
+fn ordinary_turns_keep_the_legacy_shape_until_a_prompt_is_durably_admitted() {
+    let old = serde_json::json!({ "type": "turn", "id": "execution" });
+    let event: ChatEvent = serde_json::from_value(old.clone()).unwrap();
+    assert!(matches!(event, ChatEvent::Turn { prompt_id: None, .. }));
+    assert_eq!(serde_json::to_value(event).unwrap(), old);
+    let admitted = ChatEvent::Turn { id: "execution".into(), prompt_id: Some("caller".into()) };
+    let json = serde_json::to_value(admitted).unwrap();
+    assert_eq!(json["prompt_id"], "caller");
+    assert!(matches!(serde_json::from_value::<ChatEvent>(json).unwrap(),
+        ChatEvent::Turn { prompt_id: Some(id), .. } if id == "caller"));
+}
+
+#[test]
 fn a_question_reaches_the_browser_in_the_shape_it_reads() {
     let event = ChatEvent::Ask {
         id: "3".into(),

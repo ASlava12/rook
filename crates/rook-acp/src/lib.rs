@@ -500,6 +500,7 @@ async fn prompt(
                 // progress from the tool calls it is shown.
                 Progress::Spent { .. }
                 | Progress::Turn { .. }
+                | Progress::PromptAdmitted { .. }
                 | Progress::Step { .. }
                 | Progress::Delta(Delta::Done { .. } | Delta::ReasoningDone(_)) => {
                     return;

@@ -61,8 +61,17 @@ inspect the parent's tree before retrying.
 Browsing and reading history leave the active conversation alone. Continuing a
 branch preserves the unsent draft and does not submit it. In local `--alone`
 mode, a running turn must finish or be stopped before switching conversations.
+The TUI refuses that switch before generating or saving a transfer summary.
 Through the daemon, switching changes the observed session; the previous turn
-keeps running. In the browser, **Conversation branches** is available in both
+keeps running. Its late output and connection errors cannot replace the new
+conversation. Prompt attachments remain selected for the next explicit send;
+the browser names retained files even when its replaced native file field is
+empty, and **Clear selected files** releases them. Switching while the browser
+is preparing attachment bytes cancels that send and preserves the draft.
+An ordinary prompt acknowledged as durably admitted stops blocking a later
+prompt in another branch, even while its original answer continues. A prompt
+whose admission is uncertain still requires explicit retry or discard.
+In the browser, **Conversation branches** is available in both
 Chat and Sessions, with separate Explore, Read history and Continue buttons.
 The REPL `/tree [session-id]` prints a page. `/session ID` on another branch
 first offers a summary review; `/summary-draft ID` loads excerpts and
@@ -194,8 +203,9 @@ do not create or carry a summary. TUI navigation can generate a scoped model
 draft after choosing `s`, then review and save it before continuing. Browser
 navigation still requires opening the review editor and then selecting its
 explicit generation button; the REPL prints the offered draft for a separate
-save command. Remaining live-switch lifecycle checks are tracked in the
-[adoption tracker](research/pi-adoption-20260930.md).
+save command. Local busy refusal and daemon switches during model output have
+been verified with retained prompts and attachments; evidence and remaining
+queue lifecycle work are in the [adoption tracker](research/pi-adoption-20260930.md).
 
 ## Saved tool images
 

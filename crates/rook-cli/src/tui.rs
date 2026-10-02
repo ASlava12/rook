@@ -2228,7 +2228,13 @@ impl App {
             }
             ChatEvent::Text { text } => self.chat.push("text", &text),
             ChatEvent::Goal { generation } => self.chat.goal_generation = generation,
-            ChatEvent::Turn { id } => {
+            ChatEvent::Turn { id, prompt_id } => {
+                if let Some(prompt_id) = prompt_id {
+                    self.chat.prompt_retry.admitted(
+                        &prompt_id,
+                        self.chat.session.map(rook_store::format_session_id).as_deref(),
+                    );
+                }
                 if self.chat.stop_attempt.as_ref().is_some_and(|attempt| {
                     attempt.generation.is_none() && attempt.turn.as_deref() != Some(&id)
                 }) {
@@ -2529,6 +2535,14 @@ impl App {
             return;
         }
         if overlay == Overlay::History {
+            if self.history.wants_continue(key) && self.chat.busy && self.source.here().is_some() {
+                self.overlay = None;
+                self.chat.push(
+                    "stat",
+                    "A turn is running here; finish or stop it before preparing a branch transfer.",
+                );
+                return;
+            }
             if self.history.wants_branch(key) && !self.can_load_branch() {
                 self.overlay = None;
                 self.chat.push("stat", "Before branching, save or clear the draft and attachments. In --alone mode, finish or stop the running turn first.");
@@ -2815,6 +2829,10 @@ impl App {
         }
         match action {
             Action::Stop => {
+                if self.chat.remote.is_some() && !self.chat.busy && self.chat.joining.is_none() {
+                    self.quit = true;
+                    return;
+                }
                 if let Some(say) = self.chat.remote.clone() {
                     let Some(observed_session) = self.chat.session else {
                         self.chat.push("err", "Wait for the session identity before Stop.");
@@ -3248,11 +3266,7 @@ impl App {
             return;
         }
         if self.source.daemon_base().is_some() && name == "new" {
-            self.connection_epoch = self.connection_epoch.wrapping_add(1);
-            if let Some(observer) = self.turn.take() {
-                observer.abort();
-            }
-            self.chat.remote = None;
+            self.detach_daemon_observer();
             self.chat.busy = false;
             self.chat.session = None;
             self.chat.stop_attempt = None;
@@ -3518,6 +3532,12 @@ impl App {
             self.overlay = None;
             return;
         }
+        if self.chat.session != Some(id) && self.source.daemon_base().is_some() {
+            // A new socket epoch excludes already queued source frames, even
+            // errors or snapshots which do not carry a matching session ID.
+            // Disconnecting the observer leaves the daemon's turn running.
+            self.detach_daemon_observer();
+        }
         self.chat.busy = false;
         if self.chat.session != Some(id) {
             self.chat.stop_attempt = None;
@@ -3580,6 +3600,14 @@ impl App {
         self.chat.input.as_str().is_empty()
             && self.shared.output.borrow().attachments.is_empty()
             && !(self.chat.busy && self.source.here().is_some())
+    }
+
+    fn detach_daemon_observer(&mut self) {
+        self.connection_epoch = self.connection_epoch.wrapping_add(1);
+        if let Some(observer) = self.turn.take() {
+            observer.abort();
+        }
+        self.chat.remote = None;
     }
 
     /// The tail of a session's transcript, in the chat pane, as the window
@@ -3989,6 +4017,7 @@ impl App {
                             TurnEvent::Spent { input, output, cached }
                         }
                         Progress::Turn { .. }
+                        | Progress::PromptAdmitted { .. }
                         | Progress::Delta(Delta::Done { .. } | Delta::ReasoningDone(_)) => return,
                     };
                     let _ = emit.send(event);
@@ -5813,6 +5842,118 @@ fn kind_style(kind: &str) -> Style {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn stopping_an_idle_daemon_observer_quits_without_sending_a_stop_to_any_branch() {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let rook = rook_core::Rook::from_parts(
+            rook_store::Store::open(home.path().join("store")).unwrap(),
+            rook_core::Config::default(),
+            rook_skills::Environment::bare("windows", "x86_64", "0.1.0"),
+            rook_skills::SkillIndex::default(),
+            workspace.path().to_path_buf(),
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let mut app = super::App::new(crate::source::Source::Local(rook.into()), runtime, true);
+        let (remote, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        app.chat.remote = Some(remote);
+        app.chat.session = Some(42);
+        app.chat.turn_id = Some("stale-idle-turn".into());
+        app.chat.busy = false;
+        app.on_action(super::Action::Stop);
+        assert!(app.quit, "Ctrl+C quits when its observed session is idle");
+        assert!(commands.try_recv().is_err(), "an idle observer must not pause or stop any turn");
+        assert!(app.chat.stop_attempt.is_none());
+    }
+
+    #[test]
+    fn local_busy_navigation_refuses_before_summary_preparation_and_retains_the_draft_and_attachments() {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let file = workspace.path().join("untouched.txt");
+        std::fs::write(&file, "current workspace").unwrap();
+        let rook = std::sync::Arc::new(rook_core::Rook::from_parts(
+            rook_store::Store::open(home.path().join("store")).unwrap(),
+            rook_core::Config::default(),
+            rook_skills::Environment::bare("windows", "x86_64", "0.1.0"),
+            rook_skills::SkillIndex::default(),
+            workspace.path().to_path_buf(),
+        ));
+        let source = rook.start_session("source").unwrap();
+        rook.log(source, rook_store::EventKind::UserMessage, "", "source finding").unwrap();
+        let target = rook.fork_session(source, 1).unwrap().id;
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let mut app = super::App::new(crate::source::Source::Local(rook.clone()), runtime, true);
+        app.chat.session = Some(source);
+        app.chat.busy = true;
+        app.chat.input.set("UNSENT_DRAFT");
+        app.shared.output.borrow_mut().attachments =
+            vec![rook_proto::Attachment::Text { name: "context.txt".into(), text: "UNSENT_CONTEXT".into() }];
+        let attachments = serde_json::to_value(&app.shared.output.borrow().attachments).unwrap();
+        app.history.open_tree(Some(source), Some(source));
+        app.overlay = Some(super::Overlay::History);
+        let key = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('c'),
+            crossterm::event::KeyModifiers::NONE,
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !app.history.wants_continue(key) {
+            app.history.poll();
+            assert!(std::time::Instant::now() < deadline, "history worker never loaded the tree");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        app.on_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('j'),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        app.on_key(key);
+        assert!(app.overlay.is_none());
+        assert_eq!(app.chat.session, Some(source));
+        assert!(app.chat.busy);
+        assert_eq!(app.chat.input.as_str(), "UNSENT_DRAFT");
+        assert_eq!(serde_json::to_value(&app.shared.output.borrow().attachments).unwrap(), attachments);
+        assert_eq!(
+            rook.store.get_session(target).unwrap().unwrap().next_seq,
+            1,
+            "no transfer was saved before the local turn finished"
+        );
+        app.chat.busy = false;
+        app.continue_known(target, "target".into(), 1);
+        assert_eq!(app.chat.session, Some(target));
+        assert_eq!(app.chat.input.as_str(), "UNSENT_DRAFT");
+        assert_eq!(serde_json::to_value(&app.shared.output.borrow().attachments).unwrap(), attachments);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "current workspace");
+    }
+
+    #[test]
+    fn detached_daemon_observers_cannot_end_a_new_branch_with_an_already_queued_failure() {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let rook = rook_core::Rook::from_parts(
+            rook_store::Store::open(home.path().join("store")).unwrap(),
+            rook_core::Config::default(),
+            rook_skills::Environment::bare("windows", "x86_64", "0.1.0"),
+            rook_skills::SkillIndex::default(),
+            workspace.path().to_path_buf(),
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let mut app = super::App::new(crate::source::Source::Local(rook.into()), runtime, true);
+        let (remote, _commands) = tokio::sync::mpsc::unbounded_channel();
+        app.chat.remote = Some(remote);
+        app.connection_epoch = 9;
+        app.to_loop.send(super::TurnEvent::DaemonFailed(9, "OLD_BRANCH_FAILURE".into())).unwrap();
+        app.detach_daemon_observer();
+        app.chat.session = Some(42);
+        app.chat.busy = true;
+        app.chat.input.set("new branch draft");
+        app.drain_turn_events();
+        assert_eq!(app.chat.session, Some(42));
+        assert!(app.chat.busy, "a queued failure belongs to the detached observer");
+        assert_eq!(app.chat.input.as_str(), "new branch draft");
+        assert!(!app.chat.log.iter().any(|(_, text)| text.contains("OLD_BRANCH_FAILURE")));
+        assert!(app.chat.remote.is_none());
+    }
+
+    #[test]
     fn call_pane_reads_latest_calls_after_a_long_session() {
         let home = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
@@ -5889,7 +6030,7 @@ mod tests {
             serde_json::to_value(saved.frame()).unwrap(),
             "retry must send the original caller ID and turn"
         );
-        app.heard_from_daemon(super::ChatEvent::Turn { id: "turn-one".into() });
+        app.heard_from_daemon(super::ChatEvent::Turn { id: "turn-one".into(), prompt_id: None });
         assert!(app.chat.stop_attempt.is_some(), "reattaching to the same turn retains retry identity");
         app.heard_from_daemon(super::ChatEvent::StopApplied {
             id: saved.id.clone(),
@@ -5898,7 +6039,7 @@ mod tests {
         });
         assert!(app.chat.stop_attempt.is_none());
         app.chat.stop_attempt = Some(saved);
-        app.heard_from_daemon(super::ChatEvent::Turn { id: "turn-two".into() });
+        app.heard_from_daemon(super::ChatEvent::Turn { id: "turn-two".into(), prompt_id: None });
         assert!(app.chat.stop_attempt.is_none(), "a successor must not inherit the old Stop");
     }
 

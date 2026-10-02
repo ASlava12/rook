@@ -9,7 +9,7 @@ Source: Pi `ee602414c703be8da722ec56de7f2399e62581ac`; starting Rook:
 | Bounded live delivery and snapshot recovery | Complete | Queue/replay/input limits, WebSocket backpressure, atomic recovery, current controls, PTY reconnect/goal checks, browser form preservation and full CI passed |
 | Editable steering and follow-up queue | In progress | Core/CLI/API/TUI/browser, durable IDs, goal vs ordinary-turn boundaries, revoke/accept races, restart |
 | Configurable keyboard actions and prompt undo | Complete | Shared registry/config/help, bounded Unicode edit tests, remapped-key and external-editor PTY checks, full CI passed |
-| Branch navigation and optional branch summary | In progress | Existing session/event IDs, bounded tree/history, explicit workspace semantics, attributable summary |
+| Branch navigation and optional branch summary | Complete | Existing session/event IDs, bounded tree/history, explicit workspace semantics, reviewed attributable summaries, local busy refusal, daemon live switches with retained prompts/attachments and full CI passed |
 | Inline tool cards | Complete | Compact/live/saved results, attributed errors/duration/diffs and command/search/MCP facts, explicit bounded browser pixels, terminal text fallback, local/daemon and full CI passed |
 | Context provenance inspector | Complete | Request-specific sources and loaded skills, deferred MCP tools in CLI/API/TUI/browser; bounded notes, old-note compatibility, local/daemon and full CI passed |
 | Local HTML export | In progress | Selected history scope, bounded streaming, escaped content, no publication, cross-frontend access |
@@ -2317,3 +2317,82 @@ continues, and preserved prompt/attachments. Next verify those remaining live
 scenarios and the queue's real TUI Stop retry across window/daemon restart.
 Queue lifecycle, HTML download interaction, phase routing, declarative extension
 UI and terminal experiments remain in the original scope; the full goal is active.
+
+## Branch switches during model output and ordinary prompt admission
+
+Local TUI navigation now refuses a busy turn before opening a transfer review,
+generating a model draft or saving a summary. The current prompt and attachments
+remain intact. Daemon navigation detaches the departed observer and advances the
+connection epoch before attaching the target; queued old errors and snapshots
+cannot end or replace the new view. Detaching leaves the original daemon turn
+running. Ctrl+C in an idle daemon view exits instead of waiting for a turn ID.
+
+Live testing exposed a retained original prompt blocking an explicit send in the
+new branch: clients previously settled it only on terminal output, which the
+departed observer no longer receives. Core now reports ordinary prompt admission
+after its UserMessage and existing claim commit atomically. Optional `prompt_id`
+on the existing `turn` JSON event carries that caller ID and survives bounded
+replay eviction. Exact caller/session matching clears only the observed in-flight
+frame. Starting an execution before prompt hooks is insufficient; a denied or
+uncertain admission remains retryable. Legacy turn JSON still omits the field.
+No postcard layout, stored receipt format or admission transaction changes.
+
+The browser admits selection count and file metadata limits before copying File
+references. At most four retained references survive replacing the chat view;
+their bounded names stay visible beside an explicit clear button. Bytes are read
+only for an explicit send. A session, busy-state or composer-view change while
+reading attachments refuses that send and preserves the draft. Invalid selection
+refuses navigation before the view is destroyed. Existing text/image byte limits
+and historical attachment limits are shared by selection, navigation and send.
+
+Focused core checks exited 0 for durable receipt/message visibility at admission
+before a model request, and prompt-hook refusal without an admission signal.
+Rust frontend, replay and protocol checks exited 0 for exact caller/session
+settlement, uncertain disconnects, retained admission after eviction, successor
+identity, oversized IDs and legacy JSON. Local busy-navigation, stale queued
+daemon failure and idle Stop checks exited 0. Node module checks exited 0 for
+pre-copy selection count, pre-read image/combined-text byte limits, reference
+identity and durable/uncertain prompt retry. Fixtures exceed each asserted bound.
+Initial targeted invocations used incorrect fork/loop/fixture APIs and failed;
+they were corrected and rerun successfully. A build blocked by the owned running
+scratch TUI exited 101; closing that process allowed the subsequent build to exit 0.
+
+Fresh actual Windows TUI checks exited 0 in local and daemon modes. Local busy
+refusal retained the main draft and next-turn text attachment, did not cancel the
+original model reply, and allowed an explicit target send after completion.
+Daemon navigation retained that draft/attachment while the source remained
+running; the explicit target send succeeded before the source ended. Captured
+model requests contained the retained text context. Actual HTTP history verified
+the departed tail only in the source and no unsent prompt in the target before
+the explicit send. The idle daemon TUI then exited with Ctrl+C (exit 0).
+
+A real Edge check against the fresh scratch daemon exited 0: mouse navigation,
+ordinary admission before a withheld reply, retained PNG/text selections despite
+an empty replacement file field, departed turn continuing, no old tail in the
+target, and no request after switching during asynchronous file reading. The
+subsequent explicit send delivered both retained attachments to the chosen target.
+An actual selection above the count cap refused navigation and preserved its
+draft until Clear selected files. Workspace bytes remained unchanged. The first
+browser harness compared a Promise directly to a session ID and exited 1 before
+starting a turn; correcting its predicate produced the successful run above.
+Its current-machine helper is `target/branch-admission-browser.mjs`, with artifacts
+under the scratch root recorded in `target/branch-admission-root.txt`. These use
+scripted model replies and do not measure model quality or cost. Owned model,
+daemon, browser and terminal helpers were stopped and their absence verified.
+
+Final `cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0 (`ci: ok`, 699.6
+seconds), including the new admission/refusal, frontend/replay/protocol and
+branch-navigation regressions, existing real daemon queue/restart checks and
+doctests. Its log is `target/pi-live-branch-ci.log`. `cargo xtask compaction`
+exited 0 (`target/pi-live-branch-compaction.log`): 4.02 MiB on disk, 37.1x
+dictionary compression and 5.8x end-to-end for the unchanged fixture. Published
+storage claims remain unchanged. Windows runs no Unix PTY tests; the actual
+Windows terminal and browser evidence above supplies the live checks.
+
+Branch navigation and optional reviewed summaries are Complete. Next return to
+the queue's actual TUI Stop retry across window/daemon restart and remaining
+lifecycle/frontend checks. Also audit switching away from an active `/goal`
+while its initial caller frame is retained: the new ordinary-turn signal does
+not acknowledge managed goal creation. HTML download interaction, phase routing,
+declarative extension UI and terminal experiments retain their scope. The queue
+row remains In progress; the full goal is active.

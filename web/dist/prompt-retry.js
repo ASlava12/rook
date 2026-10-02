@@ -54,6 +54,11 @@ export function promptRetry(suppliedStorage) {
       if (inFlight && startedSession !== null && startedSession === session) this.settled();
       else this.disconnected();
     },
+    admitted(id, session) {
+      if (inFlight && pending?.id === id && startedSession !== null && startedSession === session) {
+        this.settled();
+      }
+    },
     disconnected() { inFlight = false; startedSession = null; },
     settled() { if (inFlight) { pending = null; inFlight = false; startedSession = null; persist(); } },
     discard() { pending = null; inFlight = false; startedSession = null; persist(); },

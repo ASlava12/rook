@@ -97,6 +97,16 @@ impl PromptRetry {
         }
     }
 
+    pub fn admitted(&mut self, id: &str, session: Option<&str>) {
+        if self.in_flight
+            && session.is_some()
+            && self.started_session.as_deref() == session
+            && matches!(&self.frame, Some(ClientMessage::Prompt { id: Some(pending), .. }) if pending == id)
+        {
+            self.discard();
+        }
+    }
+
     pub fn acknowledged(&mut self) {
         if self.in_flight {
             self.discard();
@@ -423,6 +433,25 @@ mod audit_tests {
         saved.started("new-session");
         saved.completed(Some("new-session"));
         assert!(!saved.pending());
+    }
+
+    #[test]
+    fn durable_admission_frees_only_the_exact_started_prompt_before_completion() {
+        let mut saved = PromptRetry::default();
+        saved.remember(&prompt()).unwrap();
+        saved.admitted("caller-one", Some("session"));
+        assert!(saved.pending());
+        saved.started("session");
+        saved.admitted("wrong", Some("session"));
+        saved.admitted("caller-one", Some("other"));
+        assert!(saved.pending());
+        saved.admitted("caller-one", Some("session"));
+        assert!(!saved.pending());
+        saved.remember(&prompt()).unwrap();
+        saved.started("session");
+        saved.disconnected();
+        saved.admitted("caller-one", Some("session"));
+        assert!(saved.pending(), "a disconnected, unobserved attempt remains retryable");
     }
 
     #[test]

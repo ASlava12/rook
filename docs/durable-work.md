@@ -224,11 +224,14 @@ sent while a turn or goal is running reuses its receipt when the same ID and
 original text are sent again; a different text with that ID is rejected. Save
 `submission_target` from the queue page with the ID before sending: the daemon
 then rejects a retry aimed at a replacement goal. Older socket clients can
-omit both fields. The CLI and TUI generate an ID for each socket prompt, but
-do not retain its target for a manual resend after an uncertain disconnect.
-Use the queue controls and their saved ID and target for that case. Initial
-prompts, `/goal` control commands and early TUI input before its first session
-ID still lack idempotent admission.
+omit both fields. The CLI and TUI generate an ID for each socket prompt.
+For corrections to running work, use the queue controls and their saved ID and
+target for an uncertain resend. Early TUI input before its first session ID is
+not yet a scoped queue request. Initial socket prompts and `/goal` creation
+also support caller IDs, as described in
+[the architecture](architecture.md). Ordinary prompt admission is acknowledged
+before completion, so leaving its running branch can release the exact saved
+frame. A start notification alone leaves uncertain delivery retryable.
 
 The CLI exposes the same operations locally and through the daemon:
 

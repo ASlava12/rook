@@ -411,6 +411,9 @@ impl DaemonLink {
             {
                 *session = Some(started.clone());
             }
+            if let ChatEvent::Turn { prompt_id: Some(id), .. } = &event {
+                retry.admitted(id, session.as_deref());
+            }
             if let Some(over) = watching.saw(event, &self.to) {
                 crate::notify::attention();
                 match over.done {

@@ -439,6 +439,13 @@ impl History {
             && key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(key.code, KeyCode::Enter | KeyCode::Char('s' | 'u' | 'z' | 'y'))
     }
+    pub(super) fn wants_continue(&self, key: crossterm::event::KeyEvent) -> bool {
+        if self.review.is_some() {
+            return key.modifiers.contains(KeyModifiers::CONTROL)
+                && matches!(key.code, KeyCode::Enter | KeyCode::Char('s'));
+        }
+        self.tree.is_some() && self.rename_target.is_none() && key.code == KeyCode::Char('c')
+    }
     pub(super) fn take_export(
         &mut self,
     ) -> Option<std::result::Result<(PathBuf, crate::commands::html_export::Report), String>> {

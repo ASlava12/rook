@@ -300,6 +300,11 @@ pub enum Progress<'a> {
     Turn {
         id: &'a str,
     },
+    /// The caller's ordinary prompt is durable; leaving its observer is safe.
+    PromptAdmitted {
+        id: &'a str,
+        turn: &'a str,
+    },
     /// A new queued turn starts on the same live observer and control channel.
     FollowUp {
         id: &'a str,

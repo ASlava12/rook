@@ -1776,7 +1776,10 @@ async fn ended_goal(
 /// already been given.
 fn as_event(progress: Progress<'_>, workspace: &std::path::Path) -> Option<ChatEvent> {
     Some(match progress {
-        Progress::Turn { id } => ChatEvent::Turn { id: id.into() },
+        Progress::Turn { id } => ChatEvent::Turn { id: id.into(), prompt_id: None },
+        Progress::PromptAdmitted { id, turn } => {
+            ChatEvent::Turn { id: turn.into(), prompt_id: Some(id.into()) }
+        }
         Progress::Delta(Delta::Effort(report)) => ChatEvent::ModelRequest {
             model: report.provider.clone(),
             requested_effort: report.requested.as_str().into(),

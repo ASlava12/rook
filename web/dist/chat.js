@@ -9,6 +9,7 @@ import { queuePanel, takeRestored } from './queue.js';
 import { pendingSubmission, submissionError, submitSteering } from './submission.js';
 import { promptRetry } from './prompt-retry.js';
 import { stopRetry } from './stop-retry.js';
+import { admitDraftFiles, imageFile } from './draft-files.js';
 
 // Scrollback, not the record: the session holds every word of this and the
 // sessions tab reads it back, so a tab left open for a day need not keep an
@@ -25,6 +26,7 @@ const retryStop = stopRetry();
 let goalGeneration = null;
 let goalObserved = false;
 let turnId = null;
+let retainedDraftFiles = [];
 
 const chatOut = () => $('#stream');
 
@@ -250,7 +252,10 @@ export function connect() {
         if (e.running) { say('stat', '[joined a turn already running here]'); working(); }
         break;
       case 'goal': goalGeneration = e.generation; goalObserved = true; break;
-      case 'turn': turnId = e.id; break;
+      case 'turn':
+        turnId = e.id;
+        if (e.prompt_id) retryPrompt.admitted(e.prompt_id, state.chat.session);
+        break;
       case 'stop_applied':
         retryStop.settled(e.id);
         renderStopRetry();
@@ -709,6 +714,23 @@ export async function renderChat() {
 
   let loadingAttachments = false;
   const attachmentsInput = el('input', { id: 'attachments', type: 'file', multiple: true, 'aria-label': 'Images or UTF-8 context files' });
+  const pendingFiles = el('div', { class: 'row', 'aria-label': 'Pending selected files' });
+  function showPendingFiles() {
+    pendingFiles.replaceChildren();
+    if (!retainedDraftFiles.length && !attachmentsInput.files?.length) return;
+    pendingFiles.append(el('span', {}, retainedDraftFiles.length
+      ? `Pending files: ${retainedDraftFiles.map(file => file.name.slice(0, 120)).join(', ')}`
+      : 'Selected files exceed attachment limits; clear or choose fewer files.'),
+      el('button', { type: 'button', onclick: () => {
+        retainedDraftFiles = []; attachmentsInput.value = ''; showPendingFiles();
+      } }, 'Clear selected files'));
+  }
+  attachmentsInput.addEventListener('change', () => {
+    try { retainedDraftFiles = admitDraftFiles(attachmentsInput.files, state.chat.historicalAttachments || []); }
+    catch (error) { retainedDraftFiles = []; say('err', String(error)); }
+    showPendingFiles();
+  });
+  showPendingFiles();
   const historicalAttachments = el('div', { class: 'row', 'aria-label': 'Historical attachments' });
   const showHistoricalAttachments = () => {
     const kept = state.chat.historicalAttachments || [];
@@ -731,7 +753,10 @@ export async function renderChat() {
   const form = el('form', { class: 'ask', onsubmit: async (event) => {
     event.preventDefault();
     if (loadingAttachments) return;
-    const files = Array.from(attachmentsInput.files || []);
+    let files;
+    try { files = admitDraftFiles(attachmentsInput.files?.length ? attachmentsInput.files : retainedDraftFiles,
+      state.chat.historicalAttachments || []); }
+    catch (error) { say('err', String(error)); return; }
     const text = input.value.trim() || (recipePath.value.trim() ? `Run recipe ${recipePath.value.trim()}` : files.length ? 'Analyse the attachments' : '');
     if (!text) return;
     askToNotify();
@@ -755,17 +780,10 @@ export async function renderChat() {
       const kept = state.chat.historicalAttachments || [];
       if (files.length + kept.length > 4) throw new Error('At most 4 attachments per turn');
       if (state.chat.busy && (files.length || kept.length)) throw new Error('Wait for the running turn to finish before attaching files');
-      let textBytes = kept.filter(a => a.type === 'text').reduce((n, a) => n + new TextEncoder().encode(a.text).length, 0);
-      for (const file of files) {
-        const isImage = /^image\//.test(file.type) || /\.(png|jpe?g|webp|gif)$/i.test(file.name);
-        if (isImage && file.size > 2 * 1024 * 1024) throw new Error('An image exceeds 2 MiB; resize it first');
-        if (!isImage) textBytes += file.size;
-      }
-      if (textBytes > 256 * 1024) throw new Error('Embedded text exceeds 256 KiB');
       loadingAttachments = true;
       const attachments = [...kept];
       for (const file of files) {
-        const isImage = /^image\//.test(file.type) || /\.(png|jpe?g|webp|gif)$/i.test(file.name);
+        const isImage = imageFile(file);
         const bytes = await file.arrayBuffer();
         if (isImage) {
           const uri = await new Promise((resolve, reject) => {
@@ -785,6 +803,10 @@ export async function renderChat() {
         output_schema: schema ? JSON.parse(schema) : null, schema_retries: retries };
     } catch (error) { say('err', String(error)); return; }
     finally { loadingAttachments = false; }
+    if (state.chat.session !== submittingSession || !input.isConnected || state.chat.busy !== wasBusy) {
+      say('stat', 'Conversation changed while preparing attachments; the draft was not submitted.');
+      return;
+    }
     if (followUp || pendingSubmission() || submissionError() || (wasBusy && !text.startsWith('/goal '))) {
       try {
         if (options.attachments.length) throw new Error('Queued corrections cannot include attachments');
@@ -819,6 +841,8 @@ export async function renderChat() {
     input.value = '';
     state.chat.draft = '';
     attachmentsInput.value = '';
+    retainedDraftFiles = [];
+    showPendingFiles();
     state.chat.historicalAttachments = [];
     showHistoricalAttachments();
     state.chat.branchNotice = '';
@@ -884,7 +908,7 @@ export async function renderChat() {
   $('#view').replaceChildren(el('div', { class: 'card' },
     el('div', { class: 'row', id: 'picker' }),
     el('div', { class: 'row', id: 'settings' }),
-    stream, history, branches, mcp, queue, outputSettings, historicalAttachments,
+    stream, history, branches, mcp, queue, outputSettings, historicalAttachments, pendingFiles,
     el('p', { id: 'branch-draft-note', class: 'sub', role: 'status' }, state.chat.branchNotice || ''), form, naming));
   renderPicker();
   renderSettings();
@@ -897,6 +921,12 @@ export async function renderChat() {
 
 // From another tab: continue this session in the chat.
 export function continueIn(session, prepared = null) {
+  let files;
+  try {
+    const chosen = $('#attachments')?.files;
+    files = prepared ? [] : admitDraftFiles(chosen?.length ? chosen : retainedDraftFiles,
+      state.chat.historicalAttachments || []);
+  } catch (error) { say('err', String(error)); return; }
   // Detach this observer before choosing another conversation. A queued frame
   // from the old socket must not change the selected session or its controls.
   const previous = socket;
@@ -904,6 +934,7 @@ export function continueIn(session, prepared = null) {
   previous?.close();
   state.chat.draft = prepared ? prepared.text : ($('#chat-input')?.value ?? state.chat.draft ?? '');
   if (prepared) state.chat.historicalAttachments = prepared.attachments;
+  retainedDraftFiles = files;
   done();
   callStatus = null;
   state.chat.spent = null; state.chat.context = null; state.chat.modelRequest = null;
@@ -913,7 +944,7 @@ export function continueIn(session, prepared = null) {
 
 export async function branchFromEvent(session, event) {
   const canLoad = () => !($('#chat-input')?.value ?? state.chat.draft ?? '') &&
-    !($('#attachments')?.files.length) && !(state.chat.historicalAttachments?.length);
+    !($('#attachments')?.files.length) && !retainedDraftFiles.length && !(state.chat.historicalAttachments?.length);
   if (!canLoad()) throw new Error('Save or clear the current draft and attachments before branching.');
   const forked = await api(`/api/sessions/${encodeURIComponent(session)}/branch`, { event });
   if (!canLoad()) throw new Error(`Created branch ${forked.node.id}; current draft retained because it changed while the branch was being created.`);
