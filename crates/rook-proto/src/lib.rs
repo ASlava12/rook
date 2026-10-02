@@ -28,6 +28,13 @@ pub mod work;
 /// `X-Rook-Api`; the daemon refuses a mismatch rather than misbehaving quietly.
 pub const API_VERSION: u32 = 1;
 
+/// A saved caller request, independently of an execution's lifetime.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PromptAdmission {
+    pub session: String,
+    pub id: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Health {
     pub ok: bool,
@@ -287,6 +294,10 @@ pub enum ChatEvent {
         text: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         receipt: Option<queue::Notice>,
+        /// Managed goal creation commits before any stage executes. Its
+        /// caller can stop retaining the prompt without waiting for Done.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        admission: Option<PromptAdmission>,
     },
     Tool {
         name: String,

@@ -2452,3 +2452,82 @@ while leaving its active branch, then remaining queue lifecycle/frontend parity.
 HTML download interaction,
 phase routing, declarative extension UI and terminal experiments retain their
 original scope; the full goal remains active.
+
+## Initial managed-goal prompt acknowledgement during live branch switches
+
+A fresh actual Edge check reproduced the remaining goal-specific outbox bug:
+the daemon had saved the goal and begun streaming, but the tab retained its
+initial `/goal` frame until the whole goal ended. Mouse navigation kept the
+draft, then the target's explicit Send was refused by that old saved request.
+The first-session goal claim was already admitted atomically in core; no new
+store record or transaction was needed.
+
+The existing `agent` event now has optional structured `admission` metadata
+containing the caller ID and saved session. Only successful durable goal creation
+or explicit retry of that admitted claim emits it. The daemon starts/joins the
+goal before awaiting the acknowledgement and releases the admission lock before
+delivery or rejoining an admitted claim. CLI, TUI and browser settle the exact
+in-flight caller with its intended/observed session, without requiring `Started`
+or final model output. The plain REPL also retains the acknowledged new session
+ID. Unrelated, late or disconnected acknowledgements preserve the saved request;
+explicit retry reuses its original frame. The acknowledgement does not replace
+the view's goal generation, execution turn, metrics or draft. It is independent
+of correction acceptance and does not invent a queue receipt or execution ID.
+Caller length/ASCII validation precedes copying; old agent JSON omits the
+optional field. Existing claim storage, JSON companions and postcard layouts
+are unchanged.
+
+Focused protocol, Rust retry/TUI dispatch and browser module checks exited 0 for
+legacy JSON, exact caller/session settlement before Started, wrong/unobserved
+acknowledgements, uncertain retry, successor protection and preserving the live
+view/draft. Real daemon checks exited 0 for first goal confirmation while the
+model reply is withheld, same-frame rejoin confirmation, conflicting text
+refusal, unchanged generation and no duplicate goal event. A separate real
+daemon refusal check exceeded the configured goal byte cap and exited 0: both
+attempts produced no admission confirmation and retained one reserved session
+with no transcript events. An initial targeted command used the nonexistent
+`scenarios` test target; the actual `cli` target passed. One refusal invocation
+could not rebuild rookd while the owned scratch daemon held its Windows exe;
+stopping that daemon allowed the subsequent invocation to exit 0.
+
+The corrected actual Edge check exited 0: goal confirmation before a withheld
+reply, mouse branch navigation with a retained draft, explicit target send and
+reply while the departed goal continued, and saved histories with no cross-branch
+prompt or output. A Windows daemon TUI likewise confirmed the goal, switched
+away, sent and received the target answer while the source still ran, and showed
+no departed tail. API history/health verification exited 0; the terminal exited
+0. After releasing each source reply, its tail was recorded only in its source;
+the scratch goal was explicitly cancelled. The scripted verifier reports
+`unproven`; these checks do not claim goal quality, successful independent
+verification or cost savings.
+
+An actual local Windows TUI check also exited 0: `/goal` remained metadata only,
+navigation refused while its ordinary model reply was active, and explicit
+target send succeeded after completion. Saved local histories separated the
+standing goal/source tail from the target prompt; workspace bytes remained
+unchanged. The browser harness was corrected to wait for replacement DOM nodes
+and Edge's debugging port. A first fixed-browser fixture serialized model
+requests through its default single slot and timed out waiting for the target
+reply; the fresh fixture explicitly admitted parallel model requests. These
+failed harness/build invocations are not counted as passing checks.
+
+Current-machine browser helper: `target/goal-admission-browser.mjs`; final live
+root: `target/branch-admission-918228bd633741cab5e16249f2a7bdda`, recorded in
+`target/branch-admission-root.txt`, including browser screenshots and source/target
+API histories, native daemon histories, and the local fixture under `local/`.
+Owned model, daemon, browser and terminal helpers were stopped; absence verified.
+
+Final `cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0 (`ci: ok`, 723.1
+seconds), including the new protocol/frontend acknowledgement checks, real
+daemon creation/refusal/retry scenarios, existing goal/follow-up/Stop restart
+checks, storage compatibility tests and doctests. Its log is
+`target/pi-goal-admission-ci.log`. Windows ran no Unix PTY tests; the actual
+Windows terminal and Edge checks above supply the live evidence. No storage
+code, writer or format changed, so compaction was not rerun.
+
+Queue remains In progress. Next verify actual browser Stop retry after a lost
+acknowledgement, tab reload and daemon restart: its current module and daemon
+API evidence are separate, unlike the now-completed actual TUI retry path.
+Then audit the remaining queue lifecycle/frontend requirements before changing
+the table's state. HTML download interaction, phase routing, declarative
+extension UI and terminal experiments retain their scope. The full goal is active.

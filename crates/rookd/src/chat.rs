@@ -302,6 +302,7 @@ async fn serve(
                                 let _ = outbound
                                     .send(ChatEvent::Agent {
                                         receipt: None,
+                                        admission: None,
                                         text: if already_applied {
                                             "Stop was already applied; inspect the current goal before stopping it again."
                                         } else {
@@ -497,6 +498,27 @@ async fn serve(
                     }
                 };
                 if let Some(claim) = &claimed {
+                    if claim.status == rook_core::chat_submission::Status::Admitted {
+                        // The committed claim is immutable. Rejoining or
+                        // sending its acknowledgement need not hold the
+                        // admission lock through socket backpressure.
+                        drop(admission);
+                        if requested_goal.is_some() {
+                            repeat_goal_claim(
+                                &state,
+                                &engine,
+                                claim,
+                                &outbound,
+                                &mut watching,
+                                live_snapshots,
+                            )
+                            .await;
+                        } else {
+                            repeat_claim(&state, &engine, claim, &outbound, &mut watching, live_snapshots)
+                                .await;
+                        }
+                        continue;
+                    }
                     let handled = if requested_goal.is_some() {
                         repeat_goal_claim(&state, &engine, claim, &outbound, &mut watching, live_snapshots)
                             .await
@@ -658,54 +680,65 @@ async fn serve(
                             .await;
                     }
                     match result {
-                        Ok(run) => match crate::work::join_conversation(&state, &run).await {
-                            Ok(live) => {
-                                if promotion.is_some() {
-                                    let receipt = if let Some(target) = submission_target.as_deref() {
-                                        scoped_correction(
-                                            &*goal_engine.read().await,
-                                            id,
-                                            target,
-                                            correction_id(&submission_id),
-                                            text.clone(),
-                                        )
-                                    } else {
-                                        managed::steer_noticed(
-                                            &*goal_engine.read().await,
-                                            &run.id,
-                                            Steer { id: correction_id(&submission_id), text: text.clone() },
-                                        )
-                                        .map(|(_, notice)| notice)
-                                    };
-                                    match receipt {
-                                        Ok(receipt) => {
-                                            let _ = outbound
-                                                .send(ChatEvent::Interjected {
-                                                    receipt: Some(receipt),
+                        Ok(run) => {
+                            let joined = crate::work::join_conversation(&state, &run).await;
+                            if goal_claim_key.is_some()
+                                && let Some(request) = submission_id.as_deref()
+                            {
+                                acknowledge_goal_prompt(&outbound, id, request).await;
+                            }
+                            match joined {
+                                Ok(live) => {
+                                    if promotion.is_some() {
+                                        let receipt = if let Some(target) = submission_target.as_deref() {
+                                            scoped_correction(
+                                                &*goal_engine.read().await,
+                                                id,
+                                                target,
+                                                correction_id(&submission_id),
+                                                text.clone(),
+                                            )
+                                        } else {
+                                            managed::steer_noticed(
+                                                &*goal_engine.read().await,
+                                                &run.id,
+                                                Steer {
+                                                    id: correction_id(&submission_id),
                                                     text: text.clone(),
-                                                })
-                                                .await;
+                                                },
+                                            )
+                                            .map(|(_, notice)| notice)
+                                        };
+                                        match receipt {
+                                            Ok(receipt) => {
+                                                let _ = outbound
+                                                    .send(ChatEvent::Interjected {
+                                                        receipt: Some(receipt),
+                                                        text: text.clone(),
+                                                    })
+                                                    .await;
+                                            }
+                                            Err(error) => report_window(&outbound, error.to_string()).await,
                                         }
-                                        Err(error) => report_window(&outbound, error.to_string()).await,
+                                    }
+                                    let _ = outbound.send(live.settings.describe()).await;
+                                    if !previously_watched
+                                        .as_ref()
+                                        .is_some_and(|previous| Arc::ptr_eq(previous, &live))
+                                    {
+                                        watching = Some(carry_view(
+                                            &live,
+                                            id,
+                                            outbound.clone(),
+                                            watching,
+                                            live_snapshots,
+                                            !starting,
+                                        ));
                                     }
                                 }
-                                let _ = outbound.send(live.settings.describe()).await;
-                                if !previously_watched
-                                    .as_ref()
-                                    .is_some_and(|previous| Arc::ptr_eq(previous, &live))
-                                {
-                                    watching = Some(carry_view(
-                                        &live,
-                                        id,
-                                        outbound.clone(),
-                                        watching,
-                                        live_snapshots,
-                                        !starting,
-                                    ));
-                                }
+                                Err(error) => report_window(&outbound, error).await,
                             }
-                            Err(error) => report_window(&outbound, error).await,
-                        },
+                        }
                         Err(error) => report_window(&outbound, error.to_string()).await,
                     }
                     continue;
@@ -897,6 +930,13 @@ async fn repeat_goal_claim(
         return false;
     }
     let session = rook_store::format_session_id(claim.session);
+    if let Some(request) = claim.key.rsplit('/').next().filter(|id| {
+        !id.is_empty()
+            && id.len() <= 64
+            && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    }) {
+        acknowledge_goal_prompt(outbound, claim.session, request).await;
+    }
     if same_generation
         && run.as_ref().is_some_and(|run| !run.status.terminal())
         && let Some(live) = state.live.read().await.get(&claim.session).filter(|live| live.running()).cloned()
@@ -914,6 +954,7 @@ async fn acknowledge_admitted(outbound: &delivery::Sender, session: String) {
     let _ = outbound.send(ChatEvent::Agent {
         text: "This prompt was already admitted; no new turn was started. Read session history for its recorded result.\n".into(),
         receipt: None,
+        admission: None,
     }).await;
     let _ = outbound
         .send(ChatEvent::Done {
@@ -927,6 +968,19 @@ async fn acknowledge_admitted(outbound: &delivery::Sender, session: String) {
             open_questions: Vec::new(),
             files_changed: Vec::new(),
             stopped: "already_admitted".into(),
+        })
+        .await;
+}
+
+async fn acknowledge_goal_prompt(outbound: &delivery::Sender, session: u128, request: &str) {
+    let _ = outbound
+        .send(ChatEvent::Agent {
+            text: "Goal request saved.\n".into(),
+            receipt: None,
+            admission: Some(rook_proto::PromptAdmission {
+                session: rook_store::format_session_id(session),
+                id: request.into(),
+            }),
         })
         .await;
 }
@@ -1350,7 +1404,11 @@ impl Live {
             } else {
                 format!("Message {status}: {text}")
             };
-            fan_out(&self.backlog, &self.said, ChatEvent::Agent { text, receipt: Some(receipt) });
+            fan_out(
+                &self.backlog,
+                &self.said,
+                ChatEvent::Agent { text, receipt: Some(receipt), admission: None },
+            );
         }
     }
     pub(crate) fn needs_input(&self) -> bool {
@@ -1581,7 +1639,7 @@ async fn goal_turn(
         let rook = engine.read().await;
         equipment.get_or_init(|| Shared::for_project(&rook)).await
     };
-    let _ = outbound.send(ChatEvent::Agent { receipt: None, text: "Goal started in this session; continuing automatically between stages. Ctrl-C pauses; /continue resumes.".into() });
+    let _ = outbound.send(ChatEvent::Agent { receipt: None, admission: None, text: "Goal started in this session; continuing automatically between stages. Ctrl-C pauses; /continue resumes.".into() });
     let mut announced_retry = None;
     let mut announced_generation = None;
     loop {
@@ -1608,6 +1666,7 @@ async fn goal_turn(
         if let Some(at) = run.next_attempt_at.filter(|at| *at > managed::now()) {
             if announced_retry != Some(at) {
                 let _ = outbound.send(ChatEvent::Agent {
+                    admission: None,
                     receipt: None,
                     text: format!("Goal saved; retry in {}s: {}", at - managed::now().min(at), run.reason),
                 });
@@ -1658,6 +1717,7 @@ async fn goal_turn(
             }
             Ok(run) if run.status == Status::Queued => {
                 let _ = outbound.send(ChatEvent::Agent {
+                    admission: None,
                     receipt: None,
                     text: format!(
                         "Continuing goal in this session (stage {}).",
@@ -1796,11 +1856,12 @@ fn as_event(progress: Progress<'_>, workspace: &std::path::Path) -> Option<ChatE
         // window itself, so the same work read as two different things
         // depending on which side of a socket somebody was watching from.
         Progress::Delegated { task, done, total } => {
-            ChatEvent::Agent { receipt: None, text: format!("  [{done}/{total}] {task}") }
+            ChatEvent::Agent { receipt: None, admission: None, text: format!("  [{done}/{total}] {task}") }
         }
         // Counted from one, because the reader is a person and the first
         // sub-agent is the first, not the zeroth.
         Progress::Delegating { at, doing } => ChatEvent::Agent {
+            admission: None,
             receipt: None,
             text: format!("    {}", rook_core::calls::delegating(at, doing)),
         },
@@ -1809,9 +1870,11 @@ fn as_event(progress: Progress<'_>, workspace: &std::path::Path) -> Option<ChatE
             ChatEvent::ToolWorking { name: call.to_string(), said: said.to_string() }
         }
         // What the person said while it ran, at the moment it is taken up.
-        Progress::Heard { text, receipt } => {
-            ChatEvent::Agent { receipt: receipt.cloned(), text: format!("  ✓ taken up: {text}") }
-        }
+        Progress::Heard { text, receipt } => ChatEvent::Agent {
+            receipt: receipt.cloned(),
+            admission: None,
+            text: format!("  ✓ taken up: {text}"),
+        },
         Progress::ToolDone { name, failed, result_seq } => {
             ChatEvent::ToolDone { name: name.to_string(), failed, result_seq }
         }
@@ -2567,7 +2630,8 @@ mod tests {
         );
         let json = serde_json::to_value(event.unwrap()).unwrap();
         assert_eq!(json["type"], "agent", "legacy clients still understand the event kind");
-        let ChatEvent::Agent { text, receipt: Some(actual) } = serde_json::from_value(json).unwrap() else {
+        let ChatEvent::Agent { text, receipt: Some(actual), .. } = serde_json::from_value(json).unwrap()
+        else {
             panic!("missing identity")
         };
         assert_eq!(actual, receipt);

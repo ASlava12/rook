@@ -1088,8 +1088,11 @@ fn first_socket_goal_retry_keeps_one_generation_and_no_extra_goal_event() {
         socket
     });
     assert!(model.next()["messages"].to_string().contains("GOAL_RETRY_TASK"));
+    let admission = runtime.block_on(socket_event(&mut first, "agent"));
+    assert_eq!(admission["admission"]["id"], "goal-stable", "{admission}");
     let started = runtime.block_on(socket_event(&mut first, "started"));
     let session = started["session"].as_str().unwrap().to_string();
+    assert_eq!(admission["admission"]["session"], session);
     let client = reqwest::Client::builder().no_proxy().build().unwrap();
     let work_url = format!("{}/api/work/{session}", daemon.address);
     let first_run = runtime.block_on(get(&client, &work_url));
@@ -1098,6 +1101,8 @@ fn first_socket_goal_retry_keeps_one_generation_and_no_extra_goal_event() {
         socket.send(tokio_tungstenite::tungstenite::Message::Text(prompt.to_string().into())).await.unwrap();
         socket
     });
+    let admission = runtime.block_on(socket_event(&mut retry, "agent"));
+    assert_eq!(admission["admission"], json!({"id":"goal-stable","session":session}));
     assert_eq!(runtime.block_on(socket_event(&mut retry, "attached"))["session"], session);
     runtime.block_on(async {
         retry
@@ -1144,6 +1149,49 @@ fn first_socket_goal_retry_keeps_one_generation_and_no_extra_goal_event() {
         store.events(id, 0, 100).unwrap().iter().filter(|event| event.record.label == "goal").count(),
         1
     );
+}
+
+#[test]
+fn refused_goal_creation_never_acknowledges_or_duplicates_its_reserved_request() {
+    rook_llm::init_tls();
+    let rook = Rook::new();
+    let model = Model::new();
+    rook.write_config(&config(&model.url, "initial", "ask", rook.workspace.path()));
+    let daemon = Daemon::start(&rook);
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let limit = rook_core::Config::default().work.max_goal_bytes;
+    let goal = "x".repeat(limit + 1);
+    assert!(goal.len() > limit);
+    let prompt = json!({"type":"prompt","session":null,"id":"rejected-goal", "text":format!("/goal {goal}")});
+    let address = format!("{}/api/chat", daemon.address.replacen("http", "ws", 1));
+    for _ in 0..2 {
+        runtime.block_on(async {
+            let (mut socket, _) = tokio_tungstenite::connect_async(&address).await.unwrap();
+            socket
+                .send(tokio_tungstenite::tungstenite::Message::Text(prompt.to_string().into()))
+                .await
+                .unwrap();
+            for _ in 0..128 {
+                let frame = tokio::time::timeout(std::time::Duration::from_secs(90), socket.next())
+                    .await
+                    .expect("goal refusal timed out")
+                    .expect("socket closed")
+                    .unwrap();
+                let event: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+                assert!(event["admission"].is_null(), "a refused goal cannot acknowledge admission: {event}");
+                if event["type"] == "failed" {
+                    assert!(event["message"].as_str().unwrap().contains("goal must contain text"), "{event}");
+                    return;
+                }
+            }
+            panic!("goal refusal was not delivered");
+        });
+    }
+    drop(daemon);
+    let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+    let sessions = store.list_sessions().unwrap();
+    assert_eq!(sessions.len(), 1, "retry reuses the reserved session even before goal admission");
+    assert_eq!(sessions[0].next_seq, 0, "neither refusal writes goal or prompt events");
 }
 
 #[test]

@@ -194,18 +194,28 @@ note, current goal value and admitted claim commit together. Retrying that ID
 joins its live generation or gets `already_admitted`; it cannot create another
 generation or silently attach to a later goal. A pending claim with a different
 active goal requires inspection. Frames without IDs retain their old behavior.
+After the creation transaction commits, an existing `agent` event carries an
+optional `admission` with the caller ID and saved session. This is a request
+acknowledgement, independent of stage execution IDs and queue receipts. CLI,
+TUI and browser release only the exact in-flight request and its intended or
+already observed session, even before `Started` arrives. The acknowledgement
+does not reset the live goal, turn, metrics or draft. The daemon starts or joins
+the saved goal before awaiting delivery, with the admission lock released.
+An explicit retry of an admitted goal returns the same scoped acknowledgement;
+refused creation leaves the original frame retryable. No receipt is inferred
+from status text, and legacy `agent` events omit the optional field.
 The browser keeps one exact prompt frame in its tab while delivery is uncertain,
 and attempts to retain it in session storage across reloads. Its explicit retry
 resends the same ID, destination, text and options. The browser leaves the
 candidate available after reconnect until the original turn is identified by
-its start and completion, a matching `already_admitted` reply, or explicit
+its durable admission or start and completion, a matching `already_admitted` reply, or explicit
 discard. A new prompt waits for the saved candidate to be resolved.
 Large frames can exceed browser storage quota and then remain retryable only
 while that tab stays loaded.
 The TUI likewise retains one size-checked prompt frame while its process runs.
 After a daemon socket failure, `/retry` resends that frame and `/discard`
 explicitly releases it; a new prompt cannot silently replace the ID. An
-observed start and completion or `already_admitted` acknowledgement resolves
+exact durable admission, observed start and completion or `already_admitted` acknowledgement resolves
 the retained frame. Closing the TUI process does not persist this outbox.
 The daemon-backed plain REPL uses the same bounded frame and explicit
 `/retry`/`/discard` contract. It holds the original connection settings while

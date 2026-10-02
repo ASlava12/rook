@@ -11,6 +11,29 @@ function storage() {
   };
 }
 
+test('saved goal admission precedes Started and never binds an unrelated caller or session', () => {
+  const saved = storage(), pending = promptRetry(saved);
+  const frame = { type:'prompt', session:null, id:'caller', text:'/goal inspect', options:{} };
+  pending.remember(frame);
+  pending.saved({session:'foreign', id:'other'});
+  pending.saved({session:'', id:'caller'});
+  pending.completed('foreign');
+  assert.deepEqual(pending.candidate(), frame, 'an unrelated receipt cannot bind a later Done');
+  pending.retry(); pending.saved({session:'source', id:'caller'});
+  assert.equal(pending.candidate(), null);
+  assert.equal(promptRetry(saved).candidate(), null, 'the durable acknowledgement clears tab storage');
+  pending.remember({...frame, session:'source'});
+  pending.saved({session:'target', id:'caller'});
+  assert.ok(pending.candidate());
+  pending.disconnected();pending.saved({session:'source', id:'caller'});
+  assert.ok(pending.candidate(), 'uncertain sends require explicit retry');
+  pending.retry();pending.saved({session:'source', id:'caller'});
+  assert.equal(pending.candidate(), null);
+  pending.remember({...frame, session:'target', id:'successor'});
+  pending.saved({session:'source', id:'caller'});
+  assert.equal(pending.candidate().id,'successor', 'a late source receipt cannot settle the target prompt');
+});
+
 test('durable admission frees a prompt before completion only for its exact caller and session', () => {
   const saved = storage();
   const pending = promptRetry(saved);

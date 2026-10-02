@@ -2264,13 +2264,18 @@ impl App {
             ChatEvent::Reasoning { text } => self.chat.push("think", &text),
             // The same kind a turn run here uses, so a sub-agent's work reads
             // the same whichever side of the socket it happens on.
-            ChatEvent::Agent { text, receipt } => match receipt {
-                Some(receipt) => {
-                    self.queue.invalidate_preview();
-                    self.chat.receipt_notice(receipt, &text);
+            ChatEvent::Agent { text, receipt, admission } => {
+                if let Some(admission) = admission {
+                    self.chat.prompt_retry.saved(&admission);
                 }
-                None => self.chat.push("agent", &text),
-            },
+                match receipt {
+                    Some(receipt) => {
+                        self.queue.invalidate_preview();
+                        self.chat.receipt_notice(receipt, &text);
+                    }
+                    None => self.chat.push("agent", &text),
+                }
+            }
             ChatEvent::Tool { name, doing } => {
                 let said = from_daemon(&name, &doing);
                 self.chat.tool_started(&name, &said)
@@ -6003,6 +6008,52 @@ mod tests {
         assert!(tui_commands_matching("/discard-stop ").iter().any(|(name, ..)| *name == "discard-stop"));
         assert!(tui_commands_matching("/session").iter().any(|(name, ..)| *name == "session"));
         assert!(tui_commands_matching("/export-html ").iter().any(|(name, ..)| *name == "export-html"));
+    }
+
+    #[test]
+    fn saved_goal_admission_frees_the_prompt_without_resetting_its_live_view_or_draft() {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let rook = rook_core::Rook::from_parts(
+            rook_store::Store::open(home.path().join("store")).unwrap(),
+            rook_core::Config::default(),
+            rook_skills::Environment::bare("windows", "x86_64", "0.1.0"),
+            rook_skills::SkillIndex::default(),
+            workspace.path().to_path_buf(),
+        );
+        let session = rook.start_session("goal admission").unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let mut app = super::App::new(crate::source::Source::Local(rook.into()), runtime, true);
+        let session_text = rook_store::format_session_id(session);
+        app.chat.session = Some(session);
+        app.chat.busy = true;
+        app.chat.goal_generation = Some("saved-generation".into());
+        app.chat.turn_id = Some("stage-turn".into());
+        app.chat.input.set("UNSENT_TARGET_DRAFT");
+        app.chat
+            .prompt_retry
+            .remember(&super::ClientMessage::Prompt {
+                session: Some(session_text.clone()),
+                text: "/goal inspect".into(),
+                id: Some("caller".into()),
+                target: None,
+                options: Default::default(),
+            })
+            .unwrap();
+        let event = |id: &str| super::ChatEvent::Agent {
+            text: "Goal request saved.".into(),
+            receipt: None,
+            admission: Some(rook_proto::PromptAdmission { session: session_text.clone(), id: id.into() }),
+        };
+        app.heard_from_daemon(event("foreign"));
+        assert!(app.chat.prompt_retry.pending());
+        app.heard_from_daemon(event("caller"));
+        assert!(!app.chat.prompt_retry.pending());
+        assert_eq!(app.chat.session, Some(session));
+        assert!(app.chat.busy);
+        assert_eq!(app.chat.goal_generation.as_deref(), Some("saved-generation"));
+        assert_eq!(app.chat.turn_id.as_deref(), Some("stage-turn"));
+        assert_eq!(app.chat.input.as_str(), "UNSENT_TARGET_DRAFT");
     }
 
     #[test]

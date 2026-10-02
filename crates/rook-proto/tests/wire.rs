@@ -5,6 +5,20 @@
 use rook_proto::{AskQuestion, ChatEvent, ClientMessage};
 
 #[test]
+fn goal_admission_is_optional_on_the_existing_agent_event() {
+    let old = serde_json::json!({"type":"agent","text":"progress"});
+    let event: ChatEvent = serde_json::from_value(old.clone()).unwrap();
+    assert!(matches!(event, ChatEvent::Agent { admission: None, .. }));
+    assert_eq!(serde_json::to_value(event).unwrap(), old);
+    let json = serde_json::json!({"type":"agent","text":"Goal request saved.",
+        "admission":{"session":"source","id":"caller"}});
+    let event: ChatEvent = serde_json::from_value(json.clone()).unwrap();
+    assert!(matches!(&event, ChatEvent::Agent { receipt: None, admission: Some(admission), .. }
+        if admission.session == "source" && admission.id == "caller"));
+    assert_eq!(serde_json::to_value(event).unwrap(), json);
+}
+
+#[test]
 fn ordinary_turns_keep_the_legacy_shape_until_a_prompt_is_durably_admitted() {
     let old = serde_json::json!({ "type": "turn", "id": "execution" });
     let event: ChatEvent = serde_json::from_value(old.clone()).unwrap();

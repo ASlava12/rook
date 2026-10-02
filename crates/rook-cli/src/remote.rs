@@ -113,6 +113,20 @@ impl PromptRetry {
         }
     }
 
+    pub fn saved(&mut self, admission: &rook_proto::PromptAdmission) -> bool {
+        if self.in_flight
+            && !admission.session.is_empty()
+            && matches!(&self.frame, Some(ClientMessage::Prompt { session, id: Some(id), .. })
+                if id == &admission.id && session.as_deref().is_none_or(|s| s == admission.session))
+            && self.started_session.as_deref().is_none_or(|s| s == admission.session)
+        {
+            self.discard();
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn disconnected(&mut self) {
         self.in_flight = false;
         self.started_session = None;
@@ -358,7 +372,7 @@ impl Watching {
                 };
                 let _ = to_daemon.send(ClientMessage::Approval { id, decision });
             }
-            ChatEvent::Agent { text, receipt: Some(receipt) }
+            ChatEvent::Agent { text, receipt: Some(receipt), .. }
             | ChatEvent::Interjected { text, receipt: Some(receipt) } => {
                 if !self.json {
                     let _ = writeln!(
@@ -369,7 +383,7 @@ impl Watching {
                     let _ = out.flush();
                 }
             }
-            ChatEvent::Agent { text, receipt: None } => {
+            ChatEvent::Agent { text, receipt: None, .. } => {
                 if !self.json {
                     let _ = writeln!(out, "\n{text}");
                     let _ = out.flush();
@@ -452,6 +466,42 @@ mod audit_tests {
         saved.disconnected();
         saved.admitted("caller-one", Some("session"));
         assert!(saved.pending(), "a disconnected, unobserved attempt remains retryable");
+    }
+
+    #[test]
+    fn saved_goal_receipts_settle_the_exact_caller_without_binding_a_foreign_start() {
+        let mut saved = PromptRetry::default();
+        let receipt =
+            |session: &str, id: &str| rook_proto::PromptAdmission { session: session.into(), id: id.into() };
+        saved.remember(&prompt()).unwrap();
+        saved.saved(&receipt("foreign", "other"));
+        saved.saved(&receipt("", "caller-one"));
+        assert!(saved.pending());
+        saved.completed(Some("foreign"));
+        assert!(saved.pending(), "an unrelated receipt must not bind a future Done");
+        saved.retry();
+        saved.saved(&receipt("created-session", "caller-one"));
+        assert!(!saved.pending(), "durable goal creation precedes Started and model output");
+
+        let mut intended = prompt();
+        if let ClientMessage::Prompt { session, .. } = &mut intended {
+            *session = Some("source".into());
+        }
+        saved.remember(&intended).unwrap();
+        saved.saved(&receipt("target", "caller-one"));
+        assert!(saved.pending());
+        saved.disconnected();
+        saved.saved(&receipt("source", "caller-one"));
+        assert!(saved.pending(), "an unobserved send remains uncertain until explicit retry");
+        saved.retry();
+        saved.saved(&receipt("source", "caller-one"));
+        assert!(!saved.pending());
+        if let ClientMessage::Prompt { id, .. } = &mut intended {
+            *id = Some("successor".into());
+        }
+        saved.remember(&intended).unwrap();
+        saved.saved(&receipt("source", "caller-one"));
+        assert!(saved.pending(), "late acknowledgements cannot clear a successor request");
     }
 
     #[test]

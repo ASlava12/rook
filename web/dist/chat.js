@@ -268,7 +268,10 @@ export function connect() {
       case 'text': saidByModel(e.text); break;
       case 'reasoning': say('think', e.text); break;
       // A sub-agent working, which is not the model thinking.
-      case 'agent': if (e.receipt) receiptNotice(e.receipt, e.text); else say('agent', e.text); break;
+      case 'agent':
+        if (e.admission) { retryPrompt.saved(e.admission); renderPromptRetry(); }
+        if (e.receipt) receiptNotice(e.receipt, e.text); else say('agent', e.text);
+        break;
       // `doing` says which file, which command; a daemon older than the
       // field sends nothing and the name is what it always said.
       case 'tool': toolStarted(e); break;

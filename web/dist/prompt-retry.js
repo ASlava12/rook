@@ -60,6 +60,11 @@ export function promptRetry(suppliedStorage) {
       }
     },
     disconnected() { inFlight = false; startedSession = null; },
+    saved(admission) {
+      if (inFlight && pending?.id === admission?.id && typeof admission.session === 'string' && admission.session.length > 0 &&
+          (pending.session === null || pending.session === admission.session) &&
+          (startedSession === null || startedSession === admission.session)) this.settled();
+    },
     settled() { if (inFlight) { pending = null; inFlight = false; startedSession = null; persist(); } },
     discard() { pending = null; inFlight = false; startedSession = null; persist(); },
   };

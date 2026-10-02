@@ -240,6 +240,13 @@ also support caller IDs, as described in
 [the architecture](architecture.md). Ordinary prompt admission is acknowledged
 before completion, so leaving its running branch can release the exact saved
 frame. A start notification alone leaves uncertain delivery retryable.
+The initial `/goal` request likewise receives a scoped confirmation after its
+goal and caller ID are saved, before model completion. Leaving that active
+branch can then send a new prompt in the selected branch while the original
+goal continues. A lost confirmation preserves the exact request for explicit
+retry; the retry acknowledges the saved request without creating another goal.
+Rejected creation produces no confirmation. This does not acknowledge a queued
+correction or change the observed goal generation.
 
 The CLI exposes the same operations locally and through the daemon:
 
