@@ -1162,6 +1162,22 @@ impl Rook {
                     let body = self.store.get_range(&event.record.body, 0, bytes as usize)?;
                     coverage.include(&crate::model_route::Auxiliary::read(&body)?.receipt, true);
                 }
+                if kind == EventKind::Note && event.record.label == crate::model_attempt::LABEL {
+                    if bytes > crate::model_route::MAX_BYTES as u64 {
+                        return Err(CoreError::Other(
+                            "saved model attempt exceeds 4096 bytes; preserve the store and inspect it"
+                                .into(),
+                        ));
+                    }
+                    let body = self.store.get_range(&event.record.body, 0, bytes as usize)?;
+                    match crate::model_attempt::Record::read(&body)?.state {
+                        crate::model_attempt::State::Started => coverage.attempts_started += 1,
+                        crate::model_attempt::State::Completed => coverage.attempts_completed += 1,
+                        crate::model_attempt::State::Failed => coverage.attempts_failed += 1,
+                        crate::model_attempt::State::Incomplete => coverage.attempts_incomplete += 1,
+                        crate::model_attempt::State::Interrupted => coverage.attempts_interrupted += 1,
+                    }
+                }
                 if kind == EventKind::AssistantMessage
                     || event.record.tokens_in > 0
                     || event.record.tokens_out > 0
@@ -1190,7 +1206,15 @@ impl Rook {
         }
         coverage.usage_events_without_receipt =
             usage_events.saturating_sub(coverage.main_receipts + coverage.auxiliary_receipts);
-        let cost_coverage = (usage_events > 0 || coverage.main_receipts + coverage.auxiliary_receipts > 0)
+        coverage.attempts_pending = coverage.attempts_started.saturating_sub(
+            coverage.attempts_completed
+                + coverage.attempts_failed
+                + coverage.attempts_incomplete
+                + coverage.attempts_interrupted,
+        );
+        let cost_coverage = (usage_events > 0
+            || coverage.main_receipts + coverage.auxiliary_receipts > 0
+            || coverage.attempts_started > 0)
             .then_some(coverage);
 
         // Use exactly what the next turn would carry. A separate event-kind

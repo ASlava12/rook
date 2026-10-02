@@ -11,6 +11,9 @@
 //! contain a branch on which vendor is answering.
 
 #![warn(clippy::string_slice)]
+
+pub mod attempt;
+pub use attempt::{Attempt, AttemptFacts, AttemptObserver, AttemptStatus};
 //
 // Indexing a `&str` by a computed byte panics when the byte is inside a
 // character, and under `panic = "abort"` that is the whole process. One did:
@@ -643,6 +646,23 @@ pub trait Provider: Send + Sync {
             usage_reported: false,
             completion_confirmed: false,
         })
+    }
+
+    /// Wrappers forward this to each physical leaf, including retries.
+    async fn complete_observed(
+        &self,
+        request: Request,
+        observer: std::sync::Arc<dyn AttemptObserver>,
+    ) -> Result<Completion> {
+        attempt::complete(self, request, observer).await
+    }
+
+    async fn stream_observed(
+        &self,
+        request: Request,
+        observer: std::sync::Arc<dyn AttemptObserver>,
+    ) -> Result<ResponseStream> {
+        attempt::stream(self, request, observer).await
     }
 
     fn supports_streaming(&self) -> bool {

@@ -797,6 +797,12 @@ impl Store {
         self.append_events_with_values(session, [event], &[]).map(|[seq]| seq)
     }
 
+    /// Persist before returning when the caller's next external action must
+    /// remain attributable after process loss, even before the turn ends.
+    pub fn append_event_durable(&self, session: u128, event: NewEvent<'_>) -> Result<u64> {
+        self.append_events_transaction(session, [event], true, |_, _| Ok(())).map(|[seq]| seq)
+    }
+
     /// Keep a companion payload and its event adjacent even while another
     /// thread appends to the session. Both records commit together and survive
     /// ordinary event-based forks and retention, without session KV sidecars.

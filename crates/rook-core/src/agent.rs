@@ -633,6 +633,13 @@ pub struct AgentLoop<'a> {
 }
 
 impl<'a> AgentLoop<'a> {
+    fn attempt_observer(
+        &self,
+        purpose: crate::model_route::Purpose,
+    ) -> std::sync::Arc<dyn rook_llm::AttemptObserver> {
+        crate::model_attempt::observer(self.rook, self.session, self.vault.clone(), purpose)
+    }
+
     pub fn new(rook: &'a Rook, provider: std::sync::Arc<dyn Provider>, session: u128) -> Self {
         let mut tool_ctx = tool_context(&rook.config, &rook.workspace, &rook.output_dir);
 
@@ -766,7 +773,11 @@ impl<'a> AgentLoop<'a> {
         request.effort = Some(rook_llm::Effort::Low);
 
         let started = std::time::Instant::now();
-        let mut stream = self.provider.stream(request).await.map_err(|e| CoreError::Other(e.to_string()))?;
+        let mut stream = self
+            .provider
+            .stream_observed(request, self.attempt_observer(crate::model_route::Purpose::Aside))
+            .await
+            .map_err(|e| CoreError::Other(e.to_string()))?;
         let mut assembler = Assembler::default();
         while let Some(delta) = stream.next().await {
             let delta = delta.map_err(|e| CoreError::Other(e.to_string()))?;
@@ -1156,8 +1167,16 @@ impl<'a> AgentLoop<'a> {
                     crate::diagnostics::Phase::ModelRequest
                 },
             );
-            let answering =
-                saying_it_waits(self.provider.stream(request.clone()), patience, &mut on_progress);
+            let purpose = if self.checking {
+                crate::model_route::Purpose::Checking
+            } else {
+                crate::model_route::Purpose::Main
+            };
+            let answering = saying_it_waits(
+                self.provider.stream_observed(request.clone(), self.attempt_observer(purpose)),
+                patience,
+                &mut on_progress,
+            );
             let asked = match answering.await {
                 Ok(stream) => Ok(stream),
                 // The window was an assumption and the endpoint has just
@@ -1792,8 +1811,11 @@ impl<'a> AgentLoop<'a> {
             request.max_output_tokens = self.room_for_output(used);
             request.cache_ttl = self.rook.config.agent.cache_ttl();
             let started = std::time::Instant::now();
-            let mut stream =
-                self.provider.stream(request).await.map_err(|e| CoreError::Other(e.to_string()))?;
+            let mut stream = self
+                .provider
+                .stream_observed(request, self.attempt_observer(crate::model_route::Purpose::FinalAnswer))
+                .await
+                .map_err(|e| CoreError::Other(e.to_string()))?;
             let mut assembler = Assembler::default();
             while let Some(delta) = stream.next().await {
                 let delta = delta.map_err(|e| CoreError::Other(e.to_string()))?;
@@ -1915,7 +1937,14 @@ pub const WROTE: &str = "wrote";
 /// constant: it is JSON for `changes` to read, and it belongs on a screen no
 /// more than a row of a database does.
 pub fn note_is_for_a_person(label: &str) -> bool {
-    !matches!(label, WROTE | crate::tool_details::LABEL | crate::model_route::AUX_LABEL | "compaction usage")
+    !matches!(
+        label,
+        WROTE
+            | crate::tool_details::LABEL
+            | crate::model_route::AUX_LABEL
+            | crate::model_attempt::LABEL
+            | "compaction usage"
+    )
 }
 
 const SAY_IT: &str = "\

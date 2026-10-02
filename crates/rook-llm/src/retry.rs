@@ -319,10 +319,44 @@ impl Provider for Retrying {
     }
 
     async fn complete_with_metadata(&self, request: Request) -> Result<crate::Completion> {
+        self.complete_attempts(request, None).await
+    }
+
+    async fn complete_observed(
+        &self,
+        request: Request,
+        observer: std::sync::Arc<dyn crate::AttemptObserver>,
+    ) -> Result<crate::Completion> {
+        self.complete_attempts(request, Some(observer)).await
+    }
+
+    async fn stream(&self, request: Request) -> Result<ResponseStream> {
+        self.stream_attempts(request, None).await
+    }
+
+    async fn stream_observed(
+        &self,
+        request: Request,
+        observer: std::sync::Arc<dyn crate::AttemptObserver>,
+    ) -> Result<ResponseStream> {
+        self.stream_attempts(request, Some(observer)).await
+    }
+}
+
+impl Retrying {
+    async fn complete_attempts(
+        &self,
+        request: Request,
+        observer: Option<std::sync::Arc<dyn crate::AttemptObserver>>,
+    ) -> Result<crate::Completion> {
         let mut request = self.as_accepted(request);
         let mut attempt = 1;
         loop {
-            match self.inner.complete_with_metadata(request.clone()).await {
+            let answer = match &observer {
+                Some(observer) => self.inner.complete_observed(request.clone(), observer.clone()).await,
+                None => self.inner.complete_with_metadata(request.clone()).await,
+            };
+            match answer {
                 Err(e) if worth_asking_again(&e) && self.wait_before(attempt, &e).await => attempt += 1,
                 Err(e) if self.drop_the_effort(&e, &mut request) => continue,
                 Err(e) if self.ask_for_less_output(&e, &mut request) => continue,
@@ -331,13 +365,21 @@ impl Provider for Retrying {
         }
     }
 
-    async fn stream(&self, request: Request) -> Result<ResponseStream> {
+    async fn stream_attempts(
+        &self,
+        request: Request,
+        observer: Option<std::sync::Arc<dyn crate::AttemptObserver>>,
+    ) -> Result<ResponseStream> {
         use futures_util::StreamExt;
         let requested = request.effort;
         let mut request = self.as_accepted(request);
         let mut attempt = 1;
         loop {
-            match self.inner.stream(request.clone()).await {
+            let answer = match &observer {
+                Some(observer) => self.inner.stream_observed(request.clone(), observer.clone()).await,
+                None => self.inner.stream(request.clone()).await,
+            };
+            match answer {
                 Ok(stream) => {
                     let stream: ResponseStream = match self.inner.dispatch_identity() {
                         Some(identity) => Box::pin(

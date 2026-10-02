@@ -1,5 +1,5 @@
 //! Explicit analysis-to-implementation routing and its bounded branch state.
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use rook_llm::{
@@ -134,6 +134,22 @@ impl Provider for Selected {
 
     async fn complete_with_metadata(&self, request: Request) -> rook_llm::Result<rook_llm::Completion> {
         self.inner.complete_with_metadata(request).await
+    }
+
+    async fn complete_observed(
+        &self,
+        request: Request,
+        observer: Arc<dyn rook_llm::AttemptObserver>,
+    ) -> rook_llm::Result<rook_llm::Completion> {
+        self.inner.complete_observed(request, observer).await
+    }
+
+    async fn stream_observed(
+        &self,
+        request: Request,
+        observer: Arc<dyn rook_llm::AttemptObserver>,
+    ) -> rook_llm::Result<ResponseStream> {
+        self.inner.stream_observed(request, observer).await
     }
     async fn stream(&self, request: Request) -> rook_llm::Result<ResponseStream> {
         self.inner.stream(request).await

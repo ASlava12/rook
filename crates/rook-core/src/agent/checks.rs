@@ -321,7 +321,13 @@ impl<'a> AgentLoop<'a> {
         }
         let started = std::time::Instant::now();
         let completed = saying_it_waits(
-            tokio::time::timeout(patience, self.provider.complete_with_metadata(request)),
+            tokio::time::timeout(
+                patience,
+                self.provider.complete_observed(
+                    request,
+                    self.attempt_observer(crate::model_route::Purpose::CompletionCheck),
+                ),
+            ),
             patience,
             &mut *on_progress,
         )

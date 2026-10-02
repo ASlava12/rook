@@ -371,6 +371,24 @@ impl Provider for Failover {
         first_that_answers!(self, Some(&request), |provider| provider.complete_with_metadata(request.clone()))
     }
 
+    async fn complete_observed(
+        &self,
+        request: Request,
+        observer: std::sync::Arc<dyn crate::AttemptObserver>,
+    ) -> Result<crate::Completion> {
+        first_that_answers!(self, Some(&request), |provider| provider
+            .complete_observed(request.clone(), observer.clone()))
+    }
+
+    async fn stream_observed(
+        &self,
+        request: Request,
+        observer: std::sync::Arc<dyn crate::AttemptObserver>,
+    ) -> Result<ResponseStream> {
+        first_that_answers!(self, Some(&request), |provider| provider
+            .stream_observed(request.clone(), observer.clone()))
+    }
+
     /// Failing over here is honest because every dialect checks the status
     /// before it returns the stream: a failure that reaches this point has
     /// emitted nothing, so there is no half-delivered reply to replace.

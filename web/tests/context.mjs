@@ -107,11 +107,14 @@ test('response receipt keeps selected, dispatched and adapter-returned models di
 test('cost coverage renders a known subset without presenting uncovered work as free or inherited charges as new', () => {
   const panel = contextPanel({ ...usage, cost_coverage: {
     main_receipts: 1, auxiliary_receipts: 2, priced_receipts: 2, unpriced_receipts: 1,
-    usage_events_without_receipt: 3, known_subtotal_usd: 0.0000946, complete_accounting: false
+    usage_events_without_receipt: 3, known_subtotal_usd: 0.0000946, complete_accounting: false,
+    attempts_started: 6, attempts_completed: 3, attempts_failed: 1, attempts_incomplete: 0,
+    attempts_interrupted: 1, attempts_pending: 1
   } });
   assert.match(panel.textContent, /Known subtotal: USD 0.00009460 configured-rate estimate/);
   assert.match(panel.textContent, /Priced receipts: 2 · unpriced receipts: 1 · usage events without receipt: 3/);
-  assert.match(panel.textContent, /Total cost is unknown: retry\/failure, delegated and branch-summary costs/);
+  assert.match(panel.textContent, /Recorded physical attempts: 6 started · 3 completed · 1 failed · 0 incomplete · 1 interrupted · 1 pending/);
+  assert.match(panel.textContent, /Total cost is unknown: retry\/failure attempts may lack complete usage/);
   assert.match(panel.textContent, /Inherited receipts are historical, not new charges/);
   const unknown = contextPanel({ ...usage, cost_coverage: { known_subtotal_usd: null, unpriced_receipts: 2 } });
   assert.match(unknown.textContent, /unknown \(no priced receipts\)/);

@@ -30,6 +30,7 @@ impl Model {
         let (send, requests) = mpsc::sync_channel(16);
         let thread = std::thread::spawn(move || {
             let mut count = 0;
+            let mut refused = 0;
             while !halt.load(Ordering::SeqCst) && count < 32 {
                 let Ok((mut socket, _)) = listener.accept() else {
                     std::thread::sleep(std::time::Duration::from_millis(10));
@@ -67,10 +68,15 @@ impl Model {
                 }
                 send.try_send(request.clone()).unwrap();
                 if request["model"] == "unavailable" {
-                    let body = r#"{"error":{"code":"insufficient_quota"}}"#;
+                    refused += 1;
+                    let (status, body) = if refused == 1 {
+                        ("503 Service Unavailable", r#"{"error":{"code":"overloaded"}}"#)
+                    } else {
+                        ("402 Payment Required", r#"{"error":{"code":"insufficient_quota"}}"#)
+                    };
                     let _ = write!(
                         socket,
-                        "HTTP/1.1 402 Payment Required\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len()
                     );
                     continue;
@@ -141,6 +147,11 @@ fn auxiliary_pricing_and_explicit_missing_coverage_survive_reopen_and_fork_local
             );
             let session = output["session"].as_str().unwrap();
             assert_eq!(model.next()["model"], "unavailable");
+            assert_eq!(
+                model.next()["model"],
+                "unavailable",
+                "the 503 retry must be an actual second request"
+            );
             let main = model.next();
             let check = model.next();
             let repair = model.next();
@@ -156,6 +167,12 @@ fn auxiliary_pricing_and_explicit_missing_coverage_survive_reopen_and_fork_local
             assert_eq!(coverage["main_receipts"], 1);
             assert_eq!(coverage["auxiliary_receipts"], 2);
             assert_eq!(coverage["usage_events_without_receipt"], 0);
+            assert_eq!(coverage["attempts_started"], 5);
+            assert_eq!(coverage["attempts_completed"], 3);
+            assert_eq!(coverage["attempts_failed"], 2);
+            assert_eq!(coverage["attempts_incomplete"], 0);
+            assert_eq!(coverage["attempts_interrupted"], 0);
+            assert_eq!(coverage["attempts_pending"], 0);
             assert_eq!(
                 coverage["complete_accounting"], false,
                 "the primary failure cannot be presented as free"
@@ -182,6 +199,21 @@ fn auxiliary_pricing_and_explicit_missing_coverage_survive_reopen_and_fork_local
                     .map(|e| serde_json::from_slice(&store.get(&e.record.body).unwrap()).unwrap())
                     .collect();
                 assert_eq!(aux.len(), 2);
+                let attempts: Vec<Value> = events
+                    .iter()
+                    .filter(|e| e.record.label == "rook:model-attempt:v1")
+                    .map(|e| serde_json::from_slice(&store.get(&e.record.body).unwrap()).unwrap())
+                    .collect();
+                assert_eq!(attempts.len(), 10, "one admission and one ending per physical request");
+                for pair in attempts.as_chunks::<2>().0 {
+                    assert_eq!(pair[0]["state"], "started");
+                    assert_eq!(pair[0]["id"], pair[1]["id"]);
+                    assert_eq!(pair[0]["dispatch"], pair[1]["dispatch"]);
+                }
+                for failed in attempts.iter().filter(|a| a["state"] == "failed") {
+                    assert_eq!(failed["dispatch"]["provider"], "selected");
+                    assert!(failed["usage"].is_null(), "a refusal supplies no verified usage bill");
+                }
                 assert_eq!(aux[0]["purpose"], "completion_check");
                 assert_eq!(aux[1]["purpose"], "output_repair");
                 for receipt in aux.iter().map(|a| &a["receipt"]) {

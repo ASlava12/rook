@@ -186,6 +186,25 @@ impl Provider for Limited {
         self.inner.complete_with_metadata(request).await
     }
 
+    async fn complete_observed(
+        &self,
+        request: Request,
+        observer: Arc<dyn crate::AttemptObserver>,
+    ) -> Result<crate::Completion> {
+        let _turn = self.a_turn().await?;
+        self.inner.complete_observed(request, observer).await
+    }
+
+    async fn stream_observed(
+        &self,
+        request: Request,
+        observer: Arc<dyn crate::AttemptObserver>,
+    ) -> Result<ResponseStream> {
+        let turn = self.a_turn().await?;
+        let stream = self.inner.stream_observed(request, observer).await?;
+        Ok(Box::pin(Holding { stream, _turn: turn }))
+    }
+
     /// The permit outlives this call. A stream is the request — the server is
     /// generating for as long as deltas are arriving — so releasing on return
     /// would let every waiter through at once and limit nothing.

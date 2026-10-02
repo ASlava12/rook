@@ -13,7 +13,7 @@ Source: Pi `ee602414c703be8da722ec56de7f2399e62581ac`; starting Rook:
 | Inline tool cards | Complete | Compact/live/saved results, attributed errors/duration/diffs and command/search/MCP facts, explicit bounded browser pixels, terminal text fallback, local/daemon and full CI passed |
 | Context provenance inspector | Complete | Request-specific sources and loaded skills, deferred MCP tools in CLI/API/TUI/browser; bounded notes, old-note compatibility, local/daemon and full CI passed |
 | Local HTML export | Complete | Inclusive saved ranges, bounded/escaped/attributed output, no overwrite/publication, CLI/REPL/local/shared TUI parity, actual browser download/rendering and full CI passed |
-| Opt-in phase-based model routing | In progress | Static policy, durable branch transition, historical receipts and compatible image/scoped-state handoffs implemented; native continuation/reopen/fork and automatic fallback verified; successful auxiliary receipts and explicit partial-cost coverage implemented; finish per-attempt/delegated/branch-summary accounting, live frontend checks and same-task comparison without claiming unmeasured savings |
+| Opt-in phase-based model routing | In progress | Static policy, durable branch transition, historical receipts and compatible image/scoped-state handoffs implemented; native continuation/reopen/fork and automatic fallback verified; auxiliary receipts and physical-attempt lifecycle implemented with explicit partial-cost coverage; finish missing attempt usage/pricing, delegated/branch-summary accounting, live frontend checks and same-task comparison without claiming unmeasured savings |
 | Declarative extension UI | Pending | Bounded status/progress/forms/result contract, trust boundary, text fallback and frontend parity |
 
 Regular-scrollback TUI and terminal image preview remain experiments from the
@@ -3430,3 +3430,87 @@ same-task quality/cost/latency comparison remain required. No real-model savings
 have been measured. Phase routing remains In progress, declarative
 extension UI remains Pending, and scrollback/image experiments retain their
 original scope. The full adoption goal remains active.
+
+## Physical-attempt lifecycle and crash persistence
+
+Generation now observes each physical leaf, including actual retry and fallback
+requests. Capacity waits, cooldown exclusions and incompatible-state candidates
+do not create admissions. Main/checking, completion-check, repair, compaction,
+aside and final-answer paths share this observation. The host saves a bounded
+`rook:model-attempt:v1` admission before generation and a matching ID ending:
+completed, failed, incomplete or interrupted. Opening cancellation and stream
+Drop retain interruption and the available native facts; hard process loss
+leaves the admission pending. Admission-write failure prevents generation;
+ending-write failure is surfaced once and leaves persisted admission pending.
+Both records commit with immediate durability through the existing event
+transaction, independently of the end-of-turn flush, without a companion KV
+value or new store layout. This adds a durable write per admission and ending;
+no performance or model-latency savings are inferred.
+
+The note is bounded to 4 KiB before encoding/reading. Identities are bounded
+and known secrets withheld; response text, reasoning and error bodies are not
+copied. Attempt notes carry no additional token charge, are omitted from model
+history and restored TUI/browser chat, and remain in the saved journal.
+CLI/API/TUI/browser context shows state counters over the fixed saved prefix
+using bounded pages and constant-space accumulation. Forks before a parent's
+ending retain a historical pending attempt. Added JSON counters default to zero;
+existing main/auxiliary notes and postcard layouts remain unchanged.
+
+Response estimates and attempt counts remain independent. Subtracting all old
+receipts from new attempts could conceal a later failed call; no such inferred
+matching count is exposed. The known subtotal still uses saved priced response
+receipts only. Failed/interrupted attempts can lack complete counters/pricing;
+legacy sessions lack admission evidence. `complete_accounting` remains false.
+
+The complete LLM suite exited 0 (`target/pi-attempt-llm-final.log`), including
+admission refusal, one ending after errors, opening/partial-stream cancellation,
+missing terminal evidence, zero counters and a failed ending that is surfaced
+once without a second Drop record. Browser syntax and actual context/restored
+chat module tests exited 0 (`target/pi-attempt-browser-final.log`); these are DOM
+fixtures, not live frontend interactions.
+
+The actual HTTP retry/refusal/fallback scenario exited 0
+(`target/pi-attempt-accounting-cli.log`). It covers local/daemon paths with and
+without configured rates, five physical requests (two failed and three completed),
+restart, rate snapshots, forked history and unchanged token charges. The real
+daemon Stop and owned CLI/daemon hard-termination scenario exited 0 after the
+durability correction (`target/pi-attempt-stop-crash-cli-fixed.log`). Stop closes
+one admitted request as interrupted; hard termination leaves it pending after
+reopening/forking, with no invented response, usage or USD zero.
+
+The first hard-termination invocation exited 101
+(`target/pi-attempt-stop-crash-cli.log`): ordinary appended events were visible
+in-process but the admission could be lost before the turn's normal flush. The
+new durable event entrypoint uses the existing immediate transaction for both
+admission and ending. This regression proves persistence after actual process
+loss rather than assuming append implies durability. The first complete agent
+suite exited 101 (`target/pi-attempt-agent-final.log`): 239 passed, one old exact
+half-answer transcript expected no attempt notes. That expectation now verifies
+the matched started/failed records and retains the original partial text,
+reasoning, visible event order and transport-error assertions. Failed runs are
+not counted as final verification.
+
+Final targeted partial-answer, durable-store and restored TUI checks exited 0
+(`target/pi-attempt-partial-reply-fixed.log`,
+`target/pi-attempt-storage-durable-final.log` and
+`target/pi-attempt-tui-final.log`). The first full CI exited 1 before tests
+(`target/pi-attempt-ci.log`, 54.3 seconds): Clippy requires `as_chunks::<2>()`
+for a constant-size test slice. The assertion now uses that API while retaining
+the exact ten-record and matched-ID checks.
+
+The final `cargo xtask ci` exited 0 (`ci: ok`, 1024.0 seconds;
+`target/pi-attempt-ci-final.log`). It executed the final retry/fallback and
+Stop/process-loss scenarios, all 240 agent-loop tests including the corrected
+half-answer expectation, the durable-store and observer failure checks,
+restored TUI/browser fixtures, existing native/queue/goal/CLI/store suites,
+frontend builds, Clippy and doctests. `cargo xtask compaction` also exited 0
+(`target/pi-attempt-compaction.log`): 4.02 MiB on disk, 37.1x dictionary
+compression and 5.8x end-to-end preserve the published benchmark claims.
+No earlier failed invocation is counted as evidence for the final tree.
+
+Next finish missing attempt usage/pricing and delegated-session/branch-summary
+coverage, then live phase-routing frontend interactions and same-task
+quality/cost/latency comparison. No actual-model savings have been measured.
+Phase routing remains In progress, declarative extension UI remains Pending,
+and scrollback/image experiments retain their original scope. The full goal
+remains active.

@@ -397,6 +397,146 @@ async fn socket_event(
     }
     panic!("socket never sent {kind}")
 }
+
+#[test]
+fn physical_attempts_distinguish_stop_from_process_loss_and_survive_reopen_and_fork() {
+    struct Process(std::process::Child);
+    impl Drop for Process {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    rook_llm::init_tls();
+    for case in ["stop", "daemon_crash", "local_crash"] {
+        let _local = (case == "local_crash").then(one_at_a_time);
+        let rook = Rook::new();
+        let model = Model::new();
+        rook.write_config(&config(&model.url, "initial", "ask", rook.workspace.path()));
+        let session = rook_store::new_session_id();
+        let id = rook_store::format_session_id(session);
+        {
+            let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+            store
+                .create_session(&rook_store::SessionMeta::new(
+                    session,
+                    "interrupted physical request",
+                    rook.workspace.path().display().to_string(),
+                    rook_store::now_unix(),
+                ))
+                .unwrap();
+        }
+        if case == "local_crash" {
+            let process = Process(
+                Command::new(env!("CARGO_BIN_EXE_rook"))
+                    .env("ROOK_HOME", rook.home.path())
+                    .env("ROOK_LOG", "error")
+                    .arg("--workspace")
+                    .arg(rook.workspace.path())
+                    .args(["run", "Wait for an answer.", "--session", &id])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap(),
+            );
+            assert_eq!(model.next()["model"], "initial-model");
+            drop(process);
+        } else {
+            let daemon = Daemon::start(&rook);
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let mut socket = runtime.block_on(async {
+                let (mut socket, _) = tokio_tungstenite::connect_async(format!(
+                    "{}/api/chat",
+                    daemon.address.replacen("http", "ws", 1)
+                ))
+                .await
+                .unwrap();
+                socket
+                    .send(tokio_tungstenite::tungstenite::Message::Text(
+                        json!({"type":"prompt","session":id,"text":"Wait for an answer."}).to_string().into(),
+                    ))
+                    .await
+                    .unwrap();
+                socket
+            });
+            let turn = runtime.block_on(socket_event(&mut socket, "turn"))["id"].as_str().unwrap().to_owned();
+            assert_eq!(model.next()["model"], "initial-model", "admission precedes this actual HTTP request");
+            let busy = rook.json(&["session", "context", &id]);
+            assert_eq!(busy["cost_coverage"]["attempts_started"], 1);
+            assert_eq!(busy["cost_coverage"]["attempts_pending"], 1);
+            assert!(busy["cost_coverage"]["known_subtotal_usd"].is_null());
+            if case == "stop" {
+                runtime.block_on(async {
+                    socket
+                        .send(tokio_tungstenite::tungstenite::Message::Text(
+                            json!({"type":"stop","id":"attempt-stop","turn":turn}).to_string().into(),
+                        ))
+                        .await
+                        .unwrap();
+                    assert_eq!(socket_event(&mut socket, "stop_applied").await["id"], "attempt-stop");
+                    socket_event(&mut socket, "cancelled").await;
+                });
+                // The terminal broadcast can precede the aborted future's Drop.
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    let context = rook.json(&["session", "context", &id]);
+                    if context["cost_coverage"]["attempts_interrupted"] == 1 {
+                        assert_eq!(context["cost_coverage"]["attempts_pending"], 0);
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "Stop did not close the physical attempt: {context}"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+            }
+            drop(socket);
+            drop(daemon);
+            std::fs::remove_file(rook.home.path().join("rookd.addr")).unwrap();
+        }
+        let context = rook.json(&["session", "context", &id]);
+        let coverage = &context["cost_coverage"];
+        assert_eq!(coverage["attempts_started"], 1, "{case}: {context}");
+        assert_eq!(coverage["attempts_completed"], 0);
+        assert_eq!(coverage["attempts_failed"], 0);
+        assert_eq!(coverage["attempts_interrupted"], u64::from(case == "stop"));
+        assert_eq!(coverage["attempts_pending"], u64::from(case != "stop"));
+        assert_eq!(coverage["complete_accounting"], false);
+        assert!(coverage["known_subtotal_usd"].is_null());
+        assert!(context["last_response"].is_null());
+        let end = {
+            let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+            let meta = store.get_session(session).unwrap().unwrap();
+            assert_eq!((meta.tokens_in, meta.tokens_out), (0, 0));
+            let attempts: Vec<Value> = store
+                .events(session, 0, 256)
+                .unwrap()
+                .iter()
+                .filter(|event| event.record.label == "rook:model-attempt:v1")
+                .map(|event| serde_json::from_slice(&store.get(&event.record.body).unwrap()).unwrap())
+                .collect();
+            assert_eq!(attempts.len(), if case == "stop" { 2 } else { 1 });
+            assert_eq!(attempts[0]["state"], "started");
+            assert_eq!(attempts[0]["dispatch"]["provider"], "initial");
+            if case == "stop" {
+                assert_eq!(attempts[1]["state"], "interrupted");
+                assert_eq!(attempts[0]["id"], attempts[1]["id"]);
+                assert!(attempts[1]["usage"].is_null());
+            }
+            meta.next_seq
+        };
+        let fork = rook.ok(&["session", "fork", &id, "--at", &end.to_string()]);
+        let child = fork.split_whitespace().last().unwrap();
+        assert_eq!(rook.json(&["session", "context", child])["cost_coverage"], *coverage);
+        assert!(
+            model.requests.try_recv().is_err(),
+            "inspection and forking must not generate another request"
+        );
+    }
+}
+
 async fn enqueue(client: &reqwest::Client, url: &str, id: &str) -> Value {
     let page = get(client, url).await;
     client.post(url).json(&json!({"action":"follow_up","target":page["follow_up_target"],"id":id,"text":format!("TASK_{id}")})).send().await.unwrap().error_for_status().unwrap().json().await.unwrap()

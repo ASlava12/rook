@@ -173,6 +173,38 @@ the accounting data.
 `complete_accounting` is currently false. The subtotal is a known subset of
 saved branch history, never total session spend. Missing rates or facts leave
 receipts unpriced; no priced receipts means an unknown subtotal, not USD zero.
-Per-attempt retry/failure/interruption coverage, delegated-session aggregation
-and branch-summary generation are still required. The existing note formats
-and postcard records remain readable; `cost_coverage` is an optional JSON field.
+Failed/interrupted attempts may lack usable counters and pricing. Delegated-session
+aggregation and branch-summary generation are still required. The existing note
+formats and postcard records remain readable; `cost_coverage` is an optional
+JSON field and added counter fields default to zero when reading older JSON.
+
+## Physical generation attempts
+
+Main/checking, completion-check, repair, compaction, aside and final-answer paths
+observe each actual provider leaf through retry, fallback, capacity, catalog and
+selected-policy wrappers. A `rook:model-attempt:v1` JSON admission must persist
+before opening generation. Admission and ending commit with immediate durability
+using the existing event transaction; no companion KV value or new store layout
+is introduced. Its matching ending has the same ID and one of
+completed, failed, incomplete or interrupted. No terminal marker means
+incomplete even when a native adapter synthesizes Done; legacy/custom providers
+retain their existing contract without gaining verified native counters.
+Opening-future and stream cancellation retain interruption and available usage
+facts. A process crash cannot run Drop, so its admission remains pending rather
+than implying success or zero cost. Inspection and forks never resume it.
+
+Each note is at most 4 KiB, checked before encoding/reading. Identity is bounded
+and known secrets are withheld. No reply, reasoning, endpoint, credential or
+provider error body is copied into the ledger. Notes add no store token charge
+and do not replace the last response. Restored chat and model history omit them;
+the journal retains them. The inspector reports started/completed/failed/
+incomplete/interrupted/pending counts over a fixed saved prefix with bounded
+pages and constant memory. A fork before an ending retains a pending historical
+attempt even if its parent later finishes it. Counts cover recorded attempts;
+older sessions without these notes cannot establish complete call coverage.
+
+The known subtotal still comes only from saved priced response receipts.
+Physical attempt counts and response counts are independent: subtracting old
+response receipts from new attempts could conceal a later failure. Neither
+completed nor failed establishes a verified bill. Full accounting remains
+explicitly unknown until missing usage/pricing and other scopes are covered.

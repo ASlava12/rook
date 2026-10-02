@@ -102,9 +102,22 @@ Restored TUI/browser chat omits these receipts and compaction usage carriers;
 human aside notes remain visible.
 Context inspection folds bounded event pages into a saved-history cost subtotal
 and explicit coverage counts. Forks inherit historical estimates, not new charges;
-changing configured prices cannot reprice saved receipts. Total cost remains
-unknown while retry/failure/interruption, delegation and branch-summary
-accounting are incomplete. Existing postcard layouts are unchanged.
+changing configured prices cannot reprice saved receipts. Physical generation
+attempts save bounded `rook:model-attempt:v1` admission/ending notes around each
+actual leaf call, including retries and fallback. Admission must persist before
+generation; admission and ending use an immediate durable event transaction,
+including prior writes, independently of the ordinary end-of-turn flush.
+Waiting for capacity and excluded candidates create no attempt.
+Graceful cancellation records interruption; process loss leaves an admission
+pending. These notes retain identity, purpose, elapsed time and available native
+usage/completion facts, never response text, reasoning or error bodies. They add
+no token charge and are excluded from model history and restored chat.
+The inspector folds attempt states with constant-space counters at the same
+fixed saved-history boundary; inherited attempts follow the fork's prefix.
+Attempt and response counts are independent: old receipts cannot prove that a
+later failed attempt had a priced response. Total cost remains unknown where
+attempt usage/pricing, delegated aggregation or branch-summary generation are
+uncovered. Existing postcard layouts are unchanged.
 
 Durable transcript navigation lives in `rook-core::transcript`: bounded event
 pages, snapshot search cursors, body parts and attributed source-data quotes.

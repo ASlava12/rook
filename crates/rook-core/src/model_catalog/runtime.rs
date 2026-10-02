@@ -4,6 +4,7 @@
 //! invalidate the prompt/schema prefix. A catalog refresh affects the next
 //! provider construction, without adding network probes to ordinary turns.
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use rook_llm::{
@@ -205,6 +206,22 @@ impl Provider for Observed {
 
     async fn complete_with_metadata(&self, request: Request) -> rook_llm::Result<rook_llm::Completion> {
         self.inner.complete_with_metadata(self.request(request)?).await
+    }
+
+    async fn complete_observed(
+        &self,
+        request: Request,
+        observer: Arc<dyn rook_llm::AttemptObserver>,
+    ) -> rook_llm::Result<rook_llm::Completion> {
+        self.inner.complete_observed(self.request(request)?, observer).await
+    }
+
+    async fn stream_observed(
+        &self,
+        request: Request,
+        observer: Arc<dyn rook_llm::AttemptObserver>,
+    ) -> rook_llm::Result<ResponseStream> {
+        self.inner.stream_observed(self.request(request)?, observer).await
     }
     async fn stream(&self, request: Request) -> rook_llm::Result<ResponseStream> {
         self.inner.stream(self.request(request)?).await

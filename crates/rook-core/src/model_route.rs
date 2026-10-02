@@ -11,11 +11,21 @@ pub(crate) const AUX_LABEL: &str = "rook:model-aux:v1";
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Purpose {
+    Main,
+    Checking,
     CompletionCheck,
     OutputRepair,
     Compaction,
     Aside,
     FinalAnswer,
+}
+
+pub(crate) fn identity(value: &str, vault: &Vault) -> Option<String> {
+    (!value.is_empty()
+        && value.len() <= 256
+        && !value.chars().any(char::is_control)
+        && vault.redact(value) == value)
+        .then(|| value.to_owned())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -170,16 +180,13 @@ impl Receipt {
         response: &Response,
         vault: &Vault,
     ) -> Self {
-        let identity = |s: &str| {
-            (!s.is_empty() && s.len() <= 256 && !s.chars().any(char::is_control) && vault.redact(s) == s)
-                .then(|| s.to_owned())
-        };
-        let dispatch = dispatch.filter(|d| identity(&d.provider).is_some() && identity(&d.model).is_some());
+        let dispatch = dispatch
+            .filter(|d| identity(&d.provider, vault).is_some() && identity(&d.model, vault).is_some());
         Self {
-            selected: identity(selected),
+            selected: identity(selected, vault),
             phase: phase.into(),
             dispatch,
-            reported_model: identity(&response.model),
+            reported_model: identity(&response.model, vault),
             usage: response.usage.clone(),
             complete: false,
             usage_reported: false,
@@ -261,6 +268,7 @@ impl Receipt {
 /// A subset of estimates in saved branch history, including inherited receipts.
 /// Retry/failure, delegated and branch-summary accounting is not complete yet.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CostCoverage {
     pub main_receipts: u64,
     pub auxiliary_receipts: u64,
@@ -269,6 +277,12 @@ pub struct CostCoverage {
     pub usage_events_without_receipt: u64,
     pub known_subtotal_usd: Option<f64>,
     pub complete_accounting: bool,
+    pub attempts_started: u64,
+    pub attempts_completed: u64,
+    pub attempts_failed: u64,
+    pub attempts_incomplete: u64,
+    pub attempts_interrupted: u64,
+    pub attempts_pending: u64,
 }
 
 impl CostCoverage {
@@ -293,8 +307,16 @@ impl CostCoverage {
             .map(|usd| format!("USD {} configured-rate estimate", amount(usd)))
             .unwrap_or_else(|| "unknown (no priced receipts)".into());
         format!(
-            "Cost coverage · saved branch history\nKnown subtotal: {subtotal}\nPriced receipts: {} · unpriced receipts: {} · usage events without receipt: {}\nTotal cost is unknown: retry/failure, delegated and branch-summary costs are not fully covered. Inherited receipts are historical, not new charges.\n",
-            self.priced_receipts, self.unpriced_receipts, self.usage_events_without_receipt
+            "Cost coverage · saved branch history\nKnown subtotal: {subtotal}\nPriced receipts: {} · unpriced receipts: {} · usage events without receipt: {}\nRecorded physical attempts: {} started · {} completed · {} failed · {} incomplete · {} interrupted · {} pending\nTotal cost is unknown: retry/failure attempts may lack complete usage; delegated and branch-summary costs are not fully covered. Inherited receipts are historical, not new charges.\n",
+            self.priced_receipts,
+            self.unpriced_receipts,
+            self.usage_events_without_receipt,
+            self.attempts_started,
+            self.attempts_completed,
+            self.attempts_failed,
+            self.attempts_incomplete,
+            self.attempts_interrupted,
+            self.attempts_pending
         )
     }
 }

@@ -6469,6 +6469,8 @@ and the next line"
         rook.log(session, rook_store::EventKind::Note, "btw", "visible aside").unwrap();
         let receipt = serde_json::json!({"purpose":"aside","receipt":{"phase":"ordinary","usage":{"input_tokens":0,"output_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0},"complete":false,"elapsed_ms":0}});
         rook.log(session, rook_store::EventKind::Note, "rook:model-aux:v1", &receipt.to_string()).unwrap();
+        rook.log(session, rook_store::EventKind::Note, "rook:model-attempt:v1", "internal attempt data")
+            .unwrap();
         rook.log(session, rook_store::EventKind::Note, "compaction usage", "compaction provider usage")
             .unwrap();
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
@@ -6481,6 +6483,7 @@ and the next line"
                 && text.contains("visible aside")
         );
         assert!(!text.contains("rook:model-aux") && !text.contains("compaction provider usage"));
+        assert!(!text.contains("rook:model-attempt") && !text.contains("internal attempt data"));
     }
 
     fn follow_up_window(limit: usize) -> (tempfile::TempDir, App, std::sync::Arc<rook_core::Rook>, u128) {

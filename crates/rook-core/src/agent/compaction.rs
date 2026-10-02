@@ -318,7 +318,10 @@ impl<'a> AgentLoop<'a> {
             crate::diagnostics::Phase::CompactionRequest,
         );
         let assembled: Result<Assembler> = async {
-            let mut stream = asked.stream(request).await.map_err(|e| CoreError::Other(e.to_string()))?;
+            let mut stream = asked
+                .stream_observed(request, self.attempt_observer(crate::model_route::Purpose::Compaction))
+                .await
+                .map_err(|e| CoreError::Other(e.to_string()))?;
             let mut assembler = Assembler::default();
             while let Some(delta) = stream.next().await {
                 assembler

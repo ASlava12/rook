@@ -601,7 +601,11 @@ async fn a_plain_turn_is_logged_end_to_end() {
     let entries = f.rook.transcript(session, 0, 100, 4096).unwrap();
     assert_eq!(entries.iter().filter(|e| e.label == "rook:timing:v1").count(), 1);
     // Timing and request-catalog notes supplement the conversation.
-    let entries: Vec<_> = entries.into_iter().filter(|e| e.label != "rook:timing:v1").collect();
+    assert_eq!(entries.iter().filter(|e| e.label == "rook:model-attempt:v1").count(), 4);
+    let entries: Vec<_> = entries
+        .into_iter()
+        .filter(|e| e.label != "rook:timing:v1" && e.label != "rook:model-attempt:v1")
+        .collect();
     let kinds: Vec<&str> = entries.iter().map(|e| e.kind.as_str()).collect();
     assert_eq!(
         kinds,
@@ -671,7 +675,11 @@ async fn a_tool_call_runs_and_both_halves_reach_the_log() {
     let entries = f.rook.transcript(session, 0, 100, 8192).unwrap();
     assert_eq!(entries.iter().filter(|e| e.label == "rook:timing:v1").count(), 3);
     // Timing and request-catalog notes supplement the conversation.
-    let entries: Vec<_> = entries.into_iter().filter(|e| e.label != "rook:timing:v1").collect();
+    assert_eq!(entries.iter().filter(|e| e.label == "rook:model-attempt:v1").count(), 6);
+    let entries: Vec<_> = entries
+        .into_iter()
+        .filter(|e| e.label != "rook:timing:v1" && e.label != "rook:model-attempt:v1")
+        .collect();
     let kinds: Vec<&str> = entries.iter().map(|e| e.kind.as_str()).collect();
     assert_eq!(
         kinds,
@@ -1498,8 +1506,20 @@ async fn a_turn_that_broke_keeps_what_it_had_already_said() {
 
     let entries = f.rook.transcript(session, 0, usize::MAX, 4096).unwrap();
     assert_eq!(entries.iter().filter(|e| e.label == "rook:timing:v1").count(), 1);
-    // Timing and request-catalog notes supplement the conversation.
-    let entries: Vec<_> = entries.into_iter().filter(|e| e.label != "rook:timing:v1").collect();
+    let attempts: Vec<serde_json::Value> = entries
+        .iter()
+        .filter(|e| e.label == "rook:model-attempt:v1")
+        .map(|e| serde_json::from_str(&e.body).unwrap())
+        .collect();
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts[0]["state"], "started");
+    assert_eq!(attempts[1]["state"], "failed");
+    assert_eq!(attempts[0]["id"], attempts[1]["id"]);
+    // Bookkeeping supplements the conversation without replacing the half-answer.
+    let entries: Vec<_> = entries
+        .into_iter()
+        .filter(|e| e.label != "rook:timing:v1" && e.label != "rook:model-attempt:v1")
+        .collect();
     let kinds: Vec<&str> = entries.iter().map(|e| e.kind.as_str()).collect();
     assert_eq!(
         kinds,

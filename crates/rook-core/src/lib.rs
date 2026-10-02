@@ -41,6 +41,7 @@ pub mod mcp_server;
 pub mod memory;
 pub mod mention;
 pub mod message_queue;
+mod model_attempt;
 pub mod model_catalog;
 pub mod model_route;
 pub mod models;
