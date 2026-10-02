@@ -7,10 +7,68 @@ use rook_proto::work::{
     Steering, WithdrawInstruction,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
+use std::path::PathBuf;
+use std::sync::Mutex;
 
 use crate::{CoreError, Result, Rook};
 
 const INDEX: &str = "work/managed-index";
+
+static STEPS: Mutex<BTreeSet<(PathBuf, u128)>> = Mutex::new(BTreeSet::new());
+
+struct Step {
+    root: PathBuf,
+    id: u128,
+}
+
+impl Step {
+    // Called under WRITING so cancellation cannot retire a stage between
+    // reading its runnable state and registering the future that owns it.
+    fn claim(rook: &Rook, id: &str) -> Result<Self> {
+        let id = rook_store::parse_session_id(id).ok_or_else(|| bad("invalid work id"))?;
+        let root = rook.store.root();
+        let mut steps = STEPS.lock().unwrap_or_else(|e| e.into_inner());
+        if steps.iter().any(|(path, known)| path == root && *known == id) {
+            return Err(bad("this work stage is already running"));
+        }
+        if steps.iter().filter(|(path, _)| path == root).count() >= rook.config.work.max_parallel_runs {
+            return Err(bad("managed work stage limit reached; wait for an active stage to stop"));
+        }
+        let step = Self { root: root.to_path_buf(), id };
+        steps.insert((step.root.clone(), id));
+        Ok(step)
+    }
+}
+
+impl Drop for Step {
+    fn drop(&mut self) {
+        STEPS.lock().unwrap_or_else(|e| e.into_inner()).remove(&(std::mem::take(&mut self.root), self.id));
+    }
+}
+
+fn owns_step(rook: &Rook, id: &str) -> bool {
+    let id = rook_store::parse_session_id(id);
+    STEPS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .any(|(root, known)| root == rook.store.root() && Some(*known) == id)
+}
+
+fn retire_cancelled(rook: &Rook, saved: &mut Saved) -> Result<bool> {
+    if saved.run.status != Status::Cancelled || owns_step(rook, &saved.run.id) {
+        return Ok(false);
+    }
+    let Some(active) = &saved.active else { return Ok(false) };
+    let session =
+        rook_store::parse_session_id(&active.session).ok_or_else(|| bad("invalid active session"))?;
+    if crate::execution::is_active(rook, session) || rook.recovery_block(session)?.is_some() {
+        return Ok(false);
+    }
+    saved.active = None;
+    Ok(true)
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Active {
@@ -85,12 +143,17 @@ pub fn for_session(rook: &Rook, session: u128) -> Result<Option<Run>> {
 pub fn update<T>(rook: &Rook, id: &str, change: impl FnOnce(&mut Saved) -> Result<T>) -> Result<T> {
     let _lock = WRITING.lock().unwrap_or_else(|e| e.into_inner());
     let mut saved = read(rook, id)?;
-    let old_session = saved.active.as_ref().map(|a| a.session.clone());
+    let old_session = saved.active.as_ref().and_then(|a| rook_store::parse_session_id(&a.session));
     let result = change(&mut saved)?;
     saved.run.updated_at = now();
-    save(rook, &saved)?;
-    if old_session != saved.active.as_ref().map(|a| a.session.clone())
-        && let Some(session) = old_session.and_then(|s| rook_store::parse_session_id(&s))
+    save_transition(rook, &saved, old_session)?;
+    Ok(result)
+}
+
+fn save_transition(rook: &Rook, saved: &Saved, old_session: Option<u128>) -> Result<()> {
+    save(rook, saved)?;
+    if old_session != saved.active.as_ref().and_then(|a| rook_store::parse_session_id(&a.session))
+        && let Some(session) = old_session
     {
         for meta in super::family(rook, session)? {
             if !saved.run.status.terminal()
@@ -106,7 +169,7 @@ pub fn update<T>(rook: &Rook, id: &str, change: impl FnOnce(&mut Saved) -> Resul
         }
         rook.store.flush()?;
     }
-    Ok(result)
+    Ok(())
 }
 
 fn save(rook: &Rook, saved: &Saved) -> Result<()> {
@@ -178,9 +241,17 @@ pub fn start_with_claim(rook: &Rook, request: Start, claim_key: Option<&str>) ->
     }
     let workspace = rook.workspace.canonicalize().map_err(|e| bad(e.to_string()))?.display().to_string();
     for id in &index {
-        let existing = read(rook, id)?;
+        let mut existing = read(rook, id)?;
+        if existing.run.workspace == workspace {
+            let old_session = existing.active.as_ref().and_then(|a| rook_store::parse_session_id(&a.session));
+            if retire_cancelled(rook, &mut existing)? {
+                // Earlier runners could leave a cancelled paused stage here.
+                // Its execution/recovery receipts remain available separately.
+                save_transition(rook, &existing, old_session)?;
+            }
+        }
         if existing.run.workspace == workspace
-            && (!existing.run.status.terminal() || existing.active.is_some())
+            && (!existing.run.status.terminal() || existing.active.is_some() || owns_step(rook, id))
             && (conversation.is_none()
                 || existing.run.conversation.is_none()
                 || conversation.as_ref() == Some(id))
@@ -358,7 +429,7 @@ pub fn withdraw_instruction_noticed(
 
 pub fn control(rook: &Rook, id: &str, action: Action) -> Result<Run> {
     update(rook, id, |saved| {
-        apply_control(saved, action)?;
+        apply_control(rook, saved, action)?;
         Ok(saved.run.clone())
     })
 }
@@ -394,10 +465,11 @@ pub fn control_identified(rook: &Rook, id: &str, request: IdentifiedControl) -> 
     if saved.controls.len() >= MAX_CONTROL_RECEIPTS {
         return Err(bad("control receipt limit reached for this run; inspect it before another control"));
     }
-    apply_control(&mut saved, request.action)?;
+    let old_session = saved.active.as_ref().and_then(|a| rook_store::parse_session_id(&a.session));
+    apply_control(rook, &mut saved, request.action)?;
     saved.controls.push(ControlReceipt { id: request.id.clone(), action: request.action });
     saved.run.updated_at = now();
-    save(rook, &saved)?;
+    save_transition(rook, &saved, old_session)?;
     Ok(ControlOutcome {
         id: request.id,
         generation: request.generation,
@@ -406,7 +478,7 @@ pub fn control_identified(rook: &Rook, id: &str, request: IdentifiedControl) -> 
     })
 }
 
-fn apply_control(saved: &mut Saved, action: Action) -> Result<()> {
+fn apply_control(rook: &Rook, saved: &mut Saved, action: Action) -> Result<()> {
     if saved.run.status.terminal() {
         return Err(bad("this run has ended"));
     }
@@ -418,6 +490,7 @@ fn apply_control(saved: &mut Saved, action: Action) -> Result<()> {
         Action::Cancel => {
             saved.run.status = Status::Cancelled;
             saved.run.reason = "cancelled by user; an active operation finishes before stopping".into();
+            retire_cancelled(rook, saved)?;
         }
         Action::Resume => {
             if saved.run.status == Status::Limited {
@@ -653,7 +726,14 @@ pub async fn advance<'a>(
     make_agent: impl Fn(u128) -> Result<crate::agent::AgentLoop<'a>>,
     mut progress: impl FnMut(crate::agent::Progress<'_>),
 ) -> Result<Run> {
-    let mut saved = read(rook, id)?;
+    let (mut saved, _step) = {
+        let _writing = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = read(rook, id)?;
+        if !saved.run.status.runnable() || saved.run.next_attempt_at.is_some_and(|at| at > now()) {
+            return Ok(saved.run);
+        }
+        (saved, Step::claim(rook, id)?)
+    };
     if rook.workspace.canonicalize().map_err(|e| bad(e.to_string()))?.display().to_string()
         != saved.run.workspace
     {

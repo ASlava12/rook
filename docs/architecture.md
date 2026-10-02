@@ -575,6 +575,16 @@ beside the run state under the managed-work write lock. A repeat with the same
 action and generation reads the current run without applying the control again;
 an old generation cannot affect a replacement conversation goal. The bare
 action request and response remain compatible with older clients.
+Cancellation retires retained paused context only after both the managed stage
+and its execution have stopped, and when recovery has no unknown effects.
+A process-local guard owns the entire managed `advance` future, including the
+gaps before execution and during verification. Claims are serialized with
+controls and capped by `work.max_parallel_runs` per store before copying paths;
+duplicate stage claims are refused, and dropping the future releases its claim.
+Identified cancellation saves its receipt and state together, then removes the
+retired family's managed-work tags. Starting a new goal also retires stopped
+context left by older cancelled records. Execution/recovery receipts and stored
+run formats remain unchanged.
 The socket's `/continue` prompt reuses its caller ID for a paused goal's resume
 control. Repeating that prompt after another pause finds the saved control
 receipt and leaves the later pause intact. Older socket prompts without IDs

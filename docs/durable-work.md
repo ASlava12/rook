@@ -150,6 +150,13 @@ stopping a later owner. A resumed goal may report its
 current paused status on a duplicate prompt; inspect the goal before choosing
 a new continuation.
 
+Pause keeps the current stage's transcript for resume. Cancelling that goal
+after the stage has stopped releases its retained context, so a new goal can
+start in the same session. A still-running stage must finish first. Unknown
+operation effects keep the context and block replacement until recovery is
+resolved; cancellation does not remove their execution receipts. Older cancelled
+runs with stopped retained context are cleaned up when a new goal is submitted.
+
 ## Edit or withdraw queued messages
 
 Open **message queue** from Ctrl-P, or type `/queue`, in the TUI. The panel shows

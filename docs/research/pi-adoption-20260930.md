@@ -2531,3 +2531,106 @@ API evidence are separate, unlike the now-completed actual TUI retry path.
 Then audit the remaining queue lifecycle/frontend requirements before changing
 the table's state. HTML download interaction, phase routing, declarative
 extension UI and terminal experiments retain their scope. The full goal is active.
+
+## Actual browser Stop recovery and cancelled paused-stage retirement
+
+Fresh actual Edge checks now connect the browser's saved Stop UI to the real
+daemon across transport loss, tab reload and two daemon restarts. A bounded
+loopback proxy captured the original caller, session and owner before dropping
+an ordinary Stop request. The turn continued; reload preserved the exact frame;
+the actual Retry saved Stop button delivered it once and cleared the saved
+request on acknowledgement. A later ordinary Stop was applied but its
+acknowledgement was withheld. After reload and daemon restart, explicit retry
+returned `already_applied=true`, cleared tab storage, started no turn and left
+the history boundary unchanged.
+
+The goal scenario withheld a saved pause's socket acknowledgement, let the
+current operation finish, then reloaded the tab and restarted the daemon. After
+an explicit HTTP resume and rejoin, Retry saved Stop used the identified HTTP
+route with the original caller and generation. Its already-applied response
+cleared the saved request without pausing the resumed goal, starting another
+turn or changing the history boundary. A later retained Stop for that generation
+was refused after goal replacement: no HTTP control was submitted, the new goal
+continued and the old frame stayed available for inspection. Explicit discard
+followed by a fresh Stop used a new caller and the replacement generation.
+Workspace bytes remained unchanged. All phases of the final fresh fixture
+exited 0.
+
+The first replacement attempt exposed a core bug: cancelling a paused goal
+after its stage future had finished left `Saved.active` attached forever. The
+daemon rejected a new goal with "resume or cancel" despite the cancelled state.
+Cancellation now retires stopped context, including family work tags. Starting
+another goal also cleans compatible older cancelled records left in that state.
+Pause still retains context for resume. Execution and unknown-effect recovery
+receipts remain intact, and unknown effects continue to block replacement.
+
+Checking only the execution receipt would incorrectly clear a stage before its
+agent was constructed or between execution and verification. A private guard
+therefore owns the whole managed stage future. Admission and cancellation share
+the existing writer lock; duplicate claims are refused. Active claims are capped
+by the configured parallel-run limit per store before copying paths, and the
+guard releases its slot when the future finishes or is dropped. No stored fields,
+postcard layouts, control IDs or wire formats changed. Both bare and identified
+controls use the same retirement rule; identified receipts and run state remain
+one saved JSON record.
+
+Focused direct-core checks exited 0 for paused context preservation, bare and
+identified cancellation after the future finishes, retained legacy records across
+store reopen, replacement generation isolation, cancellation before any running
+execution receipt, refusal to replace a still-owned stage, parallel admission
+bounds and slot reuse. Unknown-effect cancellation retained its active context
+and execution receipt and refused replacement. Existing managed pause, goal
+promotion, verification, budget and retry regressions also passed. Local goal
+metadata still uses its existing ordinary-turn behavior; managed cancellation
+is exercised directly in core and through the real daemon API.
+
+The browser harness initially rejoined immediately after HTTP resume, while the
+goal was still queued, and timed out in the idle view. Waiting for the actual
+running operation before rejoining fixed that fixture race. This failed
+invocation is not counted as a pass. The original cancelled-context failure
+was reproduced against the unmodified core; the corrected final fresh fixture
+passed through the entire replacement path. A real CLI cancellation was applied,
+but PowerShell's `ErrorActionPreference=Stop` treated its normal stderr receipt
+line as an error before its exit could be recorded. The explicit same-ID retry
+then exited 0 with `already_applied=true` and cancelled status. Only that retry
+is counted as a passing CLI check.
+
+The first full `cargo xtask ci` ran with default test parallelism and exited 1
+after 503.9 seconds. Its only failed target was the CLI suite: the existing
+`killed_followups_resume_once_with_saved_settings_and_cancelled_ones_stay_stopped`
+scenario timed out waiting for its model request after daemon restart. The
+remaining workspace suites and doctests completed without failures. An exact
+separate rerun with `RUST_TEST_THREADS=1` exited 0. The failure log is
+`target/pi-browser-stop-ci.log`; the focused rerun is
+`target/pi-browser-stop-recovery-recheck.log`. The timeout's cause is not established
+by that successful rerun. The final full gate uses the same serial test setting
+as previous Windows blocks; no test is excluded.
+
+Current-machine helper: `target/browser-stop-live.mjs`. Final evidence is under
+`target/stop-live-decf259339c44824b2ff35d41d6e165d`, recorded in
+`target/stop-live-root.txt`: captured socket/HTTP receipts, before-restart
+histories, screenshots and CLI retry output. The original failing replacement
+fixture is retained under `target/stop-live-3df9011c00b14cac89e8eb506adff7c3`.
+The replies are scripted; this is delivery/lifecycle evidence, not model quality
+or cost evidence. All owned browser, proxy, model and daemon helpers were stopped
+and their absence verified.
+
+Final `cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0 (`ci: ok`, 621.6
+seconds), including every workspace suite, the previously failed daemon
+follow-up recovery scenario, managed cancellation/admission regressions,
+storage compatibility checks and doctests. Its log is
+`target/pi-browser-stop-ci-serial.log`. `cargo xtask compaction` exited 0
+(`target/pi-browser-stop-compaction.log`): 4.02 MiB on disk, 37.1x dictionary
+compression and 5.8x end-to-end for the existing fixture. Published measurements
+remain unchanged. Windows runs no Unix PTY tests; actual Edge interaction,
+captured protocol/HTTP receipts and direct-core execution supply this block's
+lifecycle evidence.
+
+Queue remains In progress. Next audit acknowledgement of an identified
+`/continue` prompt while leaving a resumed goal's branch: the previous block
+acknowledged initial goal creation, and resume uses a separate control path.
+Include retry against a replacement generation in that audit: the existing
+socket resume path reads the generation from the current run on each attempt.
+Then finish the remaining queue lifecycle/frontend requirements before changing
+the table's state. HTML download interaction, phase routing, declarative extension
+UI and terminal experiments retain their scope. The full goal is active.

@@ -975,6 +975,176 @@ async fn pause_and_cancel_wait_for_the_current_request_without_starting_another_
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn cancelling_a_finished_paused_stage_releases_its_context_for_a_replacement_goal() {
+    for identified in [false, true] {
+        let workspace = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let rook = engine(workspace.path(), store.path());
+        let session = rook.start_session("paused goal cancellation").unwrap();
+        let run = conversation_goal(&rook, session, "old goal");
+        let provider = held(vec![answer("partial reply")]);
+        let running = work::advance(
+            &rook,
+            &run.id,
+            |session| Ok(AgentLoop::new(&rook, provider.clone(), session)),
+            |_| {},
+        );
+        let pause = async {
+            provider.entered.notified().await;
+            work::control(&rook, &run.id, Action::Pause).unwrap();
+            assert!(work::read(&rook, &run.id).unwrap().active.is_some(), "an owned request is retained");
+            provider.release.notify_one();
+        };
+        let (result, ()) = tokio::join!(running, pause);
+        assert_eq!(result.unwrap().status, Status::Paused);
+        let paused = work::read(&rook, &run.id).unwrap();
+        assert!(paused.active.is_some(), "paused context remains available for resume");
+        if identified {
+            work::control_identified(
+                &rook,
+                &run.id,
+                control("cancel-paused", &run.generation, Action::Cancel),
+            )
+            .unwrap();
+        } else {
+            work::control(&rook, &run.id, Action::Cancel).unwrap();
+        }
+        assert!(
+            work::read(&rook, &run.id).unwrap().active.is_none(),
+            "cancel retires an unowned paused context"
+        );
+        assert!(!rook.store.get_session(session).unwrap().unwrap().tags.iter().any(|tag| tag == "rook:work"));
+        // A record produced by an earlier runner can still contain that context.
+        work::update(&rook, &run.id, |saved| {
+            saved.active = paused.active;
+            Ok(())
+        })
+        .unwrap();
+        assert!(work::read(&rook, &run.id).unwrap().active.is_some());
+        drop(rook);
+        let rook = engine(workspace.path(), store.path());
+        let replacement = conversation_goal(&rook, session, "replacement goal");
+        assert_ne!(replacement.generation, run.generation);
+        assert!(work::read(&rook, &replacement.id).unwrap().active.is_none());
+        assert_eq!(rook.goal(session).unwrap().as_deref(), Some("replacement goal"));
+        assert!(
+            work::control_identified(
+                &rook,
+                &replacement.id,
+                control("old-stop", &run.generation, Action::Pause)
+            )
+            .is_err()
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cancellation_before_execution_keeps_the_owned_stage_until_its_future_returns() {
+    let workspace = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let rook = engine(workspace.path(), store.path());
+    let session = rook.start_session("before execution").unwrap();
+    let run = conversation_goal(&rook, session, "old goal");
+    let provider = Script::new(vec![answer("must not be requested")]);
+    let result = work::advance(
+        &rook,
+        &run.id,
+        |session| {
+            assert!(rook.execution(session).unwrap().iter().all(|execution| execution.status != "running"));
+            assert!(work::read(&rook, &run.id).unwrap().active.is_some());
+            work::control(&rook, &run.id, Action::Cancel).unwrap();
+            assert!(
+                work::read(&rook, &run.id).unwrap().active.is_some(),
+                "no execution receipt does not mean no supervisor owner"
+            );
+            assert!(
+                work::start(
+                    &rook,
+                    Start {
+                        goal: "replacement".into(),
+                        workspace: None,
+                        autonomous: false,
+                        max_iterations: None,
+                        max_tokens: None,
+                        max_seconds: None,
+                        conversation: run.conversation.clone(),
+                    }
+                )
+                .is_err(),
+                "replacement cannot overtake the suspended old stage"
+            );
+            Ok(AgentLoop::new(&rook, provider.clone(), session))
+        },
+        |_| {},
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.status, Status::Cancelled);
+    assert!(provider.seen.lock().unwrap().is_empty());
+    assert!(work::read(&rook, &run.id).unwrap().active.is_none());
+    let replacement = conversation_goal(&rook, session, "replacement");
+    assert_ne!(replacement.generation, run.generation);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stage_ownership_is_bounded_and_released_when_the_future_finishes() {
+    let workspace = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let mut rook = engine(workspace.path(), store.path());
+    rook.config.work.max_parallel_runs = 1;
+    let first = conversation_goal(&rook, rook.start_session("first").unwrap(), "first");
+    let second = conversation_goal(&rook, rook.start_session("second").unwrap(), "second");
+    let provider = held(vec![Err(rook_llm::LlmError::Other("temporary outage".into()))]);
+    let running = work::advance(
+        &rook,
+        &first.id,
+        |session| Ok(AgentLoop::new(&rook, provider.clone(), session)),
+        |_| {},
+    );
+    let competing = async {
+        provider.entered.notified().await;
+        assert_eq!(rook.config.work.max_parallel_runs, 1);
+        assert_eq!(
+            work::read(&rook, &first.id).unwrap().run.status,
+            Status::Running,
+            "the only stage slot is held"
+        );
+        let denied = work::advance(
+            &rook,
+            &second.id,
+            |_| panic!("a stage above the cap cannot construct an agent"),
+            |_| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(denied.to_string().contains("stage limit"), "{denied}");
+        let duplicate = work::advance(
+            &rook,
+            &first.id,
+            |_| panic!("an already owned stage cannot construct another agent"),
+            |_| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(duplicate.to_string().contains("already running"), "{duplicate}");
+        provider.release.notify_one();
+    };
+    let (result, ()) = tokio::join!(running, competing);
+    assert_eq!(result.unwrap().status, Status::RetryWait);
+    let provider = Script::new(vec![Err(rook_llm::LlmError::Other("temporary outage".into()))]);
+    let next = work::advance(
+        &rook,
+        &second.id,
+        |session| Ok(AgentLoop::new(&rook, provider.clone(), session)),
+        |_| {},
+    )
+    .await
+    .unwrap();
+    assert_eq!(next.status, Status::RetryWait);
+    assert_eq!(provider.seen.lock().unwrap().len(), 1, "the released slot is reusable");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_unknown_effect_blocks_the_scheduler_before_it_can_retry() {
     let workspace = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();
@@ -1012,6 +1182,30 @@ async fn an_unknown_effect_blocks_the_scheduler_before_it_can_retry() {
     .unwrap();
     assert_eq!(result.status, Status::Blocked);
     assert!(result.reason.contains("unknown"), "{}", result.reason);
+    let cancelled = work::control(&rook, &run.id, Action::Cancel).unwrap();
+    assert_eq!(cancelled.status, Status::Cancelled);
+    assert!(work::read(&rook, &run.id).unwrap().active.is_some());
+    let replacement = work::start(
+        &rook,
+        Start {
+            conversation: None,
+            goal: "replacement must not hide an unknown write".into(),
+            workspace: None,
+            autonomous: true,
+            max_iterations: None,
+            max_tokens: None,
+            max_seconds: None,
+        },
+    );
+    assert!(replacement.is_err());
+    assert!(work::read(&rook, &run.id).unwrap().active.is_some());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &rook.store.kv_get(&format!("execution/{session:032x}")).unwrap().unwrap()
+        )
+        .unwrap()["unknown"][0]["id"],
+        "operation-one"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
