@@ -2795,3 +2795,82 @@ and whole-goal pause/completion through the managed runner. Then finish actual
 HTML download/TUI interaction and the Pending phase routing and declarative
 extension UI capabilities. Terminal experiments retain their original scope;
 the full goal is active.
+
+## Fresh ordinary queue UI checks and stable draft width
+
+Fresh checks on this Windows machine exercised the real browser modules and
+native TUI, using an owned store/workspace and a bounded scripted provider.
+The provider retained at most 80 requests of at most 1 MiB each and held separate
+original, steering and follow-up replies until explicitly released. These are
+delivery and interface checks, not measurements of model quality.
+
+The browser used actual mouse actions to submit steering and follow-up, edit
+both queued messages into multiline Unicode text, and withdraw another message
+into an already populated draft. It retained all three receipt IDs and revisions;
+withdrawal did not send the draft or create another model request. Releasing the
+original reply accepted the edited steering at the next request. The follow-up
+stayed unreserved while that request was held, then started exactly one separate
+turn after the ordinary turn completed. Finished controls showed the accepted
+and withdrawn states. Saved history and actual model requests contained the
+edited text and excluded the withdrawn and obsolete text. The draft and workspace
+file stayed intact. The completed check exited 0
+(`target/pi-queue-live-browser-complete.log`); queue snapshots, history and rendered
+pixels are under `target/branch-admission-5d8b36d48a994689ab986e4747999e01`.
+Earlier browser attempts exited 1 for fixture mistakes: starting before the chat
+rerender/Edge debug-port file and an incorrectly escaped multiline expression.
+They are not passing evidence.
+
+The same held-reply sequence passed through shared TUI in the fixture's fork and
+through a fresh `tui --alone` in
+`target/branch-admission-295fad9087874ea2bd0822053dc80b0c`. The native queue panel's
+edit and withdraw-to-draft actions retained Unicode text and receipt identity.
+The returned message appended to the existing draft, visibly without sending.
+Only the latest edited steering reached the next request, and the follow-up
+waited for the full ordinary turn. Node inspected the daemon snapshots and
+history with UTF-8 JSON; every executed stage exited 0. Direct local
+`session queue SESSION list --all` exited 0 after the TUI released the store,
+and the local assertions exited 0 (`target/pi-queue-live-local.log`). Native
+withdrawal/completion output is `target/pi-queue-live-local-terminal.json`.
+PowerShell's first HTTP inspection misdecoded non-ASCII response bytes and exited
+1; it is superseded by the Node reads, not counted as a product failure or pass.
+The tool PTY did not deliver raw Ctrl-U/Ctrl-S as control keys, so the owned
+console received real `WriteConsoleInputW` key records instead. Both commands
+then worked without changing product bindings.
+
+This check exposed a real composer bug: the long quiet-model status occupied
+the draft's prefix/gutter and left only a few editable columns. An ordinary
+retained multiline draft became almost a column of single characters. The TUI
+now puts progress on the composer border and keeps the same two-cell draft
+prefix in idle and busy states. Hidden-row hints remain visible on the opposite
+border while busy. Queue ordering and the bottom preview are unchanged.
+
+The new rendered regression exercised a long silence status, multiline Unicode
+draft, caret and a next-message preview at widths 40 and 80. Before the fix it
+executed and exited 101: at width 40 the status changed three draft rows into
+24 (`target/pi-queue-draft-before.log`). The completed correction exited 0
+(`target/pi-queue-draft-verified.log`). Intermediate attempts also exited 101
+for a Rust borrow and a fixture assertion that treated an emoji continuation
+cell as part of the text; neither was counted as a pass. A fresh debug build
+exited 0 and both native paths then held an actual response long enough to show
+the silence status on the border without rewrapping the Unicode draft. The
+daemon check verified a still-pending receipt before inspecting the pinned
+preview. Output is `target/pi-queue-draft-native-local.json` and
+`target/pi-queue-draft-native-daemon.json`; both TUIs exited 0. Owned helper
+absence was rechecked after termination; the installed user daemon was untouched.
+
+The full `cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0 (`ci: ok`,
+714.3 seconds; `target/pi-queue-ui-ci.log`), including the rendered regression,
+full CLI/daemon scenarios, managed-work checks, Clippy and doctests. Storage
+formats and readers did not change in this block; compaction was not rerun.
+Queue stays In progress: next check whole managed-goal pause and completion with
+fresh frontend interactions, then match the original requirements against the
+existing race/retry/restart evidence before changing the table to Complete.
+The original review also requires a named TUI follow-up action. Current
+`keybindings::ACTIONS` has `prompt.submit` and no follow-up action: `/followup`
+exists as a command, but sending the current draft as a follow-up cannot yet be
+bound through the shared action registry. Add that action with palette/help and
+configuration parity, retaining the existing newline shortcuts, and verify it
+with the same queue contract before closing this capability.
+Local `--alone` goal metadata retains its documented behavior. Actual HTML
+download/TUI checks, phase routing, declarative extension UI and the later
+terminal experiments remain in scope. The full goal is active.

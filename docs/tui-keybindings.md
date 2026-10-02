@@ -1,5 +1,11 @@
 # Terminal keys and prompt undo
 
+While a turn runs, its progress and model-wait status appear on the prompt
+field's border. The editable draft keeps the same width and arrow-key movement
+as an idle prompt. The next queued message remains at the bottom, above the
+footer; `/queue` edits or withdraws it. Withdrawing into the draft appends its
+text to existing input without sending it.
+
 `/turns` opens recorded results and token totals for the current session. In the
 history viewer, `t` opens the same view, `n` scans older results, Enter opens the
 full stored outcome, and `h` returns to history. Esc closes without changing the

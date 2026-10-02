@@ -4440,20 +4440,23 @@ impl App {
             _ if !completing.is_empty() => ((completing.len() + 2) as u16).min((area.height / 2).max(3)),
             _ => 0,
         };
-        let prompt = match (self.chat.busy && self.chat.asking.is_none(), self.chat.since) {
-            (true, Some(since)) => format!(
-                "  working… {}{}{}  ",
+        let progress = match (self.chat.busy && self.chat.asking.is_none(), self.chat.since) {
+            (true, Some(since)) => Some(format!(
+                " working… {}{}{} ",
                 crate::fmt::elapsed(since.elapsed()),
                 match self.chat.step {
                     Some((at, of)) => format!(" · step {at}/{of}"),
                     None => String::new(),
                 },
                 self.chat.silence(self.waiting_for())
-            ),
-            (true, None) => "  working… ".to_string(),
-            _ => "› ".to_string(),
+            )),
+            (true, None) => Some(" working… ".to_string()),
+            _ => None,
         };
-        self.chat.input.geometry.set(wrapping::Geometry::new(&prompt, area.width.saturating_sub(2)));
+        // A quiet-model status can fill almost an entire terminal row. Keep it
+        // on the border so waiting never narrows or rewraps the editable draft.
+        let prompt = "› ";
+        self.chat.input.geometry.set(wrapping::Geometry::new(prompt, area.width.saturating_sub(2)));
         // The box grows with what is in it, because a pasted paragraph is one
         // prompt and a person editing it has to see it. Capped, since the
         // conversation is what the window is for: past this the box scrolls.
@@ -4698,13 +4701,17 @@ impl App {
         }
 
         let inner = input.inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 });
-        let (typing, (row, column)) = self.chat.input.view(&prompt, inner.width, inner.height);
+        let (typing, (row, column)) = self.chat.input.view(prompt, inner.width, inner.height);
         let (above, below) = self.chat.input.hidden_rows(inner.height);
         let title = match (above, below) {
             (0, 0) => String::new(),
             _ => format!(" draft · ↑{above} ↓{below} hidden rows · Home/End "),
         };
-        f.render_widget(Paragraph::new(typing).block(bordered(&title)), input);
+        let mut block = bordered(progress.as_deref().unwrap_or(&title));
+        if progress.is_some() && !title.is_empty() {
+            block = block.title_bottom(title.as_str());
+        }
+        f.render_widget(Paragraph::new(typing).block(block), input);
         // Wherever the box takes typing, which is everywhere but an approval:
         // a running turn takes what is typed as an interjection, and hiding the
         // caret there left somebody typing into a box with no sign of it. An
@@ -6501,6 +6508,57 @@ and the next line"
         let [_, approval, input, preview] = chat_layout(area, 6, 3, 3);
         assert_eq!(preview, short_preview, "approval controls must not move the queue");
         assert_eq!(approval.bottom(), input.y);
+    }
+
+    #[test]
+    fn a_quiet_model_does_not_squeeze_the_retained_draft_into_a_narrow_column() {
+        let home = tempfile::tempdir().unwrap();
+        let rook = rook_core::Rook::from_parts(
+            rook_store::Store::open(home.path().join("store")).unwrap(),
+            rook_core::Config::default(),
+            rook_skills::Environment::bare("windows", "x86_64", "0.1.0"),
+            rook_skills::SkillIndex::default(),
+            home.path().to_path_buf(),
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let mut app = App::new(crate::source::Source::Local(rook.into()), runtime, true);
+        let draft = "KEEP_DRAFT Поправка 🙂 final\n\nWITHDRAWN_MESSAGE";
+        app.chat.input.set(draft);
+        app.shared.interjections.say("NEXT_MESSAGE");
+        for width in [40, 80] {
+            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 24)).unwrap();
+            app.chat.busy = false;
+            terminal.draw(|frame| app.draw_chat(frame, frame.area())).unwrap();
+            let idle_rows = app.chat.input.rows();
+            let idle_caret = app.chat.input.caret();
+            app.chat.busy = true;
+            let quiet = std::time::Instant::now() - std::time::Duration::from_secs(95);
+            app.chat.since = Some(quiet);
+            app.chat.heard = Some(quiet);
+            app.chat.step = Some((2, 200));
+            assert!(
+                app.chat.silence(app.waiting_for()).len() > 30,
+                "the regression must show a long model-wait status"
+            );
+            terminal.draw(|frame| app.draw_chat(frame, frame.area())).unwrap();
+            assert_eq!(app.chat.input.rows(), idle_rows, "status changed draft wrapping at width {width}");
+            assert_eq!(app.chat.input.caret(), idle_caret, "status moved the draft caret at width {width}");
+            let buffer = terminal.backend().buffer();
+            let rows: Vec<String> = (0..24)
+                .map(|row| (0..width).map(|column| buffer[(column, row)].symbol()).collect())
+                .collect();
+            assert!(rows.iter().any(|row| row.contains("working…")), "{rows:?}");
+            assert!(
+                rows.iter().any(|row| row.contains("KEEP_DRAFT Поправка 🙂") && row.contains("final")),
+                "{rows:?}"
+            );
+            assert!(rows.iter().any(|row| row.contains("WITHDRAWN_MESSAGE")), "{rows:?}");
+            assert!(
+                rows[22].contains("NEXT_MESSAGE"),
+                "the queued message must stay at the bottom: {rows:?}"
+            );
+            assert_eq!(app.chat.input.as_str(), draft);
+        }
     }
 
     fn asking_to_run(command: &str) -> ApprovalRequest {
