@@ -431,11 +431,9 @@ async fn branch_summary_suggest(
 ) -> ApiResult<rook_core::branches::SummaryDraft> {
     let target = session_id(&id)?;
     let source = session_id(&q.source)?;
-    let Json((draft, config)) = history_read(s, move |r| {
-        Ok((rook_core::branches::draft_summary(r, source, target)?, r.config.clone()))
-    })
-    .await?;
-    Ok(Json(rook_core::branches::suggest_summary(&config, draft).await?))
+    let Json(suggestion) =
+        history_read(s, move |r| rook_core::branches::prepare_summary_suggestion(r, source, target)).await?;
+    Ok(Json(suggestion.generate().await?))
 }
 async fn branch_summary(
     State(s): State<Shared>,

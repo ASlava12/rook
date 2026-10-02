@@ -109,14 +109,18 @@ test('cost coverage renders a known subset without presenting uncovered work as 
     main_receipts: 1, auxiliary_receipts: 2, priced_receipts: 2, unpriced_receipts: 1,
     usage_events_without_receipt: 3, known_subtotal_usd: 0.0000946, complete_accounting: false,
     attempts_started: 6, attempts_completed: 3, attempts_failed: 1, attempts_incomplete: 0,
-    attempts_interrupted: 1, attempts_pending: 1
+    attempts_interrupted: 1, attempts_pending: 1,
+    priced_attempts: 3, unpriced_attempts: 2, attempt_known_subtotal_usd: 0.0000946
   } });
   assert.match(panel.textContent, /Known subtotal: USD 0.00009460 configured-rate estimate/);
   assert.match(panel.textContent, /Priced receipts: 2 · unpriced receipts: 1 · usage events without receipt: 3/);
   assert.match(panel.textContent, /Recorded physical attempts: 6 started · 3 completed · 1 failed · 0 incomplete · 1 interrupted · 1 pending/);
+  assert.match(panel.textContent, /Attempt subtotal: USD 0.00009460 configured-rate estimate · 3 priced · 2 unpriced endings/);
+  assert.match(panel.textContent, /Receipt and attempt subtotals overlap; do not add them/);
   assert.match(panel.textContent, /Total cost is unknown: retry\/failure attempts may lack complete usage/);
   assert.match(panel.textContent, /Inherited receipts are historical, not new charges/);
   const unknown = contextPanel({ ...usage, cost_coverage: { known_subtotal_usd: null, unpriced_receipts: 2 } });
   assert.match(unknown.textContent, /unknown \(no priced receipts\)/);
+  assert.match(unknown.textContent, /unknown \(no priced attempts\)/);
   assert.doesNotMatch(unknown.textContent, /USD 0\.00000000/);
 });

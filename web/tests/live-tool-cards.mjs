@@ -117,11 +117,12 @@ test('resumed chat keeps human notes while auxiliary receipts and compaction usa
       { kind: 'note', label: 'rook:model-aux:v1', body: '{"purpose":"aside","receipt":"internal data"}' },
       { kind: 'note', label: 'rook:model-attempt:v1', body: '{"state":"started","dispatch":"internal attempt"}' },
       { kind: 'note', label: 'compaction usage', body: 'compaction provider usage' },
+      { kind: 'note', label: 'branch summary usage', body: 'summary provider usage' },
     ] }) };
   };
   const { resume } = await import('../dist/chat.js');
   await resume('recorded-costs');
   assert.deepEqual(requests, ['/api/sessions/recorded-costs/history']);
   assert.match(stream.textContent, /visible prompt.*visible answer.*visible aside/);
-  assert.doesNotMatch(stream.textContent, /rook:model-aux|rook:model-attempt|internal data|internal attempt|compaction provider usage/);
+  assert.doesNotMatch(stream.textContent, /rook:model-aux|rook:model-attempt|internal data|internal attempt|compaction provider usage|summary provider usage/);
 });

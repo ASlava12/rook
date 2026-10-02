@@ -41,7 +41,9 @@ export function contextPanel(usage) {
       el('p', {}, `Known subtotal: ${c.known_subtotal_usd == null ? 'unknown (no priced receipts)' : `USD ${dollars(c.known_subtotal_usd)} configured-rate estimate`}`),
       el('p', {}, `Priced receipts: ${c.priced_receipts || 0} · unpriced receipts: ${c.unpriced_receipts || 0} · usage events without receipt: ${c.usage_events_without_receipt || 0}`),
       el('p', {}, `Recorded physical attempts: ${c.attempts_started || 0} started · ${c.attempts_completed || 0} completed · ${c.attempts_failed || 0} failed · ${c.attempts_incomplete || 0} incomplete · ${c.attempts_interrupted || 0} interrupted · ${c.attempts_pending || 0} pending`),
-      el('p', { class: 'sub' }, 'Total cost is unknown: retry/failure attempts may lack complete usage; delegated and branch-summary costs are not fully covered. Inherited receipts are historical, not new charges.')));
+      el('p', {}, `Attempt subtotal: ${c.attempt_known_subtotal_usd == null ? 'unknown (no priced attempts)' : `USD ${dollars(c.attempt_known_subtotal_usd)} configured-rate estimate`} · ${c.priced_attempts || 0} priced · ${c.unpriced_attempts || 0} unpriced endings`),
+      el('p', { class: 'sub' }, 'Receipt and attempt subtotals overlap; do not add them.'),
+      el('p', { class: 'sub' }, 'Total cost is unknown: retry/failure attempts may lack complete usage; legacy history and delegated-session costs can remain uncovered. Inherited receipts are historical, not new charges.')));
   }
   if (!saved) return el('div', { class: 'context-view' }, current,
     el('section', { class: 'card' }, el('h2', {}, 'Last request attempt'),

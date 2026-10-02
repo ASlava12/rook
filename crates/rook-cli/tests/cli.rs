@@ -692,7 +692,7 @@ fn model_branch_suggestion_is_reviewable_locally_and_through_daemon() {
     let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
     let server = std::thread::spawn(move || {
         let mut requests = Vec::new();
-        for _ in 0..2 {
+        for ordinal in 0..5 {
             let (mut socket, _) = listener.accept().unwrap();
             socket.set_read_timeout(Some(std::time::Duration::from_secs(30))).unwrap();
             let mut bytes = Vec::new();
@@ -717,12 +717,25 @@ fn model_branch_suggestion_is_reviewable_locally_and_through_daemon() {
                 }
             };
             requests.push(request);
+            let text = if ordinal == 1 { "" } else { "Option A was explored; outcome remains unverified." };
+            let reason = if ordinal == 4 {
+                None
+            } else if ordinal == 3 {
+                Some("length")
+            } else {
+                Some("stop")
+            };
             let answer = serde_json::json!({
-                "id":"summary-test", "model":"test",
-                "choices":[{"index":0,"delta":{"role":"assistant","content":"Option A was explored; outcome remains unverified."},"finish_reason":"stop"}],
+                "id":"summary-test", "model":"server-summary",
+                "choices":[{"index":0,"delta":{"role":"assistant","content":text},"finish_reason":reason}],
                 "usage":{"prompt_tokens":10,"completion_tokens":8}
-            }).to_string();
-            let body = format!("data: {answer}\n\ndata: [DONE]\n\n");
+            })
+            .to_string();
+            let body = if ordinal == 4 {
+                format!("data: {answer}\n\n")
+            } else {
+                format!("data: {answer}\n\ndata: [DONE]\n\n")
+            };
             socket.write_all(format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()
             ).as_bytes()).unwrap();
@@ -730,7 +743,7 @@ fn model_branch_suggestion_is_reviewable_locally_and_through_daemon() {
         requests
     });
     rook.write_config(&format!(
-        "[agent]\nmodel='local'\n[models.local]\nmodel='test'\napi='openai'\nurl='{endpoint}'\n"
+        "[agent]\nmodel='local'\n[models.local]\nmodel='test'\napi='openai'\nurl='{endpoint}'\ninput_usd_per_million=2.0\noutput_usd_per_million=6.0\n"
     ));
     let preliminary = rook.json(&["session", "summary-draft", &from, &to]);
     assert_eq!(preliminary["source_through"], 0);
@@ -738,18 +751,71 @@ fn model_branch_suggestion_is_reviewable_locally_and_through_daemon() {
     assert_eq!(local["source_session"], from);
     assert_eq!(local["source_through"], 0);
     assert!(local["text"].as_str().unwrap().contains("Option A was explored"));
+    let empty = rook.run(&["session", "summary-draft", &from, &to, "--suggest"]);
+    assert!(!empty.status.success());
+    assert!(String::from_utf8_lossy(&empty.stderr).contains("no reviewable text"));
     let daemon = Daemon::start(&rook);
     let remote = rook.json(&["session", "summary-draft", &from, &to, "--suggest"]);
-    assert_eq!(remote, local);
+    assert_eq!(remote["source_session"], local["source_session"]);
+    assert!(remote["source_through"].as_u64().unwrap() > local["source_through"].as_u64().unwrap());
+    assert!(remote["text"].as_str().unwrap().contains("Option A was explored"));
+    let capped = rook.run(&["session", "summary-draft", &from, &to, "--suggest"]);
+    assert!(!capped.status.success());
+    assert!(String::from_utf8_lossy(&capped.stderr).contains("no complete draft"));
+    let partial = rook.run(&["session", "summary-draft", &from, &to, "--suggest"]);
+    assert!(!partial.status.success(), "unconfirmed native EOF cannot produce a reviewable draft");
+    assert!(String::from_utf8_lossy(&partial.stderr).contains("completion marker"), "{partial:?}");
     let requests = server.join().unwrap();
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 5);
     for request in requests {
         assert!(request.to_string().contains("Explore option A"));
         assert!(!request.to_string().contains("state of current workspace"));
     }
     let history = rook.json(&["session", "history", &to]);
     assert!(!history.to_string().contains("Option A was explored"), "suggestion must not save itself");
+    let context = rook.json(&["session", "context", &from]);
+    let coverage = &context["cost_coverage"];
+    assert!(context["last_response"].is_null());
+    assert_eq!(coverage["attempts_started"], 5);
+    assert_eq!(coverage["attempts_completed"], 4);
+    assert_eq!(coverage["attempts_pending"], 0);
+    assert_eq!(coverage["attempts_incomplete"], 1);
+    assert_eq!(coverage["auxiliary_receipts"], 5, "rejected model output still consumed usage");
+    assert_eq!(coverage["priced_receipts"], 4);
+    assert_eq!(coverage["priced_attempts"], 4);
+    assert_eq!(coverage["unpriced_attempts"], 1);
+    assert_eq!(coverage["unpriced_receipts"], 1);
+    assert!((coverage["known_subtotal_usd"].as_f64().unwrap() - 0.000272).abs() < 1e-15);
+    assert_eq!(coverage["attempt_known_subtotal_usd"], coverage["known_subtotal_usd"]);
+    assert_eq!(coverage["complete_accounting"], false);
     drop(daemon);
+    let end = {
+        let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+        let meta = store.get_session(source).unwrap().unwrap();
+        assert_eq!((meta.tokens_in, meta.tokens_out), (50, 40), "no double token charge");
+        assert_eq!(store.get_session(target).unwrap().unwrap().next_seq, 0);
+        let notes: Vec<serde_json::Value> = store
+            .events(source, 0, 256)
+            .unwrap()
+            .iter()
+            .filter(|event| event.record.label == "rook:model-aux:v1")
+            .map(|event| serde_json::from_slice(&store.get(&event.record.body).unwrap()).unwrap())
+            .collect();
+        assert_eq!(notes.len(), 5);
+        for note in notes {
+            assert_eq!(note["purpose"], "branch_summary");
+            assert_eq!(note["receipt"]["dispatch"]["provider"], "local");
+            assert_eq!(note["receipt"]["reported_model"], "server-summary");
+        }
+        meta.next_seq
+    };
+    rook.write_config("[agent]\nmodel='local'\n[models.local]\nmodel='test'\napi='openai'\ninput_usd_per_million=99.0\noutput_usd_per_million=99.0\n");
+    let restarted = Daemon::start(&rook);
+    assert_eq!(rook.json(&["session", "context", &from])["cost_coverage"], *coverage);
+    let fork = rook.ok(&["session", "fork", &from, "--at", &end.to_string()]);
+    let child = fork.split_whitespace().last().unwrap();
+    assert_eq!(rook.json(&["session", "context", child])["cost_coverage"], *coverage);
+    drop(restarted);
 }
 
 #[test]

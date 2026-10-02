@@ -1184,11 +1184,10 @@ pub async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command
         "summary-draft" | "summary-suggest" => {
             let target = rook_store::parse_session_id(rest)
                 .ok_or_else(|| anyhow::anyhow!("use /{name} TARGET_SESSION"))?;
-            let draft = rook_core::branches::draft_summary(rook, *session, target)?;
             let draft = if name == "summary-suggest" {
-                rook_core::branches::suggest_summary(&rook.config, draft).await?
+                rook_core::branches::prepare_summary_suggestion(rook, *session, target)?.generate().await?
             } else {
-                draft
+                rook_core::branches::draft_summary(rook, *session, target)?
             };
             say!("{}", draft.text);
             say!(

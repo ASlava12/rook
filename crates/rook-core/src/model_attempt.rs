@@ -32,6 +32,8 @@ pub(crate) struct Record {
     pub completion_confirmed: bool,
     pub reported_model: Option<String>,
     pub elapsed_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<crate::model_route::Cost>,
 }
 
 impl Record {
@@ -66,6 +68,26 @@ impl Record {
         {
             return Err(CoreError::Other("unsupported saved model attempt identity".into()));
         }
+        if record.cost.is_some() {
+            crate::model_route::Receipt {
+                selected: None,
+                phase: "ordinary".into(),
+                dispatch: record.dispatch.clone(),
+                reported_model: record.reported_model.clone(),
+                usage: record
+                    .usage
+                    .clone()
+                    .ok_or_else(|| CoreError::Other("priced model attempt has no usage".into()))?,
+                complete: record.completion_confirmed,
+                usage_reported: record.usage_reported,
+                elapsed_ms: record.elapsed_ms,
+                cost: record.cost.clone(),
+            }
+            .validate()?;
+            if matches!(record.state, State::Started) {
+                return Err(CoreError::Other("model admission cannot contain a cost estimate".into()));
+            }
+        }
         Ok(record)
     }
 }
@@ -76,7 +98,23 @@ pub(crate) fn observer(
     vault: Arc<Vault>,
     purpose: Purpose,
 ) -> Arc<dyn rook_llm::AttemptObserver> {
-    Arc::new(Observer { store: rook.store.clone(), session, vault, purpose })
+    observer_with_prices(
+        rook,
+        session,
+        vault,
+        purpose,
+        Arc::new(crate::model_route::Prices::new(&rook.config)),
+    )
+}
+
+pub(crate) fn observer_with_prices(
+    rook: &Rook,
+    session: u128,
+    vault: Arc<Vault>,
+    purpose: Purpose,
+    prices: Arc<crate::model_route::Prices>,
+) -> Arc<dyn rook_llm::AttemptObserver> {
+    Arc::new(Observer { store: rook.store.clone(), session, vault, purpose, prices })
 }
 
 struct Observer {
@@ -84,6 +122,7 @@ struct Observer {
     session: u128,
     vault: Arc<Vault>,
     purpose: Purpose,
+    prices: Arc<crate::model_route::Prices>,
 }
 
 impl rook_llm::AttemptObserver for Observer {
@@ -103,6 +142,7 @@ impl rook_llm::AttemptObserver for Observer {
             completion_confirmed: false,
             reported_model: None,
             elapsed_ms: 0,
+            cost: None,
         };
         // A failed admission prevents the leaf from opening its HTTP request.
         record.save(&self.store, self.session)?;
@@ -112,6 +152,7 @@ impl rook_llm::AttemptObserver for Observer {
             vault: self.vault.clone(),
             record,
             started: Instant::now(),
+            prices: self.prices.clone(),
         }))
     }
 }
@@ -122,6 +163,7 @@ struct Active {
     vault: Arc<Vault>,
     record: Record,
     started: Instant,
+    prices: Arc<crate::model_route::Prices>,
 }
 
 impl rook_llm::Attempt for Active {
@@ -138,6 +180,7 @@ impl rook_llm::Attempt for Active {
         self.record.reported_model =
             facts.reported_model.as_deref().and_then(|name| crate::model_route::identity(name, &self.vault));
         self.record.elapsed_ms = self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        self.record.cost = self.prices.estimate(self.record.dispatch.as_ref(), facts);
         self.record.save(&self.store, self.session)
     }
 }
@@ -158,13 +201,79 @@ mod tests {
     }
 
     #[test]
+    fn priced_attempts_survive_without_a_response_receipt_and_cannot_be_repriced_or_forged() {
+        let home = tempfile::tempdir().unwrap();
+        let mut rook = engine(home.path());
+        rook.config.models.insert(
+            "physical".into(),
+            crate::ModelSource {
+                model: "model".into(),
+                input_usd_per_million: Some(2.0),
+                output_usd_per_million: Some(6.0),
+                ..Default::default()
+            },
+        );
+        let session = rook.start_session("priced interruption").unwrap();
+        let observed = observer(&rook, session, Arc::new(Vault::empty()), Purpose::Main);
+        let mut active = observed.start(Dispatch::bounded("physical", "model", true).as_ref()).unwrap();
+        rook.config.models.get_mut("physical").unwrap().input_usd_per_million = Some(99.0);
+        active
+            .finish(
+                AttemptStatus::Interrupted,
+                &AttemptFacts {
+                    usage: Some(rook_llm::Usage { input_tokens: 10, output_tokens: 3, ..Default::default() }),
+                    usage_reported: true,
+                    completion_confirmed: true,
+                    reported_model: Some("server".into()),
+                },
+            )
+            .unwrap();
+        let end = rook.store.get_session(session).unwrap().unwrap().next_seq;
+        let fork = rook.fork_session(session, end).unwrap().id;
+        let event = rook.store.events(session, 0, 8).unwrap().pop().unwrap();
+        let bytes = rook.store.get(&event.record.body).unwrap();
+        let mut record = Record::read(&bytes).unwrap();
+        assert_eq!(record.cost.as_ref().unwrap().input_usd_per_million, 2.0);
+        record.cost.as_mut().unwrap().estimated_usd += 1.0;
+        assert!(Record::read(&serde_json::to_vec(&record).unwrap()).is_err());
+        let mut old: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        old.as_object_mut().unwrap().remove("cost");
+        assert!(Record::read(&serde_json::to_vec(&old).unwrap()).unwrap().cost.is_none());
+        drop(active);
+        drop(observed);
+        drop(rook);
+        let rook = engine(home.path());
+        for id in [session, fork] {
+            let context = rook.context_usage(id, Some(65536)).unwrap();
+            assert!(context.last_response.is_none());
+            let coverage = context.cost_coverage.unwrap();
+            assert_eq!(coverage.priced_attempts, 1);
+            assert_eq!(coverage.unpriced_attempts, 0);
+            assert!(coverage.known_subtotal_usd.is_none(), "no response receipt was saved");
+            assert!((coverage.attempt_known_subtotal_usd.unwrap() - 0.000038).abs() < 1e-15);
+            assert!(!coverage.complete_accounting);
+            let meta = rook.store.get_session(id).unwrap().unwrap();
+            assert_eq!(
+                (meta.tokens_in, meta.tokens_out),
+                (0, 0),
+                "physical receipts add no second token charge"
+            );
+        }
+    }
+
+    #[test]
     fn admissions_reopen_and_fork_as_pending_until_their_saved_boundary_contains_an_ending() {
         let home = tempfile::tempdir().unwrap();
         let rook = engine(home.path());
         let session = rook.start_session("attempt history").unwrap();
         let vault = Arc::new(Vault::empty());
-        let observer =
-            Observer { store: rook.store.clone(), session, vault: vault.clone(), purpose: Purpose::Main };
+        let observer = Observer {
+            store: rook.store.clone(),
+            session,
+            vault: vault.clone(),
+            purpose: Purpose::Main,
+            prices: Arc::new(crate::model_route::Prices::new(&rook.config)),
+        };
         let dispatch = Dispatch::bounded("physical", "model", true).unwrap();
         let mut first = observer.start(Some(&dispatch)).unwrap();
         let boundary = rook.store.get_session(session).unwrap().unwrap().next_seq;
@@ -218,7 +327,13 @@ mod tests {
         let session = rook.start_session("attempt bounds").unwrap();
         let vault = Arc::new(Vault::empty());
         vault.also_hide("private-token");
-        let recorder = Observer { store: rook.store.clone(), session, vault, purpose: Purpose::Aside };
+        let recorder = Observer {
+            store: rook.store.clone(),
+            session,
+            vault,
+            purpose: Purpose::Aside,
+            prices: Arc::new(crate::model_route::Prices::new(&rook.config)),
+        };
         let secret = Dispatch::bounded("physical", "private-token", true).unwrap();
         let mut active = recorder.start(Some(&secret)).unwrap();
         active

@@ -173,6 +173,9 @@ fn auxiliary_pricing_and_explicit_missing_coverage_survive_reopen_and_fork_local
             assert_eq!(coverage["attempts_incomplete"], 0);
             assert_eq!(coverage["attempts_interrupted"], 0);
             assert_eq!(coverage["attempts_pending"], 0);
+            assert_eq!(coverage["priced_attempts"], if priced { 3 } else { 0 });
+            assert_eq!(coverage["unpriced_attempts"], if priced { 2 } else { 5 });
+            assert_eq!(coverage["attempt_known_subtotal_usd"], coverage["known_subtotal_usd"]);
             assert_eq!(
                 coverage["complete_accounting"], false,
                 "the primary failure cannot be presented as free"

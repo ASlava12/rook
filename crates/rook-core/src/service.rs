@@ -1170,12 +1170,22 @@ impl Rook {
                         ));
                     }
                     let body = self.store.get_range(&event.record.body, 0, bytes as usize)?;
-                    match crate::model_attempt::Record::read(&body)?.state {
+                    let attempt = crate::model_attempt::Record::read(&body)?;
+                    match attempt.state {
                         crate::model_attempt::State::Started => coverage.attempts_started += 1,
                         crate::model_attempt::State::Completed => coverage.attempts_completed += 1,
                         crate::model_attempt::State::Failed => coverage.attempts_failed += 1,
                         crate::model_attempt::State::Incomplete => coverage.attempts_incomplete += 1,
                         crate::model_attempt::State::Interrupted => coverage.attempts_interrupted += 1,
+                    }
+                    if !matches!(attempt.state, crate::model_attempt::State::Started) {
+                        if let Some(cost) = attempt.cost {
+                            coverage.priced_attempts += 1;
+                            coverage.attempt_known_subtotal_usd =
+                                Some(coverage.attempt_known_subtotal_usd.unwrap_or(0.0) + cost.estimated_usd);
+                        } else {
+                            coverage.unpriced_attempts += 1;
+                        }
                     }
                 }
                 if kind == EventKind::AssistantMessage
@@ -1184,7 +1194,11 @@ impl Rook {
                     || (kind == EventKind::Note
                         && matches!(
                             event.record.label.as_str(),
-                            "usage" | "completion check" | "btw" | "compaction usage"
+                            "usage"
+                                | "completion check"
+                                | "btw"
+                                | "compaction usage"
+                                | "branch summary usage"
                         ))
                 {
                     usage_events += 1;

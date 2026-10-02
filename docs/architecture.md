@@ -115,9 +115,21 @@ no token charge and are excluded from model history and restored chat.
 The inspector folds attempt states with constant-space counters at the same
 fixed saved-history boundary; inherited attempts follow the fork's prefix.
 Attempt and response counts are independent: old receipts cannot prove that a
-later failed attempt had a priced response. Total cost remains unknown where
-attempt usage/pricing, delegated aggregation or branch-summary generation are
-uncovered. Existing postcard layouts are unchanged.
+later failed attempt had a priced response. Endings optionally retain estimates
+from a prepared snapshot of up to 512 priced sources, using bounded identity
+hashes and numeric rates rather than copying Config. Missing facts, rates or
+snapshot entries remain unpriced. A saved attempt estimate survives even without
+a response receipt; the two subtotals overlap and must not be added.
+Session-owned branch-summary generation uses the same physical observer and
+records one durable usage/auxiliary-receipt pair on the source branch. Rejected
+empty/limited replies still retain usage; unconfirmed native completion cannot
+produce a reviewable draft. The reviewed source boundary stays pinned before
+generation. Preparation releases the daemon engine guard before model I/O;
+no full Config clone is retained. The config-only compatibility entrypoint has
+no session/store accounting; product CLI/REPL/TUI/browser/API paths use the
+prepared, recorded entrypoint. Total cost remains unknown where usage/pricing,
+legacy history or delegated aggregation are uncovered. Existing postcard
+layouts are unchanged.
 
 Durable transcript navigation lives in `rook-core::transcript`: bounded event
 pages, snapshot search cursors, body parts and attributed source-data quotes.

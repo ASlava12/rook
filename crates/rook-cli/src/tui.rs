@@ -6473,6 +6473,8 @@ and the next line"
             .unwrap();
         rook.log(session, rook_store::EventKind::Note, "compaction usage", "compaction provider usage")
             .unwrap();
+        rook.log(session, rook_store::EventKind::Note, "branch summary usage", "summary provider usage")
+            .unwrap();
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let mut app = super::App::new(crate::source::Source::Local(rook.into()), runtime, true);
         app.recall_conversation(session, None);
@@ -6484,6 +6486,7 @@ and the next line"
         );
         assert!(!text.contains("rook:model-aux") && !text.contains("compaction provider usage"));
         assert!(!text.contains("rook:model-attempt") && !text.contains("internal attempt data"));
+        assert!(!text.contains("branch summary usage") && !text.contains("summary provider usage"));
     }
 
     fn follow_up_window(limit: usize) -> (tempfile::TempDir, App, std::sync::Arc<rook_core::Rook>, u128) {

@@ -174,7 +174,7 @@ the accounting data.
 saved branch history, never total session spend. Missing rates or facts leave
 receipts unpriced; no priced receipts means an unknown subtotal, not USD zero.
 Failed/interrupted attempts may lack usable counters and pricing. Delegated-session
-aggregation and branch-summary generation are still required. The existing note
+aggregation remains required. Branch-summary generation is accounted below. The existing note
 formats and postcard records remain readable; `cost_coverage` is an optional
 JSON field and added counter fields default to zero when reading older JSON.
 
@@ -203,8 +203,39 @@ pages and constant memory. A fork before an ending retains a pending historical
 attempt even if its parent later finishes it. Counts cover recorded attempts;
 older sessions without these notes cannot establish complete call coverage.
 
-The known subtotal still comes only from saved priced response receipts.
-Physical attempt counts and response counts are independent: subtracting old
-response receipts from new attempts could conceal a later failure. Neither
-completed nor failed establishes a verified bill. Full accounting remains
-explicitly unknown until missing usage/pricing and other scopes are covered.
+The response subtotal comes from saved priced main/auxiliary receipts.
+Attempt endings also retain an optional configured-rate estimate and its rates.
+The observer prepares at most 512 priced source entries, keyed by bounded
+identity hashes and containing numeric rates only. Excess sources, omitted
+counters, unconfirmed completion, invalid cache arithmetic and missing rates
+remain unpriced. Config changes/reopen never reprice a saved ending. An ending
+can retain an estimate even when cancellation or process loss prevents the
+successful-response receipt from being saved. Attempt notes still charge no
+additional store tokens.
+
+Context inspection exposes priced/unpriced ending counts and a separate
+`attempt_known_subtotal_usd`. Response and attempt subtotals overlap; do not add
+them. Counts remain independent: subtracting old response receipts from new
+attempts could conceal a later failure. Neither completed nor failed establishes
+a verified bill. Full accounting remains unknown until missing facts/pricing,
+legacy history and delegated-session aggregation are covered.
+
+## Branch-summary generation costs
+
+Product CLI/REPL/TUI/browser/API paths prepare one owned summary generator,
+release the daemon engine guard before model I/O and charge the source branch.
+Every retry/fallback leaf retains a `branch_summary` physical-attempt purpose.
+A received response records a durable usage/`rook:model-aux:v1` pair with that
+purpose, even if its empty text or output limit makes the draft unusable.
+Completed physical generation does not mean the summary was accepted. Native
+EOF without confirmed completion is rejected and stays unpriced; available
+usage is retained. Early consumer rejection can leave unknown usage, explicitly
+represented by the attempt rather than USD zero.
+
+The source boundary in the draft is captured before generation. Source
+bookkeeping does not modify the target, transfer text, replace the main response
+or enter model/restored chat context. Prices survive restart and a fork's saved
+prefix. Existing summary/receipt records and postcard layouts remain readable;
+attempt costs and coverage fields have JSON defaults. The older public
+config-only `suggest_summary` function remains for embedded callers without a
+store; session-owned integrations use `prepare_summary_suggestion`.

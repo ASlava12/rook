@@ -18,6 +18,7 @@ pub(crate) enum Purpose {
     Compaction,
     Aside,
     FinalAnswer,
+    BranchSummary,
 }
 
 pub(crate) fn identity(value: &str, vault: &Vault) -> Option<String> {
@@ -113,6 +114,17 @@ pub(crate) fn validate_prices(source: &crate::ModelSource) -> rook_llm::Result<(
 }
 
 impl Cost {
+    fn rates(source: &crate::ModelSource) -> Option<Self> {
+        validate_prices(source).ok()?;
+        Some(Self {
+            estimated_usd: 0.0,
+            input_usd_per_million: source.input_usd_per_million?,
+            output_usd_per_million: source.output_usd_per_million?,
+            cache_read_usd_per_million: source.cache_read_usd_per_million,
+            cache_write_usd_per_million: source.cache_write_usd_per_million,
+        })
+    }
+
     fn calculate(&self, usage: &Usage, dispatch: &Dispatch) -> Option<f64> {
         if !valid_rate(self.input_usd_per_million)
             || !valid_rate(self.output_usd_per_million)
@@ -146,6 +158,71 @@ impl Cost {
                 + write)
                 / 1_000_000.0,
         )
+    }
+}
+
+/// Only bounded identity hashes and numeric rates survive preparation. Provider
+/// construction may copy credentials; this snapshot must never copy Config.
+#[derive(Default)]
+pub(crate) struct Prices {
+    entries: std::collections::BTreeMap<[u8; 32], Cost>,
+}
+
+impl Prices {
+    pub(crate) const MAX_SOURCES: usize = 512;
+
+    fn key(provider: &str, model: &str) -> Option<[u8; 32]> {
+        use sha2::{Digest, Sha256};
+        if provider.is_empty()
+            || model.is_empty()
+            || provider.len() > 256
+            || model.len() > 256
+            || provider.chars().chain(model.chars()).any(char::is_control)
+        {
+            return None;
+        }
+        let mut hash = Sha256::new();
+        hash.update(b"rook-price-source-v1");
+        hash.update((provider.len() as u64).to_le_bytes());
+        hash.update(provider.as_bytes());
+        hash.update(model.as_bytes());
+        Some(hash.finalize().into())
+    }
+
+    pub(crate) fn new(config: &crate::Config) -> Self {
+        let mut prices = Self::default();
+        for (name, source) in &config.models {
+            // Remaining sources stay explicitly unpriced, never USD zero.
+            if prices.entries.len() == Self::MAX_SOURCES {
+                break;
+            }
+            let Some(key) = Self::key(name, source.model.trim()) else { continue };
+            let Some(rates) = Cost::rates(source) else { continue };
+            prices.entries.insert(key, rates);
+        }
+        prices
+    }
+
+    pub(crate) fn estimate(
+        &self,
+        dispatch: Option<&Dispatch>,
+        facts: &rook_llm::AttemptFacts,
+    ) -> Option<Cost> {
+        if !facts.completion_confirmed || !facts.usage_reported {
+            return None;
+        }
+        let usage = facts.usage.as_ref()?;
+        if usage.input_tokens == 0
+            && usage.output_tokens == 0
+            && usage.cache_read_tokens == 0
+            && usage.cache_write_tokens == 0
+        {
+            return None;
+        }
+        let dispatch = dispatch?;
+        let mut cost = self.entries.get(&Self::key(&dispatch.provider, &dispatch.model)?)?.clone();
+        cost.estimated_usd = cost.calculate(usage, dispatch)?;
+        Some(cost)
     }
 }
 
@@ -211,17 +288,7 @@ impl Receipt {
         else {
             return;
         };
-        let (Some(input), Some(output)) = (source.input_usd_per_million, source.output_usd_per_million)
-        else {
-            return;
-        };
-        let mut cost = Cost {
-            estimated_usd: 0.0,
-            input_usd_per_million: input,
-            output_usd_per_million: output,
-            cache_read_usd_per_million: source.cache_read_usd_per_million,
-            cache_write_usd_per_million: source.cache_write_usd_per_million,
-        };
+        let Some(mut cost) = Cost::rates(source) else { return };
         let Some(usd) = cost.calculate(&self.usage, dispatch) else { return };
         cost.estimated_usd = usd;
         self.cost = Some(cost);
@@ -236,7 +303,7 @@ impl Receipt {
         Ok(receipt)
     }
 
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         let invalid_cost = self.cost.as_ref().is_some_and(|cost| {
             !self.complete
                 || !self.usage_reported
@@ -283,6 +350,9 @@ pub struct CostCoverage {
     pub attempts_incomplete: u64,
     pub attempts_interrupted: u64,
     pub attempts_pending: u64,
+    pub priced_attempts: u64,
+    pub unpriced_attempts: u64,
+    pub attempt_known_subtotal_usd: Option<f64>,
 }
 
 impl CostCoverage {
@@ -306,8 +376,12 @@ impl CostCoverage {
             .known_subtotal_usd
             .map(|usd| format!("USD {} configured-rate estimate", amount(usd)))
             .unwrap_or_else(|| "unknown (no priced receipts)".into());
+        let attempt_subtotal = self
+            .attempt_known_subtotal_usd
+            .map(|usd| format!("USD {} configured-rate estimate", amount(usd)))
+            .unwrap_or_else(|| "unknown (no priced attempts)".into());
         format!(
-            "Cost coverage · saved branch history\nKnown subtotal: {subtotal}\nPriced receipts: {} · unpriced receipts: {} · usage events without receipt: {}\nRecorded physical attempts: {} started · {} completed · {} failed · {} incomplete · {} interrupted · {} pending\nTotal cost is unknown: retry/failure attempts may lack complete usage; delegated and branch-summary costs are not fully covered. Inherited receipts are historical, not new charges.\n",
+            "Cost coverage · saved branch history\nKnown subtotal: {subtotal}\nPriced receipts: {} · unpriced receipts: {} · usage events without receipt: {}\nRecorded physical attempts: {} started · {} completed · {} failed · {} incomplete · {} interrupted · {} pending\nAttempt subtotal: {attempt_subtotal} · {} priced · {} unpriced endings\nReceipt and attempt subtotals overlap; do not add them.\nTotal cost is unknown: retry/failure attempts may lack complete usage; legacy history and delegated-session costs can remain uncovered. Inherited receipts are historical, not new charges.\n",
             self.priced_receipts,
             self.unpriced_receipts,
             self.usage_events_without_receipt,
@@ -316,7 +390,9 @@ impl CostCoverage {
             self.attempts_failed,
             self.attempts_incomplete,
             self.attempts_interrupted,
-            self.attempts_pending
+            self.attempts_pending,
+            self.priced_attempts,
+            self.unpriced_attempts
         )
     }
 }
@@ -387,6 +463,45 @@ mod tests {
             },
             model: "server-echo".into(),
         }
+    }
+
+    #[test]
+    fn price_snapshots_retain_bounded_numeric_rates_and_leave_excess_or_unverified_sources_unknown() {
+        let mut config = Config::default();
+        let source = crate::ModelSource {
+            model: "physical-model".into(),
+            input_usd_per_million: Some(2.0),
+            output_usd_per_million: Some(6.0),
+            cache_read_usd_per_million: Some(0.2),
+            cache_write_usd_per_million: Some(0.5),
+            ..Default::default()
+        };
+        for index in 0..=Prices::MAX_SOURCES {
+            config.models.insert(format!("source-{index:04}"), source.clone());
+        }
+        assert!(config.models.len() > Prices::MAX_SOURCES, "the snapshot cap must actually be exceeded");
+        let prices = Prices::new(&config);
+        assert_eq!(prices.entries.len(), Prices::MAX_SOURCES);
+        let dispatch = Dispatch::bounded("source-0000", "physical-model", true).unwrap();
+        let mut facts = rook_llm::AttemptFacts {
+            usage: Some(response().usage),
+            usage_reported: true,
+            completion_confirmed: true,
+            reported_model: Some("server-version".into()),
+        };
+        let frozen = prices.estimate(Some(&dispatch), &facts).unwrap();
+        assert!((frozen.estimated_usd - 0.000123).abs() < 1e-15);
+        config.models.get_mut("source-0000").unwrap().input_usd_per_million = Some(99.0);
+        assert_eq!(prices.estimate(Some(&dispatch), &facts).unwrap().estimated_usd, frozen.estimated_usd);
+        let excess =
+            Dispatch::bounded(&format!("source-{:04}", Prices::MAX_SOURCES), "physical-model", true).unwrap();
+        assert!(prices.estimate(Some(&excess), &facts).is_none());
+        assert!(Prices::key("source", &"🙂".repeat(65)).is_none());
+        facts.completion_confirmed = false;
+        assert!(prices.estimate(Some(&dispatch), &facts).is_none());
+        facts.completion_confirmed = true;
+        facts.usage_reported = false;
+        assert!(prices.estimate(Some(&dispatch), &facts).is_none());
     }
 
     #[test]

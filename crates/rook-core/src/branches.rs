@@ -273,6 +273,8 @@ pub fn draft_summary(rook: &Rook, source: u128, target: u128) -> Result<SummaryD
 
 /// Suggest a reviewable summary from bounded historical excerpts. The model
 /// never writes the target branch: only `transfer_summary_at` can do that.
+/// This compatibility entrypoint has no store. Session-owned callers should
+/// use `prepare_summary_suggestion` to retain usage and physical attempts.
 pub async fn suggest_summary(config: &crate::Config, draft: SummaryDraft) -> Result<SummaryDraft> {
     let vault = crate::Vault::load().map_err(|e| CoreError::Other(e.to_string()))?;
     let provider = crate::models::provider_for(config, &vault, &config.agent.model)
@@ -280,7 +282,112 @@ pub async fn suggest_summary(config: &crate::Config, draft: SummaryDraft) -> Res
     suggest_summary_with(&*provider, draft).await
 }
 
-async fn suggest_summary_with(provider: &dyn Provider, mut draft: SummaryDraft) -> Result<SummaryDraft> {
+/// Prepare generation and accounting without retaining a daemon engine lock
+/// during network I/O. The source owns the expense even if the draft is rejected.
+pub fn prepare_summary_suggestion(rook: &Rook, source: u128, target: u128) -> Result<SummarySuggestion> {
+    let draft = draft_summary(rook, source, target)?;
+    let vault = std::sync::Arc::new(crate::Vault::load().map_err(|e| CoreError::Other(e.to_string()))?);
+    let provider = crate::models::provider_for(&rook.config, &vault, &rook.config.agent.model)
+        .map_err(|e| CoreError::Other(e.to_string()))?;
+    let prices = std::sync::Arc::new(crate::model_route::Prices::new(&rook.config));
+    let observer = crate::model_attempt::observer_with_prices(
+        rook,
+        source,
+        vault.clone(),
+        crate::model_route::Purpose::BranchSummary,
+        prices.clone(),
+    );
+    Ok(SummarySuggestion {
+        draft,
+        provider,
+        accounting: SummaryAccounting {
+            store: rook.store.clone(),
+            source,
+            selected: crate::model_route::identity(&rook.config.agent.model, &vault),
+            vault,
+            prices,
+            observer,
+        },
+    })
+}
+
+pub struct SummarySuggestion {
+    draft: SummaryDraft,
+    provider: Box<dyn Provider>,
+    accounting: SummaryAccounting,
+}
+
+impl SummarySuggestion {
+    pub async fn generate(self) -> Result<SummaryDraft> {
+        suggest_summary_accounted(self.provider.as_ref(), self.draft, Some(&self.accounting)).await
+    }
+}
+
+struct SummaryAccounting {
+    store: std::sync::Arc<rook_store::Store>,
+    source: u128,
+    selected: Option<String>,
+    vault: std::sync::Arc<crate::Vault>,
+    prices: std::sync::Arc<crate::model_route::Prices>,
+    observer: std::sync::Arc<dyn rook_llm::AttemptObserver>,
+}
+
+impl SummaryAccounting {
+    fn record(
+        &self,
+        dispatch: Option<rook_llm::Dispatch>,
+        facts: rook_llm::AttemptFacts,
+        started: std::time::Instant,
+    ) -> Result<()> {
+        let dispatch = dispatch.filter(|d| {
+            crate::model_route::identity(&d.provider, &self.vault).is_some()
+                && crate::model_route::identity(&d.model, &self.vault).is_some()
+        });
+        let usage = facts.usage.clone().unwrap_or_default();
+        let auxiliary = crate::model_route::Auxiliary {
+            purpose: crate::model_route::Purpose::BranchSummary,
+            receipt: crate::model_route::Receipt {
+                selected: self.selected.clone(),
+                phase: "ordinary".into(),
+                cost: self.prices.estimate(dispatch.as_ref(), &facts),
+                dispatch,
+                reported_model: facts.reported_model,
+                usage: usage.clone(),
+                complete: facts.completion_confirmed,
+                usage_reported: facts.usage_reported,
+                elapsed_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+            },
+        };
+        // Rejected/empty drafts still consumed the completed model response.
+        let bytes = crate::persistence::encode_with_limit(&auxiliary, crate::model_route::MAX_BYTES)?;
+        self.store.append_event_pair_durable(
+            self.source,
+            rook_store::NewEvent::new(rook_store::EventKind::Note, rook_store::Kind::Message, b"")
+                .label("branch summary usage")
+                .usage(usage.input_tokens, usage.output_tokens),
+            rook_store::NewEvent::new(rook_store::EventKind::Note, rook_store::Kind::Message, &bytes)
+                .label(crate::model_route::AUX_LABEL),
+        )?;
+        Ok(())
+    }
+}
+
+async fn suggest_summary_with(provider: &dyn Provider, draft: SummaryDraft) -> Result<SummaryDraft> {
+    suggest_summary_accounted(provider, draft, None).await
+}
+
+async fn suggest_summary_accounted(
+    provider: &dyn Provider,
+    mut draft: SummaryDraft,
+    accounting: Option<&SummaryAccounting>,
+) -> Result<SummaryDraft> {
+    if draft.text.len() > SUMMARY_BYTES
+        || draft.source_session.len() > 256
+        || draft.source_session.chars().any(char::is_control)
+        || draft.common_ancestor.as_ref().is_some_and(|id| id.len() > 256 || id.chars().any(char::is_control))
+    {
+        return Err(CoreError::Other("branch summary input exceeds its bounded draft contract".into()));
+    }
     let mut request = Request::new(vec![
         Message::system(format!(
             "Write a concise draft summary of a departed conversation branch for a person to review. \
@@ -293,7 +400,15 @@ async fn suggest_summary_with(provider: &dyn Provider, mut draft: SummaryDraft) 
         Message::user(crate::sources::data("transcript", "departed branch excerpts", &draft.text)),
     ]);
     request.effort = Some(Effort::Low);
-    let mut stream = provider.stream(request).await.map_err(|e| CoreError::Other(e.to_string()))?;
+    let started = std::time::Instant::now();
+    let stream = match accounting {
+        Some(accounting) => provider.stream_observed(request, accounting.observer.clone()).await,
+        None => provider.stream(request).await,
+    };
+    let mut stream = stream.map_err(|e| CoreError::Other(e.to_string()))?;
+    let mut facts = rook_llm::AttemptFacts::default();
+    let mut dispatch = None;
+    let mut metadata_seen = false;
     let scope = if draft.scope_known {
         format!("events #{}..#{}", draft.source_from, draft.source_through)
     } else {
@@ -307,6 +422,8 @@ async fn suggest_summary_with(provider: &dyn Provider, mut draft: SummaryDraft) 
     let mut said = String::new();
     let mut received = 0usize;
     let mut complete = false;
+    let mut finished = false;
+    let mut refusal = None;
     while let Some(delta) = stream.next().await {
         match delta.map_err(|e| CoreError::Other(e.to_string()))? {
             Delta::Text(text) => {
@@ -328,18 +445,42 @@ async fn suggest_summary_with(provider: &dyn Provider, mut draft: SummaryDraft) 
                     "summary model requested a tool; no tool calls are permitted".into(),
                 ));
             }
-            Delta::Done { stop_reason: StopReason::EndTurn, .. } => complete = true,
-            Delta::Done { stop_reason, .. } => {
-                return Err(CoreError::Other(format!(
-                    "summary model stopped at {}; no complete draft was produced",
-                    stop_reason.as_str()
-                )));
+            Delta::Dispatch(value) => {
+                dispatch =
+                    rook_llm::Dispatch::bounded(&value.provider, &value.model, value.input_includes_cache)
+            }
+            Delta::ResponseMetadata { usage_reported, completion_confirmed } => {
+                metadata_seen = true;
+                facts.usage_reported = usage_reported;
+                facts.completion_confirmed = completion_confirmed;
+            }
+            Delta::Done { stop_reason, usage, model } => {
+                finished = true;
+                complete = stop_reason == StopReason::EndTurn;
+                facts.usage = Some(usage);
+                facts.reported_model =
+                    accounting.and_then(|a| crate::model_route::identity(&model, &a.vault));
+                if !metadata_seen {
+                    facts.completion_confirmed = true;
+                }
+                if !complete {
+                    refusal = Some(format!(
+                        "summary model stopped at {}; no complete draft was produced",
+                        stop_reason.as_str()
+                    ));
+                }
             }
             _ => {}
         }
     }
-    if !complete {
-        return Err(CoreError::Other("summary model stream ended without a completion marker".into()));
+    let confirmed = !metadata_seen || facts.completion_confirmed;
+    if finished && let Some(accounting) = accounting {
+        accounting.record(dispatch, facts, started)?;
+    }
+    if !complete || !confirmed {
+        return Err(CoreError::Other(
+            refusal.unwrap_or_else(|| "summary model stream ended without a completion marker".into()),
+        ));
     }
     if said.trim().is_empty() {
         return Err(CoreError::Other("summary model returned no reviewable text".into()));
@@ -800,6 +941,16 @@ mod tests {
         assert!(suggested.text.contains("Option A was investigated."));
         assert!(suggested.text.len() <= SUMMARY_BYTES);
         assert_eq!(rook.store.get_session(2).unwrap().unwrap().next_seq, before);
+        let mut oversized = draft.clone();
+        oversized.text.push_str(&"x".repeat(SUMMARY_BYTES));
+        assert!(oversized.text.len() > SUMMARY_BYTES);
+        assert!(
+            suggest_summary_with(&SummaryModel("not requested".into(), StopReason::EndTurn), oversized)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("input exceeds")
+        );
         assert!(
             suggest_summary_with(
                 &SummaryModel("x".repeat(SUMMARY_BYTES), StopReason::EndTurn),

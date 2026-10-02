@@ -1041,14 +1041,13 @@ impl Source {
     ) -> Result<rook_core::branches::SummaryDraft> {
         match self {
             Self::Local(rook) => {
-                let draft = rook_core::branches::draft_summary(rook, source, target)?;
-                let config = rook.config.clone();
+                let suggestion = rook_core::branches::prepare_summary_suggestion(rook, source, target)?;
                 let generated = std::thread::Builder::new()
                     .name("branch-summarizer".into())
                     .stack_size(8 * 1024 * 1024)
                     .spawn(move || -> Result<_> {
                         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-                        Ok(runtime.block_on(rook_core::branches::suggest_summary(&config, draft))?)
+                        Ok(runtime.block_on(suggestion.generate())?)
                     })?
                     .join()
                     .map_err(|_| anyhow::anyhow!("branch summarizer stopped unexpectedly"))??;

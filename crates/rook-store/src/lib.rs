@@ -815,6 +815,17 @@ impl Store {
         self.append_events_with_values(session, [before, event], &[])
     }
 
+    /// An auxiliary response can finish outside a turn. Persist its usage and
+    /// receipt together before returning the result to the caller.
+    pub fn append_event_pair_durable(
+        &self,
+        session: u128,
+        before: NewEvent<'_>,
+        event: NewEvent<'_>,
+    ) -> Result<[u64; 2]> {
+        self.append_events_transaction(session, [before, event], true, |_, _| Ok(()))
+    }
+
     /// Commit events and their caller-owned state together. Nonempty values
     /// make the transaction durable before returning, so a receipt cannot
     /// survive without the event it acknowledges, or vice versa.

@@ -13,7 +13,7 @@ Source: Pi `ee602414c703be8da722ec56de7f2399e62581ac`; starting Rook:
 | Inline tool cards | Complete | Compact/live/saved results, attributed errors/duration/diffs and command/search/MCP facts, explicit bounded browser pixels, terminal text fallback, local/daemon and full CI passed |
 | Context provenance inspector | Complete | Request-specific sources and loaded skills, deferred MCP tools in CLI/API/TUI/browser; bounded notes, old-note compatibility, local/daemon and full CI passed |
 | Local HTML export | Complete | Inclusive saved ranges, bounded/escaped/attributed output, no overwrite/publication, CLI/REPL/local/shared TUI parity, actual browser download/rendering and full CI passed |
-| Opt-in phase-based model routing | In progress | Static policy, durable branch transition, historical receipts and compatible image/scoped-state handoffs implemented; native continuation/reopen/fork and automatic fallback verified; auxiliary receipts and physical-attempt lifecycle implemented with explicit partial-cost coverage; finish missing attempt usage/pricing, delegated/branch-summary accounting, live frontend checks and same-task comparison without claiming unmeasured savings |
+| Opt-in phase-based model routing | In progress | Static policy, durable branch transition, historical receipts and compatible image/scoped-state handoffs implemented; native continuation/reopen/fork and automatic fallback verified; auxiliary/branch-summary receipts, physical-attempt lifecycle and saved rate estimates implemented with explicit partial-cost coverage; finish delegated aggregation, uncovered-fact handling, live frontend checks and same-task comparison without claiming unmeasured savings |
 | Declarative extension UI | Pending | Bounded status/progress/forms/result contract, trust boundary, text fallback and frontend parity |
 
 Regular-scrollback TUI and terminal image preview remain experiments from the
@@ -3514,3 +3514,78 @@ quality/cost/latency comparison. No actual-model savings have been measured.
 Phase routing remains In progress, declarative extension UI remains Pending,
 and scrollback/image experiments retain their original scope. The full goal
 remains active.
+
+## Saved attempt estimates and source-owned branch-summary costs
+
+Physical endings now optionally retain configured-rate estimates, keyed by
+the actual admitted leaf and its native counter/terminal facts. The prepared
+rate snapshot retains at most 512 priced sources as bounded identity hashes
+and numeric rates; it does not clone Config, model text, endpoints or secrets.
+Excess/missing sources, unverified counters/completion and invalid cache
+arithmetic stay unpriced. Old attempt JSON defaults missing costs to unknown.
+Saved rates survive configuration changes, reopening and a fork's prefix.
+
+CLI/API/TUI/browser expose priced/unpriced endings and an independent attempt
+subtotal. The response and attempt subtotals overlap and must not be added.
+A terminated attempt can retain a price even without a successful-response
+receipt; older receipts cannot hide later unpriced failures. Attempt records
+still add no second store token charge. `complete_accounting` remains false.
+
+Product summary generation now prepares one owned generator, releases the
+daemon engine guard before model I/O and records expenses on the source branch.
+The generator observes every physical retry/fallback and saves a durable
+usage/auxiliary-receipt pair with purpose `branch_summary`. Empty replies and
+native output limits still retain their consumed usage. An unconfirmed native
+EOF is rejected, retains available usage and remains unpriced. Early consumer
+rejection/cancellation can leave unknown counters, represented by the attempt.
+Completed physical generation does not imply an accepted summary.
+
+Source attribution, reviewed transfer and the pre-generation source boundary
+remain intact. Bookkeeping cannot write the target or replace the main reply,
+and is omitted from model/restored-chat history. New metadata fields have JSON
+defaults; existing summary/receipt and postcard layouts remain readable. The
+public config-only generator remains for embedded callers without a store;
+all product CLI/REPL/TUI/browser/API integrations use the prepared accounting
+entrypoint. No new runtime or storage migration is introduced.
+
+The focused native HTTP/CLI/daemon scenario exited 0
+(`target/pi-summary-accounting-cli.log`): five actual requests cover local and
+daemon suggestions, empty output, output limit and native EOF without terminal
+evidence. Four priced completions and one unpriced incomplete call retain
+source usage once, leave the target unchanged, preserve estimates after a daemon
+restart with changed rates and inherit them in a fork. The physical retry/
+fallback scenario also exited 0 (`target/pi-summary-attempt-prices-cli.log`),
+including priced/unpriced attempts and unchanged response-subtotal arithmetic.
+These are controlled protocol checks, not actual-model quality/savings evidence.
+
+Focused core price/attempt/model checks exited 0 (24 tests;
+`target/pi-summary-prices-core-final.log`), including an actually exceeded
+513-source setup, frozen rates, omitted terminal/counter evidence, forged cost
+rejection and a priced interruption without a response receipt after reopen/fork.
+The bounded branch suite exited 0 (15 tests;
+`target/pi-summary-branches-core.log`); its later oversized-input assertion is
+covered by the final gate below. Initial core receipt checks also exited 0
+(`target/pi-summary-prices-core.log`), before that snapshot scenario was added.
+The browser context/restored-chat module checks exited 0
+(`target/pi-summary-cost-browser.log`). Syntax and the final context/restored-chat
+fixtures, including branch-usage omission, exited 0 again
+(`target/pi-summary-cost-browser-final.log`). These are DOM fixtures, not live
+UI interactions.
+
+The first full CI exited 1 before tests (20.6 seconds;
+`target/pi-summary-attempt-pricing-ci.log`): Clippy required collapsing the
+nested optional-accounting condition. The condition is now one let-chain with
+the same behavior. This failed run does not count as final verification.
+The final `cargo xtask ci` exited 0 (`ci: ok`, 840.5 seconds;
+`target/pi-summary-attempt-pricing-ci-final.log`). It executed both real
+CLI/daemon scenarios, price-snapshot/forgery/reopen/fork checks, the final
+oversized summary-input assertion and restored TUI/browser fixtures, alongside
+all existing native/phase/queue/goal/core/store suites, frontend builds, Clippy
+and doctests. `cargo xtask compaction` also exited 0
+(`target/pi-summary-attempt-pricing-compaction.log`): 4.02 MiB on disk, 37.1x
+dictionary compression and 5.8x end-to-end retain the published benchmark
+claims. No failed invocation is counted as proof of the final tree.
+Next complete delegated-session aggregation and uncovered-fact handling, then
+live phase-routing frontend interactions and same-task quality/cost/latency
+comparison. Declarative extension UI remains Pending; scrollback/image
+experiments retain their scope. The full adoption goal remains active.
