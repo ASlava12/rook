@@ -449,6 +449,10 @@ fn show_context(usage: &rook_core::ContextUsage, json: bool) -> Result<()> {
     if let Some(coverage) = &usage.cost_coverage {
         println!("{}", coverage.describe());
     }
+    let extensions = usage.extension_ui.describe();
+    if !extensions.is_empty() {
+        println!("{extensions}");
+    }
     println!("window       {:>9}  (usable {}, compacts at {})", usage.window, usage.usable, usage.compact_at);
     println!(
         "in context   {:>9}  {:.0}% of usable {}",

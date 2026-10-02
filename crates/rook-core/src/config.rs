@@ -37,6 +37,7 @@ pub struct Config {
     pub mcp_connections: crate::mcp_connections::Settings,
     pub transcript: crate::transcript::Settings,
     pub branches: crate::branches::Settings,
+    pub extension_ui: crate::extension_ui::Settings,
     pub tui: crate::keybindings::Settings,
     pub user_input: rook_tools::pending::Limits,
     /// Language servers, as `[[lsp]]` tables. When empty, known servers found
@@ -314,6 +315,7 @@ impl Default for Config {
             mcp_connections: Default::default(),
             transcript: Default::default(),
             branches: Default::default(),
+            extension_ui: Default::default(),
             tui: Default::default(),
             user_input: Default::default(),
             server: Default::default(),

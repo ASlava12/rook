@@ -29,6 +29,7 @@ pub mod docs;
 pub mod error;
 pub mod evaluation;
 pub mod execution;
+pub mod extension_ui;
 pub mod fileset;
 pub mod hooks;
 pub mod install;

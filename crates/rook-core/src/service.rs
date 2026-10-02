@@ -1125,6 +1125,7 @@ impl Rook {
         let mut compactions = 0;
         let mut request_record = None;
         let mut accounting = crate::model_accounting::Fold::default();
+        let mut extension_ui = crate::extension_ui::State::default();
         let through = self.store.get_session(session)?.map(|meta| meta.next_seq).unwrap_or(0);
         let mut next = 0;
 
@@ -1142,6 +1143,7 @@ impl Rook {
                     request_record = Some((event.seq, event.record.body, bytes));
                 }
                 accounting.include(&self.store, &event, bytes)?;
+                extension_ui.include(&self.store, &event, bytes, &self.config.extension_ui)?;
                 let entry = by_kind.entry(kind.as_str().to_string()).or_default();
                 entry.events += 1;
                 entry.bytes += bytes;
@@ -1183,6 +1185,7 @@ impl Rook {
             last_request,
             last_response,
             cost_coverage,
+            extension_ui,
         })
     }
 
@@ -2216,6 +2219,8 @@ pub struct ContextUsage {
     /// Recorded estimates only, never a claim about complete session spend.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_coverage: Option<crate::model_route::CostCoverage>,
+    #[serde(default)]
+    pub extension_ui: crate::extension_ui::State,
 }
 
 /// What a user typed where a session was wanted: an id, or `last` for the most

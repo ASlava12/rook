@@ -2,6 +2,18 @@
 
 [English](architecture.md) · [Русский](ru/architecture.md)
 
+## Extension reports
+
+Explicitly enabled `hooks[].ui` replies can declare bounded status, progress,
+result and clear items. Core assigns source identity, redacts configured secrets
+and saves display-only `rook:extension-ui:v1` Notes in the existing journal.
+They neither enter model replay nor grant permissions. Context reads fold the
+fixed saved prefix with byte/count admission, source-owned replacement and clear,
+and explicit omissions. CLI/API, local/shared TUI and browser show historical
+source/event attribution; these reports do not certify current files or tests.
+The existing store schema is unchanged. Forms and persistent live widgets remain
+unimplemented; see [the report contract](extension-ui.md).
+
 ## The shape
 
 ```

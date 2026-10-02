@@ -13,6 +13,23 @@ pub(super) enum Incoming {
 }
 
 impl AgentLoop<'_> {
+    pub(super) async fn run_hooks(
+        &self,
+        event: hooks::Event,
+        subject: &str,
+        payload: &serde_json::Value,
+    ) -> hooks::Outcome {
+        if !self.hooks.has_ui() {
+            return self.hooks.run(event, subject, payload).await;
+        }
+        self.hooks
+            .run_with_ui(event, subject, payload, &self.rook.config.extension_ui, |batch| {
+                if let Err(why) = batch.record(self.rook, self.session, |value| self.vault.redact(value)) {
+                    tracing::warn!("extension display record failed: {why}");
+                }
+            })
+            .await
+    }
     fn report_prompt_admission(&self, turn: &str, progress: &mut impl FnMut(Progress<'_>)) {
         if self.depth == 0
             && let Some(key) = &self.submission_key
@@ -160,8 +177,7 @@ impl AgentLoop<'_> {
             self.offer_server_update().await;
         }
         let gate = self
-            .hooks
-            .run(hooks::Event::Prompt, prompt, &self.payload(serde_json::json!({ "prompt": prompt })))
+            .run_hooks(hooks::Event::Prompt, prompt, &self.payload(serde_json::json!({ "prompt": prompt })))
             .await;
         if let Some(rook_tools::policy::Decision::Deny(ref why)) = gate.decision {
             if let Some(setup) = setup {
@@ -276,7 +292,7 @@ impl AgentLoop<'_> {
             return;
         }
         let outcome =
-            self.hooks.run(hooks::Event::SessionStart, "", &self.payload(serde_json::json!({}))).await;
+            self.run_hooks(hooks::Event::SessionStart, "", &self.payload(serde_json::json!({}))).await;
         if let Ok(mut slot) = self.session_context.lock() {
             *slot = Some(outcome.context().unwrap_or_default());
         }
@@ -318,7 +334,7 @@ impl AgentLoop<'_> {
             "input_tokens": outcome.input_tokens,
             "output_tokens": outcome.output_tokens,
         }));
-        self.hooks.run(hooks::Event::TurnEnd, &outcome.stopped, &payload).await;
+        self.run_hooks(hooks::Event::TurnEnd, &outcome.stopped, &payload).await;
         receipt.finish("turn_end hooks returned")
     }
 

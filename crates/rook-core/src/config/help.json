@@ -592,6 +592,10 @@
     "kind": "string",
     "help": "Shell command executed for the chosen event. Receives event JSON on stdin."
   },
+  "hooks.*.ui": {
+    "kind": "boolean",
+    "help": "Accept bounded display-only status/progress/result declarations from this hook. Default off. Enabled replies must be complete JSON; reports never grant permission or enter model context."
+  },
   "hooks.*.timeout_secs": {
     "kind": "integer",
     "help": "Maximum hook runtime in seconds."
@@ -777,6 +781,22 @@
   "transcript.search_events": {
     "kind": "integer",
     "help": "Maximum events visited per search request, 1–4096; default 256."
+  },
+  "extension_ui": {
+    "kind": "table",
+    "help": "Bounds for explicitly enabled hook display reports. Reports carry their source and saved event; they do not verify current files or tests."
+  },
+  "extension_ui.max_update_bytes": {
+    "kind": "integer",
+    "help": "Maximum encoded hook UI declaration bytes before decoding, 1024–32768; default 4096. Hook UI is opt-in and never grants permissions."
+  },
+  "extension_ui.max_entries": {
+    "kind": "integer",
+    "help": "Maximum items per declaration and retained extension reports, 1–128; default 32. Omitted updates are reported explicitly."
+  },
+  "extension_ui.max_state_bytes": {
+    "kind": "integer",
+    "help": "Maximum encoded retained extension report bytes, 4096–1048576; default 32768. Reports describe saved branch history, not verified current files or tests."
   },
   "transcript.quote_bytes": {
     "kind": "integer",

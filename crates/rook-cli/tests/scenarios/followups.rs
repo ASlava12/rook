@@ -148,6 +148,57 @@ fn config(endpoint: &str, model: &str, mode: &str, workspace: &std::path::Path) 
     )
 }
 
+#[test]
+fn extension_ui_reports_survive_native_local_and_daemon_reopen_and_saved_prefix_forks() {
+    rook_llm::init_tls();
+    for shared in [false, true] {
+        let _local = (!shared).then(one_at_a_time);
+        let rook = Rook::new();
+        let model = Model::new();
+        model.release.store(16, Ordering::SeqCst);
+        let declaration = r#"{"context":"EXPLICIT_HOOK_CONTEXT","ui":[{"kind":"status","id":"build","text":"DISPLAY_ONLY_NATIVE"},{"kind":"progress","id":"scan","label":"checking","done":2,"total":3},{"kind":"result","id":"tests","title":"Reported checks","body":"Historical extension output"}]}"#;
+        let command =
+            if cfg!(windows) { format!("echo {declaration}") } else { format!("echo '{declaration}'") };
+        rook.write_config(&format!("[agent]\nmodel='test'\ninstall_servers=false\none_script=false\nplan_first=false\n[models.test]\napi='openai'\nmodel='test-model'\nurl='{}'\ncontext_window=32768\n[[hooks]]\nevent='prompt'\nui=true\ncommand={}\n", model.url, serde_json::to_string(&command).unwrap()));
+        let mut daemon = shared.then(|| Daemon::start(&rook));
+        let outcome = rook.json(&["run", "Report completion."]);
+        let session = outcome["session"].as_str().unwrap();
+        let request = model.next();
+        assert!(request["messages"].to_string().contains("EXPLICIT_HOOK_CONTEXT"));
+        assert!(!request["messages"].to_string().contains("DISPLAY_ONLY_NATIVE"));
+        let context = rook.json(&["session", "context", session]);
+        let captured = context["extension_ui"].clone();
+        assert_eq!(captured["reports"].as_array().unwrap().len(), 3);
+        assert_eq!(captured["reports"][0]["source"]["event"], "prompt");
+        let seq = captured["reports"][0]["event_seq"].as_u64().unwrap();
+        let text = rook.ok(&["session", "context", session]);
+        assert!(
+            text.contains("DISPLAY_ONLY_NATIVE") && text.contains("current files and tests are not verified")
+        );
+        let before = rook.ok(&["session", "fork", session, "--at", &seq.to_string()]);
+        let before = before.split_whitespace().last().unwrap();
+        let after = rook.ok(&["session", "fork", session, "--at", &(seq + 1).to_string()]);
+        let after = after.split_whitespace().last().unwrap();
+        assert!(
+            rook.json(&["session", "context", before])["extension_ui"]["reports"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(rook.json(&["session", "context", after])["extension_ui"], captured);
+        drop(daemon.take());
+        daemon = shared.then(|| Daemon::start(&rook));
+        assert_eq!(rook.json(&["session", "context", session])["extension_ui"], captured);
+        rook.json(&["run", "Report completion again.", "--session", session]);
+        model.next();
+        let updated = rook.json(&["session", "context", session]);
+        assert_eq!(updated["extension_ui"]["reports"].as_array().unwrap().len(), 3);
+        assert!(updated["extension_ui"]["reports"][0]["event_seq"].as_u64().unwrap() > seq);
+        assert_eq!(rook.json(&["session", "context", after])["extension_ui"], captured);
+        drop(daemon);
+    }
+}
+
 async fn get(client: &reqwest::Client, url: &str) -> Value {
     client.get(url).send().await.unwrap().error_for_status().unwrap().json().await.unwrap()
 }

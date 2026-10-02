@@ -57,11 +57,13 @@ pub struct HookConfig {
     pub matches: Option<String>,
     pub command: String,
     pub timeout_secs: u64,
+    /// Accept bounded display-only declarations in the reply's `ui` array.
+    pub ui: bool,
 }
 
 impl Default for HookConfig {
     fn default() -> Self {
-        Self { event: Event::PostTool, matches: None, command: String::new(), timeout_secs: 30 }
+        Self { event: Event::PostTool, matches: None, command: String::new(), timeout_secs: 30, ui: false }
     }
 }
 
@@ -92,7 +94,7 @@ impl Outcome {
 }
 
 pub struct Hooks {
-    hooks: Vec<(HookConfig, Option<Rule>)>,
+    hooks: Vec<(HookConfig, Option<Rule>, usize)>,
 }
 
 impl Hooks {
@@ -102,8 +104,9 @@ impl Hooks {
         let mut errors = Vec::new();
         let hooks = configs
             .iter()
-            .filter(|c| !c.command.trim().is_empty())
-            .filter_map(|config| {
+            .enumerate()
+            .filter(|(_, c)| !c.command.trim().is_empty())
+            .filter_map(|(ordinal, config)| {
                 let rule = match config.matches.as_deref().map(Rule::parse).transpose() {
                     Ok(rule) => rule,
                     Err(e) => {
@@ -111,7 +114,7 @@ impl Hooks {
                         return None;
                     }
                 };
-                Some((config.clone(), rule))
+                Some((config.clone(), rule, ordinal))
             })
             .collect();
         (Self { hooks }, errors)
@@ -126,8 +129,23 @@ impl Hooks {
     /// The first denial stops the rest: once the answer is no, running further
     /// commands only delays it.
     pub async fn run(&self, event: Event, subject: &str, payload: &serde_json::Value) -> Outcome {
+        self.run_with_ui(event, subject, payload, &crate::extension_ui::Settings::default(), |_| {}).await
+    }
+
+    pub(crate) fn has_ui(&self) -> bool {
+        self.hooks.iter().any(|(config, _, _)| config.ui)
+    }
+
+    pub(crate) async fn run_with_ui(
+        &self,
+        event: Event,
+        subject: &str,
+        payload: &serde_json::Value,
+        settings: &crate::extension_ui::Settings,
+        mut on_ui: impl FnMut(crate::extension_ui::Batch),
+    ) -> Outcome {
         let mut outcome = Outcome::default();
-        for (config, rule) in &self.hooks {
+        for (config, rule, ordinal) in &self.hooks {
             if config.event != event {
                 continue;
             }
@@ -137,7 +155,7 @@ impl Hooks {
                 continue;
             }
 
-            let reply = match invoke(config, payload).await {
+            let reply = match invoke(config, payload, *ordinal, settings, &mut on_ui).await {
                 Ok(reply) => reply,
                 Err(e) => {
                     tracing::warn!("hook {:?} failed: {e}", config.command);
@@ -205,7 +223,14 @@ impl Drop for HookGroup {
     }
 }
 
-async fn invoke(config: &HookConfig, payload: &serde_json::Value) -> std::io::Result<HookReply> {
+async fn invoke(
+    config: &HookConfig,
+    payload: &serde_json::Value,
+    ordinal: usize,
+    settings: &crate::extension_ui::Settings,
+    on_ui: &mut impl FnMut(crate::extension_ui::Batch),
+) -> std::io::Result<HookReply> {
+    let input = crate::extension_ui::encoded(payload, 8 * 1024 * 1024)?;
     let mut command = shell(&config.command);
     rook_contain::on_its_own(command.as_std_mut());
     let mut child = command
@@ -216,10 +241,6 @@ async fn invoke(config: &HookConfig, payload: &serde_json::Value) -> std::io::Re
         .spawn()?;
 
     let _group = HookGroup(rook_contain::Group::holding(child.id()));
-    let input = serde_json::to_vec(payload)?;
-    if input.len() > 8 * 1024 * 1024 {
-        return Err(std::io::Error::other("hook input exceeds 8 MiB"));
-    }
     let stdin = child.stdin.take();
     let (mut out, mut err) = (child.stdout.take(), child.stderr.take());
     let finished = async {
@@ -233,7 +254,7 @@ async fn invoke(config: &HookConfig, payload: &serde_json::Value) -> std::io::Re
             tokio::join!(feed, bounded(&mut out), bounded(&mut err), child.wait());
         (status, stdout, stderr)
     };
-    let (status, stdout, stderr) =
+    let (status, (stdout, truncated), (stderr, _)) =
         tokio::time::timeout(Duration::from_secs(config.timeout_secs), finished).await.map_err(|_| {
             std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
@@ -250,6 +271,30 @@ async fn invoke(config: &HookConfig, payload: &serde_json::Value) -> std::io::Re
         )));
     }
 
+    if config.ui {
+        if truncated {
+            return Err(std::io::Error::other("hook display reply exceeds 64 KiB"));
+        }
+        let reply = serde_json::from_str::<HookReply>(&stdout)?;
+        #[derive(Deserialize)]
+        struct Declared<'a> {
+            #[serde(borrow)]
+            ui: Option<&'a serde_json::value::RawValue>,
+        }
+        if let Ok(declared) = serde_json::from_str::<Declared<'_>>(&stdout)
+            && let Some(raw) = declared.ui
+        {
+            match crate::extension_ui::Batch::parse(
+                raw.get(),
+                crate::extension_ui::Source::hook(config, ordinal),
+                settings,
+            ) {
+                Ok(batch) => on_ui(batch),
+                Err(why) => tracing::warn!("hook display declaration refused: {why}"),
+            }
+        }
+        return Ok(reply);
+    }
     // JSON when it is JSON, otherwise whatever was printed is the context.
     Ok(serde_json::from_str(&stdout)
         .unwrap_or(HookReply { context: (!stdout.is_empty()).then_some(stdout), ..Default::default() }))
@@ -260,16 +305,18 @@ async fn invoke(config: &HookConfig, payload: &serde_json::Value) -> std::io::Re
 /// Not `take`: stopping the read leaves the writer blocked on a full pipe, so a
 /// hook that printed more than the cap would never exit and every one of them
 /// would end at its timeout. The pipe is drained; only the memory is bounded.
-async fn bounded(stream: &mut Option<impl tokio::io::AsyncRead + Unpin>) -> String {
+async fn bounded(stream: &mut Option<impl tokio::io::AsyncRead + Unpin>) -> (String, bool) {
     use tokio::io::AsyncReadExt;
-    let Some(stream) = stream else { return String::new() };
+    let Some(stream) = stream else { return (String::new(), false) };
     let (mut kept, mut chunk) = (Vec::new(), vec![0u8; 16 * 1024]);
+    let mut truncated = false;
     while let Ok(n) = stream.read(&mut chunk).await {
         if n == 0 {
             break;
         }
         let room = MOST_REPLY_BYTES.saturating_sub(kept.len());
+        truncated |= n > room;
         kept.extend_from_slice(&chunk[..n.min(room)]);
     }
-    String::from_utf8_lossy(&kept).trim().to_string()
+    (String::from_utf8_lossy(&kept).trim().to_string(), truncated)
 }

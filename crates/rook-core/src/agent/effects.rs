@@ -95,7 +95,7 @@ impl<'a> AgentLoop<'a> {
                 "input": arguments,
                 "action": risk.describe(),
             }));
-            let outcome = self.hooks.run(hooks::Event::PreTool, name, &payload).await;
+            let outcome = self.run_hooks(hooks::Event::PreTool, name, &payload).await;
             if let Some(hooked) = outcome.decision {
                 decision = hooked;
             }

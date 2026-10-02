@@ -2175,6 +2175,167 @@ fn prints(json: &str) -> String {
     }
 }
 
+#[tokio::test]
+async fn extension_ui_reports_are_source_owned_historical_and_absent_from_model_context() {
+    use rook_core::extension_ui::Item;
+    use rook_core::hooks::{Event, HookConfig};
+    let f = fixture();
+    let declarations = r#"{"context":"explicit model context","ui":[{"kind":"status","id":"build","text":"DISPLAY_ONLY_REPORT"},{"kind":"progress","id":"scan","label":"checking","done":1,"total":3}]}"#;
+    let config = HookConfig { ui: true, ..hook(Event::Prompt, &prints(declarations)) };
+    let rook = hooked(&f, vec![config.clone(), config]);
+    let session = rook.start_session("extension reports").unwrap();
+    let provider = ScriptedProvider::new(vec![reply("done")]);
+    let seen = provider.share();
+    AgentLoop::new(&rook, Arc::new(provider), session).run("show reports").await.unwrap();
+    let sent: String =
+        seen.lock().unwrap().last().unwrap().messages.iter().map(|m| m.content.clone()).collect();
+    assert!(sent.contains("explicit model context"));
+    assert!(!sent.contains("DISPLAY_ONLY_REPORT"));
+    let usage = rook.context_usage(session, None).unwrap();
+    assert_eq!(usage.extension_ui.reports.len(), 4);
+    let first = &usage.extension_ui.reports[0];
+    assert!(matches!(&first.item, Item::Status { text, .. } if text == "DISPLAY_ONLY_REPORT"));
+    assert_eq!(first.source.ordinal, 0);
+    assert_eq!(usage.extension_ui.reports[2].source.ordinal, 1);
+    assert_ne!(first.source.digest, usage.extension_ui.reports[2].source.digest);
+    let before = rook.fork_session(session, first.event_seq).unwrap().id;
+    let after = rook.fork_session(session, first.event_seq + 1).unwrap().id;
+    assert!(rook.context_usage(before, None).unwrap().extension_ui.reports.is_empty());
+    assert_eq!(rook.context_usage(after, None).unwrap().extension_ui.reports.len(), 2);
+    let captured = serde_json::to_value(rook.context_usage(after, None).unwrap().extension_ui).unwrap();
+    AgentLoop::new(&rook, Arc::new(ScriptedProvider::new(vec![reply("again")])), session)
+        .run("repeat")
+        .await
+        .unwrap();
+    assert_eq!(
+        rook.context_usage(session, None).unwrap().extension_ui.reports.len(),
+        4,
+        "same source and id replaces the report"
+    );
+    assert_eq!(
+        serde_json::to_value(rook.context_usage(after, None).unwrap().extension_ui).unwrap(),
+        captured
+    );
+    let log = rook.store.events(session, 0, 200).unwrap();
+    assert!(
+        log.iter()
+            .filter(|e| e.record.label == "rook:extension-ui:v1")
+            .all(|e| e.record.tokens_in == 0 && e.record.tokens_out == 0)
+    );
+}
+
+#[tokio::test]
+async fn extension_ui_requires_explicit_opt_in_and_never_replays_invalid_json_as_context() {
+    use rook_core::hooks::{Event, HookConfig, Hooks};
+    let raw = r#"{"ui":[{"kind":"status","id":"x","text":"display only"}]}"#;
+    let f = fixture();
+    let rook = hooked(&f, vec![hook(Event::Prompt, &prints(raw))]);
+    let session = rook.start_session("disabled").unwrap();
+    AgentLoop::new(&rook, Arc::new(ScriptedProvider::new(vec![reply("ok")])), session)
+        .run("test")
+        .await
+        .unwrap();
+    assert!(rook.context_usage(session, None).unwrap().extension_ui.reports.is_empty());
+    let config = HookConfig { ui: true, ..hook(Event::PreTool, &prints("malformed UI")) };
+    let (hooks, errors) = Hooks::compile(&[config]);
+    assert!(errors.is_empty());
+    let outcome = hooks.run(Event::PreTool, "write_file", &serde_json::json!({})).await;
+    assert!(outcome.context.is_empty());
+    assert!(matches!(outcome.decision, Some(rook_tools::policy::Decision::Deny(_))));
+    let config = HookConfig {
+        ui: true,
+        ..hook(
+            Event::PreTool,
+            &prints(r#"{"decision":"deny","reason":"still denied","ui":[{"kind":"bogus"}]}"#),
+        )
+    };
+    let (hooks, _) = Hooks::compile(&[config]);
+    assert!(matches!(hooks.run(Event::PreTool, "write_file", &serde_json::json!({})).await.decision,
+        Some(rook_tools::policy::Decision::Deny(reason)) if reason.contains("still denied")));
+}
+
+#[test]
+fn extension_ui_saved_updates_clear_only_their_source_and_admit_bounded_state() {
+    let config = Config {
+        extension_ui: rook_core::extension_ui::Settings {
+            max_update_bytes: 32768,
+            max_entries: 2,
+            max_state_bytes: 4096,
+        },
+        ..Default::default()
+    };
+    let f = fixture_with(config);
+    let session = f.rook.start_session("bounded reports").unwrap();
+    let append = |ordinal: usize, items: serde_json::Value| {
+        f.rook
+            .log(
+                session,
+                rook_store::EventKind::Note,
+                "rook:extension-ui:v1",
+                &serde_json::json!({
+                    "source": {"event":"prompt","ordinal":ordinal,"digest":"a".repeat(64)}, "items":items,
+                })
+                .to_string(),
+            )
+            .unwrap()
+    };
+    append(0, serde_json::json!([{"kind":"status","id":"same","text":"first"}]));
+    append(1, serde_json::json!([{"kind":"status","id":"same","text":"other source"}]));
+    append(0, serde_json::json!([{"kind":"status","id":"extra","text":"over entry count"}]));
+    let state = f.rook.context_usage(session, None).unwrap().extension_ui;
+    assert_eq!(state.reports.len(), 2);
+    assert_eq!(state.omitted_updates, 1);
+    append(0, serde_json::json!([{"kind":"clear","id":"same"}]));
+    let state = f.rook.context_usage(session, None).unwrap().extension_ui;
+    assert_eq!(state.reports.len(), 1);
+    assert_eq!(state.reports[0].source.ordinal, 1);
+    append(0, serde_json::json!([{"kind":"result","id":"large","title":"first","body":"x".repeat(2048)}]));
+    append(1, serde_json::json!([{"kind":"result","id":"same","title":"too large","body":"y".repeat(2048)}]));
+    let state = f.rook.context_usage(session, None).unwrap().extension_ui;
+    assert_eq!(state.omitted_updates, 2);
+    assert!(
+        state.describe().contains("other source"),
+        "failed admission retains the prior report and explicit omission"
+    );
+    f.rook.log(session, rook_store::EventKind::Note, "rook:extension-ui:v1", &"x".repeat(40000)).unwrap();
+    append(0, serde_json::json!([{"kind":"status","id":"x","text":"\u{001b}[2J"}]));
+    let state = f.rook.context_usage(session, None).unwrap().extension_ui;
+    assert_eq!(state.invalid_records, 2);
+    assert_eq!(state.reports.len(), 2);
+}
+
+#[tokio::test]
+async fn extension_ui_truncation_is_refused_and_oversized_input_never_starts_a_hook() {
+    use rook_core::hooks::{Event, HookConfig, Hooks};
+    let f = fixture();
+    let path = f.workspace.path().join("reply.json");
+    let raw = format!("{{\"context\":\"must not replay truncated output\"}}{}", " ".repeat(65536));
+    std::fs::write(&path, raw).unwrap();
+    let command = if cfg!(windows) {
+        format!("type \"{}\"", path.display())
+    } else {
+        format!("cat '{}'", path.display())
+    };
+    let (hooks, _) = Hooks::compile(&[HookConfig { ui: true, ..hook(Event::PreTool, &command) }]);
+    let outcome = hooks.run(Event::PreTool, "write_file", &serde_json::json!({})).await;
+    assert!(outcome.context.is_empty());
+    assert!(
+        matches!(outcome.decision, Some(rook_tools::policy::Decision::Deny(reason)) if reason.contains("64 KiB"))
+    );
+    let marker = f.workspace.path().join("must-not-start");
+    let command = if cfg!(windows) {
+        format!("echo started > \"{}\"", marker.display())
+    } else {
+        format!("echo started > '{}'", marker.display())
+    };
+    let (hooks, _) = Hooks::compile(&[hook(Event::PreTool, &command)]);
+    let outcome = hooks
+        .run(Event::PreTool, "write_file", &serde_json::json!({"large":"x".repeat(8 * 1024 * 1024)}))
+        .await;
+    assert!(matches!(outcome.decision, Some(rook_tools::policy::Decision::Deny(_))));
+    assert!(!marker.exists());
+}
+
 /// A hook command that keeps the payload it was handed, so a test can assert on
 /// the payload itself. Deliberately a shell builtin rather than an interpreter:
 /// a stock Windows and a stock FreeBSD have no `python3`.

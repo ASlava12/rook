@@ -58,6 +58,23 @@ export function contextPanel(usage) {
         el('p', { class: 'sub' }, 'Child snapshots retain their recorded boundaries; later child activity is excluded. Response and attempt subtotals overlap; do not add them.')));
     }
   }
+  const extensions = usage.extension_ui;
+  if (extensions?.reports?.length || extensions?.omitted_updates || extensions?.invalid_records) {
+    const reports = (extensions.reports || []).slice(0, 128);
+    current.append(el('section', {},
+      el('h3', {}, 'Extension reports · saved branch history'),
+      el('p', { class: 'sub' }, 'Reported by extensions; current files and tests are not verified.'),
+      ...reports.map(report => {
+        const source = report.source || {}, item = report.item || {};
+        const caption = `hook ${limited(source.event, 32)} #${Number(source.ordinal || 0) + 1} · source ${limited(source.digest, 8)} · event #${Number(report.event_seq || 0)}`;
+        const title = limited(item.text ?? item.label ?? item.title, 1024);
+        const progress = item.kind === 'progress' ? ` · ${Number(item.done)}/${Number(item.total)}` : '';
+        return el('section', {}, el('p', { class: 'sub' }, caption),
+          el('p', {}, `${limited(item.id, 64)}: ${title}${progress}`),
+          item.kind === 'result' ? el('pre', {}, limited(item.body, 2048)) : null);
+      }),
+      extensions.omitted_updates || extensions.invalid_records ? el('p', { class: 'warn' }, `${Number(extensions.omitted_updates || 0)} omitted updates · ${Number(extensions.invalid_records || 0)} invalid records; displayed reports may be older.`) : null));
+  }
   if (!saved) return el('div', { class: 'context-view' }, current,
     el('section', { class: 'card' }, el('h2', {}, 'Last request attempt'),
       el('p', { class: 'empty' }, 'No recorded request attempt in this session.')));

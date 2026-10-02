@@ -7,6 +7,9 @@ impl Config {
     /// so a broken file can still be inspected and repaired.
     pub fn validation_errors(&self) -> Vec<String> {
         let mut errors = Vec::new();
+        if !self.extension_ui.valid() {
+            errors.push("extension_ui: expected update bytes 1024..=32768, entries 1..=128 and state bytes 4096..=1048576".into());
+        }
         for (name, value, low, high) in [
             ("max_requests", self.user_input.max_requests, 1, 4096),
             ("max_bytes", self.user_input.max_bytes, 4096, 32 * 1024 * 1024),

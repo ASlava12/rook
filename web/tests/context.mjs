@@ -40,6 +40,27 @@ const usage = {
   } },
 };
 
+test('extension reports retain host source, plain text and historical attribution without a request', () => {
+  const extension_ui = { reports: [
+    { source: { event: 'prompt', ordinal: 0, digest: 'a'.repeat(64) }, event_seq: 7,
+      item: { kind: 'status', id: 'build', text: '<script>fake success</script>' } },
+    { source: { event: 'post_tool', ordinal: 1, digest: 'b'.repeat(64) }, event_seq: 9,
+      item: { kind: 'progress', id: 'scan', label: 'checking', done: 1, total: 3 } },
+    { source: { event: 'turn_end', ordinal: 2, digest: 'c'.repeat(64) }, event_seq: 11,
+      item: { kind: 'result', id: 'tests', title: 'Reported result', body: '<img src=x onerror=bad()>' } },
+  ], omitted_updates: 2, invalid_records: 1 };
+  const panel = contextPanel({ ...usage, last_request: null, extension_ui });
+  assert.match(panel.textContent, /saved branch history/);
+  assert.match(panel.textContent, /current files and tests are not verified/);
+  assert.match(panel.textContent, /source aaaaaaaa · event #7/);
+  assert.match(panel.textContent, /checking · 1\/3/);
+  assert.match(panel.textContent, /<script>fake success<\/script>/);
+  assert.match(panel.textContent, /<img src=x onerror=bad\(\)>/);
+  assert.match(panel.textContent, /2 omitted updates · 1 invalid records/);
+  assert.equal(panel.find(node => node.tag === 'script' || node.tag === 'img'), null);
+  assert.doesNotMatch(contextPanel({ ...usage, extension_ui: {} }).textContent, /Extension reports/);
+});
+
 test('browser context separates the live estimate from recorded request provenance', () => {
   const panel = contextPanel(usage);
   assert.match(panel.textContent, /Current live estimate:|Current live estimate/);

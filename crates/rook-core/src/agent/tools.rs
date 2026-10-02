@@ -610,7 +610,7 @@ impl<'a> AgentLoop<'a> {
             "full_bytes": outcome.full_bytes,
             "meta": outcome.meta,
         }));
-        self.hooks.run(hooks::Event::PostTool, name, &payload).await.context()
+        self.run_hooks(hooks::Event::PostTool, name, &payload).await.context()
     }
 
     /// The last `count` exchanges as plain text, for a child asked to inherit

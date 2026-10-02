@@ -14,7 +14,7 @@ Source: Pi `ee602414c703be8da722ec56de7f2399e62581ac`; starting Rook:
 | Context provenance inspector | Complete | Request-specific sources and loaded skills, deferred MCP tools in CLI/API/TUI/browser; bounded notes, old-note compatibility, local/daemon and full CI passed |
 | Local HTML export | Complete | Inclusive saved ranges, bounded/escaped/attributed output, no overwrite/publication, CLI/REPL/local/shared TUI parity, actual browser download/rendering and full CI passed |
 | Opt-in phase-based model routing | In progress | Static policy, durable branch transition, historical receipts and compatible image/scoped-state handoffs implemented; native continuation/reopen/fork and automatic fallback verified; auxiliary/branch-summary receipts, physical-attempt lifecycle, saved rate estimates and frozen delegated aggregation implemented with explicit unknown facts; actual local/shared TUI and browser phase interactions verified; real comparison runner and failed target-availability pilot retained; finish completed same-task quality/cost/latency comparison without claiming unmeasured savings |
-| Declarative extension UI | Pending | Bounded status/progress/forms/result contract, trust boundary, text fallback and frontend parity |
+| Declarative extension UI | In progress | Opt-in bounded source-owned hook status/progress/result/clear reports in saved Context; forms, typed answers, cancellation/reconnect and persistent live widget lifecycle/frontend parity remain |
 
 Regular-scrollback TUI and terminal image preview remain experiments from the
 review, to assess after the main capabilities. Existing MCP/OAuth, durable goals,
@@ -3800,3 +3800,56 @@ A working implementation model was requested once; comparison remains In
 progress and can resume when that source is available. Declarative extension UI
 and scrollback/image experiments remain actionable independent work. The full
 adoption goal stays active.
+
+### Extension UI: bounded saved report foundation (2026-10-02)
+
+Declarative extension UI is now In progress. Explicit `hooks[].ui = true`
+accepts status, progress, result and clear declarations alongside existing hook
+reply context/decisions. Core assigns the source from the hook event, original
+configuration position and command digest; producers cannot supply it. Reports
+are display-only saved Notes, with secret redaction before storage, existing
+event/storage formats and zero usage counters. They do not enter model replay
+or grant approval. The source is an attribution, not verification of claims.
+
+The fixed-prefix Context reader folds updates by source and ID, handles clear
+within its source, caps entry/encoded state size before retention and reports
+omissions or invalid saved records explicitly. Object size is admitted before
+body copies, and raw producer updates and entry counts are admitted before item
+decoding. Integer progress is limited to the exact browser integer range.
+CLI/JSON/API, local/shared TUI Context and browser Context render source/event
+and saved-history attribution with a current-files/tests advisory. Reopening and
+forking retain only the selected prefix; subsequent parent updates leave the
+fork untouched. Older Context JSON defaults to empty reports.
+
+Hook input now serializes through a capped writer before starting a child.
+Output continues to drain with bounded retention. UI-enabled hooks refuse
+truncated/malformed JSON instead of replaying it as plain model context; invalid
+UI arrays preserve valid explicit context and decisions. Non-opted-in hooks
+keep their existing JSON/plain-text behavior.
+
+Focused core and actual hook process checks exited 0
+(`target/pi-extension-foundation-final-tests.log`, four integration checks;
+`target/pi-extension-redaction-tests.log`, four module checks). Actual native
+CLI/controlled HTTP/daemon restart/fork scenarios exited 0
+(`target/pi-extension-native-tests.log`); both local and daemon requests retained
+explicit hook context without display text. TUI Context and browser DOM checks
+exited 0 (`target/pi-extension-tui-tests.log`,
+`target/pi-extension-browser-tests.log`), including plain-text malicious markup,
+source attribution and reports without a saved model request.
+
+The contract is documented in `docs/extension-ui.md`. This block adds saved
+reports refreshed after hooks return. Interactive forms, typed answers,
+cancellation/reconnect handling, persistent live widgets and actual frontend
+interaction checks for those remain open. The phase comparison still requires
+a working implementation source; its failed real-model pilot remains unchanged.
+The full goal remains active. The first full CI exited 1 because the new table
+and opt-in field lacked editor help (`target/pi-extension-foundation-ci.log`);
+all other workspace targets passed. Section/field help was added and the focused
+editable-field census exited 0 (`target/pi-extension-config-help-tests.log`).
+`cargo xtask compaction` exited 0 (`target/pi-extension-foundation-compaction.log`):
+23.31 MiB logical, 5.29 MiB distinct objects, 0.14 MiB dictionary-compressed,
+4.02 MiB complete on-disk store, preserving the existing measurement/schema.
+The corrected full `cargo xtask ci` exited 0 (`ci: ok`, 908.7 seconds;
+`target/pi-extension-foundation-final-ci.log`), including the editable-field
+census, native CLI/daemon/TUI scenarios, workspace libraries, compatibility
+checks and doctests. Both mandatory gates are complete for this block.

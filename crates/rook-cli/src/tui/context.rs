@@ -89,6 +89,11 @@ fn describe(usage: &ContextUsage) -> String {
         text.push_str(&coverage.describe());
     }
     let Some(saved) = &usage.last_request else {
+        let extensions = usage.extension_ui.describe();
+        if !extensions.is_empty() {
+            text.push('\n');
+            text.push_str(&extensions);
+        }
         text.push_str("\nNo recorded request attempt in this session.\n");
         return text;
     };
@@ -141,6 +146,11 @@ fn describe(usage: &ContextUsage) -> String {
         let _ = writeln!(text, "  {} sources omitted from this view", sources.omitted_sources);
     }
     text.push_str("Recorded sources and tool names may differ from the current workspace or server.\n");
+    let extensions = usage.extension_ui.describe();
+    if !extensions.is_empty() {
+        text.push('\n');
+        text.push_str(&extensions);
+    }
     text
 }
 
@@ -204,6 +214,18 @@ mod tests {
         assert!(pane.text.contains("Known subtotal: unknown (no priced receipts)"));
         assert!(pane.text.contains("Total cost is unknown"));
         assert!(pane.text.contains("Inherited receipts are historical, not new charges"));
+
+        let mut ui_usage = rook.context_usage(session, None).unwrap();
+        ui_usage.last_request = None;
+        ui_usage.extension_ui = serde_json::from_value(serde_json::json!({"reports":[{
+            "source":{"event":"prompt","ordinal":0,"digest":"a".repeat(64)},"event_seq":1,
+            "item":{"kind":"progress","id":"build","label":"Extension checking","done":1,"total":3}
+        }]}))
+        .unwrap();
+        let text = describe(&ui_usage);
+        assert!(text.contains("Extension checking · 1/3"));
+        assert!(text.contains("source aaaaaaaa · event #1"));
+        assert!(text.contains("current files and tests are not verified"));
 
         // Refresh follows the newest saved attempt, including an older note
         // format that predates MCP provenance.
