@@ -137,8 +137,16 @@ the TUI keeps that ID while rejoining the goal. The browser saves one bounded
 goal Stop in tab storage before sending and offers **Retry saved Stop** and
 **Discard saved Stop** after a reload. Explicit retry reads the current goal,
 checks the saved generation and uses the identified HTTP control, including
-when no live socket remains after a daemon restart. Ordinary-turn Stop has no durable turn identity,
-so it is not offered for retry after a reload. A resumed goal may report its
+when no live socket remains after a daemon restart. Ordinary Stop carries its
+execution turn ID; the browser retains that scoped frame in tab storage and
+retries it over a reconnected socket. The TUI keeps one pending Stop per workspace
+and session in a bounded private journal under `ROOK_HOME`, including across
+window restarts. Open the original session and use `/retry-stop` to repeat its
+exact caller ID and owner, or `/discard-stop` after inspection. Retry is allowed
+while the same observed turn or goal generation is still running. Unknown
+identity, another session, a successor turn or a replacement goal cannot receive
+the saved Stop. The daemon acknowledges an already applied request without
+stopping a later owner. A resumed goal may report its
 current paused status on a duplicate prompt; inspect the goal before choosing
 a new continuation.
 

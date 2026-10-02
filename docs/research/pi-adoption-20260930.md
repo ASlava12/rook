@@ -2396,3 +2396,59 @@ while its initial caller frame is retained: the new ordinary-turn signal does
 not acknowledge managed goal creation. HTML download interaction, phase routing,
 declarative extension UI and terminal experiments retain their scope. The queue
 row remains In progress; the full goal is active.
+
+## Explicit Stop retry while its saved owner is still running
+
+A fresh actual Windows TUI check exposed that `/retry-stop` refused every busy
+view after rejoining, including the same original turn whose Stop had never
+reached the daemon. The request was preserved, but the interface told the user
+to wait for the turn they were trying to stop. Explicit retry now accepts a busy
+view only when the observed session and ordinary turn or goal generation match
+the saved owner. Unknown identity, a different session/turn, a promoted goal and
+a replacement generation retain the request without sending it. Idle views can
+still obtain an already-applied acknowledgement. Existing Stop frames, durable
+daemon receipts and the bounded private sidecar format are unchanged.
+
+The focused TUI regression exited 0 for same-owner ordinary/goal retry while
+busy, unknown/mismatched identity refusal, exact frame reuse and successor
+cleanup. A live loopback fault proxy withheld an ordinary Stop before delivery:
+the source continued, the caller identity persisted before the write, and the
+original interface's busy refusal was reproduced. After closing that window,
+the corrected TUI loaded the same sidecar, rejoined the active turn and resent
+the exact original frame. The daemon acknowledged its first application and
+stopped the original turn; the acknowledgement cleared the sidecar. Actual
+frame/health/sidecar verification exited 0, and the TUI exited 0.
+
+A second live scenario delivered Stop but withheld all resulting view frames,
+including its acknowledgement. The daemon's captured acknowledgement recorded
+the first application, the source stopped, and the local sidecar stayed pending.
+After closing the window and restarting the owned daemon on a new port, a new
+TUI loaded the saved owner from disk and explicitly retried it. The daemon
+returned the same caller ID with `already_applied=true`; the sidecar cleared,
+no turn started, and the saved history boundary stayed unchanged. The verification
+and TUI both exited 0. Owned proxy/model/daemon helpers were stopped and their
+absence verified. Current-machine helpers are `target/stop-retry-proxy.mjs` and
+`target/stop-retry-setup.ps1`; `target/stop-live-root.txt` records the fresh root
+containing captured frames and before/after history. These are scripted-model
+and transport checks, not model-quality measurements.
+
+An initial held-reply fixture reached the normal 90-second stream idle limit;
+the fresh fixture explicitly set 600 seconds before starting the daemon. The
+proxy's first metadata read in each new window failed transiently; rejoining
+the same session succeeded without changing the retained Stop identity. An
+initial verification before successful rejoin exited 1 for a missing retry
+capture; the final capture/sidecar/health checks above exited 0. This evidence
+does not attribute those proxy metadata failures to a production daemon path.
+
+Final `cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0 (`ci: ok`, 627.4
+seconds), including the extended exact-owner TUI regression, existing real
+daemon ordinary/goal Stop and restart checks and doctests. Its log is
+`target/pi-active-stop-retry-ci.log`. Windows ran no Unix PTY tests; the actual
+Windows terminal/frame/health/sidecar evidence above supplies the live checks.
+No storage code, writer or format changed, so compaction was not rerun.
+
+Queue remains In progress. Next audit initial managed-goal prompt acknowledgement
+while leaving its active branch, then remaining queue lifecycle/frontend parity.
+HTML download interaction,
+phase routing, declarative extension UI and terminal experiments retain their
+original scope; the full goal remains active.

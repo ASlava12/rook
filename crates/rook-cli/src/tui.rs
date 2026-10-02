@@ -3185,12 +3185,23 @@ impl App {
     /// Reuse its session, turn and ID so a restarted daemon can acknowledge
     /// an already applied Stop without touching a later turn.
     fn retry_stop(&mut self) {
-        if self.chat.busy {
-            self.chat.push("err", "Wait for the current turn before retrying Stop.");
-        } else if let Some(attempt) = self.chat.stop_attempt.clone() {
+        if let Some(attempt) = self.chat.stop_attempt.clone() {
             if self.chat.session != Some(attempt.session) {
                 self.chat.push("err", "Return to the stopped session before retrying Stop.");
                 return;
+            }
+            if self.chat.busy {
+                let same_owner = match (attempt.generation.as_deref(), attempt.turn.as_deref()) {
+                    (Some(generation), None) => self.chat.goal_generation.as_deref() == Some(generation),
+                    (None, Some(turn)) => {
+                        self.chat.goal_generation.is_none() && self.chat.turn_id.as_deref() == Some(turn)
+                    }
+                    _ => false,
+                };
+                if !same_owner {
+                    self.chat.push("err", "Wait for the saved Stop's turn or goal identity before retrying; another owner must not receive it.");
+                    return;
+                }
             }
             let frame = attempt.frame();
             let sent = self.chat.remote.as_ref().is_some_and(|remote| remote.send(frame.clone()).is_ok());
@@ -6024,6 +6035,18 @@ mod tests {
         assert!(app.chat.log.iter().any(|(_, line)| line.contains("/retry-stop")));
         let (reconnected, mut repeated) = tokio::sync::mpsc::unbounded_channel();
         app.chat.remote = Some(reconnected);
+        app.chat.busy = true;
+        app.chat.turn_id = None;
+        app.retry_stop();
+        assert!(repeated.try_recv().is_err(), "a rejoin without identity cannot resend Stop");
+        app.chat.turn_id = Some("another-turn".into());
+        app.retry_stop();
+        assert!(repeated.try_recv().is_err(), "a different ordinary turn cannot receive the saved Stop");
+        app.chat.turn_id = Some("turn-one".into());
+        app.chat.goal_generation = Some("promoted-goal".into());
+        app.retry_stop();
+        assert!(repeated.try_recv().is_err(), "an ordinary Stop must not pause a promoted goal");
+        app.chat.goal_generation = None;
         app.retry_stop();
         assert_eq!(
             serde_json::to_value(repeated.try_recv().unwrap()).unwrap(),
@@ -6041,6 +6064,30 @@ mod tests {
         app.chat.stop_attempt = Some(saved);
         app.heard_from_daemon(super::ChatEvent::Turn { id: "turn-two".into(), prompt_id: None });
         assert!(app.chat.stop_attempt.is_none(), "a successor must not inherit the old Stop");
+
+        let saved_goal = super::StopAttempt {
+            session,
+            id: rook_store::format_session_id(rook_store::new_session_id()),
+            generation: Some("saved-generation".into()),
+            turn: None,
+        };
+        app.chat.stop_attempt = Some(saved_goal.clone());
+        app.chat.goal_generation = None;
+        app.retry_stop();
+        assert!(repeated.try_recv().is_err(), "unknown goal identity cannot settle a goal Stop");
+        app.chat.goal_generation = Some("replacement-generation".into());
+        app.retry_stop();
+        assert!(repeated.try_recv().is_err(), "a replacement generation cannot receive the old Stop");
+        app.chat.goal_generation = saved_goal.generation.clone();
+        app.retry_stop();
+        assert_eq!(
+            serde_json::to_value(repeated.try_recv().unwrap()).unwrap(),
+            serde_json::to_value(saved_goal.frame()).unwrap(),
+            "the same running generation can be stopped"
+        );
+        app.chat.session = Some(rook_store::new_session_id());
+        app.retry_stop();
+        assert!(repeated.try_recv().is_err(), "a different session cannot receive the old Stop");
     }
 
     #[test]

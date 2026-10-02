@@ -89,6 +89,10 @@ attempt per workspace and session across window restarts. Opening that session
 restores the ID for explicit retry and pins a retry hint in the TUI footer even
 after a live snapshot replaces the chat. The daemon remains the authority on
 whether the Stop was applied.
+Explicit retry can stop the same still-running ordinary turn or goal generation
+after rejoining it. A busy view with an unknown or different owner cannot send
+the saved request. An idle view can ask the daemon whether its scoped Stop had
+already committed, including after a daemon restart.
 
 An explicitly reviewed branch summary is a bounded Note in the target session.
 Its record names the source session and last source event. Replay treats the
