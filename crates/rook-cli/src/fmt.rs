@@ -237,6 +237,9 @@ impl Watching {
             return;
         }
         let written = match progress {
+            Progress::ExtensionUi(rook_proto::ChatEvent::Agent { text, .. }) if !text.is_empty() => {
+                format!("\n{text}\n")
+            }
             Progress::Delta(rook_llm::Delta::Effort(report)) => {
                 let report = report.describe();
                 if self.last_effort.as_ref() == Some(&report) {

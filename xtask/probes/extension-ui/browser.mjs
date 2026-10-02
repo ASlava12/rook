@@ -27,6 +27,9 @@ try{
  await click('document.querySelector("#chat-input")');await command('Input.insertText',{text:'BROWSER_EXTENSION'});
  await click('document.querySelector("#send")');
  await wait('document.querySelectorAll(".ask-form fieldset").length===4');
+ await wait('document.querySelector("#extension-widget").textContent.includes("waiting for an answer")');
+ assert.match(await evaluate('document.querySelector("#extension-widget").textContent'),/hook prompt #1.*source/s);
+ assert.match(await evaluate('document.querySelector("#extension-widget").textContent'),/current files and tests are not verified/);
  const id=await evaluate('window.extensionState.chat.session');fs.writeFileSync(path.join(root,'session-id'),id);
  const key=await evaluate('document.querySelector(".ask-form").dataset.inputKey');
  assert.match(await evaluate('document.querySelector(".ask-form").textContent'),/Extension hook prompt #1.*source/s);
@@ -42,10 +45,16 @@ try{
  assert.equal(await evaluate(`${field(0)}.querySelector('input[type="text"]').value`),'PRIVATE_BROWSER_INPUT');
  assert.equal(await evaluate(`${field(1)}.querySelector('input[value="remote"]').checked`),true);
  await capture('browser-form-reconnected');
+ await wait('document.querySelector("#extension-widget").textContent.includes("waiting for an answer")');
  await click(`${field(2)}.querySelector('input[value="No"]')`);
  await click(`${field(3)}.querySelector('input[type="text"]')`);await command('Input.insertText',{text:'7'});
  await click(`document.querySelector('.ask-form button[type="submit"]')`);
  await wait('!window.extensionState.chat.busy && !document.querySelector(".ask-form")');
+ await wait('document.querySelector("#extension-widget").textContent.includes("LIVE_RESULT")');
+ const widget=await evaluate('document.querySelector("#extension-widget").textContent');
+ assert(widget.includes('LIVE_PROGRESS') && widget.includes('3/4') && widget.includes('DISPLAY_RESULT_ONLY'));
+ assert(!widget.includes('FORM_DISPLAY_ONLY') && !widget.includes('PRIVATE_BROWSER_INPUT'));
+ await capture('browser-widget-finished');
  const answer=fs.readFileSync(path.join(root,'workspace/hook-answer.json'),'utf8');
  assert.deepEqual(JSON.parse(answer).form_answer.values,{name:'PRIVATE_BROWSER_INPUT',target:'remote',confirm:false,count:7});
  const context=await(await fetch(`${address}/api/sessions/${id}/context?workspace=${encodeURIComponent(path.join(root,'workspace'))}`)).json();
@@ -56,17 +65,21 @@ try{
  await capture('browser-form-context');
  await click(`document.querySelector('nav button[data-tab="chat"]')`);
  await wait('!!document.querySelector("#chat-input")');
+ await wait('document.querySelector("#extension-widget").textContent.includes("LIVE_RESULT")');
+ assert(!(await evaluate('document.querySelector("#stream").textContent')).includes('rook:extension-ui:v1'));
+ await capture('browser-widget-restored');
  await click('document.querySelector("#chat-input")');await command('Input.insertText',{text:'STOP_EXTENSION'});await click('document.querySelector("#send")');
  await wait('document.querySelectorAll(".ask-form fieldset").length===4');
  await click('document.querySelector("#stop")');
  await wait('!window.extensionState.chat.busy && !document.querySelector(".ask-form")');
+ await wait('document.querySelector("#extension-widget").textContent.includes("interrupted")');
  assert.equal(fs.readFileSync(path.join(root,'workspace/hook-answer.json'),'utf8'),answer);
  const stopped=await(await fetch(`${address}/api/sessions/${id}/context?workspace=${encodeURIComponent(path.join(root,'workspace'))}`)).json();
  assert(stopped.extension_ui.reports.some(r=>r.item.text.includes('interrupted')));
  await capture('browser-form-stopped');
  const requestFiles=fs.readdirSync(root).filter(name=>/^request-\d{3}\.json$/.test(name));
  assert(requestFiles.length<=48);
- for(const name of requestFiles){const file=path.join(root,name);assert(fs.statSync(file).size<=4*1024*1024);assert(!fs.readFileSync(file,'utf8').includes('PRIVATE_BROWSER_INPUT'));}
- fs.writeFileSync(path.join(root,'browser-proof.json'),JSON.stringify({session:id,reconnected_key:key,typed_answer:true,stop:true},null,2));
+ for(const name of requestFiles){const file=path.join(root,name);assert(fs.statSync(file).size<=4*1024*1024);const request=fs.readFileSync(file,'utf8');for(const marker of ['PRIVATE_BROWSER_INPUT','FORM_DISPLAY_ONLY','DISPLAY_RESULT_ONLY'])assert(!request.includes(marker));}
+ fs.writeFileSync(path.join(root,'browser-proof.json'),JSON.stringify({session:id,reconnected_key:key,typed_answer:true,stop:true,live_widgets:true,progress_result_clear:true,reopen:true},null,2));
  console.log('Browser forms: typed values, source, retained draft after socket reconnect, Context and Stop verified');
 }catch(error){await capture('browser-form-failed').catch(()=>{});throw error;}finally{socket.close();}

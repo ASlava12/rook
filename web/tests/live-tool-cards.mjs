@@ -110,6 +110,7 @@ test('resumed chat keeps human notes while auxiliary receipts and compaction usa
   const requests = [];
   globalThis.fetch = async path => {
     requests.push(path);
+    if (path.endsWith('/extension-ui')) return new Response(JSON.stringify({type:'agent', extension_ui:{session:'recorded-costs',through:9,state:{reports:[],omitted_updates:0,invalid_records:0}}}));
     return { ok: true, json: async () => ({ items: [
       { kind: 'user', body: 'visible prompt' },
       { kind: 'assistant', body: 'visible answer' },
@@ -123,7 +124,7 @@ test('resumed chat keeps human notes while auxiliary receipts and compaction usa
   };
   const { resume } = await import('../dist/chat.js');
   await resume('recorded-costs');
-  assert.deepEqual(requests, ['/api/sessions/recorded-costs/history']);
+  assert.deepEqual(requests, ['/api/sessions/recorded-costs/extension-ui', '/api/sessions/recorded-costs/history']);
   assert.match(stream.textContent, /visible prompt.*visible answer.*visible aside/);
   assert.doesNotMatch(stream.textContent, /rook:model-aux|rook:model-attempt|rook:model-delegation|internal child costs|internal data|internal attempt|compaction provider usage|summary provider usage/);
 });

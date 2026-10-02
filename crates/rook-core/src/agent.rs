@@ -297,6 +297,8 @@ const CHANGES_THINGS: &[&str] =
 /// the model stops asking for a tool, not when the tool has run. A front end
 /// with only the deltas shows every call as still working.
 pub enum Progress<'a> {
+    /// Attributed saved display state; never a model delta or permission.
+    ExtensionUi(&'a rook_proto::ChatEvent),
     /// The execution receipt that owns this top-level ordinary turn.
     Turn {
         id: &'a str,
@@ -827,6 +829,46 @@ impl<'a> AgentLoop<'a> {
     pub async fn run_with<F: FnMut(Progress<'_>)>(
         &mut self,
         prompt: &str,
+        on_progress: F,
+    ) -> Result<TurnOutcome> {
+        let rook = self.rook;
+        let session = self.session;
+        let mut changed = rook.extension_changed.subscribe();
+        let mut cursor = crate::extension_ui::live::Cursor::default();
+        let progress = std::sync::Mutex::new(on_progress);
+        let emit = |cursor: &mut crate::extension_ui::live::Cursor, initial: bool| match cursor
+            .advance(rook, session)
+            .and_then(|changed| if changed { cursor.event(rook, session).map(Some) } else { Ok(None) })
+        {
+            Ok(Some(event)) => {
+                if !initial || matches!(&event, rook_proto::ChatEvent::Agent { text, .. } if !text.is_empty())
+                {
+                    (progress.lock().unwrap_or_else(|e| e.into_inner()))(Progress::ExtensionUi(&event));
+                }
+            }
+            Ok(None) => {}
+            Err(why) => tracing::warn!("extension display refresh failed: {why}"),
+        };
+        emit(&mut cursor, true);
+        let mut relay = |p: Progress<'_>| (progress.lock().unwrap_or_else(|e| e.into_inner()))(p);
+        let mut running = Box::pin(self.run_with_inner(prompt, &mut relay));
+        loop {
+            tokio::select! {
+                outcome = &mut running => {
+                    emit(&mut cursor, false);
+                    return outcome;
+                }
+                notification = changed.changed() => {
+                    if notification.is_err() { return running.await; }
+                    emit(&mut cursor, false);
+                }
+            }
+        }
+    }
+
+    async fn run_with_inner<F: FnMut(Progress<'_>)>(
+        &mut self,
+        prompt: &str,
         mut on_progress: F,
     ) -> Result<TurnOutcome> {
         let original_provider = self.provider.clone();
@@ -893,7 +935,9 @@ impl<'a> AgentLoop<'a> {
         // flight. Only the turn a person asked for: a sub-agent's session ends
         // with its parent's, and two explanations of one death read as two.
         let _running = (self.depth == 0).then(|| crate::service::Running::marked(self.session));
-        let mut outcome = match self.run_inner(prompt, &mut on_progress).await {
+        // The nested model/tool future is large in debug builds. Keep it off
+        // the caller's future so a native delegated turn fits Windows' stack.
+        let mut outcome = match Box::pin(self.run_inner(prompt, &mut on_progress)).await {
             Ok(outcome) => outcome,
             Err(error) => {
                 journal.finish("failed", self.tool_ctx.jobs.as_deref())?;

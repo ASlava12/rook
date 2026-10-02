@@ -1,4 +1,4 @@
-# Native extension form probes
+# Native extension form and live report probes
 
 These Windows probes run the actual CLI/TUI, daemon, browser modules and hook
 process against a controlled HTTP model fixture. They verify interaction and
@@ -33,7 +33,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File xtask/probes/extension-ui/tu
 Use `-Mode shared` for the daemon TUI. The driver attaches only to the single
 owned CLI console, captures bounded actual screen text, answers text/select/
 confirm/integer fields and opens Context. It checks source/title/field visibility,
-typed producer values, saved status and absence of the private fixture value in
+typed producer values, persistent waiting/source panels, live progress/results,
+source-owned clear, saved status and absence of the private fixture value in
 model requests. It exits the TUI before reporting success. Retain the terminal's
 actual exit status as well as the driver's exit status. Do not rebuild the CLI
 while that executable is running on Windows.
@@ -41,7 +42,9 @@ while that executable is running on Windows.
 For the browser, run `node xtask/probes/extension-ui/browser.mjs`. It uses actual
 CDP mouse/text events, records screenshots, disconnects/reconnects the actual
 chat socket and checks draft retention, typed submission, saved Context and
-Stop while a second form is pending. A successful second prompt also proves the
+Stop while a second form is pending. It verifies waiting widgets before answering,
+their recovery after reconnect/navigation, progress/results/clear after completion
+and the saved interruption reaching an idle chat panel. A successful second prompt also proves the
 recovered admission cleared its uncertain delivery retry. Failure captures are
 retained; absence of `browser-proof.json` is not a pass.
 

@@ -10,6 +10,7 @@ import { pendingSubmission, submissionError, submitSteering } from './submission
 import { promptRetry } from './prompt-retry.js';
 import { stopRetry } from './stop-retry.js';
 import { admitDraftFiles, imageFile } from './draft-files.js';
+import { extensionPanel, readExtension } from './extension-ui.js';
 
 // Scrollback, not the record: the session holds every word of this and the
 // sessions tab reads it back, so a tab left open for a day need not keep an
@@ -27,6 +28,35 @@ let goalGeneration = null;
 let goalObserved = false;
 let turnId = null;
 let retainedDraftFiles = [];
+let extensionDisplay = null;
+let extensionLoad = 0;
+
+function extensionUi(ui) {
+ if (ui?.session !== state.chat.session || !Number.isSafeInteger(ui.through) || ui.through < 0) return;
+ if (extensionDisplay?.session === ui.session && extensionDisplay.through > ui.through) return;
+ const panel = $('#extension-widget');
+ try {
+  const content = extensionPanel(ui.state);
+  extensionDisplay = ui;
+  if (panel) { panel.replaceChildren(content); panel.hidden = content.hidden; }
+ } catch (error) {
+  extensionDisplay = null;
+  if (panel) { panel.replaceChildren(el('p', {class:'warn'}, `${error.message}; inspect Context`)); panel.hidden = false; }
+ }
+}
+
+function resetExtensions() {
+ extensionDisplay = null; extensionLoad++;
+ const panel = $('#extension-widget'); if (panel) { panel.replaceChildren(); panel.hidden = true; }
+}
+
+async function restoreExtensions(session) {
+ const load = ++extensionLoad;
+ try {
+  const event = await readExtension(session);
+  if (load === extensionLoad && session === state.chat.session) extensionUi(event.extension_ui);
+ } catch { /* Streaming state remains usable; the saved Context is available. */ }
+}
 
 const chatOut = () => $('#stream');
 
@@ -212,6 +242,7 @@ export function connect() {
         break;
       }
       case 'snapshot': {
+        if (state.chat.session !== e.session) resetExtensions();
         goalGeneration = null;
         goalObserved = false;
         turnId = null;
@@ -234,12 +265,13 @@ export function connect() {
         renderSettings(); renderPicker();
         break;
       }
-      case 'started': clearPendingCalls(); goalGeneration = null; goalObserved = false; turnId = null; retryPrompt.started(e.session); state.chat.session = e.session; state.chat.spent = null; state.chat.context = null; state.chat.modelRequest = null; renderSettings(); renderPicker(); break;
+      case 'started': if (state.chat.session !== e.session) resetExtensions(); clearPendingCalls(); goalGeneration = null; goalObserved = false; turnId = null; retryPrompt.started(e.session); state.chat.session = e.session; state.chat.spent = null; state.chat.context = null; state.chat.modelRequest = null; renderSettings(); renderPicker(); break;
       // Joined a turn this page did not start. Said out loud either way: a
       // page that quietly starts streaming looks like it is answering
       // something you did not ask, and one that says nothing after asking
       // cannot be told from a daemon that did not hear.
       case 'attached':
+        if (state.chat.session !== e.session) resetExtensions();
         if (state.chat.session !== e.session) clearPendingCalls();
         goalGeneration = null;
         goalObserved = false;
@@ -271,6 +303,7 @@ export function connect() {
       case 'reasoning': say('think', e.text); break;
       // A sub-agent working, which is not the model thinking.
       case 'agent':
+        if (e.extension_ui) { extensionUi(e.extension_ui); break; }
         if (e.admission) { retryPrompt.saved(e.admission); renderPromptRetry(); }
         if (e.receipt) receiptNotice(e.receipt, e.text); else say('agent', e.text);
         break;
@@ -629,11 +662,13 @@ function renderPicker() {
 export async function resume(session) {
   if (state.chat.busy) return;
   state.chat.session = session;
+  resetExtensions();
   const out = chatOut();
   if (out) out.replaceChildren();
   current = null;
   renderPicker();
   if (!session) return;
+  await restoreExtensions(session);
   try {
     const { items } = await api(`/api/sessions/${session}/history`);
     if (state.chat.session !== session || state.chat.busy) return;
@@ -643,7 +678,7 @@ export async function resume(session) {
       else if (e.kind === 'tool-call' || e.kind === 'tool-result') block('tool', savedToolCard(session, e));
       // `wrote` is JSON for `changes` to read, not prose for anybody. The same
       // question is `note_is_for_a_person` in rook-core, which the window asks.
-      else if (e.kind === 'note' && !['wrote', 'rook:model-aux:v1', 'rook:model-attempt:v1', 'rook:model-delegation:v1', 'compaction usage', 'branch summary usage'].includes(e.label)) say('stat', `${e.label}: ${e.body}`);
+      else if (e.kind === 'note' && !['wrote', 'rook:extension-ui:v1', 'rook:model-aux:v1', 'rook:model-attempt:v1', 'rook:model-delegation:v1', 'compaction usage', 'branch summary usage'].includes(e.label)) say('stat', `${e.label}: ${e.body}`);
     }
     say('stat', `— ${items.length} earlier entries; the next prompt continues this session —`);
   } catch (e) {
@@ -932,10 +967,11 @@ export async function renderChat() {
   $('#view').replaceChildren(el('div', { class: 'card' },
     el('div', { class: 'row', id: 'picker' }),
     el('div', { class: 'row', id: 'settings' }),
-    stream, history, branches, mcp, queue, outputSettings, historicalAttachments, pendingFiles,
+    stream, el('div', {id:'extension-widget', style:'max-height:20rem;overflow:auto', hidden:true}), history, branches, mcp, queue, outputSettings, historicalAttachments, pendingFiles,
     el('p', { id: 'branch-draft-note', class: 'sub', role: 'status' }, state.chat.branchNotice || ''), form, naming));
   renderPicker();
   renderSettings();
+  if (extensionDisplay?.session === state.chat.session) extensionUi(extensionDisplay);
   connect();
   if (state.chat.busy) working();
   else { renderPromptRetry(); renderStopRetry(); }

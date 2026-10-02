@@ -14,7 +14,7 @@ Source: Pi `ee602414c703be8da722ec56de7f2399e62581ac`; starting Rook:
 | Context provenance inspector | Complete | Request-specific sources and loaded skills, deferred MCP tools in CLI/API/TUI/browser; bounded notes, old-note compatibility, local/daemon and full CI passed |
 | Local HTML export | Complete | Inclusive saved ranges, bounded/escaped/attributed output, no overwrite/publication, CLI/REPL/local/shared TUI parity, actual browser download/rendering and full CI passed |
 | Opt-in phase-based model routing | In progress | Static policy, durable branch transition, historical receipts and compatible image/scoped-state handoffs implemented; native continuation/reopen/fork and automatic fallback verified; auxiliary/branch-summary receipts, physical-attempt lifecycle, saved rate estimates and frozen delegated aggregation implemented with explicit unknown facts; actual local/shared TUI and browser phase interactions verified; real comparison runner and failed target-availability pilot retained; finish completed same-task quality/cost/latency comparison without claiming unmeasured savings |
-| Declarative extension UI | In progress | Opt-in bounded source-owned hook status/progress/result/clear reports in saved Context; streaming typed forms, cancellation/reconnect and actual local/shared TUI/browser interactions verified with full CI/compaction passed; persistent live chat widget lifecycle/frontend parity remain |
+| Declarative extension UI | Complete | Opt-in bounded source-owned status/progress/forms/result/clear reports; persistent local/shared TUI and browser panels, legacy text fallback, cancellation/reconnect/reopen/fork restoration, before-copy count/byte bounds and actual frontend interactions verified; full CI/compaction passed |
 
 Regular-scrollback TUI and terminal image preview remain experiments from the
 review, to assess after the main capabilities. Existing MCP/OAuth, durable goals,
@@ -3935,3 +3935,77 @@ actual local/daemon/frontend parity.
 The real phase comparison still needs a working implementation source; terminal
 scrollback/image experiments remain separate open review work. The full goal
 stays active.
+
+## Persistent live extension reports completed
+
+Committed source-owned Notes now invalidate a coalesced revision shared across
+workspace views. Local TUI folds the saved prefix directly; socket observers
+read current snapshots through bounded delivery, independently of agent task
+state. Full display snapshots do not enter local TUI or daemon unbounded progress
+channels. A read-only session endpoint restores saved reports without running
+hooks or models. Optional `agent.extension_ui` preserves attributed plain text
+for older clients. Session/prefix ownership prevents foreign or older updates
+from replacing a selected view. The store schema is unchanged.
+
+TUI has a compact persistent panel above input/queue; browser renders bounded
+plain text outside replaceable transcript history. Reports identify their
+producer and saved event and disclaim current workspace/test verification.
+Whole-report omissions fit the smaller queue/replay budget before copying.
+Saved-record item counts are admitted before decoding; unreadable optional
+display records do not terminate the agent.
+
+Focused core streaming/form tests exited 0, including live reports while a human
+answer is pending. TUI tests exited 0 (75 tests), including the queued message
+remaining at the bottom with a widget visible. Browser focused tests exited 0
+(10 tests). The first native CLI/daemon form/restore scenario exited 0. Actual
+local TUI widget/form/progress/result/clear proof and terminal exit both exited 0
+in `target/extension-live-local-0fdc6c84708346c7aefce86be46e8d90`.
+
+The first browser proof exited 1: Stop saved interruption correctly but the
+live panel remained waiting. The revision notification raced task destruction;
+the active-task filter discarded that update. Socket display reads now follow
+committed revisions regardless of task state, without full snapshots queued in
+ordinary turn progress. The failure is retained in
+`target/pi-extension-live-browser-proof.log` and
+`target/extension-live-browser-6916ab9550684af3bba1fa9ea4ea5e75`.
+Both owned fixtures were stopped. The corrected native socket scenario exited 0
+(`target/pi-extension-live-native-final.log`), including an interrupted report
+received after cancellation. Reports are restored before reattaching the current
+input, including identified prompt retries, and delivered independently of
+evictable transcript replay.
+
+Actual corrected browser proof exited 0
+(`target/pi-extension-live-browser-final-proof.log`), in
+`target/extension-live-browser-3bb090164ac74c469cc6bb15d61199ed`: waiting/source
+visible before answering, same form draft and reports after reconnect,
+progress/result/clear after completion, saved restoration after leaving chat,
+and interrupted reports after Stop. PNGs were inspected. The actual shared TUI
+driver and terminal both exited 0 (`target/pi-extension-live-shared-proof.log`),
+in `target/extension-live-shared-90387d6107944f44a0a164540c03d749`.
+Both fresh fixtures were stopped with cleanup exit 0. Controlled HTTP fixtures
+verify interaction/data flow, not real model quality, savings or latency.
+
+The first native delegation check exited 101: debug Windows main stack overflow
+and a child request timeout (`target/pi-extension-live-delegated.log`). Boxing
+the large inner model/tool future reduces nested future stack usage without
+changing OS stack limits. Both native local/daemon delegated scenarios then
+exited 0 (`target/pi-extension-live-delegated-final.log`).
+The first full gate exited 1 in Clippy (nested display-send conditional and
+a test's default-field reassignment), recorded in
+`target/pi-extension-live-ci.log`; both were corrected before the final gate.
+
+The final mandatory `cargo xtask ci` exited 0 (`ci: ok`, 1031.4 seconds;
+`target/pi-extension-live-final-ci.log`), including native saved-prefix fork/API
+restoration, cancellation socket delivery, both delegation regressions, all
+workspace tests, actual CLI/daemon builds, formatting, Clippy and doctests.
+The separate full browser test suite exited 0 (45 tests;
+`target/pi-extension-live-all-browser-tests.log`); `cargo xtask ci` itself runs
+the Rust gate, so this browser result is recorded separately.
+`cargo xtask compaction` also exited 0
+(`target/pi-extension-live-compaction.log`): 23.31 MiB logical, 5.29 MiB distinct,
+0.14 MiB dictionary-compressed and 4.02 MiB on disk. Published measurements and
+storage formats remain unchanged. All fixture processes are stopped; the
+proof index is `target/pi-extension-live-proof.json`. Earlier failed checks
+remain retained and are not counted as passes. The declarative extension UI
+capability is Complete; eight of the nine main capabilities are now complete.
+Phase comparison and both terminal experiments remain open; the goal is active.

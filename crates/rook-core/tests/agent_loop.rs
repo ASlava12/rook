@@ -2378,13 +2378,21 @@ async fn extension_stream_forms_use_live_input_and_keep_typed_values_out_of_mode
     let asker = Arc::new(ChannelAsker::new(tx, std::time::Duration::from_secs(30), Default::default()));
     let provider = ScriptedProvider::new(vec![reply("done")]);
     let seen = provider.share();
+    let live_ui = Arc::new(std::sync::Mutex::new(None));
     let run = tokio::spawn({
         let rook = rook.clone();
         let asker = asker.clone();
+        let live_ui = live_ui.clone();
         async move {
             let mut agent = AgentLoop::new(&rook, Arc::new(provider), session);
             agent.ask_via(asker);
-            agent.run("Use the extension form").await
+            agent
+                .run_with("Use the extension form", |progress| {
+                    if let rook_core::agent::Progress::ExtensionUi(event) = progress {
+                        *live_ui.lock().unwrap() = Some(event.clone());
+                    }
+                })
+                .await
         }
     });
     let request = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv()).await.unwrap().unwrap();
@@ -2401,6 +2409,13 @@ async fn extension_stream_forms_use_live_input_and_keep_typed_values_out_of_mode
     // The command's five-second patience must not run while a person answers.
     tokio::time::sleep(std::time::Duration::from_secs(6)).await;
     assert_eq!(asker.current().len(), 1);
+    let current = live_ui.lock().unwrap().clone().expect("reports must arrive before the hook finishes");
+    let rook_proto::ChatEvent::Agent { extension_ui: Some(ui), text, .. } = current else {
+        panic!("missing live reports")
+    };
+    assert_eq!(ui.session, rook_store::format_session_id(session));
+    assert!(text.contains("waiting for an answer") && text.contains("FORM_DISPLAY_ONLY"));
+    assert!(text.contains("hook prompt #1"));
     asker.answer(
         &request.id,
         vec![vec!["PRIVATE_TYPED_VALUE".into()], vec!["remote".into()], vec!["No".into()], vec!["7".into()]],

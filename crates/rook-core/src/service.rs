@@ -37,6 +37,7 @@ pub struct Rook {
     /// project. Binding the two together is what made a second project a second
     /// process, and a second process the one that could not open the store.
     pub store: Arc<Store>,
+    pub(crate) extension_changed: Arc<tokio::sync::watch::Sender<u64>>,
     pub config: Config,
     /// Detected on first use, not on open. Probing sixteen toolchains costs
     /// about a third of a second warm and over a second cold — more than the
@@ -199,6 +200,7 @@ impl Rook {
         skill_errors.extend(plugin_errors);
         Ok(Self {
             store: Arc::new(store),
+            extension_changed: Arc::new(tokio::sync::watch::channel(0).0),
             config,
             env: OnceLock::new(),
             skills: skills.into(),
@@ -228,6 +230,7 @@ impl Rook {
         let root = store.root().to_path_buf();
         Self {
             store: Arc::new(store),
+            extension_changed: Arc::new(tokio::sync::watch::channel(0).0),
             config,
             env: OnceLock::from(env),
             skills: skills.into(),
@@ -255,6 +258,7 @@ impl Rook {
         skill_errors.extend(plugin_errors);
         Self {
             store: self.store.clone(),
+            extension_changed: self.extension_changed.clone(),
             config: self.config.clone(),
             env: match self.env.get() {
                 Some(env) => OnceLock::from(env.clone()),
@@ -1579,6 +1583,9 @@ impl Rook {
         if kind == EventKind::Compaction {
             self.set_mark(COMPACTED, session, seq)?;
         }
+        if kind == EventKind::Note && label == crate::extension_ui::LABEL {
+            self.extension_changed.send_modify(|revision| *revision = revision.wrapping_add(1));
+        }
         Ok(seq)
     }
 
@@ -2598,6 +2605,7 @@ mod tests {
     fn unprobed(dir: &Path) -> Rook {
         let (skills, _) = SkillIndex::discover(&[]);
         Rook {
+            extension_changed: Arc::new(tokio::sync::watch::channel(0).0),
             store: Store::open(dir).unwrap().into(),
             config: Config::default(),
             env: OnceLock::new(),

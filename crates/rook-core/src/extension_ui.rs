@@ -6,6 +6,7 @@ use std::io::Write;
 use serde::{Deserialize, Serialize};
 
 pub(crate) mod forms;
+pub(crate) mod live;
 
 pub(crate) const LABEL: &str = "rook:extension-ui:v1";
 
@@ -254,9 +255,18 @@ impl State {
             return Ok(());
         }
         let raw = store.get_range(&event.record.body, 0, bytes as usize)?;
-        let batch = serde_json::from_slice::<Batch>(&raw).ok().filter(|b| {
-            b.source.valid() && b.items.len() <= settings.max_entries && b.items.iter().all(Item::valid)
-        });
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Saved<'a> {
+            source: Source,
+            #[serde(borrow)]
+            items: &'a serde_json::value::RawValue,
+        }
+        let batch =
+            serde_json::from_slice::<Saved<'_>>(&raw).ok().filter(|b| b.source.valid()).and_then(|b| {
+                let bounded = Settings { max_update_bytes: settings.note_bytes(), ..settings.clone() };
+                Batch::parse(b.items.get(), b.source, &bounded).ok()
+            });
         let Some(batch) = batch else {
             self.invalid_records = self.invalid_records.saturating_add(1);
             return Ok(());

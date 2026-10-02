@@ -161,9 +161,36 @@ request. Exact durable prompt admissions recovered after disconnect also clear
 the saved prompt retry; unrelated completions and receipts do not. Existing
 protocol shapes and storage formats remain unchanged.
 
-## Remaining adoption work
+## Live chat reports
 
-Persistent live status/progress/result widgets in the chat remain unfinished.
-Streaming reports are currently inspected by refreshing Context. This contract
-does not complete the declarative extension UI capability; live widgets must
-preserve source ownership, text fallback and local/daemon/frontend parity.
+Committed updates refresh a persistent panel in local/shared TUI and browser
+chat while the model or a form is waiting. Status, progress, result and clear
+keep the same producer/source ownership as saved Context. Panels remain after
+the turn ends and restore from the selected conversation's saved prefix on
+reopen or branch navigation. They explicitly describe historical extension
+reports; they do not verify current files or tests. The compact TUI shows up to
+two recent reports and links result bodies to `/context`; the browser shows
+bounded plain text, including result bodies. On small terminals, the panel
+yields space to current input and the next queued message at the bottom.
+
+Notifications retain only a coalesced revision, without producer data. Each
+observer folds its own saved session prefix. Local TUI reads that state directly
+instead of adding full snapshots to its turn-event queue. Daemon observers use
+their bounded delivery queue and restore display from saved Notes on attachment,
+independently of evictable transcript replay. Live display
+can omit whole reports to fit the smaller queue/replay budget; omissions are
+explicit and full admitted saved reports remain available in Context.
+
+The existing `agent` chat event has an optional `extension_ui` object with
+`session`, `through` (exclusive saved prefix), and `state`. Older clients still
+receive attributed `text`. New clients apply structured snapshots only to the
+observed session and ignore older prefixes. Replacing transcript history does
+not erase the panel. A cancelled producer's saved interruption can refresh an
+idle observer even after the agent task was aborted.
+
+`GET /api/sessions/{id}/extension-ui` restores the same snapshot without
+executing hooks or model requests. CLI local/daemon Source uses this read for
+restoration; browser response bytes are admitted while arriving before JSON
+decoding. Receiver limits are 128 reports and 1 MiB of encoded display state.
+Malformed optional reports are refused and shown as omissions/invalid records;
+display-read failure does not stop the agent. No store schema changed.

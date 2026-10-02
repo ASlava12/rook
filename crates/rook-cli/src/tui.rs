@@ -739,6 +739,8 @@ impl StopAttempt {
 
 #[derive(Default)]
 struct Chat {
+    extensions: rook_core::extension_ui::State,
+    extension_prefix: Option<(u128, u64)>,
     last_effort: Option<String>,
     input: Typing,
     /// Prompts already sent, oldest first, and where in them the up-arrow has
@@ -1059,6 +1061,24 @@ impl Asking {
 }
 
 impl Chat {
+    fn extension_ui(&mut self, ui: rook_proto::ExtensionUi) {
+        let Some(session) = rook_store::parse_session_id(&ui.session) else { return };
+        if self.session != Some(session)
+            || self.extension_prefix.is_some_and(|(id, end)| id == session && end > ui.through)
+        {
+            return;
+        }
+        match rook_core::extension_ui::State::from_display(&ui.state) {
+            Ok(state) => {
+                self.extensions = state;
+                self.extension_prefix = Some((session, ui.through));
+            }
+            Err(error) => {
+                self.extensions = Default::default();
+                self.push("err", &format!("Extension display unavailable: {error}; inspect /context"));
+            }
+        }
+    }
     fn effort_report(&mut self, report: String) {
         if self.last_effort.as_ref() != Some(&report) {
             self.push("stat", &format!("  {report}"));
@@ -1435,6 +1455,7 @@ struct App {
     shared: crate::chat::Session,
     history: history::History,
     context: context::ContextPane,
+    extension_changes: Option<tokio::sync::watch::Receiver<u64>>,
     /// Source boundary of the model draft currently offered for review.
     summary_boundary: Option<(u128, u128, u64)>,
     turn: Option<tokio::task::JoinHandle<()>>,
@@ -1528,6 +1549,7 @@ struct App {
 
 impl App {
     fn new(source: crate::source::Source, runtime: tokio::runtime::Runtime, yes: bool) -> Self {
+        let extension_changes = source.here().map(|r| r.extension_ui_changes());
         let (to_loop, events) = mpsc::unbounded_channel();
         let (requests, mut incoming) = mpsc::unbounded_channel::<ApprovalRequest>();
 
@@ -1584,6 +1606,7 @@ impl App {
             ),
         };
         let mut app = Self {
+            extension_changes,
             bindings,
             mcp: mcp_controls,
             queue,
@@ -2080,10 +2103,23 @@ impl App {
     }
 
     fn drain_turn_events(&mut self) {
+        if self.extension_changes.as_mut().is_some_and(|r| {
+            if r.has_changed().unwrap_or(false) {
+                r.borrow_and_update();
+                true
+            } else {
+                false
+            }
+        }) {
+            self.refresh_extension_ui();
+        }
         while let Ok(event) = self.events.try_recv() {
             self.chat.heard = Some(std::time::Instant::now());
             match event {
-                TurnEvent::Started(id) => self.chat.session = Some(id),
+                TurnEvent::Started(id) => {
+                    self.chat.session = Some(id);
+                    self.refresh_extension_ui();
+                }
                 TurnEvent::Effort(report) => self.chat.effort_report(report),
                 TurnEvent::Text(text) => self.chat.push("text", &text),
                 TurnEvent::Reasoning(text) => self.chat.push("think", &text),
@@ -2276,7 +2312,11 @@ impl App {
             ChatEvent::Reasoning { text } => self.chat.push("think", &text),
             // The same kind a turn run here uses, so a sub-agent's work reads
             // the same whichever side of the socket it happens on.
-            ChatEvent::Agent { text, receipt, admission } => {
+            ChatEvent::Agent { text, receipt, admission, extension_ui } => {
+                if let Some(ui) = extension_ui {
+                    self.chat.extension_ui(ui);
+                    return;
+                }
                 if let Some(admission) = admission {
                     self.chat.prompt_retry.saved(&admission);
                 }
@@ -2438,12 +2478,22 @@ impl App {
             crate::notify::attention();
         }
         self.chat.ended();
+        self.refresh_extension_ui();
         if self.source.here().is_none() {
             for text in self.shared.interjections.take() {
                 self.chat.push("err", &format!("not sent (the turn ended before accepting it): {text}"));
             }
         }
         self.reload();
+    }
+
+    fn refresh_extension_ui(&mut self) {
+        let Some(session) = self.chat.session else { return };
+        if let Ok(ChatEvent::Agent { extension_ui: Some(ui), .. }) =
+            self.source.extension_ui_snapshot(session, self.source.workspace())
+        {
+            self.chat.extension_ui(ui);
+        }
     }
 
     fn flush_interjections(&mut self) {
@@ -3646,6 +3696,9 @@ impl App {
     /// for the reason the scrollback is: the store holds all of it and the
     /// Sessions tab reads it back.
     fn recall_conversation(&mut self, session: u128, next_seq: Option<u64>) {
+        self.chat.extensions = Default::default();
+        self.chat.extension_prefix = None;
+        self.refresh_extension_ui();
         const RECALLED: usize = 60;
         self.chat.clear_log();
         self.chat.scroll = 0;
@@ -4050,6 +4103,9 @@ impl App {
             let result = agent
                 .run_with(&prompt, |progress| {
                     let event = match progress {
+                        // Coalesced committed-note notifications drive the
+                        // local widget; full snapshots never queue unbounded.
+                        Progress::ExtensionUi(_) => return,
                         Progress::Delta(Delta::Text(text)) => TurnEvent::Text(text.clone()),
                         Progress::Delta(Delta::Reasoning(text)) => TurnEvent::Reasoning(text.clone()),
                         Progress::Delta(Delta::ToolCall(call)) => TurnEvent::Tool {
@@ -4530,7 +4586,60 @@ impl App {
         } else {
             0
         };
-        let [log, ask, input, preview] = chat_layout(area, blocking, typed, pinned);
+        let mut widgets = Vec::new();
+        if self.chat.extension_prefix.is_some_and(|(id, _)| Some(id) == self.chat.session) {
+            let mut reports: Vec<_> = self.chat.extensions.reports.iter().collect();
+            reports.sort_by_key(|r| std::cmp::Reverse(r.event_seq));
+            let warning =
+                self.chat.extensions.omitted_updates > 0 || self.chat.extensions.invalid_records > 0;
+            for report in reports.into_iter().take(if warning { 1 } else { 2 }) {
+                widgets.push(Line::from(format!(
+                    "hook {} #{} · source {} · event #{}",
+                    report.source.event.as_str(),
+                    report.source.ordinal.saturating_add(1),
+                    report.source.digest.get(..8).unwrap_or("unknown"),
+                    report.event_seq
+                )));
+                widgets.push(Line::from(match &report.item {
+                    rook_core::extension_ui::Item::Status { id, text } => format!("{id}: {text}"),
+                    rook_core::extension_ui::Item::Progress { id, label, done, total } => {
+                        format!("{id}: {label} · {done}/{total}")
+                    }
+                    rook_core::extension_ui::Item::Result { id, title, .. } => {
+                        format!("{id}: {title} · /context for body")
+                    }
+                    rook_core::extension_ui::Item::Clear { .. } => String::new(),
+                }));
+            }
+            if warning {
+                widgets.push(Line::from(format!(
+                    "{} omitted · {} invalid; inspect /context",
+                    self.chat.extensions.omitted_updates, self.chat.extensions.invalid_records
+                )));
+            }
+        }
+        let widget_height = if widgets.is_empty() {
+            0
+        } else {
+            (widgets.len() as u16 + 3).min(7).min(area.height.saturating_sub(typed + blocking + pinned + 3))
+        };
+        let [log, ask, input, preview] = chat_layout(
+            Rect { height: area.height.saturating_sub(widget_height), ..area },
+            blocking,
+            typed,
+            pinned,
+        );
+        // Reserve widget space above the composer/queue rather than displacing
+        // the next queued message from the terminal's lower edge.
+        let shift = |rect: Rect| Rect { y: rect.y.saturating_add(widget_height), ..rect };
+        let widget_area = Rect { y: log.bottom(), height: widget_height, ..log };
+        let ask = shift(ask);
+        let input = shift(input);
+        let preview = shift(preview);
+        if widget_height > 0 {
+            widgets.insert(0, Line::from("Saved reports; current files/tests not verified · /context"));
+            f.render_widget(Paragraph::new(widgets).block(bordered(" Extension reports ")), widget_area);
+        }
 
         let mut lines: Vec<Line> = Vec::new();
         let selected = self.chat.selected_tool().map(|(line, ..)| line);
@@ -6110,6 +6219,7 @@ mod tests {
             text: "Goal request saved.".into(),
             receipt: None,
             admission: Some(rook_proto::PromptAdmission { session: session_text.clone(), id: id.into() }),
+            extension_ui: None,
         };
         app.heard_from_daemon(event("foreign"));
         assert!(app.chat.prompt_retry.pending());
@@ -6769,6 +6879,12 @@ and the next line"
         let draft = "KEEP_DRAFT Поправка 🙂 final\n\nWITHDRAWN_MESSAGE";
         app.chat.input.set(draft);
         app.shared.interjections.say("NEXT_MESSAGE");
+        app.chat.session = Some(42);
+        app.chat.extension_ui(rook_proto::ExtensionUi {
+            session: rook_store::format_session_id(42),
+            through: 7,
+            state: serde_json::json!({"reports":[{"source":{"event":"prompt","ordinal":0,"digest":"a".repeat(64)},"event_seq":6,"item":{"kind":"status","id":"build","text":"LIVE_REPORT"}}],"omitted_updates":0,"invalid_records":0}),
+        });
         for width in [40, 80] {
             let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 24)).unwrap();
             app.chat.busy = false;
@@ -6797,12 +6913,36 @@ and the next line"
                 "{rows:?}"
             );
             assert!(rows.iter().any(|row| row.contains("WITHDRAWN_MESSAGE")), "{rows:?}");
+            assert!(rows.iter().any(|row| row.contains("LIVE_REPORT")), "{rows:?}");
+            assert!(rows.iter().any(|row| row.contains("hook prompt #1")), "{rows:?}");
             assert!(
                 rows[22].contains("NEXT_MESSAGE"),
                 "the queued message must stay at the bottom: {rows:?}"
             );
             assert_eq!(app.chat.input.as_str(), draft);
         }
+    }
+
+    #[test]
+    fn extension_widgets_ignore_foreign_and_older_prefixes_and_clear_without_changing_the_draft() {
+        let mut chat = super::Chat { session: Some(42), ..Default::default() };
+        chat.input.set("UNSENT");
+        let event = |session, through, text: &str| rook_proto::ExtensionUi {
+            session: rook_store::format_session_id(session),
+            through,
+            state: serde_json::json!({"reports":[{"source":{"event":"prompt","ordinal":0,"digest":"a".repeat(64)},"event_seq":through-1,"item":{"kind":"status","id":"build","text":text}}],"omitted_updates":0,"invalid_records":0}),
+        };
+        chat.extension_ui(event(42, 8, "LATEST"));
+        chat.extension_ui(event(42, 7, "OLDER"));
+        chat.extension_ui(event(43, 9, "FOREIGN"));
+        assert!(chat.extensions.describe().contains("LATEST"));
+        chat.extension_ui(rook_proto::ExtensionUi {
+            session: rook_store::format_session_id(42),
+            through: 9,
+            state: serde_json::json!({"reports":[],"omitted_updates":0,"invalid_records":0}),
+        });
+        assert!(chat.extensions.reports.is_empty());
+        assert_eq!(chat.input.as_str(), "UNSENT");
     }
 
     fn asking_to_run(command: &str) -> ApprovalRequest {

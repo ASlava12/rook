@@ -14,6 +14,9 @@ function WaitFrame([string]$Name,[string]$Pattern) {
 Console -Text ($Mode.ToUpperInvariant()+'_EXTENSION') -Key enter
 $taskFirst=WaitFrame ($Mode+'-form-1') 'question 1 of 4'
 if(!$taskFirst.Contains('Typed extension setup') -or !$taskFirst.Contains('Extension hook prompt #1') -or !$taskFirst.Contains('Name')){throw 'Source, title or first field was clipped'}
+$null=WaitFrame ($Mode+'-widget-waiting') 'Extension reports'
+$taskWidgets=WaitFrame ($Mode+'-widget-source') 'hook prompt #1'
+if(!$taskWidgets.Contains('waiting for an answer') -or !$taskWidgets.Contains('not verified')){throw 'Live waiting widget or historical attribution was missing'}
 Console -Text PRIVATE_TUI_INPUT -Key enter
 $null=WaitFrame ($Mode+'-form-2') 'Target \(choose listed options\)'
 Console -Text 2 -Key enter
@@ -22,6 +25,8 @@ Console -Text 2 -Key enter
 $null=WaitFrame ($Mode+'-form-4') 'Count \(1\.\.=10\)'
 Console -Text 7 -Key enter
 $null=WaitFrame ($Mode+'-form-finished') 'IMPLEMENTATION_SEED'
+$taskWidgets=WaitFrame ($Mode+'-widget-finished') 'LIVE_PROGRESS'
+if(!$taskWidgets.Contains('3/4') -or !$taskWidgets.Contains('LIVE_RESULT') -or $taskWidgets.Contains('FORM_DISPLAY_ONLY')){throw 'Live progress, result or source-owned clear failed'}
 $taskAnswerPath=Join-Path $taskRoot 'workspace/hook-answer.json'
 if((Get-Item $taskAnswerPath).Length-gt8192){throw 'Fixture answer exceeds admitted limit'}
 $taskAnswer=Get-Content -Raw -Encoding utf8 $taskAnswerPath | ConvertFrom-Json
@@ -37,7 +42,8 @@ for($taskPage=0;$taskPage-lt24;$taskPage++){
 if(!$taskFound){throw 'Saved form status missing from actual Context pane'}
 foreach($taskRequest in Get-ChildItem -LiteralPath $taskRoot -Filter 'request-*.json'){
  if($taskRequest.Length-gt4194304){throw 'Fixture request exceeds its admitted limit'}
- if((Get-Content -Raw -Encoding utf8 $taskRequest.FullName).Contains('PRIVATE_TUI_INPUT')){throw 'Form values leaked to model request'}
+ $taskBody=Get-Content -Raw -Encoding utf8 $taskRequest.FullName
+ foreach($taskMarker in @('PRIVATE_TUI_INPUT','FORM_DISPLAY_ONLY','DISPLAY_RESULT_ONLY')){if($taskBody.Contains($taskMarker)){throw 'Form values or display reports leaked to model request'}}
 }
 Console -Key escape
 if($Mode-eq'local'){Console -Text /quit -Key enter}else{Console -Key escape}
@@ -46,5 +52,5 @@ while(@(Get-CimInstance Win32_Process | Where-Object {$_.Name-eq'rook.exe' -and 
  if((Get-Date)-gt$taskDeadline){throw 'Owned TUI did not exit'}
  Start-Sleep -Milliseconds 100
 }
-[IO.File]::WriteAllText((Join-Path $taskRoot ($Mode+'-proof.json')),(@{mode=$Mode;typed_answer=$true;source_visible=$true;context=$true;model_exclusion=$true}|ConvertTo-Json))
+[IO.File]::WriteAllText((Join-Path $taskRoot ($Mode+'-proof.json')),(@{mode=$Mode;typed_answer=$true;source_visible=$true;context=$true;model_exclusion=$true;live_widgets=$true;progress_result_clear=$true}|ConvertTo-Json))
 Write-Output ('Actual '+$Mode+' TUI forms and typed answers verified')

@@ -421,6 +421,10 @@ async fn prompt(
     let result = agent
         .run_with(&text, |progress| {
             let update = match progress {
+                Progress::ExtensionUi(rook_proto::ChatEvent::Agent { text, .. }) if !text.is_empty() => {
+                    protocol::agent_thought_chunk(&session_id, &format!("{text}\n"), &part(1))
+                }
+                Progress::ExtensionUi(_) => return,
                 Progress::Delta(Delta::Effort(report)) => protocol::agent_thought_chunk(
                     &session_id,
                     &format!("[request: {}]\n", report.describe()),

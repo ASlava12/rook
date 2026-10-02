@@ -186,6 +186,23 @@ fn extension_ui_reports_survive_native_local_and_daemon_reopen_and_saved_prefix_
                 .is_empty()
         );
         assert_eq!(rook.json(&["session", "context", after])["extension_ui"], captured);
+        if let Some(daemon) = &daemon {
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            for (id, expected) in [
+                (before, json!({"reports":[],"omitted_updates":0,"invalid_records":0})),
+                (after, captured.clone()),
+            ] {
+                let display = runtime.block_on(get(
+                    &reqwest::Client::new(),
+                    &format!("{}/api/sessions/{id}/extension-ui", daemon.address),
+                ));
+                assert_eq!(display["extension_ui"]["session"], id);
+                assert_eq!(
+                    display["extension_ui"]["state"], expected,
+                    "live restoration must use the selected branch prefix"
+                );
+            }
+        }
         drop(daemon.take());
         daemon = shared.then(|| Daemon::start(&rook));
         assert_eq!(rook.json(&["session", "context", session])["extension_ui"], captured);
@@ -195,6 +212,17 @@ fn extension_ui_reports_survive_native_local_and_daemon_reopen_and_saved_prefix_
         assert_eq!(updated["extension_ui"]["reports"].as_array().unwrap().len(), 3);
         assert!(updated["extension_ui"]["reports"][0]["event_seq"].as_u64().unwrap() > seq);
         assert_eq!(rook.json(&["session", "context", after])["extension_ui"], captured);
+        if let Some(daemon) = &daemon {
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let display = runtime.block_on(get(
+                &reqwest::Client::new(),
+                &format!("{}/api/sessions/{after}/extension-ui", daemon.address),
+            ));
+            assert_eq!(
+                display["extension_ui"]["state"], captured,
+                "parent updates after daemon restart cannot change the saved branch display"
+            );
+        }
         drop(daemon);
     }
 }
@@ -286,6 +314,31 @@ fn extension_forms_use_native_unavailable_fallback_and_daemon_answer_reconnect_a
         );
         let waiting = rook.json(&["session", "context", &id])["extension_ui"].clone();
         assert!(waiting.to_string().contains("waiting for an answer"));
+        let display = runtime.block_on(get(
+            &reqwest::Client::new(),
+            &format!("{}/api/sessions/{id}/extension-ui", daemon.address),
+        ));
+        assert_eq!(display["extension_ui"]["session"], id);
+        assert_eq!(display["extension_ui"]["state"], waiting);
+        runtime.block_on(async {
+            let (mut observer, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+            observer
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    json!({"type":"attach","session":id}).to_string().into(),
+                ))
+                .await
+                .unwrap();
+            for _ in 0..8 {
+                let event = socket_event(&mut observer, "agent").await;
+                if event["extension_ui"].is_object() {
+                    assert_eq!(event["extension_ui"]["session"], id);
+                    assert!(event["extension_ui"]["state"].to_string().contains("waiting for an answer"));
+                    observer.close(None).await.unwrap();
+                    return;
+                }
+            }
+            panic!("attached observer did not recover the live widget");
+        });
         assert!(model.requests.try_recv().is_err());
         if case == "reconnect" {
             runtime.block_on(socket.close(None)).unwrap();
@@ -316,6 +369,14 @@ fn extension_forms_use_native_unavailable_fallback_and_daemon_answer_reconnect_a
                     .unwrap();
                 socket_event(&mut socket, "stop_applied").await;
                 socket_event(&mut socket, "cancelled").await;
+                for _ in 0..8 {
+                    let event = socket_event(&mut socket, "agent").await;
+                    if event["extension_ui"]["state"].to_string().contains("interrupted") {
+                        assert_eq!(event["extension_ui"]["session"], id);
+                        return;
+                    }
+                }
+                panic!("cancellation did not refresh the observed widget");
             });
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
             while !rook.json(&["session", "context", &id])["extension_ui"].to_string().contains("interrupted")

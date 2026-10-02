@@ -18,8 +18,14 @@ Cancellation ends the owned process group and removes pending input. Channel
 epochs prevent stale answers binding after restart. Browser reconnect preserves
 disabled drafts until the exact current declaration is recovered, and exact
 durable prompt admissions settle retries without resending. The existing store
-schema and input protocol shapes are unchanged. Persistent chat widgets remain
-unfinished; see [the report/form contract](extension-ui.md).
+schema and input protocol shapes are unchanged. Committed report revisions are
+coalesced without retaining producer data; each view folds its own saved prefix.
+Persistent chat panels restore through a read-only snapshot API, preserve source
+attribution, and fit the bounded chat delivery/replay budget. The optional
+`agent.extension_ui` field preserves attributed text for older clients. Local
+TUI reads revisions directly instead of queuing full display snapshots; idle
+daemon observers also receive producer interruption after task cancellation.
+See [the report/form contract](extension-ui.md).
 
 ## The shape
 

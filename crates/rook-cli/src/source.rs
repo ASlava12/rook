@@ -260,6 +260,21 @@ impl Source {
         }
     }
 
+    pub fn extension_ui_snapshot(
+        &self,
+        session: u128,
+        workspace: &std::path::Path,
+    ) -> Result<rook_proto::ChatEvent> {
+        match self {
+            Self::Local(rook) => Ok(rook.extension_ui_snapshot(session)?),
+            Self::Daemon(d) => d.get_bounded(&format!(
+                "/api/sessions/{}/extension-ui?workspace={}",
+                rook_store::format_session_id(session),
+                here(workspace)
+            )),
+        }
+    }
+
     pub fn changes(&self, session: u128, with_diff: bool) -> Result<rook_core::changes::Changes> {
         match self {
             Self::Local(rook) => Ok(rook.changes(session, with_diff)?),

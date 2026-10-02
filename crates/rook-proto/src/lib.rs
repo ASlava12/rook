@@ -24,6 +24,14 @@ pub mod queue;
 pub mod schedule;
 pub mod work;
 
+/// Saved extension display state for one conversation, never model context.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ExtensionUi {
+    pub session: String,
+    pub through: u64,
+    pub state: serde_json::Value,
+}
+
 /// Bumped when the HTTP surface changes incompatibly. Clients send it in
 /// `X-Rook-Api`; the daemon refuses a mismatch rather than misbehaving quietly.
 pub const API_VERSION: u32 = 1;
@@ -298,6 +306,9 @@ pub enum ChatEvent {
         /// caller can stop retaining the prompt without waiting for Done.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         admission: Option<PromptAdmission>,
+        /// Additive: older clients render `text` as the attributed fallback.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        extension_ui: Option<ExtensionUi>,
     },
     Tool {
         name: String,

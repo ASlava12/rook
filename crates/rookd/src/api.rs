@@ -51,6 +51,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/sessions/{id}/history/{seq}/quote", get(history_quote))
         .route("/api/sessions/{id}/changes", get(changes))
         .route("/api/sessions/{id}/context", get(context))
+        .route("/api/sessions/{id}/extension-ui", get(extension_ui))
         .route("/api/sessions/{id}/goal", post(set_goal))
         .route("/api/sessions/{id}/rewind", post(rewind))
         .route("/api/sessions/{id}/move", post(move_session))
@@ -562,6 +563,16 @@ async fn context(
     let engine = s.engine_for(q.workspace.as_deref()).await.map_err(CoreError::Other)?;
     let rook = engine.read().await;
     Ok(Json(rook.context_usage(session_id(&id)?, q.window)?))
+}
+
+async fn extension_ui(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+    Query(q): Query<ContextQuery>,
+) -> ApiResult<rook_proto::ChatEvent> {
+    let engine = s.engine_for(q.workspace.as_deref()).await.map_err(CoreError::Other)?;
+    let rook = engine.read().await;
+    Ok(Json(rook.extension_ui_snapshot(session_id(&id)?)?))
 }
 
 #[derive(serde::Deserialize)]

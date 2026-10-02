@@ -143,8 +143,24 @@ async fn serve(
     // Which turn this window is watching, and the task carrying it here. The
     // turn itself is the daemon's; this is only the view of it.
     let mut watching: Option<Watching> = None;
-
-    while let Some(Ok(message)) = stream.next().await {
+    let mut display_session = None;
+    let mut extension_changes = engine.read().await.extension_ui_changes();
+    loop {
+        let incoming = tokio::select! {
+            changed = extension_changes.changed() => {
+                if changed.is_err() { break; }
+                // Cancellation publishes its report while the task is still
+                // dropping. Read committed reports independently of task state,
+                // through this view's bounded delivery queue.
+                if let Some(session) = watching.as_ref().map(|w| w.session).or(display_session) {
+                    let snapshot = engine.read().await.extension_ui_snapshot(session);
+                    if let Ok(event) = snapshot && outbound.send(event).await.is_err() { break; }
+                }
+                continue;
+            }
+            incoming = stream.next() => incoming,
+        };
+        let Some(Ok(message)) = incoming else { break };
         let Message::Text(text) = message else { continue };
         let Ok(incoming) = serde_json::from_str::<ClientMessage>(&text) else { continue };
 
@@ -302,7 +318,7 @@ async fn serve(
                                 let _ = outbound
                                     .send(ChatEvent::Agent {
                                         receipt: None,
-                                        admission: None,
+                                        admission: None, extension_ui: None,
                                         text: if already_applied {
                                             "Stop was already applied; inspect the current goal before stopping it again."
                                         } else {
@@ -397,11 +413,13 @@ async fn serve(
                     continue;
                 };
                 let live = state.live.read().await.get(&id).cloned();
+                display_session = Some(id);
                 if let Some(previous) = watching.take() {
                     previous.carrying.abort();
                 }
                 let running = live.as_ref().is_some_and(|l| l.running());
                 let _ = outbound.send(ChatEvent::Attached { session, running }).await;
+                restore_extension_ui(&engine, &outbound, id).await;
                 match session_goal(&*engine.read().await, id) {
                     Ok(run) => {
                         let _ = outbound.send(goal_event(run.as_ref())).await;
@@ -913,6 +931,7 @@ async fn repeat_claim(
     let session = rook_store::format_session_id(claim.session);
     if same_turn && let Some(live) = live.as_ref() {
         let _ = outbound.send(ChatEvent::Attached { session, running: true }).await;
+        restore_extension_ui(engine, outbound, claim.session).await;
         *watching = Some(watch(live, claim.session, outbound.clone(), watching.take(), live_snapshots));
         return true;
     }
@@ -976,6 +995,7 @@ async fn repeat_goal_claim(
         && let Some(live) = state.live.read().await.get(&claim.session).filter(|live| live.running()).cloned()
     {
         let _ = outbound.send(ChatEvent::Attached { session, running: true }).await;
+        restore_extension_ui(engine, outbound, claim.session).await;
         *watching = Some(watch(&live, claim.session, outbound.clone(), watching.take(), live_snapshots));
         return true;
     }
@@ -983,12 +1003,25 @@ async fn repeat_goal_claim(
     true
 }
 
+async fn restore_extension_ui(
+    engine: &Arc<tokio::sync::RwLock<rook_core::Rook>>,
+    outbound: &delivery::Sender,
+    session: u128,
+) {
+    let snapshot = engine.read().await.extension_ui_snapshot(session);
+    if let Ok(event) = snapshot
+        && matches!(&event, ChatEvent::Agent { text, .. } if !text.is_empty())
+    {
+        let _ = outbound.send(event).await;
+    }
+}
+
 async fn acknowledge_admitted(outbound: &delivery::Sender, session: String) {
     let _ = outbound.send(ChatEvent::Started { session }).await;
     let _ = outbound.send(ChatEvent::Agent {
         text: "This prompt was already admitted; no new turn was started. Read session history for its recorded result.\n".into(),
         receipt: None,
-        admission: None,
+        admission: None, extension_ui: None,
     }).await;
     let _ = outbound
         .send(ChatEvent::Done {
@@ -1011,6 +1044,7 @@ async fn acknowledge_goal_prompt(outbound: &delivery::Sender, session: u128, req
         .send(ChatEvent::Agent {
             text: "Goal request saved.\n".into(),
             receipt: None,
+            extension_ui: None,
             admission: Some(rook_proto::PromptAdmission {
                 session: rook_store::format_session_id(session),
                 id: request.into(),
@@ -1441,7 +1475,7 @@ impl Live {
             fan_out(
                 &self.backlog,
                 &self.said,
-                ChatEvent::Agent { text, receipt: Some(receipt), admission: None },
+                ChatEvent::Agent { text, receipt: Some(receipt), admission: None, extension_ui: None },
             );
         }
     }
@@ -1673,7 +1707,7 @@ async fn goal_turn(
         let rook = engine.read().await;
         equipment.get_or_init(|| Shared::for_project(&rook)).await
     };
-    let _ = outbound.send(ChatEvent::Agent { receipt: None, admission: None, text: "Goal started in this session; continuing automatically between stages. Ctrl-C pauses; /continue resumes.".into() });
+    let _ = outbound.send(ChatEvent::Agent { receipt: None, admission: None, extension_ui: None, text: "Goal started in this session; continuing automatically between stages. Ctrl-C pauses; /continue resumes.".into() });
     let mut announced_retry = None;
     let mut announced_generation = None;
     loop {
@@ -1701,6 +1735,7 @@ async fn goal_turn(
             if announced_retry != Some(at) {
                 let _ = outbound.send(ChatEvent::Agent {
                     admission: None,
+                    extension_ui: None,
                     receipt: None,
                     text: format!("Goal saved; retry in {}s: {}", at - managed::now().min(at), run.reason),
                 });
@@ -1752,6 +1787,7 @@ async fn goal_turn(
             Ok(run) if run.status == Status::Queued => {
                 let _ = outbound.send(ChatEvent::Agent {
                     admission: None,
+                    extension_ui: None,
                     receipt: None,
                     text: format!(
                         "Continuing goal in this session (stage {}).",
@@ -1870,6 +1906,10 @@ async fn ended_goal(
 /// already been given.
 fn as_event(progress: Progress<'_>, workspace: &std::path::Path) -> Option<ChatEvent> {
     Some(match progress {
+        // Committed revision notifications deliver these through each view's
+        // bounded queue. Do not enqueue full snapshots in the turn's ordinary
+        // unbounded progress channel.
+        Progress::ExtensionUi(_) => return None,
         Progress::Turn { id } => ChatEvent::Turn { id: id.into(), prompt_id: None },
         Progress::PromptAdmitted { id, turn } => {
             ChatEvent::Turn { id: turn.into(), prompt_id: Some(id.into()) }
@@ -1889,13 +1929,17 @@ fn as_event(progress: Progress<'_>, workspace: &std::path::Path) -> Option<ChatE
         // `Reasoning` over the socket and `Agent` when the turn ran in the
         // window itself, so the same work read as two different things
         // depending on which side of a socket somebody was watching from.
-        Progress::Delegated { task, done, total } => {
-            ChatEvent::Agent { receipt: None, admission: None, text: format!("  [{done}/{total}] {task}") }
-        }
+        Progress::Delegated { task, done, total } => ChatEvent::Agent {
+            receipt: None,
+            admission: None,
+            extension_ui: None,
+            text: format!("  [{done}/{total}] {task}"),
+        },
         // Counted from one, because the reader is a person and the first
         // sub-agent is the first, not the zeroth.
         Progress::Delegating { at, doing } => ChatEvent::Agent {
             admission: None,
+            extension_ui: None,
             receipt: None,
             text: format!("    {}", rook_core::calls::delegating(at, doing)),
         },
@@ -1907,6 +1951,7 @@ fn as_event(progress: Progress<'_>, workspace: &std::path::Path) -> Option<ChatE
         Progress::Heard { text, receipt } => ChatEvent::Agent {
             receipt: receipt.cloned(),
             admission: None,
+            extension_ui: None,
             text: format!("  ✓ taken up: {text}"),
         },
         Progress::ToolDone { name, failed, result_seq } => {
