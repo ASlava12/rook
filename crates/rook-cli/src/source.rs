@@ -1159,6 +1159,28 @@ impl Source {
             )),
         }
     }
+    pub(crate) fn transcript_image(
+        &self,
+        session: u128,
+        seq: u64,
+        index: usize,
+    ) -> Result<rook_core::transcript::SavedToolImage> {
+        anyhow::ensure!(
+            index < rook_llm::images::MAX_IMAGES_PER_MESSAGE,
+            "image index must be between 0 and 3"
+        );
+        match self {
+            Self::Local(rook) => Ok(rook.transcript_image(session, seq, index)?),
+            Self::Daemon(d) => d.request_bounded(
+                &format!(
+                    "/api/sessions/{}/history/{seq}/images/{index}",
+                    rook_store::format_session_id(session)
+                ),
+                None,
+                rook_core::transcript::IMAGE_RESPONSE_BYTES,
+            ),
+        }
+    }
     pub fn transcript_quote(
         &self,
         session: u128,

@@ -1703,6 +1703,96 @@ fn doctor_answers_with_the_daemon_up() {
 /// answers — and the search must carry its filters, or a narrowed question comes
 /// back widened with nothing saying so.
 #[test]
+fn retained_tool_images_export_locally_and_through_the_daemon_without_overwriting_files() {
+    rook_llm::init_tls();
+    let rook = Rook::new();
+    let session = rook_store::new_session_id();
+    let id = rook_store::format_session_id(session);
+    let png =
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+    let data = serde_json::to_vec(
+        &serde_json::json!([{ "mime_type":"image/png", "width":1, "height":1, "data":png }]),
+    )
+    .unwrap();
+    let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+    store
+        .create_session(&rook_store::SessionMeta::new(
+            session,
+            "image fixture",
+            rook.workspace.path().display().to_string(),
+            rook_store::now_unix(),
+        ))
+        .unwrap();
+    let [note, result] = store
+        .append_event_pair(
+            session,
+            rook_store::NewEvent::new(rook_store::EventKind::Note, rook_store::Kind::Message, &data)
+                .label("rook:tool-images:v1"),
+            rook_store::NewEvent::new(
+                rook_store::EventKind::ToolResult,
+                rook_store::Kind::ToolResult,
+                format!(
+                    "saved capture\n[1 tool image(s); content {}]",
+                    rook_store::ObjectId::of(&data).to_hex()
+                )
+                .as_bytes(),
+            )
+            .label("camera__shot"),
+        )
+        .unwrap();
+    drop(store);
+    let result = result.to_string();
+    let history = rook.json(&["session", "entry", &id, &result]);
+    assert_eq!(history["entry"]["image_note"], note);
+    assert!(!history.to_string().contains(png));
+    let first = rook.workspace.path().join("local.png");
+    let first = first.to_str().unwrap();
+    let exported = rook.json(&["session", "image", &id, &result, "--output", first]);
+    assert!(exported["source"].as_str().unwrap().contains(&format!("image source #{note}")));
+    let pixels = std::fs::read(first).unwrap();
+    assert!(pixels.starts_with(b"\x89PNG"));
+    assert!(!rook.run(&["session", "image", &id, &result, "--output", first]).status.success());
+    assert_eq!(std::fs::read(first).unwrap(), pixels);
+    let daemon = Daemon::start(&rook);
+    assert_eq!(rook.json(&["session", "entry", &id, &result]), history);
+    let second = rook.workspace.path().join("routed.png");
+    rook.ok(&["session", "image", &id, &result, "--output", second.to_str().unwrap()]);
+    assert_eq!(std::fs::read(second).unwrap(), pixels);
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    runtime.block_on(async {
+        let url = format!("{}/api/sessions/{id}/history/{result}/images", daemon.address);
+        let image: serde_json::Value = client
+            .get(format!("{url}/0"))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(image["note_seq"], note);
+        assert_eq!(image["index"], 0);
+        assert_eq!(image["count"], 1);
+        assert_eq!(image["image"]["data"], png);
+        assert!(serde_json::to_vec(&image).unwrap().len() <= rook_core::transcript::IMAGE_RESPONSE_BYTES);
+        assert_eq!(
+            client.get(format!("{url}/4")).send().await.unwrap().status(),
+            reqwest::StatusCode::BAD_REQUEST
+        );
+    });
+    let absent = rook.workspace.path().join("absent.png");
+    assert!(
+        !rook
+            .run(&["session", "image", &id, &result, "--index", "1", "--output", absent.to_str().unwrap()])
+            .status
+            .success()
+    );
+    assert!(!absent.exists());
+}
+
+#[test]
 fn every_read_answers_the_same_through_the_daemon_as_it_does_direct() {
     let rook = Rook::new();
     rook.skill("greet", "---\nname: greet\nversion: 1.0.0\ndescription: say hello\n---\n\nHello.");

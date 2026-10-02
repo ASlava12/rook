@@ -245,7 +245,8 @@ pub(crate) fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, js
             return Ok(());
         }
         SessionCmd::Entry { id, seq, offset } => {
-            let page = source.transcript_entry(source.session_named(id, workspace)?, *seq, *offset)?;
+            let session = source.session_named(id, workspace)?;
+            let page = source.transcript_entry(session, *seq, *offset)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&page)?);
             } else {
@@ -262,6 +263,12 @@ pub(crate) fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, js
                 if let Some(note) = page.entry.change_note {
                     println!("saved changes: event #{note} · read with session entry {id} {note}");
                 }
+                if let Some(note) = page.entry.image_note {
+                    println!(
+                        "saved image source #{note} · export: rook session image {} {seq} --index 0 --output NEW_FILE",
+                        rook_store::format_session_id(session)
+                    );
+                }
                 if let Some(offset) = page.next_offset {
                     println!("next: --offset {offset}");
                 }
@@ -274,6 +281,39 @@ pub(crate) fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, js
                 println!("{}", serde_json::to_string_pretty(&quote)?);
             } else {
                 println!("{}", quote.text);
+            }
+            return Ok(());
+        }
+        SessionCmd::Image { id, seq, index, output } => {
+            use std::io::Write;
+            let session = source.session_named(id, workspace)?;
+            let image = source.transcript_image(session, *seq, *index)?;
+            let bytes = image.bytes()?;
+            let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(output)?;
+            if let Err(error) = file.write_all(&bytes).and_then(|()| file.flush()) {
+                drop(file);
+                let _ = std::fs::remove_file(output);
+                return Err(error.into());
+            }
+            let source = format!(
+                "session {} · result #{seq} · image source #{} · image {} of {}",
+                rook_store::format_session_id(session),
+                image.note_seq,
+                index + 1,
+                image.count
+            );
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({"path":output,"source":source,"bytes":bytes.len(),
+                    "mime_type":image.image.mime_type,"width":image.image.width,"height":image.image.height})
+                );
+            } else {
+                println!(
+                    "saved {} ({source}; historical tool output) to {}",
+                    image.image.mime_type,
+                    output.display()
+                );
             }
             return Ok(());
         }
@@ -327,6 +367,7 @@ pub(crate) fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, js
         | SessionCmd::ExportHtml { .. }
         | SessionCmd::Find { .. }
         | SessionCmd::Entry { .. }
+        | SessionCmd::Image { .. }
         | SessionCmd::Quote { .. }
         | SessionCmd::Diagnostics { .. }
         | SessionCmd::Recovery { .. }
@@ -555,6 +596,9 @@ fn show_transcript(entries: &[rook_core::TranscriptEntry], json: bool) -> Result
         }
         if let Some(details) = &e.tool_details {
             println!("{}\n", details.text());
+        }
+        if let Some(note) = e.image_note {
+            println!("saved image source #{note} (pixels omitted from text)");
         }
         if let Some(note) = e.change_note {
             println!("saved changes: event #{note} · open that event for a bounded historical preview\n");

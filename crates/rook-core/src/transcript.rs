@@ -130,6 +130,36 @@ pub struct ToolImage {
     pub width: u32,
     pub height: u32,
 }
+/// Maximum JSON bytes for the explicit single-image endpoint, including its
+/// small source/index wrapper. Default history never returns this payload.
+pub const IMAGE_RESPONSE_BYTES: usize = rook_llm::images::MAX_IMAGE_BYTES.div_ceil(3) * 4 + 1024;
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SavedToolImage {
+    pub note_seq: u64,
+    pub index: usize,
+    pub count: usize,
+    pub image: rook_llm::Image,
+}
+impl SavedToolImage {
+    /// Bounded raster bytes for local export; revalidate routed image data.
+    pub fn bytes(&self) -> Result<Vec<u8>> {
+        use base64::Engine;
+        if self.count == 0
+            || self.count > rook_llm::images::MAX_IMAGES_PER_MESSAGE
+            || self.index >= self.count
+        {
+            return Err(CoreError::Other("invalid saved image index/count".into()));
+        }
+        let checked = rook_llm::Image::from_base64(&self.image.mime_type, &self.image.data)
+            .map_err(CoreError::Other)?;
+        if checked.width != self.image.width || checked.height != self.image.height {
+            return Err(CoreError::Other("saved image dimensions do not match its bytes".into()));
+        }
+        base64::engine::general_purpose::STANDARD
+            .decode(&checked.data)
+            .map_err(|e| CoreError::Other(e.to_string()))
+    }
+}
 impl ToolDetails {
     pub fn text(&self) -> String {
         let summary = match &self.result {
@@ -307,6 +337,7 @@ fn entry_from(rook: &Rook, event: &Event, body: String, truncated: bool) -> Resu
         tool_measurement: crate::diagnostics::tool_measurement(rook, event)?,
         change_note: crate::tool_changes::source(rook, event)?,
         tool_details: crate::tool_details::load(rook, event)?,
+        image_note: crate::tool_images::companion(rook, event)?.map(|image| image.seq),
     })
 }
 struct Count {
@@ -384,6 +415,10 @@ impl Rook {
 
     pub fn transcript_entry(&self, session: u128, seq: u64, offset: u64) -> Result<EntryPage> {
         self.entry_page(session, seq, offset, self.config.transcript.bounded().body_bytes)
+    }
+    /// Read one retained tool image explicitly, from this session/result only.
+    pub fn transcript_image(&self, session: u128, seq: u64, index: usize) -> Result<SavedToolImage> {
+        crate::tool_images::read(self, &event(self, session, seq)?, index)
     }
     fn entry_page(&self, session: u128, seq: u64, offset: u64, limit: usize) -> Result<EntryPage> {
         let event = event(self, session, seq)?;

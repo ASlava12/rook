@@ -376,6 +376,16 @@ impl History {
         let page = self.tree.as_ref()?;
         page.ancestors.iter().chain(std::iter::once(&page.selected)).chain(page.children.iter()).nth(self.at)
     }
+    fn image_hint(&self, entry: &rook_core::TranscriptEntry) -> String {
+        match (self.session, entry.image_note) {
+            (Some(session), Some(note)) => format!(
+                "saved image source #{note} · historical pixels\nExport: rook session image {} {} --index 0 --output NEW_FILE\n",
+                rook_store::format_session_id(session),
+                entry.seq,
+            ),
+            _ => String::new(),
+        }
+    }
     fn target(&self) -> Option<(u64, u64)> {
         if self.show_bookmarks {
             return self.bookmarks.as_ref()?.items.get(self.at).map(|bookmark| (bookmark.seq, 0));
@@ -934,7 +944,7 @@ impl History {
                 .unwrap_or_else(|| "No bookmarks in this session. Mark an event with m.".into())
         } else if let Some(page) = &self.entry {
             format!(
-                "#{} · byte {} / {}{}\n{}\n{}\n{}{}",
+                "#{} · byte {} / {}{}\n{}\n{}\n{}{}{}",
                 page.entry.seq,
                 page.offset,
                 page.total_bytes,
@@ -945,6 +955,7 @@ impl History {
                     .change_note
                     .map(|seq| format!("saved changes #{seq} · c opens preview\n"))
                     .unwrap_or_default(),
+                self.image_hint(&page.entry),
                 page.entry.body
             )
         } else if let Some(hits) = &self.hits {
@@ -964,7 +975,7 @@ impl History {
                 .and_then(|p| p.items.get(self.at))
                 .map(|e| {
                     format!(
-                        "#{} {}{}\n{}\n{}\n{}{}",
+                        "#{} {}{}\n{}\n{}\n{}{}{}",
                         e.seq,
                         e.kind,
                         if e.truncated { " · Enter reads full body in pages" } else { "" },
@@ -973,6 +984,7 @@ impl History {
                         e.change_note
                             .map(|seq| format!("saved changes #{seq} · c opens preview\n"))
                             .unwrap_or_default(),
+                        self.image_hint(e),
                         e.body
                     )
                 })

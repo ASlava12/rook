@@ -18,6 +18,10 @@ use rook_proto::{API_VERSION, ApiError, Health, Page};
 use crate::AppState;
 
 type Shared = Arc<AppState>;
+// Pixel decoding is much heavier than a normal bounded history body. Admit
+// work before spawning it; the owned permit also survives an HTTP disconnect.
+static IMAGE_READS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(2)));
 
 pub fn router(state: Shared) -> Router {
     let allowed = state.rook.try_read().map(|r| r.config.server.allowed_hosts.clone()).unwrap_or_default();
@@ -43,6 +47,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/sessions/{id}/history", get(history_page))
         .route("/api/sessions/{id}/history/search", get(history_search))
         .route("/api/sessions/{id}/history/{seq}", get(history_entry))
+        .route("/api/sessions/{id}/history/{seq}/images/{index}", get(history_image))
         .route("/api/sessions/{id}/history/{seq}/quote", get(history_quote))
         .route("/api/sessions/{id}/changes", get(changes))
         .route("/api/sessions/{id}/context", get(context))
@@ -128,7 +133,9 @@ impl From<CoreError> for Fail {
                 "capture_too_big",
                 Some("narrow the paths, or raise the limits under [storage] in config.toml"),
             ),
-            CoreError::NoTranscriptEvent(_) | CoreError::Store(rook_store::StoreError::MissingObject(_)) => {
+            CoreError::NoTranscriptEvent(_)
+            | CoreError::NoToolImage(_, _)
+            | CoreError::Store(rook_store::StoreError::MissingObject(_)) => {
                 (StatusCode::NOT_FOUND, "not_found", None)
             }
             _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal", None),
@@ -513,6 +520,29 @@ async fn history_quote(
 ) -> ApiResult<rook_core::transcript::Quote> {
     let session = session_id(&id)?;
     history_read(s, move |r| r.transcript_quote(session, seq, q.offset)).await
+}
+async fn history_image(
+    State(s): State<Shared>,
+    Path((id, seq, index)): Path<(String, u64, usize)>,
+) -> ApiResult<rook_core::transcript::SavedToolImage> {
+    if index >= rook_llm::images::MAX_IMAGES_PER_MESSAGE {
+        return Err(Fail(
+            StatusCode::BAD_REQUEST,
+            ApiError::new("bad_request", "image index must be between 0 and 3"),
+        ));
+    }
+    let session = session_id(&id)?;
+    let permit = IMAGE_READS.clone().try_acquire_owned().map_err(|_| {
+        Fail(
+            StatusCode::TOO_MANY_REQUESTS,
+            ApiError::new("busy", "saved image reader is busy; try again after it finishes"),
+        )
+    })?;
+    history_read(s, move |r| {
+        let _permit = permit;
+        r.transcript_image(session, seq, index)
+    })
+    .await
 }
 
 #[derive(Deserialize)]
@@ -1539,6 +1569,49 @@ mod tests {
             stopping: tokio::sync::Notify::new(),
         });
         Fixture { _home: home, _workspace: workspace, router: router(state.clone()), state, session }
+    }
+
+    #[tokio::test]
+    async fn image_admission_stays_bounded_when_an_http_reader_disconnects_during_a_blocking_read() {
+        let f = fixture();
+        let hold = f.state.rook.write().await;
+        let path = format!("/api/sessions/{}/history/0/images/0", rook_store::format_session_id(f.session));
+        let request = || {
+            axum::http::Request::builder()
+                .uri(&path)
+                .header("host", "localhost")
+                .body(axum::body::Body::empty())
+                .unwrap()
+        };
+        let first = tokio::spawn(f.router.clone().oneshot(request()));
+        let second = tokio::spawn(f.router.clone().oneshot(request()));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while IMAGE_READS.available_permits() != 0 {
+            assert!(std::time::Instant::now() < deadline, "both reads must reach the admission bound");
+            tokio::task::yield_now().await;
+        }
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        assert_eq!(IMAGE_READS.available_permits(), 0, "the abandoned blocking worker still owns its slot");
+        let refused =
+            tokio::time::timeout(std::time::Duration::from_secs(30), f.router.clone().oneshot(request()))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            refused.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "admission must not wait for the store lock"
+        );
+        drop(hold);
+        assert_eq!(second.await.unwrap().unwrap().status(), StatusCode::NOT_FOUND);
+        while IMAGE_READS.available_permits() != 2 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "slots must return when the workers actually finish"
+            );
+            tokio::task::yield_now().await;
+        }
     }
 
     /// The daemon read its configuration once at start, so changing

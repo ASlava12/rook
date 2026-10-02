@@ -1054,6 +1054,7 @@ impl Rook {
                 tool_measurement: crate::diagnostics::tool_measurement(self, &e)?,
                 change_note: crate::tool_changes::source(self, &e)?,
                 tool_details: crate::tool_details::load(self, &e)?,
+                image_note: crate::tool_images::companion(self, &e)?.map(|image| image.seq),
             });
         }
         Ok(out)
@@ -2268,6 +2269,9 @@ pub struct TranscriptEntry {
     pub change_note: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_details: Option<crate::transcript::ToolDetails>,
+    /// Attributed image companion; pixel data is read only on explicit request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_note: Option<u64>,
 }
 
 /// The note a capture carries when a skill arrived from a source, and the

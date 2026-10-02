@@ -303,6 +303,27 @@ the live link also binds saved dispatch timing; it does not wrap the scoped
 skill instructions again or add replay events. Failed built-ins use their
 existing journal results as well, even when their own event is an `Error`.
 Live completion, resumed chat and history use the same expandable card reader.
+Results can also carry an optional `image_note` reference. This is computed from
+the adjacent existing image companion and its object hash in the saved result's
+caption, using only a 128-byte result tail; an orphaned companion at a fork
+boundary cannot lend pixels to a different answer. The same binding is used by
+model replay and explicit image retrieval. Valid historical records and stored
+formats are unchanged. Default history/live frames do not include encoded pixels.
+`GET /api/sessions/{id}/history/{seq}/images/{index}` explicitly returns one
+validated raster image and its source/index/count. The reader checks raw object
+size before loading, borrows stored strings while admitting at most four images,
+and validates each file's 2 MiB limit, MIME and dimensions before copying. HTTP
+admits at most two decoding workers; their slots outlive an abandoned connection
+until the blocking work actually finishes. CLI routed responses and browser
+image reads are bounded while bytes arrive, including base64 and the small JSON
+wrapper. Missing pixels return 404; indices outside 0–3 return 400.
+Browser **Show saved image**, paging and **Hide image** controls are explicit.
+Only one picture is retained across cards; a new request cancels the previous
+one, closing releases the picture, and detached cards ignore late data. Each
+picture identifies its original session/result and image companion. CLI
+`session image ... --output NEW_FILE` exports the checked raster bytes without
+replacing existing files. TUI Calls/history keep an attributed text fallback
+and a pinned CLI export command; terminal pixel rendering remains an experiment.
 Each reader admits one request at a time and replaces its bounded body part;
 result and diff parts load only on explicit expansion or paging. Disconnected
 cards ignore late replies. The saved timing and change-note source remain

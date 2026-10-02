@@ -552,6 +552,15 @@ pub(crate) enum SessionCmd {
         #[arg(long, default_value_t = 0)]
         offset: u64,
     },
+    /// Save one retained tool image to a new local file (zero-based index).
+    Image {
+        id: String,
+        seq: u64,
+        #[arg(long, default_value_t = 0)]
+        index: usize,
+        #[arg(long)]
+        output: std::path::PathBuf,
+    },
     /// Produce a bounded, attributed data quote for a new prompt.
     Quote {
         id: String,

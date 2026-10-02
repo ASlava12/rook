@@ -24,6 +24,8 @@ pub enum CoreError {
     NoSession(String),
     #[error("no transcript event #{0}")]
     NoTranscriptEvent(u64),
+    #[error("no attributed saved image {1} for transcript result #{0}")]
+    NoToolImage(u64, usize),
     #[error(transparent)]
     Llm(#[from] rook_llm::LlmError),
     #[error("{0}")]

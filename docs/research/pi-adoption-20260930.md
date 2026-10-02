@@ -10,7 +10,7 @@ Source: Pi `ee602414c703be8da722ec56de7f2399e62581ac`; starting Rook:
 | Editable steering and follow-up queue | In progress | Core/CLI/API/TUI/browser, durable IDs, goal vs ordinary-turn boundaries, revoke/accept races, restart |
 | Configurable keyboard actions and prompt undo | Complete | Shared registry/config/help, bounded Unicode edit tests, remapped-key and external-editor PTY checks, full CI passed |
 | Branch navigation and optional branch summary | In progress | Existing session/event IDs, bounded tree/history, explicit workspace semantics, attributable summary |
-| Inline tool cards | In progress | Compact/expanded results, errors/duration/diffs, bounded loading, TUI/browser verification |
+| Inline tool cards | Complete | Compact/live/saved results, attributed errors/duration/diffs and command/search/MCP facts, explicit bounded browser pixels, terminal text fallback, local/daemon and full CI passed |
 | Context provenance inspector | Complete | Request-specific sources and loaded skills, deferred MCP tools in CLI/API/TUI/browser; bounded notes, old-note compatibility, local/daemon and full CI passed |
 | Local HTML export | In progress | Selected history scope, bounded streaming, escaped content, no publication, cross-frontend access |
 | Opt-in phase-based model routing | Pending | Explicit policy, continuity/capability constraints, actual route/cost reporting, comparison without claiming unmeasured savings |
@@ -2179,3 +2179,78 @@ of live delivery and default history pages. Terminal image rendering remains a
 later experiment. Original queue lifecycle, branch live checks, HTML download
 interaction, phase routing, declarative extension UI and terminal experiments
 remain open; successful `load_skill` navigation is no longer a missing block.
+
+## Explicit retained image presentation (2026-10-02)
+
+Saved results now expose an optional JSON-only `image_note` reference. A shared
+reader binds the adjacent existing image object to the hash in the result's
+caption, reading at most 128 tail bytes. Model replay and the explicit image
+reader use that same check: an orphaned companion at a fork cutoff no longer
+attaches to a different result. No stored struct, object encoding, companion
+format or writer was changed. Old transcript JSON defaults the new field to None.
+
+`GET /api/sessions/{id}/history/{seq}/images/{index}` returns one saved image,
+the companion source and its validated index/count. Raw companion size is checked
+before loading; a borrowing JSON visitor admits no more than four records and
+checks each encoded size/MIME before copying. Existing 2 MiB raster and 4096
+pixel dimension limits remain. HTTP admits two decoding workers before spawning;
+owned permits stay with blocking work after a client disconnects. Extra requests
+receive 429, missing pictures 404, and indices outside 0–3 receive 400. Default
+history and live delivery contain no encoded pixels.
+
+The shared browser card adds explicit show/hide and multi-image paging. Incoming
+JSON is bounded while streaming and before chunk copies, including a Content-Length
+precheck. At most one picture remains across the page; switching cancels the old
+request, closing releases pixels, and detached cards ignore late data. A caption
+pins the original session/result/image source. CLI `session image` exports checked
+raster bytes into a new file, reports that source and refuses replacement. TUI
+Calls/history show a source number and an export command pinned to the historical
+session/result. Terminal pixel rendering remains a separate experiment.
+
+Focused core tests passed (exit 0) for indexed retrieval, complete forks/reopen,
+orphaned-companion rejection, old JSON, source metadata without pixel data,
+oversized records/images and excess image count; fixtures exceed each asserted
+bound. Existing direct/deferred MCP, batch/replay and compaction image scenarios
+passed. Browser module tests passed for explicit retrieval, paging/source identity,
+one retained picture, close/disconnect, stream/header bounds and cancellation.
+The first selector assumed image 1 after paging to image 2; the fixture now selects
+the current show button and passes. Local/routed CLI export and actual HTTP checks
+passed, including identical PNG bytes, no overwrite and no file on a missing index.
+The first isolated CLI run omitted TLS initialization for its raw HTTP client;
+initializing it fixed the fixture and the repeated run exited 0. TUI pairing/render
+checks passed for the image-source text fallback. A real-router test filled both
+worker slots, abandoned one HTTP future while blocked, observed immediate 429
+and verified slots return only after the workers finish (exit 0).
+
+A fresh scratch daemon and real Edge mouse interaction passed (exit 0): actual
+MCP output, no eager pixels, source-pinned explicit retrieval before a withheld
+next model reply, a decoded 1×1 PNG, hide/reopen after chat recovery, inert tool
+text and no encoded pixels in HTML export. Owned scratch processes were stopped
+and their absence verified. The worker-admission correction was subsequently
+verified through the actual router test above.
+
+Final `cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0 (`ci: ok`,
+714.9 seconds), including the new image bounds/source/fork checks, CLI local/
+daemon export, TUI source rendering, router admission/disconnect regression,
+existing queue/branch/recovery and MCP replay checks, and doctests. Its log is
+`target/pi-retained-pixels-ci.log`. Windows ran no Unix PTY tests; earlier card
+blocks retain real Windows local/daemon navigation evidence, and this block's
+new terminal fallback was checked through the actual pairing/renderer.
+`cargo xtask compaction` exited 0 (`target/pi-retained-pixels-compaction.log`):
+4.02 MiB on disk, 37.1x dictionary compression and 5.8x end-to-end for its fixture.
+Published storage measurements remain unchanged.
+
+The main inline-card requirements in review section 5 are now Complete:
+compact/expanded live and saved results, attributable failure/dispatch duration,
+saved file diffs, command exit/background state, search matching-line/partial-scan
+facts, typed configured MCP identity/content and explicit retained pixels, bounded
+loading and terminal text fallback. The preceding blocks retain local/daemon TUI
+navigation and browser lifecycle evidence, and the final gate verifies the
+integrated tree. Terminal image rendering remains a separate experiment rather
+than a missing main-card requirement.
+
+Original queue lifecycle, branch live checks (including the remaining navigation
+summary-draft work documented in conversation-branches), HTML download interaction,
+phase routing, declarative extension UI and terminal experiments remain open.
+Next return to the queue lifecycle/branch navigation gaps, then close HTML
+interaction and implement both Pending capabilities; the full goal remains active.

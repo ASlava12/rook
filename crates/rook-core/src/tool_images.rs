@@ -1,6 +1,10 @@
 //! Tool images are companion events, never new instructions from the user.
 use rook_llm::Image;
 use rook_store::{Event, EventKind, Kind, NewEvent, ObjectId};
+use serde::{
+    Deserialize,
+    de::{SeqAccess, Visitor},
+};
 
 use crate::{CoreError, Result, Rook};
 
@@ -112,32 +116,92 @@ fn decode(rook: &Rook, event: &Event) -> Result<Vec<Image>> {
     if size > MAX_PAYLOAD {
         return Err(CoreError::Other("stored tool images exceed the payload limit".into()));
     }
-    let images: Vec<Image> = serde_json::from_slice(&rook.store.get(&event.record.body)?)?;
-    if images.len() > rook_llm::images::MAX_IMAGES_PER_MESSAGE {
-        return Err(CoreError::Other("stored tool result has more than 4 images".into()));
+    // Our stored base64/MIME strings have no JSON escapes. Borrow them so the
+    // count and each encoded length are admitted before copying pixel data.
+    #[derive(Deserialize)]
+    struct StoredImage<'a> {
+        mime_type: &'a str,
+        data: &'a str,
     }
-    images
-        .into_iter()
-        .map(|image| Image::from_base64(&image.mime_type, &image.data).map_err(CoreError::Other))
-        .collect()
+    struct Images(Vec<Image>);
+    impl<'de> Deserialize<'de> for Images {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+            struct Bounded;
+            impl<'de> Visitor<'de> for Bounded {
+                type Value = Images;
+                fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.write_str("at most four bounded raster images")
+                }
+                fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<Images, A::Error> {
+                    let mut images = Vec::with_capacity(rook_llm::images::MAX_IMAGES_PER_MESSAGE);
+                    while images.len() < rook_llm::images::MAX_IMAGES_PER_MESSAGE {
+                        let Some(image) = seq.next_element::<StoredImage<'_>>()? else {
+                            return Ok(Images(images));
+                        };
+                        if !matches!(image.mime_type, "image/png" | "image/jpeg" | "image/webp" | "image/gif")
+                        {
+                            return Err(serde::de::Error::custom("unsupported stored image MIME type"));
+                        }
+                        images.push(
+                            Image::from_base64(image.mime_type, image.data)
+                                .map_err(serde::de::Error::custom)?,
+                        );
+                    }
+                    if seq.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                        return Err(serde::de::Error::custom("stored tool result has more than 4 images"));
+                    }
+                    Ok(Images(images))
+                }
+            }
+            deserializer.deserialize_seq(Bounded)
+        }
+    }
+    Ok(serde_json::from_slice::<Images>(&rook.store.get(&event.record.body)?)?.0)
+}
+
+pub(crate) fn companion(rook: &Rook, result: &Event) -> Result<Option<Event>> {
+    if result.record.kind != EventKind::ToolResult {
+        return Ok(None);
+    }
+    let Some(previous) = result.seq.checked_sub(1) else { return Ok(None) };
+    let event = rook.store.events(result.session, previous, 1)?.into_iter().next();
+    let Some(event) =
+        event.filter(|e| e.seq == previous && e.record.kind == EventKind::Note && e.record.label == LABEL)
+    else {
+        return Ok(None);
+    };
+    // A fork may end at the companion, then append a different tool answer.
+    // The existing caption hashes the actual image object; adjacency alone
+    // would attach the abandoned pixels to that unrelated answer.
+    let size = rook.store.stat_object(&result.record.body)?.map(|m| m.size_raw).unwrap_or(0);
+    let tail = rook.store.get_range(&result.record.body, size.saturating_sub(128), 128)?;
+    for count in 1..=rook_llm::images::MAX_IMAGES_PER_MESSAGE {
+        let caption = format!("\n[{count} tool image(s); content {}]", event.record.body.to_hex());
+        if tail.ends_with(caption.as_bytes()) {
+            return Ok(Some(event));
+        }
+    }
+    Ok(None)
 }
 
 pub(crate) fn load(rook: &Rook, result: &Event) -> Result<Vec<Image>> {
-    if result.record.kind != EventKind::ToolResult {
-        return Ok(Vec::new());
+    match companion(rook, result)? {
+        Some(event) => decode(rook, &event),
+        None => Ok(Vec::new()),
     }
-    let Some(previous) = result.seq.checked_sub(1) else { return Ok(Vec::new()) };
-    let event = rook.store.events(result.session, previous, 1)?.into_iter().next();
-    match event {
-        Some(event)
-            if event.seq == previous
-                && event.record.kind == EventKind::Note
-                && event.record.label == LABEL =>
-        {
-            decode(rook, &event)
-        }
-        _ => Ok(Vec::new()),
+}
+
+pub(crate) fn read(rook: &Rook, result: &Event, index: usize) -> Result<crate::transcript::SavedToolImage> {
+    if index >= rook_llm::images::MAX_IMAGES_PER_MESSAGE {
+        return Err(CoreError::Other("image index must be between 0 and 3".into()));
     }
+    let event = companion(rook, result)?.ok_or(CoreError::NoToolImage(result.seq, index))?;
+    let mut images = decode(rook, &event)?;
+    let count = images.len();
+    if index >= count {
+        return Err(CoreError::NoToolImage(result.seq, index));
+    }
+    Ok(crate::transcript::SavedToolImage { note_seq: event.seq, index, count, image: images.remove(index) })
 }
 
 pub(crate) fn preview(rook: &Rook, event: &Event) -> Result<String> {

@@ -30,6 +30,63 @@ globalThis.document = {
 };
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
+test('saved pixels load explicitly by source, replace the previous picture and reject oversized or misattributed replies', async () => {
+  const calls = [];
+  const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==';
+  let mode = 'ok'; let cancelled = false;
+  const maximum = Math.ceil(2 * 1024 * 1024 / 3) * 4 + 1024;
+  globalThis.fetch = async path => {
+    calls.push(path);
+    if (mode === 'oversized') return new Response(new ReadableStream({
+      start(controller) { const chunk = new Uint8Array(maximum + 1); assert(chunk.length > maximum); controller.enqueue(chunk); },
+      cancel() { cancelled = true; },
+    }));
+    return new Response(JSON.stringify({note_seq:mode === 'wrong' ? 99 : 0,index:Number(path.split('/').at(-1)),count:2,
+      image:{mime_type:'image/png',width:1,height:1,data:png}}));
+  };
+  const entry = {seq:1,kind:'tool-result',label:'camera__shot',image_note:0};
+  const first = savedToolCard('original',entry);
+  const second = savedToolCard('another',{...entry,seq:7});
+  const show = card => card.find(n=>n.tag==='button'&&n.textContent.startsWith('Show saved image '));
+  assert.deepEqual(calls,[]); assert(!first.find(n=>n.tag==='img'));
+  show(first).listeners.click(); await tick();
+  assert.deepEqual(calls,['/api/sessions/original/history/1/images/0']);
+  assert.equal(first.find(n=>n.tag==='img').src,`data:image/png;base64,${png}`);
+  assert.match(first.textContent,/Session original · result #1 · image source #0 · image 1 of 2/);
+  first.find(n=>n.tag==='button'&&n.textContent==='Next image').listeners.click(); await tick();
+  assert.equal(calls.at(-1),'/api/sessions/original/history/1/images/1');
+  assert.match(first.textContent,/image 2 of 2/);
+  show(second).listeners.click(); await tick();
+  assert(!first.find(n=>n.tag==='img'),'only one picture is retained across cards');
+  assert(second.find(n=>n.tag==='img'));
+  second.open=false; second.listeners.toggle();
+  assert(!second.find(n=>n.tag==='img'),'closing the card releases its pixels');
+  mode='wrong'; show(first).listeners.click(); await tick();
+  assert(!first.find(n=>n.tag==='img')); assert.match(first.textContent,/source or payload is invalid/);
+  mode='oversized'; show(first).listeners.click(); await tick();
+  assert(cancelled); assert(!first.find(n=>n.tag==='img')); assert.match(first.textContent,/exceeds its byte limit/);
+  mode='ok'; first.isConnected=false; show(first).listeners.click(); await tick();
+  assert(!first.find(n=>n.tag==='img'),'a detached card ignores late image data');
+});
+
+test('a new image request cancels the older one and refuses a declared oversized response before reading', async () => {
+  let aborted = false; let cancelled = false; let started = false;
+  globalThis.fetch = (path, {signal}) => path.includes('/old/') ? new Promise((resolve,reject)=>{
+    started = true;
+    signal.addEventListener('abort',()=>{aborted=true;reject(new Error('cancelled older image'));},{once:true});
+  }) : Promise.resolve(new Response(new ReadableStream({cancel(){cancelled=true;}}),{
+    headers:{'content-length':String(Math.ceil(2*1024*1024/3)*4+1025)}
+  }));
+  const entry = {seq:1,kind:'tool-result',image_note:0};
+  const old = savedToolCard('old',entry), next = savedToolCard('next',entry);
+  const show = card => card.find(n=>n.tag==='button'&&n.textContent.startsWith('Show saved image '));
+  show(old).listeners.click(); await tick(); assert(started);
+  show(next).listeners.click(); await tick();
+  assert(aborted); assert(cancelled);
+  assert(!old.find(n=>n.tag==='img')&&!next.find(n=>n.tag==='img'));
+  assert.match(next.textContent,/exceeds its byte limit/);
+});
+
 test('structured saved facts show command states, matching lines and inert typed MCP identity', async () => {
   const facts = [
     [{type:'command',exit_code:7,timed_out:false,running:false}, /command exit 7/],

@@ -227,6 +227,7 @@ struct Call {
     measurement: Option<rook_core::transcript::ToolMeasurement>,
     details: Option<rook_core::transcript::ToolDetails>,
     change_note: Option<u64>,
+    image_note: Option<u64>,
     elided: bool,
 }
 
@@ -256,6 +257,7 @@ fn paired(entries: Vec<TranscriptEntry>) -> Vec<Call> {
                     measurement: None,
                     details: None,
                     change_note: None,
+                    image_note: None,
                     elided: entry.truncated,
                 });
             }
@@ -266,6 +268,7 @@ fn paired(entries: Vec<TranscriptEntry>) -> Vec<Call> {
                     calls[at].measurement = entry.tool_measurement;
                     calls[at].details = entry.tool_details;
                     calls[at].change_note = entry.change_note;
+                    calls[at].image_note = entry.image_note;
                     calls[at].elided |= entry.truncated;
                 }
             }
@@ -4845,6 +4848,11 @@ impl App {
                 if let Some(details) = &call.details {
                     lines.push(Line::from(details.text()));
                 }
+                if let Some(note) = call.image_note {
+                    lines.push(Line::from(format!(
+                        "saved image source #{note} · session image exports retained pixels"
+                    )));
+                }
                 lines.push(Line::from(Span::styled("given", Style::default().fg(Color::DarkGray))));
                 for line in call.given.lines() {
                     lines.push(Line::from(Span::raw(format!("  {line}"))));
@@ -6988,6 +6996,7 @@ and the next line"
             rook_core::transcript::ToolMeasurement { failed: true, duration_ms: 42, timing_seq: 4 };
         entries[2].tool_measurement = Some(measurement);
         entries[2].change_note = Some(1);
+        entries[2].image_note = Some(0);
         let details = rook_core::transcript::ToolDetails {
             note_seq: 0,
             result: rook_core::transcript::ToolResultDetails::Command {
@@ -7001,6 +7010,7 @@ and the next line"
         assert_eq!(calls[1].given, "first");
         assert_eq!(calls[1].measurement, Some(measurement));
         assert_eq!(calls[1].change_note, Some(1));
+        assert_eq!(calls[1].image_note, Some(0));
         assert_eq!(calls[1].details, Some(details));
         assert_eq!(calls[0].given, "second");
         assert_eq!(calls[0].measurement, None, "failure is not inferred from prose");
@@ -7026,6 +7036,7 @@ and the next line"
         assert!(text.contains("saved failure") && text.contains("dispatch 42 ms"), "{text}");
         assert!(text.contains("current files/tests not verified"), "{text}");
         assert!(text.contains("saved change preview #1"), "{text}");
+        assert!(text.contains("saved image source #0"), "{text}");
         assert!(text.contains("command exit 7") && text.contains("details #0"), "{text}");
         app.overlay = Some(super::Overlay::Calls);
         app.on_key(crossterm::event::KeyEvent::new(
@@ -7056,6 +7067,7 @@ and the next line"
                 tool_measurement: None,
                 change_note: None,
                 tool_details: None,
+                image_note: None,
             })
             .collect()
     }

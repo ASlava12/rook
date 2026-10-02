@@ -183,3 +183,28 @@ verification in the current workspace. Browsing and ordinary branch switching
 do not create or carry a summary. Automatic draft generation from the departed
 branch during navigation, scoped to events after the common ancestor, remains
 pending; the explicit suggestion command above is available now.
+
+## Saved tool images
+
+History identifies a retained tool image by its original session, result and
+image-companion event. In the browser, expand the result and select **Show saved
+image**; use **Previous image**/**Next image** for multi-image results and
+**Hide image** to release it. Pictures load only on that action, and only one is
+retained across cards. They describe historical tool output, not current files
+or test results. A copied branch can read its copied pictures; a branch ending
+before the associated result cannot attach them to a different answer.
+
+For a local raster file, use:
+
+```sh
+rook session image SESSION RESULT_EVENT --index 0 --output capture.png
+```
+
+The index starts at zero; each result can contain at most four images. The command
+works locally and through the running daemon, reports the source, and creates
+a new file without replacing an existing one. TUI history shows an export
+command pinned to the displayed session/result; Calls retains the image-source
+number as a text fallback. File payloads are limited to 2 MiB and 4096 pixels
+per side. Ordinary history, live delivery and HTML export keep captions and
+descriptors without embedding encoded pixel data. Terminal pixel rendering
+remains a separate experiment.

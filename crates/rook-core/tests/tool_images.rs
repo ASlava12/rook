@@ -11,6 +11,91 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 const PNG: &str =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
 
+#[test]
+fn explicit_image_reads_keep_their_source_and_reject_abandoned_or_oversized_companions() {
+    use rook_store::{EventKind, Kind, NewEvent, ObjectId};
+    let root = tempfile::tempdir().unwrap();
+    let rook = rook_at(root.path());
+    let session = rook.start_session("saved pixels").unwrap();
+    let image = rook_llm::Image::from_base64("image/png", PNG).unwrap();
+    let data = serde_json::to_vec(&[image.clone(), image.clone()]).unwrap();
+    let [note, result] = rook
+        .store
+        .append_event_pair(
+            session,
+            NewEvent::new(EventKind::Note, Kind::Message, &data).label("rook:tool-images:v1"),
+            NewEvent::new(
+                EventKind::ToolResult,
+                Kind::ToolResult,
+                format!("caption\n[2 tool image(s); content {}]", ObjectId::of(&data).to_hex()).as_bytes(),
+            )
+            .label("camera__shot"),
+        )
+        .unwrap();
+    let read = rook.transcript_image(session, result, 1).unwrap();
+    assert_eq!((read.note_seq, read.index, read.count), (note, 1, 2));
+    assert_eq!(read.image.data, PNG);
+    assert!(read.bytes().unwrap().starts_with(b"\x89PNG"));
+    assert!(serde_json::to_vec(&read).unwrap().len() <= rook_core::transcript::IMAGE_RESPONSE_BYTES);
+    assert!(rook.transcript_image(session, result, 2).is_err());
+    assert!(rook.transcript_image(session, result, 4).unwrap_err().to_string().contains("index"));
+    assert_eq!(rook.transcript_entry(session, result, 0).unwrap().entry.image_note, Some(note));
+    let mut old = serde_json::to_value(rook.transcript_entry(session, result, 0).unwrap().entry).unwrap();
+    old.as_object_mut().unwrap().remove("image_note");
+    assert!(serde_json::from_value::<rook_core::TranscriptEntry>(old).unwrap().image_note.is_none());
+    assert!(
+        !serde_json::to_string(&rook.transcript_page(session, &Default::default()).unwrap())
+            .unwrap()
+            .contains(PNG)
+    );
+    let complete = rook.fork_session(session, result + 1).unwrap().id;
+    assert_eq!(rook.transcript_image(complete, result, 0).unwrap().image.data, PNG);
+    let abandoned = rook.fork_session(session, result).unwrap().id;
+    let unrelated = rook.log(abandoned, EventKind::ToolResult, "camera__shot", "a different answer").unwrap();
+    assert_eq!(unrelated, result, "the orphaned image is still immediately before the new result");
+    assert!(rook.transcript_image(abandoned, unrelated, 0).is_err());
+    assert_eq!(rook.transcript_entry(abandoned, unrelated, 0).unwrap().entry.image_note, None);
+    let mut forged = read.clone();
+    forged.image.width = 4096;
+    assert!(forged.bytes().is_err());
+    let oversized = "A".repeat(rook_llm::images::MAX_IMAGE_BYTES.div_ceil(3) * 4 + 1);
+    assert!(oversized.len() > rook_llm::images::MAX_IMAGE_BYTES.div_ceil(3) * 4);
+    for (data, expected) in [
+        (serde_json::to_vec(&vec![image; 5]).unwrap(), "more than 4"),
+        (json!([{"mime_type":"image/png","data":oversized}]).to_string().into_bytes(), "exceeds 2 MiB"),
+        (vec![b' '; (rook_llm::images::MAX_IMAGE_BYTES.div_ceil(3) * 4 * 4 + 4096) + 1], "payload limit"),
+    ] {
+        let raw = data.len();
+        if expected == "more than 4" {
+            assert!(
+                serde_json::from_slice::<serde_json::Value>(&data).unwrap().as_array().unwrap().len()
+                    > rook_llm::images::MAX_IMAGES_PER_MESSAGE
+            );
+        }
+        let [_, result] = rook
+            .store
+            .append_event_pair(
+                session,
+                NewEvent::new(EventKind::Note, Kind::Message, &data).label("rook:tool-images:v1"),
+                NewEvent::new(
+                    EventKind::ToolResult,
+                    Kind::ToolResult,
+                    format!("\n[1 tool image(s); content {}]", ObjectId::of(&data).to_hex()).as_bytes(),
+                )
+                .label("camera__shot"),
+            )
+            .unwrap();
+        if expected == "payload limit" {
+            assert!(raw > rook_llm::images::MAX_IMAGE_BYTES.div_ceil(3) * 4 * 4 + 4096);
+        }
+        assert!(rook.transcript_image(session, result, 0).unwrap_err().to_string().contains(expected));
+    }
+    drop(rook);
+    let reopened = rook_at(root.path());
+    assert_eq!(reopened.transcript_image(session, result, 0).unwrap().image.data, PNG);
+    assert!(reopened.transcript_image(abandoned, unrelated, 0).is_err());
+}
+
 struct Model {
     script: Mutex<Vec<Message>>,
     seen: Mutex<Vec<Request>>,
