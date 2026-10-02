@@ -13,7 +13,7 @@ Source: Pi `ee602414c703be8da722ec56de7f2399e62581ac`; starting Rook:
 | Inline tool cards | Complete | Compact/live/saved results, attributed errors/duration/diffs and command/search/MCP facts, explicit bounded browser pixels, terminal text fallback, local/daemon and full CI passed |
 | Context provenance inspector | Complete | Request-specific sources and loaded skills, deferred MCP tools in CLI/API/TUI/browser; bounded notes, old-note compatibility, local/daemon and full CI passed |
 | Local HTML export | Complete | Inclusive saved ranges, bounded/escaped/attributed output, no overwrite/publication, CLI/REPL/local/shared TUI parity, actual browser download/rendering and full CI passed |
-| Opt-in phase-based model routing | In progress | Static policy, durable branch transition, historical receipts and compatible image/scoped-state handoffs implemented; native continuation/reopen/fork and automatic fallback verified; auxiliary/branch-summary receipts, physical-attempt lifecycle, saved rate estimates and frozen delegated aggregation implemented with explicit unknown facts; actual local/shared TUI and browser phase interactions verified; finish actual same-task quality/cost/latency comparison without claiming unmeasured savings |
+| Opt-in phase-based model routing | In progress | Static policy, durable branch transition, historical receipts and compatible image/scoped-state handoffs implemented; native continuation/reopen/fork and automatic fallback verified; auxiliary/branch-summary receipts, physical-attempt lifecycle, saved rate estimates and frozen delegated aggregation implemented with explicit unknown facts; actual local/shared TUI and browser phase interactions verified; real comparison runner and failed target-availability pilot retained; finish completed same-task quality/cost/latency comparison without claiming unmeasured savings |
 | Declarative extension UI | Pending | Bounded status/progress/forms/result contract, trust boundary, text fallback and frontend parity |
 
 Regular-scrollback TUI and terminal image preview remain experiments from the
@@ -3736,3 +3736,67 @@ result remains applicable. Phase routing
 stays In progress until actual same-task quality/cost/latency comparison is
 complete. Declarative extension UI and terminal scrollback/image experiments
 retain their original scope; the full adoption goal remains active.
+
+## Real phase comparison runner and failed availability pilot
+
+The [comparison runner](../../xtask/probes/phase-routing/BENCH.md) adds fresh
+fixed/routed workspace and store pairs, alternating repetition order and an
+explicit two-turn protocol: inspect/write DESIGN.txt with unchanged seed files,
+then implement the same task. The independent oracle is outside the model's
+workspace and imports the actual modules. Rename/neighbour preservation, port
+validation/batch behavior and exact money/data migration cover different work.
+The defective seeds must fail before inference; a model's claim never scores
+the task. This measures this staged workload, not all one-prompt workflows.
+
+The runner retains incremental admission/ending records, owned PIDs, live bounded
+stdout/stderr, actual process exits, stop reasons, wall time, native turn totals,
+historical receipts, final cost coverage and script/source identity. It bounds
+steps/output, ordinary delegation, commands, captures, journal/body reads and
+candidate admission before evaluation. Planning validity and actual final target
+dispatch remain separate from workspace quality. Only final cumulative coverage
+is used; receipt and attempt estimates overlap. Cloning a new physical model
+does not copy another model's prices. Missing facts/rates stay unknown.
+
+The first real pilot used configured `home-lmstudio`
+(`huihui-ornith-1.5-35b-a3b-abliterated-i1`) and the server-listed
+`qwen3.8-9b-heretic-uncensored`, with a common window of 32768, effort none,
+8 steps per turn and 1536 output tokens per generation. Its overall runner
+exited 1 (`target/pi-phase-real-pilot.log`); retained evidence is under
+`target/phase-bench-14950503-768d-4a14-a38c-1dd52a7bd5a0`.
+The fixed analysis turn exited 0 in 365.6 seconds; implementation exited 2
+(`max_steps`) in 92.0 seconds. The independent rename oracle passed, but that
+does not claim successful agent completion. Native turn counters and all twelve
+confirmed main/auxiliary receipts agree: 67419 input and 4267 output tokens.
+No configured pricing exists, so the recorded USD subtotals are unknown.
+
+The routed analysis turn wrote DESIGN.txt without modifying the seed, then its
+first target request returned HTTP 400: the server listed the 9B model but failed
+to load it. The actual CLI exited 1 in 57.0 seconds, with no final stdout JSON.
+It was not rerun. Separate bounded CLI reads recovered its sole saved session
+`01M3YYWM78R1P61KG2NXYHZW6Z` and exited 0, retaining `failed-context.json` and
+`failed-journal.json`: three physical admissions, two completed analysis calls
+and one failed target call, zero pending admissions, unknown prices. A load
+failure is not a cheap/fast implementation; this pilot supplies no completed
+paired quality, savings or latency comparison.
+
+The pilot ran the initial runner before live capture and failed-session recovery
+were added; its original report is retained, including the initial misnamed
+binary-version `source_commit` field. The current runner records an actual Git
+revision, binary version and script hash. It recovers only an unambiguous session
+after absent/invalid final JSON, leaves unavailable turn totals null and aborts
+the suite before scheduling another real case after a fatal error. An actual
+local CLI/controlled HTTP regression verifies this failure path and its saved
+attempt coverage; this is harness evidence, not real-model benchmark data.
+
+Focused oracle, real-child capture/admission/live-read and native failed-session
+checks exited 0 (`target/pi-phase-bench-oracles-native-final.log`), and Node syntax
+checks exited 0. Full `cargo xtask ci` exited 0 (`ci: ok`, 866.0 seconds;
+`target/pi-phase-real-bench-ci.log`), including frontend builds, Clippy, native
+CLI/daemon/TUI scenarios, library and compatibility tests and doctests. These
+successful gates do not turn the real pilot's exit 1 into comparison evidence.
+No production storage code or format changes in this block, so the prior
+committed compaction measurement remains applicable.
+A working implementation model was requested once; comparison remains In
+progress and can resume when that source is available. Declarative extension UI
+and scrollback/image experiments remain actionable independent work. The full
+adoption goal stays active.

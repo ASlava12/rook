@@ -117,3 +117,7 @@ command line against the recorded root before stopping it and verifies that no
 process for that root remains. Artifacts are retained for diagnosis; no installed
 user daemon or store is targeted. These interactive Windows probes are separate
 from the portable `cargo xtask ci` gate.
+
+For independent real-model quality/cost/latency work, use the separate
+[comparison runner](BENCH.md). The frontend fixture's prescribed usage and delay
+must never be used as evidence for that comparison.

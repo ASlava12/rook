@@ -296,3 +296,24 @@ Inspection creates no additional model POST and does not rewind workspace files.
 Scratch roots, raw requests, native screen text, browser PNGs and a verification
 index stay under `target/`; the checked-in scripts recreate them on another
 Windows machine. Interactive probes remain separate from `cargo xtask ci`.
+
+## Real comparison runner
+
+The [real-model runner](../xtask/probes/phase-routing/BENCH.md) compares paired
+fresh workspaces under a fixed source and the same source with implementation
+routing. Its two-turn protocol first writes a design without changing code,
+then implements the same task. Independent external oracles check behaviour
+rather than a model's success claim or an editable workspace test. It retains
+native exits, stop reasons, token outcomes, wall time, saved receipts and cost
+coverage, with explicit admission/deadline limits and no implicit retries after
+a failed real run. Monetary estimates require configured rates; otherwise they
+remain unknown. Cumulative coverage snapshots and overlapping estimate views
+must not be summed.
+
+The first real availability pilot used the configured Ornith 35B source and
+Qwen 9B on the same LM Studio endpoint. The fixed-source workspace passed the
+rename oracle, but its second turn exited 2 at the step limit. The routed source
+could not load the target and returned HTTP 400. Its saved ledger correctly
+retains the failed target attempt; the missing final outcome is not zero usage.
+This failed pilot establishes neither paired quality nor savings or a latency
+improvement. A working target and completed paired cases are still required.
