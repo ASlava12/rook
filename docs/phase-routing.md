@@ -101,8 +101,9 @@ cache are atomic with each other, not with the external filesystem operation.
 The selected session model remains the analysis source. A routing progress line
 and bounded dispatch note expose the target provider identity. Phase notes and
 response receipts are not additional model instructions. Same-task quality,
-cost and latency comparison, complete comparison accounting and live frontend
-interaction checks remain pending. No savings have been measured or claimed.
+cost and latency comparison remain pending. Live frontend interaction checks and
+saved cost coverage are implemented and verified below; omitted usage and prices
+remain explicit unknown facts. No real-model savings have been measured or claimed.
 
 ## Route and cost receipt
 
@@ -174,7 +175,8 @@ the accounting data.
 saved branch history, never total session spend. Missing rates or facts leave
 receipts unpriced; no priced receipts means an unknown subtotal, not USD zero.
 Failed/interrupted attempts may lack usable counters and pricing. Delegated-session
-aggregation remains required. Branch-summary generation is accounted below. The existing note
+aggregation uses frozen child snapshots, described below. Branch-summary generation
+is accounted below. The existing note
 formats and postcard records remain readable; `cost_coverage` is an optional
 JSON field and added counter fields default to zero when reading older JSON.
 
@@ -271,3 +273,26 @@ a still-pending physical attempt before that attempt's own Drop saves its
 interruption. Process loss keeps durable parent and child admissions pending;
 neither scenario invents a zero-cost completion. Missing or unreadable child
 accounting retains an explicit missing snapshot.
+
+## Reproducible live frontend checks
+
+[Windows probes](../xtask/probes/phase-routing/README.md) drive the actual local
+and daemon TUI executables and Edge with the shipped browser modules. A bounded
+loopback HTTP fixture emits an analysis tool call followed by an implementation
+stream. Its usage and pause are prescribed; this is protocol/UI evidence, not a
+comparison of real model quality, latency or savings.
+
+While the implementation stream is open, Context keeps the preceding historical
+analysis receipt, shows the implementation model's next-request window and
+reports one pending physical attempt. After terminal usage and the completion
+classifier, the saved subtotal includes all three generations. Selected policy,
+dispatched source and server-reported model are shown separately. Receipt and
+attempt subtotals overlap and must not be added.
+
+Actual browser reload retains the saved receipt and subtotal. Actual local/shared
+TUI reopen and selection of forks before/after the successful write result retain
+their respective analysis/implementation receipt, subtotal and next window.
+Inspection creates no additional model POST and does not rewind workspace files.
+Scratch roots, raw requests, native screen text, browser PNGs and a verification
+index stay under `target/`; the checked-in scripts recreate them on another
+Windows machine. Interactive probes remain separate from `cargo xtask ci`.

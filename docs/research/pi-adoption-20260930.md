@@ -13,7 +13,7 @@ Source: Pi `ee602414c703be8da722ec56de7f2399e62581ac`; starting Rook:
 | Inline tool cards | Complete | Compact/live/saved results, attributed errors/duration/diffs and command/search/MCP facts, explicit bounded browser pixels, terminal text fallback, local/daemon and full CI passed |
 | Context provenance inspector | Complete | Request-specific sources and loaded skills, deferred MCP tools in CLI/API/TUI/browser; bounded notes, old-note compatibility, local/daemon and full CI passed |
 | Local HTML export | Complete | Inclusive saved ranges, bounded/escaped/attributed output, no overwrite/publication, CLI/REPL/local/shared TUI parity, actual browser download/rendering and full CI passed |
-| Opt-in phase-based model routing | In progress | Static policy, durable branch transition, historical receipts and compatible image/scoped-state handoffs implemented; native continuation/reopen/fork and automatic fallback verified; auxiliary/branch-summary receipts, physical-attempt lifecycle, saved rate estimates and frozen delegated aggregation implemented with explicit unknown facts; finish live frontend checks and same-task comparison without claiming unmeasured savings |
+| Opt-in phase-based model routing | In progress | Static policy, durable branch transition, historical receipts and compatible image/scoped-state handoffs implemented; native continuation/reopen/fork and automatic fallback verified; auxiliary/branch-summary receipts, physical-attempt lifecycle, saved rate estimates and frozen delegated aggregation implemented with explicit unknown facts; actual local/shared TUI and browser phase interactions verified; finish actual same-task quality/cost/latency comparison without claiming unmeasured savings |
 | Declarative extension UI | Pending | Bounded status/progress/forms/result contract, trust boundary, text fallback and frontend parity |
 
 Regular-scrollback TUI and terminal image preview remain experiments from the
@@ -3676,3 +3676,63 @@ Phase routing remains In progress: live frontend interactions and actual
 same-task quality/cost/latency comparison remain. Declarative extension UI is
 Pending, and terminal scrollback/image experiments retain their scope. The full
 adoption goal remains active.
+
+## Live phase-routing frontend evidence
+
+The reproducible [Windows probes](../../xtask/probes/phase-routing/README.md)
+now live in the repository rather than depending on scripts from another
+machine's temporary directory. They drive actual `rook.exe` local/shared TUI
+windows and Edge against a scratch daemon with the shipped browser modules.
+An isolated bounded loopback provider supplies native tool calls, streamed
+deltas and prescribed terminal usage. This is controlled protocol/UI evidence;
+no real-model quality, savings or latency has been measured.
+
+During the implementation stream, the last saved receipt still identifies
+analysis while the next-request window is 32768 and physical coverage is two
+admissions, one completed and one pending. On completion, the last main receipt
+identifies implementation, selected policy remains analysis, and the reported
+model is the separate server echo. Three priced generations, including the
+completion classifier, retain USD 0.00007000 in each independent overlapping
+estimate view. The browser retains the explicit instruction not to add them.
+
+Native local/shared live/final drivers exited 0
+(`target/pi-phase-live-tui-local-verified.log`,
+`target/pi-phase-live-tui-shared-verified.log`); the actual TUI processes also
+exited 0. Reopened actual TUI windows then selected the parent and forks before
+the successful write result (exclusive boundary 10) and after the completed
+turn (26). Both recovery drivers and TUI processes exited 0
+(`target/pi-phase-recovery-local.log`, `target/pi-phase-recovery-shared.log`).
+The earlier fork retains analysis, window 65536 and USD 0.00003800; the later
+fork and parent retain implementation, window 32768 and USD 0.00007000.
+All three saved prefixes were inspected without another model request or
+workspace rewind.
+
+The actual browser pending/completed/reload probe exited 0, then the permanent
+script passed again on a fresh root with exit 0
+(`target/pi-phase-live-browser-permanent.log`). Browser text and PNG captures,
+raw requests and native active-screen captures are retained in the roots
+indexed by `target/pi-phase-live-proof.json`. The permanent artifact verifier
+exited 0, confirming exactly three model POSTs per frontend, the physical stream
+order, saved receipts/windows/costs and unchanged unrelated workspace contents.
+The verifier does not replace the actual process exit checks.
+
+Failed early fixture runs are not counted: one used only the newest user-role
+message and missed the task tag after a routing diagnostic; another expected
+the chat tab after reload although Context was preserved. Native automation
+initially used redirected standard input rather than `CONIN$`, and literal
+Unicode patterns were misread by Windows PowerShell without a BOM. The final
+helper opens console handles explicitly, caps input/capture and uses ASCII
+patterns; drivers wait for actual content under bounded deadlines. One abandoned
+fixture hit its provider deadline and was retired rather than counted as a pass.
+All owned fixture browser/daemon/model processes were stopped after validation;
+installed user processes and stores were not targeted.
+
+Node and PowerShell syntax checks exited 0. Full `cargo xtask ci` exited 0
+(`ci: ok`, 848.1 seconds; `target/pi-phase-live-frontends-ci.log`), including
+native CLI/daemon and TUI suites, frontend builds, Clippy, compatibility,
+queue/goal/branch/model accounting tests and doctests. No production storage
+code or record format changes in this block; the prior committed compaction
+result remains applicable. Phase routing
+stays In progress until actual same-task quality/cost/latency comparison is
+complete. Declarative extension UI and terminal scrollback/image experiments
+retain their original scope; the full adoption goal remains active.
