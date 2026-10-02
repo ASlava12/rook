@@ -1,8 +1,10 @@
-//! Durable identity for a socket prompt that starts an ordinary turn.
+//! Durable identity for a socket prompt that starts a turn or controls a goal.
 //!
 //! The session claim and the prompt event are separate boundaries. A claim
 //! survives a disconnected caller; admission is marked in the same transaction
 //! as the UserMessage so a retry cannot run an already accepted prompt again.
+//! Goal creation and continuation instead bind the same owner slot to their
+//! generation in the transaction that saves the managed run.
 
 use crate::{AGENT_VERSION, CoreError, Result, Rook};
 use rook_proto::TurnOptions;
@@ -210,13 +212,29 @@ pub(crate) fn goal_admitted_value(
     session: u128,
     generation: &str,
 ) -> Result<Vec<u8>> {
+    goal_value(store, key, session, generation, false)
+}
+
+/// A repeated continuation can confirm its saved admission without changing
+/// the current status of that generation.
+pub(crate) fn continuation_admitted_value(
+    store: &Store,
+    key: &str,
+    session: u128,
+    generation: &str,
+    already_applied: bool,
+) -> Result<Vec<u8>> {
+    goal_value(store, key, session, generation, already_applied)
+}
+
+fn goal_value(store: &Store, key: &str, session: u128, generation: &str, repeat: bool) -> Result<Vec<u8>> {
     let mut value = store
         .kv_get_limited(key, RECORD)?
         .ok_or_else(|| CoreError::Other("chat goal receipt disappeared before admission".into()))?;
     if value.len() != RECORD
         || value[..16] != session.to_be_bytes()
-        || value[16] != 0
-        || value[49..] != *PENDING_TURN
+        || !(value[16] == 0 && value[49..] == *PENDING_TURN
+            || repeat && value[16] == 1 && &value[49..] == generation.as_bytes())
         || generation.parse::<ulid::Ulid>().is_err()
     {
         return Err(CoreError::Other("chat goal receipt changed before admission".into()));

@@ -498,12 +498,27 @@ async fn serve(
                     }
                 };
                 if let Some(claim) = &claimed {
+                    let goal_claim = if requested_goal.is_some() {
+                        true
+                    } else if text == rook_core::agent::CARRY_ON && claim.turn.is_some() {
+                        match managed::for_session(&*engine.read().await, claim.session) {
+                            Ok(run) => run
+                                .as_ref()
+                                .is_some_and(|run| claim.turn.as_deref() == Some(run.generation.as_str())),
+                            Err(error) => {
+                                report_window(&outbound, error.to_string()).await;
+                                continue;
+                            }
+                        }
+                    } else {
+                        false
+                    };
                     if claim.status == rook_core::chat_submission::Status::Admitted {
                         // The committed claim is immutable. Rejoining or
                         // sending its acknowledgement need not hold the
                         // admission lock through socket backpressure.
                         drop(admission);
-                        if requested_goal.is_some() {
+                        if goal_claim {
                             repeat_goal_claim(
                                 &state,
                                 &engine,
@@ -519,7 +534,7 @@ async fn serve(
                         }
                         continue;
                     }
-                    let handled = if requested_goal.is_some() {
+                    let handled = if goal_claim {
                         repeat_goal_claim(&state, &engine, claim, &outbound, &mut watching, live_snapshots)
                             .await
                     } else {
@@ -557,7 +572,13 @@ async fn serve(
                     }
                 };
                 if requested_goal.is_some() || existing.is_some() {
-                    if claimed.is_some() && (existing.is_some() || requested_goal.is_none()) {
+                    let continuation = existing.is_some() && text == rook_core::agent::CARRY_ON;
+                    let identified_continuation =
+                        continuation && existing.as_ref().is_some_and(|run| !run.generation.is_empty());
+                    if claimed.is_some()
+                        && (existing.is_some() || requested_goal.is_none())
+                        && !(continuation && claimed.as_ref().is_some_and(|claim| claim.turn.is_none()))
+                    {
                         report_window(&outbound, "this prompt has a pending ordinary-turn receipt; inspect that turn before starting a goal".into()).await;
                         continue;
                     }
@@ -586,26 +607,27 @@ async fn serve(
                         .unwrap_or_else(|| settings.clone());
                     let previously_watched = watching.as_ref().and_then(|w| w.live.upgrade());
                     let mut interjected = None;
-                    let goal_claim_key = if existing.is_none() && submission_id.is_some() {
-                        match claimed {
-                            Some(ref claim) => Some(claim.key.clone()),
-                            None => match rook_core::chat_submission::claim(
-                                &*goal_engine.read().await,
-                                Some(id),
-                                submission_id.as_deref().unwrap_or_default(),
-                                &text,
-                                &options,
-                            ) {
-                                Ok(claim) => Some(claim.key),
-                                Err(error) => {
-                                    report_window(&outbound, error.to_string()).await;
-                                    continue;
-                                }
-                            },
-                        }
-                    } else {
-                        None
-                    };
+                    let goal_claim_key =
+                        if (existing.is_none() || identified_continuation) && submission_id.is_some() {
+                            match claimed {
+                                Some(ref claim) => Some(claim.key.clone()),
+                                None => match rook_core::chat_submission::claim(
+                                    &*goal_engine.read().await,
+                                    Some(id),
+                                    submission_id.as_deref().unwrap_or_default(),
+                                    &text,
+                                    &options,
+                                ) {
+                                    Ok(claim) => Some(claim.key),
+                                    Err(error) => {
+                                        report_window(&outbound, error.to_string()).await;
+                                        continue;
+                                    }
+                                },
+                            }
+                        } else {
+                            None
+                        };
                     let result = {
                         let rook = goal_engine.read().await;
                         if let Some(run) = existing {
@@ -630,7 +652,19 @@ async fn serve(
                                     };
                                     interjected = Some(notice);
                                 }
-                                if !run.status.runnable() {
+                                if continuation && let Some(claim_key) = goal_claim_key.as_deref() {
+                                    managed::resume_with_claim(
+                                        &rook,
+                                        &run.id,
+                                        IdentifiedControl {
+                                            id: submission_id.as_deref().unwrap_or_default().into(),
+                                            generation: run.generation,
+                                            action: Action::Resume,
+                                        },
+                                        claim_key,
+                                    )
+                                    .map(|outcome| outcome.run)
+                                } else if !run.status.runnable() {
                                     if let Some(control_id) =
                                         submission_id.as_deref().filter(|_| !run.generation.is_empty())
                                     {

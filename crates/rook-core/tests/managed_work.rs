@@ -129,6 +129,127 @@ fn identified_control_receipts_have_a_bound_without_losing_retry_identity() {
 }
 
 #[test]
+fn continuation_claim_and_control_survive_reopen_without_resuming_a_replacement() {
+    let workspace = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let mut rook = engine(workspace.path(), store.path());
+    rook.config.work.max_messages = 1;
+    let session = rook.start_session("continuation ownership").unwrap();
+    let run = conversation_goal(&rook, session, "original goal");
+    work::control(&rook, &run.id, Action::Pause).unwrap();
+    let options = Default::default();
+    let claim = rook_core::chat_submission::claim(
+        &rook,
+        Some(session),
+        "resume-once",
+        rook_core::agent::CARRY_ON,
+        &options,
+    )
+    .unwrap();
+    let request = || control("resume-once", &run.generation, Action::Resume);
+    let resumed = work::resume_with_claim(&rook, &run.id, request(), &claim.key).unwrap();
+    assert!(!resumed.already_applied);
+    assert_eq!(resumed.run.status, Status::Queued);
+    let admitted =
+        rook_core::chat_submission::read(&rook, session, "resume-once", rook_core::agent::CARRY_ON, &options)
+            .unwrap()
+            .unwrap();
+    assert_eq!(admitted.status, rook_core::chat_submission::Status::Admitted);
+    assert_eq!(admitted.turn.as_deref(), Some(run.generation.as_str()));
+    assert!(
+        rook_core::chat_submission::claim(
+            &rook,
+            Some(session),
+            "above-cap",
+            rook_core::agent::CARRY_ON,
+            &options,
+        )
+        .is_err(),
+        "a second caller exceeds the one-claim cap"
+    );
+    work::control(&rook, &run.id, Action::Pause).unwrap();
+    drop(rook);
+    let rook = engine(workspace.path(), store.path());
+    let retry = work::resume_with_claim(&rook, &run.id, request(), &claim.key).unwrap();
+    assert!(retry.already_applied);
+    assert_eq!(retry.run.status, Status::Paused);
+    assert_eq!(work::read(&rook, &run.id).unwrap().controls.len(), 1);
+    work::control(&rook, &run.id, Action::Cancel).unwrap();
+    let replacement = conversation_goal(&rook, session, "replacement goal");
+    work::control(&rook, &replacement.id, Action::Pause).unwrap();
+    assert!(work::resume_with_claim(&rook, &replacement.id, request(), &claim.key).is_err());
+    // Even substituting the current generation cannot reuse the admitted old
+    // prompt: the claim's immutable owner and control receipt must agree.
+    assert!(
+        work::resume_with_claim(
+            &rook,
+            &replacement.id,
+            control("resume-once", &replacement.generation, Action::Resume),
+            &claim.key,
+        )
+        .is_err()
+    );
+    let untouched = work::read(&rook, &replacement.id).unwrap();
+    assert_eq!(untouched.run.status, Status::Paused);
+    assert!(untouched.controls.is_empty());
+}
+
+#[test]
+fn refused_continuation_claim_leaves_the_goal_and_control_receipts_unchanged() {
+    for invalid in ["caller", "oversize", "budget", "cap"] {
+        let workspace = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let rook = engine(workspace.path(), store.path());
+        let session = rook.start_session("refused continuation").unwrap();
+        let run = conversation_goal(&rook, session, "goal");
+        work::control(&rook, &run.id, Action::Pause).unwrap();
+        let claim = rook_core::chat_submission::claim(
+            &rook,
+            Some(session),
+            "resume-once",
+            rook_core::agent::CARRY_ON,
+            &Default::default(),
+        )
+        .unwrap();
+        if invalid == "oversize" {
+            // The record bound is 75 bytes; this fixture exceeds it before a
+            // value is copied or the control can be committed.
+            assert_eq!(rook.store.kv_get(&claim.key).unwrap().unwrap().len(), 75);
+            rook.store.kv_set(&claim.key, &[0; 76]).unwrap();
+        } else if invalid == "budget" {
+            work::update(&rook, &run.id, |saved| {
+                saved.run.status = Status::Limited;
+                Ok(())
+            })
+            .unwrap();
+        } else if invalid == "cap" {
+            work::update(&rook, &run.id, |saved| {
+                saved.controls = (0..1024)
+                    .map(|i| work::ControlReceipt { id: format!("used-{i}"), action: Action::Pause })
+                    .collect();
+                Ok(())
+            })
+            .unwrap();
+        }
+        let before = rook.store.kv_get(&format!("work/managed/{}", run.id)).unwrap().unwrap();
+        let claim_before = rook.store.kv_get(&claim.key).unwrap().unwrap();
+        let caller = if invalid == "caller" { "another-caller" } else { "resume-once" };
+        let error = work::resume_with_claim(
+            &rook,
+            &run.id,
+            control(caller, &run.generation, Action::Resume),
+            &claim.key,
+        )
+        .unwrap_err();
+        if invalid == "oversize" {
+            assert!(error.to_string().contains("exceeds 75 bytes"), "{error}");
+        }
+        assert_eq!(rook.store.kv_get(&format!("work/managed/{}", run.id)).unwrap().unwrap(), before);
+        assert_eq!(rook.store.kv_get(&claim.key).unwrap().unwrap(), claim_before);
+    }
+}
+
+#[test]
 fn steering_is_durable_idempotent_bounded_and_acknowledged_only_on_delivery() {
     let workspace = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();

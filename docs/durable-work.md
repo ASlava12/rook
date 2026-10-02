@@ -119,8 +119,14 @@ the CLI; inspect its state after an uncertain response.
 
 When `/continue` resumes a paused goal over the chat socket, its prompt ID is
 also the resume control ID. Retrying that exact prompt after a later pause
-cannot resume the goal again, including across a daemon restart. A client that
-omits the prompt ID retains the older behavior. Ctrl-C and the browser Stop
+cannot resume the goal again, including across a daemon restart. The prompt's
+saved admission retains that goal generation, so retry cannot resume a later
+replacement either. Its scoped confirmation releases the saved prompt before
+model completion, allowing navigation and an explicit send in another branch.
+Resume state, control ID and admission commit together; refusal produces no
+confirmation. Continuation claims share the existing per-session prompt cap.
+A client that omits the prompt ID, or an old run without a generation, retains
+the older behavior. Ctrl-C and the browser Stop
 button send `{"type":"stop","id":"...","generation":"..."}` for a managed
 goal. The daemon announces that generation in a `goal` event when a turn starts,
 is joined, or switches goals. A Stop retry with the same ID cannot pause a

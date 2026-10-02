@@ -685,8 +685,9 @@ fn a_retried_continue_prompt_does_not_resume_a_later_paused_goal() {
         .await
         .unwrap();
         socket.send(tokio_tungstenite::tungstenite::Message::Text(prompt.to_string().into())).await.unwrap();
-        let error = socket_event(&mut socket, "failed").await;
-        assert!(error.to_string().contains("paused by user"), "{error}");
+        let admission = socket_event(&mut socket, "agent").await;
+        assert_eq!(admission["admission"], json!({"id":"continue-once","session":id}));
+        assert_eq!(socket_event(&mut socket, "done").await["stopped"], "already_admitted");
         assert_eq!(get(&client, &format!("{}/api/work/{id}", daemon.address)).await["status"], "paused");
         socket
             .send(tokio_tungstenite::tungstenite::Message::Text(
@@ -699,6 +700,160 @@ fn a_retried_continue_prompt_does_not_resume_a_later_paused_goal() {
             assert!(tokio::time::Instant::now() < deadline, "legacy continuation no longer resumes");
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
+        let before = get(&client, &format!("{}/api/work/{id}", daemon.address)).await;
+        client
+            .post(format!("{}/api/work/{id}/control", daemon.address))
+            .json(&"cancel")
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        while get(&client, &format!("{}/api/health", daemon.address)).await["turns_running"] != 0 {
+            assert!(tokio::time::Instant::now() < deadline, "cancelled continuation still owns its stage");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        // A missing provider cannot retain a live execution. The new goal is
+        // deliberately paused before retrying the original continuation.
+        let replacement: Value = client
+            .post(format!("{}/api/work", daemon.address))
+            .json(&json!({
+                "goal":"A different goal", "autonomous":false,
+                "conversation":before["conversation"],
+                "max_iterations":0, "max_tokens":0, "max_seconds":0,
+            }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_ne!(replacement["generation"], before["generation"]);
+        client
+            .post(format!("{}/api/work/{id}/control", daemon.address))
+            .json(&"pause")
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        let history = format!("{}/api/sessions/{id}/history?limit=100", daemon.address);
+        let boundary = get(&client, &history).await["through"].clone();
+        // A fresh caller does not consume completion frames left over from
+        // the separate legacy continuation checked above.
+        let (mut replay, _) = tokio_tungstenite::connect_async(format!(
+            "{}/api/chat",
+            daemon.address.replacen("http", "ws", 1),
+        ))
+        .await
+        .unwrap();
+        replay.send(tokio_tungstenite::tungstenite::Message::Text(prompt.to_string().into())).await.unwrap();
+        assert_eq!(socket_event(&mut replay, "done").await["stopped"], "already_admitted");
+        let after = get(&client, &format!("{}/api/work/{id}", daemon.address)).await;
+        assert_eq!(after["status"], "paused");
+        assert_eq!(after["generation"], replacement["generation"]);
+        assert_eq!(get(&client, &history).await["through"], boundary);
+    });
+}
+
+#[test]
+fn a_socket_continuation_is_confirmed_before_its_held_reply_and_rejoins_on_retry() {
+    rook_llm::init_tls();
+    let rook = Rook::new();
+    let model = Model::new();
+    rook.write_config(&config(&model.url, "initial", "ask", rook.workspace.path()));
+    let session = rook_store::new_session_id();
+    let id = rook_store::format_session_id(session);
+    {
+        let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+        store
+            .create_session(&rook_store::SessionMeta::new(
+                session,
+                "continuation acknowledgement",
+                rook.workspace.path().display().to_string(),
+                rook_store::now_unix(),
+            ))
+            .unwrap();
+    }
+    let daemon = Daemon::start(&rook);
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let work = format!("{}/api/work/{id}", daemon.address);
+    let created: Value = runtime.block_on(async {
+        client
+            .post(format!("{}/api/work", daemon.address))
+            .json(&json!({
+                "goal":"CONTINUATION_TASK", "autonomous":false,
+                "conversation":{"session":id, "model":null, "effort":"high", "stance":"readonly"},
+                "max_iterations":0, "max_tokens":0, "max_seconds":0,
+            }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap()
+    });
+    assert!(model.next()["messages"].to_string().contains("CONTINUATION_TASK"));
+    runtime.block_on(async {
+        client
+            .post(format!("{work}/control"))
+            .json(&"pause")
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        model.release.store(1, Ordering::SeqCst);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        while get(&client, &format!("{}/api/health", daemon.address)).await["turns_running"] != 0 {
+            assert!(tokio::time::Instant::now() < deadline, "pause did not finish its operation");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    });
+    let prompt = json!({"type":"prompt","session":id,"id":"resume-stable","text":"/continue"});
+    runtime.block_on(async {
+        let address = format!("{}/api/chat", daemon.address.replacen("http", "ws", 1));
+        let (mut first, _) = tokio_tungstenite::connect_async(&address).await.unwrap();
+        first.send(tokio_tungstenite::tungstenite::Message::Text(prompt.to_string().into())).await.unwrap();
+        assert_eq!(
+            socket_event(&mut first, "agent").await["admission"],
+            json!({"id":"resume-stable","session":id})
+        );
+        assert_eq!(model.release.load(Ordering::SeqCst), 1, "the resumed reply is still withheld");
+        assert!(model.next()["messages"].to_string().contains("CONTINUATION_TASK"));
+        let (mut retry, _) = tokio_tungstenite::connect_async(&address).await.unwrap();
+        retry.send(tokio_tungstenite::tungstenite::Message::Text(prompt.to_string().into())).await.unwrap();
+        assert_eq!(
+            socket_event(&mut retry, "agent").await["admission"],
+            json!({"id":"resume-stable","session":id})
+        );
+        assert_eq!(socket_event(&mut retry, "attached").await["session"], id);
+        assert_eq!(get(&client, &work).await["generation"], created["generation"]);
+        assert!(model.requests.try_recv().is_err(), "retry must not construct a second model request");
+        let mut conflict = prompt.clone();
+        conflict["options"] = json!({"schema_retries":1});
+        retry.send(tokio_tungstenite::tungstenite::Message::Text(conflict.to_string().into())).await.unwrap();
+        assert!(
+            socket_event(&mut retry, "failed").await["message"]
+                .as_str()
+                .unwrap()
+                .contains("different prompt")
+        );
+        client
+            .post(format!("{work}/control"))
+            .json(&"cancel")
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        model.release.store(2, Ordering::SeqCst);
     });
 }
 

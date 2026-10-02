@@ -194,6 +194,12 @@ note, current goal value and admitted claim commit together. Retrying that ID
 joins its live generation or gets `already_admitted`; it cannot create another
 generation or silently attach to a later goal. A pending claim with a different
 active goal requires inspection. Frames without IDs retain their old behavior.
+Identified continuation also admits its claim in the transaction that saves
+the resume control and run state. The same fixed-size owner slot retains the
+original goal generation. A retry confirms or rejoins that owner; it cannot
+resume a replacement generation, including after restart. Failed admission
+leaves the claim pending and commits no resume receipt. Named claims retain
+the existing per-session message cap, and run serialization remains bounded.
 After the creation transaction commits, an existing `agent` event carries an
 optional `admission` with the caller ID and saved session. This is a request
 acknowledgement, independent of stage execution IDs and queue receipts. CLI,
@@ -204,6 +210,10 @@ the saved goal before awaiting delivery, with the admission lock released.
 An explicit retry of an admitted goal returns the same scoped acknowledgement;
 refused creation leaves the original frame retryable. No receipt is inferred
 from status text, and legacy `agent` events omit the optional field.
+Successful identified goal continuation uses that same early acknowledgement.
+An admitted continuation for an earlier generation reports `already_admitted`
+without joining or changing its replacement. Legacy generations and prompts
+without caller IDs keep the existing bare resume path.
 The browser keeps one exact prompt frame in its tab while delivery is uncertain,
 and attempts to retain it in session storage across reloads. Its explicit retry
 resends the same ID, destination, text and options. The browser leaves the

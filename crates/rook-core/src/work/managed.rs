@@ -437,6 +437,29 @@ pub fn control(rook: &Rook, id: &str, action: Action) -> Result<Run> {
 /// Apply once per caller ID and generation, including after a daemon restart.
 /// The receipt and changed status share one stored JSON value.
 pub fn control_identified(rook: &Rook, id: &str, request: IdentifiedControl) -> Result<ControlOutcome> {
+    control_with_claim(rook, id, request, None)
+}
+
+/// Resume a conversation goal and atomically admit the socket prompt that
+/// requested it. Its existing fixed-size owner slot retains the generation.
+pub fn resume_with_claim(
+    rook: &Rook,
+    id: &str,
+    request: IdentifiedControl,
+    claim_key: &str,
+) -> Result<ControlOutcome> {
+    if request.action != Action::Resume {
+        return Err(bad("a continuation claim requires a resume control"));
+    }
+    control_with_claim(rook, id, request, Some(claim_key))
+}
+
+fn control_with_claim(
+    rook: &Rook,
+    id: &str,
+    request: IdentifiedControl,
+    claim_key: Option<&str>,
+) -> Result<ControlOutcome> {
     if request.id.is_empty()
         || request.id.len() > 64
         || !request.id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
@@ -451,31 +474,47 @@ pub fn control_identified(rook: &Rook, id: &str, request: IdentifiedControl) -> 
     if saved.run.generation != request.generation {
         return Err(bad("this control belongs to an earlier run generation; inspect the current goal"));
     }
-    if let Some(known) = saved.controls.iter().find(|known| known.id == request.id) {
+    let already_applied = if let Some(known) = saved.controls.iter().find(|known| known.id == request.id) {
         if known.action != request.action {
             return Err(bad("control id was already used for another action"));
         }
-        return Ok(ControlOutcome {
-            id: request.id,
-            generation: request.generation,
-            already_applied: true,
-            run: saved.run,
-        });
-    }
-    if saved.controls.len() >= MAX_CONTROL_RECEIPTS {
+        true
+    } else {
+        false
+    };
+    if !already_applied && saved.controls.len() >= MAX_CONTROL_RECEIPTS {
         return Err(bad("control receipt limit reached for this run; inspect it before another control"));
     }
     let old_session = saved.active.as_ref().and_then(|a| rook_store::parse_session_id(&a.session));
-    apply_control(rook, &mut saved, request.action)?;
-    saved.controls.push(ControlReceipt { id: request.id.clone(), action: request.action });
-    saved.run.updated_at = now();
-    save_transition(rook, &saved, old_session)?;
-    Ok(ControlOutcome {
-        id: request.id,
-        generation: request.generation,
-        already_applied: false,
-        run: saved.run,
-    })
+    if !already_applied {
+        apply_control(rook, &mut saved, request.action)?;
+        saved.controls.push(ControlReceipt { id: request.id.clone(), action: request.action });
+        saved.run.updated_at = now();
+    }
+    if let Some(claim_key) = claim_key {
+        let session = saved
+            .run
+            .conversation
+            .as_ref()
+            .and_then(|c| rook_store::parse_session_id(&c.session))
+            .ok_or_else(|| bad("a continuation claim requires a conversation"))?;
+        if claim_key != format!("chat-prompt/session/{session:032x}/{}", request.id) {
+            return Err(bad("continuation claim belongs to another caller or session"));
+        }
+        let claim = crate::chat_submission::continuation_admitted_value(
+            &rook.store,
+            claim_key,
+            session,
+            &saved.run.generation,
+            already_applied,
+        )?;
+        let record = crate::persistence::encode(&saved)?;
+        rook.store.kv_update_session_values(session, &[(&key(id)?, &record), (claim_key, &claim)])?;
+        rook.store.flush()?;
+    } else if !already_applied {
+        save_transition(rook, &saved, old_session)?;
+    }
+    Ok(ControlOutcome { id: request.id, generation: request.generation, already_applied, run: saved.run })
 }
 
 fn apply_control(rook: &Rook, saved: &mut Saved, action: Action) -> Result<()> {

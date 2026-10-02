@@ -2634,3 +2634,103 @@ socket resume path reads the generation from the current run on each attempt.
 Then finish the remaining queue lifecycle/frontend requirements before changing
 the table's state. HTML download interaction, phase routing, declarative extension
 UI and terminal experiments retain their scope. The full goal is active.
+
+## Managed continuation acknowledgement and preserved generation
+
+Actual Edge interaction reproduced the remaining continuation outbox bug:
+`/continue` resumed the paused goal, but retained its caller frame until the goal
+ended. After mouse branch navigation, that old frame refused the target's
+explicit Send. Capturing the exact pending frame also reproduced a generation
+bug against the real daemon: after cancellation and replacement, its retry
+resumed the new paused goal using the old caller ID.
+
+Identified continuation now admits the existing fixed-size chat claim together
+with the resume control and current run JSON in one session-checked store
+transaction. The claim's owner slot holds the goal generation. Validation,
+control/claim caps and bounded serialization precede committing that state;
+refusal saves no control or admission. A repeated admitted request can rejoin
+its own live generation or report `already_admitted`. It never reapplies resume
+to a later pause or replacement goal. The daemon sends the same structured
+request acknowledgement used for goal creation after starting/joining the saved
+goal, with the admission lock released before delivery. CLI, TUI and browser
+already consume its exact caller/session without resetting the observed goal,
+turn, metrics or draft. No frontend payload, stored layout or postcard format
+changed. Prompts without caller IDs and legacy runs without generations retain
+their bare resume behavior. Claims use the existing per-session message cap;
+the managed record still has its bounded encoder and control cap.
+
+Direct-core checks exited 0 for admission/control ownership, reopen, repeated
+confirmation without another resume, rejection across replacement generations
+even when a caller substitutes the current generation, the one-claim cap and
+unchanged stored bytes after caller mismatch, an oversized claim, budget refusal
+or full control receipts. The oversized fixture exceeds the actual 75-byte
+record bound and checks the bound-specific error before any control is saved.
+The existing managed lifecycle checks also passed.
+
+Real daemon regressions exited 0 for acknowledgement while a resumed model reply
+is held, exact same-frame rejoin with no second model request, changed-options
+refusal, paused-state preservation across daemon restart, legacy unidentified
+resume, and replay after replacement with unchanged generation/status/history.
+The extended replacement test initially consumed an unread `work_paused` frame
+from its separate legacy continuation. Giving replay a fresh socket produced
+the successful check; that earlier invocation exited 101. An initial exact
+filter omitted the module prefix and ran no tests; only the corrected executed
+test is counted as evidence.
+
+A fresh actual Edge check exited 0 after the fix: early continuation confirmation,
+mouse branch navigation with a retained draft, target send/reply while the source
+continued, no cross-branch prompt/output, and unchanged workspace bytes. Its
+captured original continuation then received `already_admitted` against a
+replacement paused goal, with no resume or history change (exit 0). Browser
+evidence: `target/branch-admission-85614730fe1840a3a4610a9ebe35f1a9`, recorded in
+`target/goal-resume-browser-root.txt`; helpers `target/goal-resume-browser.mjs`
+and `target/goal-resume-replaced.mjs`. The original positive bug reproduction is
+under `target/branch-admission-9c6851fd7d9844c79a5ccdbba2699e5c`.
+
+An actual Windows daemon TUI also resumed the source, opened history/tree with
+the configured F9 key, skipped optional summary transfer, retained its draft,
+then sent/received the target answer while the source still ran. Source/target
+history, generation, health and workspace verification exited 0; its idle
+terminal exited 0. Native evidence is under
+`target/branch-admission-d480881eafb24b6f853fd545f49025c5`, recorded in
+`target/branch-admission-root.txt`, including `native-verify.json` and saved
+histories. Initial injected control-key attempts did not open the overlay and
+the held reply reached the standard idle timeout; those partial fixtures are
+not navigation evidence. The fresh fixture used `[tui.keys]` and explicitly
+set the agent's idle timeout to 600 seconds before starting the daemon. Earlier
+`[keys]` and model-level timeout entries did not configure these settings.
+The replies/verifier are scripted and do not measure model quality or cost.
+All owned terminal, model, daemon and browser helpers were stopped and their
+absence verified. Local goal metadata uses its existing ordinary-turn path;
+the shared storage behavior is covered directly in core and through the daemon.
+
+The first integrated `cargo xtask ci` with `RUST_TEST_THREADS=1` exited 1
+after 1051.9 seconds (`target/pi-goal-resume-ci.log`). All 32 managed-work
+checks passed, including the new continuation scenarios. CLI integration
+finished with 93 passes and one failure:
+`followups::killed_followups_resume_once_with_saved_settings_and_cancelled_ones_stay_stopped`
+timed out waiting for the fourth streamed model request after restart at
+`followups.rs:1462`. This is not a green gate. Its exact separate rerun exited
+0 (`target/pi-goal-resume-followup-rerun.log`, one executed test, 122.20 seconds
+including the daemon build). The cause of the first timeout is not established;
+no assertion or timeout was weakened. The repeat full `cargo xtask ci` with
+`RUST_TEST_THREADS=1` exited 0 (`ci: ok`, 1213.3 seconds;
+`target/pi-goal-resume-ci-final.log`), including all CLI integration scenarios,
+the managed-work checks, Clippy and doctests. `cargo xtask compaction` also
+exited 0 (`target/pi-goal-resume-compaction.log`): 4.02 MiB on disk, 37.1x
+dictionary compression and 5.8x end-to-end, matching the published measurements.
+
+Queue remains In progress until the remaining lifecycle/frontend evidence is
+audited against the original queue requirements. The reader audit found a
+concrete remaining bounds gap: `chat/followups.rs::read` copies the entire
+driver companion before checking 16 KiB; `message_queue.rs::read_from` and
+the managed readers (`ids`, `read`, `for_session`, `read_identity`) use
+unlimited `kv_get` although their writers already cap JSON at 8 MiB.
+`execution.rs` also reads saved outcomes and evaluation caches with unlimited
+`kv_get`; follow-up readiness reads a saved outcome. Next replace these reads
+with admission against their existing writer bounds before copying, exercise
+actual above-bound fixtures and unchanged state on refusal locally and through
+the daemon, and retain legacy JSON/default compatibility. Then finish the queue
+audit and actual HTML download/TUI interaction. Phase routing, declarative
+extension UI and terminal experiments retain their original scope. The full
+goal is active.
