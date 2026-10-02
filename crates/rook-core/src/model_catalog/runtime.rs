@@ -172,6 +172,14 @@ impl Provider for Observed {
         self.inner.supports_tools()
             && self.observed.as_ref().and_then(|model| model.capabilities.tools) != Some(false)
     }
+
+    fn image_input_support(&self) -> Option<bool> {
+        self.observed.as_ref().and_then(|model| model.capabilities.image_input)
+    }
+
+    fn can_replay_reasoning(&self, messages: &[rook_llm::Message]) -> bool {
+        self.inner.can_replay_reasoning(messages)
+    }
     fn takes_effort(&self) -> bool {
         self.inner.takes_effort()
             && Effort::ALL.into_iter().any(|level| self.selected_effort(level).is_some())

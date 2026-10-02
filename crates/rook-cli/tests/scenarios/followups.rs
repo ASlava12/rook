@@ -24,8 +24,13 @@ impl Model {
         Self::with_messages(Vec::new())
     }
     fn with_messages(messages: Vec<Value>) -> Self {
+        Self::with_catalog(messages, json!({"data":[]}))
+    }
+    fn with_catalog(messages: Vec<Value>, catalog: Value) -> Self {
         assert!(messages.len() <= 16);
         let messages = Arc::new(messages);
+        let catalog = Arc::new(catalog.to_string());
+        assert!(catalog.len() <= 4096);
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/v1", listener.local_addr().unwrap());
         listener.set_nonblocking(true).unwrap();
@@ -44,6 +49,7 @@ impl Model {
                 connections += 1;
                 let (halt, gate, count, send) = (halt.clone(), gate.clone(), count.clone(), send.clone());
                 let messages = messages.clone();
+                let catalog = catalog.clone();
                 std::thread::spawn(move || {
                     socket.set_read_timeout(Some(std::time::Duration::from_secs(90))).unwrap();
                     let mut bytes = Vec::new();
@@ -58,7 +64,12 @@ impl Model {
                         let text = String::from_utf8_lossy(&bytes);
                         if let Some((head, body)) = text.split_once("\r\n\r\n") {
                             if !head.contains("chat/completions") {
-                                let _=socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"data\":[]}");
+                                let header = format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                    catalog.len()
+                                );
+                                let _ = socket.write_all(header.as_bytes());
+                                let _ = socket.write_all(catalog.as_bytes());
                                 return;
                             }
                             let length: usize = head
@@ -235,6 +246,134 @@ fn phase_routing_changes_the_physical_model_after_a_write_locally_and_through_th
             1
         );
         assert!(store.kv_get_limited(&format!("model-phase/{id:032x}"), 16384).unwrap().is_some());
+    }
+}
+
+#[test]
+fn phase_handoffs_preserve_images_and_native_schemas_locally_and_through_the_daemon() {
+    rook_llm::init_tls();
+    for shared in [false, true] {
+        for (refresh, vision, tools) in
+            [(true, true, true), (false, true, true), (true, false, true), (true, true, false)]
+        {
+            let rook = Rook::new();
+            let image = rook.workspace.path().join("evidence.png");
+            std::fs::write(
+                &image,
+                [
+                    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8,
+                    6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 120, 156, 99, 248, 207, 192,
+                    240, 31, 0, 5, 0, 1, 255, 137, 153, 61, 29, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+                ],
+            )
+            .unwrap();
+            let catalog = json!({"data":[
+                {"id":"initial-model","supported_parameters":["tools"],"architecture":{"input_modalities":["text","image"]}},
+                {"id":"followup-model","supported_parameters":if tools { vec!["tools"] } else { vec![] },"architecture":{"input_modalities":if vision { vec!["text","image"] } else { vec!["text"] }}}
+            ]});
+            let model = Model::with_catalog(
+                vec![
+                    json!({"role":"assistant","content":"","tool_calls":[{"index":0,"id":"write-with-image","type":"function","function":{"name":"write_file","arguments":json!({"path":"evidence.txt","content":"after\n"}).to_string()}}]}),
+                    json!({"role":"assistant","content":"IMAGE_REPLY"}),
+                    json!({"role":"assistant","content":"RESUMED_IMAGE_REPLY"}),
+                ],
+                catalog,
+            );
+            model.release.store(16, Ordering::SeqCst);
+            rook.write_config(
+                &config(&model.url, "initial", "ask", rook.workspace.path())
+                    .replace("mode='ask'", "mode='ask'\nallow=['evidence.txt']")
+                    .replace(
+                        "[models.initial]",
+                        "[models.initial]\nimplementation_model='followup'\ncontext_window=65536",
+                    )
+                    .replace("[models.followup]", "[models.followup]\ncontext_window=32768"),
+            );
+            if refresh {
+                for source in ["initial", "followup"] {
+                    let output = rook.run(&["models", "--source", source, "--refresh"]);
+                    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+                }
+            }
+            let mut daemon = shared.then(|| Daemon::start(&rook));
+            let output = rook.run(&[
+                "--json",
+                "run",
+                "Inspect the attached evidence, write once, then answer.",
+                "--image",
+                image.to_str().unwrap(),
+            ]);
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            let outcome: Value = serde_json::from_slice(&output.stdout).unwrap();
+            let session = outcome["session"].as_str().unwrap();
+            let first = model.next();
+            let second = model.next();
+            let routed = refresh && vision && tools;
+            assert_eq!(first["model"], "initial-model");
+            assert_eq!(second["model"], if routed { "followup-model" } else { "initial-model" });
+            let retained_image = |request: &Value| {
+                request["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|m| m["content"].as_array())
+                    .flatten()
+                    .find(|p| p["type"] == "image_url")
+                    .unwrap()
+                    .clone()
+            };
+            assert_eq!(
+                retained_image(&second),
+                retained_image(&first),
+                "no placeholder or image re-encoding"
+            );
+            assert_eq!(second["tools"], first["tools"], "native schemas remain exact");
+            let write = second["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|m| m["tool_calls"].as_array())
+                .flatten()
+                .find(|call| call["function"]["name"] == "write_file")
+                .unwrap();
+            let arguments: Value =
+                serde_json::from_str(write["function"]["arguments"].as_str().unwrap()).unwrap();
+            assert_eq!(arguments["content"], "after\n");
+            assert!(
+                second["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|m| m["role"] == "tool" && m["tool_call_id"] == write["id"])
+            );
+            let context = rook.json(&["session", "context", session]);
+            assert_eq!(context["window"], if routed { 32768 } else { 65536 });
+            assert_eq!(
+                context["last_response"]["receipt"]["phase"],
+                if routed { "implementation" } else { "implementation_held" }
+            );
+            if let Some(old) = daemon.take() {
+                drop(old);
+            }
+            if !refresh {
+                let output = rook.run(&["models", "--source", "followup", "--refresh"]);
+                assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            }
+            if shared {
+                daemon = Some(Daemon::start(&rook));
+            }
+            let output = rook.run(&["--json", "run", "Continue without another edit.", "--session", session]);
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            let resumed = model.next();
+            assert_eq!(resumed["model"], if vision && tools { "followup-model" } else { "initial-model" });
+            assert_eq!(retained_image(&resumed), retained_image(&first));
+            assert_eq!(
+                std::fs::read_to_string(rook.workspace.path().join("evidence.txt")).unwrap(),
+                "after\n"
+            );
+            assert!(model.requests.try_recv().is_err(), "no classifier request or repeated write");
+            drop(daemon);
+        }
     }
 }
 

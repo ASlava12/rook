@@ -11,8 +11,21 @@ use serde::{Deserialize, Serialize};
 use crate::{Config, CoreError, ModelSource, Result, Rook};
 
 pub(crate) const LABEL: &str = "rook:model-phase:v1";
-pub(crate) fn handoff_blocked(messages: &[rook_llm::Message]) -> bool {
-    messages.iter().any(|m| !m.reasoning.is_empty() || !m.images.is_empty())
+pub(crate) fn handoff_reason(
+    messages: &[rook_llm::Message],
+    target: &dyn Provider,
+    native_tools: bool,
+) -> Option<&'static str> {
+    if native_tools && !target.supports_tools() {
+        return Some("the target cannot preserve native tool schemas");
+    }
+    if messages.iter().any(|m| !m.images.is_empty()) && target.image_input_support() != Some(true) {
+        return Some("target image input support is unsupported or unverified");
+    }
+    if !target.can_replay_reasoning(messages) {
+        return Some("the target cannot preserve provider-owned reasoning");
+    }
+    None
 }
 const MAX_BYTES: usize = 16384;
 const MAX_POLICIES: usize = 16;
@@ -84,6 +97,14 @@ impl Provider for Selected {
     }
     fn supports_tools(&self) -> bool {
         self.inner.supports_tools()
+    }
+
+    fn image_input_support(&self) -> Option<bool> {
+        self.inner.image_input_support()
+    }
+
+    fn can_replay_reasoning(&self, messages: &[rook_llm::Message]) -> bool {
+        self.inner.can_replay_reasoning(messages)
     }
     fn takes_effort(&self) -> bool {
         self.inner.takes_effort()

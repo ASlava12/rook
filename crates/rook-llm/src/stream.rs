@@ -212,7 +212,7 @@ impl ToolCallBuffer {
     }
 }
 
-fn json_bytes(value: &serde_json::Value) -> Result<usize> {
+pub(crate) fn json_bytes(value: &serde_json::Value) -> Result<usize> {
     struct Count(usize);
     impl std::io::Write for Count {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {

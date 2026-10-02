@@ -68,6 +68,15 @@ impl Provider for Responses {
     fn context_key(&self) -> Option<[u8; 32]> {
         Some(self.context_key)
     }
+
+    fn can_replay_reasoning(&self, messages: &[crate::Message]) -> bool {
+        messages.iter().all(|message| {
+            message.reasoning.is_empty()
+                || (message.role == Role::Assistant
+                    && message.reasoning.len() == 1
+                    && replay(message, &self.context_key).is_some())
+        })
+    }
     fn context_is_explicit(&self) -> bool {
         self.inner.context_is_explicit()
     }
@@ -262,12 +271,10 @@ fn wire_request(model: &str, scope: &[u8; 32], request: &Request, stream: bool) 
 /// later edit must not be undone by a stale provider snapshot.
 fn replay<'a>(message: &'a Message, scope: &[u8; 32]) -> Option<&'a Vec<Value>> {
     for block in &message.reasoning {
-        if block
-            .get("rook_responses_scope")
-            .cloned()
-            .and_then(|value| serde_json::from_value::<[u8; 32]>(value).ok())
-            != Some(*scope)
-        {
+        if !crate::catalog::matches_scope(block.get("rook_responses_scope"), scope) {
+            continue;
+        }
+        if crate::stream::json_bytes(block).is_err() {
             continue;
         }
         let Some(items) = block.get(REPLAY).and_then(Value::as_array) else { continue };

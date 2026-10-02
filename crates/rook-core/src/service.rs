@@ -1102,15 +1102,22 @@ impl Rook {
                     .filter(|s| !s.is_empty())
                     .unwrap_or_else(|| self.config.agent.model.clone());
                 let target = self.config.models.get(&name).filter(|s| !s.implementation_model.is_empty());
-                let effective = if let Some(source) = target
-                    && !crate::phase_routing::handoff_blocked(&replay)
+                if let Some(source) = target
                     && crate::phase_routing::implementing(self, session, &name, &source.implementation_model)?
+                    && let Ok(selected) = crate::models::chosen(&self.config, Some(&name))
+                    && let Ok(provider) =
+                        crate::models::chosen(&self.config, Some(&source.implementation_model))
+                    && crate::phase_routing::handoff_reason(
+                        &replay,
+                        provider.as_ref(),
+                        self.config.agent.native_tools && selected.supports_tools(),
+                    )
+                    .is_none()
                 {
-                    &source.implementation_model
+                    self.window_to_budget(provider.as_ref())
                 } else {
-                    &name
-                };
-                self.window_for_model(effective)
+                    self.window_for_model(&name)
+                }
             }
         };
         let budget = crate::context::ContextBudget::new(window, self.config.agent.compact_at);

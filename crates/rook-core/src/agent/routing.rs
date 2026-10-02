@@ -22,6 +22,7 @@ impl crate::agent::AgentLoop<'_> {
     pub(super) fn reset_phase_route(&mut self) {
         (self.routing, self.routing_invalid) = settings(self.provider.as_ref());
         self.routed = false;
+        self.routing_target = None;
         self.routing_guard_reported = false;
     }
 
@@ -44,25 +45,28 @@ impl crate::agent::AgentLoop<'_> {
         if !crate::phase_routing::implementing(self.rook, self.session, selected, target)? {
             return Ok(false);
         }
-        // A signature/encrypted state or image cannot be silently translated
-        // into another model's dialect. Keep the original model for this phase.
-        if crate::phase_routing::handoff_blocked(messages) {
+        // Freeze the target's observations for this turn as well as the source's.
+        let provider = match &self.routing_target {
+            Some(provider) => provider.clone(),
+            None => {
+                let provider: Arc<dyn Provider> =
+                    crate::models::provider_for(&self.rook.config, &self.vault, target)?.into();
+                self.routing_target = Some(provider.clone());
+                provider
+            }
+        };
+        if let Some(reason) =
+            crate::phase_routing::handoff_reason(messages, provider.as_ref(), self.native_tools())
+        {
             if !self.routing_guard_reported {
-                let said = "Implementation phase recorded; keeping the analysis model to preserve images or provider-owned reasoning.";
-                progress(crate::agent::Progress::Working { call: "model routing", said });
+                let said = format!("Implementation phase recorded; keeping the analysis model: {reason}.");
+                progress(crate::agent::Progress::Working { call: "model routing", said: &said });
                 self.routing_guard_reported = true;
             }
             return Ok(false);
         }
-        let provider: Arc<dyn Provider> =
-            crate::models::provider_for(&self.rook.config, &self.vault, target)?.into();
         if provider.id().len() > 512 {
             return Err(CoreError::Other("implementation model identity exceeds 512 bytes".into()));
-        }
-        if self.native_tools() && !provider.supports_tools() {
-            return Err(CoreError::Other(
-                "implementation model cannot preserve native tool schemas; choose a compatible target".into(),
-            ));
         }
         let said =
             format!("{selected}: implementation → {}", provider.id().chars().take(256).collect::<String>());
@@ -174,5 +178,56 @@ mod tests {
         );
         assert_eq!(agent.provider.id(), "recipe");
         assert_eq!(agent.budget.window, 16384);
+    }
+
+    #[test]
+    fn children_checks_and_errands_do_not_apply_or_resolve_the_parent_phase_target() {
+        let home = tempfile::tempdir().unwrap();
+        let mut rook = engine(home.path());
+        let session = rook.start_session("independent selection").unwrap();
+        crate::phase_routing::edited(&rook, session, "analysis", "implementation").unwrap();
+        rook.config.models.get_mut("implementation").unwrap().key = "secret:missing-target-key".into();
+        let provider = crate::models::provider_for(&rook.config, &Vault::empty(), "analysis").unwrap();
+        let mut agent = crate::agent::AgentLoop::new(&rook, provider.into(), session);
+        agent.depth = 1;
+        assert!(!agent.apply_phase_route(&[], &mut |_| panic!("child must keep its provider")).unwrap());
+        agent.depth = 0;
+        agent.checking = true;
+        assert!(!agent.apply_phase_route(&[], &mut |_| panic!("checker must keep its provider")).unwrap());
+        assert!(agent.routing_target.is_none(), "neither path resolves target credentials");
+        assert_eq!(agent.provider.id(), "analysis");
+        assert_eq!(agent.budget.window, 65536);
+        let errand = crate::models::errand_provider_for(&rook.config, &Vault::empty(), "analysis").unwrap();
+        assert!(errand.phase_routing().is_none());
+        agent.checking = false;
+        assert!(
+            agent.apply_phase_route(&[], &mut |_| {}).is_err(),
+            "the ordinary path actually needs the missing target key"
+        );
+    }
+
+    #[test]
+    fn a_compatible_responses_alias_handoffs_the_entire_envelope_unchanged() {
+        let home = tempfile::tempdir().unwrap();
+        let mut rook = engine(home.path());
+        for name in ["analysis", "implementation"] {
+            let source = rook.config.models.get_mut(name).unwrap();
+            source.api = "responses".into();
+            source.model = "physical".into();
+            source.context_window = Some(65536);
+        }
+        let session = rook.start_session("compatible state").unwrap();
+        crate::phase_routing::edited(&rook, session, "analysis", "implementation").unwrap();
+        let provider = crate::models::provider_for(&rook.config, &Vault::empty(), "analysis").unwrap();
+        let mut message = Message::assistant("answer");
+        message.reasoning.push(serde_json::json!({
+            "rook_responses_scope":provider.context_key().unwrap(),
+            "rook_responses_output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]}]
+        }));
+        let before = serde_json::to_vec(&message).unwrap();
+        let mut agent = crate::agent::AgentLoop::new(&rook, provider.into(), session);
+        assert!(agent.apply_phase_route(std::slice::from_ref(&message), &mut |_| {}).unwrap());
+        assert_eq!(agent.provider.id(), "implementation");
+        assert_eq!(serde_json::to_vec(&message).unwrap(), before);
     }
 }

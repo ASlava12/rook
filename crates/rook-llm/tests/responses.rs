@@ -164,6 +164,53 @@ async fn complete_response_replays_ordered_output_and_preserves_tool_schemas() {
 }
 
 #[tokio::test]
+async fn compatible_aliases_preserve_reasoning_but_foreign_or_edited_envelopes_cannot_handoff() {
+    let output = json!([reasoning(), text_item("inspect"), tool("call_a", "inspect", r#"{"path":"a"}"#)]);
+    let (url, seen) =
+        serve(vec![reply(answer(output.clone())), reply(answer(json!([text_item("done")])))]).await;
+    let response = provider(url.clone()).complete(Request::new(vec![Message::user("go")])).await.unwrap();
+    let config = || Config::new(url.clone(), Some("private-key".into()), 128_000);
+    let alias = Responses::new("another-alias", "gpt-6-astra", config()).unwrap();
+    assert!(alias.can_replay_reasoning(std::slice::from_ref(&response.message)));
+    let mut wrong_role = response.message.clone();
+    wrong_role.role = rook_llm::Role::User;
+    assert!(!alias.can_replay_reasoning(&[wrong_role]));
+    let different_model = Responses::new("different", "gpt-6-sol", config()).unwrap();
+    assert!(!different_model.can_replay_reasoning(std::slice::from_ref(&response.message)));
+    let foreign = Responses::new(
+        "foreign",
+        "gpt-6-astra",
+        Config::new(format!("{url}/other"), Some("private-key".into()), 128_000),
+    )
+    .unwrap();
+    assert!(!foreign.can_replay_reasoning(std::slice::from_ref(&response.message)));
+    let different_key =
+        Responses::new("other-key", "gpt-6-astra", Config::new(url, Some("other-key".into()), 128_000))
+            .unwrap();
+    assert!(!different_key.can_replay_reasoning(std::slice::from_ref(&response.message)));
+    let mut edited = response.message.clone();
+    edited.tool_calls[0].arguments["path"] = json!("other");
+    assert!(!alias.can_replay_reasoning(&[edited]));
+    let mut extra = response.message.clone();
+    extra.reasoning.push(json!({"type":"thinking","signature":"foreign"}));
+    assert!(!alias.can_replay_reasoning(&[extra]), "every opaque block must survive");
+    let mut oversized_scope = response.message.clone();
+    oversized_scope.reasoning[0]["rook_responses_scope"] = json!(vec![0; 65536]);
+    assert!(oversized_scope.reasoning[0]["rook_responses_scope"].as_array().unwrap().len() > 32);
+    assert!(!alias.can_replay_reasoning(&[oversized_scope]));
+    alias
+        .complete(Request::new(vec![
+            Message::user("go"),
+            response.message,
+            Message::tool_result("call_a", "evidence"),
+        ]))
+        .await
+        .unwrap();
+    let seen = seen.lock().unwrap();
+    assert_eq!(&seen[1].body["input"].as_array().unwrap()[1..4], output.as_array().unwrap().as_slice());
+}
+
+#[tokio::test]
 async fn stream_text_summary_and_calls_match_the_terminal_response_without_duplicates() {
     let output = json!([reasoning(), text_item("Привет"), tool("call_a", "inspect", r#"{"path":"a"}"#)]);
     let events = [

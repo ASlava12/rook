@@ -136,6 +136,14 @@ impl Provider for Limited {
         self.inner.supports_tools()
     }
 
+    fn image_input_support(&self) -> Option<bool> {
+        self.inner.image_input_support()
+    }
+
+    fn can_replay_reasoning(&self, messages: &[crate::Message]) -> bool {
+        self.inner.can_replay_reasoning(messages)
+    }
+
     fn takes_effort(&self) -> bool {
         self.inner.takes_effort()
     }

@@ -290,6 +290,18 @@ impl Provider for Failover {
         self.candidates.iter().all(|p| p.supports_tools())
     }
 
+    fn image_input_support(&self) -> Option<bool> {
+        if self.candidates.iter().any(|p| p.image_input_support() == Some(false)) {
+            Some(false)
+        } else {
+            self.candidates.iter().all(|p| p.image_input_support() == Some(true)).then_some(true)
+        }
+    }
+
+    fn can_replay_reasoning(&self, messages: &[crate::Message]) -> bool {
+        self.candidates.iter().all(|p| p.can_replay_reasoning(messages))
+    }
+
     fn takes_effort(&self) -> bool {
         self.candidates.iter().all(|p| p.takes_effort())
     }
@@ -643,5 +655,47 @@ mod tests {
     #[test]
     fn a_model_the_server_cannot_load_is_a_reason_to_ask_elsewhere() {
         assert!(handed_over(WILL_NOT_LOAD));
+    }
+
+    struct Facts {
+        images: Option<bool>,
+        opaque: bool,
+    }
+    #[async_trait]
+    impl Provider for Facts {
+        fn id(&self) -> &str {
+            "capability-fixture"
+        }
+        fn context_window(&self) -> usize {
+            65536
+        }
+        fn image_input_support(&self) -> Option<bool> {
+            self.images
+        }
+        fn can_replay_reasoning(&self, messages: &[Message]) -> bool {
+            self.opaque || messages.iter().all(|m| m.reasoning.is_empty())
+        }
+        async fn complete(&self, _: Request) -> Result<Response> {
+            panic!("capability checks must not send a probe")
+        }
+    }
+
+    #[test]
+    fn handoff_capabilities_include_every_fallback_through_retry_and_capacity_wrappers() {
+        let leaf = |images, opaque| -> Box<dyn Provider> {
+            Box::new(crate::limit::Limited::new(
+                Box::new(crate::retry::Retrying::new(Box::new(Facts { images, opaque }))),
+                "capability-fixture",
+                1,
+            ))
+        };
+        let mut message = Message::assistant("state");
+        message.reasoning.push(serde_json::json!({"type":"thinking","signature":"keep"}));
+        for (images, opaque) in [(Some(true), true), (None, false), (Some(false), false)] {
+            let providers =
+                Failover::new(vec![leaf(Some(true), true), leaf(images, opaque)], Prefer::AsConfigured);
+            assert_eq!(providers.image_input_support(), images);
+            assert_eq!(providers.can_replay_reasoning(std::slice::from_ref(&message)), opaque);
+        }
     }
 }

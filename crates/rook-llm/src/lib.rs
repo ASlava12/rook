@@ -597,6 +597,16 @@ pub trait Provider: Send + Sync {
         true
     }
 
+    /// A fresh, credential-matched observation, not a guess from a model name.
+    fn image_input_support(&self) -> Option<bool> {
+        None
+    }
+
+    /// Whether every provider-owned block would survive this transport unchanged.
+    fn can_replay_reasoning(&self, messages: &[Message]) -> bool {
+        messages.iter().all(|message| message.reasoning.is_empty())
+    }
+
     /// Whether `effort` reaches this model at all.
     ///
     /// Each dialect sends it only to the families documented to take it, which

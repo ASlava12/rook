@@ -533,6 +533,7 @@ pub struct AgentLoop<'a> {
     pub provider: std::sync::Arc<dyn Provider>,
     routing: Option<(String, String)>,
     routed: bool,
+    routing_target: Option<std::sync::Arc<dyn Provider>>,
     routing_guard_reported: bool,
     routing_invalid: bool,
     /// Resolve frontend settings at the next turn, never during a model request.
@@ -691,6 +692,7 @@ impl<'a> AgentLoop<'a> {
             rook,
             routing,
             routed: false,
+            routing_target: None,
             routing_guard_reported: false,
             routing_invalid,
             provider,

@@ -13,7 +13,7 @@ Source: Pi `ee602414c703be8da722ec56de7f2399e62581ac`; starting Rook:
 | Inline tool cards | Complete | Compact/live/saved results, attributed errors/duration/diffs and command/search/MCP facts, explicit bounded browser pixels, terminal text fallback, local/daemon and full CI passed |
 | Context provenance inspector | Complete | Request-specific sources and loaded skills, deferred MCP tools in CLI/API/TUI/browser; bounded notes, old-note compatibility, local/daemon and full CI passed |
 | Local HTML export | Complete | Inclusive saved ranges, bounded/escaped/attributed output, no overwrite/publication, CLI/REPL/local/shared TUI parity, actual browser download/rendering and full CI passed |
-| Opt-in phase-based model routing | In progress | Static policy, durable branch transition and historical dispatch/usage/rate receipts implemented; finish capability/continuity audit, comparison accounting, live frontend checks and same-task comparison without claiming unmeasured savings |
+| Opt-in phase-based model routing | In progress | Static policy, durable branch transition, historical receipts and compatible image/scoped-state handoffs implemented; finish full continuity/recovery audit, comparison accounting, live frontend checks and same-task comparison without claiming unmeasured savings |
 | Declarative extension UI | Pending | Bounded status/progress/forms/result contract, trust boundary, text fallback and frontend parity |
 
 Regular-scrollback TUI and terminal image preview remain experiments from the
@@ -3199,3 +3199,71 @@ interactions and compare quality/cost/latency on the same tasks. A scripted serv
 proves request plumbing and arithmetic, not model quality or savings.
 Declarative extension UI and scrollback/image terminal experiments keep their
 original scope; the full adoption goal remains active.
+
+## Compatible phase handoffs and inherited-provider audit
+
+Phase decisions now use target capabilities instead of rejecting every image
+and opaque block. Every fallback candidate participates: images require fresh,
+credential-matched positive catalog observations, and opaque state requires
+unchanged scoped replay by every candidate. Unknown/negative image support,
+incompatible opaque state or a native-schema downgrade keeps the analysis
+provider with one attributable reason per turn. The original images, tool
+schemas, tool arguments/result bindings and implementation intent remain intact.
+The first constructed phase target freezes its observations for this turn;
+subsequent turns can use a refreshed catalog. Context inspection shares this
+decision for its next effective window.
+
+Responses verifies its complete scoped envelope against the visible text/calls;
+extra blocks, altered bindings, foreign scopes and non-assistant opaque state
+cannot establish a handoff. Scope tags admit exactly 32 bytes without cloning
+arbitrary JSON; envelope byte counting precedes projection copies. Anthropic
+adds an internal origin tag to newly received thinking/redacted blocks, checks
+it for compatible aliases and strips only the tag from wire output. The actual
+signature/thinking/data bytes are preserved. Model, credential, endpoint or
+window changes cannot prove compatibility. Old unscoped Anthropic data still
+works on its original transport; the phase decision retains that transport.
+Existing postcard records, phase-state storage and note formats are unchanged.
+
+Checking/child paths return before phase-target construction, including target
+credential resolution. They preserve their ordinary/inherited provider and
+budget. Errand builders have no phase policy; an already routed parent can
+still supply its current provider under the existing inheritance rules.
+Explicit recipe selection continues to replace the phase policy.
+
+Focused checks exited 0: four core route/recipe/inheritance scenarios
+(`target/pi-phase-capability-core.log`), native Anthropic/Responses suites
+(`target/pi-phase-capability-native-fixed.log`, 26 and 14 executed tests), and
+the retry/capacity/fallback capability scenario
+(`target/pi-phase-capability-fallback.log`, one executed test). The native suites
+cover actual signed/opaque socket responses and wire requests, compatible
+aliases, changed model/key/endpoint, changed bindings, extra blocks and an
+actually oversized scope array. Subsequent non-assistant-state assertions
+were verified by the final full CI.
+
+The new local/daemon CLI scenario executed and exited 0
+(`target/pi-phase-capability-cli-fixed.log`, 96.38 seconds including its owned
+daemon build). Eight combinations cover confirmed vision/native-tools,
+unverified vision, explicitly absent vision and absent native tools. They compare
+actual image wire objects and native schemas, retained write arguments and
+actual call/result bindings, historical held/routed receipts and effective
+windows. Reopening/restarting keeps state; an explicit catalog refresh makes
+the following turn eligible without another write. These are scripted protocol
+checks, not model-quality measurements or actual live frontend interactions.
+
+Initial failures are retained: `target/pi-phase-capability-native.log` exited
+101 because the fixture assumed OpenAI Config implemented Clone; it now builds
+matching configurations. `target/pi-phase-capability-cli.log` exited 101 because
+the fixture compared a result against the raw provider call ID rather than the
+actual saved/wire call ID. It now verifies the real binding and arguments.
+Neither failed invocation counts as a pass.
+
+The final `cargo xtask ci` exited 0 (`ci: ok`, 838.1 seconds;
+`target/pi-phase-capability-ci.log`), including all new scenarios, the complete
+existing suites, frontend builds, Clippy and doctests. `cargo xtask compaction`
+also exited 0 (`target/pi-phase-capability-compaction.log`): 4.02 MiB on disk,
+37.1x dictionary compression and 5.8x end-to-end retain the published claims.
+The routing row remains In progress. Remaining work includes full native opaque continuation/reopen/fork
+and automatic-fallback continuity evidence, comparison accounting (auxiliary
+requests, failed attempts and explicit missing-cost coverage), live TUI/browser
+checks and same-task quality/cost/latency comparison. Declarative extension UI
+and scrollback/image experiments retain their scope; the full goal stays active.

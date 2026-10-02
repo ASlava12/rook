@@ -125,6 +125,29 @@ impl Provider for Anthropic {
         Some(self.context_key)
     }
 
+    fn can_replay_reasoning(&self, messages: &[Message]) -> bool {
+        messages.iter().all(|message| {
+            (message.reasoning.is_empty() || message.role == Role::Assistant)
+                && message.reasoning.iter().all(|block| {
+                    crate::catalog::matches_scope(block.get("rook_anthropic_scope"), &self.context_key)
+                        && match block.get("type").and_then(serde_json::Value::as_str) {
+                            Some("thinking") => {
+                                block.get("thinking").and_then(serde_json::Value::as_str).is_some()
+                                    && block
+                                        .get("signature")
+                                        .and_then(serde_json::Value::as_str)
+                                        .is_some_and(|s| !s.is_empty())
+                            }
+                            Some("redacted_thinking") => block
+                                .get("data")
+                                .and_then(serde_json::Value::as_str)
+                                .is_some_and(|s| !s.is_empty()),
+                            _ => false,
+                        }
+                })
+        })
+    }
+
     fn context_is_explicit(&self) -> bool {
         self.config.context_window_explicit
     }
@@ -238,7 +261,11 @@ impl Provider for Anthropic {
                 }),
                 // Carried, not read: the signature covers these bytes, and the
                 // next request of this turn is refused without them.
-                Some("thinking" | "redacted_thinking") => reasoning.push(block),
+                Some("thinking" | "redacted_thinking") => {
+                    let mut block = block;
+                    block["rook_anthropic_scope"] = serde_json::json!(self.context_key);
+                    reasoning.push(block);
+                }
                 _ => {}
             }
         }
@@ -291,6 +318,7 @@ impl Provider for Anthropic {
         let asked_to_read = request.prompt_bytes() / crate::BYTES_A_TOKEN_ROUGHLY;
         let endpoint = self.config.base_url.clone();
         let fallback_model = self.model.clone();
+        let scope = self.context_key;
 
         Ok(Box::pin(async_stream::try_stream! {
             let mut bytes = response.bytes_stream();
@@ -362,7 +390,7 @@ impl Provider for Anthropic {
                                 // back whole.
                                 Block::RedactedThinking { data } => {
                                     yield Delta::ReasoningDone(
-                                        serde_json::json!({ "type": "redacted_thinking", "data": data }),
+                                        serde_json::json!({ "type": "redacted_thinking", "data": data, "rook_anthropic_scope": scope }),
                                     )
                                 }
                                 Block::Other => {}
@@ -418,7 +446,7 @@ impl Provider for Anthropic {
             for (_, (said, signature)) in thinking {
                 if !signature.is_empty() {
                     yield Delta::ReasoningDone(
-                        serde_json::json!({ "type": "thinking", "thinking": said, "signature": signature }),
+                        serde_json::json!({ "type": "thinking", "thinking": said, "signature": signature, "rook_anthropic_scope": scope }),
                     );
                 }
             }
@@ -561,7 +589,13 @@ fn wire_request(model: &str, request: &Request, stream: bool) -> serde_json::Val
                             Some("thinking" | "redacted_thinking")
                         )
                     })
-                    .cloned()
+                    .map(|block| {
+                        let mut block = block.clone();
+                        if let Some(object) = block.as_object_mut() {
+                            object.remove("rook_anthropic_scope");
+                        }
+                        block
+                    })
                     .collect();
                 if !message.content.trim().is_empty() {
                     blocks.push(text_block(&message.content, false, request.cache_ttl));

@@ -80,6 +80,14 @@ pub struct ModelCapabilities {
     /// none of Rook's effort levels. It does not imply thinking is disabled.
     pub effort_levels: Option<Vec<Effort>>,
 }
+
+/// Provider-owned scope tags are exactly 32 bytes. Compare before any copy.
+pub(crate) fn matches_scope(value: Option<&serde_json::Value>, expected: &[u8; 32]) -> bool {
+    value.and_then(serde_json::Value::as_array).is_some_and(|bytes| {
+        bytes.len() == expected.len()
+            && bytes.iter().zip(expected).all(|(value, byte)| value.as_u64() == Some(u64::from(*byte)))
+    })
+}
 impl ModelCapabilities {
     pub(crate) fn anthropic(value: &serde_json::Value) -> Self {
         let support = |name: &str| value.get(name)?.get("supported")?.as_bool();

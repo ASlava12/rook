@@ -35,17 +35,36 @@ The first successful top-level `write_file`, `edit_file`, `delete_file` or
 writing-looking model text do not. The next model request after the complete
 tool batch can use the target. A retry of that request retains its provider;
 there is no classifier request. Independent errands and delegated/checking
-agents retain their existing provider selection in this initial block.
+agents retain their existing provider selection. Children and checkers keep
+their ordinary/inherited provider; they do not independently apply the parent's
+phase target. An already routed parent can pass its current physical provider
+to a child under existing selection rules. Errand builders carry no phase policy.
 
 Before sending to the target, the loop rebuilds the conversation and source
 manifest with its tool mode/cache prefix, resets the old usage anchor and applies
 the target's context window. Existing context compaction and overflow checks then
 run against that window. Native tool schemas cannot silently become text tools.
 
-Images and provider-owned reasoning currently hold the analysis provider, with
-one visible notice per turn. They are neither dropped nor replaced by text
-placeholders. Routing can proceed when the retained request contains neither.
-Supporting proven compatible image/reasoning handoffs is still adoption work.
+Images can move only when every target/fallback candidate has a fresh,
+credential-matched catalog observation confirming image input. Unsupported or
+unknown support retains the analysis provider. Catalog refreshes affect the next
+turn; the source and first constructed phase target freeze their observations
+for the current turn. There is no generation-time metadata probe or classifier.
+
+Provider-owned reasoning moves only when every target/fallback candidate can
+replay every block unchanged. Responses validates its scoped envelope and visible
+text/tool bindings. Anthropic tags newly received thinking/redacted blocks with
+an internal 32-byte endpoint/credential/model/window scope, removes only that
+tag before the wire request, and preserves signed/opaque bytes. Compatible
+aliases of the same transport can move; changed endpoint, key, model or window
+cannot establish that compatibility. Legacy unscoped Anthropic blocks remain
+usable on their original provider and retain it for a phase handoff.
+
+An incompatible native-tool target also retains the analysis provider instead
+of converting native schemas to text. These holds explain their reason once per
+turn, leave implementation intent durable and preserve images, schemas and state.
+No placeholder is substituted. Context inspection shares the same decision and
+reports the next effective window. A later turn re-evaluates fresh observations.
 An explicitly selected recipe model replaces the preceding phase policy.
 
 ## Branch state and recovery
@@ -71,7 +90,7 @@ cache are atomic with each other, not with the external filesystem operation.
 The selected session model remains the analysis source. A routing progress line
 and bounded dispatch note expose the target provider identity. Phase notes and
 response receipts are not additional model instructions. Same-task quality,
-cost and latency comparison, compatible capability handoffs and live frontend
+cost and latency comparison, complete comparison accounting and live frontend
 interaction checks remain pending. No savings have been measured or claimed.
 
 ## Route and cost receipt

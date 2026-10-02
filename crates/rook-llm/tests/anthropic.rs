@@ -499,12 +499,37 @@ async fn thinking_comes_back_beside_the_call_it_led_to() {
     let (url, _) = serve("200 OK", "text/event-stream", events).await;
 
     let mut stream =
-        provider(url).stream(Request::new(vec![Message::user("what is in a.txt?")])).await.unwrap();
+        provider(url.clone()).stream(Request::new(vec![Message::user("what is in a.txt?")])).await.unwrap();
     let mut assembler = rook_llm::Assembler::default();
     while let Some(delta) = stream.next().await {
         assembler.push(delta.unwrap()).unwrap();
     }
     let thought = assembler.finish().message;
+
+    let compatible = Anthropic::new(
+        "another-alias",
+        "claude-opus-5",
+        Config::new(url.clone(), "k".into(), "claude-opus-5"),
+    )
+    .unwrap();
+    assert!(compatible.can_replay_reasoning(std::slice::from_ref(&thought)));
+    let mut wrong_role = thought.clone();
+    wrong_role.role = Role::User;
+    assert!(!compatible.can_replay_reasoning(&[wrong_role]));
+    let different_model =
+        Anthropic::new("another-model", "different", Config::new(url.clone(), "k".into(), "different"))
+            .unwrap();
+    assert!(!different_model.can_replay_reasoning(std::slice::from_ref(&thought)));
+    let different_key =
+        Anthropic::new("another-key", "claude-opus-5", Config::new(url, "other-key".into(), "claude-opus-5"))
+            .unwrap();
+    assert!(!different_key.can_replay_reasoning(std::slice::from_ref(&thought)));
+    let mut legacy = thought.clone();
+    legacy.reasoning[0].as_object_mut().unwrap().remove("rook_anthropic_scope");
+    assert!(
+        !compatible.can_replay_reasoning(&[legacy]),
+        "old unscoped state stays usable on its source but cannot prove a handoff"
+    );
 
     assert_eq!(thought.reasoning.len(), 1, "the block is kept: {:?}", thought.reasoning);
     assert_eq!(thought.reasoning[0]["type"], "thinking");
@@ -537,6 +562,10 @@ async fn thinking_comes_back_beside_the_call_it_led_to() {
     let blocks = assistant["content"].as_array().unwrap();
     assert_eq!(blocks[0]["type"], "thinking", "first, as the API orders them: {blocks:?}");
     assert_eq!(blocks[0]["signature"], "EqQBCgIYAh", "verbatim, signature and all");
+    assert!(
+        blocks[0].get("rook_anthropic_scope").is_none(),
+        "internal origin metadata must never reach the provider"
+    );
     assert!(
         blocks.iter().any(|b| b["type"] == "tool_use"),
         "and still beside the call it led to: {blocks:?}"

@@ -68,9 +68,14 @@ An explicit named-model phase policy is carried beside the physical provider;
 branch state before the execution journal closes the operation. The next complete
 tool-batch boundary can select the configured implementation source, rebuild its
 request prefix and apply its context window. Forks inherit only transitions in
-their saved prefix; compaction does not reset the companion state. Images and
-opaque reasoning currently retain the analysis provider, and native tools cannot
-silently downgrade. Recipes replace the selected policy; independent errands
+their saved prefix; compaction does not reset the companion state. Image handoffs
+require fresh credential-matched support from every target/fallback candidate.
+Opaque reasoning requires unchanged, scoped replay by every candidate. Compatible
+Responses/Anthropic aliases preserve their state; unverifiable or incompatible
+images/state/native schemas retain the analysis provider with one reason per turn.
+The first phase target freezes its observations for that turn, and context
+inspection uses the same compatibility decision for the next effective window.
+Recipes replace the selected policy; independent errands
 keep their existing selection. See [phase routing](phase-routing.md) for the
 opt-in configuration, persistence limits and remaining adoption work.
 
