@@ -404,6 +404,17 @@ pub struct Response {
     pub model: String,
 }
 
+/// Facts from a non-streaming generation, separate from the existing response
+/// format. Absence of native usage or terminal metadata is never inferred from
+/// nonzero counters or an adapter-synthesized stop reason.
+#[derive(Clone, Debug)]
+pub struct Completion {
+    pub response: Response,
+    pub dispatch: Option<crate::Dispatch>,
+    pub usage_reported: bool,
+    pub completion_confirmed: bool,
+}
+
 /// A model the provider says it can serve.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelInfo {

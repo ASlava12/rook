@@ -139,6 +139,13 @@ impl Assembler {
             model,
         }
     }
+
+    pub fn finish_with_metadata(mut self) -> crate::Completion {
+        let dispatch = self.dispatch.take();
+        let usage_reported = self.usage_reported();
+        let completion_confirmed = self.completion_confirmed();
+        crate::Completion { response: self.finish(), dispatch, usage_reported, completion_confirmed }
+    }
 }
 
 /// Accumulates OpenAI-style `tool_calls` deltas, which arrive as fragments

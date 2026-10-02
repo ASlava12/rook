@@ -219,6 +219,10 @@ impl Provider for Google {
     }
 
     async fn complete(&self, request: Request) -> Result<Response> {
+        self.complete_with_metadata(request).await.map(|completed| completed.response)
+    }
+
+    async fn complete_with_metadata(&self, request: Request) -> Result<crate::Completion> {
         let response = self.send(&request, false).await?;
         let status = response.status();
         if !status.is_success() {
@@ -246,19 +250,27 @@ impl Provider for Google {
             }
         }
 
-        Ok(Response {
-            stop_reason: stop_reason(finish.as_deref(), !tool_calls.is_empty()),
-            message: Message {
-                role: Role::Assistant,
-                content,
-                tool_calls,
-                tool_call_id: None,
-                cache: false,
-                images: Vec::new(),
-                reasoning: Vec::new(),
+        let usage_reported =
+            wire.usage.prompt_token_count.is_some() && wire.usage.candidates_token_count.is_some();
+        let completion_confirmed = finish.is_some();
+        Ok(crate::Completion {
+            dispatch: self.dispatch_identity(),
+            usage_reported,
+            completion_confirmed,
+            response: Response {
+                stop_reason: stop_reason(finish.as_deref(), !tool_calls.is_empty()),
+                message: Message {
+                    role: Role::Assistant,
+                    content,
+                    tool_calls,
+                    tool_call_id: None,
+                    cache: false,
+                    images: Vec::new(),
+                    reasoning: Vec::new(),
+                },
+                usage: wire.usage.into(),
+                model: wire.model_version.unwrap_or_else(|| self.model.clone()),
             },
-            usage: wire.usage.into(),
-            model: wire.model_version.unwrap_or_else(|| self.model.clone()),
         })
     }
 

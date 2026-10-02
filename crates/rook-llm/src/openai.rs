@@ -132,6 +132,10 @@ impl Provider for OpenAiCompatible {
     }
 
     async fn complete(&self, request: Request) -> Result<Response> {
+        self.complete_with_metadata(request).await.map(|completed| completed.response)
+    }
+
+    async fn complete_with_metadata(&self, request: Request) -> Result<crate::Completion> {
         let resp = self.send(&request, false).await?;
         let status = resp.status();
         if !status.is_success() {
@@ -171,24 +175,32 @@ impl Provider for OpenAiCompatible {
             None => StopReason::Other,
         };
 
-        Ok(Response {
-            message: Message {
-                role: Role::Assistant,
-                content: choice.message.content.map(Text::into_string).unwrap_or_default(),
-                tool_calls,
-                tool_call_id: None,
-                cache: false,
-                images: Vec::new(),
-                reasoning: Vec::new(),
+        let usage_reported =
+            wire.usage.as_ref().is_some_and(|u| u.prompt_tokens.is_some() && u.completion_tokens.is_some());
+        let completion_confirmed = choice.finish_reason.is_some();
+        Ok(crate::Completion {
+            dispatch: self.dispatch_identity(),
+            usage_reported,
+            completion_confirmed,
+            response: Response {
+                message: Message {
+                    role: Role::Assistant,
+                    content: choice.message.content.map(Text::into_string).unwrap_or_default(),
+                    tool_calls,
+                    tool_call_id: None,
+                    cache: false,
+                    images: Vec::new(),
+                    reasoning: Vec::new(),
+                },
+                stop_reason,
+                usage: Usage {
+                    input_tokens: wire.usage.as_ref().and_then(|u| u.prompt_tokens).unwrap_or(0),
+                    output_tokens: wire.usage.as_ref().and_then(|u| u.completion_tokens).unwrap_or(0),
+                    cache_read_tokens: wire.usage.as_ref().map(WireUsage::cached).unwrap_or(0),
+                    ..Default::default()
+                },
+                model: wire.model.unwrap_or_else(|| self.model.clone()),
             },
-            stop_reason,
-            usage: Usage {
-                input_tokens: wire.usage.as_ref().and_then(|u| u.prompt_tokens).unwrap_or(0),
-                output_tokens: wire.usage.as_ref().and_then(|u| u.completion_tokens).unwrap_or(0),
-                cache_read_tokens: wire.usage.as_ref().map(WireUsage::cached).unwrap_or(0),
-                ..Default::default()
-            },
-            model: wire.model.unwrap_or_else(|| self.model.clone()),
         })
     }
 

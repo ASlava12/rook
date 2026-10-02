@@ -131,6 +131,10 @@ impl Provider for Selected {
     async fn complete(&self, request: Request) -> rook_llm::Result<Response> {
         self.inner.complete(request).await
     }
+
+    async fn complete_with_metadata(&self, request: Request) -> rook_llm::Result<rook_llm::Completion> {
+        self.inner.complete_with_metadata(request).await
+    }
     async fn stream(&self, request: Request) -> rook_llm::Result<ResponseStream> {
         self.inner.stream(request).await
     }

@@ -103,3 +103,17 @@ test('response receipt keeps selected, dispatched and adapter-returned models di
   assert.match(priced.textContent, /120 ms · completion confirmed: true/);
   assert.match(priced.textContent, /input\/output counters reported: true/);
 });
+
+test('cost coverage renders a known subset without presenting uncovered work as free or inherited charges as new', () => {
+  const panel = contextPanel({ ...usage, cost_coverage: {
+    main_receipts: 1, auxiliary_receipts: 2, priced_receipts: 2, unpriced_receipts: 1,
+    usage_events_without_receipt: 3, known_subtotal_usd: 0.0000946, complete_accounting: false
+  } });
+  assert.match(panel.textContent, /Known subtotal: USD 0.00009460 configured-rate estimate/);
+  assert.match(panel.textContent, /Priced receipts: 2 · unpriced receipts: 1 · usage events without receipt: 3/);
+  assert.match(panel.textContent, /Total cost is unknown: retry\/failure, delegated and branch-summary costs/);
+  assert.match(panel.textContent, /Inherited receipts are historical, not new charges/);
+  const unknown = contextPanel({ ...usage, cost_coverage: { known_subtotal_usd: null, unpriced_receipts: 2 } });
+  assert.match(unknown.textContent, /unknown \(no priced receipts\)/);
+  assert.doesNotMatch(unknown.textContent, /USD 0\.00000000/);
+});

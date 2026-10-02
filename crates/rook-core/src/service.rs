@@ -1124,25 +1124,61 @@ impl Rook {
         let mut by_kind: BTreeMap<String, KindUsage> = BTreeMap::new();
         let mut compactions = 0;
         let mut request_record = None;
-        let mut response_record = None;
+        let mut last_response = None;
+        let mut coverage = crate::model_route::CostCoverage::default();
+        let mut usage_events = 0u64;
+        let through = self.store.get_session(session)?.map(|meta| meta.next_seq).unwrap_or(0);
+        let mut next = 0;
 
-        for event in self.store.events(session, 0, usize::MAX)? {
-            let kind = event.record.kind;
-            if kind == EventKind::Compaction {
-                compactions += 1;
-            }
-            let bytes = self.store.stat_object(&event.record.body)?.map(|m| m.size_raw).unwrap_or(0);
-            if kind == EventKind::Note && event.record.label == crate::context::REQUEST_CATALOG_LABEL {
-                request_record = Some((event.seq, event.record.body, bytes));
-            }
-            if kind == EventKind::Note && event.record.label == crate::model_route::LABEL {
-                response_record = Some((event.seq, event.record.body, bytes));
-            }
-            let entry = by_kind.entry(kind.as_str().to_string()).or_default();
-            entry.events += 1;
-            entry.bytes += bytes;
-            entry.tokens +=
-                if kind == EventKind::UserMessage && event.record.label == crate::attachments::LABEL {
+        while next < through {
+            let events = self.store.events(session, next, 256)?;
+            let Some(last) = events.last() else { break };
+            next = last.seq.saturating_add(1);
+            for event in events.into_iter().take_while(|event| event.seq < through) {
+                let kind = event.record.kind;
+                if kind == EventKind::Compaction {
+                    compactions += 1;
+                }
+                let bytes = self.store.stat_object(&event.record.body)?.map(|m| m.size_raw).unwrap_or(0);
+                if kind == EventKind::Note && event.record.label == crate::context::REQUEST_CATALOG_LABEL {
+                    request_record = Some((event.seq, event.record.body, bytes));
+                }
+                if kind == EventKind::Note && event.record.label == crate::model_route::LABEL {
+                    if bytes > crate::model_route::MAX_BYTES as u64 {
+                        return Err(CoreError::Other(
+                            "saved model route receipt exceeds 4096 bytes; preserve the store and inspect it"
+                                .into(),
+                        ));
+                    }
+                    let body = self.store.get_range(&event.record.body, 0, bytes as usize)?;
+                    let receipt = crate::model_route::Receipt::read(&body)?;
+                    coverage.include(&receipt, false);
+                    last_response = Some(crate::model_route::SavedReceipt { event_seq: event.seq, receipt });
+                }
+                if kind == EventKind::Note && event.record.label == crate::model_route::AUX_LABEL {
+                    if bytes > crate::model_route::MAX_BYTES as u64 {
+                        return Err(CoreError::Other("saved auxiliary model receipt exceeds 4096 bytes; preserve the store and inspect it".into()));
+                    }
+                    let body = self.store.get_range(&event.record.body, 0, bytes as usize)?;
+                    coverage.include(&crate::model_route::Auxiliary::read(&body)?.receipt, true);
+                }
+                if kind == EventKind::AssistantMessage
+                    || event.record.tokens_in > 0
+                    || event.record.tokens_out > 0
+                    || (kind == EventKind::Note
+                        && matches!(
+                            event.record.label.as_str(),
+                            "usage" | "completion check" | "btw" | "compaction usage"
+                        ))
+                {
+                    usage_events += 1;
+                }
+                let entry = by_kind.entry(kind.as_str().to_string()).or_default();
+                entry.events += 1;
+                entry.bytes += bytes;
+                entry.tokens += if kind == EventKind::UserMessage
+                    && event.record.label == crate::attachments::LABEL
+                {
                     let body = self.store.get(&event.record.body)?;
                     crate::attachments::tokens(&crate::attachments::decode(&String::from_utf8_lossy(&body))?)
                 } else if kind == EventKind::Note && event.record.label == crate::tool_images::LABEL {
@@ -1150,7 +1186,12 @@ impl Rook {
                 } else {
                     (bytes as usize).div_ceil(4)
                 };
+            }
         }
+        coverage.usage_events_without_receipt =
+            usage_events.saturating_sub(coverage.main_receipts + coverage.auxiliary_receipts);
+        let cost_coverage = (usage_events > 0 || coverage.main_receipts + coverage.auxiliary_receipts > 0)
+            .then_some(coverage);
 
         // Use exactly what the next turn would carry. A separate event-kind
         // estimate lost signed state, missing-call results and pruning rules.
@@ -1163,21 +1204,6 @@ impl Rook {
                 .map(|catalog| crate::context::SavedRequestCatalog { event_seq, catalog })
         });
 
-        let last_response = response_record
-            .map(|(event_seq, object, bytes)| {
-                if bytes > crate::model_route::MAX_BYTES as u64 {
-                    return Err(CoreError::Other(
-                        "saved model route receipt exceeds 4096 bytes; preserve the store and inspect it"
-                            .into(),
-                    ));
-                }
-                let body = self.store.get_range(&object, 0, bytes as usize)?;
-                Ok(crate::model_route::SavedReceipt {
-                    event_seq,
-                    receipt: crate::model_route::Receipt::read(&body)?,
-                })
-            })
-            .transpose()?;
         Ok(ContextUsage {
             window,
             usable: budget.usable(),
@@ -1190,6 +1216,7 @@ impl Rook {
             by_kind: by_kind.into_iter().collect(),
             last_request,
             last_response,
+            cost_coverage,
         })
     }
 
@@ -2220,6 +2247,9 @@ pub struct ContextUsage {
     /// One completed main-conversation response; this is not total spend.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_response: Option<crate::model_route::SavedReceipt>,
+    /// Recorded estimates only, never a claim about complete session spend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_coverage: Option<crate::model_route::CostCoverage>,
 }
 
 /// What a user typed where a session was wanted: an id, or `last` for the most

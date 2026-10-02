@@ -34,6 +34,14 @@ export function contextPanel(usage) {
       el('p', {}, `Elapsed: ${r.elapsed_ms || 0} ms · completion confirmed: ${Boolean(r.complete)} · input/output counters reported: ${Boolean(r.usage_reported)}`),
       el('p', { class: 'sub' }, 'This is one response, not total session spend. Zero counters may mean omitted server usage.')));
   }
+  if (usage.cost_coverage) {
+    const c = usage.cost_coverage;
+    current.append(el('section', {},
+      el('h3', {}, 'Cost coverage · saved branch history'),
+      el('p', {}, `Known subtotal: ${c.known_subtotal_usd == null ? 'unknown (no priced receipts)' : `USD ${dollars(c.known_subtotal_usd)} configured-rate estimate`}`),
+      el('p', {}, `Priced receipts: ${c.priced_receipts || 0} · unpriced receipts: ${c.unpriced_receipts || 0} · usage events without receipt: ${c.usage_events_without_receipt || 0}`),
+      el('p', { class: 'sub' }, 'Total cost is unknown: retry/failure, delegated and branch-summary costs are not fully covered. Inherited receipts are historical, not new charges.')));
+  }
   if (!saved) return el('div', { class: 'context-view' }, current,
     el('section', { class: 'card' }, el('h2', {}, 'Last request attempt'),
       el('p', { class: 'empty' }, 'No recorded request attempt in this session.')));

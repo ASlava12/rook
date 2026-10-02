@@ -311,6 +311,7 @@ impl<'a> AgentLoop<'a> {
         // that thinking on writing its own summary.
         request.effort = Some(rook_llm::Effort::Low);
         let asked = self.summariser();
+        let started = std::time::Instant::now();
         let mut timing = crate::diagnostics::Timer::start(
             self.rook,
             self.session,
@@ -341,7 +342,27 @@ impl<'a> AgentLoop<'a> {
         // that says the span could not be summarised throws away a transcript
         // that exists.
         let thought = assembler.reasoning().trim().to_string();
-        let said = assembler.finish().message.content;
+        let completed = assembler.finish_with_metadata();
+        crate::model_route::Auxiliary::new(
+            &self.rook.config,
+            &self.vault,
+            crate::model_route::Purpose::Compaction,
+            asked.id(),
+            &completed,
+            started,
+        )
+        .record(
+            self.rook,
+            self.session,
+            rook_store::NewEvent::new(
+                EventKind::Note,
+                rook_store::Kind::Message,
+                b"compaction provider usage",
+            )
+            .label("compaction usage")
+            .usage(completed.response.usage.input_tokens, completed.response.usage.output_tokens),
+        )?;
+        let said = completed.response.message.content;
         let summary = if said.trim().is_empty() { thought } else { said };
         match summary.trim().is_empty() {
             true => Err(CoreError::Other("the model returned an empty summary".into())),

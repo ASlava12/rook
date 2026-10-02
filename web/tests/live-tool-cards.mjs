@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 class Node {
   constructor(tag, text = '') {
     this.tag = tag; this.nodeType = tag === '#text' ? 3 : 1;
-    this.text = text; this.children = []; this.className = ''; this.scrollHeight = 0; this.isConnected = true; this.listeners = {};
+    this.text = text; this.children = []; this.className = ''; this.dataset = {}; this.scrollHeight = 0; this.isConnected = true; this.listeners = {};
   }
   append(...children) { this.children.push(...children); }
   remove() { this.isConnected = false; }
@@ -28,6 +28,7 @@ globalThis.document = {
   querySelectorAll: () => [],
   createElement: tag => new Node(tag),
   createTextNode: text => new Node('#text', text),
+  createDocumentFragment: () => new Node('#fragment'),
 };
 globalThis.location = { protocol: 'http:', host: 'localhost:3000' };
 class Socket {
@@ -102,4 +103,24 @@ test('live completions open their exact saved result and diff in bounded parts w
   assert.match(saved.textContent, /next result part/);
   assert.doesNotMatch(saved.textContent, /<script>result/);
   assert.equal(paths.at(-1), '/api/sessions/original/history/0?offset=24');
+});
+
+test('resumed chat keeps human notes while auxiliary receipts and compaction usage stay in the inspector', async () => {
+  state.chat.busy = false;
+  const requests = [];
+  globalThis.fetch = async path => {
+    requests.push(path);
+    return { ok: true, json: async () => ({ items: [
+      { kind: 'user', body: 'visible prompt' },
+      { kind: 'assistant', body: 'visible answer' },
+      { kind: 'note', label: 'btw', body: 'visible aside' },
+      { kind: 'note', label: 'rook:model-aux:v1', body: '{"purpose":"aside","receipt":"internal data"}' },
+      { kind: 'note', label: 'compaction usage', body: 'compaction provider usage' },
+    ] }) };
+  };
+  const { resume } = await import('../dist/chat.js');
+  await resume('recorded-costs');
+  assert.deepEqual(requests, ['/api/sessions/recorded-costs/history']);
+  assert.match(stream.textContent, /visible prompt.*visible answer.*visible aside/);
+  assert.doesNotMatch(stream.textContent, /rook:model-aux|internal data|compaction provider usage/);
 });

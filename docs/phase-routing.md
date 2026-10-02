@@ -147,3 +147,32 @@ all-zero counters, a missing/mismatched physical identity or missing rates leave
 the monetary estimate unknown. Rates and the computed estimate are saved in
 the receipt; changing configuration cannot reprice history. They are operator
 estimates from provider counters, not verified billed charges.
+
+## Auxiliary receipts and cost coverage
+
+Completion checks and structured-output repair retain native nonstreaming
+metadata. Compaction, aside questions and final-answer calls retain streaming
+metadata. Each successful call saves a `rook:model-aux:v1` note, limited to
+4 KiB before copying/encoding and committed with its usage-bearing transcript
+event. The note contains its purpose and the same bounded identity, wire facts
+and saved rates as the main receipt. It carries no second token charge. Empty
+final answers still retain usage. Aside and compaction calls now contribute to
+stored token counters; custom providers remain unpriced without verified facts.
+
+`session context`, TUI `/context`, the HTTP context response and browser Context
+show `cost_coverage`: main/auxiliary receipt counts, priced/unpriced counts,
+usage events without a receipt and an optional known subtotal. Event metadata
+is read in bounded pages against a fixed saved-history boundary; accumulation
+uses constant space. The subtotal adds saved estimates without consulting
+today's prices. Inherited fork receipts remain historical, not additional
+charges. An auxiliary call cannot replace `last_response` or enter model context.
+Restored TUI/browser chat hides auxiliary receipts and the compaction usage
+carrier; human aside notes remain visible. The saved journal and inspector keep
+the accounting data.
+
+`complete_accounting` is currently false. The subtotal is a known subset of
+saved branch history, never total session spend. Missing rates or facts leave
+receipts unpriced; no priced receipts means an unknown subtotal, not USD zero.
+Per-attempt retry/failure/interruption coverage, delegated-session aggregation
+and branch-summary generation are still required. The existing note formats
+and postcard records remain readable; `cost_coverage` is an optional JSON field.

@@ -47,6 +47,9 @@ impl Model {
                     continue;
                 };
                 connections += 1;
+                // Windows may retain the listener's nonblocking mode on an
+                // accepted socket. Each worker reads a complete HTTP request.
+                socket.set_nonblocking(false).unwrap();
                 let (halt, gate, count, send) = (halt.clone(), gate.clone(), count.clone(), send.clone());
                 let messages = messages.clone();
                 let catalog = catalog.clone();

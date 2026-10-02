@@ -90,6 +90,22 @@ effective phase window. CLI, TUI and browser distinguish the last historical
 response from the last request attempt and current live context. Missing prices
 or unverifiable/partial counters never imply free usage.
 
+Successful auxiliary calls use `rook:model-aux:v1` JSON notes: completion
+checks, output repair, compaction, aside questions and limit-triggered final
+answers. Their 4 KiB receipts commit atomically with the existing usage carrier;
+the receipt itself charges no additional tokens. Aside and compaction carriers
+now include their provider usage. Native nonstreaming responses carry the same
+physical-leaf identity, counter-presence and terminal evidence through wrappers
+as streaming replies; custom providers leave unverified evidence unknown.
+Auxiliary receipts never enter model history or replace the main-response view.
+Restored TUI/browser chat omits these receipts and compaction usage carriers;
+human aside notes remain visible.
+Context inspection folds bounded event pages into a saved-history cost subtotal
+and explicit coverage counts. Forks inherit historical estimates, not new charges;
+changing configured prices cannot reprice saved receipts. Total cost remains
+unknown while retry/failure/interruption, delegation and branch-summary
+accounting are incomplete. Existing postcard layouts are unchanged.
+
 Durable transcript navigation lives in `rook-core::transcript`: bounded event
 pages, snapshot search cursors, body parts and attributed source-data quotes.
 CLI, TUI and browser use the same operations. The TUI owns one bounded reader

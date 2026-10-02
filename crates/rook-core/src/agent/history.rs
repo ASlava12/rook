@@ -123,6 +123,9 @@ fn replay_inner(
         if event.record.kind == EventKind::Note && event.record.label == crate::model_route::LABEL {
             continue;
         }
+        if event.record.kind == EventKind::Note && event.record.label == crate::model_route::AUX_LABEL {
+            continue;
+        }
         if event.record.kind == EventKind::Note && event.record.label == crate::phase_routing::LABEL {
             continue;
         }

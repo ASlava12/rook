@@ -634,6 +634,17 @@ pub trait Provider: Send + Sync {
 
     async fn complete(&self, request: Request) -> Result<Response>;
 
+    /// Native wire facts for accounting. Existing custom providers keep their
+    /// response contract and leave unverified facts explicitly unknown.
+    async fn complete_with_metadata(&self, request: Request) -> Result<Completion> {
+        Ok(Completion {
+            response: self.complete(request).await?,
+            dispatch: self.dispatch_identity(),
+            usage_reported: false,
+            completion_confirmed: false,
+        })
+    }
+
     fn supports_streaming(&self) -> bool {
         false
     }

@@ -176,6 +176,16 @@ fn reply(text: &str) -> Response {
     }
 }
 
+fn auxiliary_receipts(rook: &Rook, session: u128) -> Vec<serde_json::Value> {
+    rook.store
+        .events(session, 0, 256)
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.record.label == "rook:model-aux:v1")
+        .map(|event| serde_json::from_slice(&rook.store.get(&event.record.body).unwrap()).unwrap())
+        .collect()
+}
+
 fn call(name: &str, args: serde_json::Value) -> Response {
     Response {
         message: Message {
@@ -595,7 +605,7 @@ async fn a_plain_turn_is_logged_end_to_end() {
     let kinds: Vec<&str> = entries.iter().map(|e| e.kind.as_str()).collect();
     assert_eq!(
         kinds,
-        vec!["user", "note", "assistant", "note", "note", "note", "note"],
+        vec!["user", "note", "assistant", "note", "note", "note", "note", "note"],
         "both sides, the completion check and the result pair must be in the log"
     );
     assert_eq!(entries[0].body, "say hello");
@@ -606,9 +616,13 @@ async fn a_plain_turn_is_logged_end_to_end() {
     assert!(receipt.complete);
     assert!(receipt.dispatch.is_none(), "a custom scripted provider cannot prove a physical endpoint");
     assert!(receipt.cost.is_none());
-    assert_eq!(entries[5].label, "turn-summary");
-    assert_eq!(entries[6].label, "turn-result");
-    let (_, saved): (String, rook_core::agent::TurnOutcome) = serde_json::from_str(&entries[6].body).unwrap();
+    assert_eq!(entries[4].label, "completion check");
+    assert_eq!(entries[5].label, "rook:model-aux:v1");
+    let auxiliary: serde_json::Value = serde_json::from_str(&entries[5].body).unwrap();
+    assert_eq!(auxiliary["purpose"], "completion_check");
+    assert_eq!(entries[6].label, "turn-summary");
+    assert_eq!(entries[7].label, "turn-result");
+    let (_, saved): (String, rook_core::agent::TurnOutcome) = serde_json::from_str(&entries[7].body).unwrap();
     assert_eq!(saved.reply, outcome.reply);
 }
 
@@ -673,13 +687,16 @@ async fn a_tool_call_runs_and_both_halves_reach_the_log() {
             "note",
             "note",
             "note",
+            "note",
             "note"
         ]
     );
     assert_eq!(entries[1].label, rook_core::context::REQUEST_CATALOG_LABEL);
     assert_eq!(entries[6].label, rook_core::context::REQUEST_CATALOG_LABEL);
-    assert_eq!(entries[10].label, "turn-summary");
-    assert_eq!(entries[11].label, "turn-result");
+    assert_eq!(entries[9].label, "completion check");
+    assert_eq!(entries[10].label, "rook:model-aux:v1");
+    assert_eq!(entries[11].label, "turn-summary");
+    assert_eq!(entries[12].label, "turn-result");
     assert!(entries[5].body.contains("line two"), "{}", entries[5].body);
     assert_eq!(entries[2].label, "usage", "tool-only usage is durable before the effect");
     for index in [3, 8] {
@@ -1993,6 +2010,13 @@ async fn compaction_summarises_and_later_turns_start_from_the_summary() {
         !carried.contains("question 0"),
         "the compacted span must not be carried; only the recent tail should remain"
     );
+    let receipts = auxiliary_receipts(&f.rook, session);
+    let summary = receipts.iter().find(|r| r["purpose"] == "compaction").unwrap();
+    assert_eq!(summary["receipt"]["usage"]["input_tokens"], 100);
+    assert_eq!(summary["receipt"]["usage"]["output_tokens"], 20);
+    let meta = f.rook.store.get_session(session).unwrap().unwrap();
+    assert_eq!((meta.tokens_in, meta.tokens_out), (200, 40), "summarisation is charged exactly once");
+    assert!(!carried.contains("compaction provider usage") && !carried.contains("rook:model-aux"));
 }
 
 #[tokio::test]
@@ -2573,6 +2597,29 @@ async fn an_aside_is_still_recorded_for_the_transcript() {
         .expect("an aside must be auditable even though the model never sees it again");
     assert!(note.body.contains("what is it?"));
     assert!(note.body.contains("forty-two"));
+    let receipts = auxiliary_receipts(&f.rook, session);
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0]["purpose"], "aside");
+    assert!(!rook_core::agent::note_is_for_a_person("rook:model-aux:v1"));
+    assert!(!rook_core::agent::note_is_for_a_person("compaction usage"));
+    assert!(rook_core::agent::note_is_for_a_person("btw"), "the actual aside remains readable");
+    assert_eq!(receipts[0]["receipt"]["usage"]["input_tokens"], 100);
+    assert_eq!(receipts[0]["receipt"]["usage"]["output_tokens"], 20);
+    assert_eq!(
+        receipts[0]["receipt"]["usage_reported"], false,
+        "custom providers do not prove wire counters"
+    );
+    let meta = f.rook.store.get_session(session).unwrap().unwrap();
+    assert_eq!(
+        (meta.tokens_in, meta.tokens_out),
+        (100, 20),
+        "an aside used tokens even outside main history"
+    );
+    let context = f.rook.context_usage(session, Some(16000)).unwrap();
+    assert!(context.last_response.is_none());
+    let coverage = context.cost_coverage.unwrap();
+    assert_eq!(coverage.unpriced_receipts, 1);
+    assert!(coverage.known_subtotal_usd.is_none() && !coverage.complete_accounting);
 }
 
 #[tokio::test]
@@ -6252,6 +6299,19 @@ async fn a_turn_that_asks_the_same_thing_forever_is_ended_and_says_so() {
     assert!(asked.contains("asked the same thing"), "and it was told why it was being asked: {asked}");
     assert!(asked.contains("without calling anything"), "with nothing left to reach for: {asked}");
 
+    let receipts = auxiliary_receipts(&f.rook, session);
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0]["purpose"], "final_answer");
+    let meta = f.rook.store.get_session(session).unwrap().unwrap();
+    assert_eq!(
+        (meta.tokens_in, meta.tokens_out),
+        (600, 120),
+        "five attempts and final answer each charged once"
+    );
+    let coverage = f.rook.context_usage(session, Some(16000)).unwrap().cost_coverage.unwrap();
+    assert_eq!((coverage.main_receipts, coverage.auxiliary_receipts), (5, 1));
+    assert_eq!(coverage.usage_events_without_receipt, 0);
+
     // And the refusals are in the transcript, which held nothing but the
     // model's own messages while it spent a turn on one call.
     let events = f.rook.transcript(session, 0, 200, 4_000).unwrap();
@@ -7647,6 +7707,26 @@ async fn a_recipe_loads_its_skill_and_tightens_the_existing_turn_limits() {
     assert!(
         messages.iter().any(|m| m.content.contains("Only inspect the code") && m.content.contains("Audit"))
     );
+}
+
+#[tokio::test]
+async fn an_empty_final_answer_still_records_its_usage_and_unknown_cost() {
+    let f = fixture();
+    let session = f.rook.start_session("empty final answer").unwrap();
+    let provider = ScriptedProvider::new(vec![call("list_dir", serde_json::json!({"path":"."})), reply("")]);
+    let mut agent = AgentLoop::new(&f.rook, Arc::new(provider), session);
+    agent.max_steps = 1;
+    let outcome = agent.run("inspect once").await.unwrap();
+    assert_eq!(outcome.stopped, "max_steps");
+    let receipts = auxiliary_receipts(&f.rook, session);
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0]["purpose"], "final_answer");
+    let meta = f.rook.store.get_session(session).unwrap().unwrap();
+    assert_eq!((meta.tokens_in, meta.tokens_out), (200, 40));
+    let coverage = f.rook.context_usage(session, Some(16000)).unwrap().cost_coverage.unwrap();
+    assert_eq!((coverage.main_receipts, coverage.auxiliary_receipts), (1, 1));
+    assert_eq!(coverage.usage_events_without_receipt, 0);
+    assert!(coverage.known_subtotal_usd.is_none() && !coverage.complete_accounting);
 }
 
 #[tokio::test]

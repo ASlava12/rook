@@ -63,13 +63,15 @@ impl<'a> AgentLoop<'a> {
             if let Some(by) = self.by {
                 patience = patience.min(by.saturating_duration_since(std::time::Instant::now()));
             }
-            let response = saying_it_waits(
-                tokio::time::timeout(patience, self.provider.complete(request)),
+            let started = std::time::Instant::now();
+            let completed = saying_it_waits(
+                tokio::time::timeout(patience, self.provider.complete_with_metadata(request)),
                 patience,
                 &mut *on_progress,
             )
             .await
             .map_err(|_| CoreError::Other("output schema repair timed out".into()))??;
+            let response = &completed.response;
             outcome.input_tokens = outcome.input_tokens.saturating_add(response.usage.input_tokens);
             outcome.output_tokens = outcome.output_tokens.saturating_add(response.usage.output_tokens);
             outcome.cached_tokens = outcome.cached_tokens.saturating_add(response.usage.cache_read_tokens);
@@ -78,7 +80,16 @@ impl<'a> AgentLoop<'a> {
                 output: outcome.output_tokens,
                 cached: outcome.cached_tokens,
             });
-            self.rook.store.append_event(
+            crate::model_route::Auxiliary::new(
+                &self.rook.config,
+                &self.vault,
+                crate::model_route::Purpose::OutputRepair,
+                self.provider.id(),
+                &completed,
+                started,
+            )
+            .record(
+                self.rook,
                 self.session,
                 rook_store::NewEvent::new(
                     EventKind::AssistantMessage,
@@ -93,7 +104,7 @@ impl<'a> AgentLoop<'a> {
             {
                 return Err(CoreError::Other("output schema repair did not return a complete answer".into()));
             }
-            outcome.reply = response.message.content;
+            outcome.reply = completed.response.message.content;
             attempts += 1;
         }
         if attempts > 0 {

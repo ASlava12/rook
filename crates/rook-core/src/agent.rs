@@ -765,6 +765,7 @@ impl<'a> AgentLoop<'a> {
         // An aside is a question about work already done, not the work.
         request.effort = Some(rook_llm::Effort::Low);
 
+        let started = std::time::Instant::now();
         let mut stream = self.provider.stream(request).await.map_err(|e| CoreError::Other(e.to_string()))?;
         let mut assembler = Assembler::default();
         while let Some(delta) = stream.next().await {
@@ -773,7 +774,8 @@ impl<'a> AgentLoop<'a> {
             assembler.push(delta).map_err(|e| CoreError::Other(e.to_string()))?;
         }
 
-        let response = assembler.finish();
+        let completed = assembler.finish_with_metadata();
+        let response = &completed.response;
         // A model that answers an aside with a tool call has nothing to say and
         // no way to act; an empty pane would leave that looking like a hang.
         let answer = match response.message.content.trim() {
@@ -783,7 +785,22 @@ impl<'a> AgentLoop<'a> {
             "" => "(the model returned nothing)".to_string(),
             text => text.to_string(),
         };
-        self.rook.log(self.session, EventKind::Note, "btw", &format!("Q: {question}\nA: {answer}")).ok();
+        let body = format!("Q: {question}\nA: {answer}");
+        crate::model_route::Auxiliary::new(
+            &self.rook.config,
+            &self.vault,
+            crate::model_route::Purpose::Aside,
+            self.provider.id(),
+            &completed,
+            started,
+        )
+        .record(
+            self.rook,
+            self.session,
+            rook_store::NewEvent::new(EventKind::Note, rook_store::Kind::Message, body.as_bytes())
+                .label("btw")
+                .usage(response.usage.input_tokens, response.usage.output_tokens),
+        )?;
         Ok(answer)
     }
 
@@ -1774,6 +1791,7 @@ impl<'a> AgentLoop<'a> {
             request.effort = Some(self.effort);
             request.max_output_tokens = self.room_for_output(used);
             request.cache_ttl = self.rook.config.agent.cache_ttl();
+            let started = std::time::Instant::now();
             let mut stream =
                 self.provider.stream(request).await.map_err(|e| CoreError::Other(e.to_string()))?;
             let mut assembler = Assembler::default();
@@ -1782,22 +1800,38 @@ impl<'a> AgentLoop<'a> {
                 on_progress(Progress::Delta(&delta));
                 assembler.push(delta).map_err(|e| CoreError::Other(e.to_string()))?;
             }
-            let response = assembler.finish();
+            let completed = assembler.finish_with_metadata();
+            let response = &completed.response;
             outcome.input_tokens += response.usage.input_tokens;
             outcome.output_tokens += response.usage.output_tokens;
             outcome.cached_tokens += response.usage.cache_read_tokens;
+            let carrier = if response.message.content.is_empty() {
+                rook_store::NewEvent::new(
+                    EventKind::Note,
+                    rook_store::Kind::Message,
+                    b"empty final-answer response",
+                )
+                .label("usage")
+            } else {
+                rook_store::NewEvent::new(
+                    EventKind::AssistantMessage,
+                    rook_store::Kind::Message,
+                    response.message.content.as_bytes(),
+                )
+                .label(&response.model)
+            }
+            .usage(response.usage.input_tokens, response.usage.output_tokens);
+            crate::model_route::Auxiliary::new(
+                &self.rook.config,
+                &self.vault,
+                crate::model_route::Purpose::FinalAnswer,
+                self.provider.id(),
+                &completed,
+                started,
+            )
+            .record(self.rook, self.session, carrier)?;
             if !response.message.content.is_empty() {
-                self.rook.store.append_event(
-                    self.session,
-                    rook_store::NewEvent::new(
-                        EventKind::AssistantMessage,
-                        rook_store::Kind::Message,
-                        response.message.content.as_bytes(),
-                    )
-                    .label(&response.model)
-                    .usage(response.usage.input_tokens, response.usage.output_tokens),
-                )?;
-                outcome.reply = response.message.content;
+                outcome.reply = completed.response.message.content;
             }
         } else if let Some(left) = &left {
             outcome.reply.push_str(&format!("\n\n{left}"));
@@ -1881,7 +1915,7 @@ pub const WROTE: &str = "wrote";
 /// constant: it is JSON for `changes` to read, and it belongs on a screen no
 /// more than a row of a database does.
 pub fn note_is_for_a_person(label: &str) -> bool {
-    !matches!(label, WROTE | crate::tool_details::LABEL)
+    !matches!(label, WROTE | crate::tool_details::LABEL | crate::model_route::AUX_LABEL | "compaction usage")
 }
 
 const SAY_IT: &str = "\

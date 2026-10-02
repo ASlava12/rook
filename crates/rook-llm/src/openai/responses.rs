@@ -103,13 +103,27 @@ impl Provider for Responses {
     }
 
     async fn complete(&self, request: Request) -> Result<Response> {
+        self.complete_with_metadata(request).await.map(|completed| completed.response)
+    }
+
+    async fn complete_with_metadata(&self, request: Request) -> Result<crate::Completion> {
         let response = self.send(&request, false).await?;
         let text =
             crate::whole_text(response, &self.inner.config.base_url, self.inner.config.stream_idle_timeout)
                 .await?;
         let value: Value = serde_json::from_str(&text)
             .map_err(|error| LlmError::Decode(format!("Responses JSON: {error}")))?;
-        decode(&value, &self.inner.model, &self.context_key)
+        let response = decode(&value, &self.inner.model, &self.context_key)?;
+        Ok(crate::Completion {
+            response,
+            dispatch: self.dispatch_identity(),
+            usage_reported: value.pointer("/usage/input_tokens").is_some_and(Value::is_u64)
+                && value.pointer("/usage/output_tokens").is_some_and(Value::is_u64),
+            completion_confirmed: matches!(
+                value.get("status").and_then(Value::as_str),
+                Some("completed" | "incomplete")
+            ),
+        })
     }
 
     async fn stream(&self, request: Request) -> Result<ResponseStream> {

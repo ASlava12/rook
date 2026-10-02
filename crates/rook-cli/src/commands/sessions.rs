@@ -446,6 +446,9 @@ fn show_context(usage: &rook_core::ContextUsage, json: bool) -> Result<()> {
     if let Some(saved) = &usage.last_response {
         println!("{}", rook_core::model_route::describe(saved));
     }
+    if let Some(coverage) = &usage.cost_coverage {
+        println!("{}", coverage.describe());
+    }
     println!("window       {:>9}  (usable {}, compacts at {})", usage.window, usage.usable, usage.compact_at);
     println!(
         "in context   {:>9}  {:.0}% of usable {}",

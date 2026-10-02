@@ -6,6 +6,70 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) const LABEL: &str = "rook:model-route:v1";
 pub(crate) const MAX_BYTES: usize = 4096;
+pub(crate) const AUX_LABEL: &str = "rook:model-aux:v1";
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Purpose {
+    CompletionCheck,
+    OutputRepair,
+    Compaction,
+    Aside,
+    FinalAnswer,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct Auxiliary {
+    pub purpose: Purpose,
+    pub receipt: Receipt,
+}
+
+impl Auxiliary {
+    pub(crate) fn new(
+        config: &crate::Config,
+        vault: &crate::Vault,
+        purpose: Purpose,
+        selected: &str,
+        completed: &rook_llm::Completion,
+        started: std::time::Instant,
+    ) -> Self {
+        let dispatch = completed
+            .dispatch
+            .as_ref()
+            .and_then(|d| Dispatch::bounded(&d.provider, &d.model, d.input_includes_cache));
+        let mut receipt = Receipt::new(selected, "ordinary", dispatch, &completed.response, vault);
+        receipt.complete = completed.completion_confirmed;
+        receipt.usage_reported = completed.usage_reported;
+        receipt.elapsed_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        receipt.price(config);
+        Self { purpose, receipt }
+    }
+
+    pub(crate) fn record(
+        &self,
+        rook: &crate::Rook,
+        session: u128,
+        carrier: rook_store::NewEvent<'_>,
+    ) -> Result<()> {
+        let bytes = crate::persistence::encode_with_limit(self, MAX_BYTES)?;
+        rook.store.append_event_pair(
+            session,
+            carrier,
+            rook_store::NewEvent::new(rook_store::EventKind::Note, rook_store::Kind::Message, &bytes)
+                .label(AUX_LABEL),
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn read(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() > MAX_BYTES {
+            return Err(crate::CoreError::Other("saved auxiliary model receipt exceeds 4096 bytes".into()));
+        }
+        let auxiliary: Self = serde_json::from_slice(bytes)?;
+        auxiliary.receipt.validate()?;
+        Ok(auxiliary)
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Cost {
@@ -161,22 +225,27 @@ impl Receipt {
             return Err(crate::CoreError::Other("saved model route receipt exceeds 4096 bytes".into()));
         }
         let receipt: Self = serde_json::from_slice(bytes)?;
-        let invalid_cost = receipt.cost.as_ref().is_some_and(|cost| {
-            !receipt.complete
-                || !receipt.usage_reported
+        receipt.validate()?;
+        Ok(receipt)
+    }
+
+    fn validate(&self) -> Result<()> {
+        let invalid_cost = self.cost.as_ref().is_some_and(|cost| {
+            !self.complete
+                || !self.usage_reported
                 || !cost.estimated_usd.is_finite()
-                || receipt.dispatch.as_ref().and_then(|d| cost.calculate(&receipt.usage, d))
+                || self.dispatch.as_ref().and_then(|d| cost.calculate(&self.usage, d))
                     != Some(cost.estimated_usd)
         });
         if invalid_cost
             || !["ordinary", "analysis", "implementation", "implementation_held"]
-                .contains(&receipt.phase.as_str())
-            || receipt
+                .contains(&self.phase.as_str())
+            || self
                 .selected
                 .iter()
-                .chain(receipt.reported_model.iter())
+                .chain(self.reported_model.iter())
                 .any(|s| s.len() > 256 || s.chars().any(char::is_control))
-            || receipt
+            || self
                 .dispatch
                 .as_ref()
                 .is_some_and(|d| Dispatch::bounded(&d.provider, &d.model, d.input_includes_cache).is_none())
@@ -185,8 +254,53 @@ impl Receipt {
                 "unsupported model route receipt; preserve the store and inspect it".into(),
             ));
         }
-        Ok(receipt)
+        Ok(())
     }
+}
+
+/// A subset of estimates in saved branch history, including inherited receipts.
+/// Retry/failure, delegated and branch-summary accounting is not complete yet.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct CostCoverage {
+    pub main_receipts: u64,
+    pub auxiliary_receipts: u64,
+    pub priced_receipts: u64,
+    pub unpriced_receipts: u64,
+    pub usage_events_without_receipt: u64,
+    pub known_subtotal_usd: Option<f64>,
+    pub complete_accounting: bool,
+}
+
+impl CostCoverage {
+    pub(crate) fn include(&mut self, receipt: &Receipt, auxiliary: bool) {
+        if auxiliary {
+            self.auxiliary_receipts += 1;
+        } else {
+            self.main_receipts += 1;
+        }
+        match &receipt.cost {
+            Some(cost) => {
+                self.priced_receipts += 1;
+                self.known_subtotal_usd = Some(self.known_subtotal_usd.unwrap_or(0.0) + cost.estimated_usd);
+            }
+            None => self.unpriced_receipts += 1,
+        }
+    }
+
+    pub fn describe(&self) -> String {
+        let subtotal = self
+            .known_subtotal_usd
+            .map(|usd| format!("USD {} configured-rate estimate", amount(usd)))
+            .unwrap_or_else(|| "unknown (no priced receipts)".into());
+        format!(
+            "Cost coverage · saved branch history\nKnown subtotal: {subtotal}\nPriced receipts: {} · unpriced receipts: {} · usage events without receipt: {}\nTotal cost is unknown: retry/failure, delegated and branch-summary costs are not fully covered. Inherited receipts are historical, not new charges.\n",
+            self.priced_receipts, self.unpriced_receipts, self.usage_events_without_receipt
+        )
+    }
+}
+
+fn amount(usd: f64) -> String {
+    if usd > 0.0 && usd < 1e-8 { format!("{usd:.3e}") } else { format!("{usd:.8}") }
 }
 
 /// Text fallback shared by CLI and TUI. Counters belong to this one response;
@@ -202,11 +316,7 @@ pub fn describe(saved: &SavedReceipt) -> String {
         .cost
         .as_ref()
         .map(|c| {
-            let amount = if c.estimated_usd > 0.0 && c.estimated_usd < 1e-8 {
-                format!("{:.3e}", c.estimated_usd)
-            } else {
-                format!("{:.8}", c.estimated_usd)
-            };
+            let amount = amount(c.estimated_usd);
             format!("USD {amount} estimate from recorded configured rates; not an invoice")
         })
         .unwrap_or_else(|| "unknown (missing pricing, identity or complete usage)".into());
@@ -255,6 +365,146 @@ mod tests {
             },
             model: "server-echo".into(),
         }
+    }
+
+    #[test]
+    fn auxiliary_costs_survive_reopen_and_forks_without_becoming_context_or_recharging_usage() {
+        let home = tempfile::tempdir().unwrap();
+        let mut rook = engine(home.path());
+        rook.config.models.insert(
+            "physical-source".into(),
+            crate::ModelSource {
+                model: "physical-model".into(),
+                input_usd_per_million: Some(2.0),
+                output_usd_per_million: Some(6.0),
+                cache_read_usd_per_million: Some(0.2),
+                cache_write_usd_per_million: Some(3.0),
+                ..Default::default()
+            },
+        );
+        let session = rook.start_session("auxiliary accounting").unwrap();
+        // Force the context metadata reader to cross its bounded page boundary.
+        for _ in 0..260 {
+            rook.log(session, EventKind::Note, "diagnostic", "not a generation").unwrap();
+        }
+        assert!(rook.store.get_session(session).unwrap().unwrap().next_seq > 256);
+        let mut completed = rook_llm::Completion {
+            response: response(),
+            dispatch: Dispatch::bounded("physical-source", "physical-model", true),
+            usage_reported: true,
+            completion_confirmed: true,
+        };
+        let vault = Vault::empty();
+        let auxiliary = Auxiliary::new(
+            &rook.config,
+            &vault,
+            Purpose::CompletionCheck,
+            "preferred",
+            &completed,
+            std::time::Instant::now(),
+        );
+        let estimate = auxiliary.receipt.cost.as_ref().unwrap().estimated_usd;
+        auxiliary
+            .record(
+                &rook,
+                session,
+                rook_store::NewEvent::new(EventKind::Note, rook_store::Kind::Message, b"checked")
+                    .label("completion check")
+                    .usage(120, 7),
+            )
+            .unwrap();
+        let usage = rook.context_usage(session, Some(65536)).unwrap();
+        assert!(usage.last_response.is_none(), "an auxiliary call cannot replace the main response");
+        assert!(crate::agent::history::replay(&rook, session).unwrap().is_empty());
+        let before = rook.store.get_session(session).unwrap().unwrap();
+        assert_eq!((before.tokens_in, before.tokens_out), (120, 7), "receipt carries no second token charge");
+        completed.dispatch = None;
+        Auxiliary::new(
+            &rook.config,
+            &vault,
+            Purpose::OutputRepair,
+            "custom",
+            &completed,
+            std::time::Instant::now(),
+        )
+        .record(
+            &rook,
+            session,
+            rook_store::NewEvent::new(EventKind::Note, rook_store::Kind::Message, b"repair usage")
+                .label("usage")
+                .usage(120, 7),
+        )
+        .unwrap();
+        rook.store
+            .append_event(
+                session,
+                rook_store::NewEvent::new(
+                    EventKind::AssistantMessage,
+                    rook_store::Kind::Message,
+                    b"legacy answer",
+                )
+                .usage(9, 4),
+            )
+            .unwrap();
+        let coverage = rook.context_usage(session, Some(65536)).unwrap().cost_coverage.unwrap();
+        assert_eq!(
+            (
+                coverage.main_receipts,
+                coverage.auxiliary_receipts,
+                coverage.priced_receipts,
+                coverage.unpriced_receipts,
+                coverage.usage_events_without_receipt
+            ),
+            (0, 2, 1, 1, 1)
+        );
+        assert_eq!(coverage.known_subtotal_usd, Some(estimate));
+        assert!(!coverage.complete_accounting, "retry/failure/child/branch-summary costs remain uncovered");
+        assert!(coverage.describe().contains("Total cost is unknown"));
+        let end = rook.store.get_session(session).unwrap().unwrap().next_seq;
+        let child = rook.fork_session(session, end).unwrap().id;
+        drop(rook);
+        // Current rates/models are absent. Saved estimates retain their snapshot.
+        let rook = engine(home.path());
+        for id in [session, child] {
+            let coverage = rook.context_usage(id, Some(65536)).unwrap().cost_coverage.unwrap();
+            assert_eq!(coverage.known_subtotal_usd, Some(estimate));
+            assert_eq!(coverage.usage_events_without_receipt, 1);
+        }
+    }
+
+    #[test]
+    fn auxiliary_receipt_limits_and_secret_redaction_apply_before_copying_and_replay() {
+        let home = tempfile::tempdir().unwrap();
+        let rook = engine(home.path());
+        let session = rook.start_session("bounded auxiliary report").unwrap();
+        let vault = Vault::empty();
+        vault.also_hide("private-access-token");
+        let mut completed = rook_llm::Completion {
+            response: response(),
+            dispatch: Dispatch::bounded("source", "private-access-token", true),
+            usage_reported: true,
+            completion_confirmed: true,
+        };
+        completed.response.model = "private-access-token".into();
+        let auxiliary = Auxiliary::new(
+            &rook.config,
+            &vault,
+            Purpose::Aside,
+            "private-access-token",
+            &completed,
+            std::time::Instant::now(),
+        );
+        let mut bytes = serde_json::to_vec(&auxiliary).unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("private-access-token"));
+        bytes.resize(MAX_BYTES + 1, b' ');
+        assert!(bytes.len() > MAX_BYTES && serde_json::from_slice::<Auxiliary>(&bytes).is_ok());
+        rook.log(session, EventKind::Note, AUX_LABEL, std::str::from_utf8(&bytes).unwrap()).unwrap();
+        assert!(crate::agent::history::replay(&rook, session).unwrap().is_empty());
+        let before = rook.store.get_session(session).unwrap().unwrap().next_seq;
+        assert!(
+            rook.context_usage(session, Some(65536)).unwrap_err().to_string().contains("exceeds 4096 bytes")
+        );
+        assert_eq!(rook.store.get_session(session).unwrap().unwrap().next_seq, before);
     }
     #[test]
     fn known_secrets_are_not_copied_into_model_identity_receipts() {

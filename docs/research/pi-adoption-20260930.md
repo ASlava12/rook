@@ -13,7 +13,7 @@ Source: Pi `ee602414c703be8da722ec56de7f2399e62581ac`; starting Rook:
 | Inline tool cards | Complete | Compact/live/saved results, attributed errors/duration/diffs and command/search/MCP facts, explicit bounded browser pixels, terminal text fallback, local/daemon and full CI passed |
 | Context provenance inspector | Complete | Request-specific sources and loaded skills, deferred MCP tools in CLI/API/TUI/browser; bounded notes, old-note compatibility, local/daemon and full CI passed |
 | Local HTML export | Complete | Inclusive saved ranges, bounded/escaped/attributed output, no overwrite/publication, CLI/REPL/local/shared TUI parity, actual browser download/rendering and full CI passed |
-| Opt-in phase-based model routing | In progress | Static policy, durable branch transition, historical receipts and compatible image/scoped-state handoffs implemented; native continuation/reopen/fork and automatic fallback verified; finish comparison accounting, live frontend checks and same-task comparison without claiming unmeasured savings |
+| Opt-in phase-based model routing | In progress | Static policy, durable branch transition, historical receipts and compatible image/scoped-state handoffs implemented; native continuation/reopen/fork and automatic fallback verified; successful auxiliary receipts and explicit partial-cost coverage implemented; finish per-attempt/delegated/branch-summary accounting, live frontend checks and same-task comparison without claiming unmeasured savings |
 | Declarative extension UI | Pending | Bounded status/progress/forms/result contract, trust boundary, text fallback and frontend parity |
 
 Regular-scrollback TUI and terminal image preview remain experiments from the
@@ -3339,3 +3339,94 @@ comparison accounting (auxiliary requests, failed attempts and missing-cost
 coverage), live TUI/browser interactions and same-task quality/cost/latency
 comparison remain required. Declarative extension UI and scrollback/image
 experiments keep their original scope.
+
+## Auxiliary request accounting and explicit partial coverage
+
+Native nonstreaming generation now returns physical-leaf dispatch identity,
+primary-counter presence and terminal evidence separately from the unchanged
+Response contract. OpenAI chat, Responses, Anthropic and Google preserve these
+facts through retry, fallback, capacity, catalog and selected-policy wrappers.
+Custom providers retain their existing API and leave unverified facts unknown.
+Actual HTTP checks cover the four dialects, omitted counters, explicit zero and
+missing terminal evidence; nonzero totals cannot establish complete reporting.
+
+Successful completion checks, structured-output repairs, compaction, aside
+questions and limit-triggered final answers save `rook:model-aux:v1` JSON notes.
+Receipts are bounded to 4 KiB before copying/encoding and commit atomically with
+their usage carrier; the note adds no second token charge. Aside and compaction
+now retain their previously omitted store usage. Empty final answers retain
+usage too. Auxiliary receipts do not enter model history or replace the main
+response in context inspection. Existing postcard layouts and main receipt
+format are unchanged; known secret identities are withheld.
+
+CLI, API, TUI and browser expose an optional cost-coverage view over saved branch
+history. Bounded event pages and constant-space counters yield main/auxiliary,
+priced/unpriced and unreceipted-usage counts plus a known subtotal. The subtotal
+uses saved rates, survives reopen and follows a fork's saved prefix. Inherited
+receipts are historical rather than new charges. No priced receipts means an
+unknown subtotal, not USD zero. `complete_accounting` stays false: per-physical
+retry/failure/interruption, delegated-session aggregation and branch-summary
+generation remain uncovered. This block supplies successful-response evidence
+for that remaining ledger; it does not close comparison accounting.
+
+The local/daemon HTTP scenario exited 0
+(`target/pi-aux-coverage-cli-restart.log`) with and without configured prices.
+It verifies a preferred endpoint's quota refusal, actual fallback identity for
+the main reply/check/repair, one token charge per call, restart, historical
+pricing after configuration changes and inherited fork estimates. The later
+final-answer assertion is covered by the final CI below. Browser module syntax
+and context rendering checks also exited 0; these are frontend fixtures, not a
+live model comparison or a live browser interaction.
+
+Initial failed scenarios are retained: `target/pi-aux-coverage-cli.log` rejected
+the fixture's nonexistent sandbox mode; `target/pi-aux-coverage-cli-fixed.log`
+found restart discovery reading the killed daemon's old address file. The shared
+fixture now clears only its own scratch address before spawning and waits for
+the new child to publish. Neither failure counts as a pass.
+
+The focused agent suite, core receipt checks, native wire-reporting checks and
+TUI context test exited 0 (`target/pi-aux-coverage-agent-final.log`,
+`target/pi-aux-coverage-core-final.log`, `target/pi-nonstream-facts-native-final.log`
+and `target/pi-aux-coverage-tui-final.log`). They verify actual compaction/aside
+usage charges, final-answer and empty-answer receipts, context exclusion,
+cross-page inspection, secret redaction and a valid JSON receipt actually over
+the copy bound. The first agent invocation exited 101
+(`target/pi-aux-coverage-agent.log`): two exact transcript expectations omitted
+the new completion-check receipt. They now verify its position/purpose while
+retaining the visible-event, route-receipt and durable-result assertions.
+
+The first full CI exited 1 (`target/pi-aux-accounting-ci.log`, 892.4 seconds).
+Its sole failed target was the existing image/native-schema handoff scenario:
+the resumed request to its HTTP fixture reported Windows connection error
+10053. The older fixture accepted sockets from a nonblocking listener without
+restoring blocking mode; its read worker could abandon an incomplete request.
+It now explicitly restores blocking mode, matching the proven native fixtures.
+This failed gate is not evidence for the final tree. The corrected focused
+scenario exited 0 (`target/pi-aux-accounting-image-fixture.log`), preserving all
+local/daemon image, schema and restart checks.
+
+The subsequent full invocation was deliberately stopped with exit 1 after a
+concrete UI audit found new accounting notes could appear as raw JSON in
+restored chat (`target/pi-aux-accounting-ci-interrupted.log`). It was live when
+stopped; this was not a timeout/restart or a successful gate. TUI and browser
+now hide auxiliary receipts and the compaction usage carrier, while retaining
+human aside notes, the saved journal and context inspection. Actual restored
+chat fixtures verify visible prompts/answers/asides and absence of bookkeeping;
+the browser DOM mock needed dataset/fragment support for real answer rendering.
+The restored TUI chat test and browser context/replay checks exited 0
+(`target/pi-aux-accounting-note-filter.log` and
+`target/pi-aux-accounting-browser-final.log`). The final `cargo xtask ci` exited
+0 (`ci: ok`, 815.9 seconds; `target/pi-aux-accounting-ci-final.log`), covering
+the final-answer assertion, note filtering, corrected image fixture, all existing
+native/queue/goal/CLI/TUI/store suites, frontend builds, Clippy and doctests.
+`cargo xtask compaction` exited 0 (`target/pi-aux-accounting-compaction.log`):
+4.02 MiB on disk, 37.1x dictionary compression and 5.8x end-to-end preserve the
+published claims. Failed/interrupted invocations above are not counted as passes.
+
+Next implement bounded per-physical-attempt retry/failure/interruption records,
+then delegated-session/branch-summary coverage; retain explicit unknown totals
+until that coverage is proved. Live phase-routing frontend interactions and
+same-task quality/cost/latency comparison remain required. No real-model savings
+have been measured. Phase routing remains In progress, declarative
+extension UI remains Pending, and scrollback/image experiments retain their
+original scope. The full adoption goal remains active.

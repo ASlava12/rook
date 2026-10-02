@@ -319,14 +319,16 @@ impl<'a> AgentLoop<'a> {
         if let Some(by) = self.by {
             patience = patience.min(by.saturating_duration_since(std::time::Instant::now()));
         }
-        let response = saying_it_waits(
-            tokio::time::timeout(patience, self.provider.complete(request)),
+        let started = std::time::Instant::now();
+        let completed = saying_it_waits(
+            tokio::time::timeout(patience, self.provider.complete_with_metadata(request)),
             patience,
             &mut *on_progress,
         )
         .await
         .map_err(|_| "completion check timed out; task completion is unknown".to_owned())?
         .map_err(|e| format!("completion check failed; task completion is unknown: {e}"))?;
+        let response = &completed.response;
         outcome.input_tokens = outcome.input_tokens.saturating_add(response.usage.input_tokens);
         outcome.output_tokens = outcome.output_tokens.saturating_add(response.usage.output_tokens);
         outcome.cached_tokens = outcome.cached_tokens.saturating_add(response.usage.cache_read_tokens);
@@ -335,20 +337,27 @@ impl<'a> AgentLoop<'a> {
             output: outcome.output_tokens,
             cached: outcome.cached_tokens,
         });
-        self.rook
-            .store
-            .append_event(
-                self.session,
-                rook_store::NewEvent::new(
-                    EventKind::Note,
-                    rook_store::Kind::Message,
-                    response.message.content.as_bytes(),
-                )
-                .label("completion check")
-                .usage(response.usage.input_tokens, response.usage.output_tokens),
+        crate::model_route::Auxiliary::new(
+            &self.rook.config,
+            &self.vault,
+            crate::model_route::Purpose::CompletionCheck,
+            self.provider.id(),
+            &completed,
+            started,
+        )
+        .record(
+            self.rook,
+            self.session,
+            rook_store::NewEvent::new(
+                EventKind::Note,
+                rook_store::Kind::Message,
+                response.message.content.as_bytes(),
             )
-            .map_err(|e| e.to_string())?;
-        crate::completion::verdict(&response).ok_or_else(|| {
+            .label("completion check")
+            .usage(response.usage.input_tokens, response.usage.output_tokens),
+        )
+        .map_err(|e| e.to_string())?;
+        crate::completion::verdict(response).ok_or_else(|| {
             "completion check returned no valid verdict; task completion is unknown".to_owned()
         })
     }

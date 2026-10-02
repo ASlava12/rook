@@ -181,6 +181,11 @@ impl Provider for Limited {
         self.inner.complete(request).await
     }
 
+    async fn complete_with_metadata(&self, request: Request) -> Result<crate::Completion> {
+        let _turn = self.a_turn().await?;
+        self.inner.complete_with_metadata(request).await
+    }
+
     /// The permit outlives this call. A stream is the request — the server is
     /// generating for as long as deltas are arriving — so releasing on return
     /// would let every waiter through at once and limit nothing.

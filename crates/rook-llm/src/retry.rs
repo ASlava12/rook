@@ -315,10 +315,14 @@ impl Provider for Retrying {
     }
 
     async fn complete(&self, request: Request) -> Result<Response> {
+        self.complete_with_metadata(request).await.map(|completed| completed.response)
+    }
+
+    async fn complete_with_metadata(&self, request: Request) -> Result<crate::Completion> {
         let mut request = self.as_accepted(request);
         let mut attempt = 1;
         loop {
-            match self.inner.complete(request.clone()).await {
+            match self.inner.complete_with_metadata(request.clone()).await {
                 Err(e) if worth_asking_again(&e) && self.wait_before(attempt, &e).await => attempt += 1,
                 Err(e) if self.drop_the_effort(&e, &mut request) => continue,
                 Err(e) if self.ask_for_less_output(&e, &mut request) => continue,

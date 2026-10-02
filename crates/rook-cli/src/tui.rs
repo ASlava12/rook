@@ -6453,6 +6453,36 @@ and the next line"
         assert!(app.chat.log.iter().any(|(_, line)| line.contains("submitting · /queue")));
     }
 
+    #[test]
+    fn restored_chat_keeps_asides_without_showing_auxiliary_accounting_records() {
+        let home = tempfile::tempdir().unwrap();
+        let rook = rook_core::Rook::from_parts(
+            rook_store::Store::open(home.path().join("store")).unwrap(),
+            rook_core::Config::default(),
+            rook_skills::Environment::bare("windows", "x86_64", "0.1.0"),
+            rook_skills::SkillIndex::default(),
+            home.path().into(),
+        );
+        let session = rook.start_session("accounting records").unwrap();
+        rook.log(session, rook_store::EventKind::UserMessage, "", "visible prompt").unwrap();
+        rook.log(session, rook_store::EventKind::AssistantMessage, "", "visible answer").unwrap();
+        rook.log(session, rook_store::EventKind::Note, "btw", "visible aside").unwrap();
+        let receipt = serde_json::json!({"purpose":"aside","receipt":{"phase":"ordinary","usage":{"input_tokens":0,"output_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0},"complete":false,"elapsed_ms":0}});
+        rook.log(session, rook_store::EventKind::Note, "rook:model-aux:v1", &receipt.to_string()).unwrap();
+        rook.log(session, rook_store::EventKind::Note, "compaction usage", "compaction provider usage")
+            .unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let mut app = super::App::new(crate::source::Source::Local(rook.into()), runtime, true);
+        app.recall_conversation(session, None);
+        let text: String = app.chat.log.iter().map(|(_, line)| line.as_str()).collect();
+        assert!(
+            text.contains("visible prompt")
+                && text.contains("visible answer")
+                && text.contains("visible aside")
+        );
+        assert!(!text.contains("rook:model-aux") && !text.contains("compaction provider usage"));
+    }
+
     fn follow_up_window(limit: usize) -> (tempfile::TempDir, App, std::sync::Arc<rook_core::Rook>, u128) {
         let home = tempfile::tempdir().unwrap();
         let mut config = rook_core::Config::default();

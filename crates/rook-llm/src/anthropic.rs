@@ -246,6 +246,10 @@ impl Provider for Anthropic {
     }
 
     async fn complete(&self, request: Request) -> Result<Response> {
+        self.complete_with_metadata(request).await.map(|completed| completed.response)
+    }
+
+    async fn complete_with_metadata(&self, request: Request) -> Result<crate::Completion> {
         let response = self.send(&request, false).await?;
         let status = response.status();
         if !status.is_success() {
@@ -291,24 +295,31 @@ impl Provider for Anthropic {
         } else {
             StopReason::ToolUse
         };
-        Ok(Response {
-            message: Message {
-                role: Role::Assistant,
-                content,
-                tool_calls,
-                tool_call_id: None,
-                cache: false,
-                images: Vec::new(),
-                reasoning,
+        let usage_reported = wire.usage.input_tokens.is_some() && wire.usage.output_tokens.is_some();
+        let completion_confirmed = wire.stop_reason.is_some();
+        Ok(crate::Completion {
+            dispatch: self.dispatch_identity(),
+            usage_reported,
+            completion_confirmed,
+            response: Response {
+                message: Message {
+                    role: Role::Assistant,
+                    content,
+                    tool_calls,
+                    tool_call_id: None,
+                    cache: false,
+                    images: Vec::new(),
+                    reasoning,
+                },
+                stop_reason,
+                usage: Usage {
+                    input_tokens: wire.usage.input_tokens.unwrap_or(0),
+                    output_tokens: wire.usage.output_tokens.unwrap_or(0),
+                    cache_read_tokens: wire.usage.cache_read_input_tokens,
+                    cache_write_tokens: wire.usage.cache_creation_input_tokens,
+                },
+                model: wire.model.unwrap_or_else(|| self.model.clone()),
             },
-            stop_reason,
-            usage: Usage {
-                input_tokens: wire.usage.input_tokens.unwrap_or(0),
-                output_tokens: wire.usage.output_tokens.unwrap_or(0),
-                cache_read_tokens: wire.usage.cache_read_input_tokens,
-                cache_write_tokens: wire.usage.cache_creation_input_tokens,
-            },
-            model: wire.model.unwrap_or_else(|| self.model.clone()),
         })
     }
 

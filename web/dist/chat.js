@@ -624,7 +624,7 @@ export async function resume(session) {
       else if (e.kind === 'tool-call' || e.kind === 'tool-result') block('tool', savedToolCard(session, e));
       // `wrote` is JSON for `changes` to read, not prose for anybody. The same
       // question is `note_is_for_a_person` in rook-core, which the window asks.
-      else if (e.kind === 'note' && e.label !== 'wrote') say('stat', `${e.label}: ${e.body}`);
+      else if (e.kind === 'note' && !['wrote', 'rook:model-aux:v1', 'compaction usage'].includes(e.label)) say('stat', `${e.label}: ${e.body}`);
     }
     say('stat', `— ${items.length} earlier entries; the next prompt continues this session —`);
   } catch (e) {

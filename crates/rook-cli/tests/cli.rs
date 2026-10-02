@@ -1544,6 +1544,14 @@ impl Daemon {
     /// tests can never collide over a number someone chose.
     fn start(rook: &Rook) -> Self {
         let one = one_at_a_time();
+        // Killing a fixture bypasses the daemon's address-file cleanup. A
+        // restart must wait for this child, rather than read the previous port.
+        let address_file = rook.home.path().join("rookd.addr");
+        match std::fs::remove_file(&address_file) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("cannot clear fixture daemon address: {error}"),
+        }
         // Kept rather than discarded: a daemon that never published its address
         // and one that exited on the way to binding are the same silence, and
         // the runner where that happens is not the one this is read on.
@@ -1561,7 +1569,6 @@ impl Daemon {
         // `rookd` opens a store, discovers skills and plugins and binds a port
         // before it writes anything, and four seconds of that was a claim about
         // speed rather than a deadline. It returns the moment the file appears.
-        let address_file = rook.home.path().join("rookd.addr");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         while std::time::Instant::now() < deadline {
             if let Ok(address) = std::fs::read_to_string(&address_file) {
@@ -3194,3 +3201,6 @@ mod followups;
 
 #[path = "scenarios/phase_state.rs"]
 mod phase_state;
+
+#[path = "scenarios/accounting.rs"]
+mod accounting;

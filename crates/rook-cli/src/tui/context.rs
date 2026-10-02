@@ -84,6 +84,10 @@ fn describe(usage: &ContextUsage) -> String {
         text.push('\n');
         text.push_str(&rook_core::model_route::describe(saved));
     }
+    if let Some(coverage) = &usage.cost_coverage {
+        text.push('\n');
+        text.push_str(&coverage.describe());
+    }
     let Some(saved) = &usage.last_request else {
         text.push_str("\nNo recorded request attempt in this session.\n");
         return text;
@@ -196,6 +200,10 @@ mod tests {
         assert!(pane.text.contains("120 ms · completion confirmed: true"));
         assert!(pane.text.contains("input/output counters reported: false"));
         assert!(pane.text.contains("configured fallback if omitted by server"));
+        assert!(pane.text.contains("Cost coverage · saved branch history"));
+        assert!(pane.text.contains("Known subtotal: unknown (no priced receipts)"));
+        assert!(pane.text.contains("Total cost is unknown"));
+        assert!(pane.text.contains("Inherited receipts are historical, not new charges"));
 
         // Refresh follows the newest saved attempt, including an older note
         // format that predates MCP provenance.
