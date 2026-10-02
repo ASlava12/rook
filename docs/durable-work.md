@@ -346,6 +346,14 @@ Tool-initiated stance changes are saved at turn boundaries. A session run only b
 a local CLI has no daemon settings snapshot: send an explicit prompt through the
 daemon to establish one. The daemon does not invent settings for those sessions.
 
+Saved session queues, managed goals and their index, execution receipts, outcomes
+and evaluation caches have an 8 MiB read admission limit, matching their existing
+writer limit. Follow-up driver settings use 16 KiB. Admission precedes copying
+the stored value; refusal preserves it and never treats truncated data as a
+valid queue, result or instruction. An oversized evaluation cache is refused
+before creating another execution or adding its task to history. These limits
+do not change record layouts or legacy JSON defaults.
+
 After a lost process, a reserved follow-up can resume with its original execution
 ID and admitted prompt. Saved session and prompt hook context is restored without
 running those hooks again. If its outcome was already recorded, recovery reuses

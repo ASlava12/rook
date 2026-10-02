@@ -14,6 +14,7 @@ pub(crate) struct Saved {
     error: Option<String>,
 }
 static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+const MAX_DRIVER_BYTES: usize = 16 * 1024;
 
 fn key(session: u128) -> String {
     format!("followup-driver/{session:032x}")
@@ -52,8 +53,8 @@ impl Settings {
 fn save(rook: &rook_core::Rook, session: u128, saved: &Saved) -> Result<(), String> {
     // A fixed writer bounds escaped JSON before allocating an encoded copy.
     // Leave room for a later diagnostic without making the pause itself fail.
-    let mut buffer = [0u8; 16384];
-    let limit = if saved.error.is_some() { 16384 } else { 8192 };
+    let mut buffer = [0u8; MAX_DRIVER_BYTES];
+    let limit = if saved.error.is_some() { MAX_DRIVER_BYTES } else { MAX_DRIVER_BYTES / 2 };
     let mut encoded = std::io::Cursor::new(&mut buffer[..limit]);
     serde_json::to_writer(&mut encoded, saved).map_err(|_| {
         "follow-up settings exceed the recovery limit; shorten the model or workspace name".to_string()
@@ -64,14 +65,9 @@ fn save(rook: &rook_core::Rook, session: u128, saved: &Saved) -> Result<(), Stri
 }
 fn read(rook: &rook_core::Rook, session: u128) -> Result<Option<Saved>, String> {
     rook.store
-        .kv_get(&key(session))
+        .kv_get_limited(&key(session), MAX_DRIVER_BYTES)
         .map_err(|e| e.to_string())?
-        .map(|bytes| {
-            if bytes.len() > 16384 {
-                return Err("saved follow-up settings exceed 16 KiB".into());
-            }
-            serde_json::from_slice(&bytes).map_err(|e| e.to_string())
-        })
+        .map(|bytes| serde_json::from_slice(&bytes).map_err(|e| e.to_string()))
         .transpose()
 }
 pub(crate) fn pause(rook: &rook_core::Rook, session: u128, reason: Option<String>) -> Result<(), String> {
@@ -243,6 +239,38 @@ mod tests {
         settings.save_followups(&rook, session, true).unwrap();
         assert!(!read(&rook, session).unwrap().unwrap().paused);
     }
+    #[test]
+    fn an_oversized_saved_driver_is_refused_without_unpausing_or_replacing_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let rook = engine(dir.path());
+        let session = rook.start_session("driver reader bound").unwrap();
+        let legacy = serde_json::json!({
+            "workspace":rook.workspace, "model":rook.config.agent.model,
+            "effort":"high", "stance":"readonly"
+        });
+        let mut bytes = serde_json::to_vec(&legacy).unwrap();
+        bytes.resize(MAX_DRIVER_BYTES, b' ');
+        rook.store.kv_set(&key(session), &bytes).unwrap();
+        let saved = read(&rook, session).unwrap().unwrap();
+        assert!(!saved.paused);
+        assert!(saved.error.is_none(), "legacy defaults still load at the cap");
+        bytes.push(b' ');
+        assert!(bytes.len() > MAX_DRIVER_BYTES);
+        assert!(serde_json::from_slice::<Saved>(&bytes).is_ok());
+        rook.store.kv_set(&key(session), &bytes).unwrap();
+        let error = read(&rook, session).err().unwrap();
+        assert!(error.contains("exceeds 16384 bytes"), "{error}");
+        assert!(pause(&rook, session, None).is_err());
+        let settings = Settings::new(&rook);
+        assert!(settings.save_followups(&rook, session, false).is_err());
+        assert!(status(&rook, session).unwrap().starts_with("Follow-up recovery settings invalid:"));
+        assert_eq!(rook.store.kv_get(&key(session)).unwrap().unwrap(), bytes);
+        // Explicit resume retains its existing repair behavior; background
+        // supervision and unrelated settings changes cannot do this.
+        settings.save_followups(&rook, session, true).unwrap();
+        assert!(!read(&rook, session).unwrap().unwrap().paused);
+    }
+
     #[test]
     fn recovery_settings_are_bounded_before_the_encoded_copy_and_leave_room_for_failure() {
         let dir = tempfile::tempdir().unwrap();

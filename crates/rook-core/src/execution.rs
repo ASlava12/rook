@@ -147,8 +147,9 @@ pub(crate) fn is_active(rook: &Rook, session: u128) -> bool {
 }
 
 fn load(store: &Store, session: u128) -> Result<Option<Execution>> {
-    let Some(bytes) = store.kv_get_limited(&key(session), 8 * 1024 * 1024)? else { return Ok(None) };
-    let state: Execution = serde_json::from_slice(&bytes)?;
+    let Some(state): Option<Execution> = crate::persistence::read_json(store, &key(session))? else {
+        return Ok(None);
+    };
     if state.version != 1
         || state.background.len() > MAX_PENDING
         || state.unknown.len() > MAX_PENDING + 1
@@ -503,10 +504,11 @@ impl Journal {
         if !self.resumed {
             return Ok(None);
         }
-        let Some(bytes) = self.store.kv_get(&format!("execution-outcome/{:032x}", self.session))? else {
+        let Some((turn, outcome)): Option<(String, crate::agent::TurnOutcome)> =
+            crate::persistence::read_json(&self.store, &format!("execution-outcome/{:032x}", self.session))?
+        else {
             return Ok(None);
         };
-        let (turn, outcome): (String, crate::agent::TurnOutcome) = serde_json::from_slice(&bytes)?;
         Ok((turn == self.turn).then_some(outcome))
     }
 
@@ -982,17 +984,13 @@ impl Rook {
         if let Some(reason) = self.recovery_block(session)? {
             return Err(CoreError::Other(reason));
         }
-        let journal = Journal::start(self, session, jobs, false)?;
-        journal.admit("Evaluate the work scorecard")?;
         if card.checks.len() > 256 {
             return Err(CoreError::Other("work recovery supports at most 256 checks".into()));
         }
         let key = format!("evaluation/{session:032x}");
         let contract = rook_store::ObjectId::of(&crate::persistence::encode(&(card, before))?).to_string();
-        let mut cache: EvaluationCache = match self.store.kv_get(&key)? {
-            Some(bytes) => serde_json::from_slice(&bytes)?,
-            None => EvaluationCache { contract: contract.clone(), entries: Vec::new() },
-        };
+        let mut cache: EvaluationCache = crate::persistence::read_json(&self.store, &key)?
+            .unwrap_or_else(|| EvaluationCache { contract: contract.clone(), entries: Vec::new() });
         if cache.contract != contract || cache.entries.len() > card.checks.len() {
             return Err(CoreError::Other("the saved evaluation uses a different scorecard or baseline; start a new work iteration to evaluate again".into()));
         }
@@ -1014,6 +1012,9 @@ impl Rook {
                 Some(scored)
             })
             .collect();
+        // Refused recovery data must not replace an execution or admit a task.
+        let journal = Journal::start(self, session, jobs, false)?;
+        journal.admit("Evaluate the work scorecard")?;
         let result = crate::evaluation::run_observed(&self.workspace, card, before, &previous, |progress| {
             match progress {
                 crate::evaluation::CheckProgress::Starting(check) => {
@@ -1047,10 +1048,11 @@ impl Rook {
         if state.status == "running" {
             return Ok(None);
         }
-        let Some(bytes) = self.store.kv_get(&format!("execution-outcome/{session:032x}"))? else {
+        let Some((turn, outcome)): Option<(String, crate::agent::TurnOutcome)> =
+            crate::persistence::read_json(&self.store, &format!("execution-outcome/{session:032x}"))?
+        else {
             return Ok(None);
         };
-        let (turn, outcome): (String, crate::agent::TurnOutcome) = serde_json::from_slice(&bytes)?;
         Ok((turn == state.turn).then_some(outcome))
     }
 
@@ -1154,6 +1156,96 @@ mod tests {
             rook_skills::SkillIndex::default(),
             dir.into(),
         )
+    }
+
+    #[test]
+    fn saved_outcomes_are_bounded_before_completion_reads_and_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let rook = engine(dir.path());
+        let session = rook.start_session("outcome reader bound").unwrap();
+        let journal = Journal::start(&rook, session, None, false).unwrap();
+        journal.admit("a completed task").unwrap();
+        // Omit newer optional fields to exercise legacy outcome defaults.
+        let outcome: crate::agent::TurnOutcome = serde_json::from_value(serde_json::json!({
+            "steps":1, "stopped":"end_turn", "reply":"saved 🙂", "input_tokens":0,
+            "output_tokens":0, "cached_tokens":0, "tools_called":[], "skills_loaded":[],
+            "skills_written":[], "facts_learned":[], "facts_forgotten":[],
+            "delegated":[], "compactions":0
+        }))
+        .unwrap();
+        journal.record_outcome(&outcome).unwrap();
+        journal.finish("end_turn", None).unwrap();
+        drop(journal);
+        let outcome_key = format!("execution-outcome/{session:032x}");
+        let mut bytes = rook.store.kv_get(&outcome_key).unwrap().unwrap();
+        bytes.resize(crate::persistence::MAX_JSON_BYTES, b' ');
+        rook.store.kv_set(&outcome_key, &bytes).unwrap();
+        assert_eq!(rook.completed_turn(session).unwrap().unwrap().reply, outcome.reply);
+        bytes.push(b' ');
+        assert!(bytes.len() > crate::persistence::MAX_JSON_BYTES);
+        assert!(serde_json::from_slice::<(String, crate::agent::TurnOutcome)>(&bytes).is_ok());
+        rook.store.kv_set(&outcome_key, &bytes).unwrap();
+        let execution = rook.store.kv_get(&key(session)).unwrap().unwrap();
+        let error = rook.completed_turn(session).unwrap_err();
+        assert!(error.to_string().contains("exceeds 8388608 bytes"), "{error}");
+        assert_eq!(rook.store.kv_get(&key(session)).unwrap().unwrap(), execution);
+        bytes.pop();
+        rook.store.kv_set(&outcome_key, &bytes).unwrap();
+        let target = crate::message_queue::followups::target(&rook, session).unwrap().unwrap();
+        crate::message_queue::followups::submit(
+            &rook,
+            session,
+            &target,
+            rook_proto::work::Steer { id: "reserved".into(), text: "next task".into() },
+        )
+        .unwrap();
+        let (followup, _) = Journal::reserve_follow_up(&rook, session).unwrap().unwrap();
+        followup.record_outcome(&outcome).unwrap();
+        // A killed process cannot run Drop's explicit blocked-receipt write.
+        // Retain its original reservation while releasing this test's owner.
+        let queue_key = crate::message_queue::key(session);
+        let reservation = rook.store.kv_get(&queue_key).unwrap().unwrap();
+        drop(followup);
+        rook.store.kv_set(&queue_key, &reservation).unwrap();
+        bytes = rook.store.kv_get(&outcome_key).unwrap().unwrap();
+        bytes.resize(crate::persistence::MAX_JSON_BYTES + 1, b' ');
+        assert!(bytes.len() > crate::persistence::MAX_JSON_BYTES);
+        rook.store.kv_set(&outcome_key, &bytes).unwrap();
+        let (recovered, _) = Journal::reserve_follow_up(&rook, session).unwrap().unwrap();
+        assert!(recovered.resumed, "the real resume path retains the outcome owner");
+        let execution = rook.store.kv_get(&key(session)).unwrap().unwrap();
+        let error = recovered.recovered_outcome().unwrap_err();
+        assert!(error.to_string().contains("exceeds 8388608 bytes"), "{error}");
+        assert_eq!(rook.store.kv_get(&key(session)).unwrap().unwrap(), execution);
+        assert_eq!(rook.store.kv_get(&outcome_key).unwrap().unwrap(), bytes);
+    }
+
+    #[test]
+    fn refused_evaluation_cache_does_not_replace_execution_or_admit_another_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let rook = engine(dir.path());
+        let session = rook.start_session("evaluation reader bound").unwrap();
+        let card = crate::evaluation::Scorecard::default();
+        let before = crate::evaluation::witness(&rook.workspace, &card);
+        let contract =
+            rook_store::ObjectId::of(&crate::persistence::encode(&(&card, &before)).unwrap()).to_string();
+        let cache = EvaluationCache { contract, entries: Vec::new() };
+        let cache_key = format!("evaluation/{session:032x}");
+        let mut bytes = serde_json::to_vec(&cache).unwrap();
+        bytes.resize(crate::persistence::MAX_JSON_BYTES, b' ');
+        rook.store.kv_set(&cache_key, &bytes).unwrap();
+        rook.evaluate_recorded(session, &card, &before, None).unwrap();
+        bytes.push(b' ');
+        assert!(bytes.len() > crate::persistence::MAX_JSON_BYTES);
+        assert!(serde_json::from_slice::<EvaluationCache>(&bytes).is_ok());
+        rook.store.kv_set(&cache_key, &bytes).unwrap();
+        let execution = rook.store.kv_get(&key(session)).unwrap().unwrap();
+        let events = rook.store.events(session, 0, 100).unwrap().len();
+        let error = rook.evaluate_recorded(session, &card, &before, None).unwrap_err();
+        assert!(error.to_string().contains("exceeds 8388608 bytes"), "{error}");
+        assert_eq!(rook.store.kv_get(&key(session)).unwrap().unwrap(), execution);
+        assert_eq!(rook.store.events(session, 0, 100).unwrap().len(), events);
+        assert_eq!(rook.store.kv_get(&cache_key).unwrap().unwrap(), bytes);
     }
 
     #[test]

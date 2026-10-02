@@ -194,6 +194,14 @@ note, current goal value and admitted claim commit together. Retrying that ID
 joins its live generation or gets `already_admitted`; it cannot create another
 generation or silently attach to a later goal. A pending claim with a different
 active goal requires inspection. Frames without IDs retain their old behavior.
+Managed runs and their index, session queues, execution receipts, saved outcomes
+and evaluation caches admit stored JSON through the same 8 MiB limit used by
+their writers. `persistence::read_json` uses `Store::kv_get_limited` before
+copying or decoding the companion. Follow-up driver settings use their existing
+16 KiB maximum at the same boundary. Oversized values remain stored and produce
+an explicit refusal; they are never shortened into executable recovery state.
+Evaluation validates its stored cache before starting a journal or admitting a
+task. JSON defaults and postcard formats are unchanged.
 Identified continuation also admits its claim in the transaction that saves
 the resume control and run state. The same fixed-size owner slot retains the
 original goal generation. A retry confirms or rejoins that owner; it cannot

@@ -2734,3 +2734,64 @@ the daemon, and retain legacy JSON/default compatibility. Then finish the queue
 audit and actual HTML download/TUI interaction. Phase routing, declarative
 extension UI and terminal experiments retain their original scope. The full
 goal is active.
+
+## Bounded stored queue and recovery reads
+
+The reader gap identified above is closed for session queues, all managed run
+and index readers, execution receipts, saved outcomes, evaluation caches and
+follow-up driver settings. Core uses `persistence::read_json`, backed by
+`Store::kv_get_limited`, with the same 8 MiB bound as its existing encoder.
+Driver settings use their existing 16 KiB bound before copying. No stored
+layout, JSON defaults, postcard record or protocol payload changed. An oversized
+value produces a refusal and remains intact; no shortened record becomes
+authority to execute or accept an instruction. Evaluation validates its cache
+before creating a journal or admitting another task, so refusal cannot replace
+the previous execution or add a prompt to history.
+
+Fixtures contain valid JSON padded to the exact writer bound and then one byte
+above it; they assert both the actual size and a bound-specific error. Queue
+reads, edits, withdrawal, acceptance and follow-up readiness leave receipt bytes
+and history unchanged on refusal. Managed checks cover direct reads, session
+lookup, generation-scoped pending reads, controls and the run index. Outcome
+checks cover completion and reserved recovery; cache refusal preserves execution,
+history and stored cache. Legacy defaults remain readable at the cap. Driver
+refusal cannot pause, change settings or silently reset its snapshot; the
+existing explicit resume repair still works.
+
+The final outcome regression exited 0
+(`target/pi-queue-readers-outcome-final.log`), all managed-work scenarios exited
+0 (`target/pi-queue-readers-managed.log`), and the executed driver regression
+exited 0 (`target/pi-queue-readers-driver-final.log`). The real daemon regression
+also exited 0 (`target/pi-queue-readers-daemon-complete.log`): local core reads,
+direct/routed CLI queue reads, routed goal inspection, HTTP queue/work/index
+reads and refused edits/controls/new-goal admission preserve the stored bytes,
+current goal, session count and history boundary.
+
+Initial filtered invocations ran no tests and are not pass evidence. Two core
+fixture attempts incorrectly treated ordinary continuation and then normal
+`Drop` as reservation recovery; both exited 101. The corrected fixture retains
+the pre-Drop reservation that a killed owner leaves, then uses the real
+reservation recovery path; this does not claim a new process-kill experiment.
+Initial daemon-fixture runs exited 101 for missing TLS initialization, treating
+daemon-starting `task show` as a local read, and using schedule `task list` for
+managed enumeration. The corrected check tests only existing paths. The daemon
+accidentally started by that failed fixture was verified against its exact
+`store_root` through health, stopped and its absence verified. The final fixture
+released all of its owned daemon processes.
+
+The final full `cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0
+(`ci: ok`, 689.8 seconds; `target/pi-queue-readers-ci.log`), including the
+executed boundary regressions, all CLI integration scenarios, Clippy and
+doctests. `cargo xtask compaction` exited 0
+(`target/pi-queue-readers-compaction.log`): 4.02 MiB on disk, 37.1x dictionary
+compression and 5.8x end-to-end, matching the existing published measurements.
+Queue remains In progress until the original lifecycle/frontend requirements
+are audited against the current evidence. Next verify fresh queue interactions
+in native TUI and browser, including editing/withdrawal into the retained draft,
+steering versus follow-up and receipt state while output is held. Local `--alone`
+goals retain their documented metadata-only behavior; full managed goals belong
+to the daemon. Check ordinary-turn boundaries locally and through the daemon,
+and whole-goal pause/completion through the managed runner. Then finish actual
+HTML download/TUI interaction and the Pending phase routing and declarative
+extension UI capabilities. Terminal experiments retain their original scope;
+the full goal is active.

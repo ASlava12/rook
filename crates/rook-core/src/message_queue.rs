@@ -25,10 +25,7 @@ pub fn list(rook: &Rook, session: u128) -> Result<Vec<Steering>> {
 }
 
 pub(crate) fn read_from(store: &rook_store::Store, session: u128) -> Result<Vec<Steering>> {
-    store
-        .kv_get(&key(session))?
-        .map(|bytes| serde_json::from_slice(&bytes).map_err(Into::into))
-        .unwrap_or_else(|| Ok(Vec::new()))
+    Ok(crate::persistence::read_json(store, &key(session))?.unwrap_or_default())
 }
 
 fn update<T>(rook: &Rook, session: u128, change: impl FnOnce(&mut Vec<Steering>) -> Result<T>) -> Result<T> {
@@ -250,6 +247,35 @@ mod tests {
         rook.delete_session(session).unwrap();
         assert!(rook.store.kv_get(&key(session)).unwrap().is_none(), "retention removes the queue too");
         assert!(submit(&rook, session, request("late", "after deletion")).is_err());
+    }
+
+    #[test]
+    fn an_oversized_saved_queue_refuses_reads_and_mutations_without_losing_receipts() {
+        let dir = tempfile::tempdir().unwrap();
+        let rook = engine(dir.path());
+        let session = rook.start_session("reader bound").unwrap();
+        submit(&rook, session, request("one", "pending 🙂")).unwrap();
+        let mut bytes = rook.store.kv_get(&key(session)).unwrap().unwrap();
+        bytes.resize(crate::persistence::MAX_JSON_BYTES, b' ');
+        rook.store.kv_set(&key(session), &bytes).unwrap();
+        assert_eq!(list(&rook, session).unwrap()[0].text, "pending 🙂");
+        bytes.push(b' ');
+        assert!(bytes.len() > crate::persistence::MAX_JSON_BYTES);
+        assert!(serde_json::from_slice::<Vec<Steering>>(&bytes).is_ok(), "valid JSON exceeds the cap");
+        rook.store.kv_set(&key(session), &bytes).unwrap();
+        let bound = |error: CoreError| {
+            assert!(error.to_string().contains("exceeds 8388608 bytes"), "{error}");
+        };
+        bound(list(&rook, session).unwrap_err());
+        bound(submit(&rook, session, request("two", "refused")).unwrap_err());
+        bound(
+            edit(&rook, session, "one", EditInstruction { revision: 0, text: "refused".into() }).unwrap_err(),
+        );
+        bound(withdraw(&rook, session, "one", WithdrawInstruction { revision: 0 }).unwrap_err());
+        bound(accept(&rook, session, "one", None).err().unwrap());
+        bound(followups::ready(&rook, session).unwrap_err());
+        assert_eq!(rook.store.kv_get(&key(session)).unwrap().unwrap(), bytes);
+        assert!(rook.store.events(session, 0, 100).unwrap().is_empty());
     }
 
     #[test]

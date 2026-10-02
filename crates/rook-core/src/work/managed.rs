@@ -116,15 +116,11 @@ fn key(id: &str) -> Result<String> {
 }
 
 fn ids(rook: &Rook) -> Result<Vec<String>> {
-    rook.store
-        .kv_get(INDEX)?
-        .map(|b| serde_json::from_slice(&b).map_err(Into::into))
-        .unwrap_or(Ok(Vec::new()))
+    Ok(crate::persistence::read_json(&rook.store, INDEX)?.unwrap_or_default())
 }
 
 pub fn read(rook: &Rook, id: &str) -> Result<Saved> {
-    let bytes = rook.store.kv_get(&key(id)?)?.ok_or_else(|| bad("no such work run"))?;
-    Ok(serde_json::from_slice(&bytes)?)
+    crate::persistence::read_json(&rook.store, &key(id)?)?.ok_or_else(|| bad("no such work run"))
 }
 
 pub fn list(rook: &Rook) -> Result<Vec<Run>> {
@@ -133,8 +129,9 @@ pub fn list(rook: &Rook) -> Result<Vec<Run>> {
 
 pub fn for_session(rook: &Rook, session: u128) -> Result<Option<Run>> {
     let id = rook_store::format_session_id(session);
-    let Some(bytes) = rook.store.kv_get(&key(&id)?)? else { return Ok(None) };
-    let saved: Saved = serde_json::from_slice(&bytes)?;
+    let Some(saved): Option<Saved> = crate::persistence::read_json(&rook.store, &key(&id)?)? else {
+        return Ok(None);
+    };
     Ok(saved.run.conversation.is_some().then_some(saved.run))
 }
 
@@ -570,8 +567,9 @@ pub fn pending(rook: &Rook, identity: &RunIdentity) -> Result<Vec<String>> {
 }
 
 fn read_identity(rook: &Rook, identity: &RunIdentity) -> Result<Option<Saved>> {
-    let Some(bytes) = rook.store.kv_get(&key(&identity.id)?)? else { return Ok(None) };
-    let saved: Saved = serde_json::from_slice(&bytes)?;
+    let Some(saved): Option<Saved> = crate::persistence::read_json(&rook.store, &key(&identity.id)?)? else {
+        return Ok(None);
+    };
     Ok((saved.run.identity() == *identity).then_some(saved))
 }
 

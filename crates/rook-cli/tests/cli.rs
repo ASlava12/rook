@@ -13,6 +13,161 @@ struct Rook {
 }
 
 #[test]
+fn oversized_saved_queue_and_work_refuse_local_and_daemon_reads_without_changes() {
+    rook_llm::init_tls();
+    let cap = 8 * 1024 * 1024;
+    for case in ["queue", "work", "index"] {
+        let rook = Rook::new();
+        let (session, id, key, bytes) = {
+            let engine = rook_core::Rook::from_parts(
+                rook_store::Store::open(rook.home.path().join("store")).unwrap(),
+                rook_core::Config::default(),
+                rook_skills::Environment::bare("test", "test", "0.10.0"),
+                rook_skills::SkillIndex::default(),
+                rook.workspace.path().to_path_buf(),
+            );
+            let session = engine.start_session("bounded recovery").unwrap();
+            let id = rook_store::format_session_id(session);
+            let key = if case == "queue" {
+                rook_core::message_queue::submit(
+                    &engine,
+                    session,
+                    rook_proto::work::Steer {
+                        id: "pending".into(),
+                        text: "original pending instruction".into(),
+                    },
+                )
+                .unwrap();
+                format!("message-queue/{session:032x}")
+            } else {
+                let run = rook_core::work::managed::start(
+                    &engine,
+                    rook_proto::work::Start {
+                        goal: "a paused goal".into(),
+                        workspace: None,
+                        autonomous: false,
+                        conversation: Some(rook_proto::work::Conversation {
+                            session: id.clone(),
+                            model: None,
+                            effort: "high".into(),
+                            stance: "readonly".into(),
+                            options: Default::default(),
+                        }),
+                        max_iterations: None,
+                        max_tokens: None,
+                        max_seconds: None,
+                    },
+                )
+                .unwrap();
+                rook_core::work::managed::control(&engine, &run.id, rook_proto::work::Action::Pause).unwrap();
+                if case == "index" { "work/managed-index".into() } else { format!("work/managed/{id}") }
+            };
+            let mut bytes = engine.store.kv_get(&key).unwrap().unwrap();
+            bytes.resize(cap + 1, b' ');
+            assert!(bytes.len() > cap);
+            assert!(
+                serde_json::from_slice::<serde_json::Value>(&bytes).is_ok(),
+                "valid JSON exceeds the cap"
+            );
+            engine.store.kv_set(&key, &bytes).unwrap();
+            engine.store.flush().unwrap();
+            let error = if case == "queue" {
+                rook_core::message_queue::list(&engine, session).err().unwrap()
+            } else if case == "work" {
+                rook_core::work::managed::read(&engine, &id).err().unwrap()
+            } else {
+                rook_core::work::managed::list(&engine).err().unwrap()
+            };
+            assert!(error.to_string().contains("exceeds 8388608 bytes"), "{error}");
+            (session, id, key, bytes)
+        };
+        let args = match case {
+            "queue" => Some(vec!["session", "queue", &id]),
+            "work" => Some(vec!["task", "show", &id]),
+            _ => None, // Managed enumeration has an API, not a CLI command.
+        };
+        // Task commands always require a daemon; only session queue also has
+        // a direct CLI path. The core reads above exercise all local readers.
+        if case == "queue" {
+            let refused = rook.run(args.as_ref().unwrap());
+            assert!(!refused.status.success(), "local queue read must be refused");
+            assert!(
+                String::from_utf8_lossy(&refused.stderr).contains("exceeds 8388608 bytes"),
+                "{refused:?}"
+            );
+        }
+        let before = {
+            let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+            (
+                store.get_session(session).unwrap().unwrap().next_seq,
+                store.list_sessions().unwrap().len(),
+                store.kv_get(&format!("work/managed/{id}")).unwrap(),
+            )
+        };
+        let daemon = Daemon::start(&rook);
+        if let Some(args) = &args {
+            let refused = rook.run(args);
+            assert!(!refused.status.success(), "{case} routed read must be refused");
+            assert!(
+                String::from_utf8_lossy(&refused.stderr).contains("exceeds 8388608 bytes"),
+                "{refused:?}"
+            );
+        }
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(90))
+            .build()
+            .unwrap();
+        let api = match case {
+            "queue" => format!("/api/sessions/{id}/queue"),
+            "work" => format!("/api/work/{id}"),
+            _ => "/api/work".into(),
+        };
+        runtime.block_on(async {
+            let response = client.get(format!("{}{api}", daemon.address)).send().await.unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+            assert!(response.text().await.unwrap().contains("exceeds 8388608 bytes"));
+            let response = if case == "queue" {
+                client
+                    .post(format!("{}{api}", daemon.address))
+                    .json(&serde_json::json!({
+                        "action":"edit", "reference":"session.pending", "revision":0, "text":"refused edit"
+                    }))
+                    .send()
+                    .await
+                    .unwrap()
+            } else if case == "work" {
+                client
+                    .post(format!("{}/api/work/{id}/control", daemon.address))
+                    .json(&"resume")
+                    .send()
+                    .await
+                    .unwrap()
+            } else {
+                client
+                    .post(format!("{}/api/work", daemon.address))
+                    .json(&serde_json::json!({
+                        "goal":"refused goal", "autonomous":false,
+                        "max_iterations":0, "max_tokens":0, "max_seconds":0
+                    }))
+                    .send()
+                    .await
+                    .unwrap()
+            };
+            assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+            assert!(response.text().await.unwrap().contains("exceeds 8388608 bytes"));
+        });
+        drop(daemon);
+        let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+        assert_eq!(store.kv_get(&key).unwrap().unwrap(), bytes);
+        assert_eq!(store.get_session(session).unwrap().unwrap().next_seq, before.0);
+        assert_eq!(store.list_sessions().unwrap().len(), before.1);
+        assert_eq!(store.kv_get(&format!("work/managed/{id}")).unwrap(), before.2);
+    }
+}
+
+#[test]
 fn saved_tool_measurements_match_in_local_cli_daemon_history_and_html_export() {
     let rook = Rook::new();
     let session = rook_store::new_session_id();

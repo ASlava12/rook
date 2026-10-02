@@ -42,6 +42,55 @@ fn control(id: &str, generation: &str, action: Action) -> IdentifiedControl {
 }
 
 #[test]
+fn saved_work_and_its_index_are_admitted_before_reads_or_controls() {
+    let workspace = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let rook = engine(workspace.path(), store.path());
+    let session = rook.start_session("work reader bound").unwrap();
+    let run = conversation_goal(&rook, session, "paused goal");
+    work::control(&rook, &run.id, Action::Pause).unwrap();
+    let key = format!("work/managed/{}", run.id);
+    let original = rook.store.kv_get(&key).unwrap().unwrap();
+    let cap = 8 * 1024 * 1024;
+    let mut bytes = original.clone();
+    bytes.resize(cap, b' ');
+    rook.store.kv_set(&key, &bytes).unwrap();
+    assert_eq!(work::read(&rook, &run.id).unwrap().run.status, Status::Paused);
+    assert_eq!(work::for_session(&rook, session).unwrap().unwrap().generation, run.generation);
+    assert!(work::pending(&rook, &run.identity()).unwrap().is_empty());
+    bytes.push(b' ');
+    assert!(bytes.len() > cap);
+    assert!(serde_json::from_slice::<work::Saved>(&bytes).is_ok());
+    rook.store.kv_set(&key, &bytes).unwrap();
+    let bound = |error: rook_core::CoreError| {
+        assert!(error.to_string().contains("exceeds 8388608 bytes"), "{error}");
+    };
+    bound(work::read(&rook, &run.id).unwrap_err());
+    bound(work::list(&rook).unwrap_err());
+    bound(work::for_session(&rook, session).unwrap_err());
+    bound(work::pending(&rook, &run.identity()).unwrap_err());
+    bound(
+        work::control_identified(&rook, &run.id, control("refused", &run.generation, Action::Resume))
+            .unwrap_err(),
+    );
+    assert_eq!(rook.store.kv_get(&key).unwrap().unwrap(), bytes);
+    rook.store.kv_set(&key, &original).unwrap();
+    let index_key = "work/managed-index";
+    let original_index = rook.store.kv_get(index_key).unwrap().unwrap();
+    let mut index = original_index.clone();
+    index.resize(cap, b' ');
+    rook.store.kv_set(index_key, &index).unwrap();
+    assert_eq!(work::list(&rook).unwrap().len(), 1);
+    index.push(b' ');
+    assert!(index.len() > cap);
+    assert!(serde_json::from_slice::<Vec<String>>(&index).is_ok());
+    rook.store.kv_set(index_key, &index).unwrap();
+    bound(work::list(&rook).unwrap_err());
+    assert_eq!(rook.store.kv_get(index_key).unwrap().unwrap(), index);
+    assert_eq!(rook.store.kv_get(&key).unwrap().unwrap(), original);
+}
+
+#[test]
 fn identified_controls_survive_reopen_without_reapplying_or_crossing_a_goal_generation() {
     let workspace = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();
