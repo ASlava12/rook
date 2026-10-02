@@ -175,8 +175,16 @@ impl Failover {
     /// anyway. Sixty seconds of refusing to try is the right answer for a
     /// second endpoint and the wrong one for the last: a blip would otherwise
     /// leave the agent with nothing to talk to while the machine was back.
-    fn worth_asking(&self) -> Vec<&dyn Provider> {
-        let all = || self.candidates.iter().map(Box::as_ref);
+    fn worth_asking(&self, request: Option<&Request>) -> Vec<&dyn Provider> {
+        // Filter before applying the cooldown: an incompatible healthy route
+        // must not keep the only compatible route out of rotation.
+        let all = || {
+            self.candidates
+                .iter()
+                .enumerate()
+                .filter(|(at, provider)| Self::can_send(provider.as_ref(), *at, request))
+                .map(|(_, provider)| provider.as_ref())
+        };
         let mut answering: Vec<&dyn Provider> = all().filter(|p| !is_missing(p.id())).collect();
         if answering.is_empty() {
             answering = all().collect();
@@ -194,14 +202,31 @@ impl Failover {
         }
         answering
     }
+
+    fn can_send(provider: &dyn Provider, at: usize, request: Option<&Request>) -> bool {
+        request.is_none_or(|request| {
+            if at == 0 {
+                provider.can_resume_reasoning(&request.messages)
+            } else {
+                provider.can_replay_reasoning(&request.messages)
+            }
+        })
+    }
 }
 
 /// Runs `call` against each candidate until one answers, and collects what the
 /// others said for the error if none does.
 macro_rules! first_that_answers {
     ($self:expr, |$provider:ident| $call:expr) => {{
-        let mut refused = Vec::new();
-        for $provider in $self.worth_asking() {
+        first_that_answers!($self, None, |$provider| $call)
+    }};
+    ($self:expr, $request:expr, |$provider:ident| $call:expr) => {{
+        let request: Option<&Request> = $request;
+        let mut refused: Vec<String> = $self.candidates.iter().enumerate()
+            .filter(|(at, provider)| !Failover::can_send(provider.as_ref(), *at, request))
+            .map(|(_, provider)| format!("{}: cannot replay provider-owned state unchanged; resume with its original model/endpoint or explicitly compact the history", provider.id()))
+            .collect();
+        for $provider in $self.worth_asking(request) {
             match $call.await {
                 Ok(answer) => {
                     note_answering($provider.id());
@@ -302,6 +327,16 @@ impl Provider for Failover {
         self.candidates.iter().all(|p| p.can_replay_reasoning(messages))
     }
 
+    fn can_resume_reasoning(&self, messages: &[crate::Message]) -> bool {
+        self.candidates.iter().enumerate().any(|(at, provider)| {
+            if at == 0 {
+                provider.can_resume_reasoning(messages)
+            } else {
+                provider.can_replay_reasoning(messages)
+            }
+        })
+    }
+
     fn takes_effort(&self) -> bool {
         self.candidates.iter().all(|p| p.takes_effort())
     }
@@ -329,14 +364,14 @@ impl Provider for Failover {
     }
 
     async fn complete(&self, request: Request) -> Result<Response> {
-        first_that_answers!(self, |provider| provider.complete(request.clone()))
+        first_that_answers!(self, Some(&request), |provider| provider.complete(request.clone()))
     }
 
     /// Failing over here is honest because every dialect checks the status
     /// before it returns the stream: a failure that reaches this point has
     /// emitted nothing, so there is no half-delivered reply to replace.
     async fn stream(&self, request: Request) -> Result<ResponseStream> {
-        first_that_answers!(self, |provider| provider.stream(request.clone()))
+        first_that_answers!(self, Some(&request), |provider| provider.stream(request.clone()))
     }
 }
 
@@ -598,7 +633,7 @@ mod tests {
         let room: Box<dyn Provider> = Box::new(crate::limit::Limited::new(room, &room_id, 4));
 
         let asked = Failover::new(vec![full, room], Prefer::WhicheverIsFree);
-        let order: Vec<&str> = asked.worth_asking().iter().map(|p| p.id()).collect();
+        let order: Vec<&str> = asked.worth_asking(None).iter().map(|p| p.id()).collect();
 
         assert_eq!(order, [room_id.as_str(), full_id.as_str()], "the one with room goes first");
     }
@@ -615,7 +650,7 @@ mod tests {
         let room: Box<dyn Provider> = Box::new(crate::limit::Limited::new(room, &room_id, 4));
 
         let asked = Failover::new(vec![full, room], Prefer::AsConfigured);
-        let order: Vec<&str> = asked.worth_asking().iter().map(|p| p.id()).collect();
+        let order: Vec<&str> = asked.worth_asking(None).iter().map(|p| p.id()).collect();
 
         assert_eq!(order, [full_id.as_str(), room_id.as_str()], "moving a turn costs its cache");
     }

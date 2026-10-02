@@ -282,6 +282,10 @@ impl Provider for Retrying {
         self.inner.can_replay_reasoning(messages)
     }
 
+    fn can_resume_reasoning(&self, messages: &[crate::Message]) -> bool {
+        self.inner.can_resume_reasoning(messages)
+    }
+
     fn takes_effort(&self) -> bool {
         !self.effort_refused.load(std::sync::atomic::Ordering::Relaxed) && self.inner.takes_effort()
     }

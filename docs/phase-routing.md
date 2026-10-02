@@ -60,6 +60,17 @@ aliases of the same transport can move; changed endpoint, key, model or window
 cannot establish that compatibility. Legacy unscoped Anthropic blocks remain
 usable on their original provider and retain it for a phase handoff.
 
+Automatic generation fallback applies the same scoped replay check before
+copying/sending a request to another candidate. A recovered preferred endpoint
+cannot take over a conversation whose opaque state belongs to its fallback.
+Compatible aliases may continue unchanged. If no compatible candidate answers,
+the request fails with the candidate names and recovery guidance; state is not
+silently stripped. Compatibility is filtered before endpoint cooldowns, so a
+healthy incompatible endpoint cannot prevent retrying the only compatible one.
+Legacy unscoped Anthropic blocks can resume on the configured primary only;
+they cannot establish compatibility with a fallback. Signed and redacted
+Anthropic blocks retain their relative wire order as well as their bytes.
+
 An incompatible native-tool target also retains the analysis provider instead
 of converting native schemas to text. These holds explain their reason once per
 turn, leave implementation intent durable and preserve images, schemas and state.

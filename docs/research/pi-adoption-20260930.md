@@ -13,7 +13,7 @@ Source: Pi `ee602414c703be8da722ec56de7f2399e62581ac`; starting Rook:
 | Inline tool cards | Complete | Compact/live/saved results, attributed errors/duration/diffs and command/search/MCP facts, explicit bounded browser pixels, terminal text fallback, local/daemon and full CI passed |
 | Context provenance inspector | Complete | Request-specific sources and loaded skills, deferred MCP tools in CLI/API/TUI/browser; bounded notes, old-note compatibility, local/daemon and full CI passed |
 | Local HTML export | Complete | Inclusive saved ranges, bounded/escaped/attributed output, no overwrite/publication, CLI/REPL/local/shared TUI parity, actual browser download/rendering and full CI passed |
-| Opt-in phase-based model routing | In progress | Static policy, durable branch transition, historical receipts and compatible image/scoped-state handoffs implemented; finish full continuity/recovery audit, comparison accounting, live frontend checks and same-task comparison without claiming unmeasured savings |
+| Opt-in phase-based model routing | In progress | Static policy, durable branch transition, historical receipts and compatible image/scoped-state handoffs implemented; native continuation/reopen/fork and automatic fallback verified; finish comparison accounting, live frontend checks and same-task comparison without claiming unmeasured savings |
 | Declarative extension UI | Pending | Bounded status/progress/forms/result contract, trust boundary, text fallback and frontend parity |
 
 Regular-scrollback TUI and terminal image preview remain experiments from the
@@ -3267,3 +3267,75 @@ and automatic-fallback continuity evidence, comparison accounting (auxiliary
 requests, failed attempts and explicit missing-cost coverage), live TUI/browser
 checks and same-task quality/cost/latency comparison. Declarative extension UI
 and scrollback/image experiments retain their scope; the full goal stays active.
+
+## Native continuation and automatic fallback audit
+
+Generation fallback now verifies state continuity before copying/sending each
+request. Scoped Responses/Anthropic history stays with a compatible origin or
+alias even after the preferred endpoint recovers. A foreign candidate is never
+contacted with that history; if the origin cannot answer, the error names the
+excluded candidates and explains how to recover. Filtering precedes cooldowns,
+so a healthy incompatible candidate cannot suppress retrying the only compatible
+one. Complete and streaming generation share the check; catalog/reachability
+operations keep their existing selection. Retry, capacity, selected-policy and
+catalog wrappers forward the primary-resume contract. Old unscoped native
+Anthropic blocks remain usable on the configured primary, but cannot authorize
+fallback. Tagged foreign/malformed data cannot use this compatibility exception.
+Explicit direct transport selection retains its prior wire behavior.
+
+The native lifecycle scenario exposed an independent Anthropic stream bug:
+redacted blocks were emitted immediately, before earlier signed blocks retained
+until the stream ended. Both now share the original-index accumulator. Relative
+order, signatures and opaque bytes survive continuation; unsigned thinking is
+still withheld. Existing response bounds and postcard formats are unchanged.
+
+Real HTTP regression fixtures cover both generation paths, an origin that
+becomes unavailable, its recovery while in cooldown, a recovered incompatible
+preferred endpoint, unchanged alias replay and legacy Anthropic primary-only
+continuation. The before-fix Responses invocation exited 101
+(`target/pi-fallback-state-before.log`) after accepting an answer whose foreign
+transport had dropped encrypted state. The corrected focused invocation exited
+0 (`target/pi-fallback-state-after.log`), followed by the native/library suites
+(`target/pi-fallback-state-native.log`). That earlier suite predates the
+Anthropic ordering correction; final verification is recorded below.
+
+Lifecycle checks use real CLI processes and an owned daemon, both native
+protocols and compatible/incompatible phase targets. They verify the write once,
+unchanged reasoning/call bytes and result binding, native schemas, reopen/restart
+and forks before a result, before phase intent and after intent. The pre-intent
+fork retains its recorded result but starts analysis; the interrupted fork has
+an explicit missing-result marker rather than a claimed successful write.
+An independent fallback lifecycle check proves origin selection from saved
+state after a fresh process/daemon and complete/interrupted forks, without
+depending on the earlier process's cooldown map. These are protocol fixtures,
+not quality, price or latency measurements of real models.
+
+The local/daemon lifecycle scenarios executed and exited 0
+(`target/pi-phase-native-continuity-stable.log`). They cover eight phase
+combinations and four fallback combinations. Initial failures remain in
+`target/pi-phase-native-continuity*.log`: fixture expectations confused the
+result boundary with intent, assumed context could not precede a result and
+omitted Anthropic's allowed cache marker. The ordering failure identified the
+production correction above. Socket diagnostics subsequently proved Windows
+accepted-socket `WouldBlock`, not a protocol refusal: the bounded mock listener
+now explicitly restores blocking mode on each accepted connection. The passing
+run uses the corrected protocol fixture and all original lifecycle boundaries.
+
+The final native/library suites exited 0
+(`target/pi-fallback-state-native-final.log`), including the ordering correction.
+The real core HTTP/store reopen/fork/interruption/compaction scenario also exited
+0 (`target/pi-phase-native-store-final.log`), preserving opaque-state exclusion
+from transcripts and the bound before tool effects.
+
+The final `cargo xtask ci` exited 0 (`ci: ok`, 944.9 seconds;
+`target/pi-native-continuity-ci.log`), including both lifecycle scenarios,
+existing queue/TUI/browser checks, the complete native/core/store suites,
+frontend builds, Clippy and doctests. `cargo xtask compaction` exited 0
+(`target/pi-native-continuity-compaction.log`): 4.02 MiB on disk, 37.1x dictionary
+compression and 5.8x end-to-end retain the published storage claims. No failed
+focused invocation is counted as a gate or proof of the final tree.
+The routing row remains In progress:
+comparison accounting (auxiliary requests, failed attempts and missing-cost
+coverage), live TUI/browser interactions and same-task quality/cost/latency
+comparison remain required. Declarative extension UI and scrollback/image
+experiments keep their original scope.

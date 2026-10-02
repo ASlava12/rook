@@ -3191,3 +3191,6 @@ fn managed_mcp_commands_reload_one_connection_in_the_running_daemon() {
 
 #[path = "scenarios/followups.rs"]
 mod followups;
+
+#[path = "scenarios/phase_state.rs"]
+mod phase_state;

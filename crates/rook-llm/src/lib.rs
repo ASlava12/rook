@@ -607,6 +607,12 @@ pub trait Provider: Send + Sync {
         messages.iter().all(|message| message.reasoning.is_empty())
     }
 
+    /// Replay on the configured primary, including legacy state without origin
+    /// metadata. This never grants permission to hand that state to a fallback.
+    fn can_resume_reasoning(&self, messages: &[Message]) -> bool {
+        self.can_replay_reasoning(messages)
+    }
+
     /// Whether `effort` reaches this model at all.
     ///
     /// Each dialect sends it only to the families documented to take it, which

@@ -69,7 +69,36 @@ pub struct Anthropic {
     context_key: [u8; 32],
 }
 
+enum RetainedThinking {
+    Signed(String, String),
+    Redacted(String),
+}
+
 impl Anthropic {
+    fn replays(&self, messages: &[Message], legacy: bool) -> bool {
+        messages.iter().all(|message| {
+            (message.reasoning.is_empty() || message.role == Role::Assistant)
+                && message.reasoning.iter().all(|block| {
+                    let scope = block.get("rook_anthropic_scope");
+                    (crate::catalog::matches_scope(scope, &self.context_key) || (legacy && scope.is_none()))
+                        && match block.get("type").and_then(serde_json::Value::as_str) {
+                            Some("thinking") => {
+                                block.get("thinking").and_then(serde_json::Value::as_str).is_some()
+                                    && block
+                                        .get("signature")
+                                        .and_then(serde_json::Value::as_str)
+                                        .is_some_and(|s| !s.is_empty())
+                            }
+                            Some("redacted_thinking") => block
+                                .get("data")
+                                .and_then(serde_json::Value::as_str)
+                                .is_some_and(|s| !s.is_empty()),
+                            _ => false,
+                        }
+                })
+        })
+    }
+
     pub fn new(id: &str, model: &str, config: Config) -> Result<Self> {
         let context_key = crate::catalog::context_key(
             &[
@@ -126,26 +155,11 @@ impl Provider for Anthropic {
     }
 
     fn can_replay_reasoning(&self, messages: &[Message]) -> bool {
-        messages.iter().all(|message| {
-            (message.reasoning.is_empty() || message.role == Role::Assistant)
-                && message.reasoning.iter().all(|block| {
-                    crate::catalog::matches_scope(block.get("rook_anthropic_scope"), &self.context_key)
-                        && match block.get("type").and_then(serde_json::Value::as_str) {
-                            Some("thinking") => {
-                                block.get("thinking").and_then(serde_json::Value::as_str).is_some()
-                                    && block
-                                        .get("signature")
-                                        .and_then(serde_json::Value::as_str)
-                                        .is_some_and(|s| !s.is_empty())
-                            }
-                            Some("redacted_thinking") => block
-                                .get("data")
-                                .and_then(serde_json::Value::as_str)
-                                .is_some_and(|s| !s.is_empty()),
-                            _ => false,
-                        }
-                })
-        })
+        self.replays(messages, false)
+    }
+
+    fn can_resume_reasoning(&self, messages: &[Message]) -> bool {
+        self.replays(messages, true)
     }
 
     fn context_is_explicit(&self) -> bool {
@@ -341,7 +355,7 @@ impl Provider for Anthropic {
             // Thinking, by block index: the text and the signature that makes it
             // acceptable back. Kept apart from `building` because a turn can have
             // both, and their order on the wire is not the order they finish.
-            let mut thinking: std::collections::BTreeMap<usize, (String, String)> = Default::default();
+            let mut thinking: std::collections::BTreeMap<usize, RetainedThinking> = Default::default();
 
             'outer: loop {
                 let patience = match said_anything {
@@ -384,14 +398,14 @@ impl Provider for Anthropic {
                                     building.insert(index, (id, name, String::new()));
                                 }
                                 Block::Thinking => {
-                                    thinking.insert(index, (String::new(), String::new()));
+                                    thinking.insert(index, RetainedThinking::Signed(String::new(), String::new()));
                                 }
                                 // Opaque by design: it arrives whole and goes
                                 // back whole.
                                 Block::RedactedThinking { data } => {
-                                    yield Delta::ReasoningDone(
-                                        serde_json::json!({ "type": "redacted_thinking", "data": data, "rook_anthropic_scope": scope }),
-                                    )
+                                    // Emitting this immediately puts it before
+                                    // earlier signed blocks retained until EOF.
+                                    thinking.insert(index, RetainedThinking::Redacted(data));
                                 }
                                 Block::Other => {}
                             },
@@ -400,8 +414,8 @@ impl Provider for Anthropic {
                                     yield Delta::Text(text)
                                 }
                                 BlockDelta::ThinkingDelta { thinking: said } => {
-                                    if let Some(slot) = thinking.get_mut(&index) {
-                                        slot.0.push_str(&said);
+                                    if let Some(RetainedThinking::Signed(text, _)) = thinking.get_mut(&index) {
+                                        text.push_str(&said);
                                     }
                                     if !said.is_empty() {
                                         yield Delta::Reasoning(said);
@@ -410,8 +424,8 @@ impl Provider for Anthropic {
                                 // Last, and what makes the block acceptable
                                 // back: a thinking block without it is refused.
                                 BlockDelta::SignatureDelta { signature } => {
-                                    if let Some(slot) = thinking.get_mut(&index) {
-                                        slot.1 = signature;
+                                    if let Some(RetainedThinking::Signed(_, retained)) = thinking.get_mut(&index) {
+                                        *retained = signature;
                                     }
                                 }
                                 BlockDelta::InputJsonDelta { partial_json } => {
@@ -443,11 +457,19 @@ impl Provider for Anthropic {
 
             // Before the calls, as the API wants them ordered, and only the
             // signed ones: an unsigned block is one this stream did not finish.
-            for (_, (said, signature)) in thinking {
-                if !signature.is_empty() {
-                    yield Delta::ReasoningDone(
-                        serde_json::json!({ "type": "thinking", "thinking": said, "signature": signature, "rook_anthropic_scope": scope }),
-                    );
+            for (_, block) in thinking {
+                match block {
+                    RetainedThinking::Signed(said, signature) if !signature.is_empty() => {
+                        yield Delta::ReasoningDone(
+                            serde_json::json!({ "type": "thinking", "thinking": said, "signature": signature, "rook_anthropic_scope": scope }),
+                        );
+                    }
+                    RetainedThinking::Redacted(data) => {
+                        yield Delta::ReasoningDone(
+                            serde_json::json!({ "type": "redacted_thinking", "data": data, "rook_anthropic_scope": scope }),
+                        );
+                    }
+                    RetainedThinking::Signed(_, _) => {}
                 }
             }
 

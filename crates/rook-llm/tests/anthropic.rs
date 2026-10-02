@@ -71,6 +71,56 @@ fn provider(url: String) -> Anthropic {
 const DONE: &str = r#"{"id":"msg_1","model":"claude-opus-5","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":9,"output_tokens":2}}"#;
 
 #[tokio::test]
+async fn legacy_signed_blocks_resume_on_the_primary_but_never_establish_an_automatic_fallback() {
+    for available in [true, false] {
+        let (primary, primary_seen) = if available {
+            serve("200 OK", "application/json", DONE).await
+        } else {
+            serve("400 Bad Request", "application/json", r#"{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API."}"#).await
+        };
+        let (secondary, secondary_seen) = serve("200 OK", "application/json", DONE).await;
+        let endpoint = |url: String, name: String| rook_llm::Endpoint {
+            name,
+            api: rook_llm::Api::Anthropic,
+            metadata_api: rook_llm::MetadataApi::None,
+            assumed_context_window: None,
+            url,
+            key: Some("k".into()),
+            model: "claude-opus-5".into(),
+            context_window: None,
+            parallel: Some(1),
+            key_in_the_clear: false,
+            queue: None,
+            proxy: Default::default(),
+        };
+        let primary_name = format!("legacy-primary-{primary}");
+        let secondary_name = format!("legacy-secondary-{secondary}");
+        let transport = rook_llm::from_endpoints_with(
+            vec![endpoint(primary, primary_name), endpoint(secondary, secondary_name.clone())],
+            Duration::from_secs(2),
+            rook_llm::Prefer::WhicheverIsFree,
+        )
+        .unwrap();
+        let signed =
+            serde_json::json!({"type":"thinking","thinking":"checked","signature":"native-signature"});
+        let redacted = serde_json::json!({"type":"redacted_thinking","data":"native-opaque"});
+        let mut assistant = Message::assistant("previous answer");
+        assistant.reasoning = vec![signed.clone(), redacted.clone()];
+        let result = transport.complete(Request::new(vec![Message::user("inspect"), assistant])).await;
+        if available {
+            assert_eq!(result.unwrap().message.content, "hi");
+        } else {
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("provider-owned state") && error.contains(&secondary_name), "{error}");
+        }
+        let seen = primary_seen.lock().unwrap();
+        let blocks = seen.as_ref().unwrap()["messages"][1]["content"].as_array().unwrap();
+        assert_eq!(&blocks[..2], &[signed, redacted]);
+        assert!(secondary_seen.lock().unwrap().is_none(), "legacy state reached a fallback");
+    }
+}
+
+#[tokio::test]
 async fn foreign_provider_state_is_omitted_while_native_signed_blocks_survive() {
     let (url, seen) = serve("200 OK", "application/json", DONE).await;
     let signed = serde_json::json!({"type":"thinking","thinking":"checked","signature":"native-signature"});
@@ -520,16 +570,22 @@ async fn thinking_comes_back_beside_the_call_it_led_to() {
         Anthropic::new("another-model", "different", Config::new(url.clone(), "k".into(), "different"))
             .unwrap();
     assert!(!different_model.can_replay_reasoning(std::slice::from_ref(&thought)));
+    assert!(!different_model.can_resume_reasoning(std::slice::from_ref(&thought)));
     let different_key =
         Anthropic::new("another-key", "claude-opus-5", Config::new(url, "other-key".into(), "claude-opus-5"))
             .unwrap();
     assert!(!different_key.can_replay_reasoning(std::slice::from_ref(&thought)));
+    assert!(!different_key.can_resume_reasoning(std::slice::from_ref(&thought)));
     let mut legacy = thought.clone();
     legacy.reasoning[0].as_object_mut().unwrap().remove("rook_anthropic_scope");
     assert!(
-        !compatible.can_replay_reasoning(&[legacy]),
+        !compatible.can_replay_reasoning(std::slice::from_ref(&legacy)),
         "old unscoped state stays usable on its source but cannot prove a handoff"
     );
+    assert!(compatible.can_resume_reasoning(std::slice::from_ref(&legacy)));
+    let mut malformed = legacy.clone();
+    malformed.reasoning[0]["rook_anthropic_scope"] = serde_json::json!([]);
+    assert!(!compatible.can_resume_reasoning(&[malformed]), "a malformed tag is not legacy data");
 
     assert_eq!(thought.reasoning.len(), 1, "the block is kept: {:?}", thought.reasoning);
     assert_eq!(thought.reasoning[0]["type"], "thinking");

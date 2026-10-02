@@ -178,6 +178,14 @@ a caller gets depends on what it is: a turn wants the one it was pointed at,
 because moving it part-way throws away its cached prefix, and an errand wants
 whichever has room.
 
+Generation failover filters candidates for unchanged scoped provider-state
+replay before copying requests or applying cooldowns. A recovered primary
+cannot steal a continuation from the actual fallback origin; no compatible
+answer produces an attributable error instead of dropped state. Legacy
+unscoped Anthropic data can resume on the configured primary, but cannot prove
+a fallback handoff. Anthropic streams retain signed and redacted blocks together
+by their original indices to preserve their relative order.
+
 **`rook-contain` is the floor.** Platform glue and capability filesystem operations,
 with no internal dependencies, and the one place Win32 lives. Its external
 dependencies are cap-std and platform bindings, without native C builds, so

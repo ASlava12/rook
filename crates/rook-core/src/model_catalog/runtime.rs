@@ -180,6 +180,10 @@ impl Provider for Observed {
     fn can_replay_reasoning(&self, messages: &[rook_llm::Message]) -> bool {
         self.inner.can_replay_reasoning(messages)
     }
+
+    fn can_resume_reasoning(&self, messages: &[rook_llm::Message]) -> bool {
+        self.inner.can_resume_reasoning(messages)
+    }
     fn takes_effort(&self) -> bool {
         self.inner.takes_effort()
             && Effort::ALL.into_iter().any(|level| self.selected_effort(level).is_some())

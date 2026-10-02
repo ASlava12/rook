@@ -588,3 +588,174 @@ async fn moving_to_another_endpoint_keeps_visible_calls_but_withholds_foreign_en
     assert_eq!(input[2]["call_id"], "original");
     assert!(!seen[0].body.to_string().contains("opaque-signed-state"));
 }
+
+fn continuity_endpoint(url: String, name: String) -> rook_llm::Endpoint {
+    rook_llm::Endpoint {
+        name,
+        api: rook_llm::Api::Responses,
+        metadata_api: rook_llm::MetadataApi::None,
+        assumed_context_window: None,
+        url,
+        key: Some("private-key".into()),
+        model: "gpt-6-astra".into(),
+        context_window: Some(128_000),
+        parallel: Some(1),
+        key_in_the_clear: false,
+        queue: None,
+        proxy: Default::default(),
+    }
+}
+
+fn continuity_reply(output: Value, stream: bool) -> Reply {
+    let response = answer(output);
+    let body = if stream {
+        frame(json!({"type":"response.completed","response":response}))
+    } else {
+        response.to_string()
+    };
+    Reply { status: 200, body, stream, fragment: usize::MAX }
+}
+
+async fn finish_request(
+    provider: &dyn Provider,
+    request: Request,
+    stream: bool,
+) -> rook_llm::Result<rook_llm::Response> {
+    if !stream {
+        return provider.complete(request).await;
+    }
+    let mut response = provider.stream(request).await?;
+    let mut assembled = Assembler::default();
+    while let Some(delta) = response.next().await {
+        assembled.push(delta?)?;
+    }
+    Ok(assembled.finish())
+}
+
+#[tokio::test]
+async fn automatic_fallback_preserves_the_origin_or_refuses_without_sending_foreign_state() {
+    for stream in [false, true] {
+        for secondary_origin in [false, true] {
+            let quota = || Reply {
+                status: 402,
+                body: r#"{"error":{"code":"insufficient_quota"}}"#.into(),
+                stream: false,
+                fragment: usize::MAX,
+            };
+            let original = json!([reasoning(), tool("original", "inspect", "{}")]);
+            let primary_replies = if secondary_origin {
+                vec![quota(), continuity_reply(json!([text_item("must not use this answer")]), stream)]
+            } else {
+                vec![
+                    continuity_reply(original.clone(), stream),
+                    quota(),
+                    continuity_reply(json!([text_item("recovered")]), stream),
+                ]
+            };
+            let secondary_replies = if secondary_origin {
+                vec![
+                    continuity_reply(original.clone(), stream),
+                    continuity_reply(json!([text_item("ok")]), stream),
+                ]
+            } else {
+                vec![continuity_reply(json!([text_item("must not discard state")]), stream)]
+            };
+            let (primary, primary_seen) = serve(primary_replies).await;
+            let (secondary, secondary_seen) = serve(secondary_replies).await;
+            let primary_name = format!("continuity-primary-{primary}");
+            let secondary_name = format!("continuity-secondary-{secondary}");
+            let provider = rook_llm::from_endpoints_with(
+                vec![
+                    continuity_endpoint(primary, primary_name.clone()),
+                    continuity_endpoint(secondary, secondary_name.clone()),
+                ],
+                Duration::from_secs(2),
+                rook_llm::Prefer::AsConfigured,
+            )
+            .unwrap();
+            let response =
+                finish_request(provider.as_ref(), Request::new(vec![Message::user("inspect")]), stream)
+                    .await
+                    .unwrap();
+            assert!(!response.message.reasoning.is_empty());
+            // A recovered primary must not steal the next step from the actual origin.
+            rook_llm::answering_again(Some(&primary_name));
+            let request = Request::new(vec![
+                Message::user("inspect"),
+                response.message,
+                Message::tool_result("original", "done"),
+            ]);
+            let result = finish_request(provider.as_ref(), request.clone(), stream).await;
+            if secondary_origin {
+                assert_eq!(result.unwrap().message.content, "ok");
+                assert_eq!(primary_seen.lock().unwrap().len(), 1, "foreign primary was contacted");
+                let seen = secondary_seen.lock().unwrap();
+                assert_eq!(seen.len(), 2);
+                let input = seen[1].body["input"].as_array().unwrap();
+                assert_eq!(&input[1..3], original.as_array().unwrap());
+                assert_eq!(input[3]["call_id"], "original");
+                assert_eq!(input[3]["output"], "done");
+            } else {
+                let error = result.unwrap_err().to_string();
+                assert!(error.contains("provider-owned state") && error.contains(&secondary_name), "{error}");
+                assert_eq!(primary_seen.lock().unwrap().len(), 2);
+                assert!(secondary_seen.lock().unwrap().is_empty(), "foreign fallback was contacted");
+                // The compatible primary is now in cooldown. An incompatible
+                // healthy fallback must not prevent trying that primary again.
+                assert_eq!(
+                    finish_request(provider.as_ref(), request, stream).await.unwrap().message.content,
+                    "recovered"
+                );
+                assert_eq!(primary_seen.lock().unwrap().len(), 3);
+                assert!(secondary_seen.lock().unwrap().is_empty());
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn automatic_fallback_can_replay_an_unchanged_scope_through_an_alias() {
+    for stream in [false, true] {
+        let original = json!([reasoning(), tool("original", "inspect", "{}")]);
+        let (url, seen) = serve(vec![
+            continuity_reply(original.clone(), stream),
+            Reply {
+                status: 402,
+                body: r#"{"error":{"code":"insufficient_quota"}}"#.into(),
+                stream: false,
+                fragment: usize::MAX,
+            },
+            continuity_reply(json!([text_item("alias continued")]), stream),
+        ])
+        .await;
+        let provider = rook_llm::from_endpoints_with(
+            vec![
+                continuity_endpoint(url.clone(), format!("alias-primary-{url}")),
+                continuity_endpoint(url.clone(), format!("alias-secondary-{url}")),
+            ],
+            Duration::from_secs(2),
+            rook_llm::Prefer::AsConfigured,
+        )
+        .unwrap();
+        let initial = finish_request(provider.as_ref(), Request::new(vec![Message::user("inspect")]), stream)
+            .await
+            .unwrap();
+        let request = Request::new(vec![
+            Message::user("inspect"),
+            initial.message,
+            Message::tool_result("original", "done"),
+        ]);
+        assert_eq!(
+            finish_request(provider.as_ref(), request, stream).await.unwrap().message.content,
+            "alias continued"
+        );
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 3);
+        for sent in &seen[1..] {
+            let input = sent.body["input"].as_array().unwrap();
+            assert_eq!(&input[1..3], original.as_array().unwrap());
+            assert_eq!(input[3]["call_id"], "original");
+            assert_eq!(input[3]["output"], "done");
+        }
+    }
+}
