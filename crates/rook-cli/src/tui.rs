@@ -2942,6 +2942,7 @@ impl App {
             Action::Newline => self.chat.input.insert('\n'),
             Action::Submit if self.chat.asking.is_some() => self.answer(),
             Action::Submit => self.send(),
+            Action::FollowUp => self.follow_up(),
             Action::Backspace => self.chat.input.backspace(),
             Action::PageUp => self.chat.scroll = self.chat.scroll.saturating_sub(10),
             Action::PageDown => self.chat.scroll = self.chat.scroll.saturating_add(10),
@@ -3764,6 +3765,47 @@ impl App {
         }
     }
 
+    fn follow_up_session(&self) -> Result<u128> {
+        anyhow::ensure!(
+            self.chat.asking.is_none(),
+            "Answer the current question before queuing a follow-up."
+        );
+        let options = self.shared.output.borrow();
+        anyhow::ensure!(
+            options.attachments.is_empty()
+                && options.recipe.is_none()
+                && options.output.is_none()
+                && options.output_schema.is_none(),
+            "Follow-ups accept text only; clear attachments, recipe and output settings first."
+        );
+        self.chat.session.ok_or_else(|| anyhow::anyhow!("start or open a session first"))
+    }
+
+    fn follow_up(&mut self) {
+        if self.chat.input.as_str().trim().is_empty() {
+            return;
+        }
+        // The queue reserves and bounds the text before history copies it. On
+        // refusal the original draft (and its undo history) remains editable.
+        let result = self
+            .follow_up_session()
+            .and_then(|session| self.queue.submit(session, self.chat.input.as_str().trim(), true));
+        match result {
+            Ok(()) => {
+                let draft = self.chat.input.take();
+                let prompt = format!("/followup {}", draft.trim());
+                if self.chat.history.last() != Some(&prompt) {
+                    self.chat.history.push(prompt.clone());
+                    remember_prompt(&prompt);
+                }
+                self.chat.recalled = None;
+                self.chat.draft.clear();
+                self.chat.push("stat", "Submitting follow-up; /queue shows its status.");
+            }
+            Err(error) => self.chat.push("err", &error.to_string()),
+        }
+    }
+
     fn send(&mut self) {
         if self.source.daemon_base().is_some()
             && self.chat.input.as_str().len() > rook_core::attachments::MAX_FRAME_BYTES
@@ -3796,11 +3838,8 @@ impl App {
         self.chat.recalled = None;
         self.chat.draft.clear();
         if let Some(text) = prompt.strip_prefix("/followup ") {
-            let result = self
-                .chat
-                .session
-                .ok_or_else(|| anyhow::anyhow!("start or open a session first"))
-                .and_then(|session| self.queue.submit(session, text.trim(), true));
+            let result =
+                self.follow_up_session().and_then(|session| self.queue.submit(session, text.trim(), true));
             match result {
                 Ok(()) => self.chat.push("stat", "Submitting follow-up; /queue shows its status."),
                 Err(error) => {
@@ -6407,6 +6446,155 @@ and the next line"
         app.chat.input.set("actual correction");
         app.send();
         assert!(app.chat.log.iter().any(|(_, line)| line.contains("submitting · /queue")));
+    }
+
+    fn follow_up_window(limit: usize) -> (tempfile::TempDir, App, std::sync::Arc<rook_core::Rook>, u128) {
+        let home = tempfile::tempdir().unwrap();
+        let mut config = rook_core::Config::default();
+        config.work.max_message_bytes = limit;
+        config.tui.keys.insert("prompt.followup".into(), vec!["f9".into()]);
+        let rook = std::sync::Arc::new(rook_core::Rook::from_parts(
+            rook_store::Store::open(home.path().join("store")).unwrap(),
+            config,
+            rook_skills::Environment::bare("windows", "x86_64", "0.1.0"),
+            rook_skills::SkillIndex::default(),
+            home.path().to_path_buf(),
+        ));
+        let session = rook.start_session("named follow-up").unwrap();
+        rook_core::work::managed::start(
+            &rook,
+            rook_proto::work::Start {
+                goal: "inspect evidence".into(),
+                workspace: None,
+                conversation: Some(rook_proto::work::Conversation {
+                    session: rook_store::format_session_id(session),
+                    model: None,
+                    effort: "high".into(),
+                    stance: "assist".into(),
+                    options: Default::default(),
+                }),
+                autonomous: false,
+                max_iterations: None,
+                max_tokens: None,
+                max_seconds: None,
+            },
+        )
+        .unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let mut app = App::new(crate::source::Source::Local(rook.clone()), runtime, true);
+        app.chat.session = Some(session);
+        (home, app, rook, session)
+    }
+
+    #[test]
+    fn followup_key_and_palette_queue_the_same_unicode_draft_without_a_turn() {
+        for palette in [false, true] {
+            let (_home, mut app, rook, session) = follow_up_window(4096);
+            let text = "Следующее поручение 🙂\nsecond line";
+            let before = rook.store.get_session(session).unwrap().unwrap().next_seq;
+            // An existing identical history entry also verifies deduplication;
+            // these library tests never append to the operator's global history.
+            app.chat.history = vec![format!("/followup {text}")];
+            app.chat.input.set(text);
+            if palette {
+                app.overlay = Some(Overlay::Palette);
+                app.palette.set("prompt.followup");
+                let entries = app.palette_entries();
+                assert_eq!(entries.len(), 1, "{entries:?}");
+                assert_eq!(entries[0].0, "action: prompt.followup");
+                assert!(entries[0].1.contains("f9"));
+                app.on_palette_key(crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                assert!(app.overlay.is_none());
+            } else {
+                app.on_key(crossterm::event::KeyEvent::new(KeyCode::F(9), KeyModifiers::NONE));
+            }
+            assert!(app.chat.input.is_empty());
+            assert_eq!(app.chat.history, [format!("/followup {text}")]);
+            app.chat.input.set("WAITING_NEW_DRAFT");
+            app.on_key(crossterm::event::KeyEvent::new(KeyCode::F(9), KeyModifiers::NONE));
+            assert_eq!(app.chat.input.as_str(), "WAITING_NEW_DRAFT");
+            assert_eq!(app.chat.history.len(), 1, "a pending send must not admit the next draft");
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            let entry = loop {
+                app.queue.poll(Some(session));
+                if let Some((receipt, text)) = app.queue.take_notice() {
+                    assert!(text.contains("Следующее поручение 🙂"));
+                    break app.source.queue_read(session, &receipt.reference).unwrap();
+                }
+                assert!(std::time::Instant::now() < until, "follow-up was never saved");
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            };
+            assert_eq!(entry.receipt.text, text);
+            assert!(entry.receipt.applied_at.is_none());
+            let follow_up = entry.receipt.follow_up.unwrap();
+            assert!(follow_up.after.starts_with("goal."));
+            assert!(follow_up.reserved.is_none());
+            assert!(follow_up.goal.is_some());
+            assert!(!app.chat.busy, "queueing does not start a model turn");
+            assert_eq!(app.chat.input.as_str(), "WAITING_NEW_DRAFT");
+            assert_eq!(app.source.queue_page(session, &Default::default()).unwrap().items.len(), 1);
+            assert_eq!(rook.store.get_session(session).unwrap().unwrap().next_seq, before);
+        }
+    }
+
+    #[test]
+    fn refused_followup_actions_keep_the_draft_options_and_question_editable() {
+        let (_home, mut app, _rook, session) = follow_up_window(16);
+        let key = crossterm::event::KeyEvent::new(KeyCode::F(9), KeyModifiers::NONE);
+        let oversized = "🙂".repeat(5);
+        assert!(oversized.len() > 16, "the message must exceed the byte limit");
+        app.chat.input.set(&oversized);
+        app.on_key(key);
+        assert_eq!(app.chat.input.as_str(), oversized);
+        assert!(app.chat.log.last().unwrap().1.contains("max_message_bytes"));
+        app.chat.input.undo();
+        assert!(app.chat.input.is_empty(), "refusal must preserve undo");
+        app.chat.input.set("answer draft");
+        app.chat.asking = Some(Asking {
+            id: "question".into(),
+            questions: vec![Question { question: "Which?".into(), choices: vec![], multi: false }],
+            at: 0,
+            chosen: vec![],
+        });
+        app.on_key(key);
+        assert_eq!(app.chat.input.as_str(), "answer draft");
+        assert!(app.chat.asking.as_ref().unwrap().chosen.is_empty());
+        app.chat.asking = None;
+        app.chat.pending = Some(asking_to_run("echo approval"));
+        app.on_action(Action::FollowUp);
+        assert_eq!(app.chat.input.as_str(), "answer draft");
+        assert!(app.chat.pending.is_some(), "a follow-up cannot answer an approval");
+        app.chat.pending = None;
+        app.chat.session = None;
+        app.on_key(key);
+        assert_eq!(app.chat.input.as_str(), "answer draft");
+        app.chat.session = Some(session);
+        for options in [
+            rook_proto::TurnOptions {
+                attachments: vec![rook_proto::Attachment::Text { name: "note".into(), text: "kept".into() }],
+                ..Default::default()
+            },
+            rook_proto::TurnOptions {
+                recipe: Some(rook_proto::RecipeInvocation {
+                    path: "recipe".into(),
+                    parameters: Default::default(),
+                }),
+                ..Default::default()
+            },
+            rook_proto::TurnOptions { output: Some("answer.txt".into()), ..Default::default() },
+            rook_proto::TurnOptions {
+                output_schema: Some(serde_json::json!({"type":"object"})),
+                ..Default::default()
+            },
+        ] {
+            *app.shared.output.borrow_mut() = options;
+            let before = serde_json::to_value(&*app.shared.output.borrow()).unwrap();
+            app.on_key(key);
+            assert_eq!(app.chat.input.as_str(), "answer draft");
+            assert_eq!(serde_json::to_value(&*app.shared.output.borrow()).unwrap(), before);
+            assert!(app.chat.log.last().unwrap().1.contains("text only"));
+        }
+        assert!(app.source.queue_page(session, &Default::default()).unwrap().items.is_empty());
     }
 
     /// The few that cannot run while a turn is running, and why.

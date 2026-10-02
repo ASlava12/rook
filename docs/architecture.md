@@ -84,6 +84,12 @@ hint on the opposite border.
 The TUI executes slash commands as interface actions while a turn runs.
 Their command text does not become a queued user correction; plain messages,
 `/followup` and `/goal` retain their explicit delivery paths.
+The shared `prompt.followup` action is configurable and available through the
+palette without a default shortcut. It admits the current text through the same
+bounded queue worker as `/followup`, before copying it into prompt history.
+Recalled prompt history includes `/followup` to preserve the delivery mode.
+Questions, attachments, recipes and output options cannot be silently converted
+into a text-only follow-up; immediate refusal preserves draft and options.
 If a daemon connection fails after an ordinary Stop, the open TUI retains the
 session, turn and caller ID. `/retry-stop` resends the same scoped request;
 `/discard-stop` clears it. An acknowledgement or a successor turn clears the

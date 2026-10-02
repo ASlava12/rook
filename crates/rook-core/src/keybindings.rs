@@ -54,6 +54,7 @@ actions! {
     Down, "prompt.down", Prompt, "Move down; recall the next prompt below the last row", ["down"];
     Newline, "prompt.newline", Prompt, "Insert a newline without submitting", ["ctrl+j", "shift+enter", "alt+enter"];
     Submit, "prompt.submit", Prompt, "Submit the prompt or the current answer", ["enter"];
+    FollowUp, "prompt.followup", Prompt, "Queue the draft after the current turn or whole goal completes", [];
     Backspace, "prompt.backspace", Prompt, "Delete the character before the cursor", ["backspace", "ctrl+h"];
     PageUp, "prompt.page_up", Prompt, "Scroll conversation upward", ["pageup"];
     PageDown, "prompt.page_down", Prompt, "Scroll conversation downward", ["pagedown"];
@@ -223,5 +224,21 @@ mod tests {
         for bad in ["ctrl+", "ctrl+ctrl+x", "f13", "hyper+x", "ctrl+two"] {
             assert!(normalize(bad).is_none(), "{bad}");
         }
+    }
+
+    #[test]
+    fn followup_is_a_bindable_prompt_action_without_taking_newline_keys() {
+        let settings = Settings::default();
+        let defaults = settings.bindings().unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(defaults.label(Action::FollowUp), "unbound");
+        for key in ["ctrl+j", "shift+enter", "alt+enter"] {
+            assert_eq!(defaults.action(key, true), Some(Action::Newline));
+        }
+        let remapped: Settings = toml::from_str("[keys]\n'prompt.followup'=['f9']").unwrap();
+        let bindings = remapped.bindings().unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(bindings.action("f9", true), Some(Action::FollowUp));
+        assert_eq!(bindings.action("f9", false), None);
+        assert_eq!(bindings.action("enter", true), Some(Action::Submit));
+        assert_eq!(bindings.action("alt+enter", true), Some(Action::Newline));
     }
 }

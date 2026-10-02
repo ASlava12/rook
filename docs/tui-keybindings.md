@@ -6,6 +6,15 @@ as an idle prompt. The next queued message remains at the bottom, above the
 footer; `/queue` edits or withdraws it. Withdrawing into the draft appends its
 text to existing input without sending it.
 
+The `prompt.followup` action sends the current draft after the full ordinary
+turn or managed goal completes. It is available in the command palette and
+has no default shortcut; assign one in `[tui.keys]` if desired. Pausing a goal
+does not release its follow-ups. `/followup TEXT` uses the same queue. Both
+accept text only: clear attachments, recipe and output settings first, and
+answer an outstanding question before queuing a follow-up. An immediate refusal
+keeps the draft and undo history. An uncertain asynchronous send retains its
+original text and receipt ID in `/queue` for inspection and explicit retry.
+
 `/turns` opens recorded results and token totals for the current session. In the
 history viewer, `t` opens the same view, `n` scans older results, Enter opens the
 full stored outcome, and `h` returns to history. Esc closes without changing the
@@ -48,6 +57,7 @@ undo_bytes = 1048576
 "prompt.undo" = ["ctrl+x"]
 "prompt.redo" = ["alt+x"]
 "prompt.editor" = ["alt+e"]
+"prompt.followup" = ["f9"]
 ```
 
 Keys use `ctrl`, `alt`, `shift`, or `super`, followed by a key name. Examples:
@@ -74,6 +84,7 @@ Defaults preserve the existing palette, editor and history gestures:
 | Undo prompt edit | Ctrl+Z |
 | Redo prompt edit | Alt+Z |
 | Submit | Enter |
+| Queue draft as follow-up (`prompt.followup`) | Unbound; command palette |
 | Newline | Ctrl+J, Shift+Enter, Alt+Enter |
 
 The Tool calls pane shows calls from the newest 2,000 saved events, with their

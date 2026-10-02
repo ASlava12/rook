@@ -7,7 +7,7 @@ Source: Pi `ee602414c703be8da722ec56de7f2399e62581ac`; starting Rook:
 | Capability | State | Completion evidence needed |
 |---|---|---|
 | Bounded live delivery and snapshot recovery | Complete | Queue/replay/input limits, WebSocket backpressure, atomic recovery, current controls, PTY reconnect/goal checks, browser form preservation and full CI passed |
-| Editable steering and follow-up queue | In progress | Core/CLI/API/TUI/browser, durable IDs, goal vs ordinary-turn boundaries, revoke/accept races, restart |
+| Editable steering and follow-up queue | Complete | Shared durable IDs and controls, bounded reads, ordinary/whole-goal boundaries, edit/withdraw/accept races, restart/retry/recovery, native/browser interactions, named follow-up action and full CI passed |
 | Configurable keyboard actions and prompt undo | Complete | Shared registry/config/help, bounded Unicode edit tests, remapped-key and external-editor PTY checks, full CI passed |
 | Branch navigation and optional branch summary | Complete | Existing session/event IDs, bounded tree/history, explicit workspace semantics, reviewed attributable summaries, local busy refusal, daemon live switches with retained prompts/attachments and full CI passed |
 | Inline tool cards | Complete | Compact/live/saved results, attributed errors/duration/diffs and command/search/MCP facts, explicit bounded browser pixels, terminal text fallback, local/daemon and full CI passed |
@@ -2874,3 +2874,104 @@ with the same queue contract before closing this capability.
 Local `--alone` goal metadata retains its documented behavior. Actual HTML
 download/TUI checks, phase routing, declarative extension UI and the later
 terminal experiments remain in scope. The full goal is active.
+
+## Named follow-up action and fresh managed-goal boundary checks
+
+The shared action registry now exposes `prompt.followup` to configuration,
+palette, help and the native prompt handler. It has no default shortcut; the
+existing Ctrl-J, Shift-Enter and Alt-Enter newline keys keep their assignments.
+The action submits the current draft through the existing bounded queue worker,
+before copying it into prompt history. Recalling the history entry preserves
+the `/followup` delivery mode. A pending queue request or immediate size/guard
+refusal keeps the new draft editable with its undo history. An asynchronous
+failure keeps the original attempt and ID in the existing queue retry panel.
+No independent queue, stored record or wire format was added.
+
+The action and `/followup TEXT` reject outstanding questions and pending
+attachments, recipes or output settings rather than losing them in a text-only
+submission. Existing approval focus prevents the action from answering an
+approval. The focused CLI checks executed two tests and exited 0
+(`target/pi-followup-action-ui-final.log`): remapped F9 and actual palette
+dispatch admit identical multiline Unicode text, preserve the next draft while
+the worker is busy, deduplicate prompt history, do not start a model turn or
+append transcript history, and retain the draft/options/question on refusal.
+The oversized fixture explicitly exceeds the byte limit. The core binding
+regression executed once and exited 0
+(`target/pi-followup-action-bindings.log`). The first compile attempt exited
+101 because the test's conversation fixture omitted `options`; it was corrected
+without changing the production protocol or assertions. Both debug binaries
+then built with exit 0.
+
+A fresh actual `tui --alone` held an ordinary response, sent Unicode follow-ups
+through configured F9 and the F8 action palette, and displayed the first queued
+message at the bottom with a count of two. Neither message started while the
+original response was held. Releasing each reply started exactly the next
+separate turn. Direct CLI receipt inspection and Node assertions exited 0
+(`target/pi-followup-action-native-local.log`): two accepted/reserved receipts,
+the original ordinary boundary, exact Unicode, the expected four streamed
+requests including the seed, mode-preserving prompt history and untouched
+workspace bytes. The actual terminal exited 0; its completion output is
+`target/pi-followup-action-local-terminal.json`. The fixture is
+`target/branch-admission-01b738fd87e34fa691a5cd944e83dc30`.
+
+Fresh native TUI and browser interactions through a real owned daemon verified
+the whole managed-goal boundary. Each started a goal and queued a Unicode
+follow-up while the initial reply was held. Its receipt named that goal's
+generation. Pausing and finishing the current model response left it queued,
+unreserved and unapplied. Actual `/continue` resumed the same generation; the
+follow-up remained unreserved while the resumed goal reply was held. The
+completion checker called the real `read_file` on `evidence.txt` before returning
+`holds`. Only after the saved goal reached `completed` did its one separate
+follow-up start and become accepted/reserved. Native pause/resume assertions
+exited 0 (`target/pi-followup-action-native-goal-pause.log` and
+`target/pi-followup-action-native-goal-resume.log`), and its idle terminal exited
+0. The browser used actual mouse actions with the shipped modules and displayed
+queued/accepted states; its exact-generation, Unicode, once-only request and
+unchanged-workspace assertions exited 0
+(`target/pi-followup-action-browser-goal.log`). Snapshots, saved histories and
+browser pixels are under
+`target/branch-admission-7d729843aef247a581a1163339420e67`.
+After stopping the helpers, a separate inspection of their recorded model
+requests confirmed exactly one follow-up with the original Unicode text for
+each independent goal, both completed states and unchanged evidence/workspace
+files. It exited 0 (`target/pi-followup-action-managed-final.log`). Native
+completion output is `target/pi-followup-action-native-goal-terminal.json`.
+
+These lifecycle checks use a bounded scripted provider (80 requests, 1 MiB per
+request), not a model-quality or cost comparison. Full managed goals are still
+daemon-owned; local `--alone` goal metadata retains its documented behavior.
+An initial inline Node inspection exited 1 because PowerShell removed its quote
+characters; the final file-based UTF-8 inspections above supersede it. All owned
+terminal, model, daemon and browser helpers were stopped and absence checked;
+the installed user daemon was untouched.
+
+The audit against the original review now has concrete implementations and
+current executable coverage for every queue requirement:
+
+| Requirement | Coverage |
+|---|---|
+| Steering after reply/tools; follow-up after the whole ordinary turn | `agent_loop::followups_wait_for_a_new_turn_and_accept_the_latest_revision_once`, `a_step_limit_does_not_release_a_followup`; fresh local/shared TUI and actual browser sequences in the preceding block |
+| Whole goal completion; pause/retry does not release; replacement isolation | `message_queue::followups::tests::only_whole_goal_completion_releases_followups_and_replacement_never_retargets_them`; fresh native/browser pause, continuation and verified completion above |
+| Editable pending messages, immutable acceptance, withdrawal and restoration into the draft | Ordinary and managed edit/withdraw/accept race tests; bounded detail scrolling; fresh three-receipt Unicode edit and withdraw-to-existing-draft interactions in every frontend |
+| Stable retry identity, restart and safe recovery | `scoped_submissions_survive_lost_replies_restart_and_goal_replacement_without_retargeting`; CLI daemon kill/restart, predecessor continuation and goal handoff scenarios; retained browser/native Stop retry and creation/continuation acknowledgement checks |
+| Common controls, receipt status, ordering and configurable follow-up without stealing newline keys | Core/CLI/API/REPL/TUI/browser share the existing operations; current native F9/palette and browser mouse checks; pinned bottom preview; new binding regression |
+| Bounds before copies and compatibility | Above-limit stored queue/managed/outcome/cache/driver fixtures in the preceding reader block; existing optional JSON defaults and unchanged postcard records |
+
+The earlier intermittent extra initial goal note was fixed in **Conversation
+goal note lifecycle**, where a managed stage stopped writing the already saved
+initial goal again. The current retry scenario requires exactly one note; no
+duplicate-note exception remains. The previous unexplained killed-follow-up
+timeout remains recorded as a failed gate; its exact rerun and subsequent full
+gates passed without weakening assertions or timeouts.
+
+The full `cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0 (`ci: ok`,
+665.4 seconds; `target/pi-followup-action-ci.log`). It executed the new CLI/core
+regressions, ordinary and managed queue races, daemon kill/restart, predecessor
+continuation, goal handoff, initial-goal retry, bounded reader and compatibility
+checks, Clippy and doctests. Rust sources stayed unchanged during the gate.
+Windows has no runnable Unix PTY tests; the actual native terminal/browser
+checks above supply this block's live evidence. The queue row is now Complete.
+Storage implementation and formats did not change, so compaction was not rerun.
+Next finish actual HTML download and TUI export interactions, then phase routing,
+declarative extension UI and the later terminal experiments. The full adoption
+goal remains active.
