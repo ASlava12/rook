@@ -14,6 +14,9 @@ pub(super) struct History {
     tree: Option<rook_core::branches::Page>,
     switch: Option<rook_core::branches::Node>,
     offered_switch: Option<rook_core::branches::Node>,
+    navigation_draft: Option<rook_core::branches::Node>,
+    review: Option<SummaryReview>,
+    saved_summary: Option<String>,
     forked: Option<rook_core::branches::Forked>,
     renamed: Option<rook_core::branches::Node>,
     bookmarks: Option<rook_core::branches::Bookmarks>,
@@ -34,10 +37,16 @@ pub(super) struct History {
     send: Option<SyncSender<(u64, Command)>>,
     receive: Receiver<(u64, Result<Update>)>,
 }
+struct SummaryReview {
+    node: rook_core::branches::Node,
+    source: u128,
+    through: u64,
+}
 enum Command {
     Export(u128, u64, Option<u64>, PathBuf),
     Draft(u128, u128),
     Suggest(u128, u128),
+    Carry(SummaryReview, String),
     Fork(u128, u64),
     Rename(u128, String),
     Bookmarks(u128),
@@ -52,6 +61,7 @@ enum Command {
 enum Update {
     Exported(std::result::Result<(PathBuf, crate::commands::html_export::Report), String>),
     Suggested(u128, Result<rook_core::branches::SummaryDraft, String>),
+    Carried(SummaryReview, Result<u64, String>),
     Fork(rook_core::branches::Forked),
     Rename(rook_core::branches::Node),
     Bookmarks(rook_core::branches::Bookmarks, bool),
@@ -78,6 +88,16 @@ impl Command {
                 target,
                 source.branch_summary_suggest(from, target).map_err(|error| error.to_string()),
             ),
+            Self::Carry(review, text) => {
+                let result = rook_store::parse_session_id(&review.node.id)
+                    .ok_or_else(|| "invalid target branch ID".to_string())
+                    .and_then(|target| {
+                        source
+                            .transfer_branch_summary_at(review.source, target, Some(review.through), &text)
+                            .map_err(|error| error.to_string())
+                    });
+                Update::Carried(review, result)
+            }
             Self::Fork(session, seq) => Update::Fork(source.branch_from_event(session, seq)?),
             Self::Rename(session, title) => Update::Rename(source.rename_branch(session, &title)?),
             Self::Bookmarks(session) => Update::Bookmarks(source.bookmarks(session)?, true),
@@ -127,6 +147,9 @@ impl History {
             tree: None,
             switch: None,
             offered_switch: None,
+            navigation_draft: None,
+            review: None,
+            saved_summary: None,
             forked: None,
             renamed: None,
             bookmarks: None,
@@ -148,14 +171,17 @@ impl History {
             receive,
         }
     }
-    pub(super) fn open(&mut self, session: Option<u128>) {
+    pub(super) fn open(&mut self, session: Option<u128>, departed: Option<u128>) {
         self.open_mode(session, |id| Command::Page(id, PageRequest::default()));
+        self.departed = departed;
     }
-    pub(super) fn open_entry(&mut self, session: Option<u128>, seq: u64) {
+    pub(super) fn open_entry(&mut self, session: Option<u128>, seq: u64, departed: Option<u128>) {
         self.open_mode(session, |id| Command::Entry(id, seq, 0));
+        self.departed = departed;
     }
-    pub(super) fn open_turns(&mut self, session: Option<u128>, before: Option<u64>) {
+    pub(super) fn open_turns(&mut self, session: Option<u128>, before: Option<u64>, departed: Option<u128>) {
         self.open_mode(session, |id| Command::Turns(id, before));
+        self.departed = departed;
     }
     pub(super) fn open_tree(&mut self, session: Option<u128>, departed: Option<u128>) {
         self.open_mode(session, |id| Command::Tree(id, None));
@@ -170,6 +196,8 @@ impl History {
         self.tree = None;
         self.switch = None;
         self.offered_switch = None;
+        self.navigation_draft = None;
+        self.review = None;
         self.departed = None;
         self.hits = None;
         self.entry = None;
@@ -217,6 +245,35 @@ impl History {
     }
     pub(super) fn poll(&mut self) {
         while let Ok((epoch, update)) = self.receive.try_recv() {
+            // A saved summary remains reportable even if another viewer opened
+            // before the reply. Only the original view may continue its branch.
+            if let Ok(Update::Carried(mut review, result)) = update {
+                match result {
+                    Ok(event) => {
+                        self.saved_summary = Some(format!(
+                            "Saved historical summary from {} through #{} in {} at event #{event}. Verify file and test claims in the current workspace.",
+                            rook_store::format_session_id(review.source),
+                            review.through,
+                            review.node.id,
+                        ));
+                        if epoch == self.epoch {
+                            review.node.next_seq = review.node.next_seq.max(event.saturating_add(1));
+                            self.switch = Some(review.node);
+                            self.review = None;
+                        }
+                    }
+                    Err(error) if epoch == self.epoch => {
+                        self.note = format!(
+                            "{error} Check target history before retrying an uncertain save; Esc cancels this review."
+                        );
+                    }
+                    Err(_) => {}
+                }
+                if epoch == self.epoch {
+                    self.pending = false;
+                }
+                continue;
+            }
             if let Ok(Update::Exported(result)) = update {
                 self.exported = Some(result);
                 if epoch == self.epoch {
@@ -248,6 +305,7 @@ impl History {
                 Ok(Update::Exported(_)) => {
                     unreachable!("export completion handled before stale read filtering")
                 }
+                Ok(Update::Carried(_, _)) => unreachable!("summary save handled before stale read filtering"),
                 Ok(Update::Rename(node)) => {
                     if let Some(tree) = &mut self.tree {
                         for branch in tree
@@ -336,8 +394,35 @@ impl History {
                 }
                 Ok(Update::Quote(text)) => self.quote = Some(text),
                 Ok(Update::Suggested(target, result)) => {
-                    self.suggestion = Some((target, result));
-                    self.note = "Draft ready in chat · Esc returns to review and save it".into();
+                    if let Some(node) = self.navigation_draft.take() {
+                        match result {
+                            Ok(draft)
+                                if rook_store::parse_session_id(&node.id) == Some(target)
+                                    && rook_store::parse_session_id(&draft.source_session)
+                                        == self.departed
+                                    && draft.text.len() <= rook_core::branches::SUMMARY_BYTES =>
+                            {
+                                self.input.set(&draft.text);
+                                self.input.home();
+                                self.review = self.departed.map(|source| SummaryReview {
+                                    node,
+                                    source,
+                                    through: draft.source_through,
+                                });
+                                self.offered_switch = None;
+                                self.note = "Review and edit · Ctrl+S saves and continues · Enter adds a line · Esc cancels".into();
+                            }
+                            Ok(_) => {
+                                self.note = "Draft has an invalid source or size; request it again.".into()
+                            }
+                            Err(error) => {
+                                self.note = format!("{error} · d excerpts · s model · c skip · Esc cancel")
+                            }
+                        }
+                    } else {
+                        self.suggestion = Some((target, result));
+                        self.note = "Draft ready in chat · Esc returns to review and save it".into();
+                    }
                 }
                 Err(e) => self.note = e.to_string(),
             }
@@ -345,6 +430,14 @@ impl History {
     }
     pub(super) fn take_quote(&mut self) -> Option<String> {
         self.quote.take()
+    }
+    pub(super) fn take_saved_summary(&mut self) -> Option<String> {
+        self.saved_summary.take()
+    }
+    pub(super) fn captures_review_key(&self, key: crossterm::event::KeyEvent) -> bool {
+        self.review.is_some()
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Enter | KeyCode::Char('s' | 'u' | 'z' | 'y'))
     }
     pub(super) fn take_export(
         &mut self,
@@ -402,6 +495,16 @@ impl History {
         self.page.as_ref()?.items.get(self.at).map(|e| (e.seq, 0))
     }
     pub(super) fn paste(&mut self, text: &str) {
+        if self.review.is_some() {
+            if !self.pending {
+                if text.len() <= rook_core::branches::SUMMARY_BYTES.saturating_sub(self.input.text.len()) {
+                    self.input.paste(text);
+                } else {
+                    self.note = "Summary exceeds 16 KiB; paste was not inserted.".into();
+                }
+            }
+            return;
+        }
         let maximum: usize = if self.rename_target.is_some() {
             4096
         } else if self.mark_target.is_some() {
@@ -418,6 +521,59 @@ impl History {
         }
     }
     pub(super) fn key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        if self.review.is_some() {
+            if self.pending {
+                self.note = "Saving summary; wait for its result before continuing or retrying.".into();
+                return false;
+            }
+            match key.code {
+                KeyCode::Esc => {
+                    self.review = None;
+                    self.input.set("");
+                    self.note = "Review cancelled; nothing saved · c chooses a branch".into();
+                }
+                KeyCode::Enter | KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    let text = self.input.text.trim();
+                    if text.is_empty() {
+                        self.note = "Write a reviewed summary before saving.".into();
+                    } else if let Some(review) = &self.review {
+                        let review = SummaryReview {
+                            node: review.node.clone(),
+                            source: review.source,
+                            through: review.through,
+                        };
+                        self.ask(Command::Carry(review, text.to_string()));
+                    }
+                }
+                KeyCode::Enter if self.input.text.len() < rook_core::branches::SUMMARY_BYTES => {
+                    self.input.insert('\n')
+                }
+                KeyCode::Backspace => self.input.backspace(),
+                KeyCode::Delete => self.input.delete(),
+                KeyCode::Left => self.input.left(),
+                KeyCode::Right => self.input.right(),
+                KeyCode::Up => {
+                    self.input.up();
+                }
+                KeyCode::Down => {
+                    self.input.down();
+                }
+                KeyCode::Home => self.input.home(),
+                KeyCode::End => self.input.end(),
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => self.input.set(""),
+                KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => self.input.undo(),
+                KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => self.input.redo(),
+                KeyCode::Char(c)
+                    if !key.modifiers.contains(KeyModifiers::CONTROL)
+                        && c.len_utf8()
+                            <= rook_core::branches::SUMMARY_BYTES.saturating_sub(self.input.text.len()) =>
+                {
+                    self.input.insert(c)
+                }
+                _ => {}
+            }
+            return false;
+        }
         if self.editing.is_some() || self.rename_target.is_some() || self.mark_target.is_some() {
             match key.code {
                 KeyCode::Esc => {
@@ -483,6 +639,9 @@ impl History {
         }
         if key.code == KeyCode::Esc {
             if self.offered_switch.take().is_some() {
+                self.epoch = self.epoch.wrapping_add(1);
+                self.pending = false;
+                self.navigation_draft = None;
                 self.note = "Transfer cancelled · c chooses a branch to continue".into();
                 return false;
             }
@@ -511,11 +670,17 @@ impl History {
                             } else {
                                 Command::Suggest(source, target)
                             };
-                            self.ask(command);
+                            if self.ask(command) {
+                                self.navigation_draft = Some(offered.clone());
+                            }
                         }
+                        self.offered_switch = Some(offered);
                         return false;
                     }
-                    _ => self.note = "Enter explores · c continues selected · h reads history · n scans children · u earlier ancestors".into(),
+                    _ => {
+                        self.offered_switch = Some(offered);
+                        return false;
+                    }
                 }
             }
             match key.code {
@@ -749,6 +914,18 @@ impl History {
         false
     }
     pub(super) fn draw(&self, f: &mut Frame, area: Rect) {
+        if let Some(review) = &self.review {
+            let [source, editor, help] =
+                Layout::vertical([Constraint::Length(6), Constraint::Min(3), Constraint::Length(4)])
+                    .areas(area);
+            f.render_widget(Paragraph::new(format!(
+                "Historical source {} through #{} → {}\nReview before carrying. File and test observations need verification in the current workspace.",
+                rook_store::format_session_id(review.source), review.through, review.node.id,
+            )).wrap(Wrap { trim: false }).block(bordered("branch summary source")), source);
+            self.input.draw_box(f, editor, "", "review branch summary");
+            f.render_widget(Paragraph::new(self.note.as_str()).wrap(Wrap { trim: false }), help);
+            return;
+        }
         if let Some(page) = &self.tree {
             let heading_height = self.rename_target.map_or(3, |_| self.input.box_height("", area.width, 8));
             let [heading, list, detail, help] = Layout::vertical([
@@ -1079,5 +1256,152 @@ mod branch_offer_tests {
             assert!(matches!(command, Command::Draft(1, 2)) == is_draft);
             assert!(matches!(command, Command::Suggest(1, 2)) != is_draft);
         }
+    }
+
+    fn draft() -> rook_core::branches::SummaryDraft {
+        rook_core::branches::SummaryDraft {
+            source_session: rook_store::format_session_id(1),
+            source_through: 7,
+            text: "Historical finding\nReview before carrying".into(),
+            scanned_events: 3,
+            omitted_earlier: false,
+            source_from: 5,
+            common_ancestor: Some(rook_store::format_session_id(3)),
+            scope_known: true,
+        }
+    }
+
+    fn deliver(history: &mut History, update: Update) {
+        let (send, receive) = sync_channel(1);
+        history.receive = receive;
+        send.send((history.epoch, Ok(update))).unwrap();
+        history.poll();
+    }
+
+    fn review() -> (History, Receiver<(u64, Command)>) {
+        let (mut history, commands) = tree();
+        history.key(key('c'));
+        history.key(key('s'));
+        assert!(matches!(commands.try_recv().unwrap().1, Command::Suggest(1, 2)));
+        deliver(&mut history, Update::Suggested(2, Ok(draft())));
+        assert!(history.suggestion.is_none(), "navigation draft belongs in its own editor");
+        (history, commands)
+    }
+
+    #[test]
+    fn navigation_review_edits_multiline_text_and_saves_only_on_confirmation() {
+        let (mut history, commands) = review();
+        assert!(
+            history.captures_review_key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('s'),
+                KeyModifiers::CONTROL,
+            )),
+            "the summary confirmation must take precedence over global mouse selection"
+        );
+        assert_eq!(history.review.as_ref().unwrap().through, 7);
+        assert!(history.switch.is_none());
+        history.input.end();
+        history.key(crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        history.paste("Reviewed conclusion: проверено 🦀");
+        let edited = history.input.text.clone();
+        assert!(commands.try_recv().is_err(), "editing must not write or call a model");
+        history.key(crossterm::event::KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        let (_, command) = commands.try_recv().unwrap();
+        let Command::Carry(review, text) = command else { panic!("explicit save must carry the review") };
+        assert_eq!(text, edited);
+        assert_eq!(review.source, 1);
+        assert_eq!(review.through, 7);
+        assert_eq!(review.node.id, rook_store::format_session_id(2));
+        history.key(crossterm::event::KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(history.review.is_some(), "an in-flight save cannot be dismissed and retried");
+        assert!(history.switch.is_none());
+        deliver(&mut history, Update::Carried(review, Ok(12)));
+        assert!(history.review.is_none());
+        assert_eq!(history.take_session().unwrap().next_seq, 13);
+        assert!(history.take_saved_summary().unwrap().contains("through #7"));
+    }
+
+    #[test]
+    fn navigation_review_refuses_oversized_input_before_copying_and_cancel_does_not_write() {
+        let (mut history, commands) = review();
+        let oversized = "я".repeat(rook_core::branches::SUMMARY_BYTES);
+        assert!(oversized.len() > rook_core::branches::SUMMARY_BYTES);
+        let before = history.input.text.clone();
+        history.paste(&oversized);
+        assert_eq!(history.input.text, before);
+        history.input.set(&"x".repeat(rook_core::branches::SUMMARY_BYTES - 1));
+        history.key(key('я'));
+        assert_eq!(history.input.text.len(), rook_core::branches::SUMMARY_BYTES - 1);
+        history.key(key('x'));
+        history.key(key('x'));
+        assert_eq!(history.input.text.len(), rook_core::branches::SUMMARY_BYTES);
+        history.key(crossterm::event::KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(history.review.is_none());
+        assert!(history.switch.is_none());
+        assert!(commands.try_recv().is_err());
+    }
+
+    #[test]
+    fn cancelled_navigation_ignores_late_drafts_and_wrong_source_drafts_are_rejected() {
+        let (mut history, commands) = tree();
+        history.key(key('c'));
+        history.key(key('s'));
+        let (epoch, _) = commands.try_recv().unwrap();
+        history.key(key('j'));
+        assert!(history.offered_switch.is_some(), "unrelated keys must keep the pending offer");
+        history.key(crossterm::event::KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let (send, receive) = sync_channel(1);
+        history.receive = receive;
+        send.send((epoch, Ok(Update::Suggested(2, Ok(draft()))))).unwrap();
+        history.poll();
+        assert!(history.review.is_none());
+        assert!(history.suggestion.is_none());
+        history.key(key('c'));
+        history.key(key('s'));
+        commands.try_recv().unwrap();
+        let mut wrong = draft();
+        wrong.source_session = rook_store::format_session_id(9);
+        deliver(&mut history, Update::Suggested(2, Ok(wrong)));
+        assert!(history.review.is_none());
+        assert!(history.offered_switch.is_some());
+    }
+
+    #[test]
+    fn failed_review_save_keeps_edits_and_a_stale_success_reports_without_switching() {
+        let (mut history, commands) = review();
+        let edited = history.input.text.clone();
+        history.key(crossterm::event::KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        let Command::Carry(review, _) = commands.try_recv().unwrap().1 else { panic!("expected save") };
+        deliver(&mut history, Update::Carried(review, Err("source changed; request a new draft".into())));
+        assert_eq!(history.input.text, edited);
+        assert!(history.review.is_some());
+        assert!(history.switch.is_none());
+        assert!(history.note.contains("Check target history"));
+        let review = history.review.take().unwrap();
+        let old_epoch = history.epoch;
+        history.epoch += 1;
+        let (send, receive) = sync_channel(1);
+        history.receive = receive;
+        send.send((old_epoch, Ok(Update::Carried(review, Ok(9))))).unwrap();
+        history.poll();
+        assert!(history.take_saved_summary().is_some());
+        assert!(history.switch.is_none(), "a stale save reply cannot select another conversation");
+    }
+
+    #[test]
+    fn every_history_entry_point_retains_the_actual_departed_conversation_for_tree_navigation() {
+        let (mut history, commands) = tree();
+        history.open(Some(2), Some(1));
+        assert!(matches!(commands.try_recv().unwrap().1, Command::Page(2, _)));
+        assert_eq!(history.departed, Some(1));
+        history.open_entry(Some(3), 4, Some(1));
+        assert!(matches!(commands.try_recv().unwrap().1, Command::Entry(3, 4, 0)));
+        assert_eq!(history.departed, Some(1));
+        history.open_turns(Some(2), None, Some(1));
+        assert!(matches!(commands.try_recv().unwrap().1, Command::Turns(2, None)));
+        assert_eq!(history.departed, Some(1));
+        history.open(Some(2), None);
+        commands.try_recv().unwrap();
+        assert_eq!(history.departed, None, "browsing before opening a chat cannot invent a source");
     }
 }

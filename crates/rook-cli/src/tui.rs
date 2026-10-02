@@ -1816,6 +1816,9 @@ impl App {
             self.drain_turn_events();
             self.tasks.poll();
             self.history.poll();
+            if let Some(notice) = self.history.take_saved_summary() {
+                self.chat.push("stat", &notice);
+            }
             if let Some(result) = self.history.take_export() {
                 match result {
                     Ok((path, report)) => self.chat.push(
@@ -2460,6 +2463,10 @@ impl App {
             }
             return;
         }
+        if self.overlay == Some(Overlay::History) && self.history.captures_review_key(key) {
+            self.on_overlay_key(Overlay::History, key);
+            return;
+        }
         if self.overlay == Some(Overlay::Queue)
             && key.code == KeyCode::Char('s')
             && key.modifiers.contains(KeyModifiers::CONTROL)
@@ -2540,7 +2547,7 @@ impl App {
         }
         if overlay == Overlay::Sessions && key.code == KeyCode::Char('f') {
             let session = self.session_state.selected().and_then(|i| self.sessions.get(i)).map(|s| s.meta.id);
-            self.history.open(session);
+            self.history.open(session, self.chat.session);
             self.overlay = Some(Overlay::History);
             return;
         }
@@ -2606,7 +2613,7 @@ impl App {
             if let Some(note) =
                 self.call_state.selected().and_then(|at| self.calls.get(at)).and_then(|call| call.change_note)
             {
-                self.history.open_entry(self.chat.session, note);
+                self.history.open_entry(self.chat.session, note, self.chat.session);
                 self.overlay = Some(Overlay::History);
             }
             return;
@@ -2733,7 +2740,7 @@ impl App {
                     None => {
                         self.overlay = Overlay::PANES.iter().copied().find(|pane| pane.name() == name);
                         if self.overlay == Some(Overlay::History) {
-                            self.history.open(self.chat.session);
+                            self.history.open(self.chat.session, self.chat.session);
                         } else if self.overlay == Some(Overlay::Context) {
                             self.context.open(&self.source, self.chat.session, None);
                         } else if self.overlay == Some(Overlay::Queue) {
@@ -2872,14 +2879,14 @@ impl App {
             Action::End => self.chat.input.end(),
             Action::Editor => self.editor = Some(editor::Picker::discover()),
             Action::History => {
-                self.history.open(self.chat.session);
+                self.history.open(self.chat.session, self.chat.session);
                 self.overlay = Some(Overlay::History);
             }
             Action::ToolPrevious => self.chat.select_tool(false),
             Action::ToolNext => self.chat.select_tool(true),
             Action::ToolResult => {
                 if let Some((_, session, seq)) = self.chat.selected_tool() {
-                    self.history.open_entry(Some(session), seq);
+                    self.history.open_entry(Some(session), seq, self.chat.session);
                     self.overlay = Some(Overlay::History);
                 } else {
                     self.chat.push("stat", "No saved tool result retained here; open conversation history.");
@@ -3384,7 +3391,7 @@ impl App {
                 }
             };
             self.overlay = Some(Overlay::History);
-            self.history.open_turns(self.chat.session, before);
+            self.history.open_turns(self.chat.session, before, self.chat.session);
             return;
         }
         if name == "queue" {

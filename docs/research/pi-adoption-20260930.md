@@ -2254,3 +2254,66 @@ summary-draft work documented in conversation-branches), HTML download interacti
 phase routing, declarative extension UI and terminal experiments remain open.
 Next return to the queue lifecycle/branch navigation gaps, then close HTML
 interaction and implement both Pending capabilities; the full goal remains active.
+
+## Review and carry a summary within TUI navigation (2026-10-02)
+
+Choosing excerpts or a model draft in the TUI branch-switch offer now opens a
+separate bounded multiline editor. The main prompt and attachments are retained.
+The editor shows the departed session and pinned source boundary; Enter inserts
+a line, Ctrl+U clears, Ctrl+Z/Ctrl+Y undo/redo, and Ctrl+S confirms the reviewed
+text and continues. Ctrl+Enter is also accepted when the terminal reports it.
+The review keys take precedence over global mouse selection while this editor
+is open. Opening an offer, generating, editing or cancelling writes no summary.
+An in-flight save cannot be dismissed and repeated from the same editor; errors
+retain the edits and advise checking target history before an uncertain retry.
+A committed reply from an older viewer reports its event without switching a
+newly opened conversation. Existing Source/core/HTTP methods and the bounded
+branch-summary Note format are reused; no stored structs or writers changed.
+
+Real Windows TUI interaction found that opening a tree from history lost the
+departed conversation and silently skipped the offer. All history entry points
+now pass the actual open conversation separately from the inspected session,
+including Calls and turn results. Unrelated keys keep a pending offer; cancelling
+a pending model draft invalidates late replies without putting them into chat.
+
+Focused editor/worker-state tests passed (exit 0): confirmation, multiline Unicode
+edits, pre-copy paste and typed byte bounds, cancellation, late/wrong-source
+drafts, source-change errors, stale save receipts and history entry points.
+The oversized fixture asserts it exceeds 16 KiB. The existing CLI test for scoped
+drafts locally and through the daemon passed (exit 0). An initial invocation
+requested a nonexistent CLI library target and exited 1; the correct `--bin rook`
+target passed. A new Unix PTY scenario covers cancelled review followed by one
+confirmed local/daemon save, exact source/boundary, retained prompt and untouched
+workspace; Windows executes no tests from that Unix-only file, so its exit 0
+is not PTY evidence. The existing tree-navigation scenario now explicitly skips
+the summary offer when continuing a different branch.
+
+Actual fresh Windows PTY runs completed locally and through a scratch daemon
+(exit 0). Both requested the model draft through navigation; captured requests
+included source-only events and excluded the shared prefix. Local cancellation
+followed by excerpt review saved one attributed multiline summary and retained
+the unsent main prompt. In the daemon case, a concurrent source append made the
+pinned save fail while retaining edits and leaving target history unchanged;
+fresh excerpts then saved and continued with the main prompt intact. Actual HTTP
+history verified exactly the two confirmed summaries and their different pinned
+boundaries, no submitted draft, and unchanged workspace bytes (verification
+script exit 0). Owned model/daemon helpers were stopped and their absence checked.
+The scratch seed model initially returned an invalid completion verdict; its
+fixture was corrected before the navigation checks. These checks use scripted
+model replies, not a model-quality or cost benchmark.
+
+Final `cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0 (`ci: ok`, 689.7
+seconds), including the new editor/history-source checks, local/daemon scoped
+draft and model-suggestion integration scenarios, existing queue/restart and
+storage compatibility checks, and doctests. Its log is
+`target/pi-navigation-review-ci.log`. `cargo xtask compaction` exited 0
+(`target/pi-navigation-review-compaction.log`): 4.02 MiB on disk, 37.1x dictionary
+compression and 5.8x end-to-end for the unchanged fixture. Published storage
+claims remain unchanged. No scratch helpers remain running.
+
+Branch navigation remains In progress for live switches during model output:
+local busy-turn refusal, daemon observation switching while the departed turn
+continues, and preserved prompt/attachments. Next verify those remaining live
+scenarios and the queue's real TUI Stop retry across window/daemon restart.
+Queue lifecycle, HTML download interaction, phase routing, declarative extension
+UI and terminal experiments remain in the original scope; the full goal is active.

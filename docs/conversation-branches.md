@@ -71,8 +71,18 @@ TEXT`, or repeat `/session ID` to continue without saving a summary. This works
 locally and through the daemon. `/session` without an ID shows the current one.
 In the TUI tree, `c` on a different branch offers `d` for recorded excerpts,
 `s` for a model draft, `c` again to continue without a summary, and Esc to
-cancel. The draft appears in chat for review and must be saved with `/summary`
-before switching; opening the offer never saves it.
+cancel. Choosing `d` or `s` opens a separate bounded multiline review editor;
+the main chat prompt and attachments stay intact. Enter adds a line, Ctrl+U
+clears the review, Ctrl+Z/Ctrl+Y undo/redo, and Ctrl+S saves the reviewed text
+and continues the selected branch. Ctrl+Enter also confirms in terminals that
+report it. Esc cancels without writing. While saving, the editor waits for the
+reply so a second key cannot repeat the write. A failed save keeps the edits;
+check target history before retrying an uncertain response. If the source
+changed, cancel and request a fresh draft. The source session and event boundary
+are pinned, including when the tree was opened from historical Calls, history
+or turn results. Opening the offer never saves or requests a model draft.
+The explicit `/summary-draft` and `/summary-suggest` commands still print to
+chat for saving separately with `/summary`.
 In the browser, **Continue in chat** on another branch first offers a reviewed
 summary. **Review summary** opens the existing editor, **Continue without
 summary** switches directly, and **Cancel** leaves the current conversation
@@ -180,9 +190,12 @@ session and its last saved event when the summary was submitted. History shows
 that attribution. The next model request sees the summary as source data, with
 an explicit warning that historical file observations and test results need
 verification in the current workspace. Browsing and ordinary branch switching
-do not create or carry a summary. Automatic draft generation from the departed
-branch during navigation, scoped to events after the common ancestor, remains
-pending; the explicit suggestion command above is available now.
+do not create or carry a summary. TUI navigation can generate a scoped model
+draft after choosing `s`, then review and save it before continuing. Browser
+navigation still requires opening the review editor and then selecting its
+explicit generation button; the REPL prints the offered draft for a separate
+save command. Remaining live-switch lifecycle checks are tracked in the
+[adoption tracker](research/pi-adoption-20260930.md).
 
 ## Saved tool images
 

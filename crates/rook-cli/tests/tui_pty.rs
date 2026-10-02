@@ -574,7 +574,7 @@ fn branch_navigation_pages_reads_and_continues_without_submitting_the_draft_or_r
         pty.screen_showing(100, 30, "history ·");
         pty.send("v");
         pty.screen_showing(100, 30, "conversation tree");
-        pty.send("kc"); // Explicitly continue the parent, with the draft intact.
+        pty.send("kcc"); // Continue the parent and explicitly skip its summary offer.
         let continued = pty.screen_showing(100, 30, "ROOT_HISTORY").join("\n");
         assert!(continued.contains("› DRAFT_BRANCH_SWITCH"), "switching keeps the draft: {continued}");
         drop(pty);
@@ -588,6 +588,96 @@ fn branch_navigation_pages_reads_and_continues_without_submitting_the_draft_or_r
             );
         }
         assert_eq!(std::fs::read_to_string(file).unwrap(), "keep these workspace bytes");
+    }
+}
+
+#[test]
+fn branch_navigation_reviews_and_carries_a_pinned_summary_without_submitting_the_prompt() {
+    let _one = one_at_a_time();
+    for remote in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let file = workspace.path().join("untouched.txt");
+        std::fs::write(&file, "current workspace bytes").unwrap();
+        {
+            let store = rook_store::Store::open(home.path().join("store")).unwrap();
+            for (id, parent, text) in [(1, None, "SOURCE_BRANCH_FINDING"), (2, Some(1), "TARGET_HISTORY")] {
+                let mut meta =
+                    rook_store::SessionMeta::new(id, text, workspace.path().display().to_string(), 1);
+                meta.parent = parent;
+                store.create_session(&meta).unwrap();
+                store
+                    .append_event(
+                        id,
+                        rook_store::NewEvent::new(
+                            rook_store::EventKind::UserMessage,
+                            rook_store::Kind::Message,
+                            text.as_bytes(),
+                        ),
+                    )
+                    .unwrap();
+            }
+        }
+        let daemon = remote.then(|| Daemon::start(home.path(), workspace.path()));
+        let mut pty = if remote {
+            Pty::spawn(
+                std::path::Path::new(env!("CARGO_BIN_EXE_rook")),
+                &["--workspace", workspace.path().to_str().unwrap(), "tui"],
+                &[
+                    ("ROOK_HOME", home.path().to_str().unwrap()),
+                    ("ROOK_LOG", "error"),
+                    ("TERM", "xterm-256color"),
+                ],
+                100,
+                30,
+            )
+        } else {
+            tui(home.path(), workspace.path())
+        };
+        pty.screen(100, 30);
+        pty.send(&format!("/tree {}\r", rook_store::format_session_id(1)));
+        pty.screen_showing(100, 30, "conversation tree");
+        pty.send("c");
+        pty.screen_showing(100, 30, "SOURCE_BRANCH_FINDING");
+        pty.send("UNSENT_MAIN_PROMPT");
+        pty.screen_showing(100, 30, "UNSENT_MAIN_PROMPT");
+        pty.send("\u{6}");
+        pty.screen_showing(100, 30, "history ·");
+        pty.send("v");
+        pty.screen_showing(100, 30, "conversation tree");
+        pty.send("jcd");
+        pty.screen_showing(100, 30, "review branch summary");
+        pty.send("\u{1b}");
+        pty.screen_showing(100, 30, "Review cancelled; nothing saved");
+        pty.send("cd");
+        pty.screen_showing(100, 30, "review branch summary");
+        pty.send("\u{15}REVIEWED_BRANCH_SUMMARY\u{13}"); // Ctrl+u replaces; Ctrl+s confirms.
+        let screen = pty.screen_showing(100, 30, "TARGET_HISTORY").join("\n");
+        assert!(
+            screen.contains("UNSENT_MAIN_PROMPT"),
+            "summary editing must retain the chat draft: {screen}"
+        );
+        assert!(
+            screen.contains("REVIEWED_BRANCH_SUMMARY"),
+            "saved summary must be recalled in the target: {screen}"
+        );
+        drop(pty);
+        drop(daemon);
+        let store = rook_store::Store::open(home.path().join("store")).unwrap();
+        assert_eq!(store.get_session(1).unwrap().unwrap().next_seq, 1);
+        assert_eq!(
+            store.get_session(2).unwrap().unwrap().next_seq,
+            2,
+            "one explicit summary, no submitted prompt"
+        );
+        let events = store.events_before(2, 2, 2).unwrap();
+        let saved = events.iter().find(|event| event.record.label == "branch-summary").unwrap();
+        let summary: serde_json::Value =
+            serde_json::from_slice(&store.get(saved.record.object).unwrap()).unwrap();
+        assert_eq!(summary["source_session"], rook_store::format_session_id(1));
+        assert_eq!(summary["source_through"], 0);
+        assert_eq!(summary["text"], "REVIEWED_BRANCH_SUMMARY");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "current workspace bytes");
     }
 }
 

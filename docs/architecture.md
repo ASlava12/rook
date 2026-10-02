@@ -95,6 +95,12 @@ Its record names the source session and last source event. Replay treats the
 summary as attributed source data, while transcript reading renders that
 attribution for people. It does not imply that files or tests still match the
 departed branch. Ordinary branch navigation does not create this event.
+The TUI history worker prepares and saves an opted-in navigation draft through
+the same local/daemon Source methods. A separate bounded editor pins its source
+and boundary and keeps the chat prompt intact. A save reply from a replaced
+viewer reports the committed event without switching the new conversation.
+Every history entry point carries the actual open conversation as the departed
+source; the session being inspected may be a different one.
 
 Managed MCP equipment lives in `rook-core::mcp_connections`. Initial admission
 bounds declarations and concurrent handshakes; reports contain no endpoint,
