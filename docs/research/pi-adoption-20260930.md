@@ -13,7 +13,7 @@ Source: Pi `ee602414c703be8da722ec56de7f2399e62581ac`; starting Rook:
 | Inline tool cards | Complete | Compact/live/saved results, attributed errors/duration/diffs and command/search/MCP facts, explicit bounded browser pixels, terminal text fallback, local/daemon and full CI passed |
 | Context provenance inspector | Complete | Request-specific sources and loaded skills, deferred MCP tools in CLI/API/TUI/browser; bounded notes, old-note compatibility, local/daemon and full CI passed |
 | Local HTML export | Complete | Inclusive saved ranges, bounded/escaped/attributed output, no overwrite/publication, CLI/REPL/local/shared TUI parity, actual browser download/rendering and full CI passed |
-| Opt-in phase-based model routing | Pending | Explicit policy, continuity/capability constraints, actual route/cost reporting, comparison without claiming unmeasured savings |
+| Opt-in phase-based model routing | In progress | Static opt-in policy and durable branch transition implemented; finish capability/continuity audit, actual route/cost reporting, live frontend checks and comparison without claiming unmeasured savings |
 | Declarative extension UI | Pending | Bounded status/progress/forms/result contract, trust boundary, text fallback and frontend parity |
 
 Regular-scrollback TUI and terminal image preview remain experiments from the
@@ -3037,3 +3037,67 @@ dispatch/usage without claiming unmeasured savings. The pinned virtual-model
 documentation and `jev-router.ts` remain the reference for phase boundaries.
 Declarative extension UI and the later scrollback/image terminal experiments
 retain their original scope. The full adoption goal is active.
+
+## Static phase policy and durable branch intent
+
+The first phase-routing block adds optional `models.*.implementation_model`.
+Empty preserves the existing physical source. Named policies reject an unknown,
+self or chained target offline, before a turn builds its provider; model
+selection and config checking share that validation. `Provider` carries bounded
+policy names beside the existing transport. Independent errands retain ordinary
+selection, and a recipe's explicit model replaces the preceding policy.
+Configuration, limits and the current scope are in [phase routing](../phase-routing.md).
+
+The first successful top-level file tool records implementation intent. Read-only
+exploration, failed/refused calls and writing-looking reply text do not. The next
+request after a complete tool batch can use the target. The loop rebuilds request
+history, cache marks and its source manifest, applies the target context window
+and discards the previous model's usage anchor before ordinary compaction checks.
+Native tools cannot silently downgrade. Any retained images or opaque reasoning
+currently hold the analysis provider and emit one notice per turn; proven
+compatible handoffs remain part of the capability audit.
+
+A phase note and JSON companion value share one durable transaction, with no
+postcard changes. Reads admit at most 16 KiB before copying. A branch retains at
+most 16 policy pairs, without eviction. Restart and recorded compaction preserve
+intent; forks inherit only transitions before their exclusive history boundary,
+and deletion cleans up the companion. This is phase intent, not a claim about
+the current workspace or another branch's tests. Phase notes do not reach model
+replay or compaction summaries.
+
+The successful tool's execution receipt closes only after phase persistence.
+Failure to persist leaves its operation pending; losing its owner therefore
+requires inspection under ordinary unknown-side-effect recovery. Phase state
+and its note are atomic with each other, not with external filesystem changes.
+The journal supplies the exact result sequence so the intervening phase note
+cannot hide a saved result, image binding or tool timing.
+
+Focused core checks exited 0 (`target/pi-phase-routing-core-complete.log` and
+`target/pi-phase-routing-state-complete.log`): immutable image/opaque guards,
+one notice, target context budget, recipe override, saved prefix inheritance,
+reopen/recorded-compaction/deletion, actual over-limit bytes, full policy capacity
+without eviction, offline policy refusal and the failed-persistence recovery
+seam. The new CLI integration scenario executed and exited 0
+(`target/pi-phase-routing-cli-final.log`, 82.40 seconds including the owned
+daemon build). Real local and daemon requests stay on analysis after a read and
+a failed edit, switch after a successful write with original arguments/tool ID
+bindings and native schemas intact, then keep implementation after a new process
+and daemon restart. There is one actual write and no classifier request.
+
+Initial compilation/test failures are not passes. The initial module placement
+and fixture context-window type were corrected; fixture checks now use the
+provider's named identity and parse actual tool arguments instead of assuming
+one JSON escaping level. Their failed logs remain in `target/pi-phase-routing-*`.
+The full `cargo xtask ci` with `RUST_TEST_THREADS=1` exited 0 (`ci: ok`,
+758.6 seconds; `target/pi-phase-routing-ci.log`), including the new local/daemon
+scenario, all new core checks, complete existing suites, native TUI/PTY checks,
+frontend builds, Clippy and doctests. `cargo xtask compaction` exited 0
+(`target/pi-phase-routing-compaction.log`): 4.02 MiB on disk, 37.1x dictionary
+compression and 5.8x end-to-end retain the published storage measurements.
+
+The phase row remains In progress. Next finish selected-versus-dispatched
+reporting with actual usage/cost, capability/continuity/recovery audit and live
+TUI/browser interactions, then compare quality, cost and latency on the same
+tasks without treating a scripted server as measured model quality or savings.
+Delegated/checking policy behavior also needs an explicit audit. Declarative
+extension UI and the scrollback/image experiments retain their original scope.

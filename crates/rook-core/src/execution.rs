@@ -709,6 +709,17 @@ impl Journal {
         jobs: Option<&rook_tools::jobs::Jobs>,
         new_job: Option<&str>,
     ) -> Result<()> {
+        self.complete_with_phase(result, jobs, new_job, None).map(|_| ())
+    }
+
+    pub(crate) fn complete_with_phase(
+        &self,
+        result: &str,
+        jobs: Option<&rook_tools::jobs::Jobs>,
+        new_job: Option<&str>,
+        phase: Option<(&Rook, &str, &str)>,
+    ) -> Result<u64> {
+        let mut result_seq = 0;
         self.update(|state| {
             let operation = state
                 .pending
@@ -735,6 +746,7 @@ impl Journal {
                 )?,
             };
             state.last_result_seq = Some(seq);
+            result_seq = seq;
             state.completed_operations += 1;
             if let Some(id) = new_job {
                 if state.background.len() >= MAX_PENDING {
@@ -745,8 +757,15 @@ impl Journal {
                 pending.registry = jobs.map(rook_tools::jobs::Jobs::identity);
                 state.background.push(pending);
             }
+            // Persist phase intent before closing the operation receipt. A lost
+            // owner before this point leaves an unknown side effect, never a
+            // safely completed write with its phase silently missing.
+            if let Some((rook, selected, target)) = phase {
+                crate::phase_routing::edited(rook, self.session, selected, target)?;
+            }
             Ok(())
-        })
+        })?;
+        Ok(result_seq)
     }
 
     pub(crate) fn background(&self, tool: &str, arguments: &str) -> Result<Background> {
@@ -1156,6 +1175,50 @@ mod tests {
             rook_skills::SkillIndex::default(),
             dir.into(),
         )
+    }
+
+    #[test]
+    fn a_file_operation_cannot_close_before_its_phase_state_is_durable() {
+        let dir = tempfile::tempdir().unwrap();
+        let rook = engine(dir.path());
+        let session = rook.start_session("phase receipt").unwrap();
+        let journal = Journal::start(&rook, session, None, false).unwrap();
+        journal.admit("write a file").unwrap();
+        journal.begin("write_file", "{}", true, false, None).unwrap();
+        let phase_key = format!("model-phase/{session:032x}");
+        let mut oversized = vec![b' '; 16385];
+        oversized[..2].copy_from_slice(b"[]");
+        assert!(oversized.len() > 16384);
+        assert!(serde_json::from_slice::<serde_json::Value>(&oversized).is_ok());
+        rook.store.kv_set(&phase_key, &oversized).unwrap();
+        let error = journal
+            .complete_with_phase("write succeeded", None, None, Some((&rook, "analysis", "implementation")))
+            .unwrap_err();
+        assert!(error.to_string().contains("exceeds"), "{error}");
+        let state = load(&rook.store, session).unwrap().unwrap();
+        assert!(state.pending.is_some(), "failed phase persistence leaves the operation open");
+        assert_eq!(state.completed_operations, 0);
+        drop(journal);
+        assert!(
+            rook.recovery_block(session).unwrap().is_some(),
+            "lost ownership remains an unknown side effect"
+        );
+        let successful = rook.start_session("durable phase receipt").unwrap();
+        let journal = Journal::start(&rook, successful, None, false).unwrap();
+        journal.admit("write a file").unwrap();
+        journal.begin("write_file", "{}", true, false, None).unwrap();
+        let seq = journal
+            .complete_with_phase("write succeeded", None, None, Some((&rook, "analysis", "implementation")))
+            .unwrap();
+        let state = load(&rook.store, successful).unwrap().unwrap();
+        assert!(state.pending.is_none());
+        assert_eq!(state.last_result_seq, Some(seq));
+        assert!(crate::phase_routing::implementing(&rook, successful, "analysis", "implementation").unwrap());
+        assert_eq!(rook.store.events(successful, seq, 1).unwrap()[0].record.kind, EventKind::ToolResult);
+        assert_eq!(
+            rook.store.events(successful, seq + 1, 1).unwrap()[0].record.label,
+            crate::phase_routing::LABEL
+        );
     }
 
     #[test]

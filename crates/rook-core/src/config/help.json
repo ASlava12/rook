@@ -416,6 +416,10 @@
     "kind": "string",
     "help": "The model to ask for, as this endpoint spells it."
   },
+  "models.*.implementation_model": {
+    "kind": "string",
+    "help": "Opt in to analysis on this selected source, then use this named physical source after a successful file edit. Empty keeps one model. The branch phase survives reopen/compaction; incompatible image or provider reasoning state keeps the analysis model."
+  },
   "models.*.endpoint": {
     "kind": "string",
     "help": "A name from [endpoints] to ask, where the address is written down once and several models share it."

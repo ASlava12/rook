@@ -198,6 +198,9 @@ pub struct ApiEndpoint {
 pub struct ModelSource {
     /// The model to ask for, as this endpoint spells it.
     pub model: String,
+    /// Opt in to analysis on this source, then implementation on this named
+    /// source after a successful file edit. Empty keeps one model throughout.
+    pub implementation_model: String,
     /// A name from `[endpoints]` to ask, where the address is written down once
     /// and several models share it.
     ///

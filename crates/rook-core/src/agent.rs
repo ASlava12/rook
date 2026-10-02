@@ -33,6 +33,7 @@ pub(crate) mod history;
 mod lifecycle;
 mod output;
 mod prompt;
+mod routing;
 mod setup;
 mod stream;
 mod tool_catalog;
@@ -530,6 +531,10 @@ pub struct AgentLoop<'a> {
     /// Shared rather than owned so a delegated child can reuse the connection
     /// instead of building a second HTTP client per sub-task.
     pub provider: std::sync::Arc<dyn Provider>,
+    routing: Option<(String, String)>,
+    routed: bool,
+    routing_guard_reported: bool,
+    routing_invalid: bool,
     /// Resolve frontend settings at the next turn, never during a model request.
     pub followup_model: Option<std::sync::Arc<FollowUpModel<'a>>>,
     pub tools: ToolBox,
@@ -673,6 +678,7 @@ impl<'a> AgentLoop<'a> {
 
         let window = rook.window_to_budget(provider.as_ref());
         let budget = ContextBudget::new(window, rook.config.agent.compact_at);
+        let (routing, routing_invalid) = routing::settings(provider.as_ref());
         Self {
             execution: None,
             reserved_execution: None,
@@ -683,6 +689,10 @@ impl<'a> AgentLoop<'a> {
             recipe_skill: None,
             recipe_output: false,
             rook,
+            routing,
+            routed: false,
+            routing_guard_reported: false,
+            routing_invalid,
             provider,
             followup_model: None,
             tools,
@@ -981,6 +991,14 @@ impl<'a> AgentLoop<'a> {
             if crate::results::prune(self.rook, self.session, &mut messages)? > 0 {
                 anchor = None;
                 worth_compacting = true;
+            }
+
+            if self.apply_phase_route(&messages, &mut on_progress)? {
+                anchor = None;
+                worth_compacting = true;
+                // Tool mode, context sources and cache marks belong to the
+                // selected physical model, so rebuild before budgeting it.
+                (messages, source_manifest) = self.request_messages(prompt)?;
             }
 
             // Once per turn that it achieves something. A span too small to
@@ -1557,7 +1575,7 @@ impl<'a> AgentLoop<'a> {
                     self.session,
                     crate::diagnostics::Phase::ToolDispatch,
                 );
-                let (mut result, failed) = match repeated.get(&key) {
+                let (mut result, failed, recorded_seq) = match repeated.get(&key) {
                     Some((_, times)) if *times >= 2 => {
                         let said = format!(
                             "`{}` with these same arguments was made {times} times this turn and \
@@ -1573,7 +1591,7 @@ impl<'a> AgentLoop<'a> {
                         // that would have explained them never recorded.
                         self.rook.log(self.session, EventKind::ToolResult, &call.name, &said).ok();
                         looping += 1;
-                        (said, true)
+                        (said, true, None)
                     }
                     _ => {
                         let done = self
@@ -1621,7 +1639,7 @@ impl<'a> AgentLoop<'a> {
                     .get_session(self.session)
                     .ok()
                     .flatten()
-                    .and_then(|m| m.next_seq.checked_sub(1))
+                    .and_then(|m| recorded_seq.or_else(|| m.next_seq.checked_sub(1)))
                     .and_then(|seq| self.rook.store.events(self.session, seq, 1).ok())
                     .and_then(|events| events.into_iter().next())
                     .filter(|e| {
@@ -1653,8 +1671,8 @@ impl<'a> AgentLoop<'a> {
                     anchor = None;
                     worth_compacting = true;
                 }
-                // The receipt and image binding both inspect the latest result.
-                // Only now can a diagnostic note be appended without hiding it.
+                // The journal supplies the exact result sequence even when a
+                // phase note follows it. Bind images before adding diagnostics.
                 timing.finish(
                     if failed {
                         crate::diagnostics::Status::Failed

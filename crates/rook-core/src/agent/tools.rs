@@ -96,7 +96,7 @@ impl<'a> AgentLoop<'a> {
         on_progress: &mut impl FnMut(Progress<'_>),
         crew: &'f Crew<'a>,
         nursery: &mut Nursery<'f>,
-    ) -> Result<(String, bool)>
+    ) -> Result<(String, bool, Option<u64>)>
     where
         'a: 'f,
     {
@@ -114,7 +114,7 @@ impl<'a> AgentLoop<'a> {
                 &self.vault.redact(&call.arguments.to_string()),
             )?;
             self.rook.log(self.session, EventKind::ToolResult, &call.name, &reason)?;
-            return Ok((reason, true));
+            return Ok((reason, true, None));
         }
         let journal = self
             .execution
@@ -133,8 +133,19 @@ impl<'a> AgentLoop<'a> {
         *self.launched_job.lock().unwrap_or_else(|e| e.into_inner()) = None;
         let result = self.dispatch(call, outcome, on_progress, crew, nursery).await;
         let job = self.launched_job.lock().unwrap_or_else(|e| e.into_inner()).take();
-        journal.complete(&result.0, self.tool_ctx.jobs.as_deref(), job.as_deref())?;
-        Ok(result)
+        let phase = self.routing.as_ref().filter(|_| {
+            !result.1
+                && !self.checking
+                && self.depth == 0
+                && super::CHANGES_FILES.contains(&call.name.as_str())
+        });
+        let seq = journal.complete_with_phase(
+            &result.0,
+            self.tool_ctx.jobs.as_deref(),
+            job.as_deref(),
+            phase.map(|(selected, target)| (self.rook, selected.as_str(), target.as_str())),
+        )?;
+        Ok((result.0, result.1, Some(seq)))
     }
 
     /// The text the model sees, and whether the call failed — which the outcome

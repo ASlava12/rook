@@ -138,6 +138,88 @@ async fn get(client: &reqwest::Client, url: &str) -> Value {
     client.get(url).send().await.unwrap().error_for_status().unwrap().json().await.unwrap()
 }
 
+#[test]
+fn phase_routing_changes_the_physical_model_after_a_write_locally_and_through_the_daemon() {
+    rook_llm::init_tls();
+    for shared in [false, true] {
+        let rook = Rook::new();
+        std::fs::write(rook.workspace.path().join("evidence.txt"), "before\n").unwrap();
+        let tool = |id: &str, name: &str, args: Value| json!({"role":"assistant","content":"","tool_calls":[{"index":0,"id":id,"type":"function","function":{"name":name,"arguments":args.to_string()}}]});
+        let model = Model::with_messages(vec![
+            tool("read-before", "read_file", json!({"path":"evidence.txt"})),
+            tool(
+                "failed-edit",
+                "edit_file",
+                json!({"path":"evidence.txt","edits":[{"old":"absent text","new":"not written"}]}),
+            ),
+            tool("write-once", "write_file", json!({"path":"evidence.txt","content":"after\n"})),
+            json!({"role":"assistant","content":"IMPLEMENTATION_REPLY"}),
+            json!({"role":"assistant","content":"RESUMED_IMPLEMENTATION_REPLY"}),
+        ]);
+        model.release.store(16, Ordering::SeqCst);
+        let settings = config(&model.url, "initial", "ask", rook.workspace.path())
+            .replace("mode='ask'", "mode='ask'\nallow=['evidence.txt']")
+            .replace(
+                "[models.initial]",
+                "[models.initial]\nimplementation_model='followup'\ncontext_window=65536",
+            )
+            .replace("[models.followup]", "[models.followup]\ncontext_window=32768");
+        rook.write_config(&settings);
+        let mut daemon = shared.then(|| Daemon::start(&rook));
+        let output = rook.run(&["--json", "run", "Read evidence, write it once, then answer."]);
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let outcome: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let session = outcome["session"].as_str().unwrap();
+        assert_eq!(model.next()["model"], "initial-model");
+        assert_eq!(model.next()["model"], "initial-model", "read-only exploration stays on analysis");
+        assert_eq!(model.next()["model"], "initial-model", "a failed edit does not activate implementation");
+        let implementation = model.next();
+        assert_eq!(implementation["model"], "followup-model");
+        let messages = implementation["messages"].as_array().unwrap();
+        let write = messages
+            .iter()
+            .filter_map(|m| m["tool_calls"].as_array())
+            .flatten()
+            .find(|c| c["function"]["name"] == "write_file")
+            .unwrap();
+        let arguments: Value =
+            serde_json::from_str(write["function"]["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(arguments["content"], "after\n", "the new model retains the actual write arguments");
+        assert!(messages.iter().any(|m| m["role"] == "tool" && m["tool_call_id"] == write["id"]));
+        assert!(
+            implementation["tools"].as_array().unwrap().iter().any(|t| t["function"]["name"] == "write_file")
+        );
+        assert!(!implementation["messages"].to_string().contains("rook:model-phase:v1"));
+        assert_eq!(std::fs::read_to_string(rook.workspace.path().join("evidence.txt")).unwrap(), "after\n");
+        if shared {
+            drop(daemon.take());
+            daemon = Some(Daemon::start(&rook));
+        }
+        let resumed = rook.run(&["--json", "run", "Continue without another edit.", "--session", session]);
+        assert!(resumed.status.success(), "{}", String::from_utf8_lossy(&resumed.stderr));
+        assert_eq!(
+            model.next()["model"],
+            "followup-model",
+            "saved branch phase survives a new process/daemon"
+        );
+        assert!(model.requests.try_recv().is_err(), "no classifier or extra work request");
+        drop(daemon);
+        let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+        let id = rook_store::parse_session_id(session).unwrap();
+        let events = store.events(id, 0, 256).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(
+                    |e| e.record.kind == rook_store::EventKind::ToolResult && e.record.label == "write_file"
+                )
+                .count(),
+            1
+        );
+        assert!(store.kv_get_limited(&format!("model-phase/{id:032x}"), 16384).unwrap().is_some());
+    }
+}
+
 async fn socket_event(
     socket: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     kind: &str,

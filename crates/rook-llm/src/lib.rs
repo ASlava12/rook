@@ -555,6 +555,13 @@ pub trait Provider: Send + Sync {
     /// `provider/model`, as written in config.
     fn id(&self) -> &str;
 
+    /// An explicitly selected analysis source and its implementation source.
+    /// The engine owns phase changes; transport adapters never infer them from
+    /// prompt text. Ordinary providers and independent errands have no policy.
+    fn phase_routing(&self) -> Option<(&str, &str)> {
+        None
+    }
+
     /// Total context window in tokens. Used for budgeting before a request is
     /// sent, rather than discovering the limit by being rejected.
     fn context_window(&self) -> usize;

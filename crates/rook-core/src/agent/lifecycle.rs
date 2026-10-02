@@ -104,6 +104,7 @@ impl AgentLoop<'_> {
             self.recipe_output = recipe.output_needs_approval;
             if let Some(model) = recipe.model {
                 self.provider = crate::models::provider_for(&self.rook.config, &self.vault, &model)?.into();
+                self.reset_phase_route();
                 self.budget = ContextBudget::new(
                     self.rook.window_to_budget(self.provider.as_ref()),
                     self.rook.config.agent.compact_at,

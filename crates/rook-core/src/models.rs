@@ -18,13 +18,29 @@ use crate::secrets::Vault;
 /// this table existed is — so nothing already working changes, and the two
 /// spellings can sit side by side in one file.
 pub fn provider_for(config: &Config, vault: &Vault, name: &str) -> Result<Box<dyn Provider>, LlmError> {
-    built(config, vault, name, rook_llm::Prefer::AsConfigured)
+    let name = name.trim();
+    validate_route(config, name)?;
+    let inner = built(config, vault, name, rook_llm::Prefer::AsConfigured)?;
+    let Some(source) = config.models.get(name).filter(|s| !s.implementation_model.is_empty()) else {
+        return Ok(inner);
+    };
+    Ok(Box::new(crate::phase_routing::Selected::new(name, &source.implementation_model, inner)))
+}
+
+fn validate_route(config: &Config, name: &str) -> Result<(), LlmError> {
+    if let Some(source) = config.models.get(name) {
+        crate::phase_routing::validate_source(config, name, source)?;
+        if let Some(target) = config.models.get(&source.implementation_model) {
+            checked_address(config, &source.implementation_model, target)?;
+        }
+    }
+    Ok(())
 }
 
 /// The same, for work that has no conversation to keep.
 ///
-/// A turn stays on the endpoint it was pointed at: moving part-way through
-/// throws away the cached prefix of everything it has sent, and hands the next
+/// Ordinary turns keep their endpoint unless the user selects a phase policy;
+/// moving part-way through throws away the cached prefix and hands the next
 /// step to a model that did not write the last one. An errand has neither of
 /// those to lose, and queueing it behind a turn on one endpoint while another
 /// sits idle costs exactly the time this saves — so it goes to whichever has
@@ -154,6 +170,7 @@ pub fn chosen(config: &Config, named: Option<&str>) -> Result<Box<dyn Provider>,
 /// the top of the next turn — and asked through the same function, so there is
 /// one answer to what a usable endpoint is.
 pub fn usable(config: &Config, named: &str) -> Result<(), String> {
+    validate_route(config, named.trim()).map_err(|why| why.to_string())?;
     let vault = Vault::load().unwrap_or_else(|_| Vault::empty());
     endpoints_for(config, &vault, named).map(|_| ()).map_err(|why| why.to_string())
 }
@@ -220,7 +237,14 @@ pub(crate) fn source_errors(config: &Config) -> Vec<String> {
     config
         .models
         .iter()
-        .filter_map(|(name, source)| checked_address(config, name, source).err().map(|why| why.to_string()))
+        .flat_map(|(name, source)| {
+            [
+                checked_address(config, name, source).err().map(|why| why.to_string()),
+                crate::phase_routing::validate_source(config, name, source).err().map(|why| why.to_string()),
+            ]
+            .into_iter()
+            .flatten()
+        })
         .collect()
 }
 

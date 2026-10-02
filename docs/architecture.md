@@ -63,6 +63,17 @@ payloads; request replay and context reporting share the same reconstruction.
 Compaction retains or summarizes a complete batch, accounting for its hidden
 state size. No postcard field is added for provider-specific data.
 
+An explicit named-model phase policy is carried beside the physical provider;
+`AgentLoop` owns its transitions. A successful top-level file tool records bounded
+branch state before the execution journal closes the operation. The next complete
+tool-batch boundary can select the configured implementation source, rebuild its
+request prefix and apply its context window. Forks inherit only transitions in
+their saved prefix; compaction does not reset the companion state. Images and
+opaque reasoning currently retain the analysis provider, and native tools cannot
+silently downgrade. Recipes replace the selected policy; independent errands
+keep their existing selection. See [phase routing](phase-routing.md) for the
+opt-in configuration, persistence limits and remaining adoption work.
+
 Durable transcript navigation lives in `rook-core::transcript`: bounded event
 pages, snapshot search cursors, body parts and attributed source-data quotes.
 CLI, TUI and browser use the same operations. The TUI owns one bounded reader

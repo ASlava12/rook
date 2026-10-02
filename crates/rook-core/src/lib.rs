@@ -46,6 +46,7 @@ pub mod models;
 mod output;
 pub mod paths;
 mod persistence;
+mod phase_routing;
 pub mod plugins;
 mod recipes;
 mod results;

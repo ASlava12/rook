@@ -1927,6 +1927,7 @@ impl Rook {
         crate::branches::inherit(self, session, forked.id, at)?;
         crate::results::inherit(self, session, forked.id)?;
         crate::execution::inherit(self, session, forked.id)?;
+        crate::phase_routing::inherit(self, session, forked.id, at)?;
         // Forking a delegated conversation is a separate branch, not a new
         // delegation whose edits the ancestor's rewind owns.
         if let Some(current) = self.store.get_session(forked.id)? {
