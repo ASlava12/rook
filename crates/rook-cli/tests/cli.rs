@@ -657,6 +657,117 @@ fn daemon_repl_keeps_a_new_session_after_its_first_prompt_fails() {
 }
 
 #[test]
+fn responses_stream_retry_preserves_physical_receipts_locally_and_through_daemon() {
+    rook_llm::init_tls();
+    use std::io::{Read, Write};
+    let rook = Rook::new();
+    let (source, target) = {
+        let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+        let ids = [rook_store::new_session_id(), rook_store::new_session_id()];
+        for id in ids {
+            store
+                .create_session(&rook_store::SessionMeta::new(
+                    id,
+                    "retry",
+                    rook.workspace.path().display().to_string(),
+                    1,
+                ))
+                .unwrap();
+        }
+        store
+            .append_event(
+                ids[0],
+                rook_store::NewEvent::new(
+                    rook_store::EventKind::UserMessage,
+                    rook_store::Kind::Message,
+                    b"Explore option A",
+                ),
+            )
+            .unwrap();
+        (rook_store::format_session_id(ids[0]), rook_store::format_session_id(ids[1]))
+    };
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let mut requests = Vec::new();
+        for ordinal in 0..4 {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket.set_read_timeout(Some(std::time::Duration::from_secs(30))).unwrap();
+            let mut bytes = Vec::new();
+            let request = loop {
+                let mut chunk = [0; 4096];
+                let n = socket.read(&mut chunk).unwrap();
+                assert!(n > 0 && bytes.len() + n < 64 * 1024, "bounded model request");
+                bytes.extend_from_slice(&chunk[..n]);
+                let text = String::from_utf8_lossy(&bytes);
+                if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                    let length: usize = head
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .and_then(|n| n.trim().parse().ok())
+                        })
+                        .unwrap();
+                    if body.len() >= length {
+                        assert!(head.starts_with("POST /v1/responses "), "{head}");
+                        break serde_json::from_str::<serde_json::Value>(body).unwrap();
+                    }
+                }
+            };
+            requests.push(request);
+            let event = if ordinal % 2 == 0 {
+                serde_json::json!({"type":"response.failed","response":{"status":"failed",
+                    "error":{"code":"slow_down","headers":{"rEtRy-AfTeR":"1"}}}})
+            } else {
+                serde_json::json!({"type":"response.completed","response":{
+                    "id":"retry-response","status":"completed","model":"server-model",
+                    "output":[{"type":"message","role":"assistant","content":[{
+                        "type":"output_text","text":"Option A was explored; outcome remains unverified."}]}],
+                    "usage":{"input_tokens":10,"output_tokens":8}}})
+            };
+            let body = format!("data: {event}\n\n");
+            socket.write_all(format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()
+            ).as_bytes()).unwrap();
+        }
+        requests
+    });
+    rook.write_config(&format!(
+        "[agent]\nmodel='local'\n[models.local]\nmodel='test'\napi='responses'\nurl='{endpoint}'\n"
+    ));
+    let local = rook.json(&["session", "summary-draft", &source, &target, "--suggest"]);
+    assert!(local["text"].as_str().unwrap().contains("Option A was explored"));
+    let daemon = Daemon::start(&rook);
+    let remote = rook.json(&["session", "summary-draft", &source, &target, "--suggest"]);
+    assert!(remote["text"].as_str().unwrap().ends_with("Option A was explored; outcome remains unverified."));
+    assert_eq!(remote["source_session"], local["source_session"]);
+    assert!(
+        remote["source_through"].as_u64().unwrap() > local["source_through"].as_u64().unwrap(),
+        "the second draft identifies the later source prefix containing physical receipts"
+    );
+    let requests = server.join().unwrap();
+    assert_eq!(requests.len(), 4);
+    assert_eq!(requests[0], requests[1]);
+    assert_eq!(requests[2], requests[3]);
+    let context = rook.json(&["session", "context", &source]);
+    let coverage = &context["cost_coverage"];
+    assert_eq!(coverage["attempts_started"], 4);
+    assert_eq!(coverage["attempts_completed"], 2);
+    assert_eq!(coverage["attempts_failed"], 2);
+    assert_eq!(coverage["attempts_incomplete"], 0);
+    assert_eq!(coverage["attempts_pending"], 0);
+    assert_eq!(coverage["auxiliary_receipts"], 2);
+    assert!(rook.json(&["session", "history", &target]).to_string().find("Option A").is_none());
+    drop(daemon);
+    assert_eq!(
+        rook.json(&["session", "context", &source])["cost_coverage"],
+        *coverage,
+        "failed and completed physical receipts survive daemon shutdown"
+    );
+}
+
+#[test]
 fn model_branch_suggestion_is_reviewable_locally_and_through_daemon() {
     rook_llm::init_tls();
     use std::io::{Read, Write};

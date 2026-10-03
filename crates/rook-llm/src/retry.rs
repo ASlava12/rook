@@ -10,9 +10,9 @@
 //! statuses mean the same thing to all three, and three copies of a retry loop
 //! is three places for the list of statuses to drift.
 //!
-//! Only the request is retried, never a stream that has started. Every dialect
-//! checks the status before it returns the stream, so a failure that reaches
-//! here has emitted nothing and there is no half-delivered reply to duplicate.
+//! A stream can report a transient refusal after HTTP 200. Retry only before
+//! any response content or completion evidence has been delivered; transport
+//! metadata alone is safe. A partial answer is never repeated automatically.
 //!
 //! The other kind of asking again is here for the same reason: a 400 that names
 //! a field the agent added, rather than one the user wrote, is not a permanent
@@ -154,26 +154,27 @@ fn names_the_output(error: &LlmError) -> bool {
         .any(|w| said.contains(w))
 }
 
+#[derive(Clone)]
 pub struct Retrying {
-    inner: Box<dyn Provider>,
+    inner: std::sync::Arc<dyn Provider>,
     /// Set by the first refusal. A model name is what decides whether the field
     /// is sent, and a gateway serving something else under that name is exactly
     /// where that guess is wrong — so the endpoint's own answer overrides it,
     /// once per process rather than once per step.
-    effort_refused: std::sync::atomic::AtomicBool,
+    effort_refused: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The largest reply this endpoint has accepted, once one has been refused
     /// for being too large. Zero until then, and once set it holds for the life
     /// of the process — asking the same refusal every step is a step spent
     /// finding out what was already found out.
-    output_ceiling: std::sync::atomic::AtomicU32,
+    output_ceiling: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl Retrying {
     pub fn new(inner: Box<dyn Provider>) -> Self {
         Self {
-            inner,
-            effort_refused: std::sync::atomic::AtomicBool::new(false),
-            output_ceiling: std::sync::atomic::AtomicU32::new(0),
+            inner: inner.into(),
+            effort_refused: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            output_ceiling: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
 
@@ -374,8 +375,50 @@ impl Retrying {
         let requested = request.effort;
         let mut request = self.as_accepted(request);
         let mut attempt = 1;
+        let mut stream = self.open_stream(&mut request, requested, &observer, &mut attempt).await?;
+        let owner = self.clone();
+        Ok(Box::pin(async_stream::try_stream! {
+            loop {
+                let mut delivered = false;
+                let mut refused = None;
+                while let Some(delta) = stream.next().await {
+                    match delta {
+                        Ok(delta) => {
+                            delivered |= !matches!(delta, crate::Delta::Dispatch(_) | crate::Delta::Effort(_));
+                            yield delta;
+                        }
+                        Err(error) => {
+                            if !delivered && worth_asking_again(&error) {
+                                refused = Some(error);
+                                break;
+                            }
+                            Err(error)?;
+                        }
+                    }
+                }
+                let Some(error) = refused else { break };
+                // Release the failed stream's endpoint permit and physical
+                // attempt before waiting or opening its replacement.
+                drop(stream);
+                if !owner.wait_before(attempt, &error).await {
+                    Err(error)?;
+                }
+                attempt += 1;
+                stream = owner.open_stream(&mut request, requested, &observer, &mut attempt).await?;
+            }
+        }))
+    }
+
+    async fn open_stream(
+        &self,
+        request: &mut Request,
+        requested: Option<crate::Effort>,
+        observer: &Option<std::sync::Arc<dyn crate::AttemptObserver>>,
+        attempt: &mut u32,
+    ) -> Result<ResponseStream> {
+        use futures_util::StreamExt;
         loop {
-            let answer = match &observer {
+            let answer = match observer {
                 Some(observer) => self.inner.stream_observed(request.clone(), observer.clone()).await,
                 None => self.inner.stream(request.clone()).await,
             };
@@ -400,9 +443,9 @@ impl Retrying {
                         futures_util::stream::once(async { Ok(crate::Delta::Effort(report)) }).chain(stream),
                     ));
                 }
-                Err(e) if worth_asking_again(&e) && self.wait_before(attempt, &e).await => attempt += 1,
-                Err(e) if self.drop_the_effort(&e, &mut request) => continue,
-                Err(e) if self.ask_for_less_output(&e, &mut request) => continue,
+                Err(e) if worth_asking_again(&e) && self.wait_before(*attempt, &e).await => *attempt += 1,
+                Err(e) if self.drop_the_effort(&e, request) => continue,
+                Err(e) if self.ask_for_less_output(&e, request) => continue,
                 answer => return answer,
             }
         }

@@ -40,6 +40,7 @@ fn frame(event: Value) -> String {
 struct Seen {
     head: String,
     body: Value,
+    at: std::time::Instant,
 }
 async fn serve(replies: Vec<Reply>) -> (String, Arc<Mutex<Vec<Seen>>>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -73,7 +74,7 @@ async fn serve(replies: Vec<Reply>) -> (String, Arc<Mutex<Vec<Seen>>>) {
                 } else {
                     serde_json::from_slice(&raw[split + 4..split + 4 + length]).unwrap()
                 };
-                captured.lock().unwrap().push(Seen { head, body });
+                captured.lock().unwrap().push(Seen { head, body, at: std::time::Instant::now() });
                 break;
             }
             let mime = if reply.stream { "text/event-stream" } else { "application/json" };
@@ -280,6 +281,229 @@ async fn broken_or_failed_streams_do_not_release_tool_calls_or_success() {
         }
         assert!(failed);
     }
+}
+
+#[tokio::test]
+async fn nested_retry_advice_is_bounded_case_insensitive_and_preserves_terminal_errors() {
+    let cases = [
+        ("rate_limit_exceeded", json!({"Retry-After":" 2 "}), 429, Some(2)),
+        ("slow_down", json!({"rEtRy-AfTeR":"120"}), 429, Some(120)),
+        ("server_error", json!({"retry-after":"0"}), 503, Some(0)),
+        ("server_is_overloaded", json!({"retry-after":"3"}), 503, Some(3)),
+        ("rate_limit_exceeded", json!({"Retry-After":"-1"}), 429, None),
+        ("rate_limit_exceeded", json!({"Retry-After":"121"}), 429, None),
+        ("rate_limit_exceeded", json!({"Retry-After":"18446744073709551616"}), 429, None),
+        ("rate_limit_exceeded", json!({"Retry-After":"1\r\nX-Evil: yes"}), 429, None),
+        ("rate_limit_exceeded", json!({"Retry-After":2}), 429, None),
+        ("rate_limit_exceeded", json!({"Retry-After":["2"]}), 429, None),
+        ("rate_limit_exceeded", json!({"Retry-After":"2","retry-after":"3"}), 429, None),
+        ("rate_limit_exceeded", json!({"Retry-After":"0".repeat(33)}), 429, None),
+        ("rate_limit_exceeded", json!({"Retry-After":"Wed, 21 Oct 2026 07:28:00 GMT"}), 429, None),
+        ("invalid_api_key", json!({"Retry-After":"2"}), 400, Some(2)),
+        ("invalid_request_error", json!({"Retry-After":"2"}), 400, Some(2)),
+    ];
+    for (code, headers, status, seconds) in cases {
+        let value = json!({"status":"failed", "error":{"code":code,"message":"come back in 99 seconds","headers":headers}});
+        let body = frame(json!({"type":"response.failed","response":value}));
+        let (url, seen) =
+            serve(vec![reply(value), Reply { status: 200, body, stream: true, fragment: 7 }]).await;
+        let provider = provider(url);
+        let complete = provider.complete(Request::new(vec![])).await.unwrap_err();
+        let mut stream = provider.stream(Request::new(vec![])).await.unwrap();
+        let streamed = stream.next().await.unwrap().unwrap_err();
+        for error in [complete, streamed] {
+            match error {
+                rook_llm::LlmError::Status { status: actual, retry_after, body } => {
+                    assert_eq!(actual, status, "{code}");
+                    assert_eq!(retry_after, seconds.map(Duration::from_secs), "{code}: {body}");
+                }
+                other => panic!("lost status for {code}: {other}"),
+            }
+        }
+        assert_eq!(seen.lock().unwrap().len(), 2);
+    }
+}
+
+#[derive(Default)]
+struct AttemptLog {
+    starts: std::sync::atomic::AtomicUsize,
+    ends: Arc<Mutex<Vec<(rook_llm::AttemptStatus, rook_llm::AttemptFacts)>>>,
+    ended: Arc<tokio::sync::Notify>,
+}
+struct AttemptEnd {
+    ends: Arc<Mutex<Vec<(rook_llm::AttemptStatus, rook_llm::AttemptFacts)>>>,
+    ended: Arc<tokio::sync::Notify>,
+}
+impl rook_llm::AttemptObserver for AttemptLog {
+    fn start(&self, dispatch: Option<&rook_llm::Dispatch>) -> rook_llm::Result<Box<dyn rook_llm::Attempt>> {
+        assert_eq!(dispatch.unwrap().provider, "my-source");
+        assert!(self.starts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 16);
+        Ok(Box::new(AttemptEnd { ends: self.ends.clone(), ended: self.ended.clone() }))
+    }
+}
+impl rook_llm::Attempt for AttemptEnd {
+    fn finish(
+        &mut self,
+        status: rook_llm::AttemptStatus,
+        facts: &rook_llm::AttemptFacts,
+    ) -> rook_llm::Result<()> {
+        let mut ends = self.ends.lock().unwrap();
+        assert!(ends.len() < 16);
+        ends.push((status, facts.clone()));
+        self.ended.notify_one();
+        Ok(())
+    }
+}
+fn failed_reply(code: &str, seconds: &str, prefix: &str) -> Reply {
+    Reply {
+        status: 200,
+        stream: true,
+        fragment: 11,
+        body: format!(
+            "{prefix}{}",
+            frame(json!({"type":"response.failed","response":{"status":"failed","error":{
+            "code":code,"message":"try in 99 seconds","headers":{"Retry-After":seconds}}}}))
+        ),
+    }
+}
+fn finished_reply() -> Reply {
+    Reply {
+        status: 200,
+        stream: true,
+        fragment: 13,
+        body: frame(
+            json!({"type":"response.completed","response":answer(json!([text_item("answered once")]))}),
+        ),
+    }
+}
+
+#[tokio::test]
+async fn pre_content_stream_refusal_waits_for_server_advice_and_records_each_physical_attempt() {
+    let (url, seen) = serve(vec![failed_reply("rate_limit_exceeded", "2", ""), finished_reply()]).await;
+    let provider = rook_llm::retry::Retrying::new(Box::new(provider(url)));
+    let log = Arc::new(AttemptLog::default());
+    let mut request = Request::new(vec![Message::user("answer")]);
+    request.effort = Some(Effort::High);
+    let mut stream = provider.stream_observed(request, log.clone()).await.unwrap();
+    let mut assembler = Assembler::default();
+    let mut efforts = 0;
+    while let Some(delta) = stream.next().await {
+        let delta = delta.unwrap();
+        if matches!(delta, Delta::Effort(_)) {
+            efforts += 1;
+        }
+        assembler.push(delta).unwrap();
+    }
+    assert_eq!(assembler.finish().message.content, "answered once");
+    assert_eq!(efforts, 2, "each physical request retains its requested/applied metadata");
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    assert!(seen[1].at.duration_since(seen[0].at) >= Duration::from_secs(2), "server delay was ignored");
+    assert_eq!(seen[0].body, seen[1].body, "retry must preserve the accepted request");
+    let ends = log.ends.lock().unwrap();
+    assert_eq!(
+        ends.iter().map(|e| e.0).collect::<Vec<_>>(),
+        [rook_llm::AttemptStatus::Failed, rook_llm::AttemptStatus::Completed]
+    );
+    assert!(ends[0].1.usage.is_none() && !ends[0].1.completion_confirmed);
+    assert!(ends[1].1.usage_reported && ends[1].1.completion_confirmed);
+}
+
+#[tokio::test]
+async fn streamed_retry_advice_never_repeats_partial_content_or_terminal_refusals() {
+    let cases = [
+        ("server_error", frame(json!({"type":"response.output_text.delta","delta":"kept text"}))),
+        (
+            "server_error",
+            frame(json!({"type":"response.reasoning_summary_text.delta","delta":"kept thought"})),
+        ),
+        ("invalid_api_key", String::new()),
+        ("context_length_exceeded", String::new()),
+        ("insufficient_quota", String::new()),
+    ];
+    for (code, prefix) in cases {
+        let (url, seen) = serve(vec![failed_reply(code, "2", &prefix), finished_reply()]).await;
+        let provider = rook_llm::retry::Retrying::new(Box::new(provider(url)));
+        let log = Arc::new(AttemptLog::default());
+        let mut stream = provider.stream_observed(Request::new(vec![]), log.clone()).await.unwrap();
+        let mut assembler = Assembler::default();
+        let mut failed = false;
+        while let Some(delta) = stream.next().await {
+            match delta {
+                Ok(delta) => assembler.push(delta).unwrap(),
+                Err(error) => {
+                    assert!(error.to_string().contains(code));
+                    failed = true;
+                }
+            }
+        }
+        assert!(failed, "{code}");
+        if prefix.contains("kept text") {
+            assert_eq!(assembler.finish().message.content, "kept text");
+        } else if prefix.contains("kept thought") {
+            assert_eq!(assembler.reasoning(), "kept thought");
+        }
+        assert_eq!(seen.lock().unwrap().len(), 1, "{code} was retried");
+        assert_eq!(log.ends.lock().unwrap()[0].0, rook_llm::AttemptStatus::Failed);
+    }
+}
+
+#[tokio::test]
+async fn cancelling_stream_retry_wait_releases_the_failed_attempt_without_another_request() {
+    let (url, seen) = serve(vec![failed_reply("server_is_overloaded", "120", ""), finished_reply()]).await;
+    let provider = rook_llm::retry::Retrying::new(Box::new(provider(url)));
+    let log = Arc::new(AttemptLog::default());
+    let mut stream = provider.stream_observed(Request::new(vec![]), log.clone()).await.unwrap();
+    {
+        let waiting = async {
+            while let Some(delta) = stream.next().await {
+                delta.unwrap();
+            }
+        };
+        tokio::select! {
+            _ = waiting => panic!("stream finished instead of waiting for its retry"),
+            result = tokio::time::timeout(Duration::from_secs(10), log.ended.notified()) => {
+                result.expect("failed attempt must end before the retry wait");
+            }
+        }
+    }
+    drop(stream);
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    assert_eq!(log.starts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(log.ends.lock().unwrap()[0].0, rook_llm::AttemptStatus::Failed);
+}
+
+#[tokio::test]
+async fn http_and_stream_refusals_share_one_four_attempt_ceiling() {
+    let http = Reply {
+        status: 503,
+        stream: false,
+        fragment: usize::MAX,
+        body: json!({"error":{"code":"server_error"}}).to_string(),
+    };
+    let (url, seen) = serve(vec![
+        http,
+        failed_reply("server_error", "0", ""),
+        failed_reply("server_error", "0", ""),
+        failed_reply("server_error", "0", ""),
+    ])
+    .await;
+    let provider = rook_llm::retry::Retrying::new(Box::new(provider(url)));
+    let log = Arc::new(AttemptLog::default());
+    let mut stream = provider.stream_observed(Request::new(vec![]), log.clone()).await.unwrap();
+    let mut last = None;
+    while let Some(delta) = stream.next().await {
+        if let Err(error) = delta {
+            last = Some(error);
+        }
+    }
+    assert!(matches!(last, Some(rook_llm::LlmError::Status { status: 503, .. })));
+    assert_eq!(seen.lock().unwrap().len(), 4);
+    assert_eq!(log.starts.load(std::sync::atomic::Ordering::SeqCst), 4);
+    assert_eq!(
+        log.ends.lock().unwrap().iter().map(|e| e.0).collect::<Vec<_>>(),
+        vec![rook_llm::AttemptStatus::Failed; 4]
+    );
 }
 
 #[tokio::test]

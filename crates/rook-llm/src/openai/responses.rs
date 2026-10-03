@@ -402,11 +402,28 @@ fn response_error(value: &Value) -> LlmError {
     let error = value.get("error").filter(|v| v.is_object()).unwrap_or(value);
     let code = error.get("code").and_then(Value::as_str).unwrap_or_default();
     let status = match code {
-        "rate_limit_exceeded" => 429,
-        "server_error" => 503,
+        "rate_limit_exceeded" | "slow_down" => 429,
+        "server_error" | "server_is_overloaded" => 503,
         _ => 400,
     };
-    LlmError::Status { status, retry_after: None, body: crate::truncate(&error.to_string(), 2000) }
+    let retry_after = error.get("headers").and_then(Value::as_object).and_then(|headers| {
+        let mut matching = headers.iter().filter(|(name, _)| name.eq_ignore_ascii_case("retry-after"));
+        let (_, value) = matching.next()?;
+        // Differently cased duplicate fields are ambiguous. Admit only the
+        // tiny scalar we need, never copy the provider's entire header map.
+        if matching.next().is_some() {
+            return None;
+        }
+        let said = value.as_str()?;
+        if said.len() > 32 {
+            return None;
+        }
+        let header = reqwest::header::HeaderValue::from_str(said).ok()?;
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, header);
+        crate::retry_after(&headers)
+    });
+    LlmError::Status { status, retry_after, body: crate::truncate(&error.to_string(), 2000) }
 }
 
 fn decode(value: &Value, model: &str, scope: &[u8; 32]) -> Result<Response> {

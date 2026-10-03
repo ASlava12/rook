@@ -81,6 +81,15 @@ same trait, and the agent loop never learns which is answering. Responses is
 selected explicitly; it shares endpoint/authentication/catalog handling with
 the compatible adapter while encoding typed input/output items separately.
 
+The shared retry wrapper also handles transient refusals inside an HTTP 200
+stream before response content is delivered. Opening failures and stream refusals
+share a four-attempt ceiling. Responses reads case-insensitive nested Retry-After
+delta-seconds with the existing 120-second patience cap; malformed, ambiguous or
+oversized hints fall back to normal backoff. Text, reasoning, tool deltas or
+completion evidence prevent replay of a partial answer. Authentication, credit
+and context refusals remain terminal. Each physical attempt retains its own
+durable admission/ending receipt, and cancellation during backoff opens no request.
+
 Provider-owned assistant state is stored as a bounded companion note paired
 atomically with the visible reply or usage record. Tool bindings preserve original
 call IDs through interrupted turns and forks. Transcript views omit opaque
