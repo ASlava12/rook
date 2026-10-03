@@ -5,6 +5,8 @@ critical receipts and lifecycle events retain their existing persistence.
 See [the delivery contract and measurements](delegation-progress.md).
 See [rooted runtime reuse and preparation](runtime-reuse.md) for equipment
 ownership, MCP generations and daemon project publication.
+The [long-task compaction regression](long-task-compaction.md) records requests
+and replacement replay around accepted corrections and unresolved decisions.
 
 Explicit delegated checkout diagnosis/restoration and source/preservation bounds
 are described in [worktree-recovery.md](worktree-recovery.md).

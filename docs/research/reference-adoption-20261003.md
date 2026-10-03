@@ -16,7 +16,7 @@ Reference commits identify mechanisms, not code to copy wholesale.
 | Delegated worktree recovery | Done | Read-only diagnosis and reviewed registered-index restoration across CLI/REPL/TUI/browser/daemon/tools, recreated/dirty file preservation, missing live lease and Windows/link/admission bounds, actual native/reopen and index-version fixtures; CI and compaction exit 0 |
 | Delegation progress persistence audit | Done | Actual delayed-reader high-water 256 to 1, constant journal/receipt writes for 1 versus 1,024 fragments, exact critical observer and reopened CLI/daemon results, bounded coalescing in nursery/blocking/checker paths; CI exit 0 |
 | Rooted runtime reuse audit | Done | Actual shared/worktree LSP processes, jobs and run approvals, HTTP MCP generation/cancellation, admitted detached daemon preparation with live delivery and publication ownership; CI exit 0 |
-| Long-task compaction scenario | Pending | Actual before/compaction/replacement/next request with accepted correction, pending question and retained rejected approach; saved/reopen/opaque-state invariants and CI |
+| Long-task compaction scenario | Done | Actual HTTP before/summary/first-next requests, pre-turn replacement replay, reached source boundary, accepted correction/open question/rejected approach, reopened old/new opaque-state invariants; CI exit 0 |
 
 Each finished block updates this tracker and product documentation, checks actual
 focused-test and `cargo xtask ci` process exits, and is committed. Storage changes
@@ -384,7 +384,11 @@ which were corrected before the successful full gates. No installed daemon,
 operator store/configuration or browser profile was used. This closes row seven;
 the three remaining audits/scenarios stay Pending.
 
-## Next continuation
+## Completion and continuation notes
+
+All ten planned rows are Done. The active implementation scope is complete;
+the other observations in the review remain separate future proposals. The
+sections below retain the per-block evidence and failed checks as history.
 
 Progress audit is Done. `agent/delegation_progress.rs` supplies nursery/blocking/
 checker delivery; `agent/stream.rs` consumes the nursery receiver. The configured
@@ -402,7 +406,11 @@ drop parent-only tools. Daemon discovery uses an admitted publication entry and
 a detached blocking worker, retaining no engine/project guard during discovery.
 Focused child, MCP generation, cancellation/delivery and cache ownership tests
 and full CI exited 0. The synchronous core `for_workspace` contract remains available.
-The final long-task compaction scenario is still Pending.
+The final long-task compaction scenario has been added to `provider_history`.
+Its actual HTTP before/summary/replacement/next-request and reopened signed-state
+checks and full CI exited 0 (`target/reference-long-task-focused-final.log`,
+`target/reference-long-task-ci.log`). Product evidence is documented
+in [long-task-compaction.md](../long-task-compaction.md).
 
 ## Eighth block: measured and bounded delegated display progress
 
@@ -481,3 +489,35 @@ After correction, final `cargo xtask ci` exited 0 in 936.6 seconds
 (`target/reference-runtime-ci-final.log`). No storage policy/layout change is
 part of this block, so compaction remeasurement was not required. No installed
 daemon or operator state was used. Only the long-task compaction row remains.
+
+## Tenth block: long-task compaction across correction and an open decision
+
+Added a controlled real HTTP Responses scenario with a long journal, an accepted
+user correction, an unanswered deployment question and a rejected deletion
+approach. It observes the actual request before compaction, summary request,
+replacement replay before another turn and first subsequent request. The live
+history exceeds the configured threshold; the saved source boundary lies after
+the question, so the facts must survive through the summary rather than only
+through the retained tail. Actual read results reach the summary input, while
+opaque state and executable tools do not.
+
+Replacement replay retains the existing `rook_source` data authority and is
+identical after closing/reopening the store before the next turn. The subsequent
+request carries the accepted correction, unanswered status and reason against
+the rejected approach once, without the discarded signed batch. The journal
+retains one original question and readable old events. A new signed response is
+saved, then a second reopen verifies new-state replay without reviving old state.
+Human-readable transcripts expose neither opaque value. The hidden read-only
+history seam exposes the engine's actual replay for this stage comparison.
+No production compaction algorithm, storage policy, layout or stable wire format
+changed; new storage remeasurement was not required.
+
+The first focused run exited 101 because the assertion searched a twice-escaped
+JSON string for the summary. Parsing the existing source wrapper allows exact
+content/kind/authority assertions. Both the new scenario and existing signed
+reopen/fork/interruption/compaction fixture then exited 0
+(`target/reference-long-task-focused-final.log`). Final `cargo xtask ci` exited 0
+in 902.1 seconds (`target/reference-long-task-ci.log`). The owned endpoint checks
+the actual summarizer input before returning a controlled summary; this proves
+engine mechanics, not the quality of a particular model on real multi-day work.
+No installed daemon or operator state was used. This closes the final row.

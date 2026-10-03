@@ -5,6 +5,8 @@ use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+static HISTORY_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn output() -> Value {
     json!([
         {"type":"reasoning","id":"rs-original","encrypted_content":"opaque-do-not-print","summary":[]},
@@ -17,12 +19,18 @@ fn text_output(text: &str) -> Value {
     json!([{"type":"message","role":"assistant","content":[{"type":"output_text","text":text}]}])
 }
 async fn server(first: Value) -> (String, Arc<Mutex<Vec<Value>>>, tokio::task::JoinHandle<()>) {
+    scripted_server(vec![first]).await
+}
+
+async fn scripted_server(
+    outputs: Vec<Value>,
+) -> (String, Arc<Mutex<Vec<Value>>>, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let seen = Arc::new(Mutex::new(Vec::new()));
     let record = seen.clone();
     let task = tokio::spawn(async move {
-        let mut first = Some(first);
+        let mut outputs: std::collections::VecDeque<_> = outputs.into();
         while let Ok((mut socket, _)) = listener.accept().await {
             let mut raw = Vec::new();
             let request: Value = loop {
@@ -56,8 +64,9 @@ async fn server(first: Value) -> (String, Arc<Mutex<Vec<Value>>>, tokio::task::J
             let output = if checker {
                 text_output(r#"{"action":"finish"}"#)
             } else {
+                assert!(record.lock().unwrap().len() < 64, "fixture request budget reached");
                 record.lock().unwrap().push(request.clone());
-                first.take().unwrap_or_else(|| text_output("The requested inspection is complete."))
+                outputs.pop_front().unwrap_or_else(|| text_output("The requested inspection is complete."))
             };
             let response = json!({"status":"completed","model":"gpt-6-astra","output":output,"usage":{"input_tokens":1,"output_tokens":1}});
             let (kind, body) = if request["stream"] == true {
@@ -115,6 +124,7 @@ fn assert_batch(request: &Value, incomplete: bool) {
 
 #[tokio::test]
 async fn signed_batches_survive_reopen_fork_interruption_and_compaction_without_leaking_to_transcripts() {
+    let _serial = HISTORY_SERIAL.lock().await;
     let home = tempfile::tempdir().unwrap();
     unsafe {
         std::env::set_var("ROOK_HOME", home.path());
@@ -192,5 +202,155 @@ async fn signed_batches_survive_reopen_fork_interruption_and_compaction_without_
     assert!(!events.iter().any(|event| event.record.kind == rook_store::EventKind::ToolCall));
     assert_eq!(events.iter().map(|event| event.record.tokens_in).sum::<u32>(), 1);
     assert_eq!(events.iter().map(|event| event.record.tokens_out).sum::<u32>(), 1);
+    task.abort();
+}
+
+const CORRECTION: &str = "Correction: retain legacy_api.rs; migrate only the cache adapter.";
+const ACCEPTED: &str = "Accepted correction: legacy_api.rs stays; only the cache adapter changes.";
+const REJECTED: &str =
+    "Rejected approach: deleting legacy_api.rs breaks downstream callers; do not retry it.";
+const QUESTION: &str = "Which deployment environment should receive the migration first?";
+const SUMMARY: &str = "## Goal\nMigrate only the cache adapter; retain legacy_api.rs (accepted user correction).\n## Done\nInspected one.txt and two.txt; their saved read results remain available.\n## Open\nDeployment environment is unanswered. Continue independent adapter work without inventing an answer. Deleting legacy_api.rs was rejected because it breaks downstream callers; do not retry that approach.";
+const NEXT: &str = "Continue independent adapter work. Leave the deployment question unanswered.";
+
+fn progress(rook: &Rook, session: u128, stage: &str, count: usize) {
+    for milestone in 0..count {
+        let details = (0..18)
+            .map(|part| {
+                format!("{stage} milestone {milestone} observation {part}: independent adapter inspection.\n")
+            })
+            .collect::<String>();
+        rook.log(
+            session,
+            rook_store::EventKind::UserMessage,
+            "",
+            &format!("Inspect {stage} milestone {milestone}."),
+        )
+        .unwrap();
+        rook.log(session, rook_store::EventKind::AssistantMessage, "", &details).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn long_task_compaction_preserves_accepted_correction_unanswered_question_and_rejected_approach() {
+    let _serial = HISTORY_SERIAL.lock().await;
+    let home = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("ROOK_HOME", home.path());
+    }
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("one.txt"), "first-file-value").unwrap();
+    std::fs::write(root.path().join("two.txt"), "second-file-value").unwrap();
+    let rook = rook_at(root.path());
+    let session = rook.start_session("long adapter migration").unwrap();
+    progress(&rook, session, "early", 50);
+    let (url, seen, task) = scripted_server(vec![
+        output(),
+        text_output("The requested inspection is complete."),
+        text_output("Independent adapter work continues; deployment remains undecided."),
+        text_output(SUMMARY),
+        json!([
+            {"type":"reasoning","id":"rs-after","encrypted_content":"opaque-after-compaction","summary":[]},
+            {"type":"message","role":"assistant","content":[{"type":"output_text","text":"Continuing the adapter migration while preserving the open deployment decision."}]}
+        ]),
+        text_output("The accepted correction and unresolved decision still apply."),
+    ]).await;
+    AgentLoop::new(&rook, provider(&url), session)
+        .run("Inspect both files before migrating the adapter.")
+        .await
+        .unwrap();
+    rook.log(session, rook_store::EventKind::UserMessage, "", CORRECTION).unwrap();
+    rook.log(session, rook_store::EventKind::AssistantMessage, "", ACCEPTED).unwrap();
+    rook.log(session, rook_store::EventKind::AssistantMessage, "", REJECTED).unwrap();
+    let question_seq = rook.log(session, rook_store::EventKind::AssistantMessage, "", QUESTION).unwrap();
+    progress(&rook, session, "later", 14);
+    let before = seen.lock().unwrap().len();
+    AgentLoop::new(&rook, provider(&url), session).run(NEXT).await.unwrap();
+    assert_eq!(seen.lock().unwrap().len(), before + 1);
+    let request_before = seen.lock().unwrap()[before].clone();
+    let text = request_before["input"].to_string();
+    for expected in [CORRECTION, ACCEPTED, REJECTED, QUESTION] {
+        assert!(text.contains(expected), "pre-compaction request lost {expected}");
+    }
+    assert_batch(&request_before, false);
+    let usage = rook.context_usage(session, Some(16_000)).unwrap();
+    assert!(
+        usage.live_tokens > usage.compact_at,
+        "the actual replay must exceed the configured compaction threshold: {usage:?}"
+    );
+    let mut agent = AgentLoop::new(&rook, provider(&url), session);
+    agent.set_window_for_test(16_000);
+    agent.compact_now().await;
+    let summary_request = seen.lock().unwrap()[before + 1].clone();
+    assert_eq!(seen.lock().unwrap().len(), before + 2);
+    let material = summary_request["input"].to_string();
+    for expected in [CORRECTION, ACCEPTED, REJECTED, QUESTION, "first-file-value", "second-file-value"] {
+        assert!(material.contains(expected), "the actual summarizer input lost {expected}");
+    }
+    assert!(!material.contains("opaque-do-not-print"), "opaque state is never summary material");
+    assert!(!summary_request["tools"].as_array().is_some_and(|tools| !tools.is_empty()));
+    let saved = rook.last_compaction(session).unwrap();
+    assert_eq!(saved.1.as_deref(), Some(SUMMARY));
+    assert!(saved.0 > question_seq, "the question must be compacted, not merely retained in the tail");
+    let replacement = serde_json::to_value(agent.history_for_test().unwrap()).unwrap();
+    let replacement_text = replacement.to_string();
+    let summary_source: Value = serde_json::from_str(replacement[0]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(summary_source["rook_source"]["kind"], "summary");
+    assert_eq!(summary_source["rook_source"]["authority"], "data");
+    assert_eq!(summary_source["rook_source"]["content"], SUMMARY);
+    assert!(!replacement_text.contains(CORRECTION), "the correction now comes from the saved summary");
+    assert!(!replacement_text.contains(QUESTION), "the question now comes from the saved summary");
+    assert!(!replacement_text.contains("opaque-do-not-print"));
+    assert!(!replacement_text.contains("original-one"));
+    assert_eq!(rook.context_usage(session, Some(16_000)).unwrap().compactions, 1);
+    drop(agent);
+    drop(rook);
+
+    let rook = rook_at(root.path());
+    assert_eq!(rook.last_compaction(session).unwrap(), saved);
+    let agent = AgentLoop::new(&rook, provider(&url), session);
+    assert_eq!(
+        serde_json::to_value(agent.history_for_test().unwrap()).unwrap(),
+        replacement,
+        "replacement replay survives reopening before the next turn"
+    );
+    drop(agent);
+    let next_at = seen.lock().unwrap().len();
+    AgentLoop::new(&rook, provider(&url), session).run(NEXT).await.unwrap();
+    assert_eq!(seen.lock().unwrap().len(), next_at + 1);
+    let next = seen.lock().unwrap()[next_at].clone();
+    let wire = next["input"].to_string();
+    assert!(wire.contains("accepted user correction"));
+    assert!(wire.contains("Deployment environment is unanswered"));
+    assert!(wire.contains("do not retry that approach"));
+    assert!(!wire.contains("opaque-do-not-print"));
+    assert!(!wire.contains("original-one"));
+    assert_eq!(
+        next["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item.to_string().contains("Deployment environment is unanswered"))
+            .count(),
+        1
+    );
+    assert_eq!(rook.last_compaction(session).unwrap(), saved);
+    let transcript = rook.transcript(session, 0, 1000, 10000).unwrap();
+    assert_eq!(
+        transcript.iter().filter(|entry| entry.body == QUESTION).count(),
+        1,
+        "compaction and continuation do not resend the pending question"
+    );
+    assert!(transcript.iter().all(|entry| !entry.body.contains("opaque-")));
+    assert_eq!(std::fs::read_to_string(root.path().join("one.txt")).unwrap(), "first-file-value");
+    drop(rook);
+
+    let rook = rook_at(root.path());
+    let after = seen.lock().unwrap().len();
+    AgentLoop::new(&rook, provider(&url), session).run("Report the independent adapter work.").await.unwrap();
+    let final_request = seen.lock().unwrap()[after].clone();
+    assert!(final_request["input"].to_string().contains("opaque-after-compaction"));
+    assert!(!final_request["input"].to_string().contains("opaque-do-not-print"));
+    assert_eq!(rook.last_compaction(session).unwrap(), saved);
     task.abort();
 }

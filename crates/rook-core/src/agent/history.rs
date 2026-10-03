@@ -57,6 +57,12 @@ fn close_open_call(messages: &mut Vec<Message>, open: &mut Option<String>) {
 }
 
 impl<'a> AgentLoop<'a> {
+    /// Inspect the actual replacement replay without beginning another turn.
+    #[doc(hidden)]
+    pub fn history_for_test(&self) -> Result<Vec<Message>> {
+        self.history()
+    }
+
     /// Rebuild the conversation from the session log, starting after the most
     /// recent compaction.
     ///
