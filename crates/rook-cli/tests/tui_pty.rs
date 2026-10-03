@@ -653,8 +653,9 @@ fn branch_navigation_reviews_and_carries_a_pinned_summary_without_submitting_the
         pty.screen_showing(100, 30, "review branch summary");
         pty.send("\u{15}REVIEWED_BRANCH_SUMMARY\u{13}"); // Ctrl+u replaces; Ctrl+s confirms.
         // The review already shows the target and edited text before the save
-        // finishes. Wait for the durable receipt before closing the process.
-        pty.screen_showing(100, 30, "Saved historical summary from");
+        // finishes. Wait for the saved event reloaded into target history;
+        // the transient acknowledgment is cleared by branch rehydration.
+        pty.screen_showing(100, 30, "[branch-summary] Summary of session");
         let screen = pty.screen_showing(100, 30, "TARGET_HISTORY").join("\n");
         assert!(
             screen.contains("UNSENT_MAIN_PROMPT"),

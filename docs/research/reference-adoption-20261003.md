@@ -546,3 +546,9 @@ I/O error instead; the focused `no_panics` suite exits 0
 (`target/release-no-panics-focused.log`). All five dry-run archives at `4b85aee`
 pass checksum/layout/skill-count verification; Unix binaries retain executable
 permissions. A new complete gate and archive build follow the stdin-borrow fix.
+
+The hosted Linux follow-up confirms ordinary Stop, local slash commands and
+daemon context now pass. The summary fixture's transient acknowledgment is
+cleared while rehydrating the selected branch, so it now waits for the saved
+`branch-summary` event loaded into target history before closing the process.
+That displayed persisted event also verifies the source-attributed recall.
