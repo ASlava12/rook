@@ -3,6 +3,8 @@
 Intermediate child display hints coalesce within configured queue bounds;
 critical receipts and lifecycle events retain their existing persistence.
 See [the delivery contract and measurements](delegation-progress.md).
+See [rooted runtime reuse and preparation](runtime-reuse.md) for equipment
+ownership, MCP generations and daemon project publication.
 
 Explicit delegated checkout diagnosis/restoration and source/preservation bounds
 are described in [worktree-recovery.md](worktree-recovery.md).

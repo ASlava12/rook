@@ -3185,6 +3185,179 @@ async fn a_delegated_child_shares_the_parent_language_servers() {
     );
 }
 
+struct RuntimeProbe {
+    calls: Arc<Mutex<Vec<(PathBuf, u64)>>>,
+}
+
+#[async_trait]
+impl rook_tools::Tool for RuntimeProbe {
+    fn name(&self) -> &str {
+        "parent_runtime_probe"
+    }
+    fn spec(&self) -> rook_llm::ToolSpec {
+        rook_llm::ToolSpec {
+            name: self.name().into(),
+            description: "Inspect the test runtime context".into(),
+            parameters: serde_json::json!({"type":"object","properties":{}}),
+        }
+    }
+    fn risk(&self, _: &serde_json::Value) -> rook_tools::policy::Risk {
+        rook_tools::policy::Risk::Network("https://runtime-audit.invalid".into())
+    }
+    async fn call(
+        &self,
+        ctx: &rook_tools::ToolContext,
+        _: &serde_json::Value,
+    ) -> rook_tools::Result<rook_tools::ToolOutcome> {
+        assert!(ctx.delegated);
+        self.calls.lock().unwrap().push((ctx.workspace.clone(), ctx.jobs.as_ref().unwrap().identity()));
+        Ok(rook_tools::ToolOutcome::ok("actual child runtime observed"))
+    }
+}
+
+struct RuntimeApprover {
+    sessions: Arc<Mutex<Vec<String>>>,
+    questions: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl rook_tools::policy::Approver for RuntimeApprover {
+    fn for_session(&self, session: &str) -> Option<Arc<dyn rook_tools::policy::Approver>> {
+        self.sessions.lock().unwrap().push(session.into());
+        Some(Arc::new(Self { sessions: self.sessions.clone(), questions: self.questions.clone() }))
+    }
+    async fn ask(
+        &self,
+        tool: &str,
+        _: &rook_tools::policy::Risk,
+        _: Option<&str>,
+    ) -> rook_tools::policy::Approval {
+        self.questions.lock().unwrap().push(tool.into());
+        rook_tools::policy::Approval::ForRun
+    }
+}
+
+#[tokio::test]
+async fn actual_delegates_reuse_rooted_lsp_jobs_and_run_approvals_while_worktrees_rebuild_and_drop_parent_tools()
+ {
+    let mut f = fixture();
+    let source = f.workspace.path().join("source.rs");
+    std::fs::write(&source, "fn broken() { oops }\n").unwrap();
+    let trace = f._store_dir.path().join("lsp-initialization.jsonl");
+    f.rook.config.lsp = vec![rook_lsp::ServerConfig {
+        language: "mock".into(),
+        command: lsp_mock().display().to_string(),
+        args: vec![format!("--initialize-log={}", trace.display())],
+        extensions: vec!["rs".into()],
+        diagnostics_wait_ms: 2000,
+        ..Default::default()
+    }];
+    let servers = rook_core::agent::servers_for(&f.rook.config, &f.rook.workspace);
+    let warm = servers.any().await.unwrap();
+    let rows = || {
+        std::fs::read_to_string(&trace)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(rows().len(), 1, "the actual parent process was initialized before delegation");
+    let jobs = rook_core::agent::jobs_for(&f.rook.config);
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let sessions = Arc::new(Mutex::new(Vec::new()));
+    let questions = Arc::new(Mutex::new(Vec::new()));
+    let batch = || {
+        let mut response = call("diagnostics", serde_json::json!({"path":"source.rs"}));
+        response.message.tool_calls.push(ToolCall {
+            id: "runtime-call".into(),
+            name: "parent_runtime_probe".into(),
+            arguments: serde_json::json!({}),
+        });
+        response
+    };
+    let session = f.rook.start_session("shared runtime audit").unwrap();
+    let script = vec![
+        call("delegate", serde_json::json!({"task":"shared first"})),
+        batch(),
+        reply("first observed"),
+        call("delegate", serde_json::json!({"task":"shared second"})),
+        batch(),
+        reply("second observed"),
+        reply("Both children observed."),
+    ];
+    let mut parent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
+    parent.servers = servers.clone();
+    rook_core::lsp::register(&mut parent.tools, servers.clone());
+    parent.tool_ctx.jobs = Some(jobs.clone());
+    parent.tools.register(Arc::new(RuntimeProbe { calls: calls.clone() }));
+    parent.approver = Arc::new(RuntimeApprover { sessions: sessions.clone(), questions: questions.clone() });
+    let shared = parent.run("Inspect through two shared children.").await.unwrap();
+    assert_eq!(shared.delegated.len(), 2);
+    assert_eq!(*calls.lock().unwrap(), vec![(f.rook.workspace.clone(), jobs.identity()); 2]);
+    assert_eq!(
+        *questions.lock().unwrap(),
+        ["parent_runtime_probe"],
+        "the second child reuses the run-scoped grant"
+    );
+    assert_eq!(
+        sessions.lock().unwrap().as_slice(),
+        shared.delegated.as_slice(),
+        "approval bridges are attributed to actual children"
+    );
+    assert_eq!(rows().len(), 1, "shared child tool use must not initialize another LSP process");
+    assert!(Arc::ptr_eq(&warm, &servers.for_path(&source).await.unwrap().0));
+    drop(parent);
+
+    git_fixture(f.workspace.path(), &["init", "-q"]);
+    git_fixture(f.workspace.path(), &["add", "source.rs"]);
+    git_fixture(f.workspace.path(), &["commit", "-qm", "rooted baseline"]);
+    let session = f.rook.start_session("isolated runtime audit").unwrap();
+    let script = vec![
+        call("delegate", serde_json::json!({"task":"isolated inspection", "isolation":"worktree"})),
+        batch(),
+        reply("isolated diagnostics completed"),
+        reply("The isolated report is retained."),
+    ];
+    let mut parent = AgentLoop::new(&f.rook, Arc::new(ScriptedProvider::new(script)), session);
+    parent.servers = servers.clone();
+    rook_core::lsp::register(&mut parent.tools, servers.clone());
+    parent.tool_ctx.jobs = Some(jobs);
+    parent.tools.register(Arc::new(RuntimeProbe { calls: calls.clone() }));
+    parent.allow_everything_not_denied();
+    let isolated = parent.run("Inspect in a worktree.").await.unwrap();
+    assert_eq!(isolated.delegated.len(), 1);
+    let child = rook_store::parse_session_id(&isolated.delegated[0]).unwrap();
+    let meta = f.rook.store.get_session(child).unwrap().unwrap();
+    assert_ne!(PathBuf::from(&meta.workspace), f.rook.workspace);
+    assert_eq!(calls.lock().unwrap().len(), 2, "the isolated child must not invoke the parent-only toolbox");
+    let history = f.rook.transcript(child, 0, 128, 1024 * 1024).unwrap();
+    assert!(
+        history
+            .iter()
+            .any(|event| event.label == "parent_runtime_probe" && event.body.contains("unknown tool")),
+        "the real unavailable call is retained: {history:?}"
+    );
+    assert!(
+        history.iter().any(|event| event.label == "diagnostics" && event.body.contains("oops")),
+        "the rooted local LSP was actually used"
+    );
+    let initialized = rows();
+    assert_eq!(initialized.len(), 2, "a worktree gets one separate LSP process");
+    assert_ne!(initialized[0]["pid"], initialized[1]["pid"]);
+    assert_eq!(
+        PathBuf::from(rook_lsp::protocol::from_uri(initialized[0]["root"].as_str().unwrap()))
+            .canonicalize()
+            .unwrap(),
+        f.rook.workspace.canonicalize().unwrap()
+    );
+    assert_eq!(
+        PathBuf::from(rook_lsp::protocol::from_uri(initialized[1]["root"].as_str().unwrap()))
+            .canonicalize()
+            .unwrap(),
+        PathBuf::from(&meta.workspace).canonicalize().unwrap()
+    );
+}
+
 /// The convention every reference agent already reads, and this one read none.
 #[tokio::test]
 async fn a_projects_own_instructions_reach_the_model_under_both_names() {

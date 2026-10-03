@@ -2968,4 +2968,121 @@ mod tests {
         drop(third);
         assert!(f.state.engine_for(Some(dirs[3].path())).await.is_ok());
     }
+
+    #[tokio::test]
+    async fn rooted_preparation_releases_engine_locks_and_keeps_delivery_after_request_cancellation() {
+        let f = fixture();
+        let ready_root = tempfile::tempdir().unwrap();
+        let ready = f.state.engine_for(Some(ready_root.path())).await.unwrap();
+        let pending_root = tempfile::tempdir().unwrap();
+        let root = pending_root.path().to_path_buf();
+        let state = f.state.clone();
+        let (started, entered) = tokio::sync::oneshot::channel();
+        // Dropping release also wakes the blocking worker on assertion failure.
+        let (release, wait) = std::sync::mpsc::channel();
+        let builds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = builds.clone();
+        let first = tokio::spawn(async move {
+            state
+                .engine_for_with(Some(&root), move |seed, root| {
+                    counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    started.send(()).unwrap();
+                    let _ = wait.recv();
+                    seed.build(root)
+                })
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(90), entered).await.unwrap().unwrap();
+        assert_eq!(builds.load(std::sync::atomic::Ordering::SeqCst), 1, "actual preparation is held");
+        assert!(f.state.rook.try_write().is_ok(), "no parent engine guard may cover discovery");
+        assert!(f.state.elsewhere.try_write().is_ok(), "no cache guard may cover discovery");
+        first.abort();
+        assert!(matches!(first.await, Err(error) if error.is_cancelled()));
+
+        let (said, mut notices) = tokio::sync::broadcast::channel(16);
+        let (to_turn, _held) = tokio::sync::mpsc::unbounded_channel();
+        let (approver, approval_relay) =
+            crate::chat::approver(to_turn.clone(), std::time::Duration::from_secs(90), Default::default());
+        let (asker, ask_relay) =
+            crate::chat::asker(to_turn, std::time::Duration::from_secs(90), Default::default());
+        f.state
+            .remember(
+                f.session,
+                Arc::new(crate::chat::Live::for_test(
+                    tokio::spawn(std::future::pending()),
+                    vec![approval_relay.abort_handle(), ask_relay.abort_handle()],
+                    said,
+                    approver,
+                    asker,
+                )),
+            )
+            .await;
+        let id = rook_store::format_session_id(f.session);
+        let current = async {
+            assert_eq!(get(&f, "/api/health").await.0, StatusCode::OK);
+            assert_eq!(get(&f, &format!("/api/sessions/{id}/context")).await.0, StatusCode::OK);
+            let (status, receipt) = post(&f, &format!("/api/sessions/{id}/instructions"), serde_json::json!({"id":"during-preparation","text":"accepted while another project is preparing"})).await;
+            assert_eq!(status, StatusCode::OK, "{receipt}");
+            assert_eq!(receipt["revision"], 0);
+            assert!(
+                notices.try_recv().is_ok(),
+                "durably admitted instruction reaches the attached live view before discovery release"
+            );
+            assert!(Arc::ptr_eq(&ready, &f.state.engine_for(Some(ready_root.path())).await.unwrap()));
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(90), current).await.unwrap();
+        let state = f.state.clone();
+        let root = pending_root.path().to_path_buf();
+        let again = tokio::spawn(async move { state.engine_for(Some(&root)).await });
+        f.state.rook.write().await.config.agent.model = "ollama/runtime-audit".into();
+        release.send(()).unwrap();
+        let built =
+            tokio::time::timeout(std::time::Duration::from_secs(90), again).await.unwrap().unwrap().unwrap();
+        assert_eq!(
+            builds.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a cancelled requester cannot cause a second discovery"
+        );
+        assert!(Arc::ptr_eq(&built, &f.state.engine_for(Some(pending_root.path())).await.unwrap()));
+        assert_eq!(built.read().await.workspace, pending_root.path().canonicalize().unwrap());
+        assert_eq!(
+            built.read().await.config.agent.model,
+            "ollama/runtime-audit",
+            "publication cannot revive the captured older configuration"
+        );
+        assert!(Arc::ptr_eq(&built.read().await.store, &f.state.rook.read().await.store));
+        f.state.live.write().await.remove(&f.session);
+        approval_relay.abort();
+        ask_relay.abort();
+    }
+
+    #[tokio::test]
+    async fn project_waiters_protect_ready_engines_before_they_clone_them() {
+        let f = fixture();
+        let dirs: Vec<_> = (0..4).map(|_| tempfile::tempdir().unwrap()).collect();
+        let first = f.state.engine_for(Some(dirs[0].path())).await.unwrap();
+        let key = dirs[0].path().canonicalize().unwrap();
+        let waiting = f.state.elsewhere.read().await.get(&key).unwrap().result.clone();
+        drop(first);
+        let second = f.state.engine_for(Some(dirs[1].path())).await.unwrap();
+        let third = f.state.engine_for(Some(dirs[2].path())).await.unwrap();
+        assert_eq!(
+            f.state.elsewhere.read().await.len(),
+            f.state.max_projects,
+            "the project cap is actually reached"
+        );
+        assert!(
+            f.state.engine_for(Some(dirs[3].path())).await.is_err(),
+            "publication before a waiter is polled must not permit another registry for the same root"
+        );
+        let handed = waiting.borrow().as_ref().unwrap().as_ref().unwrap().clone();
+        drop(waiting);
+        assert!(
+            f.state.engine_for(Some(dirs[3].path())).await.is_err(),
+            "the handed-out engine still protects the same root"
+        );
+        drop(handed);
+        assert!(f.state.engine_for(Some(dirs[3].path())).await.is_ok());
+        drop((second, third));
+    }
 }

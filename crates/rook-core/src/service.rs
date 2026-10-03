@@ -81,6 +81,38 @@ pub struct Rook {
     touched: std::sync::Mutex<BTreeMap<PathBuf, Held>>,
 }
 
+/// Immutable inputs for rooted discovery, movable off an engine lock.
+pub struct WorkspaceSeed {
+    store: Arc<Store>,
+    extension_changed: Arc<tokio::sync::watch::Sender<u64>>,
+    config: Config,
+    env: Option<Environment>,
+    output_dir: PathBuf,
+}
+
+impl WorkspaceSeed {
+    /// Discovery may block on disk; frontends run this on their blocking worker.
+    pub fn build(self, workspace: PathBuf) -> Rook {
+        let (plugins, plugin_errors) = crate::plugins::discover(&workspace);
+        let (skills, mut skill_errors) = Rook::discover_skills(&workspace, &plugins);
+        skill_errors.extend(plugin_errors);
+        Rook {
+            store: self.store,
+            extension_changed: self.extension_changed,
+            config: self.config,
+            env: self.env.map(OnceLock::from).unwrap_or_default(),
+            skills: skills.into(),
+            workspace,
+            window_learned: Default::default(),
+            skill_errors,
+            plugins,
+            output_dir: self.output_dir,
+            writing: Default::default(),
+            touched: Default::default(),
+        }
+    }
+}
+
 /// Who is writing a path, and since when.
 #[derive(Clone, Copy, Debug)]
 pub struct Held {
@@ -253,25 +285,17 @@ impl Rook {
     /// memory, one history, one search across every project rather than a store
     /// per directory.
     pub fn for_workspace(&self, workspace: PathBuf) -> Self {
-        let (plugins, plugin_errors) = crate::plugins::discover(&workspace);
-        let (skills, mut skill_errors) = Self::discover_skills(&workspace, &plugins);
-        skill_errors.extend(plugin_errors);
-        Self {
+        self.workspace_seed().build(workspace)
+    }
+
+    /// Capture only shared immutable inputs; no filesystem discovery or claims.
+    pub fn workspace_seed(&self) -> WorkspaceSeed {
+        WorkspaceSeed {
             store: self.store.clone(),
             extension_changed: self.extension_changed.clone(),
             config: self.config.clone(),
-            env: match self.env.get() {
-                Some(env) => OnceLock::from(env.clone()),
-                None => OnceLock::new(),
-            },
-            skills: skills.into(),
-            workspace,
-            window_learned: Default::default(),
-            skill_errors,
-            plugins,
+            env: self.env.get().cloned(),
             output_dir: self.output_dir.clone(),
-            writing: Default::default(),
-            touched: Default::default(),
         }
     }
 

@@ -16,6 +16,8 @@ fn main() {
     // client's tests are about — and no use to a test about noticing that a
     // write introduced something new.
     let from_the_text = std::env::args().any(|arg| arg == "--broken-lines");
+    let initialization_log =
+        std::env::args().find_map(|arg| arg.strip_prefix("--initialize-log=").map(str::to_owned));
 
     while let Some(length) = read_content_length(&mut stdin) {
         let mut body = vec![0u8; length];
@@ -24,6 +26,16 @@ fn main() {
         }
         let Ok(message) = serde_json::from_slice::<serde_json::Value>(&body) else { continue };
         let method = message["method"].as_str().unwrap_or("");
+        if method == "initialize"
+            && let Some(path) = &initialization_log
+            && let Ok(mut log) = std::fs::OpenOptions::new().create(true).append(true).open(path)
+        {
+            let _ = writeln!(
+                log,
+                "{}",
+                serde_json::json!({"pid":std::process::id(),"root":message["params"]["rootUri"]})
+            );
+        }
 
         if method == "textDocument/didOpen" || method == "textDocument/didChange" {
             let uri = message.pointer("/params/textDocument/uri").cloned().unwrap_or_default();

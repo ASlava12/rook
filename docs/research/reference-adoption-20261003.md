@@ -15,7 +15,7 @@ Reference commits identify mechanisms, not code to copy wholesale.
 | Model/price reference catalog | Done | Bounded explicit models.dev refresh/offline cache, exact direct-cloud identity and source/age, reviewed missing-rate application across CLI/terminal/browser/daemon, manual/live precedence and frozen costs; reached bounds/contention, account/environment/cache/alias/reopen tests; CI and compaction exit 0 |
 | Delegated worktree recovery | Done | Read-only diagnosis and reviewed registered-index restoration across CLI/REPL/TUI/browser/daemon/tools, recreated/dirty file preservation, missing live lease and Windows/link/admission bounds, actual native/reopen and index-version fixtures; CI and compaction exit 0 |
 | Delegation progress persistence audit | Done | Actual delayed-reader high-water 256 to 1, constant journal/receipt writes for 1 versus 1,024 fragments, exact critical observer and reopened CLI/daemon results, bounded coalescing in nursery/blocking/checker paths; CI exit 0 |
-| Rooted runtime reuse audit | Pending | MCP/LSP/approval reuse, generation invalidation, execution-root trust isolation and delivery responsiveness during background preparation; fixes if needed and CI |
+| Rooted runtime reuse audit | Done | Actual shared/worktree LSP processes, jobs and run approvals, HTTP MCP generation/cancellation, admitted detached daemon preparation with live delivery and publication ownership; CI exit 0 |
 | Long-task compaction scenario | Pending | Actual before/compaction/replacement/next request with accepted correction, pending question and retained rejected approach; saved/reopen/opaque-state invariants and CI |
 
 Each finished block updates this tracker and product documentation, checks actual
@@ -396,13 +396,13 @@ measurements are test-only and count successful `save_with_claim` updates,
 rather than all database transactions. ACP has its separate bounded observer
 transport; it does not replace the execution journal.
 
-Runtime audit: shared children clone toolbox/context/servers/policy; isolated
-children rebuild rooted tools/LSP/jobs and refuse editor-owned files/terminals.
-`Rook::for_workspace` discovers plugins/skills synchronously; `rookd::AppState::engine_for`
-currently performs it while holding the project map write lock. Test actual reuse,
-generation invalidation and background-preparation responsiveness, preserving
-execution-root and approval trust. These observations are starting points for
-the required audits, not evidence that either remaining row is complete.
+Runtime audit is Done. Shared children reuse
+actual LSP processes/jobs/run approvals; worktrees rebuild rooted equipment and
+drop parent-only tools. Daemon discovery uses an admitted publication entry and
+a detached blocking worker, retaining no engine/project guard during discovery.
+Focused child, MCP generation, cancellation/delivery and cache ownership tests
+and full CI exited 0. The synchronous core `for_workspace` contract remains available.
+The final long-task compaction scenario is still Pending.
 
 ## Eighth block: measured and bounded delegated display progress
 
@@ -448,3 +448,36 @@ in 863.2 seconds (`target/reference-delegation-ci-final.log`), including the
 reached Unicode admission and all native/core/daemon/storage/frontends checks.
 No installed daemon, operator store/configuration or browser profile was used.
 This closes row eight only; the two remaining rows stay Pending.
+
+## Ninth block: rooted equipment and responsive preparation
+
+The actual delegated fixture uses one warmed LSP process and shared jobs/run
+approval across two children. A worktree child starts a distinct LSP process with
+its checkout root, executes local diagnostics and records the refusal of a
+parent-only tool. Real HTTP MCP fixtures verify atomic generation replacement,
+old in-flight calls, failed/cancelled candidates and bounded admission; the
+existing native daemon reconnect fixture also passes in the full gate.
+
+Inspection found synchronous plugin/skill discovery under both the daemon
+project-map write lock and root engine read lock. `WorkspaceSeed` now captures
+immutable inputs; the admitted cache entry owns preparation independently of
+request cancellation, and a blocking worker performs discovery without those
+locks. Ready and pending entries share the existing project cap. Publication
+waiters protect a root before cloning its engine, and the current configuration
+is applied at publication. Saved/wire formats and synchronous `for_workspace`
+semantics are unchanged. See [runtime-reuse.md](../runtime-reuse.md).
+
+Focused checks exited 0: `target/reference-runtime-child-tests-fixed.log`,
+`target/reference-runtime-mcp-tests.log`,
+`target/reference-runtime-preparation-config.log` and
+`target/reference-runtime-project-tests.log`. The held-worker daemon fixture
+exercises real API health/context/instructions and live notice delivery after
+cancelling the first opening request, then observes one reused published engine.
+Earlier fixture compilation errors concerned the transcript API arguments and
+a `Debug` bound in a cancellation assertion; both were corrected.
+
+The first CI exited 1 in 49.2 seconds on Clippy's question-mark suggestion.
+After correction, final `cargo xtask ci` exited 0 in 936.6 seconds
+(`target/reference-runtime-ci-final.log`). No storage policy/layout change is
+part of this block, so compaction remeasurement was not required. No installed
+daemon or operator state was used. Only the long-task compaction row remains.

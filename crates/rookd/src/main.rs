@@ -186,7 +186,11 @@ impl AppState {
         let Ok(mut rook) = self.rook.try_write() else { return None };
         let mut guards = Vec::new();
         for project in projects.values() {
-            let Ok(guard) = project.engine.try_write() else { return None };
+            if project.result.borrow().as_ref().is_some_and(Result::is_err) {
+                continue;
+            }
+            let engine = project.engine()?;
+            let Ok(guard) = engine.try_write_owned() else { return None };
             guards.push(guard);
         }
         let was = rook.config.agent.model.clone();
@@ -199,9 +203,17 @@ impl AppState {
     }
 
     pub async fn engine_for(
-        &self,
+        self: &Arc<Self>,
         workspace: Option<&std::path::Path>,
     ) -> std::result::Result<Arc<RwLock<Rook>>, String> {
+        self.engine_for_with(workspace, |seed, root| seed.build(root)).await
+    }
+
+    async fn engine_for_with(
+        self: &Arc<Self>,
+        workspace: Option<&std::path::Path>,
+        build: impl FnOnce(rook_core::service::WorkspaceSeed, std::path::PathBuf) -> Rook + Send + 'static,
+    ) -> ProjectResult {
         let Some(asked) = workspace else { return Ok(self.rook.clone()) };
         let here = asked.canonicalize().map_err(|e| format!("{}: {e}", asked.display()))?;
         if !here.is_dir() {
@@ -217,13 +229,15 @@ impl AppState {
         let mut kept = self.elsewhere.write().await;
         if let Some(known) = kept.get_mut(&here) {
             known.last_used = std::time::Instant::now();
-            return Ok(known.engine.clone());
+            let result = known.result.clone();
+            drop(kept);
+            return self.project_result(&here, result).await;
         }
 
         if kept.len() >= self.max_projects {
             let stale = kept
                 .iter()
-                .filter(|(_, p)| Arc::strong_count(&p.engine) == 1)
+                .filter(|(_, p)| p.idle())
                 .min_by_key(|(_, p)| p.last_used)
                 .map(|(path, _)| path.clone());
             let Some(stale) = stale else {
@@ -232,9 +246,53 @@ impl AppState {
             kept.remove(&stale);
             self.equipment.write().await.remove(&stale);
         }
-        let built = Arc::new(RwLock::new(self.rook.read().await.for_workspace(here.clone())));
-        kept.insert(here, Project { engine: built.clone(), last_used: std::time::Instant::now() });
-        Ok(built)
+        let (published, result) = tokio::sync::watch::channel(None);
+        let result = Arc::new(result);
+        kept.insert(here.clone(), Project { result: result.clone(), last_used: std::time::Instant::now() });
+        // The cache slot admits the worker before snapshots are copied. Owning
+        // publication separately from the requester keeps cancellation from
+        // spawning duplicate discovery or leaving a permanently pending slot.
+        let state = self.clone();
+        let root = here.clone();
+        tokio::spawn(async move {
+            let seed = state.rook.read().await.workspace_seed();
+            let prepared = tokio::task::spawn_blocking(move || build(seed, root)).await;
+            let prepared = match prepared {
+                Ok(mut rook) => {
+                    // A snapshot is for discovery, not permission to publish an
+                    // older daemon configuration after a concurrent refresh.
+                    rook.config = state.rook.read().await.config.clone();
+                    Ok(Arc::new(RwLock::new(rook)))
+                }
+                Err(_) => Err("project preparation failed; retry opening the project".into()),
+            };
+            let _ = published.send(Some(prepared));
+        });
+        drop(kept);
+        self.project_result(&here, result).await
+    }
+
+    async fn project_result(
+        &self,
+        root: &std::path::Path,
+        result: Arc<tokio::sync::watch::Receiver<Option<ProjectResult>>>,
+    ) -> ProjectResult {
+        let mut updates = result.as_ref().clone();
+        let ready = loop {
+            if let Some(ready) = updates.borrow_and_update().clone() {
+                break ready;
+            }
+            if updates.changed().await.is_err() {
+                break Err("project preparation was interrupted; retry opening the project".into());
+            }
+        };
+        if ready.is_err() {
+            let mut kept = self.elsewhere.write().await;
+            if kept.get(root).is_some_and(|project| Arc::ptr_eq(&project.result, &result)) {
+                kept.remove(root);
+            }
+        }
+        ready
     }
 
     /// The shared equipment for whatever project `engine` is, made on first ask.
@@ -254,8 +312,29 @@ impl AppState {
 
 /// An engine the daemon is keeping, and when it was last wanted.
 pub struct Project {
-    pub engine: Arc<RwLock<Rook>>,
+    result: Arc<tokio::sync::watch::Receiver<Option<ProjectResult>>>,
     last_used: std::time::Instant,
+}
+
+type ProjectResult = std::result::Result<Arc<RwLock<Rook>>, String>;
+
+impl Project {
+    fn engine(&self) -> Option<Arc<RwLock<Rook>>> {
+        self.result.borrow().as_ref().and_then(|result| result.as_ref().ok()).cloned()
+    }
+
+    fn idle(&self) -> bool {
+        // Waiters already own this registry entry before they can clone the
+        // published engine. Evicting in that gap would split writing claims.
+        if Arc::strong_count(&self.result) != 1 {
+            return false;
+        }
+        match self.result.borrow().as_ref() {
+            Some(Ok(engine)) => Arc::strong_count(engine) == 1,
+            Some(Err(_)) => true,
+            None => false,
+        }
+    }
 }
 
 pub struct About {
