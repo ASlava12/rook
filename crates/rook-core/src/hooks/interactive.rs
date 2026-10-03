@@ -74,12 +74,13 @@ pub(super) async fn invoke(
         _group: HookGroup(rook_contain::Group::holding(child.id())),
         stdin: Some(child.stdin.take().ok_or_else(|| std::io::Error::other("missing hook stdin"))?),
     };
+    let stdin = input_pipe.stdin.as_mut().ok_or_else(|| std::io::Error::other("missing hook stdin"))?;
     let mut stdout =
         BufReader::new(child.stdout.take().ok_or_else(|| std::io::Error::other("missing hook stdout"))?);
     let mut err = child.stderr.take();
     let mut drain = Drain(tokio::spawn(async move { bounded(&mut err).await }));
     let patience = Duration::from_secs(config.timeout_secs);
-    send(input_pipe.stdin.as_mut().unwrap(), &input, patience).await?;
+    send(stdin, &input, patience).await?;
     let source = Source::hook(config, ordinal);
     let mut consumed = 0usize;
     let mut finished = None;
@@ -108,7 +109,7 @@ pub(super) async fn invoke(
                 &FormAnswer { form_answer: &answer },
                 settings.max_update_bytes.saturating_add(128),
             )?;
-            send(input_pipe.stdin.as_mut().unwrap(), &bytes, patience).await?;
+            send(stdin, &bytes, patience).await?;
         } else if let Some(raw) = frame.reply {
             finished = Some(serde_json::from_str::<HookReply>(raw.get())?);
             break;
@@ -116,7 +117,7 @@ pub(super) async fn invoke(
     }
     let reply =
         finished.ok_or_else(|| std::io::Error::other("hook stream frame limit reached before reply"))?;
-    deadline(patience, input_pipe.stdin.as_mut().unwrap().shutdown()).await?;
+    deadline(patience, stdin.shutdown()).await?;
     drop(input_pipe.stdin.take());
     let mut remainder = Some(stdout);
     let (tail, status, stderr) =

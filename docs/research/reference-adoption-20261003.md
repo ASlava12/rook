@@ -539,3 +539,10 @@ scenario exits 0 (`target/release-stop-focused.log`). Hosted job deadlines are
 45 minutes because cold Windows/macOS builds plus the expanded suite exceed 25.
 Full local and hosted gates are being repeated before tagging. Store formats,
 stable wire shapes and operator state are unaffected.
+
+The full local follow-up gate exited 1 in 647.8 seconds solely because the shipping
+code scan rejected new unchecked stdin unwraps. The input borrow now returns an
+I/O error instead; the focused `no_panics` suite exits 0
+(`target/release-no-panics-focused.log`). All five dry-run archives at `4b85aee`
+pass checksum/layout/skill-count verification; Unix binaries retain executable
+permissions. A new complete gate and archive build follow the stdin-borrow fix.
