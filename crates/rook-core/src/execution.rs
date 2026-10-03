@@ -17,6 +17,12 @@ type Active = BTreeMap<(std::path::PathBuf, u128), String>;
 // Also serializes read/modify/write of receipts; never held across an await.
 static ACTIVE: Mutex<Active> = Mutex::new(BTreeMap::new());
 
+#[cfg(test)]
+thread_local! {
+    // Actual successful save_with_claim writes, per current-thread engine fixture.
+    pub(crate) static RECEIPT_WRITE_MEASUREMENT: std::cell::Cell<(usize, usize, usize)> = const { std::cell::Cell::new((0, 0, 0)) };
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Operation {
     pub session: String,
@@ -214,6 +220,15 @@ fn save_with_claim(
     })?;
     // A command must never start before the receipt saying it could have run.
     store.flush()?;
+    #[cfg(test)]
+    RECEIPT_WRITE_MEASUREMENT.with(|measurement| {
+        let (count, total, largest) = measurement.get();
+        measurement.set((
+            count.saturating_add(1),
+            total.saturating_add(receipt.len()),
+            largest.max(receipt.len()),
+        ));
+    });
     Ok(())
 }
 

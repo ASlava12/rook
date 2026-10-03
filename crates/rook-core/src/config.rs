@@ -543,6 +543,8 @@ pub struct AgentConfig {
     /// How many delegated sub-tasks may run at once. Bounded because each one
     /// spends tokens against the same budget and the same provider rate limit.
     pub max_parallel_subagents: usize,
+    /// Pending child display hints; repeated hints coalesce independently of receipts.
+    pub delegation_progress_entries: usize,
     /// How many sub-agents one turn may start in total, counting the ones its
     /// children start. `max_parallel_subagents` paces them; this is what stops
     /// a single tool call from being a thousand model calls, because the list
@@ -947,6 +949,7 @@ impl Default for AgentConfig {
             context_window: None,
             max_output_tokens: 0,
             max_parallel_subagents: 4,
+            delegation_progress_entries: 32,
             max_subagents_per_turn: 16,
             server_update_after_days: 30,
             install_servers: true,
@@ -1088,6 +1091,7 @@ const PROJECT_MAY_SET: &[&str] = &[
     "agent.lazy_tools",
     "agent.max_instructions_bytes",
     "agent.max_parallel_subagents",
+    "agent.delegation_progress_entries",
     "agent.max_skill_cards",
     "agent.max_steps",
     "agent.max_subagents_per_turn",

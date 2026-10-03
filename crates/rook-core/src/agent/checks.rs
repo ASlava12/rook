@@ -182,7 +182,8 @@ impl<'a> AgentLoop<'a> {
             instruction.push_str(&format!("\n\nWhat the author says would settle it:\n{settles}"));
         }
 
-        let (doing, mut steps) = tokio::sync::mpsc::unbounded_channel::<(usize, String)>();
+        let (doing, mut steps) =
+            super::delegation_progress::channel(self.rook.config.agent.delegation_progress_entries);
         let running = self.run_checker(&instruction, doing, self.left_to_spend(outcome));
         tokio::pin!(running);
         let checked = loop {
@@ -508,7 +509,7 @@ impl<'a> AgentLoop<'a> {
     async fn run_checker(
         &self,
         instruction: &str,
-        doing: tokio::sync::mpsc::UnboundedSender<(usize, String)>,
+        doing: super::delegation_progress::Sender,
         tokens: u64,
     ) -> Result<(String, TurnOutcome)> {
         let session = self.rook.fork_for_subtask(self.session, instruction)?;
@@ -526,7 +527,7 @@ impl<'a> AgentLoop<'a> {
         &'b self,
         session: u128,
         instruction: &'b str,
-        doing: tokio::sync::mpsc::UnboundedSender<(usize, String)>,
+        doing: super::delegation_progress::Sender,
         tokens: u64,
     ) -> impl std::future::Future<Output = Result<(String, TurnOutcome)>> + Send + 'b {
         async move {
@@ -576,8 +577,7 @@ impl<'a> AgentLoop<'a> {
             let where_it_runs = self.rook.workspace.clone();
             let mut relay = |progress: Progress<'_>| {
                 if let Progress::Delta(Delta::ToolCall(call)) = progress {
-                    let _ = doing
-                        .send((0, crate::calls::doing(&call.name, Some(&call.arguments), &where_it_runs)));
+                    doing.send(0, &crate::calls::doing(&call.name, Some(&call.arguments), &where_it_runs));
                 }
             };
             let mut outcome = accounting.returned(Box::pin(child.run_with(instruction, &mut relay)).await)?;

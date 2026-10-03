@@ -64,6 +64,10 @@
     "kind": "integer",
     "help": "Maximum sub-agents started in one turn, including descendants. max_parallel_subagents separately limits how many run at once."
   },
+  "agent.delegation_progress_entries": {
+    "kind": "integer",
+    "help": "Pending child display hints (1–128, default 32). Keeps the latest per child; old intermediate hints can be replaced. Tool receipts and final outcomes remain exact."
+  },
   "agent.server_update_after_days": {
     "kind": "integer",
     "help": "Days after which a server rook lsp install fetched is offered for updating, once per session. 0 never offers."

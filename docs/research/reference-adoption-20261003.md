@@ -14,7 +14,7 @@ Reference commits identify mechanisms, not code to copy wholesale.
 | ACP child/compaction/error events | Done | Negotiated v1 object capabilities, directed tasks/answers, child editor bridges/states and restricted controls, bounded recovery and durable compaction IDs; actual owned wire/core/transport and reopen fixtures; CI and compaction exit 0 |
 | Model/price reference catalog | Done | Bounded explicit models.dev refresh/offline cache, exact direct-cloud identity and source/age, reviewed missing-rate application across CLI/terminal/browser/daemon, manual/live precedence and frozen costs; reached bounds/contention, account/environment/cache/alias/reopen tests; CI and compaction exit 0 |
 | Delegated worktree recovery | Done | Read-only diagnosis and reviewed registered-index restoration across CLI/REPL/TUI/browser/daemon/tools, recreated/dirty file preservation, missing live lease and Windows/link/admission bounds, actual native/reopen and index-version fixtures; CI and compaction exit 0 |
-| Delegation progress persistence audit | Pending | Measured write/queue behavior under streamed updates, no full-history snapshots, durable critical receipts, bounded delivery and CI |
+| Delegation progress persistence audit | Done | Actual delayed-reader high-water 256 to 1, constant journal/receipt writes for 1 versus 1,024 fragments, exact critical observer and reopened CLI/daemon results, bounded coalescing in nursery/blocking/checker paths; CI exit 0 |
 | Rooted runtime reuse audit | Pending | MCP/LSP/approval reuse, generation invalidation, execution-root trust isolation and delivery responsiveness during background preparation; fixes if needed and CI |
 | Long-task compaction scenario | Pending | Actual before/compaction/replacement/next request with accepted correction, pending question and retained rejected approach; saved/reopen/opaque-state invariants and CI |
 
@@ -181,14 +181,14 @@ formats were unchanged, so a compaction remeasurement was not required.
 
 ## Continuation notes for the remaining scope
 
-Six behavioral rows are Done; four rows remain: worktree recovery and the three
-audits. The next block is delegated worktree recovery.
-Do not mark the entire goal complete after this finished catalog block.
+Eight rows are Done; the runtime audit and long-task compaction scenario remain.
+The next block audits rooted runtime reuse and preparation responsiveness.
+Do not mark the entire goal complete after one finished block.
 
 The completed guard lives in `agent/tool_cycles.rs`. Its execution companion is
 separate from prompt compaction and commits with operation completion; keep the
 run/root/generation boundary and don't replace content proof with tool names or
-timestamps in later runtime/delegation work. Worktree recovery is still Pending;
+timestamps in later runtime/delegation work. Worktree recovery is Done;
 no audit is implicitly closed by ACP transport or catalog changes.
 
 The ACP block uses the inspected v1 capability shapes:
@@ -199,9 +199,9 @@ ordinary v1 prompt error responses are unchanged. Its v1 change is the negotiate
 subagent idle snapshot's error stop reason. Do not invent a v1 root capability or
 silently apply the v2 prompt lifecycle to the existing stable v1 adapter.
 
-For the later delegation audit, `agent/delegation.rs` forwards ToolCall progress,
-not every text delta, through two unbounded channels bounded indirectly by child
-step/task limits. Measure queue high-water and durability before changing it.
+The completed delegation audit measured ToolCall display progress, rather than
+text fragments, and replaced the unbounded nursery/blocking/checker hint queues
+with bounded coalescing. See [the measurements](../delegation-progress.md).
 Shared-root children clone tools/context/server pools; worktree children
 intentionally reconstruct local tools/LSP/jobs to avoid using parent-root MCP or
 editor access. Runtime reuse must preserve that execution-root boundary.
@@ -386,15 +386,15 @@ the three remaining audits/scenarios stay Pending.
 
 ## Next continuation
 
-Progress audit: both `Nursery::new` and blocking delegation in
-`agent/delegation.rs` use unbounded `(child-index, String)` channels. They receive
-complete `Delta::ToolCall` values, not text/argument fragments; one model reply
-may announce up to 256 calls. `calls::doing` already admits 1 KiB display fields.
-Measure actual queue high-water/delivery and saved writes for ready batches and
-streamed text before changing delivery; critical call/result/execution receipts
-and child outcomes must remain exact. `agent/stream.rs` also consumes the nursery
-receiver. The ACP preview observer sends scoped notifications and has a separate
-bounded transport; it does not replace the execution journal.
+Progress audit is Done. `agent/delegation_progress.rs` supplies nursery/blocking/
+checker delivery; `agent/stream.rs` consumes the nursery receiver. The configured
+per-queue limit is `agent.delegation_progress_entries` (32, range 1–128), with
+2 KiB admitted hint text before copy. Only intermediate display hints coalesce;
+critical call/result/execution receipts and child outcomes remain exact. The
+dedicated engine audit file explicitly uses `#![cfg(test)]`. Execution write
+measurements are test-only and count successful `save_with_claim` updates,
+rather than all database transactions. ACP has its separate bounded observer
+transport; it does not replace the execution journal.
 
 Runtime audit: shared children clone toolbox/context/servers/policy; isolated
 children rebuild rooted tools/LSP/jobs and refuse editor-owned files/terminals.
@@ -403,3 +403,48 @@ currently performs it while holding the project map write lock. Test actual reus
 generation invalidation and background-preparation responsiveness, preserving
 execution-root and approval trust. These observations are starting points for
 the required audits, not evidence that either remaining row is complete.
+
+## Eighth block: measured and bounded delegated display progress
+
+The actual delayed-reader baseline retained 256 hints from one child reply.
+Executing 256 real file reads with the same text in one versus 1,024 fragments
+retained 787 child journal records in both cases, about 42 KiB logical bodies,
+and no copied 28 KiB parent conversation. The corrected delivery retains one
+latest hint for that child, with the last read naming a different file. Both
+fragmentation cases perform 515 successful execution companion save-path writes,
+about 322 KiB across all updates, with a maximum individual receipt of 737 bytes.
+Critical observers still see all 256 calls and already-saved results plus the
+child's start/end. The product contract and reproducible measurements are in
+[delegation-progress.md](../delegation-progress.md).
+
+All three internal hint queues now share the bounded coalescing implementation:
+fixed admitted child slots, 2 KiB UTF-8-safe hints before copy, fair position for
+updates to an existing child, oldest pending hint eviction for a new child at
+capacity, one text-free wakeup and producer closure/cancellation handling.
+Reached fixtures cover excess children, stale hints, a byte limit inside a
+multibyte character, closed readers and defensive configuration ceilings.
+Durable operations/lifecycle and saved formats are unchanged. No storage-layout
+or persistence-policy change is part of this block; compaction remeasurement
+was not required.
+
+Focused checks exited 0: `target/reference-delegation-baseline-verified.log`,
+`target/reference-delegation-core-final.log`,
+`target/reference-delegation-admission-final.log`,
+`target/reference-delegation-engine-tests.log`,
+`target/reference-delegation-checker-tests.log` and
+`target/reference-delegation-native-final.log`. The native fixture drives actual
+blocking and nursery children locally and through an owned daemon, then reopens
+both stores and checks all call/result pairs, exact last-result sequences, clean
+receipts and child outcomes. Early fixture attempts confused structured OpenAI
+text content and checker requests with parent/child script routing; a subsequent
+assertion expected `completed` instead of the actual `end_turn` receipt status.
+Those fixture assumptions were corrected before the successful native run.
+
+The first full CI exited 1 in 696.3 seconds with only `no_panics` failing:
+the dedicated test file had no local `cfg(test)` marker, so the scanner treated
+its fixture unwraps as shipping code. Adding the explicit file-level marker
+preserves the rule; its targeted check exited 0. Final `cargo xtask ci` exited 0
+in 863.2 seconds (`target/reference-delegation-ci-final.log`), including the
+reached Unicode admission and all native/core/daemon/storage/frontends checks.
+No installed daemon, operator store/configuration or browser profile was used.
+This closes row eight only; the two remaining rows stay Pending.

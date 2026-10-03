@@ -12,7 +12,7 @@ impl AgentLoop<'_> {
         &self,
         mut stream: ResponseStream,
         nursery: &mut Nursery<'_>,
-        nursery_steps: &mut tokio::sync::mpsc::UnboundedReceiver<(usize, String)>,
+        nursery_steps: &mut super::delegation_progress::Receiver,
         carrying: &mut tokio::time::Interval,
         patience: std::time::Duration,
         on_progress: &mut F,

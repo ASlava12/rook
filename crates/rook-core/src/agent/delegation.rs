@@ -79,7 +79,7 @@ pub(super) struct Nursery<'f> {
     /// sub-tasks share a provider and a token budget.
     limit: std::sync::Arc<tokio::sync::Semaphore>,
     parallel: usize,
-    doing: tokio::sync::mpsc::UnboundedSender<(usize, String)>,
+    doing: super::delegation_progress::Sender,
 }
 
 /// What a sub-task came back with: the session it ran in and what it did, or
@@ -250,7 +250,7 @@ impl Crew<'_> {
         task: &str,
         inherited: Option<&str>,
         bounds: Bounds,
-        doing: tokio::sync::mpsc::UnboundedSender<(usize, String)>,
+        doing: super::delegation_progress::Sender,
         index: usize,
         said: std::sync::Arc<Interjections>,
     ) -> Result<(String, TurnOutcome)> {
@@ -270,7 +270,7 @@ impl Crew<'_> {
         task: &'b str,
         inherited: Option<&'b str>,
         bounds: Bounds,
-        doing: tokio::sync::mpsc::UnboundedSender<(usize, String)>,
+        doing: super::delegation_progress::Sender,
         index: usize,
         said: std::sync::Arc<Interjections>,
     ) -> impl std::future::Future<Output = Result<(String, TurnOutcome)>> + Send + 'b {
@@ -337,15 +337,13 @@ impl Crew<'_> {
             child.by = bounds.by;
 
             // Boxed because this is `run` calling itself through a tool call. The
-            // channel carries only tool names, so it holds at most one short string
-            // per step the children are already bounded to.
+            // display channel coalesces hints; completed calls and results keep
+            // their independent durable receipts.
             let where_it_runs = rook.workspace.clone();
             let result = Box::pin(child.run_with(task, move |progress| {
                 if let Progress::Delta(Delta::ToolCall(call)) = progress {
-                    let _ = doing.send((
-                        index,
-                        crate::calls::doing(&call.name, Some(&call.arguments), &where_it_runs),
-                    ));
+                    doing
+                        .send(index, &crate::calls::doing(&call.name, Some(&call.arguments), &where_it_runs));
                 }
             }))
             .await;
@@ -381,8 +379,8 @@ impl<'f> Nursery<'f> {
         Some(())
     }
 
-    pub(super) fn new(parallel: usize) -> (Self, tokio::sync::mpsc::UnboundedReceiver<(usize, String)>) {
-        let (doing, steps) = tokio::sync::mpsc::unbounded_channel();
+    pub(super) fn new(parallel: usize, entries: usize) -> (Self, super::delegation_progress::Receiver) {
+        let (doing, steps) = super::delegation_progress::channel(entries);
         let nursery = Self {
             running: Default::default(),
             tasks: Vec::new(),
@@ -611,7 +609,8 @@ impl<'a> AgentLoop<'a> {
         let total = tasks.len();
         // One queue each, filled from the parent's while they run.
         let relayed: Vec<std::sync::Arc<Interjections>> = (0..total).map(|_| Default::default()).collect();
-        let (doing, mut steps) = tokio::sync::mpsc::unbounded_channel::<(usize, String)>();
+        let (doing, mut steps) =
+            super::delegation_progress::channel(self.rook.config.agent.delegation_progress_entries);
         let crew = self.crew(0);
         let crew = &crew;
         // Shared out rather than handed to each: errands of one call run at the
@@ -878,6 +877,10 @@ impl<'a> AgentLoop<'a> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "delegation_audit.rs"]
+mod audit;
 
 #[cfg(test)]
 mod relay_tests {

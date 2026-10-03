@@ -8,6 +8,7 @@ impl Config {
     pub fn validation_errors(&self) -> Vec<String> {
         let mut errors = Vec::new();
         for (name, value, low, high) in [
+            ("delegation_progress_entries", self.agent.delegation_progress_entries, 1, 128),
             ("worktree_recovery_max_files", self.agent.worktree_recovery_max_files, 1, 65536),
             ("worktree_recovery_max_bytes", self.agent.worktree_recovery_max_bytes, 1, 256 * 1024 * 1024),
             (

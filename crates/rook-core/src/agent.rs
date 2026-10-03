@@ -27,6 +27,7 @@ mod budget;
 mod checks;
 mod compaction;
 mod delegation;
+mod delegation_progress;
 mod effects;
 mod followups;
 pub(crate) mod history;
@@ -1030,7 +1031,10 @@ impl<'a> AgentLoop<'a> {
         // turn had at the start, since the crew outlives every step: a child
         // started late is bounded by its share of that rather than by nothing.
         let crew = self.crew(self.max_turn_tokens);
-        let (mut nursery, mut nursery_steps) = Nursery::new(self.rook.config.agent.max_parallel_subagents);
+        let (mut nursery, mut nursery_steps) = Nursery::new(
+            self.rook.config.agent.max_parallel_subagents,
+            self.rook.config.agent.delegation_progress_entries,
+        );
         let mut carrying = tokio::time::interval(std::time::Duration::from_millis(200));
 
         let mut asked_for_one_script = false;

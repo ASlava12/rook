@@ -1,5 +1,9 @@
 # Architecture
 
+Intermediate child display hints coalesce within configured queue bounds;
+critical receipts and lifecycle events retain their existing persistence.
+See [the delivery contract and measurements](delegation-progress.md).
+
 Explicit delegated checkout diagnosis/restoration and source/preservation bounds
 are described in [worktree-recovery.md](worktree-recovery.md).
 

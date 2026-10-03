@@ -3484,3 +3484,6 @@ mod prices;
 
 #[path = "scenarios/worktrees.rs"]
 mod worktrees;
+
+#[path = "scenarios/delegation_progress.rs"]
+mod delegation_progress;
