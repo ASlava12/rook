@@ -120,6 +120,9 @@ fn replay_inner(
     let mut last_at = 0i64;
 
     for event in events {
+        if event.record.kind == EventKind::Note && event.record.label == super::repetition::DIAGNOSTIC {
+            continue;
+        }
         if event.record.kind == EventKind::Note && event.record.label == crate::model_route::LABEL {
             continue;
         }

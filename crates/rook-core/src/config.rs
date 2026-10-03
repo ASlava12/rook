@@ -551,6 +551,10 @@ pub struct AgentConfig {
     /// How long the model may go silent mid-stream before the turn gives up.
     /// A dropped connection is indistinguishable from deep thought without it.
     pub stream_idle_timeout_secs: u64,
+    /// Interrupt long exact repetitions in narrative text or reasoning.
+    pub stream_repetition_guard: bool,
+    /// Per-channel Unicode characters retained for repetition checks.
+    pub max_stream_repetition_chars: usize,
     /// How many skills the catalog names in the system prompt. The catalog is
     /// paid for on every request, and a machine that has collected skills for a
     /// year would otherwise pay for all of them; the ones left out are still
@@ -931,6 +935,8 @@ impl Default for AgentConfig {
             install_servers: true,
             max_skill_cards: 50,
             stream_idle_timeout_secs: 90,
+            stream_repetition_guard: true,
+            max_stream_repetition_chars: 64_000,
             answer_timeout_secs: 600,
             decide_alone_after_secs: 1800,
             compaction_model: String::new(),

@@ -657,6 +657,100 @@ fn daemon_repl_keeps_a_new_session_after_its_first_prompt_fails() {
 }
 
 #[test]
+fn repetition_guard_interrupts_native_streams_locally_and_through_daemon_without_replay_pollution() {
+    rook_llm::init_tls();
+    use std::io::{Read, Write};
+    let rook = Rook::new();
+    let sessions = {
+        let store = rook_store::Store::open(rook.home.path().join("store")).unwrap();
+        [rook_store::new_session_id(), rook_store::new_session_id()].map(|id| {
+            store
+                .create_session(&rook_store::SessionMeta::new(
+                    id,
+                    "guard",
+                    rook.workspace.path().display().to_string(),
+                    1,
+                ))
+                .unwrap();
+            rook_store::format_session_id(id)
+        })
+    };
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let mut streamed = 0;
+        for _ in 0..8 {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket.set_read_timeout(Some(std::time::Duration::from_secs(30))).unwrap();
+            let mut bytes = Vec::new();
+            let request = loop {
+                let mut chunk = [0; 8192];
+                let n = socket.read(&mut chunk).unwrap();
+                assert!(n > 0 && bytes.len() + n < 256 * 1024);
+                bytes.extend_from_slice(&chunk[..n]);
+                let text = String::from_utf8_lossy(&bytes);
+                if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                    let length: usize = head
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .and_then(|n| n.trim().parse().ok())
+                        })
+                        .unwrap_or(0);
+                    if body.len() >= length {
+                        break if length == 0 {
+                            serde_json::Value::Null
+                        } else {
+                            serde_json::from_str(body).unwrap()
+                        };
+                    }
+                }
+            };
+            let (mime, body) = if request["stream"] == true {
+                streamed += 1;
+                let text = "NATIVELOOP repeating the same observation without new facts.\n".repeat(1000);
+                assert!(text.chars().count() > 16000);
+                let delta = serde_json::json!({"choices":[{"index":0,"delta":{"content":text},"finish_reason":null}]});
+                let final_delta = serde_json::json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],
+                    "usage":{"prompt_tokens":10,"completion_tokens":1000}});
+                ("text/event-stream", format!("data: {delta}\n\ndata: {final_delta}\n\ndata: [DONE]\n\n"))
+            } else {
+                ("application/json", r#"{"data":[]}"#.into())
+            };
+            let _=socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes());
+            if streamed == 2 {
+                break;
+            }
+        }
+        streamed
+    });
+    rook.write_config(&format!("[agent]\nmodel='local'\ninstall_servers=false\none_script=false\n[models.local]\nmodel='test'\napi='openai'\nurl='{endpoint}'\ncontext_window=128000\n"));
+    let failed = rook.run(&["run", "inspect this workspace", "--session", &sessions[0]]);
+    assert!(!failed.status.success());
+    assert!(String::from_utf8_lossy(&failed.stderr).contains("repetition loop"), "{failed:?}");
+    let daemon = Daemon::start(&rook);
+    let failed = rook.run(&["run", "inspect this workspace", "--session", &sessions[1]]);
+    assert!(!failed.status.success());
+    assert!(String::from_utf8_lossy(&failed.stderr).contains("repetition loop"), "{failed:?}");
+    assert_eq!(server.join().unwrap(), 2, "neither interruption automatically retries");
+    for session in &sessions {
+        let context = rook.json(&["session", "context", session]);
+        assert_eq!(context["cost_coverage"]["attempts_started"], 1);
+        assert_eq!(context["cost_coverage"]["attempts_interrupted"], 1);
+        assert_eq!(context["cost_coverage"]["attempts_completed"], 0);
+        assert_eq!(context["cost_coverage"]["attempts_pending"], 0);
+        let history = rook.json(&["session", "history", session]).to_string();
+        assert!(history.contains("did not finish the task"));
+        assert!(history.contains("rook:repetition-diagnostic:v1"));
+    }
+    drop(daemon);
+    for session in sessions {
+        assert!(rook.json(&["session", "history", &session]).to_string().contains("did not finish the task"));
+    }
+}
+
+#[test]
 fn responses_stream_retry_preserves_physical_receipts_locally_and_through_daemon() {
     rook_llm::init_tls();
     use std::io::{Read, Write};

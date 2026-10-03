@@ -90,6 +90,19 @@ completion evidence prevent replay of a partial answer. Authentication, credit
 and context refusals remain terminal. Each physical attempt retains its own
 durable admission/ending receipt, and cancellation during backoff opens no request.
 
+Main/checking/delegated streams and limit-triggered final answers also pass through
+the core repetition guard. Text and narrative reasoning are watched separately,
+starting at 16,000 Unicode characters, with bounded tail sampling. At least five
+exact repetitions must cover half the sampled tail; distinct table/code rows
+remain admissible. `agent.stream_repetition_guard` defaults to true;
+`agent.max_stream_repetition_chars` defaults to 64,000 per channel (16,000–262,144).
+Disable the guard for deliberately large repetitive answers. Tool arguments and
+signed/encrypted state are neither inspected nor edited. Interruption drops the
+physical stream, executes no calls from that unfinished reply and records unknown
+unseen usage. A durable atomic pair retains redacted original tail excerpts as a
+diagnostic note and a neutral assistant marker. Only the marker reaches replay,
+context inspection, branch summaries and compaction; it never claims task completion.
+
 Provider-owned assistant state is stored as a bounded companion note paired
 atomically with the visible reply or usage record. Tool bindings preserve original
 call IDs through interrupted turns and forks. Transcript views omit opaque

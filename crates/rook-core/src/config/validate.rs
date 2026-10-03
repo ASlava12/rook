@@ -78,6 +78,9 @@ impl Config {
         if !(1024..=32 * 1024 * 1024).contains(&self.agent.max_provider_state_bytes) {
             errors.push("agent.max_provider_state_bytes: expected 1024..=33554432".into());
         }
+        if !(16_000..=262_144).contains(&self.agent.max_stream_repetition_chars) {
+            errors.push("agent.max_stream_repetition_chars: expected 16000..=262144".into());
+        }
         for (name, valid, range) in [
             ("max_bytes", (4096..=1048576).contains(&self.mcp_catalog.max_bytes), "4096..=1048576"),
             ("max_tools", (2..=64).contains(&self.mcp_catalog.max_tools), "2..=64"),

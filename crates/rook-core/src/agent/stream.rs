@@ -18,6 +18,8 @@ impl AgentLoop<'_> {
         on_progress: &mut F,
     ) -> Result<Assembler> {
         let mut assembler = Assembler::default();
+        let mut guard = super::repetition::StreamGuard::new(&self.rook.config.agent);
+        let mut repeating = None;
         // The model call is the long wait in a step, so it is where started
         // sub-agents get to run. Without this they would only advance while
         // the parent was blocked on them, which is the thing being undone.
@@ -52,6 +54,13 @@ impl AgentLoop<'_> {
                     let Some(delta) = delta else { break };
                     match delta {
                         Ok(delta) => {
+                            if let Some(channel) = guard.check(&delta) {
+                                repeating = Some(channel);
+                                broke = Some(CoreError::Other(format!(
+                                    "Rook interrupted a long repetition loop in streamed {channel}; the reply did not finish the task. Inspect the saved diagnostic excerpts. Set agent.stream_repetition_guard=false for deliberately large repetitive output."
+                                )));
+                                break;
+                            }
                             if !matches!(delta, rook_llm::Delta::Effort(_) | rook_llm::Delta::Dispatch(_) | rook_llm::Delta::ResponseMetadata { .. }) {
                                 nothing_yet = false;
                             }
@@ -87,6 +96,29 @@ impl AgentLoop<'_> {
             self.interjections.say(&text);
         }
         if let Some(e) = broke {
+            if repeating.is_some() {
+                // Loop bytes must not re-seed a reopened or compacted session.
+                // Original bounded excerpts remain outside model replay,
+                // atomically beside a neutral assistant interruption marker.
+                let diagnostic = self.vault.redact(&guard.diagnostic());
+                self.rook.store.append_event_pair_durable(
+                    self.session,
+                    rook_store::NewEvent::new(
+                        EventKind::Note,
+                        rook_store::Kind::Message,
+                        diagnostic.as_bytes(),
+                    )
+                    .label(super::repetition::DIAGNOSTIC),
+                    rook_store::NewEvent::new(
+                        EventKind::AssistantMessage,
+                        rook_store::Kind::Message,
+                        super::repetition::INTERRUPTED.as_bytes(),
+                    )
+                    .label("repetition interrupted"),
+                )?;
+                self.rook.log(self.session, EventKind::Note, "failed", &e.to_string())?;
+                return Err(e);
+            }
             // Both halves, because either can be the whole of what a turn
             // managed: a model that thought for a page and was cut before
             // its first word said something, and it is not the error.

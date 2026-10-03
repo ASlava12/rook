@@ -33,6 +33,7 @@ pub(crate) mod history;
 mod lifecycle;
 mod output;
 mod prompt;
+mod repetition;
 mod routing;
 mod setup;
 mod stream;
@@ -1855,17 +1856,21 @@ impl<'a> AgentLoop<'a> {
             request.max_output_tokens = self.room_for_output(used);
             request.cache_ttl = self.rook.config.agent.cache_ttl();
             let started = std::time::Instant::now();
-            let mut stream = self
+            let stream = self
                 .provider
                 .stream_observed(request, self.attempt_observer(crate::model_route::Purpose::FinalAnswer))
                 .await
                 .map_err(|e| CoreError::Other(e.to_string()))?;
-            let mut assembler = Assembler::default();
-            while let Some(delta) = stream.next().await {
-                let delta = delta.map_err(|e| CoreError::Other(e.to_string()))?;
-                on_progress(Progress::Delta(&delta));
-                assembler.push(delta).map_err(|e| CoreError::Other(e.to_string()))?;
-            }
+            let assembler = self
+                .receive(
+                    stream,
+                    &mut nursery,
+                    &mut nursery_steps,
+                    &mut carrying,
+                    self.rook.config.agent.stream_idle(),
+                    &mut on_progress,
+                )
+                .await?;
             let completed = assembler.finish_with_metadata();
             let response = &completed.response;
             outcome.input_tokens += response.usage.input_tokens;

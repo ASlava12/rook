@@ -1498,6 +1498,160 @@ async fn a_turn_with_no_allowance_set_is_bounded_only_by_its_steps() {
 }
 
 #[tokio::test]
+async fn repetition_interruption_keeps_diagnostics_and_clean_replay_without_executing_pending_calls() {
+    struct Repeating {
+        reasoning: bool,
+    }
+    #[async_trait]
+    impl Provider for Repeating {
+        fn id(&self) -> &str {
+            "repeating"
+        }
+        fn context_window(&self) -> usize {
+            128_000
+        }
+        async fn complete(&self, _: Request) -> rook_llm::Result<Response> {
+            Ok(reply("done"))
+        }
+        async fn stream(&self, _: Request) -> rook_llm::Result<rook_llm::ResponseStream> {
+            let looping = "RUNLOOP проверка повторяется без новых результатов 🙂.\n".repeat(1000);
+            assert!(looping.chars().count() > 16_000);
+            let mut deltas = vec![
+                Ok(rook_llm::Delta::ReasoningDone(serde_json::json!({"signature":"opaque-not-completed"}))),
+                Ok(rook_llm::Delta::ToolCall(ToolCall {
+                    id: "pending-write".into(),
+                    name: "write_file".into(),
+                    arguments: serde_json::json!({"path":"must-not-write.txt","content":"bad"}),
+                })),
+            ];
+            if self.reasoning {
+                deltas.push(Ok(rook_llm::Delta::Text("a valid prefix".into())));
+            }
+            for chunk in looping.chars().collect::<Vec<_>>().chunks(17) {
+                let text: String = chunk.iter().collect();
+                deltas.push(Ok(if self.reasoning {
+                    rook_llm::Delta::Reasoning(text)
+                } else {
+                    rook_llm::Delta::Text(text)
+                }));
+            }
+            deltas.push(Ok(rook_llm::Delta::Done {
+                stop_reason: StopReason::ToolUse,
+                usage: Usage { input_tokens: 12, output_tokens: 30, ..Default::default() },
+                model: "repeating".into(),
+            }));
+            Ok(Box::pin(futures_util::stream::iter(deltas)))
+        }
+    }
+    for reasoning in [false, true] {
+        let f = fixture();
+        let session = f.rook.start_session("repetition").unwrap();
+        let mut agent = AgentLoop::new(&f.rook, Arc::new(Repeating { reasoning }), session);
+        agent.allow_everything_not_denied();
+        let error = agent.run("inspect the workspace").await.unwrap_err();
+        assert!(
+            error.to_string().contains(if reasoning { "streamed reasoning" } else { "streamed text" }),
+            "{error}"
+        );
+        assert!(!f.rook.workspace.join("must-not-write.txt").exists());
+        let entries = f.rook.transcript(session, 0, usize::MAX, 65536).unwrap();
+        assert!(!entries.iter().any(|e| e.kind == "tool-call" || e.kind == "tool-result"));
+        let diagnostic = entries.iter().find(|e| e.label == "rook:repetition-diagnostic:v1").unwrap();
+        assert!(diagnostic.body.contains("RUNLOOP"));
+        assert!(!diagnostic.body.contains("opaque-not-completed"));
+        let assistant: Vec<_> = entries.iter().filter(|e| e.kind == "assistant").collect();
+        assert_eq!(assistant.len(), 1);
+        assert!(assistant[0].body.contains("did not finish the task"));
+        let ending = entries.iter().rev().find(|e| e.label == "rook:model-attempt:v1").unwrap();
+        let ending: serde_json::Value = serde_json::from_str(&ending.body).unwrap();
+        assert_eq!(ending["state"], "interrupted");
+        assert!(ending["usage"].is_null(), "unseen native usage must remain unknown");
+        assert_eq!(ending["completion_confirmed"], false);
+        let next = ScriptedProvider::new(vec![reply("recovered")]);
+        let seen = next.share();
+        AgentLoop::new(&f.rook, Arc::new(next), session).run("use another approach").await.unwrap();
+        {
+            let requests = seen.lock().unwrap();
+            assert!(requests[0].messages.iter().any(|m| m.content.contains("did not finish the task")));
+            assert!(
+                !requests[0]
+                    .messages
+                    .iter()
+                    .any(|m| m.content.contains("RUNLOOP") || m.content.contains("opaque-not-completed"))
+            );
+        }
+        drop(agent);
+        f.rook.store.flush().unwrap();
+        let Fixture { _store_dir, _skill_dir, workspace, rook } = f;
+        drop(rook);
+        let reopened = Rook::from_parts(
+            Store::open(_store_dir.path()).unwrap(),
+            Config::default(),
+            Environment::bare("test", "test", "0.10.0"),
+            SkillIndex::default(),
+            workspace.path().to_path_buf(),
+        );
+        let resumed = ScriptedProvider::new(vec![reply("continued")]);
+        let seen = resumed.share();
+        AgentLoop::new(&reopened, Arc::new(resumed), session).run("resume after restart").await.unwrap();
+        assert!(
+            seen.lock().unwrap()[0].messages.iter().any(|m| m.content.contains("did not finish the task"))
+        );
+        assert!(!seen.lock().unwrap()[0].messages.iter().any(|m| m.content.contains("RUNLOOP")));
+        // Exceed the retained tail so the interruption itself reaches the
+        // actual summary request, rather than testing an unused filter.
+        for i in 0..12 {
+            reopened.log(session, rook_store::EventKind::UserMessage, "", &format!("finding {i}")).unwrap();
+            reopened
+                .log(
+                    session,
+                    rook_store::EventKind::AssistantMessage,
+                    "",
+                    &format!("Established finding {i}: {}", "a distinct supported observation. ".repeat(80)),
+                )
+                .unwrap();
+        }
+        let summariser = ScriptedProvider::new(vec![reply(
+            "Rook interrupted a repeated reply; it did not finish the task. Keep the remaining work open.",
+        )]);
+        let seen = summariser.share();
+        AgentLoop::new(&reopened, Arc::new(summariser), session).compact_now().await;
+        assert!(
+            reopened.last_compaction(session).unwrap().0 > 0,
+            "the interrupted reply must actually compact"
+        );
+        let requests = seen.lock().unwrap();
+        assert_eq!(requests.len(), 1, "an actual summary request is required");
+        let material = &requests[0].messages.last().unwrap().content;
+        assert!(material.contains("did not finish the task"));
+        assert!(!material.contains("RUNLOOP") && !material.contains("opaque-not-completed"));
+    }
+}
+
+#[tokio::test]
+async fn explicitly_disabled_repetition_guard_delivers_the_requested_large_repetitive_answer() {
+    let mut config = Config::default();
+    config.agent.stream_repetition_guard = false;
+    let f = fixture_with(config);
+    let session = f.rook.start_session("deliberate repetition").unwrap();
+    let text = "this repeated requested phrase is deliberately large.\n".repeat(400);
+    assert!(text.chars().count() > 16_000);
+    let provider = ScriptedProvider::new(vec![reply(&text)]);
+    let outcome = AgentLoop::new(&f.rook, Arc::new(provider), session)
+        .run("repeat the requested phrase")
+        .await
+        .unwrap();
+    assert_eq!(outcome.reply, text);
+    assert!(
+        !f.rook
+            .transcript(session, 0, usize::MAX, 128)
+            .unwrap()
+            .iter()
+            .any(|e| e.label == "rook:repetition-diagnostic:v1")
+    );
+}
+
+#[tokio::test]
 async fn a_turn_that_broke_keeps_what_it_had_already_said() {
     let f = fixture();
     let session = f.rook.start_session("cut off").unwrap();
@@ -4690,7 +4844,10 @@ async fn what_the_model_worked_out_is_carried_back_to_it_shortened() {
     let f = fixture();
     std::fs::write(f.workspace.path().join("p.txt"), "payload").unwrap();
     let session = f.rook.start_session("thinking").unwrap();
-    let thought = format!("FIRST LINE\n{}\nLAST LINE", "working it out, at length. ".repeat(2_000));
+    // This fixture measures shortening legitimate thought, not a model loop.
+    let distinct: String =
+        (0..2_000).map(|i| format!("working out distinct finding {i}, at length.\n")).collect();
+    let thought = format!("FIRST LINE\n{distinct}\nLAST LINE");
     assert!(
         rook_core::context::estimate_tokens(&thought) > 10_000,
         "the precondition: a thought far past the 800-token budget"
