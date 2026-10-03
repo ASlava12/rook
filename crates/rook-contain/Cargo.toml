@@ -8,6 +8,7 @@ description = "Containing a command on Windows: a low integrity level, and the d
 
 [dependencies]
 cap-std = "4.0.3"
+cap-fs-ext = "4.0.3"
 
 [dev-dependencies]
 tempfile = "3.27.0"

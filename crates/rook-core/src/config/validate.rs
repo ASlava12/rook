@@ -7,6 +7,26 @@ impl Config {
     /// so a broken file can still be inspected and repaired.
     pub fn validation_errors(&self) -> Vec<String> {
         let mut errors = Vec::new();
+        for (name, value, low, high) in [
+            ("worktree_recovery_max_files", self.agent.worktree_recovery_max_files, 1, 65536),
+            ("worktree_recovery_max_bytes", self.agent.worktree_recovery_max_bytes, 1, 256 * 1024 * 1024),
+            (
+                "worktree_recovery_max_file_bytes",
+                self.agent.worktree_recovery_max_file_bytes,
+                1,
+                64 * 1024 * 1024,
+            ),
+            (
+                "worktree_recovery_max_metadata_bytes",
+                self.agent.worktree_recovery_max_metadata_bytes,
+                1024,
+                16 * 1024 * 1024,
+            ),
+        ] {
+            if !(low..=high).contains(&value) {
+                errors.push(format!("agent.{name}: expected {low}..={high}"));
+            }
+        }
         errors.extend(self.price_catalog.errors());
         if self.hooks.iter().any(|hook| hook.ui_stream && !hook.ui) {
             errors.push("hooks.ui_stream requires ui = true".into());

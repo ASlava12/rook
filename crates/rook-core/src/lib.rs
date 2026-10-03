@@ -67,6 +67,7 @@ pub mod transcript;
 pub mod turns;
 pub mod upgrade;
 pub mod work;
+pub mod worktree_recovery;
 mod worktrees;
 
 pub use config::{ApiEndpoint, Config, ConfigError, ModelSource};

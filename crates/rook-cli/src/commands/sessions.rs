@@ -7,6 +7,17 @@ use anyhow::Result;
 use rook_core::SessionSummary;
 use std::path::Path;
 
+pub(crate) fn worktree_arguments(arguments: &str) -> Result<(u128, Option<String>)> {
+    anyhow::ensure!(arguments.len() <= 256, "worktree arguments exceed 256 bytes");
+    let fields: Vec<_> = arguments.split_whitespace().collect();
+    anyhow::ensure!(
+        fields.len() == 1 || (fields.len() == 3 && fields[1] == "restore"),
+        "use /worktree <child-id> [restore <review_token>]"
+    );
+    let child = session_id(fields[0])?;
+    Ok((child, fields.get(2).map(|s| (*s).to_owned())))
+}
+
 pub(crate) fn describe_turns(page: &rook_core::turns::Page) -> String {
     let mut text = rook_core::turns::describe(page);
     for entry in &page.items {
@@ -43,6 +54,12 @@ pub(crate) fn diagnostic_arguments(arguments: &str) -> Result<(bool, std::path::
 }
 
 pub(crate) fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, json: bool) -> Result<()> {
+    if let SessionCmd::Worktree { parent, child, restore } = &cmd {
+        let parent = source.session_named(parent, workspace)?;
+        let child = session_id(child)?;
+        println!("{}", serde_json::to_string_pretty(&source.worktree(parent, child, restore.as_deref())?)?);
+        return Ok(());
+    }
     if let SessionCmd::SummaryDraft { source: from, target, suggest } = &cmd {
         let from = source.session_named(from, workspace)?;
         let to = source.session_named(target, workspace)?;
@@ -353,7 +370,8 @@ pub(crate) fn cmd_session(source: &Source, cmd: SessionCmd, workspace: &Path, js
         return show_rewind(&source.rewind(session, *to, !keep_files)?, *keep_files, json);
     }
     match cmd {
-        SessionCmd::SummaryDraft { .. }
+        SessionCmd::Worktree { .. }
+        | SessionCmd::SummaryDraft { .. }
         | SessionCmd::Summary { .. }
         | SessionCmd::Rename { .. }
         | SessionCmd::Bookmarks { .. }

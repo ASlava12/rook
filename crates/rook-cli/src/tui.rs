@@ -1851,6 +1851,9 @@ impl App {
             self.drain_turn_events();
             self.tasks.poll();
             self.history.poll();
+            if let Some(result) = self.history.take_worktree() {
+                self.chat.push("stat", &result);
+            }
             if let Some(notice) = self.history.take_saved_summary() {
                 self.chat.push("stat", &notice);
             }
@@ -3561,6 +3564,20 @@ impl App {
             self.chat.push("stat", &said);
             return;
         }
+        if name == "worktree" {
+            let Some(parent) = self.chat.session else {
+                return self.chat.push("err", "start or resume the parent session first");
+            };
+            if let Err(e) = crate::commands::sessions::worktree_arguments(rest) {
+                return self.chat.push("err", &e.to_string());
+            }
+            if self.history.worktree(parent, rest) {
+                self.chat.push("stat", "Preparing worktree diagnosis/restoration in the history worker…");
+            } else {
+                self.chat.push("err", "History worker is busy; try again when it finishes.");
+            }
+            return;
+        }
         let configured = crate::turn_options::configure(command, &mut self.shared.output.borrow_mut());
         if let Some(result) = configured {
             self.chat.push("stat", &result.unwrap_or_else(|e| e.to_string()));
@@ -3964,6 +3981,8 @@ impl App {
                 || command == "diagnostics"
                 || command.starts_with("diagnostics ")
                 || command == "export-html"
+                || command == "worktree"
+                || command.starts_with("worktree ")
                 || command.starts_with("export-html "))
         {
             self.command(command);

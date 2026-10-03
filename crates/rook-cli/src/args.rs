@@ -440,6 +440,13 @@ pub(crate) enum StoreCmd {
 
 #[derive(Subcommand)]
 pub(crate) enum SessionCmd {
+    /// Diagnose a delegated checkout; restore only with a reviewed source token.
+    Worktree {
+        parent: String,
+        child: String,
+        #[arg(long)]
+        restore: Option<String>,
+    },
     /// Show bounded source excerpts to review before carrying a branch summary.
     SummaryDraft {
         source: String,

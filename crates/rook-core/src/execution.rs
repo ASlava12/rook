@@ -143,7 +143,10 @@ pub fn stop_identified(
 }
 
 pub(crate) fn is_active(rook: &Rook, session: u128) -> bool {
-    ACTIVE.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&(rook.store.root().to_path_buf(), session))
+    is_active_in(&rook.store, session)
+}
+pub(crate) fn is_active_in(store: &Store, session: u128) -> bool {
+    ACTIVE.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&(store.root().to_path_buf(), session))
 }
 
 fn load(store: &Store, session: u128) -> Result<Option<Execution>> {

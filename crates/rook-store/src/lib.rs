@@ -756,9 +756,18 @@ impl Store {
     }
 
     pub fn get_session(&self, id: u128) -> Result<Option<SessionMeta>> {
+        self.get_session_limited(id, usize::MAX)
+    }
+
+    /// Admit a saved session before decoding its variable-length fields.
+    pub fn get_session_limited(&self, id: u128, maximum: usize) -> Result<Option<SessionMeta>> {
         let txn = self.db.begin_read()?;
         let sessions = txn.open_table(schema::SESSIONS)?;
         match sessions.get(schema::session_key(id).as_slice())? {
+            Some(v) if v.value().len() > maximum => Err(StoreError::Encoding(format!(
+                "session {} exceeds {maximum} metadata bytes",
+                format_session_id(id)
+            ))),
             Some(v) => Ok(Some(postcard::from_bytes(v.value())?)),
             None => Ok(None),
         }

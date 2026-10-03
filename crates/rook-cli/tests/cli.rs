@@ -3481,3 +3481,6 @@ mod tool_cycles;
 
 #[path = "scenarios/prices.rs"]
 mod prices;
+
+#[path = "scenarios/worktrees.rs"]
+mod worktrees;

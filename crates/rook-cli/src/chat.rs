@@ -62,6 +62,7 @@ fn editor() -> Result<rustyline::Editor<Pasting, rustyline::history::DefaultHist
 /// second hand-written copy of the answer is one that drifts.
 pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("diagnostics", "[--logs] [new-file-path]", "export local diagnostics; logs are opt-in"),
+    ("worktree", "CHILD [restore REVIEW_TOKEN]", "diagnose/restore a missing registered child checkout"),
     ("export-html", "[FROM..THROUGH] NEW_FILE", "download bounded saved history as local HTML"),
     (
         "recovery",
@@ -842,6 +843,43 @@ async fn through_the_daemon(
                         Err(error) => eprintln!("{error}"),
                     }
                 }
+                "worktree" => {
+                    if let Some(parent) = session.as_deref().and_then(rook_store::parse_session_id) {
+                        let (child, token) = crate::commands::sessions::worktree_arguments(rest)?;
+                        let client = reqwest::Client::builder()
+                            .no_proxy()
+                            .timeout(std::time::Duration::from_secs(90))
+                            .build()?;
+                        let url = format!(
+                            "{}/api/sessions/{}/worktrees/{}",
+                            link.base,
+                            rook_store::format_session_id(parent),
+                            rook_store::format_session_id(child)
+                        );
+                        let request = match token {
+                            Some(token) => client.post(&url).json(&serde_json::json!({"review_token":token})),
+                            None => client.get(&url),
+                        };
+                        let mut result = request.send().await?;
+                        let status = result.status();
+                        let mut bytes = Vec::new();
+                        while let Some(chunk) = result.chunk().await? {
+                            anyhow::ensure!(
+                                chunk.len() <= (256usize * 1024).saturating_sub(bytes.len()),
+                                "worktree response exceeds 262144 bytes"
+                            );
+                            bytes.extend_from_slice(&chunk);
+                        }
+                        let body: serde_json::Value = serde_json::from_slice(&bytes)?;
+                        if status.is_success() {
+                            println!("{}", serde_json::to_string_pretty(&body)?);
+                        } else {
+                            eprintln!("{body}");
+                        }
+                    } else {
+                        eprintln!("start or resume the parent session first");
+                    }
+                }
                 "recovery" => {
                     if let Some(session) = session.as_deref().and_then(rook_store::parse_session_id) {
                         let client = reqwest::Client::builder()
@@ -1240,6 +1278,15 @@ pub async fn dispatch(rook: &Rook, session: &mut u128, shared: &Session, command
                 output.display(),
                 report.shortened
             );
+        }
+        "worktree" => {
+            let (child, token) = crate::commands::sessions::worktree_arguments(rest)?;
+            let request = rook_core::worktree_recovery::prepare(rook, *session, child)?;
+            let report = match token {
+                Some(token) => request.restore(&token).await?,
+                None => request.inspect().await?,
+            };
+            say!("{}", serde_json::to_string_pretty(&report)?);
         }
         "recovery" => {
             if !rest.is_empty() {

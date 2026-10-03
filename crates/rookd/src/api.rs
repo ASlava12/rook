@@ -22,6 +22,8 @@ type Shared = Arc<AppState>;
 // work before spawning it; the owned permit also survives an HTTP disconnect.
 static IMAGE_READS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(2)));
+static WORKTREE_RECOVERIES: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(2)));
 
 pub fn router(state: Shared) -> Router {
     let allowed = state.rook.try_read().map(|r| r.config.server.allowed_hosts.clone()).unwrap_or_default();
@@ -34,6 +36,10 @@ pub fn router(state: Shared) -> Router {
         .route("/api/store/refs", get(refs))
         .route("/api/sessions", get(sessions))
         .route("/api/sessions/{id}/recovery", get(execution).post(acknowledge_operation))
+        .route(
+            "/api/sessions/{parent}/worktrees/{child}",
+            get(worktree_diagnosis).post(restore_worktree).layer(axum::extract::DefaultBodyLimit::max(4096)),
+        )
         .route("/api/sessions/{id}/diagnostics", get(diagnostics))
         .route("/api/sessions/{id}/transcript", get(transcript))
         .route("/api/sessions/{id}/turns", get(turns))
@@ -259,6 +265,74 @@ async fn execution(
     Path(id): Path<String>,
 ) -> ApiResult<Vec<rook_core::execution::Execution>> {
     Ok(Json(s.rook.read().await.execution(session_id(&id)?)?))
+}
+
+async fn worktree_request(
+    s: &Shared,
+    parent: u128,
+    child: u128,
+) -> std::result::Result<rook_core::worktree_recovery::Request, Fail> {
+    let workspace = s
+        .rook
+        .read()
+        .await
+        .store
+        .get_session_limited(parent, 256 * 1024)
+        .map_err(CoreError::from)?
+        .ok_or_else(|| CoreError::NoSession(rook_store::format_session_id(parent)))?
+        .workspace;
+    let engine = s.engine_for(Some(std::path::Path::new(&workspace))).await.map_err(CoreError::Other)?;
+    let request = rook_core::worktree_recovery::prepare(&*engine.read().await, parent, child)?;
+    Ok(request)
+}
+
+async fn worktree_operation(
+    s: Shared,
+    parent: u128,
+    child: u128,
+    token: Option<String>,
+) -> ApiResult<rook_core::worktree_recovery::Report> {
+    let permit = WORKTREE_RECOVERIES.clone().try_acquire_owned().map_err(|_| {
+        CoreError::Other("worktree recovery is busy; try again after the current operation finishes".into())
+    })?;
+    let request = worktree_request(&s, parent, child).await?;
+    let report = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| CoreError::Other(e.to_string()))?;
+        runtime.block_on(async {
+            match token {
+                Some(token) => request.restore(&token).await,
+                None => request.inspect().await,
+            }
+        })
+    })
+    .await
+    .map_err(|e| CoreError::Other(e.to_string()))??;
+    Ok(Json(report))
+}
+
+async fn worktree_diagnosis(
+    State(s): State<Shared>,
+    Path((parent, child)): Path<(String, String)>,
+) -> ApiResult<rook_core::worktree_recovery::Report> {
+    worktree_operation(s, session_id(&parent)?, session_id(&child)?, None).await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorktreeRestore {
+    review_token: String,
+}
+
+async fn restore_worktree(
+    State(s): State<Shared>,
+    Path((parent, child)): Path<(String, String)>,
+    Json(body): Json<WorktreeRestore>,
+) -> ApiResult<rook_core::worktree_recovery::Report> {
+    worktree_operation(s, session_id(&parent)?, session_id(&child)?, Some(body.review_token)).await
 }
 
 #[derive(Deserialize)]

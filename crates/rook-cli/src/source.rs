@@ -336,6 +336,46 @@ impl Source {
         Ok(serde_json::to_string_pretty(&self.execution(session)?)?)
     }
 
+    pub fn worktree(
+        &self,
+        parent: u128,
+        child: u128,
+        token: Option<&str>,
+    ) -> Result<rook_core::worktree_recovery::Report> {
+        match self {
+            Self::Local(rook) => {
+                let request = rook_core::worktree_recovery::prepare(rook, parent, child)?;
+                let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+                Ok(runtime.block_on(async {
+                    match token {
+                        Some(token) => request.restore(token).await,
+                        None => request.inspect().await,
+                    }
+                })?)
+            }
+            Self::Daemon(daemon) => {
+                let path = format!(
+                    "/api/sessions/{}/worktrees/{}",
+                    rook_store::format_session_id(parent),
+                    rook_store::format_session_id(child)
+                );
+                match token {
+                    Some(token) => daemon.request_bounded(
+                        &path,
+                        Some(&serde_json::json!({"review_token":token})),
+                        256 * 1024,
+                    ),
+                    None => daemon.request_bounded(&path, None, 256 * 1024),
+                }
+            }
+        }
+    }
+
+    pub fn worktree_command(&self, parent: u128, arguments: &str) -> Result<String> {
+        let (child, token) = crate::commands::sessions::worktree_arguments(arguments)?;
+        Ok(serde_json::to_string_pretty(&self.worktree(parent, child, token.as_deref())?)?)
+    }
+
     pub fn execution(&self, session: u128) -> Result<Vec<rook_core::execution::Execution>> {
         match self {
             Self::Local(rook) => Ok(rook.execution(session)?),

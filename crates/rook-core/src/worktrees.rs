@@ -8,6 +8,7 @@ use crate::{CoreError, Result, Rook};
 
 pub(crate) const TOOL: &str = "worktree";
 const GIT_BYTES: usize = 256 * 1024;
+const META_BYTES: usize = 256 * 1024;
 static CREATION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 // Shared workspace turns may coexist; removal must exclude even a child later
@@ -18,21 +19,49 @@ static USES: std::sync::Mutex<std::collections::BTreeMap<PathBuf, Option<usize>>
 pub(crate) struct Lease(PathBuf);
 impl Lease {
     pub(crate) fn acquire(path: &Path, removing: bool) -> Result<Self> {
-        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let path = lease_path(path)?;
         let mut uses = USES.lock().unwrap_or_else(|e| e.into_inner());
         match uses.get_mut(&path) {
             Some(_) if removing => {
                 return Err(CoreError::Other(
-                    "worktree has an active turn; wait for it to finish before removal".into(),
+                    "worktree has an active turn; wait for it to finish before removal or restoration".into(),
                 ));
             }
-            Some(None) => return Err(CoreError::Other("worktree removal is in progress".into())),
+            Some(None) => {
+                return Err(CoreError::Other("worktree removal or restoration is in progress".into()));
+            }
             Some(Some(count)) => *count += 1,
             None => {
                 uses.insert(path.clone(), (!removing).then_some(1));
             }
         }
         Ok(Self(path))
+    }
+}
+
+pub(crate) fn lease_path(path: &Path) -> Result<PathBuf> {
+    let mut ancestor = path;
+    let mut suffix = Vec::new();
+    loop {
+        match ancestor.canonicalize() {
+            Ok(mut base) => {
+                for part in suffix.iter().rev() {
+                    base.push(part);
+                }
+                return Ok(base);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                suffix.push(
+                    ancestor
+                        .file_name()
+                        .ok_or_else(|| CoreError::Other("workspace has no existing ancestor".into()))?,
+                );
+                ancestor = ancestor
+                    .parent()
+                    .ok_or_else(|| CoreError::Other("workspace has no existing ancestor".into()))?;
+            }
+            Err(e) => return Err(CoreError::Other(format!("cannot establish workspace lease: {e}"))),
+        }
     }
 }
 impl Drop for Lease {
@@ -47,7 +76,7 @@ impl Drop for Lease {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct Worktree {
     pub path: PathBuf,
     pub repository: PathBuf,
@@ -56,13 +85,13 @@ pub(crate) struct Worktree {
     pub removed: bool,
 }
 
-fn key(session: u128) -> String {
+pub(crate) fn key(session: u128) -> String {
     format!("worktree/{session:032x}")
 }
 
 impl Worktree {
     pub(crate) fn save(&self, rook: &Rook, session: u128) -> Result<()> {
-        rook.store.kv_set(&key(session), &serde_json::to_vec(self)?)?;
+        rook.store.kv_set(&key(session), &crate::persistence::encode_with_limit(self, META_BYTES)?)?;
         Ok(())
     }
 
@@ -80,7 +109,7 @@ impl Worktree {
 
 // No shell, no repository hooks or external diff programs. Bound both the wait
 // and captured bytes; a large diff is an error with a narrower alternative.
-async fn git(root: &Path, args: &[&str]) -> Result<String> {
+pub(crate) async fn git(root: &Path, args: &[&str]) -> Result<String> {
     let mut command = tokio::process::Command::new("git");
     #[cfg(windows)]
     command.creation_flags(rook_contain::NO_WINDOW);
@@ -91,6 +120,10 @@ async fn git(root: &Path, args: &[&str]) -> Result<String> {
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("LC_ALL", "C")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -163,7 +196,7 @@ pub(crate) struct Finished<'a>(pub &'a Rook, pub u128);
 impl Drop for Finished<'_> {
     fn drop(&mut self) {
         let result = (|| -> Result<()> {
-            if let Some(bytes) = self.0.store.kv_get(&key(self.1))? {
+            if let Some(bytes) = self.0.store.kv_get_limited(&key(self.1), META_BYTES)? {
                 let mut tree: Worktree = serde_json::from_slice(&bytes)?;
                 tree.finished = true;
                 tree.save(self.0, self.1)?;
@@ -220,7 +253,7 @@ pub(crate) async fn create(rook: &Rook, session: u128) -> Result<Worktree> {
 pub(crate) fn retained_path(rook: &Rook, session: u128) -> Result<Option<PathBuf>> {
     Ok(rook
         .store
-        .kv_get(&key(session))?
+        .kv_get_limited(&key(session), META_BYTES)?
         .map(|bytes| serde_json::from_slice::<Worktree>(&bytes))
         .transpose()?
         .map(|tree| tree.path))
@@ -233,12 +266,12 @@ pub(crate) fn owned(rook: &Rook, parent: u128, args: &Value) -> Result<(u128, Wo
         )?;
     let session = rook
         .store
-        .get_session(id)?
+        .get_session_limited(id, META_BYTES)?
         .filter(|s| s.parent == Some(parent))
         .ok_or_else(|| CoreError::Other("this is not a direct child of the current session".into()))?;
     let tree: Worktree = rook
         .store
-        .kv_get(&key(session.id))?
+        .kv_get_limited(&key(session.id), META_BYTES)?
         .map(|v| serde_json::from_slice(&v))
         .transpose()?
         .ok_or_else(|| CoreError::Other("this child has no isolated worktree".into()))?;
@@ -251,7 +284,24 @@ pub(crate) fn owned(rook: &Rook, parent: u128, args: &Value) -> Result<(u128, Wo
 pub(crate) async fn inspect(rook: &Rook, parent: u128, args: &Value, vault: &crate::Vault) -> Result<String> {
     let (id, mut tree) = owned(rook, parent, args)?;
     match args.get("action").and_then(Value::as_str).unwrap_or("status") {
+        "diagnose" => {
+            Ok(serde_json::to_string(&crate::worktree_recovery::prepare(rook, parent, id)?.inspect().await?)?)
+        }
+        "restore" => {
+            let token = args
+                .get("review_token")
+                .and_then(Value::as_str)
+                .ok_or_else(|| CoreError::Other("restore needs review_token from action=diagnose".into()))?;
+            Ok(serde_json::to_string(
+                &crate::worktree_recovery::prepare(rook, parent, id)?.restore(token).await?,
+            )?)
+        }
         "status" => {
+            if !tree.path.join(".git").is_file() {
+                return Ok(serde_json::to_string(
+                    &crate::worktree_recovery::prepare(rook, parent, id)?.inspect().await?,
+                )?);
+            }
             Ok(json!({"session":rook_store::format_session_id(id), "path":tree.path, "base":tree.base,
             "finished":tree.finished, "status":vault.redact(&git(&tree.path, &["status", "--short"]).await?)})
             .to_string())
@@ -288,7 +338,7 @@ pub(crate) async fn inspect(rook: &Rook, parent: u128, args: &Value, vault: &cra
             tree.save(rook, id)?;
             Ok("worktree removed; the child transcript remains in the store".into())
         }
-        _ => Err(CoreError::Other("action must be status, diff, read or remove".into())),
+        _ => Err(CoreError::Other("action must be status, diff, read, diagnose, restore or remove".into())),
     }
 }
 
@@ -308,5 +358,21 @@ mod tests {
         assert!(Lease::acquire(root.path(), false).is_err());
         drop(removal);
         assert!(Lease::acquire(root.path(), false).is_ok());
+    }
+    #[test]
+    fn an_existing_workspace_lease_still_excludes_restoration_after_its_directory_disappears() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("checkout");
+        std::fs::create_dir(&path).unwrap();
+        let running = Lease::acquire(&path, false).unwrap();
+        std::fs::remove_dir(&path).unwrap();
+        assert!(!path.exists());
+        assert!(Lease::acquire(&path, true).is_err(), "the missing directory must retain its lease identity");
+        drop(running);
+        let restoring = Lease::acquire(&path, true).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(Lease::acquire(&path, false).is_err(), "recreation cannot bypass restoration's lease");
+        drop(restoring);
+        assert!(Lease::acquire(&path, false).is_ok());
     }
 }

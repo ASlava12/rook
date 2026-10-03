@@ -4,6 +4,7 @@ import { $, el, api, ago, state, nav } from './lib.js';
 import { continueIn, quoteIntoDraft, branchFromEvent } from './chat.js';
 import { historyPanel } from './history.js';
 import { branchPanel } from './branches.js';
+import { worktreePanel } from './worktrees.js';
 
 let follow = 0;
 
@@ -111,6 +112,8 @@ export async function renderSessions() {
       right.append(el('p', { class: 'warn' }, 'the workspace was too large to walk, so more may have been written'));
     }
     const session = state.session;
+    right.append(worktreePanel(session, items.filter(s => String(s.parent) === String(session)),
+      () => token === follow && state.tab === 'sessions' && String(state.session) === String(session) && right.isConnected));
     const branches = el('details', {}, el('summary', {}, 'Conversation branches'));
     branches.addEventListener('toggle', () => {
       branches.querySelector('section')?.remove();

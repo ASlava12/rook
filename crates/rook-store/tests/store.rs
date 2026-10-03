@@ -1,5 +1,16 @@
 use rook_store::{EventKind, Kind, NewEvent, ObjectId, SessionMeta, Store};
 
+#[test]
+fn session_metadata_admission_refuses_an_actual_oversized_saved_record() {
+    let (_dir, store) = tmp_store();
+    let id = rook_store::new_session_id();
+    let session = SessionMeta::new(id, "x".repeat(4096), "/owned", 0);
+    store.create_session(&session).unwrap();
+    assert!(store.get_session(id).unwrap().unwrap().title.len() > 128);
+    assert!(store.get_session_limited(id, 128).unwrap_err().to_string().contains("128"));
+    assert_eq!(store.get_session_limited(id, 8192).unwrap().unwrap().title, session.title);
+}
+
 /// xorshift64*, so "incompressible" test data really is incompressible.
 fn noise(len: usize, seed: u64) -> Vec<u8> {
     let mut x = seed | 1;

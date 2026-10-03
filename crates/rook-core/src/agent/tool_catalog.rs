@@ -170,10 +170,11 @@ impl<'a> AgentLoop<'a> {
         if self.depth < MAX_DEPTH {
             push(ToolSpec {
                 name: crate::worktrees::TOOL.into(),
-                description: "Review or remove a delegated worktree; read files to transfer selected edits."
+                description: "Review/remove a delegated worktree, or diagnose and explicitly restore its missing checkout from the registered index."
                     .into(),
                 parameters: json!({"type":"object", "properties":{
-                    "session":{"type":"string"}, "action":{"type":"string","enum":["status","diff","read","remove"]},
+                    "session":{"type":"string"}, "action":{"type":"string","enum":["status","diff","read","remove","diagnose","restore"]},
+                    "review_token":{"type":"string"},
                     "path":{"type":"string"}, "offset":{"type":"integer"}, "limit":{"type":"integer"},
                     "discard":{"type":"boolean"}
                 }, "required":["session"]}),

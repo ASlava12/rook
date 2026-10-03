@@ -34,6 +34,7 @@ pub(super) struct History {
     quote: Option<String>,
     suggestion: Option<(u128, Result<rook_core::branches::SummaryDraft, String>)>,
     exported: Option<std::result::Result<(PathBuf, crate::commands::html_export::Report), String>>,
+    worktree_result: Option<String>,
     send: Option<SyncSender<(u64, Command)>>,
     receive: Receiver<(u64, Result<Update>)>,
 }
@@ -43,6 +44,7 @@ struct SummaryReview {
     through: u64,
 }
 enum Command {
+    Worktree(u128, String),
     Export(u128, u64, Option<u64>, PathBuf),
     Draft(u128, u128),
     Suggest(u128, u128),
@@ -59,6 +61,7 @@ enum Command {
     Quote(u128, u64, u64),
 }
 enum Update {
+    Worktree(u128, Result<String, String>),
     Exported(std::result::Result<(PathBuf, crate::commands::html_export::Report), String>),
     Suggested(u128, Result<rook_core::branches::SummaryDraft, String>),
     Carried(SummaryReview, Result<u64, String>),
@@ -75,6 +78,9 @@ enum Update {
 impl Command {
     fn read(self, source: &crate::source::Source) -> Result<Update> {
         Ok(match self {
+            Self::Worktree(parent, args) => {
+                Update::Worktree(parent, source.worktree_command(parent, &args).map_err(|e| e.to_string()))
+            }
             Self::Export(session, from, through, path) => Update::Exported(
                 crate::commands::html_export::save(source, session, from, through, &path)
                     .map(|report| (path, report))
@@ -167,6 +173,7 @@ impl History {
             quote: None,
             suggestion: None,
             exported: None,
+            worktree_result: None,
             send,
             receive,
         }
@@ -243,8 +250,29 @@ impl History {
         self.epoch = self.epoch.wrapping_add(1);
         self.ask(Command::Export(session, from, through, path))
     }
+    pub(super) fn worktree(&mut self, parent: u128, arguments: &str) -> bool {
+        if self.pending || arguments.len() > 256 {
+            return false;
+        }
+        self.epoch = self.epoch.wrapping_add(1);
+        self.ask(Command::Worktree(parent, arguments.to_owned()))
+    }
+    pub(super) fn take_worktree(&mut self) -> Option<String> {
+        self.worktree_result.take()
+    }
     pub(super) fn poll(&mut self) {
         while let Ok((epoch, update)) = self.receive.try_recv() {
+            if let Ok(Update::Worktree(parent, result)) = update {
+                self.worktree_result = Some(format!(
+                    "Worktree operation for parent {}:\n{}",
+                    rook_store::format_session_id(parent),
+                    result.unwrap_or_else(|e| e)
+                ));
+                if epoch == self.epoch {
+                    self.pending = false;
+                }
+                continue;
+            }
             // A saved summary remains reportable even if another viewer opened
             // before the reply. Only the original view may continue its branch.
             if let Ok(Update::Carried(mut review, result)) = update {
@@ -301,6 +329,9 @@ impl History {
             self.pending = false;
             self.note.clear();
             match update {
+                Ok(Update::Worktree(_, _)) => {
+                    unreachable!("worktree completion handled before stale read filtering")
+                }
                 Ok(Update::Fork(_)) => unreachable!("fork completion handled before stale read filtering"),
                 Ok(Update::Exported(_)) => {
                     unreachable!("export completion handled before stale read filtering")

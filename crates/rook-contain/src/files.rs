@@ -1,10 +1,186 @@
 //! Directory-relative operations keep validation and I/O in the same boundary.
+use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::Path;
 
 fn directory(root: &Path) -> io::Result<Dir> {
     Dir::open_ambient_dir(root, cap_std::ambient_authority())
+}
+
+/// UTF-8 Git paths omit the Windows verbatim prefix returned by canonicalize.
+/// Git's environment and gitdir marker parser do not accept that Win32 spelling.
+pub fn git_path(path: &Path) -> io::Result<String> {
+    let text = path.to_str().ok_or_else(|| io::Error::other("Git path is not UTF-8"))?;
+    #[cfg(windows)]
+    {
+        if let Some(unc) = text.strip_prefix("\\\\?\\UNC\\") {
+            return Ok(format!("//{}", unc.replace('\\', "/")));
+        }
+        Ok(text.strip_prefix("\\\\?\\").unwrap_or(text).replace('\\', "/"))
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(text.to_owned())
+    }
+}
+
+/// A retained restore boundary. Every traversed directory is opened without
+/// following links; publishing never replaces a concurrently created entry.
+pub struct RecoveryFiles(Dir);
+impl RecoveryFiles {
+    pub fn open(root: &Path, inside: &Path, create: bool) -> io::Result<Self> {
+        relative(inside)?;
+        Ok(Self(recovery_parent(directory(root)?, inside, create)?))
+    }
+
+    pub fn metadata(&self, path: &Path) -> io::Result<std::fs::Metadata> {
+        relative(path)?;
+        let (parent, name) = self.parent(path, false)?;
+        // Opening without following the final link binds the size admission
+        // to the actual input rather than a replacement symlink's target.
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        parent.open_with(name, &options)?.into_std().metadata()
+    }
+
+    pub fn exists(&self, path: &Path) -> io::Result<bool> {
+        relative(path)?;
+        let (parent, name) = match self.parent(path, false) {
+            Ok(pair) => pair,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e),
+        };
+        match parent.symlink_metadata(name) {
+            Ok(_) => Ok(true),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn read(&self, path: &Path, maximum: usize) -> io::Result<Vec<u8>> {
+        relative(path)?;
+        let (parent, name) = self.parent(path, false)?;
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        let file = parent.open_with(name, &options)?.into_std();
+        if !file.metadata()?.is_file() || file.metadata()?.len() > maximum as u64 {
+            return Err(io::Error::other("recovery metadata is not a bounded regular file"));
+        }
+        let mut bytes = Vec::new();
+        file.take(maximum as u64 + 1).read_to_end(&mut bytes)?;
+        if bytes.len() > maximum {
+            return Err(io::Error::other("recovery metadata grew past its byte limit"));
+        }
+        Ok(bytes)
+    }
+
+    pub fn write_new(&self, path: &Path, bytes: &[u8]) -> io::Result<bool> {
+        self.publish(path, |file| {
+            file.write_all(bytes)?;
+            Ok(())
+        })
+    }
+
+    pub fn copy_new(
+        &self,
+        path: &Path,
+        input: &mut std::fs::File,
+        maximum: u64,
+        executable: bool,
+    ) -> io::Result<bool> {
+        if !input.metadata()?.is_file() || input.metadata()?.len() > maximum {
+            return Err(io::Error::other("recovery input exceeds its file limit"));
+        }
+        self.publish(path, |output| {
+            let copied = io::copy(&mut input.take(maximum.saturating_add(1)), output)?;
+            if copied > maximum {
+                return Err(io::Error::other("recovery input grew past its file limit"));
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                output.set_permissions(std::fs::Permissions::from_mode(if executable {
+                    0o755
+                } else {
+                    0o644
+                }))?;
+            }
+            #[cfg(not(unix))]
+            let _ = executable;
+            Ok(())
+        })
+    }
+
+    pub fn symlink_new(&self, path: &Path, target: &Path) -> io::Result<bool> {
+        relative(path)?;
+        let (parent, name) = self.parent(path, true)?;
+        #[cfg(unix)]
+        let created = parent.symlink_contents(target, name);
+        #[cfg(not(unix))]
+        let created = parent.symlink_file(target, name);
+        match created {
+            Ok(()) => {
+                sync_directory(&parent);
+                Ok(true)
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn parent<'a>(&self, path: &'a Path, create: bool) -> io::Result<(Dir, &'a std::ffi::OsStr)> {
+        let name = path.file_name().ok_or_else(|| io::Error::other("recovery filename is missing"))?;
+        let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        Ok((recovery_parent(self.0.try_clone()?, parent, create)?, name))
+    }
+    fn publish(
+        &self,
+        path: &Path,
+        fill: impl FnOnce(&mut std::fs::File) -> io::Result<()>,
+    ) -> io::Result<bool> {
+        relative(path)?;
+        let (parent, name) = self.parent(path, true)?;
+        if parent.symlink_metadata(name).is_ok() {
+            return Ok(false);
+        }
+        let (temp, file) = temporary(&parent, true)?;
+        let mut file = file.into_std();
+        let result = (|| {
+            fill(&mut file)?;
+            file.sync_all()?;
+            drop(file);
+            match parent.hard_link(&temp, &parent, name) {
+                Ok(()) => {
+                    sync_directory(&parent);
+                    Ok(true)
+                }
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+                Err(e) => Err(e),
+            }
+        })();
+        let _ = parent.remove_file(&temp);
+        result
+    }
+}
+
+fn recovery_parent(mut dir: Dir, path: &Path, create: bool) -> io::Result<Dir> {
+    relative(path)?;
+    for part in path.components() {
+        if part == std::path::Component::CurDir {
+            continue;
+        }
+        let name = part.as_os_str();
+        if create {
+            match dir.create_dir(name) {
+                Ok(()) => sync_directory(&dir),
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e),
+            }
+        }
+        dir = dir.open_dir_nofollow(name)?;
+    }
+    Ok(dir)
 }
 
 fn relative(path: &Path) -> io::Result<()> {

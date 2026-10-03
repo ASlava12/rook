@@ -128,6 +128,10 @@
     "kind": "integer",
     "help": "Retained isolated worktrees per repository. Zero disables their creation."
   },
+  "agent.worktree_recovery_max_files": {"kind":"integer","help":"Index entries admitted before restoring a missing registered checkout (1..=65536, default 4096)."},
+  "agent.worktree_recovery_max_bytes": {"kind":"integer","help":"Total raw Git blob bytes admitted before restoration (1..=268435456, default 67108864)."},
+  "agent.worktree_recovery_max_file_bytes": {"kind":"integer","help":"Maximum raw Git blob size for restoration (1..=67108864, default 16777216)."},
+  "agent.worktree_recovery_max_metadata_bytes": {"kind":"integer","help":"Maximum index and Git metadata/output bytes admitted before copying (1024..=16777216, default 2097152)."},
   "agent.max_turn_tokens": {
     "kind": "integer",
     "help": "Everything one turn may spend, its sub-agents included. 0 lifts it."

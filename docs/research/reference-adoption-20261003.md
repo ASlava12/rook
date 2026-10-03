@@ -13,7 +13,7 @@ Reference commits identify mechanisms, not code to copy wholesale.
 | Browser rendering batches | Done | Bounded frame batching, final/error/Stop flush, socket/session/turn/view ownership and history races; actual Edge 1,134 to 36 parses with full fenced text; drafts/questions/queue receipts, Node/assets tests and CI exit 0 |
 | ACP child/compaction/error events | Done | Negotiated v1 object capabilities, directed tasks/answers, child editor bridges/states and restricted controls, bounded recovery and durable compaction IDs; actual owned wire/core/transport and reopen fixtures; CI and compaction exit 0 |
 | Model/price reference catalog | Done | Bounded explicit models.dev refresh/offline cache, exact direct-cloud identity and source/age, reviewed missing-rate application across CLI/terminal/browser/daemon, manual/live precedence and frozen costs; reached bounds/contention, account/environment/cache/alias/reopen tests; CI and compaction exit 0 |
-| Delegated worktree recovery | Pending | Read-only diagnosis plus explicit restore, registered checkout identity, preservation of recreated/dirty files, leases/path/platform bounds, local/daemon checks and CI |
+| Delegated worktree recovery | Done | Read-only diagnosis and reviewed registered-index restoration across CLI/REPL/TUI/browser/daemon/tools, recreated/dirty file preservation, missing live lease and Windows/link/admission bounds, actual native/reopen and index-version fixtures; CI and compaction exit 0 |
 | Delegation progress persistence audit | Pending | Measured write/queue behavior under streamed updates, no full-history snapshots, durable critical receipts, bounded delivery and CI |
 | Rooted runtime reuse audit | Pending | MCP/LSP/approval reuse, generation invalidation, execution-root trust isolation and delivery responsiveness during background preparation; fixes if needed and CI |
 | Long-task compaction scenario | Pending | Actual before/compaction/replacement/next request with accepted correction, pending question and retained rejected approach; saved/reopen/opaque-state invariants and CI |
@@ -346,12 +346,60 @@ existing native/daemon/frontend/storage checks. `cargo xtask compaction` exited 
 5.29 MiB distinct, 0.14 MiB warm and 4.02 MiB disk, with 37.1x dictionary and
 5.8x end-to-end compression. This closes the catalog row only.
 
-For the next worktree block, `worktrees.rs` persists path/repository/base before
-`git worktree add --detach` and retains finished/removed markers. Its current
-status/diff paths assume the directory exists; missing checkout diagnosis and
-explicit registered restoration still need implementing. Admission must precede
-KV/metadata copies, verify the registered Git admin/root identity, and preserve
-recreated/dirty/untracked files. The existing lease also excludes resumed turns;
-reuse that boundary and cover local/daemon paths and Windows/path/symlink bounds.
-In particular, a missing path must not change a live lease's identity when
-canonicalization falls back to its stored spelling (including Windows prefixes).
+## Seventh block: delegated checkout recovery
+
+Implemented shared core diagnosis and explicit restoration from the registered
+child Git index, including staged changes. Tokens bind parent/child/repository,
+admin, HEAD, index bytes and configured limits. Existing recreated files and
+untracked entries are preserved; healthy checkout deletions remain ordinary edits.
+No registered index, Git admin, branch or format is rewritten. Raw blob sizes,
+metadata and paths are admitted before copying; directory traversal does not
+follow links, and atomic publication preserves concurrent entries. Live leases
+keep their identity after directory deletion, including Windows canonical prefixes.
+Bounded durable JSON receipts distinguish successful restoration from interruption
+and uncertainty; task completion/current parent files/tests are never inferred.
+See [the operator contract](../worktree-recovery.md).
+
+CLI, local/shared REPL and TUI, browser, daemon and approved agent tools use the
+same implementation. TUI work runs in its background worker; daemon work is
+admitted before a blocking worker and retains no engine lock. Focused native
+CLI/daemon/REPL restoration and reopen checks exited 0, as did filesystem link,
+atomic preservation and reached input-limit tests, session metadata admission,
+core ownership/source/lease/bounds cases and browser late-view/token cases.
+The native test found Windows Git's verbatim-path refusal and a large async
+buffer causing stack overflow; both were corrected and the reached native path
+then exited 0. Actual index versions 3/4, sparse/gitlink/symlink-text fixtures and
+the split-index refusal test also exited 0. First complete CI exited 0 in 818.9
+seconds (`target/reference-worktree-ci-verified.log`). `cargo xtask compaction`
+exited 0 (`target/reference-worktree-compaction.log`): unchanged 23.31 MiB logical,
+5.29 MiB distinct, 0.14 MiB warm and 4.02 MiB disk, 37.1x dictionary and 5.8x
+end-to-end. Final review reached a browser regression with lowercase child IDs:
+the server canonicalized the ID, but the button compared its unnormalized input.
+The reached test failed, then passed after input identity normalization. Final
+`cargo xtask ci` exited 0 in 828.2 seconds
+(`target/reference-worktree-ci-final-code.log`), covering the corrected embedded
+browser assets and all native/daemon/core/storage checks. Earlier CI attempts
+exited 1 on two new Clippy findings (needless question mark and byte-char slice),
+which were corrected before the successful full gates. No installed daemon,
+operator store/configuration or browser profile was used. This closes row seven;
+the three remaining audits/scenarios stay Pending.
+
+## Next continuation
+
+Progress audit: both `Nursery::new` and blocking delegation in
+`agent/delegation.rs` use unbounded `(child-index, String)` channels. They receive
+complete `Delta::ToolCall` values, not text/argument fragments; one model reply
+may announce up to 256 calls. `calls::doing` already admits 1 KiB display fields.
+Measure actual queue high-water/delivery and saved writes for ready batches and
+streamed text before changing delivery; critical call/result/execution receipts
+and child outcomes must remain exact. `agent/stream.rs` also consumes the nursery
+receiver. The ACP preview observer sends scoped notifications and has a separate
+bounded transport; it does not replace the execution journal.
+
+Runtime audit: shared children clone toolbox/context/servers/policy; isolated
+children rebuild rooted tools/LSP/jobs and refuse editor-owned files/terminals.
+`Rook::for_workspace` discovers plugins/skills synchronously; `rookd::AppState::engine_for`
+currently performs it while holding the project map write lock. Test actual reuse,
+generation invalidation and background-preparation responsiveness, preserving
+execution-root and approval trust. These observations are starting points for
+the required audits, not evidence that either remaining row is complete.

@@ -639,6 +639,11 @@ pub struct AgentConfig {
     pub prune_tool_results_keep_tokens: usize,
     /// Retained isolated worktrees per repository. Zero disables their creation.
     pub max_worktrees: usize,
+    /// Admission limits for explicitly restoring a missing registered checkout.
+    pub worktree_recovery_max_files: usize,
+    pub worktree_recovery_max_bytes: usize,
+    pub worktree_recovery_max_file_bytes: usize,
+    pub worktree_recovery_max_metadata_bytes: usize,
     /// Everything one turn may spend, its sub-agents included. 0 lifts it.
     ///
     /// Steps were the only bound, and they do not bound this: a sub-agent
@@ -965,6 +970,10 @@ impl Default for AgentConfig {
             prune_tool_results_min_tokens: 8_000,
             prune_tool_results_keep_tokens: 8_000,
             max_worktrees: 8,
+            worktree_recovery_max_files: 4096,
+            worktree_recovery_max_bytes: 64 * 1024 * 1024,
+            worktree_recovery_max_file_bytes: 16 * 1024 * 1024,
+            worktree_recovery_max_metadata_bytes: 2 * 1024 * 1024,
             // Generous enough that ordinary work never meets it — a turn is
             // usually thousands, a long one hundreds of thousands — and low
             // enough to halve the runaway that prompted it.
@@ -1085,6 +1094,10 @@ const PROJECT_MAY_SET: &[&str] = &[
     "agent.max_turn_secs",
     "agent.max_turn_tokens",
     "agent.max_worktrees",
+    "agent.worktree_recovery_max_files",
+    "agent.worktree_recovery_max_bytes",
+    "agent.worktree_recovery_max_file_bytes",
+    "agent.worktree_recovery_max_metadata_bytes",
     "agent.one_script",
     "agent.plan_first",
     "agent.todo_tool",

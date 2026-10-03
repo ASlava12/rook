@@ -1,5 +1,8 @@
 # Architecture
 
+Explicit delegated checkout diagnosis/restoration and source/preservation bounds
+are described in [worktree-recovery.md](worktree-recovery.md).
+
 Public operator price references and their frontend/identity contract are in
 [model-price-references.md](model-price-references.md). They are never a turn dependency.
 

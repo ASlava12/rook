@@ -191,7 +191,11 @@ impl<'a> AgentLoop<'a> {
         outcome.tools_called.push(call.name.clone());
 
         if call.name == crate::worktrees::TOOL {
-            if call.arguments.get("action").and_then(|v| v.as_str()) == Some("remove") {
+            let action = call.arguments.get("action").and_then(|v| v.as_str());
+            if matches!(action, Some("remove" | "restore")) {
+                if self.checking {
+                    return ("a check may not change a worktree".into(), true);
+                }
                 let tree = match crate::worktrees::owned(self.rook, self.session, &call.arguments) {
                     Ok((_, tree)) => tree,
                     Err(why) => return (why.to_string(), true),
@@ -202,7 +206,9 @@ impl<'a> AgentLoop<'a> {
                         &call.name,
                         &call.arguments,
                         risk,
-                        Shown::Text("Remove this worktree. discard=true deletes its unmerged edits."),
+                        Shown::Text(if action == Some("restore") {
+                            "Restore missing files from the reviewed registered Git index; existing entries are preserved. This does not complete the child task."
+                        } else { "Remove this worktree. discard=true deletes its unmerged edits." }),
                     )
                     .await
                 {
