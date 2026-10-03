@@ -18,8 +18,10 @@ Source: Pi `ee602414c703be8da722ec56de7f2399e62581ac`; starting Rook:
 
 The regular-scrollback mechanism has been assessed with a bounded prototype and
 native Windows observations: direct inline adoption was rejected because shrink
-moves the lower queue upwards; no production mode was shipped. Terminal image
-preview remains an experiment from the review. Existing MCP/OAuth, durable goals,
+moves the lower queue upwards; no production mode was shipped. The terminal
+image experiment has been assessed on the current Windows transport; no positive
+Kitty response was observed, and rich preview was not shipped or certified.
+Existing MCP/OAuth, durable goals,
 skills, editor launch and storage are reused. No replacement runtime is planned.
 
 ## First integrated block
@@ -4051,3 +4053,46 @@ output is retained in `target/pi-scrollback-ci.log`. No production storage chang
 were made; the preceding committed
 compaction measurement remains applicable. Terminal image assessment and the
 completed real-model phase comparison remain open; the full goal stays active.
+
+## Terminal image transport assessment
+
+The [image note](terminal-images-20261003.md), finite `terminal_images` example
+and isolated Windows WezTerm driver assess the optional image experiment.
+The current ConPTY and three fresh mux configurations (default alternate,
+Kitty-enabled alternate and Kitty-enabled main) returned DA without a Kitty
+response. Native probes and corrected drivers exited 0; no positive protocol or
+pixel-rendering claim is made. The Windows console may consume the graphics
+query before mux parsing; no GUI/crop/deletion/production-panel parity was tested.
+
+Focused parser tests and build exited 0; the initial matcher and helper failures
+are preserved in the research note. All owned mux processes are stopped, and no
+operator configuration or store was changed. The probe bounds capture before
+copying, uses a three-second deadline and refuses overwriting results. The driver
+records the actual native exit independently of server lifetime and limits proof
+reads. The assessment keeps attributed text/export on this transport, retaining
+explicit requirements for any future rich-terminal renderer.
+
+Mandatory `cargo xtask ci` exited 0 in 573.0 seconds
+(`target/pi-terminal-image-ci.log`); no production storage changes require a
+new compaction measurement. Both optional terminal experiments have now produced
+bounded evidence and explicit adoption decisions. They do not count as shipped
+scrollback/image modes. The main table remains 8/9 complete: the real-model phase
+comparison still needs a working implementation source and measured paired
+quality/cost/latency. The full goal stays active.
+
+A subsequent bounded read-only catalog inspection found the same single
+configured `home-lmstudio` source and no loaded models. A different listed
+candidate, `google/gemma-4-e4b`, answered one short availability request with
+HTTP 200, `READY`, 23 prompt / 2 completion tokens and 11.147 seconds wall time.
+The native probe exited 0; evidence is
+`target/phase-candidate-0d83b867-1623-4f9d-91cb-a169d506c0ca/report.json` and
+`target/pi-phase-candidate-20261003.log`. This is availability evidence only;
+tool use, task quality and cost/latency comparison remain unproven. A new real
+rename pair has been started with the configured 35B analysis model and Gemma
+implementation target (`target/pi-phase-gemma-pair-20261003.log`); the failed
+9B pilot is preserved and was not repeated. No user configuration was changed.
+The active pair's authoritative report is
+`target/phase-bench-021617c8-0d3a-4ca1-9d81-32ef2addad8d/report.json`.
+At this block's commit it is still on fixed analysis; continue the confirmed
+live process rather than starting another pair. The report and per-stage PID
+files identify its fresh workspaces/stores and native process state.

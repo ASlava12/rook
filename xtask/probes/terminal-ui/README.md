@@ -54,3 +54,28 @@ console operations rather than silently counting them as successful checks.
 
 The measured adoption decision and remaining adapter requirements are in
 [the research note](../../../docs/research/terminal-scrollback-20261003.md).
+
+## Image capability assessment
+
+`cargo test -p rook-cli --example terminal_images` and
+`cargo build -p rook-cli --example terminal_images` build a separate finite probe.
+Run it with `--root FRESH_OWNED_DIRECTORY --alternate` in an actual terminal.
+It queries one dummy pixel without storing or placing an image, captures at most
+1024 bytes for three seconds and writes `image-query.json` without overwriting.
+No response is inconclusive; DA without a graphics response is negative evidence
+for that transport. Success proves the query only, never pixels/crop/deletion.
+
+On Windows with WezTerm installed, use fresh isolated mux configurations:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File xtask/probes/terminal-ui/images.ps1 -Capability default -Alternate
+powershell -NoProfile -ExecutionPolicy Bypass -File xtask/probes/terminal-ui/images.ps1 -Capability kitty -Alternate
+powershell -NoProfile -ExecutionPolicy Bypass -File xtask/probes/terminal-ui/images.ps1 -Capability kitty
+```
+
+The driver records the native probe exit independently of the persistent server,
+uses an owned short socket/config and stops that exact server. It does not open
+a GUI or change an operator configuration. Its Windows console-to-mux result
+does not prove that the graphics query reached the mux parser. See
+[the image assessment](../../../docs/research/terminal-images-20261003.md) for
+observations, retained failures, adoption decision and production requirements.

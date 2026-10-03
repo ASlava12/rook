@@ -512,7 +512,12 @@ one, closing releases the picture, and detached cards ignore late data. Each
 picture identifies its original session/result and image companion. CLI
 `session image ... --output NEW_FILE` exports the checked raster bytes without
 replacing existing files. TUI Calls/history keep an attributed text fallback
-and a pinned CLI export command; terminal pixel rendering remains an experiment.
+and a pinned CLI export command. The
+[terminal image assessment](research/terminal-images-20261003.md) found DA replies
+without Kitty responses on the tested Windows console paths, even with an owned
+WezTerm config enabling graphics. Text/export remains the supported terminal
+fallback; the transport query does not prove parser arrival, pixels or placement
+lifecycle, and no production graphics backend was added.
 Each reader admits one request at a time and replaces its bounded body part;
 result and diff parts load only on explicit expansion or paging. Disconnected
 cards ignore late replies. The saved timing and change-note source remain
